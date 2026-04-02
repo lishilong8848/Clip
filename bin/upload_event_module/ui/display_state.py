@@ -202,6 +202,9 @@ def build_notice_display_snapshot(data_dict: dict | None) -> dict:
     if normalized.get("record_binding_state") == "conflicted":
         subtitle = f"{subtitle} | Record ID 冲突" if subtitle else "Record ID 冲突"
 
+    if str(normalized.get("routing_state") or "").strip().lower() == "conflicted":
+        subtitle = f"{subtitle} | 条目路由冲突" if subtitle else "条目路由冲突"
+
     return {
         "title": title,
         "subtitle": subtitle,

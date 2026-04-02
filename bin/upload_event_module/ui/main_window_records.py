@@ -3,6 +3,7 @@ import threading
 import time
 import re
 import unicodedata
+import uuid
 from PyQt6.QtWidgets import QListWidgetItem, QInputDialog
 from PyQt6.QtCore import Qt, QSize, QTimer
 from PyQt6 import sip
@@ -271,6 +272,134 @@ class MainWindowRecordsMixin:
         if not current_id:
             return False
         return current_id == record_id
+
+    def _detail_dialog_matches_active_item(self, active_item_id: str) -> bool:
+        active_item_id = str(active_item_id or "").strip()
+        if not active_item_id:
+            return False
+        try:
+            if not self.detail_dialog or not self.detail_dialog.isVisible():
+                return False
+        except Exception:
+            return False
+        current_id = getattr(self.detail_dialog, "current_active_item_id", "") or ""
+        if not current_id:
+            return False
+        return current_id == active_item_id
+
+    @staticmethod
+    def _normalize_match_text(value) -> str:
+        text = unicodedata.normalize("NFKC", str(value or ""))
+        text = re.sub(r"\s+", " ", text).strip()
+        return text
+
+    def _build_match_identity(
+        self,
+        *,
+        notice_type: str = "",
+        title: str = "",
+        time_str: str = "",
+        text: str = "",
+    ) -> tuple[str, str]:
+        info = extract_event_info(text or "") or {}
+        resolved_notice_type = str(
+            notice_type or info.get("notice_type") or ""
+        ).strip()
+        resolved_title = self._normalize_match_text(
+            title or info.get("title") or ""
+        )
+        resolved_time = self._normalize_match_text(
+            time_str or info.get("time_str") or ""
+        )
+        if not resolved_notice_type or not resolved_title:
+            return resolved_title, ""
+        if self._is_event_notice(resolved_notice_type):
+            if not resolved_time:
+                return resolved_title, ""
+            return (
+                resolved_title,
+                f"{resolved_notice_type}|{resolved_title}|{resolved_time}",
+            )
+        return resolved_title, f"{resolved_notice_type}|{resolved_title}"
+
+    @staticmethod
+    def _normalize_routing_state(value) -> str:
+        state = str(value or "").strip().lower()
+        if state in {"normal", "conflicted"}:
+            return state
+        return "normal"
+
+    def _is_routing_conflicted(self, data_dict: dict | None) -> bool:
+        if not isinstance(data_dict, dict):
+            return False
+        return self._normalize_routing_state(data_dict.get("routing_state")) == "conflicted"
+
+    def _routing_error_text(self, data_dict: dict | None) -> str:
+        if not isinstance(data_dict, dict):
+            return "条目路由冲突，已阻止自动匹配和远端写入。"
+        detail = str(data_dict.get("routing_error") or "").strip()
+        if detail:
+            return detail
+        return "条目路由冲突，已阻止自动匹配和远端写入。"
+
+    def _ensure_active_item_identity(self, data_dict: dict | None) -> dict:
+        if not isinstance(data_dict, dict):
+            return {}
+        ensured = dict(data_dict)
+        active_item_id = str(ensured.get("active_item_id") or "").strip()
+        if not active_item_id:
+            active_item_id = uuid.uuid4().hex
+        text = str(ensured.get("text") or "")
+        parsed_info = extract_event_info(text) or {}
+        title_hint = parsed_info.get("title") or str(ensured.get("match_title") or "")
+        time_hint = parsed_info.get("time_str") or str(ensured.get("time_str") or "")
+        match_title, match_key = self._build_match_identity(
+            notice_type=str(
+                ensured.get("notice_type") or parsed_info.get("notice_type") or ""
+            ).strip(),
+            title=title_hint,
+            time_str=time_hint,
+            text=text,
+        )
+        ensured["active_item_id"] = active_item_id
+        if match_title:
+            ensured["match_title"] = match_title
+        else:
+            ensured.pop("match_title", None)
+        if match_key:
+            ensured["match_key"] = match_key
+        else:
+            ensured.pop("match_key", None)
+        routing_state = self._normalize_routing_state(ensured.get("routing_state"))
+        if routing_state == "conflicted":
+            ensured["routing_state"] = "conflicted"
+            ensured["routing_error"] = str(
+                ensured.get("routing_error") or self._routing_error_text(ensured)
+            ).strip()
+        else:
+            ensured["routing_state"] = "normal"
+            ensured.pop("routing_error", None)
+        return ensured
+
+    def _inherit_active_runtime_fields(
+        self, data_dict: dict | None, existing_data: dict | None
+    ) -> dict:
+        updated = dict(data_dict or {})
+        if not isinstance(existing_data, dict):
+            return updated
+        active_item_id = str(existing_data.get("active_item_id") or "").strip()
+        if active_item_id:
+            updated["active_item_id"] = active_item_id
+        for key in (
+            "today_in_progress_state",
+            "record_binding_state",
+            "record_binding_error",
+            "routing_state",
+            "routing_error",
+        ):
+            if key not in updated and key in existing_data:
+                updated[key] = existing_data.get(key)
+        return updated
 
     @staticmethod
     def _normalize_record_binding_state(value) -> str:
@@ -637,6 +766,156 @@ class MainWindowRecordsMixin:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _set_routing_state(
+        self,
+        active_item_id: str,
+        state: str,
+        error: str = "",
+    ):
+        active_item_id = str(active_item_id or "").strip()
+        if not active_item_id:
+            return
+        normalized_state = self._normalize_routing_state(state)
+        list_widget, item = self._find_active_item_by_active_item_id(active_item_id)
+        if not item or not self._is_valid_list_item(item):
+            return
+        data = item.data(Qt.ItemDataRole.UserRole) or {}
+        updated = dict(data)
+        updated["routing_state"] = normalized_state
+        if normalized_state == "conflicted":
+            updated["routing_error"] = str(
+                error or "条目路由冲突，已阻止自动匹配和远端写入。"
+            ).strip()
+        else:
+            updated.pop("routing_error", None)
+        record_id = self._get_cache_identity(updated)
+        if getattr(self, "cache_store", None) and record_id:
+            patch = {"routing_state": normalized_state}
+            patch["routing_error"] = (
+                updated.get("routing_error") if normalized_state == "conflicted" else None
+            )
+            try:
+                self.cache_store.patch_record_fields(record_id=record_id, patch=patch)
+            except Exception:
+                pass
+        self._commit_active_record(
+            updated,
+            refresh_detail=True,
+            rebuild_widget=True,
+            list_widget=list_widget,
+            item=item,
+        )
+
+    def _remove_active_item_widget_only(self, list_widget, item):
+        if not list_widget or not item or not self._is_valid_list_item(item):
+            return
+        try:
+            widget = list_widget.itemWidget(item)
+        except Exception:
+            widget = None
+        try:
+            list_widget.removeItemWidget(item)
+        except Exception:
+            pass
+        try:
+            row = list_widget.row(item)
+            if row != -1:
+                list_widget.takeItem(row)
+        except Exception:
+            pass
+        try:
+            if widget:
+                widget.deleteLater()
+        except Exception:
+            pass
+
+    def _build_route_conflict_error(self, match_key: str) -> str:
+        preview = str(match_key or "").split("|", 1)[-1]
+        if len(preview) > 40:
+            preview = preview[:40] + "..."
+        return f"条目路由冲突：匹配键重复（{preview}），已阻止自动匹配和远端写入。"
+
+    def _reconcile_active_route_duplicates(self):
+        groups = {}
+        for list_widget, item in self._iter_active_items():
+            try:
+                if not self._is_valid_list_item(item):
+                    continue
+                data = self._ensure_active_item_identity(
+                    item.data(Qt.ItemDataRole.UserRole)
+                )
+            except Exception:
+                continue
+            match_key = str(data.get("match_key") or "").strip()
+            if not match_key:
+                continue
+            groups.setdefault(match_key, []).append((list_widget, item, data))
+
+        changed = False
+        for match_key, entries in groups.items():
+            if len(entries) <= 1:
+                list_widget, item, data = entries[0]
+                if self._normalize_routing_state(data.get("routing_state")) != "normal":
+                    self._set_routing_state(data.get("active_item_id", ""), "normal")
+                    changed = True
+                continue
+
+            real_entries = [entry for entry in entries if not self._is_placeholder_record(entry[2])]
+            if len(real_entries) > 1:
+                error = self._build_route_conflict_error(match_key)
+                for _, _, data in entries:
+                    self._set_routing_state(
+                        data.get("active_item_id", ""),
+                        "conflicted",
+                        error=error,
+                    )
+                changed = True
+                continue
+
+            survivor = real_entries[0] if real_entries else entries[0]
+            survivor_list, survivor_item, survivor_data = survivor
+            source_list, source_item, source_data = entries[0]
+            merged = dict(source_data)
+            merged["active_item_id"] = survivor_data.get("active_item_id")
+            merged["routing_state"] = "normal"
+            merged.pop("routing_error", None)
+            if real_entries:
+                merged["record_id"] = survivor_data.get("record_id")
+                merged["_is_placeholder_record"] = False
+                merged["record_binding_state"] = survivor_data.get(
+                    "record_binding_state", "bound"
+                )
+                if "today_in_progress_state" in survivor_data:
+                    merged["today_in_progress_state"] = survivor_data.get(
+                        "today_in_progress_state"
+                    )
+            committed = self._commit_active_record(
+                self._ensure_active_item_identity(merged),
+                refresh_detail=True,
+                rebuild_widget=True,
+                list_widget=survivor_list,
+                item=survivor_item,
+            )
+            if committed:
+                survivor_data = committed
+            for list_widget, item, data in entries:
+                if item is survivor_item:
+                    continue
+                self._cleanup_payload_for_data(data)
+                self._remove_active_item_widget_only(list_widget, item)
+                changed = True
+            self._set_routing_state(
+                survivor_data.get("active_item_id", ""),
+                "normal",
+                error="",
+            )
+            changed = True
+
+        if changed:
+            self.save_active_cache()
+            self._refresh_detail_from_cache()
+        return changed
+
     @staticmethod
     def _normalize_today_in_progress_state(value) -> str:
         text = str(value or "").strip()
@@ -785,6 +1064,9 @@ class MainWindowRecordsMixin:
     def _handle_today_in_progress_toggle(self, data_dict: dict, target_state: str):
         if not self._supports_today_in_progress_toggle(data_dict):
             return
+        if self._is_routing_conflicted(data_dict):
+            self.show_message(self._routing_error_text(data_dict))
+            return
         if self._is_record_binding_conflicted(data_dict):
             self.show_message(self._record_binding_error_text(data_dict))
             return
@@ -849,7 +1131,7 @@ class MainWindowRecordsMixin:
             return None
         if not isinstance(data, dict):
             return None
-        return normalize_active_item_data(data)
+        return self._ensure_active_item_identity(normalize_active_item_data(data))
 
     def _commit_active_record(
         self,
@@ -863,7 +1145,16 @@ class MainWindowRecordsMixin:
     ) -> dict:
         if not isinstance(data_dict, dict):
             return {}
-        normalized = normalize_active_item_data(self._preserve_locked_level(data_dict))
+        existing_data = None
+        if item and self._is_valid_list_item(item):
+            try:
+                existing_data = item.data(Qt.ItemDataRole.UserRole) or {}
+            except Exception:
+                existing_data = None
+        data_dict = self._inherit_active_runtime_fields(data_dict, existing_data)
+        normalized = self._ensure_active_item_identity(
+            normalize_active_item_data(self._preserve_locked_level(data_dict))
+        )
         entry = self._build_clipboard_entry(normalized.get("text", "") or "")
         if not entry:
             entry = {"content": normalized.get("text", "")}
@@ -883,7 +1174,7 @@ class MainWindowRecordsMixin:
                 log_warning(
                     f"活动缓存提交异常，保留内存态: record_id={record_id}, error={exc}"
                 )
-        committed = (
+        committed = self._ensure_active_item_identity(
             (self._load_record_from_cache(record_id) if cache_saved else None)
             or normalized
         )
@@ -908,23 +1199,32 @@ class MainWindowRecordsMixin:
         if refresh_detail:
             self._maybe_update_detail_dialog(committed, record_id)
         self._schedule_record_binding_validation(committed)
+        self._schedule_active_route_reconcile()
         return committed
 
     def _maybe_update_detail_dialog(self, data_dict: dict, record_id: str = ""):
         if not isinstance(data_dict, dict):
             return
         rid = record_id or data_dict.get("record_id", "")
+        active_item_id = str(data_dict.get("active_item_id") or "").strip()
         display_data = self._load_record_from_cache(rid) or normalize_active_item_data(
             data_dict
         )
+        display_data = self._ensure_active_item_identity(display_data)
         if self._is_placeholder_record(data_dict):
             display_data["record_id"] = ""
         self._log_detail_preview_update(display_data, rid, reason="detail_dialog")
-        if not self._detail_dialog_matches_record(rid):
+        if active_item_id:
+            if not self._detail_dialog_matches_active_item(active_item_id):
+                return
+        elif not self._detail_dialog_matches_record(rid):
             return
         try:
             self.detail_dialog.update_content(
-                display_data, rid, editable=self._is_active_view()
+                display_data,
+                rid,
+                editable=self._is_active_view(),
+                active_item_id=active_item_id or display_data.get("active_item_id", ""),
             )
         except Exception:
             return
@@ -959,6 +1259,24 @@ class MainWindowRecordsMixin:
 
         QTimer.singleShot(0, _run)
 
+    def _schedule_active_route_reconcile(self):
+        if getattr(self, "_closing", False):
+            return
+        if getattr(self, "_route_reconcile_single_shot_pending", False):
+            return
+        self._route_reconcile_single_shot_pending = True
+
+        def _run():
+            self._route_reconcile_single_shot_pending = False
+            if getattr(self, "_closing", False):
+                return
+            try:
+                self._reconcile_active_route_duplicates()
+            except Exception as exc:
+                log_warning(f"活动条目路由校验失败: error={exc}")
+
+        QTimer.singleShot(0, _run)
+
     def _apply_cache_to_item(self, list_widget, item, cache_data: dict):
         if not list_widget or not item or not cache_data:
             return
@@ -985,9 +1303,9 @@ class MainWindowRecordsMixin:
                 if not isinstance(data, dict):
                     continue
                 record_id = str(data.get("record_id") or "").strip()
-                cache_data = self._load_record_from_cache(record_id) or normalize_active_item_data(
-                    data
-                )
+                cache_data = self._load_record_from_cache(
+                    record_id
+                ) or self._ensure_active_item_identity(normalize_active_item_data(data))
                 rebuilt = self._rebuild_active_item_widget(
                     list_widget,
                     item,
@@ -1014,19 +1332,30 @@ class MainWindowRecordsMixin:
                 return
         except Exception:
             return
+        active_item_id = getattr(self.detail_dialog, "current_active_item_id", "") or ""
         current_id = getattr(self.detail_dialog, "current_record_id", "") or ""
-        if not current_id:
+        list_widget, item = self._find_active_item_by_active_item_id(active_item_id)
+        display_data = None
+        rid = current_id
+        if item and self._is_valid_list_item(item):
+            display_data = item.data(Qt.ItemDataRole.UserRole) or {}
+            rid = display_data.get("record_id", "") or current_id
+        elif active_item_id or not current_id:
             return
-        display_data = self._load_record_from_cache(current_id)
+        if display_data is None:
+            display_data = self._load_record_from_cache(current_id)
         if not isinstance(display_data, dict):
             return
+        display_data = self._ensure_active_item_identity(display_data)
         if self._is_placeholder_record(display_data):
             display_data["record_id"] = ""
-        rid = display_data.get("record_id", "")
         self._log_detail_preview_update(display_data, rid, reason="cache_refresh")
         try:
             self.detail_dialog.update_content(
-                display_data, rid, editable=self._is_active_view()
+                display_data,
+                rid,
+                editable=self._is_active_view(),
+                active_item_id=display_data.get("active_item_id", active_item_id),
             )
         except Exception:
             return
@@ -1045,7 +1374,7 @@ class MainWindowRecordsMixin:
                 record_id = str(data.get("record_id") or "").strip()
                 cache_data = self._load_record_from_cache(
                     record_id
-                ) or normalize_active_item_data(data)
+                ) or self._ensure_active_item_identity(normalize_active_item_data(data))
                 item.setData(Qt.ItemDataRole.UserRole, cache_data)
                 self._apply_cache_to_item(list_widget, item, cache_data)
             except Exception as exc:
@@ -1062,6 +1391,7 @@ class MainWindowRecordsMixin:
                 self._mark_cache_refresh_needed()
                 continue
         self._repair_missing_item_widgets()
+        self._reconcile_active_route_duplicates()
         pending_after_repair = bool(getattr(self, "_pending_cache_refresh", False))
         self._refresh_detail_from_cache()
         self._pending_cache_refresh = bool(refresh_error or pending_after_repair)
@@ -1124,6 +1454,18 @@ class MainWindowRecordsMixin:
                 continue
             item_data = item.data(Qt.ItemDataRole.UserRole)
             if item_data.get("record_id") == record_id:
+                return list_widget, item
+        return None, None
+
+    def _find_active_item_by_active_item_id(self, active_item_id):
+        active_item_id = str(active_item_id or "").strip()
+        if not active_item_id:
+            return None, None
+        for list_widget, item in self._iter_active_items():
+            if not self._is_valid_list_item(item):
+                continue
+            item_data = item.data(Qt.ItemDataRole.UserRole)
+            if str(item_data.get("active_item_id") or "").strip() == active_item_id:
                 return list_widget, item
         return None, None
 
@@ -1409,6 +1751,11 @@ class MainWindowRecordsMixin:
                 "today_in_progress_state",
                 "record_binding_state",
                 "record_binding_error",
+                "active_item_id",
+                "match_title",
+                "match_key",
+                "routing_state",
+                "routing_error",
                 "event_source",
                 "transfer_to_overhaul",
             ],
@@ -1465,6 +1812,26 @@ class MainWindowRecordsMixin:
             data_dict["record_binding_error"] = binding_error
         else:
             data_dict.pop("record_binding_error", None)
+        active_item_id = str(cache_fields.get("active_item_id") or "").strip()
+        if active_item_id:
+            data_dict["active_item_id"] = active_item_id
+        match_title = self._normalize_match_text(cache_fields.get("match_title"))
+        if match_title:
+            data_dict["match_title"] = match_title
+        else:
+            data_dict.pop("match_title", None)
+        match_key = str(cache_fields.get("match_key") or "").strip()
+        if match_key:
+            data_dict["match_key"] = match_key
+        else:
+            data_dict.pop("match_key", None)
+        routing_state = self._normalize_routing_state(cache_fields.get("routing_state"))
+        data_dict["routing_state"] = routing_state
+        routing_error = str(cache_fields.get("routing_error") or "").strip()
+        if routing_state == "conflicted" and routing_error:
+            data_dict["routing_error"] = routing_error
+        else:
+            data_dict.pop("routing_error", None)
         if "event_source" in cache_fields:
             event_source = str(cache_fields.get("event_source") or "").strip()
             if event_source:
@@ -1475,7 +1842,7 @@ class MainWindowRecordsMixin:
             data_dict["transfer_to_overhaul"] = bool(
                 cache_fields.get("transfer_to_overhaul")
             )
-        return data_dict
+        return self._ensure_active_item_identity(data_dict)
 
     def _resolve_upload_fields_from_cache(
         self, data_dict: dict, dialog_fields: dict | None = None
@@ -1602,42 +1969,49 @@ class MainWindowRecordsMixin:
         unique_key: str = "",
     ):
         content_clean = (content or "").strip()
-        title_clean = (title or "").strip()
-        unique_key_clean = (unique_key or "").strip()
-        strict_signature_match = str(notice_type or "").strip() == "事件通告"
-        if not content_clean and not title_clean and not unique_key_clean:
+        info = extract_event_info(content_clean) or {}
+        resolved_notice_type = str(notice_type or info.get("notice_type") or "").strip()
+        resolved_time = str(info.get("time_str") or "").strip()
+        match_title, match_key = self._build_match_identity(
+            notice_type=resolved_notice_type,
+            title=title,
+            time_str=resolved_time,
+            text=content_clean,
+        )
+        if not content_clean and not match_title and not match_key:
             return None, None
-        signature_matches = []
+        key_matches = []
         title_matches = []
         for list_widget, item in self._iter_active_items():
             try:
                 if not self._is_valid_list_item(item):
                     continue
-                data = item.data(Qt.ItemDataRole.UserRole)
+                data = self._ensure_active_item_identity(
+                    item.data(Qt.ItemDataRole.UserRole)
+                )
             except Exception:
                 continue
             if not data:
                 continue
             if (
-                notice_type
+                resolved_notice_type
                 and data.get("notice_type")
-                and data.get("notice_type") != notice_type
+                and data.get("notice_type") != resolved_notice_type
             ):
                 continue
             old_text = (data.get("text") or "").strip()
             if content_clean and old_text and old_text == content_clean:
                 return list_widget, item
-            old_info = extract_event_info(old_text) or {}
-            old_unique_key = (old_info.get("unique_key") or "").strip()
-            old_title = (old_info.get("title") or "").strip()
-            if unique_key_clean and old_unique_key and old_unique_key == unique_key_clean:
-                signature_matches.append((list_widget, item))
+            item_match_key = str(data.get("match_key") or "").strip()
+            item_match_title = self._normalize_match_text(data.get("match_title"))
+            if match_key and item_match_key and item_match_key == match_key:
+                key_matches.append((list_widget, item))
                 continue
-            if title_clean and old_title and old_title == title_clean:
+            if match_title and item_match_title and item_match_title == match_title:
                 title_matches.append((list_widget, item))
-        if signature_matches:
-            return signature_matches[0]
-        if strict_signature_match:
+        if key_matches:
+            return key_matches[0]
+        if self._is_event_notice(resolved_notice_type):
             return None, None
         if title_matches:
             return title_matches[0]
@@ -1674,7 +2048,7 @@ class MainWindowRecordsMixin:
         return bool(data_dict.get("_is_placeholder_record"))
 
     def add_active_item(self, data_dict, insert_top=True, skip_cache=False):
-        data_dict = normalize_active_item_data(data_dict)
+        data_dict = self._ensure_active_item_identity(normalize_active_item_data(data_dict))
         if not skip_cache:
             data_dict = (
                 self._commit_active_record(
@@ -1747,6 +2121,7 @@ class MainWindowRecordsMixin:
             widget.mark_as_uploaded()
         self._schedule_today_in_progress_sync(data_dict)
         self._schedule_record_binding_validation(data_dict)
+        self._schedule_active_route_reconcile()
         if not skip_cache:
             self.save_active_cache()
         return item, widget
@@ -1772,10 +2147,18 @@ class MainWindowRecordsMixin:
                 continue
         return None
 
-    def sync_content_to_widget(self, record_id, new_data):
-        if not record_id:
+    def sync_content_to_widget(self, active_item_id, record_id=None, new_data=None):
+        if isinstance(record_id, dict) and new_data is None:
+            new_data = record_id
+            record_id = active_item_id
+            active_item_id = ""
+        active_item_id = str(active_item_id or "").strip()
+        record_id = str(record_id or "").strip()
+        if not active_item_id and not record_id:
             return
-        list_widget, item_ref = self._find_active_item_by_record_id(record_id)
+        list_widget, item_ref = self._find_active_item_by_active_item_id(active_item_id)
+        if not item_ref and record_id:
+            list_widget, item_ref = self._find_active_item_by_record_id(record_id)
         if not item_ref:
             return
         if not self._is_valid_list_item(item_ref):
@@ -1786,6 +2169,8 @@ class MainWindowRecordsMixin:
                 merged = dict(old_data)
                 merged.update(new_data)
                 new_data = merged
+            if isinstance(new_data, dict) and old_data:
+                new_data["active_item_id"] = old_data.get("active_item_id")
             new_data["_has_unuploaded_changes"] = True
             new_data["_pending_upload_hash"] = None
             new_data["_upload_in_progress"] = False

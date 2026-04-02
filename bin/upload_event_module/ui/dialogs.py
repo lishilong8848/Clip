@@ -8344,7 +8344,7 @@ class DetailDialog(QDialog):
 
     record_id_bind_requested = pyqtSignal(str)
 
-    content_changed = pyqtSignal(str, dict)
+    content_changed = pyqtSignal(str, str, dict)
 
 
 
@@ -8371,6 +8371,7 @@ class DetailDialog(QDialog):
         self.resize(420, 500)
 
         self.current_record_id = ""
+        self.current_active_item_id = ""
 
         self.current_data = {}
 
@@ -8544,7 +8545,11 @@ class DetailDialog(QDialog):
 
         new_data = {"text": new_text}
 
-        self.content_changed.emit(self.current_record_id, new_data)
+        self.content_changed.emit(
+            self.current_active_item_id,
+            self.current_record_id,
+            new_data,
+        )
 
         self.original_text = new_text
 
@@ -8556,11 +8561,15 @@ class DetailDialog(QDialog):
 
 
 
-    def update_content(self, data, record_id, editable=True):
+    def update_content(self, data, record_id, editable=True, active_item_id=""):
 
         self.current_data = dict(data or {})
 
         self.current_record_id = record_id
+
+        self.current_active_item_id = str(
+            active_item_id or self.current_data.get("active_item_id") or ""
+        ).strip()
 
         self.original_text = data["text"]
 

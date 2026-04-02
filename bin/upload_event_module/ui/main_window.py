@@ -289,6 +289,7 @@ class ClipboardTool(
         self._cache_id_repair_result = self._validate_cache_record_ids_on_startup()
         self._restore_active_cache()
         self._repair_missing_item_widgets()
+        self._reconcile_active_route_duplicates()
         self._validate_record_bindings_on_startup()
         if self._cache_id_repair_result.get("changed"):
             self.save_active_cache()

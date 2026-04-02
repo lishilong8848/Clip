@@ -304,6 +304,11 @@ class MainWindowWorkflowMixin:
         if target_item and not self._is_valid_list_item(target_item):
             target_item = None
             target_list = None
+        if target_item:
+            current_data = target_item.data(Qt.ItemDataRole.UserRole) or {}
+            if self._is_routing_conflicted(current_data):
+                self.show_message(self._routing_error_text(current_data))
+                return
 
         if status in ["开始", "新增", ""]:
             if target_item:
@@ -544,21 +549,25 @@ class MainWindowWorkflowMixin:
         if existing_item:
             try:
                 existing_data = existing_item.data(Qt.ItemDataRole.UserRole) or {}
-                existing_record_id = str(existing_data.get("record_id") or "").strip()
-                if existing_record_id:
-                    data["record_id"] = existing_record_id
-                data["_is_placeholder_record"] = bool(
-                    existing_data.get("_is_placeholder_record")
-                )
-                data["buildings"] = self._resolve_prefilled_buildings(
+                if self._is_routing_conflicted(existing_data):
+                    self.show_message(self._routing_error_text(existing_data))
+                    return
+                routed_data = dict(existing_data)
+                routed_data["text"] = content
+                routed_data["notice_type"] = notice_type
+                routed_data["level"] = level
+                routed_data["source"] = source
+                routed_data["time_str"] = time_str
+                routed_data["buildings"] = self._resolve_prefilled_buildings(
                     existing_data.get("buildings"),
                     data.get("buildings"),
                 )
-                data["_has_unuploaded_changes"] = True
-                data["_pending_upload_hash"] = None
-                data["_upload_in_progress"] = False
+                routed_data["_has_unuploaded_changes"] = True
+                routed_data["_pending_upload_hash"] = None
+                routed_data["_upload_in_progress"] = False
+                routed_data = self._ensure_active_item_identity(routed_data)
                 committed = self._commit_active_record(
-                    data,
+                    routed_data,
                     refresh_detail=not defer_ui,
                     rebuild_widget=not defer_ui,
                     list_widget=existing_list,
@@ -569,14 +578,20 @@ class MainWindowWorkflowMixin:
                     self._mark_cache_refresh_needed()
                     return
                 self._log_detail_preview_update(
-                    committed or data,
-                    (committed or data).get("record_id"),
+                    committed or routed_data,
+                    (committed or routed_data).get("record_id"),
                     reason="new_event_existing",
                 )
                 self.save_active_cache()
                 return
-            except Exception:
-                pass
+            except Exception as exc:
+                log_error(
+                    "handle_new_event routed update failed: "
+                    f"record_id={existing_data.get('record_id', '') if isinstance(existing_data, dict) else ''}, "
+                    f"notice_type={notice_type}, error={exc}"
+                )
+                self._schedule_pending_cache_refresh()
+                return
 
         item, widget = self.add_active_item(data)
         if defer_ui:
@@ -586,7 +601,7 @@ class MainWindowWorkflowMixin:
                 data, data.get("record_id"), reason="new_event"
             )
         if self._is_event_notice(notice_type):
-            if not defer_ui:
+            if not defer_ui and item and widget:
                 list_widget = item.listWidget()
                 list_widget.setCurrentItem(item)
                 list_widget.scrollToItem(item)
@@ -656,6 +671,7 @@ class MainWindowWorkflowMixin:
                 new_data["_is_placeholder_record"] = current_data[
                     "_is_placeholder_record"
                 ]
+        new_data = self._inherit_active_runtime_fields(new_data, current_data)
         if isinstance(current_data, dict) and "need_upload_first" in current_data:
             current_data = dict(current_data)
             current_data.pop("need_upload_first", None)
@@ -741,6 +757,9 @@ class MainWindowWorkflowMixin:
             return
         if self._is_record_binding_conflicted(data_dict):
             self.show_message(self._record_binding_error_text(data_dict))
+            return
+        if self._is_routing_conflicted(data_dict):
+            self.show_message(self._routing_error_text(data_dict))
             return
         record_id = data_dict["record_id"]
         if record_id in self.pending_action_record_ids:
@@ -1811,7 +1830,10 @@ class MainWindowWorkflowMixin:
             try:
                 if self._detail_dialog_matches_record(old_id):
                     self.detail_dialog.update_content(
-                        updated_items[0][2], new_id, editable=self._is_active_view()
+                        updated_items[0][2],
+                        new_id,
+                        editable=self._is_active_view(),
+                        active_item_id=updated_items[0][2].get("active_item_id", ""),
                     )
             except Exception:
                 pass
@@ -1981,10 +2003,14 @@ class MainWindowWorkflowMixin:
             if target_item and not self._is_valid_list_item(target_item):
                 target_item = None
             if target_item:
+                target_data = target_item.data(Qt.ItemDataRole.UserRole) or {}
+                if self._is_routing_conflicted(target_data):
+                    self.show_message(self._routing_error_text(target_data))
+                    return
                 if self._is_event_notice(info.get("notice_type")):
                     self._pin_item_to_top(target_list, target_item)
 
-                old_data = target_item.data(Qt.ItemDataRole.UserRole)
+                old_data = target_data
                 old_text = (old_data.get("text") or "").translate(WHITESPACE_TRANSLATOR)
                 new_text = cleaned_content.translate(WHITESPACE_TRANSLATOR)
                 widget = self._safe_item_widget(target_list, target_item)
@@ -2044,8 +2070,11 @@ class MainWindowWorkflowMixin:
         if item and not self._is_valid_list_item(item):
             item = None
         if item:
-            old_data = item.data(Qt.ItemDataRole.UserRole)
-            self._auto_replace_content(cleaned_content, old_data, item)
+            existing_data = item.data(Qt.ItemDataRole.UserRole) or {}
+            if self._is_routing_conflicted(existing_data):
+                self.show_message(self._routing_error_text(existing_data))
+                return
+            self._auto_replace_content(cleaned_content, existing_data, item)
             return
         self._process_event(
             info["content"],

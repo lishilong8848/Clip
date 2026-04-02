@@ -687,8 +687,12 @@ class MainWindowUiMixin:
             display_data = self._load_record_from_cache(
                 record_id
             ) or normalize_active_item_data(data)
+            display_data = self._ensure_active_item_identity(display_data)
             self.detail_dialog.update_content(
-                display_data, record_id, editable=is_active
+                display_data,
+                record_id,
+                editable=is_active,
+                active_item_id=display_data.get("active_item_id", ""),
             )
             if not self.detail_dialog.isVisible():
                 geo = self.geometry()
