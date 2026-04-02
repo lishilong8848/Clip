@@ -1,0 +1,58 @@
+# Build outputs
+/dist/
+/build/
+/build_output/
+/node_modules/
+
+# Environment and caches
+/.env
+.env
+.venv/
+/venv/
+__pycache__/
+*.py[cod]
+*.pyo
+
+# IDE and test tooling
+/.idea/
+/.vscode/
+/.pytest_cache/
+/.pytest_tmp/
+/.dev_instances/
+
+# Runtime state
+/.runtime/
+/runtime_state/
+/daily_scheduler_state.json
+/scheduler_first_launch_done.flag
+/build_meta.json
+/build_version_state.json
+
+# Temporary runtime and test artifacts
+/.tmp_runtime/
+/.tmp_runtime_tests/
+/.tmp_day_metric_sources/
+/.tmp_*/
+/.tmp_*.py
+
+# Logs and transient files
+*.log
+*.tmp
+*.bak
+*.tmp_keep
+
+
+# Existing local-only project artifacts
+/docs/
+tests/
+data/
+*.exe
+*.spec
+wheels/
+*.log
+bin/app_log.txt.legacy_conflict_20260212_113720
+bin/ca_bundle.pem
+bin/config.json.legacy_conflict_20260212_113720
+bin/crash_trace.log.legacy_conflict_20260212_113720
+bin/history.json.legacy_conflict_20260212_113720
+bin/upload_event_module/app_log.txt

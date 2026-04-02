@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>一键复制</title>
+
+    <style>
+        body {
+            font-family: system-ui, -apple-system, Segoe UI, Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+            margin: 24px;
+            line-height: 1.6;
+            background: #f5f5f5;
+        }
+
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+            background: #fff;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+        }
+
+        textarea {
+            width: 100%;
+            height: 180px;
+            margin-bottom: 16px;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-family: monospace;
+            resize: vertical;
+            box-sizing: border-box;
+            /* 修复宽度溢出问题 */
+        }
+
+        button {
+            width: 100%;
+            padding: 14px;
+            font-size: 16px;
+            color: #fff;
+            background: #007aff;
+            border: none;
+            border-radius: 8px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        button:active {
+            opacity: 0.85;
+        }
+
+        #log {
+            margin-top: 20px;
+            padding: 10px;
+            background: #333;
+            color: #0f0;
+            font-size: 12px;
+            border-radius: 4px;
+            white-space: pre-wrap;
+            word-break: break-all;
+            display: none;
+        }
+
+        .version {
+            text-align: center;
+            font-size: 12px;
+            color: #999;
+            margin-top: 20px;
+        }
+
+        .icp {
+            text-align: center;
+            font-size: 12px;
+            color: #999;
+            margin-top: 5px;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="container">
+        <h2>一键复制</h2>
+        <p style="color:#666;font-size:14px">扫码打开页面后将自动上报，按钮仅用于复制：</p>
+        <textarea id="t" readonly></textarea>
+        <button id="btn">复制内容</button>
+
+        <div id="log"></div>
+        <div class="version">页面版本: v1.4.2 (自动适配)</div>
+        <div class="icp">冀ICP备2026002667号</div>
+    </div>
+
+    <script>
+        // ===== 日志工具 =====
+        const logEl = document.getElementById('log');
+        function logToScreen(msg) {
+            logEl.style.display = 'block';
+            const time = new Date().toLocaleTimeString();
+            logEl.innerText += `[${time}] ${msg}\n`;
+            console.log(msg);
+        }
+
+        // ===== URL 参数 =====
+        const params = new URLSearchParams(window.location.search);
+        const L_HAO = params.get('l_hao') || 'Unknown';
+
+        // ===== Webhook (从URL参数读取，支持用户自定义) =====
+        const WEBHOOK_URL = params.get('webhook');
+
+        // ===== WebSocket 中转服务 (自动适配 Nginx) =====
+        // 修改点：默认使用当前域名的 /event 路径，Nginx 会自动代理到 Python
+        // 这样就不需要在 URL 里手动传 event_url 了
+        const EVENT_RELAY_URL = "/event";
+
+        let webhookSent = false;
+
+        function sendWebhook(text) {
+            if (webhookSent) return;
+            webhookSent = true;
+
+            // 使用后端代理发送，解决 CORS 问题
+            const PROXY_URL = "/proxy_dingtalk";
+
+            let dingData = {};
+            if (WEBHOOK_URL.includes("connector.dingtalk.com")) {
+                // 钉钉连接器 (保留原始带楼号的格式)
+                dingData = {
+                    louhao: L_HAO,
+                    content: text
+                };
+            } else {
+                // 自定义机器人 (标准格式)
+                dingData = {
+                    "msgtype": "text",
+                    "text": {
+                        "content": text
+                    }
+                };
+            }
+
+            const payload = {
+                url: WEBHOOK_URL,
+                data: dingData
+            };
+
+            fetch(PROXY_URL, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload)
+            })
+                .then(r => r.json())
+                .then(data => {
+                    // 钉钉自定义机器人通常返回 errcode: 0
+                    if (data && data.errcode === 0) {
+                        logToScreen("✅ 钉钉消息发送成功");
+                    }
+                    // 钉钉连接器可能返回不同格式 (如 processInstanceId)，如果没有 errcode 但有数据，视为成功
+                    else if (data && data.errcode === undefined && WEBHOOK_URL.includes("connector.dingtalk.com")) {
+                        logToScreen("✅ 钉钉连接器发送成功 (无返回码)");
+                    }
+                    else {
+                        const errMsg = (data && data.errmsg) ? data.errmsg : JSON.stringify(data);
+                        const errCode = (data && data.errcode !== undefined) ? data.errcode : "N/A";
+                        logToScreen(`❌ 发送结果异常: ${errMsg} (代码: ${errCode})`);
+                    }
+                })
+                .catch(e => {
+                    logToScreen("Webhook 代理请求失败: " + e);
+                });
+        }
+
+        // ===== 发送到 WebSocket 中转服务 =====
+        function sendToRelay(text) {
+            // 直接使用相对路径 /event，由 Nginx 转发
+            const payload = {
+                louhao: L_HAO,
+                content: text,
+                ts: Date.now()
+            };
+
+            fetch(EVENT_RELAY_URL, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload)
+            })
+                .then(r => r.json())
+                .then(data => {
+                    logToScreen(`中转服务推送成功，客户端数: ${data.clients || 0}`);
+                })
+                .catch(e => {
+                    logToScreen("中转服务推送失败 (请检查 Nginx/Python 服务): " + e);
+                });
+        }
+
+        // ===== 初始化（扫码成功入口）=====
+        function init() {
+            const hash = window.location.hash;
+            if (!hash.startsWith("#b64:")) {
+                document.getElementById("t").value = "URL 数据无效";
+                return;
+            }
+
+            try {
+                const b64 = hash.slice(5);
+                let stdB64 = b64.replace(/-/g, "+").replace(/_/g, "/");
+                while (stdB64.length % 4) stdB64 += "=";
+
+                const text = decodeURIComponent(escape(atob(stdB64)));
+                document.getElementById("t").value = text;
+
+                // 扫码成功 → 自动发送（仅当包含“事件通告”时）
+                if (text.includes("事件通告")) {
+                    sendWebhook(text);
+                    sendToRelay(text);  // 同时发送到中转服务
+                } else {
+                    logToScreen("内容未包含'事件通告'，跳过自动发送");
+                }
+
+            } catch (e) {
+                document.getElementById("t").value = "解码失败：" + e;
+                logToScreen("Base64 解码错误: " + e);
+            }
+        }
+
+        // ===== 复制按钮（只复制）=====
+        document.getElementById("btn").addEventListener("click", async () => {
+            const text = document.getElementById("t").value;
+
+            async function copyText(t) {
+                try {
+                    if (navigator.clipboard && window.isSecureContext) {
+                        await navigator.clipboard.writeText(t);
+                        return true;
+                    }
+                } catch { }
+
+                try {
+                    const ta = document.createElement("textarea");
+                    ta.value = t;
+                    ta.style.position = "fixed";
+                    ta.style.left = "-9999px";
+                    document.body.appendChild(ta);
+                    ta.select();
+                    const ok = document.execCommand("copy");
+                    document.body.removeChild(ta);
+                    return ok;
+                } catch {
+                    return false;
+                }
+            }
+
+            const ok = await copyText(text);
+            const btn = document.getElementById("btn");
+            btn.textContent = ok ? "已复制 ✅" : "复制失败";
+            setTimeout(() => btn.textContent = "复制内容", 3000);
+        });
+
+        init();
+    </script>
+
+</body>
+
+</html>
