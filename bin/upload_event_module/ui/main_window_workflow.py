@@ -21,6 +21,89 @@ from ..services.handlers import NoticePayload
 from ..core.parser import extract_event_info
 
 class MainWindowWorkflowMixin:
+    def _collect_live_payload_runtime_keys(self) -> set[str]:
+        keys = set()
+
+        def add_from_data(data):
+            if not isinstance(data, dict):
+                return
+            payload_key = str(data.get("payload_key") or "").strip()
+            if payload_key:
+                keys.add(payload_key)
+            record_id = str(data.get("record_id") or "").strip()
+            if record_id:
+                keys.add(record_id)
+            text = str(data.get("text") or "").strip()
+            if text:
+                info = extract_event_info(text) or {}
+                unique_key = str(info.get("unique_key") or "").strip()
+                if unique_key:
+                    keys.add(unique_key)
+
+        for _, item in self._iter_active_items():
+            try:
+                add_from_data(item.data(Qt.ItemDataRole.UserRole))
+            except Exception:
+                continue
+
+        for mapping in (
+            self.pending_replace_by_record_id,
+            self.pending_upload_rollback_by_record_id,
+            self.pending_end_rollback_by_record_id,
+            self.pending_new_by_record_id,
+            self.pending_update_after_upload,
+        ):
+            for value in mapping.values():
+                if isinstance(value, dict):
+                    add_from_data(value)
+                    add_from_data(value.get("new_data"))
+                    add_from_data(value.get("old_data"))
+
+        for mapping in (self._upload_queues, self._upload_workers):
+            for key in mapping.keys():
+                key = str(key or "").strip()
+                if key:
+                    keys.add(key)
+        return keys
+
+    def _cleanup_runtime_payload_state(self) -> dict[str, int]:
+        live_keys = self._collect_live_payload_runtime_keys()
+        removed_store = 0
+        removed_alias = 0
+
+        for key in list(self._payload_store.keys()):
+            if key not in live_keys:
+                self._payload_store.pop(key, None)
+                removed_store += 1
+
+        for alias_key in list(self._payload_alias.keys()):
+            target = str(self._payload_alias.get(alias_key) or "").strip()
+            if alias_key not in live_keys and target not in live_keys:
+                self._payload_alias.pop(alias_key, None)
+                removed_alias += 1
+
+        stats = {}
+        if removed_store:
+            stats["payload_store_trimmed"] = removed_store
+        if removed_alias:
+            stats["payload_alias_trimmed"] = removed_alias
+        return stats
+
+    def _cleanup_finished_upload_workers(self) -> dict[str, int]:
+        live_keys = set(
+            str(key or "").strip() for key in getattr(self, "_upload_queues", {}).keys()
+        )
+        removed = 0
+        for key, worker in list(self._upload_workers.items()):
+            try:
+                alive = bool(worker and worker.is_alive())
+            except Exception:
+                alive = False
+            if alive or str(key or "").strip() in live_keys:
+                continue
+            self._upload_workers.pop(key, None)
+            removed += 1
+        return {"upload_workers_trimmed": removed} if removed else {}
     def _enqueue_force_upload(self, data_dict: dict):
         # 旧版“先强制上传旧条再替换”链路已停用，不再入队。
         return

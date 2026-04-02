@@ -3,16 +3,177 @@ import faulthandler
 import logging
 import os
 import sys
+from logging.handlers import RotatingFileHandler
 
 from .utils import get_data_file_path, migrate_runtime_data_files
 
 LOG_FILE = get_data_file_path("app_log.txt")
 CRASH_TRACE_FILE = get_data_file_path("crash_trace.log")
+APP_LOG_MAX_BYTES = 10 * 1024 * 1024
+APP_LOG_BACKUP_COUNT = 10
+CRASH_TRACE_MAX_BYTES = 2 * 1024 * 1024
+CRASH_TRACE_BACKUP_COUNT = 3
 
 _crash_trace_file = None
 _logging_initialized = False
 _orig_stdout = sys.stdout
 _orig_stderr = sys.stderr
+
+
+def _roll_plain_log_file(path, backup_count):
+    if not path or backup_count < 1:
+        return
+    try:
+        if not os.path.exists(path):
+            return
+    except Exception:
+        return
+    try:
+        oldest = f"{path}.{backup_count}"
+        if os.path.exists(oldest):
+            os.remove(oldest)
+        for index in range(backup_count - 1, 0, -1):
+            src = f"{path}.{index}"
+            dst = f"{path}.{index + 1}"
+            if os.path.exists(src):
+                os.replace(src, dst)
+        os.replace(path, f"{path}.1")
+    except Exception:
+        pass
+
+
+def _rotate_plain_log_file(path, max_bytes, backup_count):
+    if not path or backup_count < 1:
+        return
+    try:
+        if not os.path.exists(path):
+            return
+        if os.path.getsize(path) < int(max_bytes or 0):
+            return
+    except Exception:
+        return
+    _roll_plain_log_file(path, backup_count)
+
+
+def _ensure_log_parent_dir(path):
+    try:
+        parent = os.path.dirname(path)
+        if parent and not os.path.exists(parent):
+            os.makedirs(parent, exist_ok=True)
+    except Exception:
+        pass
+
+
+def _disable_faulthandler_safe():
+    try:
+        faulthandler.disable()
+    except Exception:
+        pass
+
+
+def _close_crash_trace_stream():
+    global _crash_trace_file
+    _disable_faulthandler_safe()
+    fh = _crash_trace_file
+    _crash_trace_file = None
+    if fh is None:
+        return
+    try:
+        fh.flush()
+    except Exception:
+        pass
+    try:
+        fh.close()
+    except Exception:
+        pass
+
+
+def _open_crash_trace_stream():
+    global _crash_trace_file
+    _ensure_log_parent_dir(CRASH_TRACE_FILE)
+    try:
+        _crash_trace_file = open(
+            CRASH_TRACE_FILE, "a", encoding="utf-8", errors="ignore"
+        )
+    except Exception:
+        _crash_trace_file = None
+        return None
+    try:
+        faulthandler.enable(file=_crash_trace_file, all_threads=True)
+    except Exception:
+        pass
+    return _crash_trace_file
+
+
+def _reopen_crash_trace_stream_if_needed(force=False):
+    global _crash_trace_file
+    fh = _crash_trace_file
+    if fh is None:
+        if force:
+            _roll_plain_log_file(CRASH_TRACE_FILE, CRASH_TRACE_BACKUP_COUNT)
+        return _open_crash_trace_stream()
+    try:
+        fh.flush()
+    except Exception:
+        pass
+    need_rotate = bool(force)
+    if not need_rotate:
+        try:
+            if os.path.exists(CRASH_TRACE_FILE):
+                need_rotate = (
+                    os.path.getsize(CRASH_TRACE_FILE) >= CRASH_TRACE_MAX_BYTES
+                )
+        except Exception:
+            need_rotate = False
+    if not need_rotate:
+        return fh
+    _close_crash_trace_stream()
+    _roll_plain_log_file(CRASH_TRACE_FILE, CRASH_TRACE_BACKUP_COUNT)
+    return _open_crash_trace_stream()
+
+
+def _should_roll_crash_trace_for_bytes(extra_bytes):
+    try:
+        if extra_bytes <= 0:
+            return False
+        current_size = 0
+        if os.path.exists(CRASH_TRACE_FILE):
+            current_size = os.path.getsize(CRASH_TRACE_FILE)
+        return (current_size + int(extra_bytes)) > CRASH_TRACE_MAX_BYTES
+    except Exception:
+        return False
+
+
+def write_crash_trace_message(message):
+    if not message:
+        return
+    text = str(message).rstrip("\r\n")
+    try:
+        encoded = (text + "\n").encode("utf-8", errors="ignore")
+        if _should_roll_crash_trace_for_bytes(len(encoded)):
+            _reopen_crash_trace_stream_if_needed(force=True)
+        fh = _reopen_crash_trace_stream_if_needed()
+        if fh is None:
+            return
+        fh.write(text + "\n")
+        fh.flush()
+    except Exception:
+        pass
+
+
+def dump_crash_traceback():
+    try:
+        fh = _reopen_crash_trace_stream_if_needed()
+        if fh is None:
+            return
+        faulthandler.dump_traceback(file=fh, all_threads=True)
+        try:
+            fh.flush()
+        except Exception:
+            pass
+        _reopen_crash_trace_stream_if_needed()
+    except Exception:
+        pass
 
 
 class SafeConsoleHandler(logging.StreamHandler):
@@ -80,10 +241,8 @@ def _install_qt_message_handler():
         try:
             if msg_type == QtMsgType.QtFatalMsg:
                 logging.critical(f"QtFatal: {message}")
-                try:
-                    faulthandler.dump_traceback(file=_crash_trace_file, all_threads=True)
-                except Exception:
-                    pass
+                write_crash_trace_message(f"QtFatal: {message}")
+                dump_crash_traceback()
             elif msg_type == QtMsgType.QtCriticalMsg:
                 logging.error(f"QtCritical: {message}")
             elif msg_type == QtMsgType.QtWarningMsg:
@@ -120,7 +279,12 @@ def setup_logging():
     except Exception:
         migration_outcomes = []
     console_stream = sys.__stdout__ or _orig_stdout or sys.stdout
-    file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
+    file_handler = RotatingFileHandler(
+        LOG_FILE,
+        maxBytes=APP_LOG_MAX_BYTES,
+        backupCount=APP_LOG_BACKUP_COUNT,
+        encoding="utf-8",
+    )
     console_handler = SafeConsoleHandler(console_stream)
     logging.basicConfig(
         level=logging.DEBUG,
@@ -164,10 +328,12 @@ def setup_logging():
                 )
 
     try:
-        _crash_trace_file = open(
-            CRASH_TRACE_FILE, "a", encoding="utf-8", errors="ignore"
+        _rotate_plain_log_file(
+            CRASH_TRACE_FILE,
+            CRASH_TRACE_MAX_BYTES,
+            CRASH_TRACE_BACKUP_COUNT,
         )
-        faulthandler.enable(file=_crash_trace_file, all_threads=True)
+        _open_crash_trace_stream()
         logging.info(f"Crash trace: {CRASH_TRACE_FILE}")
     except Exception:
         pass

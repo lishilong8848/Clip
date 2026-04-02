@@ -96,6 +96,9 @@ class ClipboardTool(
         self._clipboard_toggle_request_seq = 0
         self._clipboard_restore_verify_timeout_ms = 3000
         self._clipboard_last_restore_failure_reason = ""
+        self._clipboard_last_failure_reason = ""
+        self._clipboard_last_failure_ts = 0.0
+        self._clipboard_health_restart_attempted = False
         self._clipboard_auto_restart_blocked = False
         self._clipboard_resume_after_stop = False
         self._clipboard_last_error = ""
@@ -294,6 +297,7 @@ class ClipboardTool(
         if self._cache_id_repair_result.get("changed"):
             self.save_active_cache()
         self._init_active_cache_timer()
+        self._init_runtime_maintenance_timer()
         self._init_clipboard_ipc()
 
         self.timer = None
@@ -361,6 +365,7 @@ class ClipboardTool(
         )
         self._apply_event_relay_setting(force_reload=False)
         self._init_hot_reload()
+        QTimer.singleShot(0, lambda: self._log_runtime_health_snapshot("startup"))
         QTimer.singleShot(0, self._restore_update_overlay_state)
         QTimer.singleShot(600, self._close_restart_overlay_window)
         QTimer.singleShot(1500, self._check_ocr_lang_pack)

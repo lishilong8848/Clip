@@ -9,10 +9,9 @@ from PyQt6.QtCore import Qt, QTimer, QUrl, qInstallMessageHandler
 from PyQt6.QtGui import QDesktopServices
 
 from ..config import config
-from ..logger import log_info, log_error, log_warning
+from ..logger import log_info, log_error, log_warning, write_crash_trace_message
 from ..utils import BASE_DIR
 from ..hot_reload.manager import HotReloadManager
-from ..hot_reload.state_store import get_user_data_dir
 from ..services.system_alert_webhook import send_system_alert
 from ..core.parser import extract_event_info
 from ..core.speech import speech_manager
@@ -341,12 +340,7 @@ class MainWindowRuntimeMixin:
                     log_warning(msg)
                 else:
                     log_info(msg)
-                try:
-                    trace_path = get_user_data_dir() / "crash_trace.log"
-                    with trace_path.open("a", encoding="utf-8") as fh:
-                        fh.write(msg + "\n")
-                except Exception:
-                    pass
+                write_crash_trace_message(msg)
             except Exception:
                 pass
 

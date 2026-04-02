@@ -11,6 +11,83 @@ from ..logger import log_info, log_error, log_warning
 from ..core.parser import extract_event_info
 
 class MainWindowClipboardMixin:
+    def _remember_clipboard_failure(self, reason: str):
+        self._clipboard_last_failure_reason = str(reason or "").strip()
+        self._clipboard_last_failure_ts = time.time() if reason else 0.0
+
+    def _clear_clipboard_failure(self):
+        self._clipboard_last_failure_reason = ""
+        self._clipboard_last_failure_ts = 0.0
+
+    def _trim_clipboard_crash_timestamps(self) -> int:
+        now = time.monotonic()
+        window = float(self._clipboard_crash_window_seconds or 0.0)
+        removed = 0
+        while (
+            self._clipboard_crash_timestamps
+            and (now - self._clipboard_crash_timestamps[0]) > window
+        ):
+            self._clipboard_crash_timestamps.popleft()
+            removed += 1
+        return removed
+
+    def _is_clipboard_file_timer_active(self) -> bool:
+        timer = getattr(self, "clipboard_file_timer", None)
+        if timer is None:
+            return False
+        try:
+            return bool(timer.isActive())
+        except Exception:
+            return False
+
+    def _perform_clipboard_health_maintenance(self) -> dict[str, int]:
+        stats = {}
+        removed = self._trim_clipboard_crash_timestamps()
+        if removed:
+            stats["clipboard_crash_timestamps_trimmed"] = removed
+
+        if (
+            self._closing
+            or self._clipboard_toggle_transition_in_progress
+            or self._is_clipboard_listener_disabled()
+            or self._clipboard_degraded
+            or self.clipboard_paused
+            or bool(getattr(self, "_clipboard_paused_for_patch_update", False))
+        ):
+            self._clipboard_health_restart_attempted = False
+            return stats
+
+        process = getattr(self, "_clipboard_process", None)
+        process_running = bool(
+            process and process.state() != QProcess.ProcessState.NotRunning
+        )
+        timer_active = self._is_clipboard_file_timer_active()
+        if process_running or timer_active:
+            self._clipboard_health_restart_attempted = False
+            return stats
+
+        if self._clipboard_health_restart_attempted:
+            return stats
+
+        self._clipboard_health_restart_attempted = True
+        self._remember_clipboard_failure("listener unexpectedly idle")
+        log_warning("剪贴板监听健康检查: 检测到非预期停摆，尝试恢复监听。")
+
+        timer = getattr(self, "clipboard_file_timer", None)
+        if timer is None:
+            self._init_clipboard_ipc()
+            stats["clipboard_ipc_reinitialized"] = 1
+        else:
+            try:
+                timer.start(200)
+                stats["clipboard_timer_restarted"] = 1
+            except Exception:
+                pass
+
+        self._start_clipboard_listener()
+        stats["clipboard_listener_restart_attempted"] = 1
+        return stats
+
     def _is_clipboard_listener_disabled(self) -> bool:
         return bool(getattr(config, "disable_clipboard_listener", False))
 
@@ -140,6 +217,7 @@ class MainWindowClipboardMixin:
         self._clipboard_last_restore_failure_reason = (
             str(reason or "").strip() or self._build_clipboard_restore_failure_reason()
         )
+        self._remember_clipboard_failure(self._clipboard_last_restore_failure_reason)
         self._finalize_clipboard_toggle_transition(
             success=False,
             disabled=False,
@@ -165,6 +243,7 @@ class MainWindowClipboardMixin:
         if success:
             self._clipboard_effective_running = True
             self._clipboard_last_restore_failure_reason = ""
+            self._clear_clipboard_failure()
             self._finalize_clipboard_toggle_transition(
                 success=True,
                 disabled=False,
@@ -417,6 +496,7 @@ class MainWindowClipboardMixin:
         if stderr_tail:
             detail_parts.append(f"stderr_tail={stderr_tail}")
         detail = " | ".join(detail_parts)
+        self._remember_clipboard_failure(detail)
         self._emit_system_alert(
             event_code="clipboard.listener.crashed",
             title="剪贴板监听进程异常退出",
@@ -443,6 +523,7 @@ class MainWindowClipboardMixin:
         self._clipboard_degraded = True
         self._clipboard_auto_restart_blocked = True
         self._clipboard_resume_after_stop = False
+        self._remember_clipboard_failure("listener degraded after repeated crashes")
         log_error("剪贴板监听已进入降级模式：崩溃次数过多，自动暂停监听。")
         self._emit_system_alert(
             event_code="clipboard.listener.degraded",
@@ -466,6 +547,8 @@ class MainWindowClipboardMixin:
         except Exception as exc:
             log_error(f"降级状态保存失败: {exc}")
         self._refresh_clipboard_toggle_ui()
+        if hasattr(self, "_log_runtime_health_snapshot"):
+            self._log_runtime_health_snapshot("clipboard-degraded")
         return True
 
     def _init_clipboard_ipc(self):
@@ -584,6 +667,8 @@ class MainWindowClipboardMixin:
             return
         self._clipboard_last_error = ""
         self._clipboard_effective_running = True
+        self._clipboard_health_restart_attempted = False
+        self._clear_clipboard_failure()
         if (
             self._clipboard_toggle_transition_in_progress
             and not self._clipboard_toggle_target_disabled

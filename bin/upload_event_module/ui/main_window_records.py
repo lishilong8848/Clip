@@ -4,12 +4,13 @@ import time
 import re
 import unicodedata
 import uuid
+import os
 from PyQt6.QtWidgets import QListWidgetItem, QInputDialog
 from PyQt6.QtCore import Qt, QSize, QTimer
 from PyQt6 import sip
 
 from ..config import get_field_config
-from ..logger import log_info, log_warning
+from ..logger import LOG_FILE, log_info, log_warning
 from ..utils import WHITESPACE_TRANSLATOR
 from ..services.service_registry import query_record_by_id, update_bitable_record_fields
 from ..core.parser import extract_event_info
@@ -45,6 +46,162 @@ class MainWindowRecordsMixin:
             if key in data_dict:
                 patch[key] = data_dict.get(key)
         return patch
+
+    def _init_runtime_maintenance_timer(self):
+        self.runtime_maintenance_timer = QTimer(self)
+        self.runtime_maintenance_timer.timeout.connect(
+            self._run_runtime_maintenance
+        )
+        self.runtime_maintenance_timer.start(10 * 60 * 1000)
+
+    def _collect_live_runtime_record_ids(self) -> set[str]:
+        record_ids = set()
+        for _, item in self._iter_active_items():
+            try:
+                data = item.data(Qt.ItemDataRole.UserRole)
+            except Exception:
+                continue
+            if not isinstance(data, dict):
+                continue
+            record_id = str(data.get("record_id") or "").strip()
+            if not record_id or self._is_placeholder_record(data):
+                continue
+            record_ids.add(record_id)
+        return record_ids
+
+    def _collect_busy_runtime_record_ids(self) -> set[str]:
+        busy = set()
+        for mapping in (
+            getattr(self, "pending_replace_by_record_id", {}),
+            getattr(self, "pending_upload_rollback_by_record_id", {}),
+            getattr(self, "pending_end_rollback_by_record_id", {}),
+            getattr(self, "pending_new_by_record_id", {}),
+            getattr(self, "pending_update_after_upload", {}),
+            getattr(self, "pending_action_types", {}),
+            getattr(self, "_upload_queues", {}),
+            getattr(self, "_upload_workers", {}),
+        ):
+            if isinstance(mapping, dict):
+                busy.update(
+                    str(key or "").strip()
+                    for key in mapping.keys()
+                    if str(key or "").strip()
+                )
+        return busy
+
+    def _trim_runtime_state_sets(self) -> dict[str, int]:
+        active_record_ids = self._collect_live_runtime_record_ids()
+        busy_record_ids = active_record_ids | self._collect_busy_runtime_record_ids()
+        stats = {}
+
+        before = len(self._record_binding_validated_ids)
+        self._record_binding_validated_ids.intersection_update(active_record_ids)
+        if len(self._record_binding_validated_ids) != before:
+            stats["record_binding_validated_trimmed"] = (
+                before - len(self._record_binding_validated_ids)
+            )
+
+        before = len(self._today_in_progress_synced_record_ids)
+        self._today_in_progress_synced_record_ids.intersection_update(
+            active_record_ids
+        )
+        if len(self._today_in_progress_synced_record_ids) != before:
+            stats["today_in_progress_synced_trimmed"] = (
+                before - len(self._today_in_progress_synced_record_ids)
+            )
+
+        before = len(self._record_binding_validation_pending_ids)
+        self._record_binding_validation_pending_ids.intersection_update(
+            active_record_ids
+        )
+        if len(self._record_binding_validation_pending_ids) != before:
+            stats["record_binding_pending_trimmed"] = (
+                before - len(self._record_binding_validation_pending_ids)
+            )
+
+        before = len(self._today_in_progress_pending_record_ids)
+        self._today_in_progress_pending_record_ids.intersection_update(
+            active_record_ids
+        )
+        if len(self._today_in_progress_pending_record_ids) != before:
+            stats["today_in_progress_pending_trimmed"] = (
+                before - len(self._today_in_progress_pending_record_ids)
+            )
+
+        before = len(self.pending_action_record_ids)
+        self.pending_action_record_ids.intersection_update(busy_record_ids)
+        if len(self.pending_action_record_ids) != before:
+            stats["pending_action_trimmed"] = (
+                before - len(self.pending_action_record_ids)
+            )
+
+        return stats
+
+    def _log_runtime_health_snapshot(self, reason: str):
+        try:
+            log_size = (
+                os.path.getsize(LOG_FILE) if LOG_FILE and os.path.exists(LOG_FILE) else 0
+            )
+        except Exception:
+            log_size = 0
+        clipboard_state = "paused"
+        try:
+            if getattr(self, "_clipboard_degraded", False):
+                clipboard_state = "degraded"
+            elif getattr(self, "_clipboard_effective_running", False):
+                clipboard_state = "running"
+            elif getattr(self, "_is_clipboard_listener_disabled", lambda: False)():
+                clipboard_state = "paused"
+            else:
+                clipboard_state = "idle"
+        except Exception:
+            clipboard_state = "unknown"
+        log_info(
+            "RuntimeHealth[%s]: active_items=%s validated=%s synced=%s payload_store=%s payload_alias=%s upload_workers=%s clipboard=%s app_log_bytes=%s"
+            % (
+                reason,
+                sum(1 for _ in self._iter_active_items()),
+                len(getattr(self, "_record_binding_validated_ids", set())),
+                len(getattr(self, "_today_in_progress_synced_record_ids", set())),
+                len(getattr(self, "_payload_store", {})),
+                len(getattr(self, "_payload_alias", {})),
+                len(getattr(self, "_upload_workers", {})),
+                clipboard_state,
+                log_size,
+            )
+        )
+
+    def _run_runtime_maintenance(self):
+        stats = {}
+        try:
+            stats.update(self._trim_runtime_state_sets())
+        except Exception as exc:
+            log_warning(f"运行态维护: 集合裁剪失败 error={exc}")
+        try:
+            stats.update(self._cleanup_runtime_payload_state())
+        except Exception as exc:
+            log_warning(f"运行态维护: payload清理失败 error={exc}")
+        try:
+            stats.update(self._cleanup_finished_upload_workers())
+        except Exception as exc:
+            log_warning(f"运行态维护: upload worker清理失败 error={exc}")
+        try:
+            stats.update(self._perform_clipboard_health_maintenance())
+        except Exception as exc:
+            log_warning(f"运行态维护: 剪贴板健康检查失败 error={exc}")
+        changes = {
+            key: value
+            for key, value in stats.items()
+            if isinstance(value, int) and value > 0
+        }
+        if changes:
+            log_info(
+                "RuntimeMaintenance: "
+                + ", ".join(
+                    f"{key}={value}" for key, value in sorted(changes.items())
+                )
+            )
+            self._log_runtime_health_snapshot("maintenance")
 
     def _safe_widget(self, widget):
         if not widget:
