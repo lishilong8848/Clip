@@ -4,6 +4,8 @@ import hashlib
 
 import json
 
+import os
+
 import re
 
 import shutil
@@ -35,6 +37,8 @@ BIN_DIR = PROJECT_ROOT / "bin"
 WHEELS_DIR = PROJECT_ROOT / "bin" / "wheels"
 
 PATCH_SEQUENCE_STATE_FILE = BUILD_DIR / ".patch_sequence_state.json"
+
+PREFERRED_BUILD_PYTHON = Path(r"D:\Python313\python.exe")
 
 DEFAULT_MAJOR_VERSION = 2  # 默认大版本
 
@@ -674,21 +678,51 @@ def write_patch_meta(
 
 
 
-def _find_venv_python() -> Path | None:
+def _find_build_python() -> Path | None:
 
-    candidates = [
+    candidates: list[Path] = []
 
-        BIN_DIR / ".venv" / "Scripts" / "python.exe",
+    env_python = (os.environ.get("PACKAGE_BUILD_PYTHON") or "").strip()
 
-        BIN_DIR / ".venv" / "bin" / "python",
+    if env_python:
 
-        PROJECT_ROOT / ".venv" / "Scripts" / "python.exe",
+        candidates.append(Path(env_python))
 
-        PROJECT_ROOT / ".venv" / "bin" / "python",
+    candidates.append(PREFERRED_BUILD_PYTHON)
 
-    ]
+    current_python = (sys.executable or "").strip()
+
+    if current_python:
+
+        candidates.append(Path(current_python))
+
+    candidates.extend(
+
+        [
+
+            BIN_DIR / ".venv" / "Scripts" / "python.exe",
+
+            BIN_DIR / ".venv" / "bin" / "python",
+
+            PROJECT_ROOT / ".venv" / "Scripts" / "python.exe",
+
+            PROJECT_ROOT / ".venv" / "bin" / "python",
+
+        ]
+
+    )
+
+    seen: set[str] = set()
 
     for path in candidates:
+
+        normalized = str(path).strip()
+
+        if not normalized or normalized in seen:
+
+            continue
+
+        seen.add(normalized)
 
         if path.exists():
 
@@ -754,7 +788,7 @@ def _run_cmd(
 
     except Exception as exc:
 
-        log(f"Command failed: {exc}")
+        log(f"命令执行失败: {exc}")
 
         return False
 
@@ -764,11 +798,11 @@ def _run_cmd(
 
         if log_output_on_error and result.stdout.strip():
 
-            log(f"STDOUT:\n{result.stdout.strip()}")
+            log(f"标准输出:\n{result.stdout.strip()}")
 
         if log_output_on_error and result.stderr.strip():
 
-            log(f"STDERR:\n{result.stderr.strip()}")
+            log(f"标准错误:\n{result.stderr.strip()}")
 
         return False
 
@@ -802,7 +836,7 @@ def _run_cmd_capture(args: list[str], *, cwd: Path | None = None) -> tuple[bool,
 
     except Exception as exc:
 
-        log(f"Command failed: {exc}")
+        log(f"命令执行失败: {exc}")
 
         return False, ""
 
@@ -812,11 +846,11 @@ def _run_cmd_capture(args: list[str], *, cwd: Path | None = None) -> tuple[bool,
 
         if result.stdout.strip():
 
-            log(f"STDOUT:\n{result.stdout.strip()}")
+            log(f"标准输出:\n{result.stdout.strip()}")
 
         if result.stderr.strip():
 
-            log(f"STDERR:\n{result.stderr.strip()}")
+            log(f"标准错误:\n{result.stderr.strip()}")
 
         return False, ""
 
@@ -940,7 +974,7 @@ def ensure_runtime_dependencies(venv_python: Path) -> None:
 
     if not missing:
 
-        log("Runtime dependencies already installed.")
+        log("运行时依赖已安装。")
 
         return
 
@@ -964,13 +998,13 @@ def ensure_runtime_dependencies(venv_python: Path) -> None:
 
     )
 
-    log(f"Missing runtime deps: {', '.join(missing_pkgs)}")
+    log(f"缺少运行时依赖: {', '.join(missing_pkgs)}")
 
 
 
     if WHEELS_DIR.exists():
 
-        log("Installing runtime deps from local wheels...")
+        log("正在从本地 wheels 安装运行时依赖...")
 
         _pip_install_packages(venv_python, missing_pkgs, use_local_wheels=True)
 
@@ -980,7 +1014,7 @@ def ensure_runtime_dependencies(venv_python: Path) -> None:
 
     if not missing_after_wheels:
 
-        log("Runtime dependencies installed from local wheels.")
+        log("已从本地 wheels 安装运行时依赖。")
 
         return
 
@@ -1006,7 +1040,7 @@ def ensure_runtime_dependencies(venv_python: Path) -> None:
 
     log(
 
-        "Still missing deps after local wheels, fallback to PyPI: "
+        "本地 wheels 安装后仍缺少依赖，回退到 PyPI 安装: "
 
         + ", ".join(missing_after_wheels_pkgs)
 
@@ -1026,11 +1060,11 @@ def ensure_runtime_dependencies(venv_python: Path) -> None:
 
         missing_text = ", ".join(RUNTIME_MODULE_TO_PACKAGE[m] for m in final_missing)
 
-        raise RuntimeError(f"Runtime dependency install incomplete: {missing_text}")
+        raise RuntimeError(f"运行时依赖安装不完整: {missing_text}")
 
 
 
-    log("Runtime dependencies installed successfully.")
+    log("运行时依赖安装完成。")
 
 
 
@@ -1402,7 +1436,7 @@ def _cleanup_old_patch_zips() -> int:
 
             except Exception as exc:
 
-                log(f"Skip removing old zip {zip_path.name}: {exc}")
+                log(f"跳过删除旧补丁压缩包 {zip_path.name}: {exc}")
 
     return removed
 
@@ -1418,7 +1452,7 @@ def _zip_patch_dir(patch_dir: Path) -> Path:
 
     if removed:
 
-        log(f"Removed old patch zips: {removed}")
+        log(f"已删除旧补丁压缩包: {removed}")
 
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
 
@@ -1588,7 +1622,7 @@ def _upload_patch_to_gitee(
 
     if not repo_url.strip():
 
-        log("Skip upload: empty gitee repo.")
+        log("跳过上传：Gitee 仓库地址为空。")
 
         return False
 
@@ -1606,7 +1640,7 @@ def _upload_patch_to_gitee(
 
     if not clone_ok:
 
-        log("Gitee upload: clone failed.")
+        log("Gitee 上传失败：clone 仓库失败。")
 
         return False
 
@@ -1634,11 +1668,11 @@ def _upload_patch_to_gitee(
 
             except Exception as exc:
 
-                log(f"Skip removing remote old zip {old_zip.name}: {exc}")
+                log(f"跳过删除远端旧补丁压缩包 {old_zip.name}: {exc}")
 
         if removed_old:
 
-            log(f"Gitee upload: removed old patch zips in repo: {removed_old}")
+            log(f"Gitee 仓库中已删除旧补丁压缩包: {removed_old}")
 
         shutil.copy2(patch_zip, patch_subdir / patch_zip.name)
 
@@ -1676,11 +1710,11 @@ def _upload_patch_to_gitee(
 
             if ok and not status_output.strip():
 
-                log("Gitee upload: no changes to commit.")
+                log("Gitee 上传：没有可提交的变更。")
 
                 return True
 
-            log("Gitee upload: commit failed.")
+            log("Gitee 上传失败：提交变更失败。")
 
             return False
 
@@ -1688,11 +1722,11 @@ def _upload_patch_to_gitee(
 
         if pushed:
 
-            log(f"Gitee upload success: {repo_url} ({branch})")
+            log(f"Gitee 上传成功: {repo_url} ({branch})")
 
             return True
 
-        log("Gitee upload: push failed.")
+        log("Gitee 上传失败：推送失败。")
 
         return False
 
@@ -2292,39 +2326,43 @@ def main() -> None:
 
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
 
-    venv_python = _find_venv_python()
+    build_python = _find_build_python()
 
     skip_runtime_deps = bool(args.skip_watchdog or args.skip_runtime_deps)
 
-    if venv_python and not skip_runtime_deps:
+    if build_python:
 
-        log(f"Ensuring runtime dependencies in venv: {venv_python}")
+        log(f"使用打包解释器: {build_python}")
 
-        ensure_runtime_dependencies(venv_python)
+    if build_python and not skip_runtime_deps:
 
-        if not _verify_runtime_imports(venv_python, PROJECT_ROOT):
+        log(f"正在校验并补齐打包解释器依赖: {build_python}")
 
-            raise RuntimeError("Source venv import smoke check failed.")
+        ensure_runtime_dependencies(build_python)
 
-        log("Source venv import smoke check passed.")
+        if not _verify_runtime_imports(build_python, PROJECT_ROOT):
 
-    elif not venv_python:
+            raise RuntimeError("源码目录导入冒烟检查失败。")
 
-        log("No venv Python found; skip runtime dependency install.")
+        log("源码目录导入冒烟检查通过。")
+
+    elif not build_python:
+
+        log("未找到可用的打包解释器，跳过运行时依赖安装。")
 
     current_venv_hash = ""
 
-    if venv_python:
+    if build_python:
 
-        current_venv_hash = _get_venv_hash(venv_python)
+        current_venv_hash = _get_venv_hash(build_python)
 
         if current_venv_hash:
 
-            log("Detected venv dependency hash.")
+            log("已识别当前运行时依赖哈希。")
 
         else:
 
-            log("Failed to detect venv dependency hash.")
+            log("识别当前运行时依赖哈希失败。")
 
 
 
@@ -2338,7 +2376,7 @@ def main() -> None:
 
         major_version = _extract_major_version(dist_name)
 
-        log(f"Base version not found. Creating base build: {dist_name}")
+        log(f"未找到基线版本，正在创建基础构建: {dist_name}")
 
         if dist_dir.exists():
 
@@ -2348,27 +2386,23 @@ def main() -> None:
 
         if not skip_runtime_deps:
 
-            dist_venv_python = _find_dist_venv_python(dist_dir)
-
-            if dist_venv_python:
+            if build_python:
 
                 log(
 
-                    f"Ensuring runtime dependencies in base dist venv: {dist_venv_python}"
+                    f"正在使用打包解释器执行基础构建导入冒烟检查: {build_python}"
 
                 )
 
-                ensure_runtime_dependencies(dist_venv_python)
+                if not _verify_runtime_imports(build_python, dist_dir):
 
-                if not _verify_runtime_imports(dist_venv_python, dist_dir):
+                    raise RuntimeError("基础构建导入冒烟检查失败。")
 
-                    raise RuntimeError("Base dist import smoke check failed.")
-
-                log("Base dist import smoke check passed.")
+                log("基础构建导入冒烟检查通过。")
 
             else:
 
-                raise RuntimeError("Base dist venv python not found after copy.")
+                raise RuntimeError("基础构建导入冒烟检查缺少可用的打包解释器。")
 
         write_build_meta(
 
@@ -2390,9 +2424,9 @@ def main() -> None:
 
         base_dist_dir = dist_dir
 
-        log("Base build created.")
+        log("基础构建已创建。")
 
-        log("Continue: generating patch_only against the newly created base build.")
+        log("继续：基于新创建的基础构建生成补丁包。")
 
     dist_name = args.name or format_dist_name(timestamp, base_build_id)
 
@@ -2400,7 +2434,7 @@ def main() -> None:
 
 
 
-    log("Patch-only mode: skip full build output.")
+    log("当前为仅补丁模式：跳过完整构建输出。")
 
 
 
@@ -2414,43 +2448,13 @@ def main() -> None:
 
     baseline_missing_runtime: list[str] = []
 
-    baseline_has_venv = False
-
     if baseline_dir:
 
-        base_venv_python = _find_dist_venv_python(baseline_dir)
-
-        if base_venv_python:
-
-            baseline_has_venv = True
-
-            baseline_missing_runtime = _missing_runtime_modules(base_venv_python)
-
-            if baseline_missing_runtime:
-
-                log(
-
-                    "Baseline runtime deps missing: "
-
-                    + ", ".join(
-
-                        RUNTIME_MODULE_TO_PACKAGE[m] for m in baseline_missing_runtime
-
-                    )
-
-                )
-
-        else:
-
-            log("Baseline venv python not found.")
-
-    if baseline_dir:
-
-        log(f"Building cumulative patch_only against base: {baseline_dir.name}")
+        log(f"正在基于基线版本生成累积补丁: {baseline_dir.name}")
 
     else:
 
-        log("No base version found. patch_only will include all files.")
+        log("未找到基线版本，本次补丁将包含全部文件。")
 
     if args.baseline_meta:
 
@@ -2524,7 +2528,7 @@ def main() -> None:
     if base_patch_version > baseline_patch_version:
 
         log(
-            "Using local patch sequence state: "
+            "使用本地补丁序列状态: "
             f"{baseline_patch_version} -> {base_patch_version}"
         )
 
@@ -2540,23 +2544,15 @@ def main() -> None:
 
     )
 
-    if not base_venv_hash and baseline_dir:
+    if base_venv_hash:
 
-        base_python = _find_dist_venv_python(baseline_dir)
-
-        if base_python:
-
-            base_venv_hash = _get_venv_hash(base_python)
-
-            if base_venv_hash:
-
-                log("Detected baseline venv dependency hash from baseline.")
+        log("已从基线元数据识别运行时依赖哈希。")
 
     code_changed = _has_code_changes(baseline_dir, exclude_venv=True)
 
     if not code_changed:
 
-        log("No .py changes detected versus baseline.")
+        log("相对基线未检测到 .py 代码变化。")
 
     deps_changed = False
 
@@ -2566,11 +2562,7 @@ def main() -> None:
 
     elif current_venv_hash and baseline_dir and not base_venv_hash:
 
-        log("Baseline venv hash unavailable; treat dependencies as changed.")
-
-        deps_changed = True
-
-    if baseline_dir and not baseline_has_venv:
+        log("基线运行时依赖哈希不可用，按依赖已变化处理。")
 
         deps_changed = True
 
@@ -2584,17 +2576,17 @@ def main() -> None:
 
         log(
 
-            "patch_only: dependencies changed but .venv excluded (user-side auto-install)."
+            "补丁模式：依赖已变化，但不包含 .venv 运行时目录（由用户侧自动安装依赖）。"
 
         )
 
     if include_venv:
 
-        log("patch_only will include .venv (--patch-include-venv).")
+        log("补丁将包含 .venv 运行时目录（--patch-include-venv）。")
 
     else:
 
-        log("patch_only will exclude .venv.")
+        log("补丁将排除 .venv 运行时目录。")
 
     force_ui_update = bool(DEFAULT_FORCE_UI_UPDATE or args.force_ui_update)
 
@@ -2606,15 +2598,15 @@ def main() -> None:
 
     if force_ui_update:
 
-        log("Force UI update is enabled. Patch will require restart.")
+        log("已启用强制界面更新，本次补丁需要重启程序。")
 
     else:
 
-        log("Force UI update is disabled. Patch will use hot update (no restart).")
+        log("未启用强制界面更新，本次补丁将使用热更新（无需重启）。")
 
     if ui_changed:
 
-        log("UI version changed. Patch will require restart.")
+        log("检测到界面版本变化，本次补丁需要重启程序。")
 
     patch_min_version = ""
 
@@ -2624,13 +2616,13 @@ def main() -> None:
 
         if patch_min_version:
 
-            log(f"Strict min_version enabled: {patch_min_version}")
+            log(f"已启用严格最小版本限制: {patch_min_version}")
 
     if not patch_min_version:
 
         log(
 
-            "Non-strict patch mode: min_version is empty (recommended for manual patch delivery)."
+            "当前为非严格补丁模式：min_version 为空（适合手动分发补丁）。"
 
         )
 
@@ -2696,7 +2688,7 @@ def main() -> None:
 
     )
 
-    log(f"patch_only done. Added={added}, Changed={changed}, Deleted={deleted}")
+    log(f"补丁构建完成。新增={added}，变更={changed}，删除={deleted}")
 
 
 
@@ -2704,7 +2696,7 @@ def main() -> None:
 
     patch_zip = _zip_patch_dir(patch_dir)
 
-    log(f"Patch zip created: {patch_zip.name}")
+    log(f"补丁压缩包已生成: {patch_zip.name}")
 
     latest_manifest_path, latest_manifest = _write_latest_patch_manifest(
 
@@ -2720,17 +2712,17 @@ def main() -> None:
 
     )
 
-    log(f"Latest patch manifest generated: {latest_manifest_path.name}")
+    log(f"最新补丁清单已生成: {latest_manifest_path.name}")
 
     log(
 
-        "Patch meta summary: "
+        "补丁元数据摘要: "
 
-        f"target={latest_manifest.get('target_version')} "
+        f"目标版本={latest_manifest.get('target_version')} "
 
-        f"patch={latest_manifest.get('target_patch_version')} "
+        f"补丁号={latest_manifest.get('target_patch_version')} "
 
-        f"ui_changed={latest_manifest.get('ui_changed')}"
+        f"界面变化={latest_manifest.get('ui_changed')}"
 
     )
 
@@ -2752,7 +2744,7 @@ def main() -> None:
         )
 
     else:
-        log("Gitee upload skipped (AUTO_UPLOAD_GITEE=False).")
+        log("已跳过 Gitee 上传（AUTO_UPLOAD_GITEE=False）。")
 
     if _advance_local_patch_sequence(
         patch_sequence_key,
@@ -2762,11 +2754,11 @@ def main() -> None:
         base_build_id=base_build_id,
     ):
         log(
-            "Local patch sequence advanced to "
-            f"{target_patch_version}."
+            "本地补丁序列已推进到 "
+            f"{target_patch_version}。"
         )
 
-    log("Done.")
+    log("打包完成。")
 
 
 
