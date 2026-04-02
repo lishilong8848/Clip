@@ -9,7 +9,7 @@ import hashlib
 import uuid
 from PyQt6.QtCore import Qt, QTimer
 
-from ..logger import log_info, log_error
+from ..logger import log_info, log_error, log_warning
 from ..utils import HISTORY_FILE, WHITESPACE_TRANSLATOR
 from ..services.service_registry import (
     upload_media_to_feishu,
@@ -397,6 +397,23 @@ class MainWindowWorkflowMixin:
                 if self._should_defer_ui_refresh():
                     self._mark_cache_refresh_needed()
                     return
+            else:
+                entry_id = (entry or {}).get("entry_id", "")
+                title_for_log = (entry or {}).get("title", "") or (info or {}).get(
+                    "title", ""
+                )
+                preview = " ".join(str(content or "").split())
+                if len(preview) > 160:
+                    preview = preview[:160] + "..."
+                log_warning(
+                    "未命中活动条目，已忽略更新/结束通告: "
+                    f"status={status} notice_type={notice_type} "
+                    f"title={title_for_log} entry_id={entry_id} preview={preview}"
+                )
+                self.show_message(
+                    f"无法执行【{status}】操作：\n未在主界面找到对应条目，已忽略这条通告。"
+                )
+                self._maybe_speak("未找到对应条目")
         else:
             self.show_message(f"无法执行【{status}】操作：\n未在列表中找到对应原事件。")
             self._maybe_speak("无法更新，未找到对应事件")
