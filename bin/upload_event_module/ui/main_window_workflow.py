@@ -304,7 +304,14 @@ class MainWindowWorkflowMixin:
             return True, ""
         return False, str(result)
 
-    def _handle_manual_update(self, content: str, record_id: str, info=None):
+    def _handle_manual_update(
+        self,
+        content: str,
+        record_id: str,
+        info=None,
+        *,
+        force_status: str | None = "update",
+    ):
         info = info or extract_event_info(content)
         if not info:
             return
@@ -339,7 +346,7 @@ class MainWindowWorkflowMixin:
                 data,
                 refresh_detail=not self._should_defer_ui_refresh(),
                 rebuild_widget=not self._should_defer_ui_refresh(),
-                force_status="update",
+                force_status=force_status,
                 list_widget=list_widget,
                 item=item,
             )
@@ -347,7 +354,20 @@ class MainWindowWorkflowMixin:
                 self._pin_item_to_top(list_widget, item)
             self.save_active_cache()
         else:
-            self.add_active_item(data)
+            data["_has_unuploaded_changes"] = True
+            data["_pending_upload_hash"] = None
+            data["_upload_in_progress"] = False
+            added_item, added_widget = self.add_active_item(data)
+            if added_item:
+                log_info(
+                    "ManualAdd: record_id not found in active list, added as new item "
+                    f"record_id={record_id} notice_type={notice_type}"
+                )
+            else:
+                log_warning(
+                    "ManualAdd: failed to add new item for unmatched record_id "
+                    f"record_id={record_id} notice_type={notice_type}"
+                )
 
         if not self.isVisible():
             self.toggle_window()
@@ -2089,11 +2109,17 @@ class MainWindowWorkflowMixin:
             return
         status = status or info.get("status", "")
         cleaned_content = info.get("content") or content
-        if status == "更新":
-            if record_id:
-                self._handle_manual_update(content, record_id, info)
-                return
+        if status in {"更新", "结束"} and record_id:
+            force_status = "end" if status == "结束" else "update"
+            self._handle_manual_update(
+                content,
+                record_id,
+                info,
+                force_status=force_status,
+            )
+            return
 
+        if status == "更新":
             target_list, target_item = self._find_active_item_by_content_or_title(
                 cleaned_content,
                 info.get("title", ""),
