@@ -191,17 +191,11 @@ class EventNoticeHandler(BaseNoticeHandler):
 
     def build_robot_message(self, payload: NoticePayload):
         title, content, notice_type, level = super().build_robot_message(payload)
-        info = extract_event_info(payload.text or "")
-        title_text = info.get("title", "") if info else ""
-        if not title_text:
-            match = re.search(r"【标题】(.*?)(?:\n|【|$)", payload.text or "", re.DOTALL)
-            if match:
-                title_text = match.group(1).strip()
-        if LEVEL_I3 in title_text.upper():
-            level = LEVEL_I3
-        else:
-            level = LEVEL_I2
-        return title, content, notice_type, level
+        summary = self._extract_section(payload.text or "", "概述")
+        normalized_level = self._normalize_event_level(payload.level, payload.text)
+        if summary and "负载功率过高" in summary:
+            normalized_level = LEVEL_I3
+        return title, content, notice_type, self._route_event_group_level(normalized_level)
 
     def _extract_section(self, text: str, label: str) -> str:
         if not text:
@@ -223,6 +217,12 @@ class EventNoticeHandler(BaseNoticeHandler):
                 return raw_level
 
         return self._detect_event_level_from_text(text)
+
+    def _route_event_group_level(self, level: str) -> str:
+        normalized = str(level or "").strip()
+        if normalized == LEVEL_I3:
+            return LEVEL_I3
+        return LEVEL_I2
 
     def _detect_event_level_from_text(self, text: str) -> str:
         title = self._extract_section(text or "", "标题") or (text or "")
