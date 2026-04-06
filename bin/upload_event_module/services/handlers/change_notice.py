@@ -169,6 +169,7 @@ class ChangeNoticeHandler(BaseNoticeHandler):
             fields[CHANGE_NOTICE_FIELDS["progress"]] = progress
 
         if is_end:
+            fields[CHANGE_NOTICE_FIELDS["today_in_progress"]] = "否"
             response_dt = self._parse_response_datetime(
                 payload.response_time, end_dt or start_dt
             )
