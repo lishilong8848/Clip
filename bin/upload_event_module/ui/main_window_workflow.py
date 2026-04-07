@@ -104,6 +104,40 @@ class MainWindowWorkflowMixin:
             self._upload_workers.pop(key, None)
             removed += 1
         return {"upload_workers_trimmed": removed} if removed else {}
+
+    def _has_any_upload_in_progress(self) -> bool:
+        try:
+            self._cleanup_finished_upload_workers()
+        except Exception:
+            pass
+
+        if getattr(self, "pending_action_record_ids", None):
+            return True
+
+        for task_queue in getattr(self, "_upload_queues", {}).values():
+            try:
+                if task_queue and not task_queue.empty():
+                    return True
+            except Exception:
+                continue
+
+        for worker in getattr(self, "_upload_workers", {}).values():
+            try:
+                if worker and worker.is_alive():
+                    return True
+            except Exception:
+                continue
+
+        for _, item in self._iter_active_items():
+            try:
+                data = item.data(Qt.ItemDataRole.UserRole)
+            except Exception:
+                continue
+            if isinstance(data, dict) and data.get("_upload_in_progress"):
+                return True
+
+        return False
+
     def _enqueue_force_upload(self, data_dict: dict):
         # 旧版“先强制上传旧条再替换”链路已停用，不再入队。
         return
