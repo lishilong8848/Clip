@@ -2294,6 +2294,8 @@ class ScreenshotConfirmDialog(QDialog):
 
         self._suppress_ocr_cancel_on_hide = False
 
+        self._submit_accepted = True
+
         self._ocr_vote_candidates = []
 
         self._ocr_vote_summary = {}
@@ -7762,6 +7764,8 @@ class ScreenshotConfirmDialog(QDialog):
 
         self._remember_current_state()
 
+        self._submit_accepted = True
+
         # 跳过截图时也需要传递buildings
 
         buildings = list(self.selected_buildings) if self.selected_buildings else []
@@ -7816,6 +7820,10 @@ class ScreenshotConfirmDialog(QDialog):
 
         )
 
+        if not self._consume_submit_accepted():
+
+            return
+
         self._reset_recover_selection()
 
         self.hide()
@@ -7827,6 +7835,8 @@ class ScreenshotConfirmDialog(QDialog):
         self._suppress_ocr_cancel_on_hide = False
 
         self._remember_current_state()
+
+        self._submit_accepted = True
 
         # 使用时间输入框的值（已验证有效性）
 
@@ -7885,6 +7895,10 @@ class ScreenshotConfirmDialog(QDialog):
             "auto",
 
         )
+
+        if not self._consume_submit_accepted():
+
+            return
 
         self._reset_recover_selection()
 
@@ -7959,6 +7973,22 @@ class ScreenshotConfirmDialog(QDialog):
 
 
         self._patch_cache_fields(patch)
+
+
+
+    def mark_submit_unaccepted(self):
+
+        self._submit_accepted = False
+
+
+
+    def _consume_submit_accepted(self):
+
+        accepted = bool(self._submit_accepted)
+
+        self._submit_accepted = True
+
+        return accepted
 
 
 

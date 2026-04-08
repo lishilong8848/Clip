@@ -876,7 +876,7 @@ CHANGE_NOTICE_FIELDS = {
     "impact": "影响",
     "progress": "进度",
     "building": "楼栋",
-    "today_in_progress": "今天是否进行",
+    "today_in_progress": "今日是否进行",
 }
 
 MAINTENANCE_NOTICE_FIELDS = {

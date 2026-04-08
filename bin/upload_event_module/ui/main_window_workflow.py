@@ -167,18 +167,28 @@ class MainWindowWorkflowMixin:
     def _restore_screenshot_dialog_after_group_choice_cancel(self):
         self._set_delete_interaction_enabled(False)
         self._pause_clipboard_timer()
+        dialog = getattr(self, "screenshot_dialog", None)
+        if dialog and hasattr(dialog, "mark_submit_unaccepted"):
+            try:
+                dialog.mark_submit_unaccepted()
+            except Exception:
+                pass
         try:
-            self.show()
+            if not self.isVisible():
+                self.show()
         except Exception:
             pass
         try:
-            self._position_screenshot_dialog()
+            if dialog and not dialog.isVisible():
+                self._position_screenshot_dialog()
         except Exception:
             pass
         try:
-            self.screenshot_dialog.show()
-            self.screenshot_dialog.raise_()
-            self.screenshot_dialog.activateWindow()
+            if dialog:
+                if not dialog.isVisible():
+                    dialog.show()
+                dialog.raise_()
+                dialog.activateWindow()
         except Exception:
             pass
 

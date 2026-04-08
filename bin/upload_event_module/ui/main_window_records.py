@@ -1101,7 +1101,7 @@ class MainWindowRecordsMixin:
             else ""
         )
         field_name = str(field_name or "").strip()
-        return field_name or "今天是否进行"
+        return field_name or "今日是否进行"
 
     def _supports_today_in_progress_toggle(self, data_dict: dict | None) -> bool:
         if not isinstance(data_dict, dict):
@@ -1121,6 +1121,14 @@ class MainWindowRecordsMixin:
             return "unknown"
         field_name = self._get_today_in_progress_field_name(notice_type)
         raw_value = fields.get(field_name)
+        if raw_value in (None, "", []):
+            for alias in ("今日是否进行", "今天是否进行"):
+                if alias == field_name:
+                    continue
+                alias_value = fields.get(alias)
+                if alias_value not in (None, "", []):
+                    raw_value = alias_value
+                    break
         if isinstance(raw_value, str):
             return self._normalize_today_in_progress_state(raw_value)
         if isinstance(raw_value, dict):
@@ -1209,7 +1217,7 @@ class MainWindowRecordsMixin:
                 if not success:
                     if error_text:
                         log_warning(
-                            f"今天是否进行状态同步失败: record_id={record_id}, error={error_text}"
+                            f"今日是否进行状态同步失败: record_id={record_id}, error={error_text}"
                         )
                     return
                 self._apply_today_in_progress_state_to_record(record_id, state)
@@ -1269,7 +1277,7 @@ class MainWindowRecordsMixin:
                     return
                 if widget_now and hasattr(widget_now, "set_today_progress_state"):
                     widget_now.set_today_progress_state(current_state, enabled=True)
-                self.show_message(f"更新“今天是否进行”失败\n{result}")
+                self.show_message(f"更新“今日是否进行”失败\n{result}")
 
             self._enqueue_ui_mutation("today_in_progress_toggle", apply_result)
 

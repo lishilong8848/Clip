@@ -1097,6 +1097,8 @@ class MainWindowUiMixin:
         btn_skip = msg.addButton(
             "不发送群消息", QMessageBox.ButtonRole.DestructiveRole
         )
+        btn_back = msg.addButton("关闭", QMessageBox.ButtonRole.RejectRole)
+        msg.setEscapeButton(btn_back)
         msg.exec()
         clicked = msg.clickedButton()
         if clicked == btn_i2:
@@ -1105,5 +1107,7 @@ class MainWindowUiMixin:
             return "i3"
         if clicked == btn_skip:
             return "skip"
+        if clicked == btn_back:
+            return None
         return None
 
