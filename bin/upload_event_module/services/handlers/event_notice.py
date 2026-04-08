@@ -192,8 +192,9 @@ class EventNoticeHandler(BaseNoticeHandler):
     def build_robot_message(self, payload: NoticePayload):
         title, content, notice_type, level = super().build_robot_message(payload)
         summary = self._extract_section(payload.text or "", "概述")
+        payload_level = str(payload.level or "").strip()
         normalized_level = self._normalize_event_level(payload.level, payload.text)
-        if summary and "负载功率过高" in summary:
+        if not payload_level and summary and "负载功率过高" in summary:
             normalized_level = LEVEL_I3
         return title, content, notice_type, self._route_event_group_level(normalized_level)
 

@@ -28,6 +28,7 @@ class NoticePayload:
     existing_response_time: Optional[Union[str, List[dict], dict]] = None
     transfer_to_overhaul: Optional[bool] = None
     recover: Optional[bool] = None
+    robot_group_choice: Optional[str] = None
 
 
 class BaseNoticeHandler:

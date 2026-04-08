@@ -414,6 +414,14 @@ def _send_robot_message(handler, payload: NoticePayload):
         title, content, notice_type, level = handler.build_robot_message(payload)
         if not title and not content:
             return
+        choice = str(getattr(payload, "robot_group_choice", "") or "").strip().lower()
+        if choice == "skip":
+            log_info("群机器人发送: 按用户选择跳过本次群消息发送")
+            return
+        if choice == "i2":
+            level = "I2"
+        elif choice == "i3":
+            level = "I3"
         ok, msg = handler.send_group_robot_message(title, content, notice_type, level)
         if not ok and msg != "skip":
             log_error(f"群机器人发送失败: {msg}")

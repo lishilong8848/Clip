@@ -17,7 +17,7 @@ from ..services.service_registry import (
     create_bitable_record_by_payload,
     update_bitable_record_by_payload,
 )
-from ..services.handlers import NoticePayload
+from ..services.handlers import NoticePayload, get_notice_handler
 from ..core.parser import extract_event_info
 
 class MainWindowWorkflowMixin:
@@ -138,6 +138,50 @@ class MainWindowWorkflowMixin:
 
         return False
 
+    def _resolve_default_robot_group_level(self, notice_type: str, payload: NoticePayload) -> str:
+        if not notice_type:
+            return ""
+        try:
+            handler = get_notice_handler(notice_type)
+            _, _, _, level = handler.build_robot_message(payload)
+        except Exception:
+            return ""
+        return str(level or "").strip().upper()
+
+    def _resolve_robot_group_choice_for_upload(
+        self,
+        notice_type: str,
+        payload: NoticePayload,
+        robot_group_choice: str = "auto",
+    ):
+        choice = str(robot_group_choice or "auto").strip().lower() or "auto"
+        if choice in {"i2", "i3", "skip"}:
+            return choice
+        default_level = self._resolve_default_robot_group_level(notice_type, payload)
+        if notice_type not in ("事件通告", "设备变更", "变更通告"):
+            return "auto"
+        if default_level != "I2":
+            return "auto"
+        return self._prompt_i2_robot_group_choice(notice_type)
+
+    def _restore_screenshot_dialog_after_group_choice_cancel(self):
+        self._set_delete_interaction_enabled(False)
+        self._pause_clipboard_timer()
+        try:
+            self.show()
+        except Exception:
+            pass
+        try:
+            self._position_screenshot_dialog()
+        except Exception:
+            pass
+        try:
+            self.screenshot_dialog.show()
+            self.screenshot_dialog.raise_()
+            self.screenshot_dialog.activateWindow()
+        except Exception:
+            pass
+
     def _enqueue_force_upload(self, data_dict: dict):
         # 旧版“先强制上传旧条再替换”链路已停用，不再入队。
         return
@@ -207,6 +251,12 @@ class MainWindowWorkflowMixin:
                 merged["extra_images"] = existing.get("extra_images")
             if not payload.get("response_time") and existing.get("response_time"):
                 merged["response_time"] = existing.get("response_time")
+            if str(payload.get("robot_group_choice") or "").strip().lower() in ("", "auto"):
+                existing_choice = (
+                    str(existing.get("robot_group_choice") or "").strip().lower()
+                )
+                if existing_choice in {"i2", "i3", "skip"}:
+                    merged["robot_group_choice"] = existing_choice
             payload = merged
         self.pending_update_after_upload[record_id] = payload
         log_info(
@@ -214,7 +264,8 @@ class MainWindowWorkflowMixin:
             f"record_id={record_id} action={payload.get('action_type')} "
             f"has_screenshot={bool(payload.get('screenshot_bytes'))} "
             f"extra_images={len(payload.get('extra_images') or [])} "
-            f"response_time={'Y' if payload.get('response_time') else 'N'}"
+            f"response_time={'Y' if payload.get('response_time') else 'N'} "
+            f"robot_group_choice={payload.get('robot_group_choice') or 'auto'}"
         )
         self._schedule_pending_update_after_upload()
 
@@ -309,6 +360,10 @@ class MainWindowWorkflowMixin:
                 event_level=pending_event_level,
                 event_source=resolved.get("event_source"),
                 recover_selected=bool(request.get("recover_selected", False)),
+                robot_group_choice=str(
+                    request.get("robot_group_choice") or "auto"
+                ).strip()
+                or "auto",
             )
             return
         if self.pending_update_after_upload:
@@ -1143,15 +1198,13 @@ class MainWindowWorkflowMixin:
         event_level=None,
         event_source=None,
         recover_selected=False,
+        robot_group_choice="auto",
     ):
         if not data_dict:
             return
         if not hasattr(self, "_feishu_request_lock"):
             self._feishu_request_lock = threading.Lock()
         end_item_ref = None
-        self._set_delete_interaction_enabled(True)
-        # 截图确认后恢复剪贴板监听
-        self._resume_clipboard_timer()
         if self._pending_cache_refresh:
             self._refresh_ui_from_cache()
         self._try_process_pending_force_uploads()
@@ -1179,6 +1232,27 @@ class MainWindowWorkflowMixin:
         event_source = str(resolved_fields.get("event_source") or "").strip()
         _buildings = self._normalize_buildings_value(resolved_fields.get("buildings"))
         resolved_level = str(resolved_fields.get("level") or "").strip()
+        route_payload = NoticePayload(
+            text=data_dict.get("text", ""),
+            level=resolved_level or data_dict.get("level"),
+            buildings=_buildings,
+            specialty=specialty,
+            event_source=event_source,
+            occurrence_date=data_dict.get("time_str"),
+            transfer_to_overhaul=data_dict.get("transfer_to_overhaul"),
+            robot_group_choice=str(robot_group_choice or "auto").strip() or "auto",
+        )
+        robot_group_choice = self._resolve_robot_group_choice_for_upload(
+            notice_type,
+            route_payload,
+            route_payload.robot_group_choice,
+        )
+        if robot_group_choice is None:
+            self._restore_screenshot_dialog_after_group_choice_cancel()
+            return
+        self._set_delete_interaction_enabled(True)
+        # 截图确认与 I2 群确认都完成后再恢复剪贴板监听，避免弹窗期间状态提前放开。
+        self._resume_clipboard_timer()
         if notice_type == "事件通告":
             event_level = resolved_level
         elif notice_type in ("设备变更", "变更通告"):
@@ -1247,6 +1321,7 @@ class MainWindowWorkflowMixin:
             payload.buildings = _buildings
             payload.specialty = specialty
             payload.event_source = event_source
+            payload.robot_group_choice = robot_group_choice
             payload.occurrence_date = (
                 data_dict.get("time_str") or payload.occurrence_date
             )
@@ -1291,6 +1366,7 @@ class MainWindowWorkflowMixin:
                         "event_level": event_level,
                         "event_source": event_source,
                         "recover_selected": recover_selected,
+                        "robot_group_choice": robot_group_choice,
                     },
                 )
                 return
@@ -1345,7 +1421,10 @@ class MainWindowWorkflowMixin:
                 payload = (
                     copy.deepcopy(payload_base)
                     if payload_base
-                    else NoticePayload(text=data_snapshot["text"])
+                    else NoticePayload(
+                        text=data_snapshot["text"],
+                        robot_group_choice=robot_group_choice,
+                    )
                 )
                 payload.transfer_to_overhaul = transfer_to_overhaul
                 payload.text = data_snapshot["text"]
@@ -1353,6 +1432,7 @@ class MainWindowWorkflowMixin:
                 payload.buildings = _buildings
                 payload.specialty = specialty
                 payload.event_source = event_source
+                payload.robot_group_choice = robot_group_choice
                 payload.file_tokens = file_tokens if file_tokens else None
                 payload.extra_file_tokens = (
                     extra_file_tokens if extra_file_tokens else None
@@ -1425,7 +1505,10 @@ class MainWindowWorkflowMixin:
                     payload = (
                         copy.deepcopy(payload_base)
                         if payload_base
-                        else NoticePayload(text=data_snapshot["text"])
+                        else NoticePayload(
+                            text=data_snapshot["text"],
+                            robot_group_choice=robot_group_choice,
+                        )
                     )
                     payload.transfer_to_overhaul = transfer_to_overhaul
                     payload.text = data_snapshot["text"]
@@ -1433,6 +1516,7 @@ class MainWindowWorkflowMixin:
                     payload.buildings = _buildings
                     payload.specialty = specialty
                     payload.event_source = event_source
+                    payload.robot_group_choice = robot_group_choice
                     payload.file_tokens = file_tokens
                     payload.extra_file_tokens = extra_file_tokens
                     payload.existing_file_tokens = existing_tokens
@@ -1493,7 +1577,10 @@ class MainWindowWorkflowMixin:
                     payload = (
                         copy.deepcopy(payload_base)
                         if payload_base
-                        else NoticePayload(text=data_snapshot["text"])
+                        else NoticePayload(
+                            text=data_snapshot["text"],
+                            robot_group_choice=robot_group_choice,
+                        )
                     )
                     payload.transfer_to_overhaul = transfer_to_overhaul
                     payload.text = data_snapshot["text"]
@@ -1501,6 +1588,7 @@ class MainWindowWorkflowMixin:
                     payload.buildings = _buildings
                     payload.specialty = specialty
                     payload.event_source = event_source
+                    payload.robot_group_choice = robot_group_choice
                     payload.file_tokens = file_tokens if file_tokens else None
                     payload.extra_file_tokens = (
                         extra_file_tokens if extra_file_tokens else None
@@ -1527,7 +1615,10 @@ class MainWindowWorkflowMixin:
                     payload = (
                         copy.deepcopy(payload_base)
                         if payload_base
-                        else NoticePayload(text=data_snapshot["text"])
+                        else NoticePayload(
+                            text=data_snapshot["text"],
+                            robot_group_choice=robot_group_choice,
+                        )
                     )
                     payload.transfer_to_overhaul = transfer_to_overhaul
                     payload.text = data_snapshot["text"]
@@ -1535,6 +1626,7 @@ class MainWindowWorkflowMixin:
                     payload.buildings = _buildings
                     payload.specialty = specialty
                     payload.event_source = event_source
+                    payload.robot_group_choice = robot_group_choice
                     payload.file_tokens = file_tokens if file_tokens else None
                     payload.extra_file_tokens = (
                         extra_file_tokens if extra_file_tokens else None
@@ -1615,7 +1707,10 @@ class MainWindowWorkflowMixin:
                     payload = (
                         copy.deepcopy(payload_base)
                         if payload_base
-                        else NoticePayload(text=data_snapshot["text"])
+                        else NoticePayload(
+                            text=data_snapshot["text"],
+                            robot_group_choice=robot_group_choice,
+                        )
                     )
                     payload.transfer_to_overhaul = transfer_to_overhaul
                     payload.text = data_snapshot["text"]
@@ -1623,6 +1718,7 @@ class MainWindowWorkflowMixin:
                     payload.buildings = _buildings
                     payload.specialty = specialty
                     payload.event_source = event_source
+                    payload.robot_group_choice = robot_group_choice
                     payload.file_tokens = file_tokens if file_tokens else None
                     payload.extra_file_tokens = (
                         extra_file_tokens if extra_file_tokens else None

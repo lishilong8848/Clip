@@ -2210,9 +2210,9 @@ class ScreenshotConfirmDialog(QDialog):
 
     upload_confirmed = pyqtSignal(
 
-        object, object, str, str, list, list, str, str, str, str, bool
+        object, object, str, str, list, list, str, str, str, str, bool, str
 
-    )  # (data_dict, screenshot_bytes, action_type, response_time, buildings, extra_images, specialty, change_level, event_level, event_source, recover_selected)
+    )  # (data_dict, screenshot_bytes, action_type, response_time, buildings, extra_images, specialty, change_level, event_level, event_source, recover_selected, robot_group_choice)
 
     cancelled = pyqtSignal()
 
@@ -7812,6 +7812,8 @@ class ScreenshotConfirmDialog(QDialog):
 
             self.recover_selected if self.enable_recover_select else False,
 
+            "auto",
+
         )
 
         self._reset_recover_selection()
@@ -7879,6 +7881,8 @@ class ScreenshotConfirmDialog(QDialog):
             event_source,
 
             self.recover_selected if self.enable_recover_select else False,
+
+            "auto",
 
         )
 

@@ -1081,3 +1081,28 @@ class MainWindowUiMixin:
         msg.finished.connect(_cleanup)
         msg.show()  # 使用非阻塞的 show() 替代 exec()
 
+    def _prompt_i2_robot_group_choice(self, notice_type: str):
+        msg = QMessageBox(self)
+        msg.setWindowTitle("群消息确认")
+        msg.setIcon(QMessageBox.Icon.Question)
+        msg.setText(
+            f"{notice_type or '该通告'}默认将发送到 I2 群。\n"
+            "这次只覆盖群消息去向，不会修改多维里的等级。"
+        )
+        msg.setInformativeText("请选择本次群消息的发送目标。")
+        msg.setStyleSheet(get_stylesheet(self.current_theme))
+        btn_i2 = msg.addButton("发送I2群", QMessageBox.ButtonRole.AcceptRole)
+        btn_i3 = msg.addButton("发送I3群", QMessageBox.ButtonRole.ActionRole)
+        btn_skip = msg.addButton(
+            "不发送群消息", QMessageBox.ButtonRole.DestructiveRole
+        )
+        msg.exec()
+        clicked = msg.clickedButton()
+        if clicked == btn_i2:
+            return "i2"
+        if clicked == btn_i3:
+            return "i3"
+        if clicked == btn_skip:
+            return "skip"
+        return None
+
