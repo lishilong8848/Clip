@@ -1083,7 +1083,8 @@ class MainWindowUiMixin:
 
     def _prompt_i2_robot_group_choice(self, notice_type: str):
         msg = QMessageBox(self)
-        msg.setWindowTitle("群消息确认")
+        msg.setWindowFlags(Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        msg.setWindowTitle("")
         msg.setIcon(QMessageBox.Icon.Question)
         msg.setText(
             f"{notice_type or '该通告'}默认将发送到 I2 群。\n"
