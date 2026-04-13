@@ -155,10 +155,16 @@ class MainWindowWorkflowMixin:
         robot_group_choice: str = "auto",
     ):
         choice = str(robot_group_choice or "auto").strip().lower() or "auto"
+        if notice_type in ("设备变更", "变更通告"):
+            if choice == "i3":
+                return "i3"
+            if choice in {"i2", "skip"}:
+                return "skip"
+            return "auto"
         if choice in {"i2", "i3", "skip"}:
             return choice
         default_level = self._resolve_default_robot_group_level(notice_type, payload)
-        if notice_type not in ("事件通告", "设备变更", "变更通告"):
+        if notice_type != "事件通告":
             return "auto"
         if default_level != "I2":
             return "auto"

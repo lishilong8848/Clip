@@ -415,10 +415,14 @@ def _send_robot_message(handler, payload: NoticePayload):
         if not title and not content:
             return
         choice = str(getattr(payload, "robot_group_choice", "") or "").strip().lower()
+        is_change_notice = notice_type in ("设备变更", "变更通告")
         if choice == "skip":
             log_info("群机器人发送: 按用户选择跳过本次群消息发送")
             return
         if choice == "i2":
+            if is_change_notice:
+                log_info("群机器人发送: 变更类 I2 群发送已移除，按跳过处理")
+                return
             level = "I2"
         elif choice == "i3":
             level = "I3"

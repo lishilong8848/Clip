@@ -42,13 +42,14 @@ class ChangeNoticeHandler(BaseNoticeHandler):
         raw_level = (payload.level or "").upper()
         if raw_level in (LEVEL_I1, LEVEL_I2, LEVEL_I3, LEVEL_E0):
             return raw_level
-        return LEVEL_I3
+        ali_level = self._detect_ali_level(payload.text, "")
+        return self.ZHIHANG_LEVEL_MAP.get(ali_level or "", "")
 
     def build_robot_message(self, payload: NoticePayload):
         title, content, notice_type, level = super().build_robot_message(payload)
         normalized_level = self._normalize_change_level(payload)
-        level = LEVEL_I2 if normalized_level in (LEVEL_I1, LEVEL_E0) else normalized_level
-        return title, content, notice_type, level
+        route_level = LEVEL_I3 if normalized_level == LEVEL_I3 else ""
+        return title, content, notice_type, route_level
 
     def build_create_fields(self, payload: NoticePayload) -> dict:
         info = extract_event_info(payload.text) or {}

@@ -50,7 +50,6 @@ DEFAULT_TABLE_ID_SHIJIAN = ""  # 事件通告表格ID
 DEFAULT_TABLE_ID_POWER = ""  # 上下电通告表格ID
 DEFAULT_TABLE_ID_POLLING = ""  # 设备轮巡表格ID
 DEFAULT_TABLE_ID_OVERHAUL = ""  # 设备检修表格ID
-DEFAULT_GROUP_NAME_CHANGE_I2 = ""  # I2变更群名称
 DEFAULT_GROUP_NAME_CHANGE_I3 = ""  # I3变更群名称
 DEFAULT_GROUP_NAME_EVENT_I2 = ""  # I2事件群名称
 DEFAULT_GROUP_NAME_EVENT_I3 = ""  # I3事件群名称
@@ -101,7 +100,6 @@ class ConfigManager:
         self.dependency_bootstrap_allow_get_pip = (
             DEFAULT_DEPENDENCY_BOOTSTRAP_ALLOW_GET_PIP
         )
-        self.group_name_change_i2 = DEFAULT_GROUP_NAME_CHANGE_I2
         self.group_name_change_i3 = DEFAULT_GROUP_NAME_CHANGE_I3
         self.group_name_event_i2 = DEFAULT_GROUP_NAME_EVENT_I2
         self.group_name_event_i3 = DEFAULT_GROUP_NAME_EVENT_I3
@@ -275,9 +273,6 @@ class ConfigManager:
                             DEFAULT_DEPENDENCY_BOOTSTRAP_ALLOW_GET_PIP,
                         )
                     )
-                    self.group_name_change_i2 = config_data.get(
-                        "group_name_change_i2", DEFAULT_GROUP_NAME_CHANGE_I2
-                    )
                     self.group_name_change_i3 = config_data.get(
                         "group_name_change_i3", DEFAULT_GROUP_NAME_CHANGE_I3
                     )
@@ -308,7 +303,6 @@ class ConfigManager:
         table_id_power=None,
         table_id_polling=None,
         table_id_overhaul=None,
-        group_name_change_i2=None,
         group_name_change_i3=None,
         group_name_event_i2=None,
         group_name_event_i3=None,
@@ -376,11 +370,6 @@ class ConfigManager:
                 table_id_overhaul
                 if table_id_overhaul is not None
                 else self.table_id_overhaul
-            )
-            new_group_name_change_i2 = (
-                group_name_change_i2
-                if group_name_change_i2 is not None
-                else self.group_name_change_i2
             )
             new_group_name_change_i3 = (
                 group_name_change_i3
@@ -529,7 +518,6 @@ class ConfigManager:
                 "table_id_power": new_table_id_power,
                 "table_id_polling": new_table_id_polling,
                 "table_id_overhaul": new_table_id_overhaul,
-                "group_name_change_i2": new_group_name_change_i2,
                 "group_name_change_i3": new_group_name_change_i3,
                 "group_name_event_i2": new_group_name_event_i2,
                 "group_name_event_i3": new_group_name_event_i3,
@@ -577,7 +565,6 @@ class ConfigManager:
             self.table_id_power = new_table_id_power
             self.table_id_polling = new_table_id_polling
             self.table_id_overhaul = new_table_id_overhaul
-            self.group_name_change_i2 = new_group_name_change_i2
             self.group_name_change_i3 = new_group_name_change_i3
             self.group_name_event_i2 = new_group_name_event_i2
             self.group_name_event_i3 = new_group_name_event_i3
