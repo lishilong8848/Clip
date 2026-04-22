@@ -8621,7 +8621,11 @@ class DetailDialog(QDialog):
 
         if binding_state == "conflicted":
 
-            self.record_binding_status_label.setText("Record ID 冲突")
+            binding_error = str(data.get("record_binding_error") or "").strip()
+            if "多维记录不存在" in binding_error or "已失效" in binding_error:
+                self.record_binding_status_label.setText("多维中记录不存在")
+            else:
+                self.record_binding_status_label.setText("Record ID 冲突")
 
             self.record_binding_status_label.show()
 

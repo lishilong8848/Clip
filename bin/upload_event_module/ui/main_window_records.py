@@ -412,6 +412,15 @@ class MainWindowRecordsMixin:
             )
             if len(text) > 200:
                 text = text[:200] + "..."
+            signature = (
+                str(reason or ""),
+                str(rid or ""),
+                str(display_data.get("active_item_id") or ""),
+                text,
+            )
+            if getattr(self, "_last_detail_preview_log_signature", None) == signature:
+                return
+            self._last_detail_preview_log_signature = signature
             suffix = f" reason={reason}" if reason else ""
             log_info(f"详情预览更新{suffix} record_id={rid} text={text}")
         except Exception:
@@ -701,9 +710,12 @@ class MainWindowRecordsMixin:
     ) -> tuple[bool, list[str]]:
         if not isinstance(local_fp, dict) or not isinstance(remote_fp, dict):
             return False, []
+        # record_id is the remote identity. Title is editable locally and may
+        # intentionally diverge from the remote title before the next update.
+        # Do not use title mismatch alone to mark a binding conflict.
         strong_mismatches = []
         strong_comparable_count = 0
-        for key in ("title", "time_anchor"):
+        for key in ("time_anchor",):
             local_value = str(local_fp.get(key) or "").strip()
             remote_value = str(remote_fp.get(key) or "").strip()
             if not local_value or not remote_value:
@@ -771,6 +783,18 @@ class MainWindowRecordsMixin:
                 item=item,
             )
 
+    @staticmethod
+    def _is_missing_remote_record_error(error_text: str) -> bool:
+        text = str(error_text or "").strip()
+        lowered = text.lower()
+        return (
+            "1254043" in text
+            or "1254006" in text
+            or "record_id 不存在" in text
+            or "记录不存在" in text
+            or "record id 不存在" in lowered
+        )
+
     def _schedule_record_binding_validation(self, data_dict: dict | None):
         if not isinstance(data_dict, dict):
             return
@@ -791,6 +815,7 @@ class MainWindowRecordsMixin:
             success, result = query_record_by_id(record_id, notice_type)
             conflict = False
             conflict_error = ""
+            missing_remote_record = False
             if success:
                 fields = result.get("fields", {}) if isinstance(result, dict) else {}
                 local_fp = self._extract_local_record_binding_fingerprint(local_data)
@@ -817,6 +842,11 @@ class MainWindowRecordsMixin:
                     )
             else:
                 conflict_error = str(result or "")
+                missing_remote_record = self._is_missing_remote_record_error(
+                    conflict_error
+                )
+                if missing_remote_record:
+                    conflict_error = "Record ID 已失效：多维记录不存在，可能已被删除"
 
             def apply_result():
                 self._record_binding_validation_pending_ids.discard(record_id)
@@ -824,6 +854,13 @@ class MainWindowRecordsMixin:
                     if conflict_error:
                         log_warning(
                             f"Record ID 校验失败: record_id={record_id}, error={conflict_error}"
+                        )
+                    if missing_remote_record:
+                        self._record_binding_validated_ids.add(record_id)
+                        self._set_record_binding_state(
+                            record_id,
+                            "conflicted",
+                            error=conflict_error,
                         )
                     return
                 self._record_binding_validated_ids.add(record_id)
@@ -1378,7 +1415,6 @@ class MainWindowRecordsMixin:
         display_data = self._ensure_active_item_identity(display_data)
         if self._is_placeholder_record(data_dict):
             display_data["record_id"] = ""
-        self._log_detail_preview_update(display_data, rid, reason="detail_dialog")
         if active_item_id:
             if not self._detail_dialog_matches_active_item(active_item_id):
                 return
@@ -1393,6 +1429,7 @@ class MainWindowRecordsMixin:
             )
         except Exception:
             return
+        self._log_detail_preview_update(display_data, rid, reason="detail_dialog")
 
     def _should_defer_ui_refresh(self) -> bool:
         return bool(
@@ -1514,7 +1551,6 @@ class MainWindowRecordsMixin:
         display_data = self._ensure_active_item_identity(display_data)
         if self._is_placeholder_record(display_data):
             display_data["record_id"] = ""
-        self._log_detail_preview_update(display_data, rid, reason="cache_refresh")
         try:
             self.detail_dialog.update_content(
                 display_data,
@@ -1524,6 +1560,7 @@ class MainWindowRecordsMixin:
             )
         except Exception:
             return
+        self._log_detail_preview_update(display_data, rid, reason="cache_refresh")
 
     def _refresh_ui_from_cache(self):
         if self._closing:

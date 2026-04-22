@@ -179,6 +179,15 @@ def normalize_active_item_data(data_dict: dict | None) -> dict:
     return normalized
 
 
+def _build_record_binding_subtitle(normalized: dict) -> str:
+    binding_error = str(normalized.get("record_binding_error") or "").strip()
+    if not binding_error:
+        return "Record ID 冲突"
+    if "多维记录不存在" in binding_error or "已失效" in binding_error:
+        return "多维中记录不存在"
+    return "Record ID 冲突"
+
+
 def build_notice_display_snapshot(data_dict: dict | None) -> dict:
     normalized = normalize_active_item_data(data_dict)
     text = normalized.get("text", "")
@@ -200,7 +209,8 @@ def build_notice_display_snapshot(data_dict: dict | None) -> dict:
         subtitle = _build_preview_text(text, 40)
 
     if normalized.get("record_binding_state") == "conflicted":
-        subtitle = f"{subtitle} | Record ID 冲突" if subtitle else "Record ID 冲突"
+        conflict_subtitle = _build_record_binding_subtitle(normalized)
+        subtitle = f"{subtitle} | {conflict_subtitle}" if subtitle else conflict_subtitle
 
     if str(normalized.get("routing_state") or "").strip().lower() == "conflicted":
         subtitle = f"{subtitle} | 条目路由冲突" if subtitle else "条目路由冲突"
@@ -212,4 +222,5 @@ def build_notice_display_snapshot(data_dict: dict | None) -> dict:
         "notice_type": notice_type,
         "source": source,
         "time_str": time_str,
-    }
+    }
+

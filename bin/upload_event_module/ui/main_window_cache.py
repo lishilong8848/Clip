@@ -5,11 +5,41 @@ import time
 
 from PyQt6.QtCore import Qt, QTimer
 
+from ..core.parser import extract_event_info
 from ..utils import ACTIVE_CACHE_FILE
 from .display_state import normalize_active_item_data
 
 
 class ActiveCacheMixin:
+    def _is_ended_active_cache_record(self, data):
+        if not isinstance(data, dict):
+            return False
+        if bool(data.get("_ended_moved")):
+            return True
+        info = extract_event_info(str(data.get("text") or ""))
+        return bool(info and info.get("status") == "结束")
+
+    def _history_contains_record(self, data):
+        if not isinstance(data, dict) or not hasattr(self, "load_all_history"):
+            return False
+        record_id = str(data.get("record_id") or "").strip()
+        text = str(data.get("text") or "").strip()
+        try:
+            history_data = self.load_all_history()
+        except Exception:
+            return False
+        if not isinstance(history_data, list):
+            return False
+        for item in history_data:
+            if not isinstance(item, dict):
+                continue
+            history_record_id = str(item.get("record_id") or "").strip()
+            if record_id and history_record_id and history_record_id == record_id:
+                return True
+            if not record_id and text and str(item.get("text") or "").strip() == text:
+                return True
+        return False
+
     def _init_active_cache_timer(self):
         self.active_cache_timer = QTimer(self)
         self.active_cache_timer.timeout.connect(self.save_active_cache)
@@ -86,7 +116,7 @@ class ActiveCacheMixin:
 
     def _restore_active_item(self, payload):
         if not payload:
-            return
+            return False
         if isinstance(payload, dict) and "data" in payload:
             data = payload.get("data") or {}
             meta = payload.get("meta") or {}
@@ -94,8 +124,17 @@ class ActiveCacheMixin:
             data = payload if isinstance(payload, dict) else {}
             meta = {}
         if not data:
-            return
+            return False
         data = normalize_active_item_data(data)
+        if self._is_ended_active_cache_record(data):
+            if hasattr(self, "save_to_history_file") and not self._history_contains_record(
+                data
+            ):
+                try:
+                    self.save_to_history_file(data)
+                except Exception:
+                    pass
+            return True
         if "_has_unuploaded_changes" not in data and "has_unuploaded_changes" in meta:
             data["_has_unuploaded_changes"] = bool(meta.get("has_unuploaded_changes"))
         if "_has_unuploaded_changes" not in data:
@@ -107,6 +146,7 @@ class ActiveCacheMixin:
         if widget:
             if not data.get("_has_unuploaded_changes", True):
                 widget.mark_as_uploaded()
+        return False
 
     def _restore_active_cache(self):
         store = getattr(self, "cache_store", None)
@@ -121,13 +161,14 @@ class ActiveCacheMixin:
             except Exception:
                 return
         self._is_restoring_cache = True
+        cache_changed = False
         try:
             event_items = payload.get("event", []) if isinstance(payload, dict) else []
             other_items = payload.get("other", []) if isinstance(payload, dict) else []
             for item_payload in event_items:
-                self._restore_active_item(item_payload)
+                cache_changed = self._restore_active_item(item_payload) or cache_changed
             for item_payload in other_items:
-                self._restore_active_item(item_payload)
+                cache_changed = self._restore_active_item(item_payload) or cache_changed
             if hasattr(self, "_set_clipboard_cache_payload"):
                 try:
                     self._set_clipboard_cache_payload(
@@ -137,3 +178,8 @@ class ActiveCacheMixin:
                     pass
         finally:
             self._is_restoring_cache = False
+        if cache_changed:
+            try:
+                self.save_active_cache()
+            except Exception:
+                pass
