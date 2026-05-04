@@ -26,6 +26,7 @@ from upload_event_module.config import (
     HOT_RELOAD_SAFE_MODE_WINDOW_S,
     config,
 )
+from lan_bitable_template_portal.server import PortalServerController
 
 _CRASH_TRACE_FP = None
 
@@ -192,7 +193,22 @@ def main():
 
     from upload_event_module.ui.main_window import ClipboardTool
 
+    portal_controller = None
+    try:
+        portal_controller = PortalServerController()
+        portal_url = portal_controller.start()
+        print(f"[ClipFlow] 局域网模板门户已随主程序启动: {portal_url}")
+        app.aboutToQuit.connect(portal_controller.stop)
+    except Exception as exc:
+        portal_controller = None
+        print(f"[ClipFlow] 局域网模板门户启动失败: {exc}")
+
     window = ClipboardTool()
+    if portal_controller is not None:
+        try:
+            window.lan_template_portal_url = portal_controller.get_url()
+        except Exception:
+            pass
 
     # 设置初始位置 (添加空值检查防止访问违规)
     primary_screen = app.primaryScreen()

@@ -1349,6 +1349,14 @@ class MainWindowWorkflowMixin:
             data_dict["_ended_moved"] = True
 
         data_snapshot = dict(data_dict) if isinstance(data_dict, dict) else data_dict
+        log_info(
+            "UploadTime: "
+            f"action={action_type} "
+            f"notice_type={notice_type or '-'} "
+            f"record_id={record_id or '-'} "
+            f"response_time={response_time or '-'} "
+            f"notice_time={data_snapshot.get('time_str') or '-'}"
+        )
 
         def task():
             # 从外部作用域获取参数

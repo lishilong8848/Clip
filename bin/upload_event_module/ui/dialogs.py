@@ -7380,6 +7380,34 @@ class ScreenshotConfirmDialog(QDialog):
 
         return bool(parsed_dt)
 
+    def _current_response_time_text(self) -> str:
+
+        """提交前重新归一化响应时间，确保上传使用输入框当前最终值。"""
+
+        raw_text = self.time_input.text().strip()
+
+        if not raw_text:
+
+            return ""
+
+        parsed_dt, normalized_full = self._parse_time_text(raw_text)
+
+        if parsed_dt and normalized_full:
+
+            if normalized_full != raw_text:
+
+                self.time_input.blockSignals(True)
+
+                self.time_input.setText(normalized_full)
+
+                self.time_input.blockSignals(False)
+
+            self.ocr_response_time = normalized_full
+
+            return normalized_full
+
+        return raw_text
+
 
 
     @pyqtSlot()
@@ -7790,7 +7818,7 @@ class ScreenshotConfirmDialog(QDialog):
 
         )
 
-        response_time = self.time_input.text().strip() or ""
+        response_time = self._current_response_time_text()
 
         self.upload_confirmed.emit(
 
@@ -7840,7 +7868,7 @@ class ScreenshotConfirmDialog(QDialog):
 
         # 使用时间输入框的值（已验证有效性）
 
-        response_time = self.time_input.text().strip() or ""
+        response_time = self._current_response_time_text()
 
         # 楼栋列表
 

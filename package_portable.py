@@ -221,6 +221,8 @@ SMOKE_IMPORT_MODULES = [
     "upload_event_module.ui.main_window_workflow",
     "upload_event_module.ui.main_window_ui",
     "upload_event_module.ui.main_window_runtime",
+    "lan_bitable_template_portal.portal_service",
+    "lan_bitable_template_portal.server",
     "lark_oapi",
 ]
 

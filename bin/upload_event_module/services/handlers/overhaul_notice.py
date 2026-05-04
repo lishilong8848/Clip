@@ -104,14 +104,14 @@ class OverhaulNoticeHandler(BaseNoticeHandler):
                 expected_time
             )
 
-        if expected_time and payload.response_time:
+        if payload.response_time:
             actual_start = self._apply_time_with_date(payload.response_time, expected_time)
             if actual_start:
                 fields[OVERHAUL_NOTICE_FIELDS["actual_start"]] = self._to_timestamp_ms(
                     actual_start
                 )
 
-        if status == STATUS_END and expected_time and payload.response_time:
+        if status == STATUS_END and payload.response_time:
             actual_end = self._apply_time_with_date(payload.response_time, expected_time)
             if actual_end:
                 fields[OVERHAUL_NOTICE_FIELDS["actual_end"]] = self._to_timestamp_ms(
@@ -212,7 +212,7 @@ class OverhaulNoticeHandler(BaseNoticeHandler):
                 expected_time
             )
 
-        if status == STATUS_END and expected_time and payload.response_time:
+        if status == STATUS_END and payload.response_time:
             actual_end = self._apply_time_with_date(payload.response_time, expected_time)
             if actual_end:
                 fields[OVERHAUL_NOTICE_FIELDS["actual_end"]] = self._to_timestamp_ms(
@@ -282,12 +282,14 @@ class OverhaulNoticeHandler(BaseNoticeHandler):
             return None
         return parse_single_datetime(text)
 
-    def _apply_time_with_date(self, response_time: str, base_dt: datetime):
-        if not response_time or not base_dt:
+    def _apply_time_with_date(self, response_time: str, base_dt: datetime | None):
+        if not response_time:
             return None
         parsed_dt = parse_single_datetime(response_time)
         if parsed_dt:
             return parsed_dt
+        if not base_dt:
+            return None
         time_parts = parse_time_only(response_time)
         if not time_parts:
             return None
