@@ -195,7 +195,10 @@ def main():
 
     portal_controller = None
     try:
-        portal_controller = PortalServerController()
+        portal_controller = PortalServerController(
+            host=getattr(config, "lan_template_portal_host", "0.0.0.0"),
+            port=int(getattr(config, "lan_template_portal_port", 18766) or 18766),
+        )
         portal_url = portal_controller.start()
         print(f"[ClipFlow] 局域网模板门户已随主程序启动: {portal_url}")
         app.aboutToQuit.connect(portal_controller.stop)
@@ -206,7 +209,16 @@ def main():
     window = ClipboardTool()
     if portal_controller is not None:
         try:
+            window.lan_template_portal_controller = portal_controller
             window.lan_template_portal_url = portal_controller.get_url()
+            portal_controller.set_notice_callback(window.enqueue_lan_template_notice)
+            portal_controller.set_ongoing_callback(
+                window.get_lan_maintenance_ongoing_notices
+            )
+            portal_controller.set_maintenance_action_callback(
+                window.enqueue_lan_maintenance_action
+            )
+            window.refresh_lan_template_portal_link()
         except Exception:
             pass
 

@@ -3,23 +3,25 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>维护计划模板生成</title>
+  <title>局域网维保工作台</title>
   <style>
     :root {
-      --bg: #f4f7f9;
-      --surface: #ffffff;
-      --surface-2: #f8fbfc;
-      --text: #14263a;
-      --muted: #657689;
-      --line: #d8e1e8;
-      --accent: #0c6b5f;
-      --accent-2: #084d45;
-      --accent-soft: #e2f3f0;
-      --warning: #b26a00;
-      --warning-soft: #fff4dd;
-      --danger: #a13f3f;
-      --danger-soft: #fff1f1;
-      --shadow: 0 14px 34px rgba(20, 38, 58, 0.08);
+      --bg: #eef3f5;
+      --ink: #132331;
+      --muted: #607080;
+      --line: #d3dde4;
+      --panel: #ffffff;
+      --panel-2: #f7fafb;
+      --green: #0b6b58;
+      --green-2: #084e43;
+      --blue: #1f5f99;
+      --amber: #a96805;
+      --red: #aa3c3c;
+      --soft-green: #e3f3ef;
+      --soft-blue: #e6f0f8;
+      --soft-amber: #fff4db;
+      --soft-red: #fff0f0;
+      --shadow: 0 16px 40px rgba(18, 35, 49, 0.10);
       --radius: 8px;
     }
 
@@ -27,22 +29,87 @@
 
     html, body {
       margin: 0;
-      height: 100%;
-      color: var(--text);
-      background: linear-gradient(180deg, #f7fafb 0%, var(--bg) 100%);
-      font-family: "Source Han Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+      min-height: 100%;
+      color: var(--ink);
+      background:
+        linear-gradient(90deg, rgba(11, 107, 88, 0.05) 1px, transparent 1px),
+        linear-gradient(180deg, #f8fbfc 0%, var(--bg) 100%);
+      background-size: 32px 32px, 100% 100%;
+      font-family: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+      font-size: 14px;
     }
 
     button, input, select, textarea { font: inherit; }
+    button { cursor: pointer; }
+    button:disabled { cursor: not-allowed; opacity: 0.55; }
 
-    button {
-      cursor: pointer;
+    .hidden { display: none !important; }
+
+    .gate {
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 28px;
+    }
+
+    .gate-inner {
+      width: min(980px, 100%);
+      background: rgba(255, 255, 255, 0.92);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 24px;
+    }
+
+    .gate h1 {
+      margin: 0 0 8px;
+      font-size: 28px;
+      letter-spacing: 0;
+    }
+
+    .gate p {
+      margin: 0 0 20px;
+      color: var(--muted);
+    }
+
+    .scope-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(130px, 1fr));
+      gap: 12px;
+    }
+
+    .scope-btn {
+      min-height: 92px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #fff;
+      color: var(--ink);
+      text-align: left;
+      padding: 14px;
+      transition: transform 0.14s ease, box-shadow 0.14s ease, border-color 0.14s ease;
+    }
+
+    .scope-btn:hover {
+      transform: translateY(-2px);
+      border-color: rgba(11, 107, 88, 0.55);
+      box-shadow: 0 12px 22px rgba(11, 107, 88, 0.12);
+    }
+
+    .scope-btn strong {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 20px;
+    }
+
+    .scope-btn span {
+      color: var(--muted);
+      font-size: 12px;
     }
 
     .app {
       height: 100vh;
       display: grid;
-      grid-template-rows: 58px minmax(0, 1fr);
+      grid-template-rows: 58px auto minmax(0, 1fr);
     }
 
     .topbar {
@@ -50,85 +117,157 @@
       align-items: center;
       justify-content: space-between;
       gap: 16px;
-      padding: 10px 16px;
-      border-bottom: 1px solid var(--line);
+      padding: 10px 14px;
       background: rgba(255, 255, 255, 0.94);
+      border-bottom: 1px solid var(--line);
       backdrop-filter: blur(8px);
     }
 
-    .title {
+    .brand {
       display: flex;
       align-items: baseline;
       gap: 12px;
       min-width: 0;
     }
 
-    .title h1 {
+    .brand h1 {
       margin: 0;
       font-size: 18px;
-      font-weight: 700;
       white-space: nowrap;
     }
 
-    .source {
-      color: var(--muted);
-      font-size: 12px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
+    .brand .scope {
+      min-width: 54px;
+      padding: 5px 9px;
+      border-radius: 999px;
+      background: var(--soft-green);
+      color: var(--green-2);
+      font-weight: 700;
+      text-align: center;
     }
 
     .statusbar {
       display: flex;
       gap: 8px;
-      flex-wrap: wrap;
+      align-items: center;
       justify-content: flex-end;
+      flex-wrap: wrap;
     }
 
     .pill {
+      min-height: 30px;
       display: inline-flex;
       align-items: center;
       gap: 6px;
-      min-height: 30px;
-      padding: 5px 9px;
+      padding: 5px 10px;
       border: 1px solid var(--line);
       border-radius: 999px;
-      background: var(--surface-2);
+      background: var(--panel-2);
       color: var(--muted);
       font-size: 12px;
-      white-space: nowrap;
-    }
-
-    .pill strong {
-      color: var(--text);
-      font-weight: 700;
     }
 
     .workspace {
       min-height: 0;
       display: grid;
-      grid-template-columns: 250px 360px minmax(560px, 1fr);
+      grid-template-columns: minmax(250px, 0.74fr) minmax(500px, 1.34fr) minmax(360px, 0.95fr);
       gap: 12px;
       padding: 12px;
     }
+
+    .summary-strip {
+      display: grid;
+      grid-template-columns: minmax(260px, 0.7fr) minmax(420px, 1.3fr);
+      gap: 12px;
+      padding: 12px 12px 0;
+    }
+
+    .summary-card {
+      background: rgba(255, 255, 255, 0.95);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 10px 12px;
+      overflow: hidden;
+    }
+
+    .summary-metrics {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .metric {
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--panel-2);
+      padding: 9px;
+    }
+
+    .metric strong {
+      display: block;
+      margin-top: 3px;
+      font-size: 20px;
+    }
+
+    .timeline {
+      display: flex;
+      gap: 8px;
+      overflow: auto;
+      padding-bottom: 2px;
+    }
+
+    .timeline-item {
+      min-width: 230px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--panel-2);
+      padding: 8px;
+      cursor: pointer;
+    }
+
+    .timeline-item:hover {
+      border-color: rgba(11, 107, 88, 0.55);
+      background: #f6fffb;
+    }
+
+    .timeline-title {
+      font-weight: 800;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .work-detail {
+      margin-top: 8px;
+      padding: 8px;
+      border-radius: 7px;
+      background: rgba(255,255,255,0.82);
+      border: 1px dashed var(--line);
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.55;
+    }
+
+    .work-detail strong { color: var(--ink); }
 
     .panel {
       min-height: 0;
       display: flex;
       flex-direction: column;
       overflow: hidden;
-      background: var(--surface);
+      background: var(--panel);
       border: 1px solid var(--line);
       border-radius: var(--radius);
       box-shadow: var(--shadow);
     }
 
     .panel-head {
+      min-height: 50px;
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 10px;
-      min-height: 48px;
       padding: 10px 12px;
       border-bottom: 1px solid var(--line);
     }
@@ -136,7 +275,6 @@
     .panel-head h2 {
       margin: 0;
       font-size: 15px;
-      font-weight: 700;
     }
 
     .panel-body {
@@ -145,16 +283,19 @@
       padding: 12px;
     }
 
-    .field {
+    .filters {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 10px;
       margin-bottom: 12px;
     }
 
-    .field label {
+    label {
       display: block;
-      margin-bottom: 6px;
+      margin-bottom: 5px;
       color: var(--muted);
       font-size: 12px;
-      font-weight: 600;
+      font-weight: 700;
     }
 
     input, select, textarea {
@@ -162,809 +303,923 @@
       border: 1px solid var(--line);
       border-radius: 7px;
       background: #fff;
-      color: var(--text);
-      padding: 9px 10px;
+      color: var(--ink);
       outline: none;
+      padding: 8px 9px;
     }
 
     textarea {
-      min-height: 76px;
-      resize: vertical;
-      line-height: 1.55;
-    }
-
-    .draft-body textarea {
-      min-height: 38px;
-      height: 38px;
+      min-height: 36px;
+      height: 36px;
       line-height: 1.35;
+      resize: vertical;
     }
 
     input:focus, select:focus, textarea:focus {
-      border-color: rgba(12, 107, 95, 0.55);
-      box-shadow: 0 0 0 3px rgba(12, 107, 95, 0.10);
-    }
-
-    .button-row {
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
+      border-color: rgba(11, 107, 88, 0.58);
+      box-shadow: 0 0 0 3px rgba(11, 107, 88, 0.10);
     }
 
     .btn {
-      min-height: 38px;
-      padding: 8px 11px;
+      min-height: 36px;
+      border: 1px solid var(--line);
       border-radius: 7px;
-      border: 1px solid transparent;
-      font-weight: 700;
-      color: var(--text);
       background: #fff;
+      color: var(--ink);
+      padding: 7px 10px;
+      font-weight: 700;
     }
 
     .btn.primary {
+      border-color: var(--green);
+      background: var(--green);
       color: #fff;
-      background: var(--accent);
-      border-color: var(--accent);
     }
 
-    .btn.primary:hover { background: var(--accent-2); }
+    .btn.primary:hover { background: var(--green-2); }
 
-    .btn.secondary {
-      border-color: var(--line);
-      background: var(--surface-2);
+    .btn.blue {
+      border-color: var(--blue);
+      background: var(--blue);
+      color: #fff;
     }
 
     .btn.danger {
-      color: var(--danger);
-      border-color: #f0caca;
-      background: var(--danger-soft);
+      border-color: #efc7c7;
+      background: var(--soft-red);
+      color: var(--red);
     }
 
-    .records {
+    .btn.ghost { background: var(--panel-2); }
+
+    .row-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .record-list, .draft-list, .ongoing-list {
       display: flex;
       flex-direction: column;
       gap: 8px;
     }
 
-    .record-row {
-      display: grid;
-      grid-template-columns: 28px minmax(0, 1fr) auto auto;
-      gap: 10px;
-      align-items: center;
-      padding: 10px;
+    .record-card {
       border: 1px solid var(--line);
       border-radius: 7px;
       background: #fff;
+      padding: 10px;
       cursor: pointer;
       transition: border-color 0.14s ease, background 0.14s ease, box-shadow 0.14s ease;
     }
 
-    .record-row:hover {
-      border-color: rgba(12, 107, 95, 0.55);
-      background: #f7fcfb;
-      box-shadow: 0 8px 18px rgba(12, 107, 95, 0.08);
+    .record-card:hover {
+      border-color: rgba(31, 95, 153, 0.55);
+      background: #f8fbff;
+      box-shadow: 0 8px 18px rgba(31, 95, 153, 0.08);
     }
 
-    .record-row.selected {
-      border-color: rgba(12, 107, 95, 0.65);
-      background: var(--accent-soft);
+    .record-card.selected {
+      border-color: rgba(11, 107, 88, 0.72);
+      background: var(--soft-green);
     }
 
-    .record-row.drafted {
-      border-color: rgba(178, 106, 0, 0.55);
-      background: var(--warning-soft);
+    .record-card.disabled:not(.completed) {
+      opacity: 0.72;
+      cursor: pointer;
+      background: #f5f7f8;
     }
 
-    .record-row input {
-      width: 16px;
-      height: 16px;
-      pointer-events: none;
+    .record-card.completed {
+      border-color: rgba(11, 107, 88, 0.42);
+      background: linear-gradient(180deg, #ffffff 0%, #f0faf6 100%);
     }
 
     .record-title {
-      font-size: 14px;
-      font-weight: 700;
-      line-height: 1.45;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-
-    .state-chip {
-      min-width: 42px;
-      border-radius: 999px;
-      padding: 4px 8px;
-      text-align: center;
-      color: var(--muted);
-      background: var(--surface-2);
-      border: 1px solid var(--line);
-      font-size: 12px;
-      font-weight: 700;
-      white-space: nowrap;
-    }
-
-    .record-row.selected .state-chip {
-      color: var(--accent-2);
-      background: #d4ece8;
-      border-color: rgba(12, 107, 95, 0.30);
-    }
-
-    .record-row.drafted .state-chip {
-      color: var(--warning);
-      background: #ffe7b5;
-      border-color: rgba(178, 106, 0, 0.28);
-    }
-
-    .link-btn {
-      border: none;
-      background: transparent;
-      color: var(--accent-2);
-      font-size: 12px;
-      font-weight: 700;
-      padding: 4px 6px;
-    }
-
-    .queue {
       display: flex;
-      flex-direction: column;
-      gap: 10px;
+      justify-content: space-between;
+      gap: 8px;
+      font-weight: 800;
     }
 
-    .draft {
+    .record-meta {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .tag {
+      flex: none;
+      display: inline-flex;
+      align-items: center;
+      min-height: 22px;
+      padding: 2px 7px;
+      border-radius: 999px;
+      background: var(--panel-2);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .tag.green { background: var(--soft-green); color: var(--green-2); }
+    .tag.blue { background: var(--soft-blue); color: var(--blue); }
+    .tag.amber { background: var(--soft-amber); color: var(--amber); }
+    .tag.red { background: var(--soft-red); color: var(--red); }
+
+    .draft-card, .ongoing-card {
       border: 1px solid var(--line);
       border-radius: 7px;
       background: #fff;
-      overflow: hidden;
-    }
-
-    .draft-head {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto auto;
-      gap: 10px;
-      padding: 10px;
-      align-items: center;
-      border-bottom: 1px solid var(--line);
-      background: #f8fcfb;
-      cursor: pointer;
-      transition: background 0.14s ease, box-shadow 0.14s ease;
-    }
-
-    .draft-head:hover {
-      background: #eef8f6;
-      box-shadow: inset 3px 0 0 var(--accent);
-    }
-
-    .draft.open .draft-head {
-      border-bottom-color: var(--line);
-      background: #e7f5f2;
-    }
-
-    .draft-name {
-      font-weight: 700;
-      line-height: 1.45;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-
-    .draft-hint {
-      color: var(--accent-2);
-      background: var(--accent-soft);
-      border: 1px solid rgba(12, 107, 95, 0.24);
-      border-radius: 999px;
-      padding: 4px 8px;
-      font-size: 12px;
-      font-weight: 700;
-      white-space: nowrap;
-    }
-
-    .draft-body {
-      display: none;
       padding: 12px;
     }
 
-    .draft.open .draft-body { display: block; }
-
-    .two-col {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 10px;
+    .draft-card.active {
+      border-color: rgba(11, 107, 88, 0.5);
+      box-shadow: inset 4px 0 0 var(--green);
     }
 
-    .full { grid-column: 1 / -1; }
-
-    .result {
-      min-height: 110px;
-      white-space: pre-wrap;
-      line-height: 1.65;
-      font-size: 13px;
-      border: 1px dashed var(--line);
-      background: var(--surface-2);
-      border-radius: 7px;
-      padding: 10px;
-    }
-
-    .empty {
-      padding: 18px;
-      color: var(--muted);
-      text-align: center;
-      font-size: 13px;
-      line-height: 1.6;
-    }
-
-    .modal {
-      position: fixed;
-      inset: 0;
-      display: none;
-      z-index: 100;
-      background: rgba(11, 24, 35, 0.32);
-      padding: 28px;
-    }
-
-    .modal.open {
-      display: grid;
-      place-items: center;
-    }
-
-    .modal-card {
-      width: min(920px, 100%);
-      max-height: min(760px, calc(100vh - 56px));
-      display: grid;
-      grid-template-rows: auto minmax(0, 1fr);
-      background: #fff;
-      border-radius: 8px;
-      box-shadow: 0 28px 80px rgba(0,0,0,0.22);
-      overflow: hidden;
-    }
-
-    .modal-head {
+    .card-head {
       display: flex;
       justify-content: space-between;
-      align-items: center;
-      gap: 12px;
-      padding: 12px 14px;
-      border-bottom: 1px solid var(--line);
+      gap: 10px;
+      align-items: flex-start;
+      margin-bottom: 10px;
     }
 
-    .modal-head h3 {
+    .card-title {
       margin: 0;
       font-size: 15px;
+      line-height: 1.35;
     }
 
-    .field-grid {
-      overflow: auto;
-      padding: 14px;
+    .form-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 10px;
+      gap: 9px 10px;
     }
 
-    .field-cell {
-      border: 1px solid var(--line);
+    .form-grid .wide { grid-column: 1 / -1; }
+
+    .job-line {
+      min-height: 28px;
+      margin-top: 9px;
+      padding: 6px 8px;
       border-radius: 7px;
-      background: var(--surface-2);
-      padding: 9px 10px;
-    }
-
-    .field-key {
+      background: var(--panel-2);
       color: var(--muted);
       font-size: 12px;
-      margin-bottom: 5px;
     }
 
-    .field-value {
-      font-size: 13px;
-      line-height: 1.6;
-      white-space: pre-wrap;
-      word-break: break-word;
+    .job-line.success { background: var(--soft-green); color: var(--green-2); }
+    .job-line.failed { background: var(--soft-red); color: var(--red); }
+    .job-line.busy { background: var(--soft-blue); color: var(--blue); }
+
+    .empty {
+      padding: 18px 12px;
+      color: var(--muted);
+      text-align: center;
+      border: 1px dashed var(--line);
+      border-radius: 7px;
+      background: var(--panel-2);
     }
 
-    @media (max-width: 1280px) {
-      .workspace {
-        grid-template-columns: 250px minmax(0, 1fr);
-      }
-      .workspace .panel:last-child {
-        grid-column: 1 / -1;
-      }
+    details {
+      margin-top: 8px;
     }
 
-    @media (max-width: 860px) {
+    summary {
+      cursor: pointer;
+      color: var(--blue);
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+
+    @media (max-width: 1180px) {
       .app { height: auto; min-height: 100vh; }
-      .topbar { align-items: flex-start; flex-direction: column; }
       .workspace { grid-template-columns: 1fr; }
-      .two-col, .field-grid { grid-template-columns: 1fr; }
-      .modal { padding: 12px; }
+      .summary-strip { grid-template-columns: 1fr; }
+      .panel { min-height: 420px; }
+      .scope-grid { grid-template-columns: repeat(2, minmax(130px, 1fr)); }
+    }
+
+    @media (max-width: 620px) {
+      .topbar { align-items: flex-start; flex-direction: column; }
+      .workspace { padding: 8px; gap: 8px; }
+      .summary-strip { padding: 8px 8px 0; }
+      .summary-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .form-grid { grid-template-columns: 1fr; }
+      .scope-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
 <body>
-  <div class="app">
+  <section id="gate" class="gate">
+    <div class="gate-inner">
+      <h1>局域网维保工作台</h1>
+      <p>选择楼栋后进入对应工作台，页面内只展示该范围的未开始维护项和主界面进行中通告。</p>
+      <div id="scopeGrid" class="scope-grid"></div>
+    </div>
+  </section>
+
+  <main id="app" class="app hidden">
     <header class="topbar">
-      <div class="title">
-        <h1>维护计划模板生成</h1>
-        <span class="source" id="sourceInfo"></span>
+      <div class="brand">
+        <h1>维保工作台</h1>
+        <span id="scopeLabel" class="scope">全部</span>
+        <span id="loadInfo" class="pill">未加载</span>
       </div>
       <div class="statusbar">
-        <span class="pill"><strong>维护实施状态</strong><span id="statusFilter">未开始</span></span>
-        <span class="pill"><strong id="visibleCount">0</strong> 可选</span>
-        <span class="pill"><strong id="selectedCount">0</strong> 已选</span>
-        <span class="pill"><strong id="draftCount">0</strong> 待生成</span>
+        <span id="recordCount" class="pill">未开始 0</span>
+        <span id="ongoingCount" class="pill">进行中 0</span>
+        <button id="refreshBtn" class="btn ghost">刷新</button>
+        <button id="switchScopeBtn" class="btn ghost">切换楼栋</button>
       </div>
     </header>
 
-    <main class="workspace">
-      <section class="panel">
-        <div class="panel-head"><h2>筛选</h2></div>
-        <div class="panel-body">
-          <div class="field">
-            <label for="monthSelect">计划维护月份</label>
-            <select id="monthSelect"></select>
-          </div>
-          <div class="field">
-            <label for="specialtySelect">专业类别</label>
-            <select id="specialtySelect"></select>
-          </div>
-          <div class="field">
-            <label for="buildingSelect">楼栋</label>
-            <select id="buildingSelect"></select>
-          </div>
-          <div class="field">
-            <label for="maintenanceSearch">维护总项</label>
-            <input id="maintenanceSearch" placeholder="搜索维护总项" />
-          </div>
-          <div class="button-row">
-            <button id="selectAllButton" type="button" class="btn secondary">全选当前</button>
-            <button id="clearSelectionButton" type="button" class="btn secondary">清空</button>
-            <button id="refreshButton" type="button" class="btn secondary">刷新</button>
-          </div>
+    <section class="summary-strip">
+      <div class="summary-card">
+        <div class="record-title">
+          <span>当日工作通告汇总</span>
+          <span id="summaryDate" class="tag green">今日</span>
         </div>
-      </section>
-
-      <section class="panel">
-        <div class="panel-head">
-          <h2>维护总项</h2>
-          <button id="addDraftsButton" type="button" class="btn primary">加入待生成</button>
-        </div>
-        <div class="panel-body">
-          <div id="recordsList" class="records"></div>
-        </div>
-      </section>
-
-      <section class="panel">
-        <div class="panel-head">
-          <h2>待生成</h2>
-          <div class="button-row">
-            <button id="generateAllButton" type="button" class="btn primary">生成</button>
-            <button id="copyAllButton" type="button" class="btn secondary">复制</button>
-          </div>
-        </div>
-        <div class="panel-body">
-          <div id="draftList" class="queue"></div>
-          <div class="field" style="margin-top:12px;margin-bottom:0;">
-            <label>生成结果</label>
-            <div id="combinedOutput" class="result"></div>
-          </div>
-        </div>
-      </section>
-    </main>
-  </div>
-
-  <div id="detailModal" class="modal" aria-hidden="true">
-    <div class="modal-card">
-      <div class="modal-head">
-        <h3 id="detailTitle">记录详情</h3>
-        <button id="closeDetailButton" type="button" class="btn secondary">关闭</button>
+        <div id="summaryMetrics" class="summary-metrics" style="margin-top:8px"></div>
       </div>
-      <div id="detailFields" class="field-grid"></div>
-    </div>
-  </div>
+      <div class="summary-card">
+        <div class="record-title">
+          <span>今日闭环记录</span>
+          <span id="summaryHint" class="tag blue">点击查看详情</span>
+        </div>
+        <div id="summaryTimeline" class="timeline" style="margin-top:8px"></div>
+      </div>
+    </section>
+
+    <section class="workspace">
+      <aside class="panel">
+        <div class="panel-head">
+          <h2>未开始维护项</h2>
+          <button id="clearSelectionBtn" class="btn ghost">清空</button>
+        </div>
+        <div class="panel-body">
+          <div class="filters">
+            <div>
+              <label for="monthSelect">计划维护月份</label>
+              <select id="monthSelect"></select>
+            </div>
+            <div>
+              <label for="specialtySelect">专业类别</label>
+              <select id="specialtySelect"></select>
+            </div>
+            <div>
+              <label for="searchInput">维护总项搜索</label>
+              <input id="searchInput" type="search" placeholder="输入维护总项或编号" />
+            </div>
+          </div>
+          <div id="recordList" class="record-list"></div>
+        </div>
+      </aside>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>待发起通告</h2>
+          <button id="sendAllStartBtn" class="btn primary">一键发送全部开始通报并上传</button>
+        </div>
+        <div class="panel-body">
+          <div id="draftList" class="draft-list"></div>
+        </div>
+      </section>
+
+      <aside class="panel">
+        <div class="panel-head">
+          <h2>已开始未结束</h2>
+          <button id="refreshOngoingBtn" class="btn ghost">刷新进行中</button>
+        </div>
+        <div class="panel-body">
+          <div id="ongoingList" class="ongoing-list"></div>
+        </div>
+      </aside>
+    </section>
+  </main>
 
   <script>
+    const urlScope = () => new URLSearchParams(window.location.search).get("scope") || "";
     const state = {
-      bootstrap: null,
+      scope: urlScope(),
+      scopeOptions: [
+        { value: "110", label: "110站" },
+        { value: "A", label: "A楼" },
+        { value: "B", label: "B楼" },
+        { value: "C", label: "C楼" },
+        { value: "D", label: "D楼" },
+        { value: "E", label: "E楼" },
+        { value: "H", label: "H楼" },
+        { value: "ALL", label: "全部" },
+      ],
       records: [],
-      maintenanceOptions: [],
-      visibleMaintenanceOptions: [],
-      selectedIds: new Set(),
-      drafts: [],
-      openDraftId: '',
+      ongoing: [],
+      dailySummary: { date: "", items: [], stats: {} },
+      filters: { month: "", specialty: "", search: "" },
+      defaults: { impact: "对IT业务无影响，不会触发BA和BMS系统相关告警", progress: "准备工作已完成，人员已就位，可否开始操作？" },
+      selected: new Set(),
+      drafts: new Map(),
+      jobs: new Map(),
+      actionOps: new Map(),
+      jobToOpKey: new Map(),
+      polling: new Set(),
+      expandedRecordId: "",
+      expandedSummaryKey: "",
     };
 
-    const el = {
-      sourceInfo: document.getElementById('sourceInfo'),
-      statusFilter: document.getElementById('statusFilter'),
-      visibleCount: document.getElementById('visibleCount'),
-      selectedCount: document.getElementById('selectedCount'),
-      draftCount: document.getElementById('draftCount'),
-      monthSelect: document.getElementById('monthSelect'),
-      specialtySelect: document.getElementById('specialtySelect'),
-      buildingSelect: document.getElementById('buildingSelect'),
-      maintenanceSearch: document.getElementById('maintenanceSearch'),
-      selectAllButton: document.getElementById('selectAllButton'),
-      clearSelectionButton: document.getElementById('clearSelectionButton'),
-      refreshButton: document.getElementById('refreshButton'),
-      recordsList: document.getElementById('recordsList'),
-      addDraftsButton: document.getElementById('addDraftsButton'),
-      draftList: document.getElementById('draftList'),
-      generateAllButton: document.getElementById('generateAllButton'),
-      copyAllButton: document.getElementById('copyAllButton'),
-      combinedOutput: document.getElementById('combinedOutput'),
-      detailModal: document.getElementById('detailModal'),
-      detailTitle: document.getElementById('detailTitle'),
-      detailFields: document.getElementById('detailFields'),
-      closeDetailButton: document.getElementById('closeDetailButton'),
+    const $ = (id) => document.getElementById(id);
+    const pad = (n) => String(n).padStart(2, "0");
+    const todayInput = (h, m) => {
+      const d = new Date();
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(h)}:${pad(m)}`;
     };
+    const dt = (value) => String(value || "").replace("T", " ");
+    const opId = () => `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const opFor = (key) => {
+      if (!state.actionOps.has(key)) state.actionOps.set(key, opId());
+      return state.actionOps.get(key);
+    };
+    const scopeLabel = (value) => (state.scopeOptions.find((x) => x.value === value) || {}).label || value || "全部";
 
-    function escapeHtml(value) {
-      return String(value ?? '')
-        .replaceAll('&', '&amp;')
-        .replaceAll('<', '&lt;')
-        .replaceAll('>', '&gt;')
-        .replaceAll('"', '&quot;')
-        .replaceAll("'", '&#39;');
-    }
-
-    async function apiGet(url) {
-      const response = await fetch(url);
-      const payload = await response.json();
-      if (!payload.ok) throw new Error(payload.error || '请求失败');
-      return payload.data;
-    }
-
-    async function apiPost(url, body) {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+    async function api(path, options = {}) {
+      const res = await fetch(path, {
+        headers: { "Content-Type": "application/json" },
+        ...options,
       });
-      const payload = await response.json();
-      if (!payload.ok) throw new Error(payload.error || '提交失败');
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok || !payload.ok) throw new Error(payload.error || `请求失败 ${res.status}`);
       return payload.data;
     }
 
-    function fillSelect(select, values, withAll = true) {
-      select.innerHTML = '';
-      if (withAll) {
-        const option = document.createElement('option');
-        option.value = '';
-        option.textContent = '全部';
-        select.appendChild(option);
+    function splitTimeRange(text) {
+      const raw = String(text || "");
+      const parts = raw.split(/~|至|到/).map((x) => x.trim()).filter(Boolean);
+      return { start: parts[0] || "", end: parts[1] || "" };
+    }
+
+    function html(text) {
+      return String(text ?? "").replace(/[&<>"']/g, (ch) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+      }[ch]));
+    }
+
+    function fieldsOf(record) {
+      return record.display_fields || {};
+    }
+
+    function titleForRecord(record) {
+      const f = fieldsOf(record);
+      return `EA118机房${f["楼栋"] || ""}${f["维护总项"] || ""}`;
+    }
+
+    function isRecordOngoing(record) {
+      const title = titleForRecord(record).replace(/\s+/g, "");
+      return state.ongoing.some((item) => String(item.title || "").replace(/\s+/g, "") === title);
+    }
+
+    function getDraft(record) {
+      const id = record.record_id;
+      if (!state.drafts.has(id)) {
+        const memory = record.memory || {};
+        state.drafts.set(id, {
+          start_time: todayInput(9, 30),
+          end_time: todayInput(18, 30),
+          location: memory.location || "",
+          content: memory.content || "",
+          reason: memory.reason || "",
+          impact: memory.impact || state.defaults.impact,
+          progress: state.defaults.progress,
+          job_id: "",
+        });
       }
-      values.forEach((value) => {
-        const option = document.createElement('option');
-        option.value = value;
-        option.textContent = value;
-        select.appendChild(option);
+      return state.drafts.get(id);
+    }
+
+    function setJobLine(key, text, status = "") {
+      const el = document.querySelector(`[data-job-line="${CSS.escape(key)}"]`);
+      if (!el) return;
+      el.className = `job-line ${status}`;
+      el.textContent = text || "";
+    }
+
+    function renderGate() {
+      $("scopeGrid").innerHTML = state.scopeOptions.map((item) => `
+        <button class="scope-btn" data-scope="${item.value}">
+          <strong>${html(item.label)}</strong>
+          <span>${item.value === "ALL" ? "查看所有楼栋维护工作" : "只进入该范围维护工作台"}</span>
+        </button>
+      `).join("");
+      document.querySelectorAll("[data-scope]").forEach((btn) => {
+        btn.addEventListener("click", () => selectScope(btn.dataset.scope));
       });
     }
 
-    function updateCounters() {
-      el.visibleCount.textContent = String(state.visibleMaintenanceOptions.length);
-      const selectedIds = new Set([...state.selectedIds, ...getDraftIdSet()]);
-      el.selectedCount.textContent = String(selectedIds.size);
-      el.draftCount.textContent = String(state.drafts.length);
+    async function selectScope(scope, { replace = false } = {}) {
+      state.scope = scope || "ALL";
+      const url = new URL(window.location.href);
+      url.searchParams.set("scope", state.scope);
+      if (replace) window.history.replaceState({ scope: state.scope }, "", url);
+      else window.history.pushState({ scope: state.scope }, "", url);
+      $("gate").classList.add("hidden");
+      $("app").classList.remove("hidden");
+      await loadBootstrap();
     }
 
-    function getDraftIdSet() {
-      return new Set(state.drafts.map((draft) => draft.record_id));
+    async function loadBootstrap() {
+      $("loadInfo").textContent = "加载中";
+      const data = await api(`/api/bootstrap?scope=${encodeURIComponent(state.scope)}`);
+      state.scopeOptions = data.scope_options || state.scopeOptions;
+      state.records = data.records || [];
+      state.ongoing = data.ongoing || [];
+      state.dailySummary = data.daily_summary || { date: "", items: [], stats: {} };
+      state.defaults = data.defaults || state.defaults;
+      state.filters.month = state.filters.month || data.filters?.default_month || "";
+      $("scopeLabel").textContent = data.scope_label || scopeLabel(state.scope);
+      fillSelect("monthSelect", data.filters?.months || [], state.filters.month, false);
+      fillSelect("specialtySelect", data.filters?.specialties || [], state.filters.specialty, true);
+      $("loadInfo").textContent = data.last_loaded_at ? `同步 ${data.last_loaded_at}` : "已加载";
+      render();
     }
 
-    function isDrafted(recordId) {
-      return getDraftIdSet().has(recordId);
+    function fillSelect(id, options, selected, includeAll) {
+      const el = $(id);
+      const opts = includeAll ? ["全部", ...options] : options;
+      el.innerHTML = opts.map((x) => `<option value="${html(x)}">${html(x)}</option>`).join("");
+      if (selected && opts.includes(selected)) el.value = selected;
+      else if (opts.length) {
+        el.value = opts[0];
+        if (id === "monthSelect") state.filters.month = opts[0];
+        if (id === "specialtySelect") state.filters.specialty = opts[0];
+      }
     }
 
-    function isRecordSelected(recordId) {
-      return state.selectedIds.has(recordId) || isDrafted(recordId);
-    }
-
-    function getVisibleMaintenanceOptions() {
-      const keyword = el.maintenanceSearch.value.trim();
-      return state.maintenanceOptions.filter((item) => {
-        if (!keyword) return true;
-        return item.label.includes(keyword);
+    async function refreshWorkbench() {
+      const params = new URLSearchParams({
+        scope: state.scope || "ALL",
+        month: state.filters.month || "",
+        specialty: state.filters.specialty === "全部" ? "" : state.filters.specialty,
       });
+      $("loadInfo").textContent = "刷新中";
+      const data = await api(`/api/workbench?${params}`);
+      state.records = data.records || [];
+      state.ongoing = data.ongoing || [];
+      state.dailySummary = data.daily_summary || { date: "", items: [], stats: {} };
+      $("loadInfo").textContent = "已刷新";
+      render();
     }
 
-    function toggleRecord(recordId) {
-      if (isDrafted(recordId)) {
-        state.selectedIds.add(recordId);
-        renderRecords();
+    function render() {
+      renderSummary();
+      renderRecords();
+      renderDrafts();
+      renderOngoing();
+      $("recordCount").textContent = `未开始 ${visibleRecords().length}`;
+      $("ongoingCount").textContent = `进行中 ${state.ongoing.length}`;
+    }
+
+    function renderSummary() {
+      const summary = state.dailySummary || {};
+      const stats = summary.stats || {};
+      $("summaryDate").textContent = summary.date || "今日";
+      const metrics = [
+        ["已发起", stats.started || 0, "green"],
+        ["有更新", stats.updated || 0, "blue"],
+        ["已结束", stats.ended || 0, "amber"],
+        ["进行中", stats.ongoing || state.ongoing.length || 0, "red"],
+      ];
+      $("summaryMetrics").innerHTML = metrics.map(([label, value, color]) => `
+        <div class="metric">
+          <span class="tag ${color}">${html(label)}</span>
+          <strong>${html(value)}</strong>
+        </div>
+      `).join("");
+      const items = summary.items || [];
+      if (!items.length) {
+        $("summaryTimeline").innerHTML = `<div class="empty" style="min-width:100%">今天还没有通过网页完成的通告动作</div>`;
         return;
       }
-      if (state.selectedIds.has(recordId)) state.selectedIds.delete(recordId);
-      else state.selectedIds.add(recordId);
-      renderRecords();
+      $("summaryTimeline").innerHTML = items.slice(0, 12).map((item) => {
+        const key = item.key || item.fallback_key || item.title;
+        const open = state.expandedSummaryKey === key;
+        const actions = item.actions || [];
+        return `
+          <article class="timeline-item" data-summary-key="${html(key)}">
+            <div class="timeline-title">${html(item.title || "未命名通告")}</div>
+            <div class="record-meta">${html([item.building, item.specialty, item.status].filter(Boolean).join(" | "))}</div>
+            <div class="record-meta">开始 ${html(item.started_at || "-")}；结束 ${html(item.ended_at || "-")}</div>
+            ${open ? `<div class="work-detail">${summaryDetailHtml(item, actions)}</div>` : ""}
+          </article>
+        `;
+      }).join("");
+      document.querySelectorAll("[data-summary-key]").forEach((el) => {
+        el.addEventListener("click", () => {
+          state.expandedSummaryKey = state.expandedSummaryKey === el.dataset.summaryKey ? "" : el.dataset.summaryKey;
+          renderSummary();
+        });
+      });
+    }
+
+    function summaryDetailHtml(item, actions) {
+      const actionText = (actions || []).map((action) => {
+        const line = `${action.time || "-"} ${action.label || action.action || ""}${action.progress ? "：" + action.progress : ""}`;
+        return html(line);
+      }).join("<br>");
+      return `
+        <strong>计划时间：</strong>${html(item.start_time || "-")} ~ ${html(item.end_time || "-")}<br>
+        <strong>多维记录：</strong>${html(item.feishu_record_id || "-")}<br>
+        <strong>位置：</strong>${html(item.location || "-")}<br>
+        <strong>进度轨迹：</strong><br>${actionText || "-"}
+      `;
+    }
+
+    function visibleRecords() {
+      const q = state.filters.search.trim().toLowerCase();
+      return state.records.filter((record) => {
+        const f = fieldsOf(record);
+        const text = `${f["维护总项"] || ""} ${f["维护编号"] || ""} ${f["维护项目"] || ""}`.toLowerCase();
+        return !q || text.includes(q);
+      });
     }
 
     function renderRecords() {
-      state.visibleMaintenanceOptions = getVisibleMaintenanceOptions();
-      el.recordsList.innerHTML = '';
-      if (!state.visibleMaintenanceOptions.length) {
-        el.recordsList.innerHTML = '<div class="empty">没有符合条件的维护总项。</div>';
-        updateCounters();
-        return;
-      }
-
-      state.visibleMaintenanceOptions.forEach((item) => {
-        const selected = isRecordSelected(item.record_id);
-        const drafted = isDrafted(item.record_id);
-        const statusText = drafted ? '待生成' : (selected ? '已选' : '可选');
-        const row = document.createElement('div');
-        row.className = `record-row${selected ? ' selected' : ''}${drafted ? ' drafted' : ''}`;
-        row.innerHTML = `
-          <input type="checkbox" ${selected ? 'checked' : ''} />
-          <div class="record-title">${escapeHtml(item.label)}</div>
-          <span class="state-chip">${escapeHtml(statusText)}</span>
-          <button type="button" class="link-btn">详情</button>
-        `;
-        row.addEventListener('click', () => toggleRecord(item.record_id));
-        row.querySelector('.link-btn').addEventListener('click', (event) => {
-          event.stopPropagation();
-          showRecordDetail(item.record_id);
-        });
-        el.recordsList.appendChild(row);
-      });
-      updateCounters();
-    }
-
-    function findRecord(recordId) {
-      return state.records.find((record) => record.record_id === recordId);
-    }
-
-    function showRecordDetail(recordId) {
-      const record = findRecord(recordId);
-      if (!record) return;
-      const fields = record.display_fields || {};
-      el.detailTitle.textContent = '记录详情';
-      el.detailFields.innerHTML = (state.bootstrap.field_order || [])
-        .map((field) => `
-          <div class="field-cell">
-            <div class="field-key">${escapeHtml(field)}</div>
-            <div class="field-value">${escapeHtml(fields[field] || '')}</div>
-          </div>
-        `).join('');
-      el.detailModal.classList.add('open');
-      el.detailModal.setAttribute('aria-hidden', 'false');
-    }
-
-    function closeDetail() {
-      el.detailModal.classList.remove('open');
-      el.detailModal.setAttribute('aria-hidden', 'true');
-    }
-
-    function defaultDateTimeLocal(hour, minute) {
-      const now = new Date();
-      const yyyy = now.getFullYear();
-      const mm = String(now.getMonth() + 1).padStart(2, '0');
-      const dd = String(now.getDate()).padStart(2, '0');
-      const hh = String(hour).padStart(2, '0');
-      const mi = String(minute).padStart(2, '0');
-      return `${yyyy}-${mm}-${dd}T${hh}:${mi}`;
-    }
-
-    function buildDraft(record) {
-      const fields = record.display_fields || {};
-      return {
-        record_id: record.record_id,
-        title: `EA118机房${fields['楼栋'] || ''}${fields['维护总项'] || ''}`,
-        maintenance: fields['维护总项'] || '',
-        location: '',
-        content: '',
-        reason: '',
-        start_time: defaultDateTimeLocal(9, 30),
-        end_time: defaultDateTimeLocal(18, 30),
-        impact: state.bootstrap.defaults.impact,
-        preview: '',
-      };
-    }
-
-    function addDrafts() {
-      const records = state.records.filter((record) => isRecordSelected(record.record_id));
+      const records = visibleRecords();
       if (!records.length) {
-        alert('请先选择维护总项。');
+        $("recordList").innerHTML = `<div class="empty">当前范围没有未开始维护项</div>`;
         return;
       }
-      records.forEach((record) => {
-        if (!state.drafts.find((draft) => draft.record_id === record.record_id)) {
-          state.drafts.push(buildDraft(record));
-        }
-        state.selectedIds.add(record.record_id);
+      $("recordList").innerHTML = records.map((record) => {
+        const f = fieldsOf(record);
+        const selected = state.selected.has(record.record_id);
+        const ongoing = isRecordOngoing(record);
+        const summary = record.work_summary || {};
+        const completed = summary.status === "已结束";
+        const started = Boolean(summary.started_at);
+        const disabled = ongoing || started;
+        const expanded = state.expandedRecordId === record.record_id;
+        const tagText = selected ? "已选择" : completed ? "今日已完成" : ongoing ? "已开始" : started ? "今日已开始" : "可发起";
+        const tagClass = selected ? "green" : completed ? "green" : ongoing ? "amber" : started ? "amber" : "blue";
+        return `
+          <article class="record-card ${selected ? "selected" : ""} ${disabled ? "disabled" : ""} ${completed ? "completed" : ""}" data-record-id="${html(record.record_id)}">
+            <div class="record-title">
+              <span>${html(f["维护总项"] || record.record_id)}</span>
+              <span class="tag ${tagClass}">${html(tagText)}</span>
+            </div>
+            <div class="record-meta">${html([f["楼栋"], f["专业类别"], f["计划维护月份"], f["维护编号"]].filter(Boolean).join(" | "))}</div>
+            ${started ? `<div class="work-detail ${expanded ? "" : "hidden"}">${summaryDetailHtml(summary, summary.actions || [])}</div>` : ""}
+          </article>
+        `;
+      }).join("");
+      document.querySelectorAll("[data-record-id]").forEach((el) => {
+        el.addEventListener("click", () => {
+          const record = state.records.find((x) => x.record_id === el.dataset.recordId);
+          if (!record) return;
+          const summary = record.work_summary || {};
+          if (isRecordOngoing(record) || summary.started_at) {
+            state.expandedRecordId = state.expandedRecordId === record.record_id ? "" : record.record_id;
+            renderRecords();
+            return;
+          }
+          if (state.selected.has(record.record_id)) state.selected.delete(record.record_id);
+          else {
+            state.selected.add(record.record_id);
+            getDraft(record);
+          }
+          render();
+        });
       });
-      if (!state.openDraftId && state.drafts[0]) state.openDraftId = state.drafts[0].record_id;
-      renderDrafts();
-      renderRecords();
-    }
-
-    function toggleDraft(recordId) {
-      state.openDraftId = state.openDraftId === recordId ? '' : recordId;
-      renderDrafts();
     }
 
     function renderDrafts() {
-      el.draftList.innerHTML = '';
-      if (!state.drafts.length) {
-        el.draftList.innerHTML = '<div class="empty">未加入待生成记录。</div>';
-        renderCombinedOutput();
-        updateCounters();
+      const selectedRecords = state.records.filter((r) => state.selected.has(r.record_id));
+      if (!selectedRecords.length) {
+        $("draftList").innerHTML = `<div class="empty">从左侧选择维护总项后，在这里填写开始通告字段</div>`;
         return;
       }
-
-      state.drafts.forEach((draft) => {
-        const open = state.openDraftId === draft.record_id;
-        const card = document.createElement('article');
-        card.className = `draft${open ? ' open' : ''}`;
-        card.innerHTML = `
-          <div class="draft-head">
-            <div class="draft-name">${escapeHtml(draft.title)}</div>
-            <span class="draft-hint">${open ? '收起' : '展开填写'}</span>
-            <button type="button" class="btn danger" data-remove="${escapeHtml(draft.record_id)}">移除</button>
-          </div>
-          <div class="draft-body">
-            <div class="two-col">
-              <div class="field">
-                <label>开始时间</label>
-                <input type="datetime-local" data-key="start_time" data-id="${escapeHtml(draft.record_id)}" value="${escapeHtml(draft.start_time)}" />
+      $("draftList").innerHTML = selectedRecords.map((record) => {
+        const f = fieldsOf(record);
+        const draft = getDraft(record);
+        const id = record.record_id;
+        return `
+          <article class="draft-card active" data-draft-card="${html(id)}">
+            <div class="card-head">
+              <div>
+                <h3 class="card-title">${html(titleForRecord(record))}</h3>
+                <div class="record-meta">${html([f["楼栋"], f["专业类别"], f["计划维护月份"]].filter(Boolean).join(" | "))}</div>
               </div>
-              <div class="field">
-                <label>结束时间</label>
-                <input type="datetime-local" data-key="end_time" data-id="${escapeHtml(draft.record_id)}" value="${escapeHtml(draft.end_time)}" />
-              </div>
-              <div class="field full">
-                <label>位置</label>
-                <textarea data-key="location" data-id="${escapeHtml(draft.record_id)}">${escapeHtml(draft.location)}</textarea>
-              </div>
-              <div class="field full">
-                <label>内容</label>
-                <textarea data-key="content" data-id="${escapeHtml(draft.record_id)}">${escapeHtml(draft.content)}</textarea>
-              </div>
-              <div class="field full">
-                <label>原因</label>
-                <textarea data-key="reason" data-id="${escapeHtml(draft.record_id)}">${escapeHtml(draft.reason)}</textarea>
-              </div>
-              <div class="field full">
-                <label>影响</label>
-                <textarea data-key="impact" data-id="${escapeHtml(draft.record_id)}">${escapeHtml(draft.impact)}</textarea>
-              </div>
+              <button class="btn danger" data-remove-draft="${html(id)}">移除</button>
             </div>
-          </div>
+            <div class="form-grid">
+              ${inputField(id, "start_time", "开始时间", draft.start_time, "datetime-local")}
+              ${inputField(id, "end_time", "结束时间", draft.end_time, "datetime-local")}
+              ${textField(id, "location", "位置", draft.location)}
+              ${textField(id, "content", "内容", draft.content)}
+              ${textField(id, "reason", "原因", draft.reason)}
+              ${textField(id, "impact", "影响", draft.impact)}
+              <div class="wide">${textField(id, "progress", "进度", draft.progress)}</div>
+            </div>
+            <div class="row-actions" style="margin-top:10px">
+              <button class="btn primary" data-send-start="${html(id)}">发送开始通报并上传</button>
+            </div>
+            <div class="job-line" data-job-line="${html(id)}">${draft.job_id ? "任务处理中" : "待发送至飞书并上传多维"}</div>
+          </article>
         `;
-        card.querySelector('.draft-head').addEventListener('click', (event) => {
-          if (event.target.closest('[data-remove]')) return;
-          toggleDraft(draft.record_id);
-        });
-        card.querySelector('[data-remove]').addEventListener('click', (event) => {
-          event.stopPropagation();
-          state.drafts = state.drafts.filter((item) => item.record_id !== draft.record_id);
-          state.selectedIds.delete(draft.record_id);
-          if (state.openDraftId === draft.record_id) state.openDraftId = state.drafts[0]?.record_id || '';
-          renderDrafts();
-          renderRecords();
-        });
-        el.draftList.appendChild(card);
-      });
-
-      el.draftList.querySelectorAll('[data-key]').forEach((input) => {
-        input.addEventListener('input', () => {
-          const draft = state.drafts.find((item) => item.record_id === input.dataset.id);
-          if (!draft) return;
-          draft[input.dataset.key] = input.value;
-        });
-      });
-      renderCombinedOutput();
-      updateCounters();
+      }).join("");
+      bindDraftEvents();
     }
 
-    function renderCombinedOutput() {
-      const text = state.drafts.map((draft) => draft.preview).filter(Boolean).join('\n-------------------------------------------------------------\n');
-      el.combinedOutput.textContent = text;
+    function inputField(id, key, label, value, type = "text") {
+      return `<div><label>${label}</label><input type="${type}" data-draft-field="${html(id)}:${key}" value="${html(value)}" /></div>`;
     }
 
-    async function generateAll() {
-      if (!state.drafts.length) {
-        alert('请先加入待生成记录。');
+    function textField(id, key, label, value) {
+      return `<div><label>${label}</label><textarea data-draft-field="${html(id)}:${key}">${html(value)}</textarea></div>`;
+    }
+
+    function bindDraftEvents() {
+      document.querySelectorAll("[data-draft-field]").forEach((el) => {
+        el.addEventListener("input", () => {
+          const [id, key] = el.dataset.draftField.split(":");
+          const draft = state.drafts.get(id);
+          if (draft) {
+            draft[key] = el.value;
+            draft.job_id = "";
+            draft.operation_id = "";
+            state.actionOps.delete(`${id}:start`);
+            const line = document.querySelector(`[data-job-line="${CSS.escape(id)}"]`);
+            if (line) {
+              line.className = "job-line";
+              line.textContent = "内容已修改，请重新发送";
+            }
+          }
+        });
+      });
+      document.querySelectorAll("[data-remove-draft]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          state.selected.delete(btn.dataset.removeDraft);
+          render();
+        });
+      });
+      document.querySelectorAll("[data-send-start]").forEach((btn) => {
+        btn.addEventListener("click", () => sendStart(btn.dataset.sendStart));
+      });
+    }
+
+    function renderOngoing() {
+      if (!state.ongoing.length) {
+        $("ongoingList").innerHTML = `<div class="empty">当前楼栋没有已开始未结束通告</div>`;
         return;
       }
-      const payload = {
-        drafts: state.drafts.map((draft) => ({
-          record_id: draft.record_id,
-          start_time: draft.start_time,
-          end_time: draft.end_time,
-          location: draft.location,
-          content: draft.content,
-          reason: draft.reason,
-          impact: draft.impact,
-        })),
+      $("ongoingList").innerHTML = state.ongoing.map((item) => {
+        const id = item.active_item_id;
+        const range = splitTimeRange(item.time);
+        return `
+          <article class="ongoing-card" data-ongoing="${html(id)}">
+            <div class="card-head">
+              <div>
+                <h3 class="card-title">${html(item.title || "未命名维保通告")}</h3>
+                <div class="record-meta">${html([item.building, item.specialty, item.time, item.upload_state].filter(Boolean).join(" | "))}</div>
+              </div>
+              <span class="tag ${item.can_update ? "green" : "amber"}">${item.can_update ? "可操作" : "等待"}</span>
+            </div>
+            <div class="form-grid">
+              <div>${textField(id, "progress", "进度", item.progress || "")}</div>
+              <div>${textField(id, "location", "位置", item.location || "")}</div>
+            </div>
+            <details>
+              <summary>编辑完整通告字段</summary>
+              <div class="form-grid">
+                ${inputField(id, "start_time", "开始时间", toDatetimeLocal(range.start), "datetime-local")}
+                ${inputField(id, "end_time", "结束时间", toDatetimeLocal(range.end), "datetime-local")}
+                ${textField(id, "content", "内容", item.content || "")}
+                ${textField(id, "reason", "原因", item.reason || "")}
+                ${textField(id, "impact", "影响", item.impact || state.defaults.impact)}
+              </div>
+            </details>
+            ${item.block_reason ? `<div class="job-line failed">${html(item.block_reason)}</div>` : ""}
+            <div class="row-actions" style="margin-top:10px">
+              <button class="btn blue" data-send-update="${html(id)}" ${item.can_update ? "" : "disabled"}>发送更新并上传</button>
+              <button class="btn danger" data-send-end="${html(id)}" ${item.can_end ? "" : "disabled"}>发送结束并上传</button>
+            </div>
+            <div class="job-line" data-job-line="${html(id)}">待操作</div>
+          </article>
+        `;
+      }).join("");
+      bindOngoingEvents();
+    }
+
+    function toDatetimeLocal(text) {
+      const normalized = String(text || "").trim().replace(/\//g, "-").replace(" ", "T");
+      if (/^\d{4}-\d{1,2}-\d{1,2}T\d{1,2}:\d{2}/.test(normalized)) {
+        const [date, time] = normalized.split("T");
+        const [y, m, d] = date.split("-").map((x) => pad(x));
+        return `${y}-${m}-${d}T${time.slice(0, 5)}`;
+      }
+      return "";
+    }
+
+    function readOngoingPayload(activeItemId, action) {
+      const item = state.ongoing.find((x) => x.active_item_id === activeItemId);
+      const card = document.querySelector(`[data-ongoing="${CSS.escape(activeItemId)}"]`);
+      const get = (key) => card?.querySelector(`[data-draft-field="${CSS.escape(activeItemId + ":" + key)}"]`)?.value || "";
+      const range = splitTimeRange(item?.time || "");
+      return {
+        action,
+        scope: state.scope,
+        specialty: state.filters.specialty === "全部" ? (item?.specialty || "") : state.filters.specialty,
+        active_item_id: activeItemId,
+        title: item?.title || "",
+        building: item?.building || "",
+        start_time: get("start_time") || range.start,
+        end_time: get("end_time") || range.end,
+        location: get("location") || item?.location || "",
+        content: get("content") || item?.content || "",
+        reason: get("reason") || item?.reason || "",
+        impact: get("impact") || item?.impact || state.defaults.impact,
+        progress: get("progress") || item?.progress || "",
+        operation_id: opFor(`${activeItemId}:${action}`),
       };
-      const data = await apiPost('/api/generate', payload);
-      data.items.forEach((item) => {
-        const draft = state.drafts.find((entry) => entry.record_id === item.record_id);
-        if (draft) draft.preview = item.text;
-      });
-      renderDrafts();
     }
 
-    async function copyAll() {
-      const text = state.drafts.map((draft) => draft.preview).filter(Boolean).join('\n-------------------------------------------------------------\n');
-      if (!text) {
-        alert('请先生成模板文本。');
+    function bindOngoingEvents() {
+      document.querySelectorAll(".ongoing-card [data-draft-field]").forEach((el) => {
+        el.addEventListener("input", () => {
+          const [id] = el.dataset.draftField.split(":");
+          state.actionOps.delete(`${id}:update`);
+          state.actionOps.delete(`${id}:end`);
+          const line = document.querySelector(`[data-job-line="${CSS.escape(id)}"]`);
+          if (line) {
+            line.className = "job-line";
+            line.textContent = "内容已修改，请重新发送";
+          }
+        });
+      });
+      document.querySelectorAll("[data-send-update]").forEach((btn) => {
+        btn.addEventListener("click", () => sendAction(readOngoingPayload(btn.dataset.sendUpdate, "update"), btn.dataset.sendUpdate));
+      });
+      document.querySelectorAll("[data-send-end]").forEach((btn) => {
+        btn.addEventListener("click", () => sendAction(readOngoingPayload(btn.dataset.sendEnd, "end"), btn.dataset.sendEnd));
+      });
+    }
+
+    async function sendStart(recordId) {
+      const record = state.records.find((x) => x.record_id === recordId);
+      const draft = state.drafts.get(recordId);
+      if (!record || !draft) return;
+      const recordSpecialty = String(fieldsOf(record)["专业类别"] || "").trim();
+      const uploadSpecialty = state.filters.specialty && state.filters.specialty !== "全部"
+        ? state.filters.specialty
+        : recordSpecialty;
+      if (!uploadSpecialty || uploadSpecialty === "全部") {
+        setJobLine(recordId, "该维护项缺少专业类别，无法上传", "failed");
         return;
       }
-      await navigator.clipboard.writeText(text);
-      alert('已复制。');
+      await sendAction({
+        action: "start",
+        scope: state.scope,
+        specialty: uploadSpecialty,
+        record_id: recordId,
+        start_time: draft.start_time,
+        end_time: draft.end_time,
+        location: draft.location,
+        content: draft.content,
+        reason: draft.reason,
+        impact: draft.impact,
+        progress: draft.progress,
+        operation_id: draft.operation_id || (draft.operation_id = opFor(`${recordId}:start`)),
+      }, recordId);
     }
 
-    function pruneSelection() {
-      const visibleIds = new Set(state.records.map((record) => record.record_id));
-      const draftIds = getDraftIdSet();
-      state.selectedIds = new Set(
-        [...state.selectedIds].filter((id) => visibleIds.has(id) || draftIds.has(id))
-      );
-      draftIds.forEach((id) => state.selectedIds.add(id));
+    async function sendAction(payload, lineKey) {
+      try {
+        setJobLine(lineKey, "提交中，准备加入上传队列", "busy");
+        const data = await api("/api/maintenance-actions", {
+          method: "POST",
+          body: JSON.stringify(payload),
+        });
+        const jobId = data.job_id;
+        if (payload.operation_id) state.jobToOpKey.set(jobId, payload.operation_id);
+        setJobLine(lineKey, `已加入上传队列 ${jobId.slice(0, 8)}`, "busy");
+        pollJob(jobId, lineKey);
+      } catch (err) {
+        setJobLine(lineKey, err.message || "提交失败", "failed");
+      }
     }
 
-    async function refreshRecords() {
-      const qs = new URLSearchParams({
-        month: el.monthSelect.value,
-        specialty: el.specialtySelect.value,
-        building: el.buildingSelect.value,
-      });
-      const data = await apiGet(`/api/records?${qs.toString()}`);
-      state.records = data.records;
-      state.maintenanceOptions = data.maintenance_options;
-      el.statusFilter.textContent = data.maintenance_status || '未开始';
-      pruneSelection();
-      renderRecords();
+    function pollJob(jobId, lineKey) {
+      if (state.polling.has(jobId)) return;
+      state.polling.add(jobId);
+      const tick = async () => {
+        try {
+          const job = await api(`/api/jobs/${encodeURIComponent(jobId)}`);
+          const phase = job.phase || "";
+          if (phase === "success") {
+            setJobLine(lineKey, `已完成，多维记录 ${job.record_id || ""}`, "success");
+            if (state.drafts.has(lineKey)) {
+              state.selected.delete(lineKey);
+              state.drafts.delete(lineKey);
+            }
+            const operationId = state.jobToOpKey.get(jobId);
+            if (operationId) {
+              for (const [key, value] of Array.from(state.actionOps.entries())) {
+                if (value === operationId) state.actionOps.delete(key);
+              }
+              state.jobToOpKey.delete(jobId);
+            }
+            state.polling.delete(jobId);
+            await refreshWorkbench();
+            return;
+          }
+          if (phase === "failed") {
+            const prefix = job.message_sent ? "消息已发送，上传失败" : "操作失败";
+            setJobLine(lineKey, `${prefix}: ${job.error || job.upload_message || ""}`, "failed");
+            if (!job.message_sent) {
+              const operationId = state.jobToOpKey.get(jobId);
+              if (operationId) {
+                for (const [key, value] of Array.from(state.actionOps.entries())) {
+                  if (value === operationId) state.actionOps.delete(key);
+                }
+              }
+            }
+            state.polling.delete(jobId);
+            return;
+          }
+          const queuedLabel = job.queue_position
+            ? `排队中，第 ${job.queue_position} 位`
+            : "排队中";
+          const label = {
+            queued: queuedLabel,
+            sending_message: "队列已轮到，正在发送个人飞书消息",
+            uploading: "个人消息已发送，正在上传多维",
+          }[phase] || "处理中";
+          setJobLine(lineKey, label, "busy");
+          setTimeout(tick, 1200);
+        } catch (err) {
+          setJobLine(lineKey, err.message || "任务查询失败", "failed");
+          state.polling.delete(jobId);
+        }
+      };
+      setTimeout(tick, 700);
     }
 
-    async function bootstrap() {
-      const data = await apiGet('/api/bootstrap');
-      state.bootstrap = data;
-      fillSelect(el.monthSelect, data.filters.months, false);
-      fillSelect(el.specialtySelect, data.filters.specialties, true);
-      fillSelect(el.buildingSelect, data.filters.buildings, true);
-      el.monthSelect.value = data.filters.default_month;
-      state.records = data.records;
-      state.maintenanceOptions = data.maintenance_options;
-      el.statusFilter.textContent = data.maintenance_status || '未开始';
-      el.sourceInfo.textContent = `${data.last_loaded_at || '未刷新'} / ${data.table_id}`;
-      renderRecords();
-      renderDrafts();
+    async function sendAllStart() {
+      const ids = Array.from(state.selected);
+      for (const id of ids) {
+        await sendStart(id);
+      }
     }
 
-    [el.monthSelect, el.specialtySelect, el.buildingSelect].forEach((node) => {
-      node.addEventListener('change', refreshRecords);
+    $("refreshBtn").addEventListener("click", refreshWorkbench);
+    $("refreshOngoingBtn").addEventListener("click", refreshWorkbench);
+    $("switchScopeBtn").addEventListener("click", () => {
+      state.scope = "";
+      const url = new URL(window.location.href);
+      url.searchParams.delete("scope");
+      window.history.pushState({}, "", url);
+      $("app").classList.add("hidden");
+      $("gate").classList.remove("hidden");
+      renderGate();
     });
-    el.maintenanceSearch.addEventListener('input', renderRecords);
-    el.selectAllButton.addEventListener('click', () => {
-      state.visibleMaintenanceOptions.forEach((item) => state.selectedIds.add(item.record_id));
+    $("clearSelectionBtn").addEventListener("click", () => {
+      state.selected.clear();
+      render();
+    });
+    $("sendAllStartBtn").addEventListener("click", sendAllStart);
+    $("monthSelect").addEventListener("change", (e) => {
+      state.filters.month = e.target.value;
+      refreshWorkbench();
+    });
+    $("specialtySelect").addEventListener("change", (e) => {
+      state.filters.specialty = e.target.value;
+      refreshWorkbench();
+    });
+    $("searchInput").addEventListener("input", (e) => {
+      state.filters.search = e.target.value || "";
       renderRecords();
-    });
-    el.clearSelectionButton.addEventListener('click', () => {
-      state.selectedIds.clear();
-      state.drafts = [];
-      state.openDraftId = '';
-      el.combinedOutput.textContent = '';
-      renderDrafts();
-      renderRecords();
-    });
-    el.refreshButton.addEventListener('click', async () => {
-      await apiGet('/api/refresh');
-      state.selectedIds.clear();
-      state.drafts = [];
-      await bootstrap();
-    });
-    el.addDraftsButton.addEventListener('click', addDrafts);
-    el.generateAllButton.addEventListener('click', generateAll);
-    el.copyAllButton.addEventListener('click', copyAll);
-    el.closeDetailButton.addEventListener('click', closeDetail);
-    el.detailModal.addEventListener('click', (event) => {
-      if (event.target === el.detailModal) closeDetail();
-    });
-    window.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape') closeDetail();
+      $("recordCount").textContent = `未开始 ${visibleRecords().length}`;
     });
 
-    bootstrap().catch((error) => {
-      document.body.innerHTML = `<pre style="padding:24px;color:#900;line-height:1.7;">加载失败：${escapeHtml(error.message)}</pre>`;
+    renderGate();
+    window.addEventListener("popstate", () => {
+      const scope = urlScope();
+      state.scope = scope;
+      if (scope) {
+        $("gate").classList.add("hidden");
+        $("app").classList.remove("hidden");
+        loadBootstrap().catch((err) => {
+          $("loadInfo").textContent = err.message || "加载失败";
+        });
+      } else {
+        $("app").classList.add("hidden");
+        $("gate").classList.remove("hidden");
+        renderGate();
+      }
+    });
+    if (state.scope) selectScope(state.scope, { replace: true }).catch((err) => {
+      $("loadInfo").textContent = err.message || "加载失败";
     });
   </script>
 </body>

@@ -2070,6 +2070,15 @@ class MainWindowWorkflowMixin:
             self._record_binding_validated_ids.add(new_id)
             changed = True
 
+        lan_job_map = getattr(self, "_lan_portal_jobs_by_record_id", None)
+        if isinstance(lan_job_map, dict) and old_id in lan_job_map:
+            # Keep the old key until the upload-finished callback pops the job.
+            # This makes the portal status update safe regardless of whether
+            # notification runs before or after placeholder -> real ID migration.
+            if new_id not in lan_job_map:
+                lan_job_map[new_id] = lan_job_map[old_id]
+            changed = True
+
         if self.current_screenshot_record_id == old_id:
             self.current_screenshot_record_id = new_id
             changed = True
@@ -2126,12 +2135,16 @@ class MainWindowWorkflowMixin:
                 if name == "结束" and not success and record_id:
                     self._rollback_end(record_id)
                     self.show_message(f"「{name}」失败\n{msg}")
+                    self._notify_lan_portal_upload_result(
+                        name, success, msg, record_id, ""
+                    )
                     self._try_process_deferred_events()
                     return
 
                 # 恢复按钮状态
                 self.restore_button_state(success, name, record_id)
 
+                real_record_id = None
                 if success:
                     if name in ["上传", "更新", "归档"]:
                         try:
@@ -2244,6 +2257,13 @@ class MainWindowWorkflowMixin:
                         },
                     )
                     self.show_message(f"「{name}」失败\n{msg}")
+                self._notify_lan_portal_upload_result(
+                    name,
+                    success,
+                    msg,
+                    record_id,
+                    real_record_id or "",
+                )
                 self._try_process_deferred_events()
             except Exception as exc:
                 log_error(f"on_request_finished异常: {exc}")

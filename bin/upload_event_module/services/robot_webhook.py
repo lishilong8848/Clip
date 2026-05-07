@@ -106,6 +106,8 @@ def _resolve_group_name(notice_type: str, level: str) -> str:
         if level == "I3":
             return config.group_name_change_i3
         return ""
+    if notice_type == "维保通告":
+        return getattr(config, "group_name_maintenance", "")
     if notice_type == "事件通告":
         if level == "I2":
             return config.group_name_event_i2
@@ -118,18 +120,34 @@ def _resolve_group_name(notice_type: str, level: str) -> str:
 def _send_message_to_chat(
     tenant_access_token: str, chat_id: str, text: str
 ) -> Tuple[bool, str]:
+    return _send_message_to_receive_id(
+        tenant_access_token, chat_id, text, receive_id_type="chat_id"
+    )
+
+
+def _send_message_to_open_id(
+    tenant_access_token: str, open_id: str, text: str
+) -> Tuple[bool, str]:
+    return _send_message_to_receive_id(
+        tenant_access_token, open_id, text, receive_id_type="open_id"
+    )
+
+
+def _send_message_to_receive_id(
+    tenant_access_token: str, receive_id: str, text: str, *, receive_id_type: str
+) -> Tuple[bool, str]:
     url = "https://open.feishu.cn/open-apis/im/v1/messages"
     headers = {
         "Authorization": f"Bearer {tenant_access_token}",
         "Content-Type": "application/json; charset=utf-8",
     }
     payload = {
-        "receive_id": chat_id,
+        "receive_id": receive_id,
         "msg_type": "text",
         "content": json.dumps({"text": text}, ensure_ascii=False),
         "uuid": str(uuid.uuid4()),
     }
-    params = {"receive_id_type": "chat_id"}
+    params = {"receive_id_type": receive_id_type}
 
     try:
         response = requests.post(
@@ -142,6 +160,41 @@ def _send_message_to_chat(
         return True, "ok"
     except Exception as exc:
         return False, str(exc)
+
+
+def send_text_to_open_ids(
+    text: str, open_ids: List[str]
+) -> Tuple[bool, str, List[Dict[str, Any]]]:
+    """发送文本给一个或多个 open_id。任一收件人失败则整体失败。"""
+    text = str(text or "").strip()
+    recipients = list(dict.fromkeys([str(open_id or "").strip() for open_id in open_ids]))
+    recipients = [open_id for open_id in recipients if open_id]
+    if not text:
+        return False, "消息内容为空", []
+    if not recipients:
+        return False, "收件人为空", []
+
+    token, err = _get_tenant_access_token()
+    if err:
+        return False, err, []
+
+    results: List[Dict[str, Any]] = []
+    all_ok = True
+    for open_id in recipients:
+        ok, msg = _send_message_to_open_id(token, open_id, text)
+        results.append({"open_id": open_id, "ok": ok, "message": msg})
+        if not ok:
+            all_ok = False
+
+    if all_ok:
+        log_info(f"个人消息发送成功: recipients={len(recipients)}")
+        return True, "ok", results
+    failed = [item for item in results if not item.get("ok")]
+    detail = "；".join(
+        f"{item.get('open_id')}: {item.get('message')}" for item in failed
+    )
+    log_error(f"个人消息发送失败: {detail}")
+    return False, detail or "发送失败", results
 
 
 def send_robot_title_and_content(

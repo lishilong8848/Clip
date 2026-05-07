@@ -207,6 +207,12 @@ class MainWindowUiMixin:
         self.ocr_install_btn.setToolTip("一键安装 Windows 中文 OCR 语言包")
         self.ocr_install_btn.clicked.connect(self.install_ocr_lang_pack)
 
+        self.lan_template_portal_btn = QPushButton("模板页面")
+        self.lan_template_portal_btn.setObjectName("OcrInstallBtn")
+        self.lan_template_portal_btn.setFixedHeight(30)
+        self.lan_template_portal_btn.setToolTip("打开局域网模板页面")
+        self.lan_template_portal_btn.clicked.connect(self._open_lan_template_portal)
+
         # 底部表格链接按钮（与设置同一水平）
         self.table_links = [
             ("维保表", "table_id_weibao"),
@@ -240,6 +246,7 @@ class MainWindowUiMixin:
 
         bottom_layout.addWidget(self.settings_btn)
         bottom_layout.addWidget(self.ocr_install_btn)
+        bottom_layout.addWidget(self.lan_template_portal_btn)
         bottom_layout.addWidget(self.table_link_widget)
         bottom_layout.addStretch()
         container_layout.addLayout(bottom_layout)
@@ -247,6 +254,7 @@ class MainWindowUiMixin:
         main_layout.addWidget(self.container)
         self._init_update_overlay()
         self.apply_theme(self.current_theme)
+        self.refresh_lan_template_portal_link()
         self.refresh_table_links()
         self.set_notice_tab("event")
         self._refresh_patch_button()

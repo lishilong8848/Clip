@@ -42,12 +42,15 @@ from ..config import (
 
     DEFAULT_TABLE_ID_OVERHAUL,
     DEFAULT_GROUP_NAME_CHANGE_I3,
+    DEFAULT_GROUP_NAME_MAINTENANCE,
 
     DEFAULT_GROUP_NAME_EVENT_I2,
 
     DEFAULT_GROUP_NAME_EVENT_I3,
 
     DEFAULT_GROUP_NAME_EVENT_PROMPT,
+    DEFAULT_LAN_TEMPLATE_PORTAL_HOST,
+    DEFAULT_LAN_TEMPLATE_PORTAL_PORT,
     DEFAULT_DISABLE_HOT_RELOAD,
     DEFAULT_DISABLE_ALERTS,
     DEFAULT_DISABLE_SPEECH,
@@ -337,6 +340,45 @@ class SettingsDialog(QDialog):
         relay_card_layout.addWidget(relay_hint_label)
         form_layout.addWidget(relay_card)
 
+        # ========== 局域网页面配置 ==========
+        lan_portal_title = QLabel("局域网页面")
+        lan_portal_title.setStyleSheet(
+            "font-weight: bold; color: #10B981; margin-top: 10px;"
+        )
+        form_layout.addWidget(lan_portal_title)
+
+        lan_portal_card = QFrame()
+        lan_portal_card.setObjectName("LanPortalCard")
+        lan_portal_card.setStyleSheet(
+            "QFrame#LanPortalCard {"
+            "background: rgba(16, 185, 129, 0.08);"
+            "border: 1px solid rgba(16, 185, 129, 0.28);"
+            "border-radius: 10px;"
+            "}"
+            "QLabel#LanPortalHint { color: #4B5563; font-size: 12px; }"
+        )
+        lan_portal_layout = QVBoxLayout(lan_portal_card)
+        lan_portal_layout.setContentsMargins(12, 10, 12, 10)
+        lan_portal_layout.setSpacing(8)
+
+        lan_host_label = QLabel("局域网 IP")
+        self.lan_template_portal_host_input = QLineEdit()
+        self.lan_template_portal_host_input.setPlaceholderText(
+            "例如 192.168.1.20；默认 0.0.0.0"
+        )
+        self.lan_template_portal_host_input.setMinimumHeight(34)
+        lan_portal_layout.addWidget(lan_host_label)
+        lan_portal_layout.addWidget(self.lan_template_portal_host_input)
+
+        lan_hint = QLabel(
+            f"访问地址为 http://填写的IP:{DEFAULT_LAN_TEMPLATE_PORTAL_PORT}/；"
+            "如果填写 0.0.0.0，程序本机按钮会打开 127.0.0.1。"
+        )
+        lan_hint.setObjectName("LanPortalHint")
+        lan_hint.setWordWrap(True)
+        lan_portal_layout.addWidget(lan_hint)
+        form_layout.addWidget(lan_portal_card)
+
 
         # ========== 群机器人配置 ==========
         robot_title = QLabel("群机器人配置：")
@@ -351,6 +393,15 @@ class SettingsDialog(QDialog):
         form_layout.addWidget(change_i3_label)
 
         form_layout.addWidget(self.group_name_change_i3_input)
+
+
+        maintenance_label = QLabel("维保群名称：")
+        self.group_name_maintenance_input = QLineEdit()
+
+        self.group_name_maintenance_input.setPlaceholderText("输入维保群名称（需与飞书群名一致）")
+        form_layout.addWidget(maintenance_label)
+
+        form_layout.addWidget(self.group_name_maintenance_input)
 
 
 
@@ -475,9 +526,34 @@ class SettingsDialog(QDialog):
             self.relay_webhook_format_combo.setCurrentIndex(idx)
         self._sync_relay_test_btn_state()
         self.group_name_change_i3_input.setText(config.group_name_change_i3)
+        self.group_name_maintenance_input.setText(
+            getattr(config, "group_name_maintenance", "")
+        )
         self.group_name_event_i2_input.setText(config.group_name_event_i2)
         self.group_name_event_i3_input.setText(config.group_name_event_i3)
         self.group_name_event_prompt_input.setText(config.group_name_event_prompt)
+        self.lan_template_portal_host_input.setText(
+            getattr(
+                config,
+                "lan_template_portal_host",
+                DEFAULT_LAN_TEMPLATE_PORTAL_HOST,
+            )
+        )
+
+    @staticmethod
+    def _is_valid_lan_template_portal_host(value: str) -> bool:
+        value = str(value or "").strip()
+        if not value:
+            return False
+        if value.lower() == "localhost":
+            return True
+        try:
+            import ipaddress
+
+            ipaddress.ip_address(value)
+            return True
+        except Exception:
+            return False
 
     def _sync_relay_test_btn_state(self):
         webhook = self.relay_webhook_input.text().strip()
@@ -509,11 +585,24 @@ class SettingsDialog(QDialog):
 
         group_name_change_i3 = self.group_name_change_i3_input.text().strip()
 
+        group_name_maintenance = self.group_name_maintenance_input.text().strip()
+
         group_name_event_i2 = self.group_name_event_i2_input.text().strip()
 
         group_name_event_i3 = self.group_name_event_i3_input.text().strip()
 
         group_name_event_prompt = self.group_name_event_prompt_input.text().strip()
+        lan_template_portal_host = (
+            self.lan_template_portal_host_input.text().strip()
+            or DEFAULT_LAN_TEMPLATE_PORTAL_HOST
+        )
+        if not self._is_valid_lan_template_portal_host(lan_template_portal_host):
+            show_toast_message(
+                self,
+                "❌ 局域网 IP 格式无效，请填写如 192.168.1.20 或 0.0.0.0",
+                duration_ms=2400,
+            )
+            return
 
         disable_hot_reload = self.disable_hot_reload_checkbox.isChecked()
         disable_alerts = self.disable_alerts_checkbox.isChecked()
@@ -560,11 +649,15 @@ class SettingsDialog(QDialog):
             table_id_overhaul=table_id_overhaul,
 group_name_change_i3=group_name_change_i3,
 
+            group_name_maintenance=group_name_maintenance,
+
             group_name_event_i2=group_name_event_i2,
 
             group_name_event_i3=group_name_event_i3,
 
             group_name_event_prompt=group_name_event_prompt,
+            lan_template_portal_host=lan_template_portal_host,
+            lan_template_portal_port=DEFAULT_LAN_TEMPLATE_PORTAL_PORT,
             disable_hot_reload=disable_hot_reload,
             disable_alerts=disable_alerts,
             disable_speech=disable_speech,
@@ -674,11 +767,14 @@ group_name_change_i3=group_name_change_i3,
         self._sync_relay_test_btn_state()
         self.group_name_change_i3_input.setText(DEFAULT_GROUP_NAME_CHANGE_I3)
 
+        self.group_name_maintenance_input.setText(DEFAULT_GROUP_NAME_MAINTENANCE)
+
         self.group_name_event_i2_input.setText(DEFAULT_GROUP_NAME_EVENT_I2)
 
         self.group_name_event_i3_input.setText(DEFAULT_GROUP_NAME_EVENT_I3)
 
         self.group_name_event_prompt_input.setText(DEFAULT_GROUP_NAME_EVENT_PROMPT)
+        self.lan_template_portal_host_input.setText(DEFAULT_LAN_TEMPLATE_PORTAL_HOST)
 
 
 

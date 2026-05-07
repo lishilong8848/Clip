@@ -42,6 +42,9 @@ class ClipboardTool(
     remote_update_checked = pyqtSignal(str, object, object)
     remote_patch_downloaded = pyqtSignal(object, object, str, bool)
     remote_update_phase = pyqtSignal(str)
+    lan_template_notice_received = pyqtSignal(dict)
+    lan_maintenance_action_received = pyqtSignal(dict)
+    lan_maintenance_ongoing_query_received = pyqtSignal(dict)
 
     def __init__(self):
         super().__init__()
@@ -117,6 +120,8 @@ class ClipboardTool(
         self._last_clipboard_snapshot_text = ""
         self._last_clipboard_snapshot_ts = 0
         self._clipboard_preview_auto_show_enabled = True
+        self._lan_portal_jobs_by_record_id = {}
+        self._lan_portal_jobs_by_active_item_id = {}
 
         self.current_theme = "dark"
         self.notice_tab = "event"
@@ -213,6 +218,12 @@ class ClipboardTool(
             self.settings_dialog,
             "settings_saved",
             self.refresh_event_relay_setting,
+        )
+        self.connection_registry.connect(
+            "settings_dialog",
+            self.settings_dialog,
+            "settings_saved",
+            self.refresh_lan_template_portal_setting,
         )
         self.screenshot_dialog = ScreenshotConfirmDialog(None, theme=self.current_theme)
         self.screenshot_dialog.bind_cache_store(self.cache_store)
@@ -345,6 +356,27 @@ class ClipboardTool(
             self,
             "remote_update_phase",
             self._set_remote_update_status,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self.connection_registry.connect(
+            "main_window",
+            self,
+            "lan_template_notice_received",
+            self._on_lan_template_notice_received,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self.connection_registry.connect(
+            "main_window",
+            self,
+            "lan_maintenance_action_received",
+            self._on_lan_maintenance_action_received,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self.connection_registry.connect(
+            "main_window",
+            self,
+            "lan_maintenance_ongoing_query_received",
+            self._on_lan_maintenance_ongoing_query_received,
             Qt.ConnectionType.QueuedConnection,
         )
 

@@ -51,9 +51,12 @@ DEFAULT_TABLE_ID_POWER = ""  # 上下电通告表格ID
 DEFAULT_TABLE_ID_POLLING = ""  # 设备轮巡表格ID
 DEFAULT_TABLE_ID_OVERHAUL = ""  # 设备检修表格ID
 DEFAULT_GROUP_NAME_CHANGE_I3 = ""  # I3变更群名称
+DEFAULT_GROUP_NAME_MAINTENANCE = ""  # 维保群名称
 DEFAULT_GROUP_NAME_EVENT_I2 = ""  # I2事件群名称
 DEFAULT_GROUP_NAME_EVENT_I3 = ""  # I3事件群名称
 DEFAULT_GROUP_NAME_EVENT_PROMPT = ""  # 事件提示群名称
+DEFAULT_LAN_TEMPLATE_PORTAL_HOST = "0.0.0.0"  # 局域网模板页面监听IP
+DEFAULT_LAN_TEMPLATE_PORTAL_PORT = 18766  # 局域网模板页面默认端口
 
 CONFIG_FILE = get_data_file_path("config.json")
 
@@ -101,9 +104,12 @@ class ConfigManager:
             DEFAULT_DEPENDENCY_BOOTSTRAP_ALLOW_GET_PIP
         )
         self.group_name_change_i3 = DEFAULT_GROUP_NAME_CHANGE_I3
+        self.group_name_maintenance = DEFAULT_GROUP_NAME_MAINTENANCE
         self.group_name_event_i2 = DEFAULT_GROUP_NAME_EVENT_I2
         self.group_name_event_i3 = DEFAULT_GROUP_NAME_EVENT_I3
         self.group_name_event_prompt = DEFAULT_GROUP_NAME_EVENT_PROMPT
+        self.lan_template_portal_host = DEFAULT_LAN_TEMPLATE_PORTAL_HOST
+        self.lan_template_portal_port = DEFAULT_LAN_TEMPLATE_PORTAL_PORT
         migrate_legacy_data_file("config.json")
         self.load()
 
@@ -276,6 +282,9 @@ class ConfigManager:
                     self.group_name_change_i3 = config_data.get(
                         "group_name_change_i3", DEFAULT_GROUP_NAME_CHANGE_I3
                     )
+                    self.group_name_maintenance = config_data.get(
+                        "group_name_maintenance", DEFAULT_GROUP_NAME_MAINTENANCE
+                    )
                     self.group_name_event_i2 = config_data.get(
                         "group_name_event_i2", DEFAULT_GROUP_NAME_EVENT_I2
                     )
@@ -285,6 +294,24 @@ class ConfigManager:
                     self.group_name_event_prompt = config_data.get(
                         "group_name_event_prompt", DEFAULT_GROUP_NAME_EVENT_PROMPT
                     )
+                    self.lan_template_portal_host = str(
+                        config_data.get(
+                            "lan_template_portal_host",
+                            DEFAULT_LAN_TEMPLATE_PORTAL_HOST,
+                        )
+                        or DEFAULT_LAN_TEMPLATE_PORTAL_HOST
+                    ).strip()
+                    try:
+                        self.lan_template_portal_port = int(
+                            config_data.get(
+                                "lan_template_portal_port",
+                                DEFAULT_LAN_TEMPLATE_PORTAL_PORT,
+                            )
+                        )
+                    except Exception:
+                        self.lan_template_portal_port = DEFAULT_LAN_TEMPLATE_PORTAL_PORT
+                    if self.lan_template_portal_port <= 0:
+                        self.lan_template_portal_port = DEFAULT_LAN_TEMPLATE_PORTAL_PORT
                     log_info("系统: 配置文件加载成功")
         except Exception as e:
             log_error(f"系统: 配置文件加载失败: {e}")
@@ -304,9 +331,12 @@ class ConfigManager:
         table_id_polling=None,
         table_id_overhaul=None,
         group_name_change_i3=None,
+        group_name_maintenance=None,
         group_name_event_i2=None,
         group_name_event_i3=None,
         group_name_event_prompt=None,
+        lan_template_portal_host=None,
+        lan_template_portal_port=None,
         disable_hot_reload=None,
         disable_alerts=None,
         disable_speech=None,
@@ -376,6 +406,11 @@ class ConfigManager:
                 if group_name_change_i3 is not None
                 else self.group_name_change_i3
             )
+            new_group_name_maintenance = (
+                group_name_maintenance
+                if group_name_maintenance is not None
+                else self.group_name_maintenance
+            )
             new_group_name_event_i2 = (
                 group_name_event_i2
                 if group_name_event_i2 is not None
@@ -391,6 +426,22 @@ class ConfigManager:
                 if group_name_event_prompt is not None
                 else self.group_name_event_prompt
             )
+            new_lan_template_portal_host = (
+                str(lan_template_portal_host).strip()
+                if lan_template_portal_host is not None
+                else self.lan_template_portal_host
+            )
+            if not new_lan_template_portal_host:
+                new_lan_template_portal_host = DEFAULT_LAN_TEMPLATE_PORTAL_HOST
+            if lan_template_portal_port is not None:
+                try:
+                    new_lan_template_portal_port = int(lan_template_portal_port)
+                except Exception:
+                    new_lan_template_portal_port = DEFAULT_LAN_TEMPLATE_PORTAL_PORT
+            else:
+                new_lan_template_portal_port = self.lan_template_portal_port
+            if new_lan_template_portal_port <= 0:
+                new_lan_template_portal_port = DEFAULT_LAN_TEMPLATE_PORTAL_PORT
             new_disable_hot_reload = (
                 disable_hot_reload
                 if disable_hot_reload is not None
@@ -519,9 +570,12 @@ class ConfigManager:
                 "table_id_polling": new_table_id_polling,
                 "table_id_overhaul": new_table_id_overhaul,
                 "group_name_change_i3": new_group_name_change_i3,
+                "group_name_maintenance": new_group_name_maintenance,
                 "group_name_event_i2": new_group_name_event_i2,
                 "group_name_event_i3": new_group_name_event_i3,
                 "group_name_event_prompt": new_group_name_event_prompt,
+                "lan_template_portal_host": new_lan_template_portal_host,
+                "lan_template_portal_port": new_lan_template_portal_port,
                 "disable_hot_reload": new_disable_hot_reload,
                 "disable_alerts": new_disable_alerts,
                 "disable_speech": new_disable_speech,
@@ -566,9 +620,12 @@ class ConfigManager:
             self.table_id_polling = new_table_id_polling
             self.table_id_overhaul = new_table_id_overhaul
             self.group_name_change_i3 = new_group_name_change_i3
+            self.group_name_maintenance = new_group_name_maintenance
             self.group_name_event_i2 = new_group_name_event_i2
             self.group_name_event_i3 = new_group_name_event_i3
             self.group_name_event_prompt = new_group_name_event_prompt
+            self.lan_template_portal_host = new_lan_template_portal_host
+            self.lan_template_portal_port = new_lan_template_portal_port
             self.disable_hot_reload = new_disable_hot_reload
             self.disable_alerts = new_disable_alerts
             self.disable_speech = new_disable_speech
