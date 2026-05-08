@@ -84,6 +84,9 @@ class MaintenancePortalService:
         self._memory_dir.mkdir(parents=True, exist_ok=True)
         self._summary_dir = Path(get_data_file_path("lan_template_daily_summary"))
         self._summary_dir.mkdir(parents=True, exist_ok=True)
+        self._work_status_dir = Path(get_data_file_path("lan_template_work_status"))
+        self._work_status_dir.mkdir(parents=True, exist_ok=True)
+        self._work_status_backfilled = False
         self._jobs: dict[str, dict[str, Any]] = {}
         self._jobs_lock = threading.RLock()
 
@@ -432,6 +435,78 @@ class MaintenancePortalService:
         building_key = re.sub(r"\s+", "", str(building or ""))
         return f"title:{building_key}:{title_key}" if title_key else ""
 
+    @staticmethod
+    def _work_status_fallback_key(*, title: str = "", building: str = "", plan_month: str = "") -> str:
+        title_key = re.sub(r"\s+", "", str(title or ""))
+        building_key = re.sub(r"\s+", "", str(building or ""))
+        month_key = re.sub(r"\s+", "", str(plan_month or ""))
+        return f"{building_key}:{month_key}:{title_key}" if title_key else ""
+
+    def _record_fallback_key(self, record: dict[str, Any]) -> str:
+        fields = record.get("display_fields") or {}
+        building = str(fields.get("楼栋") or "").strip()
+        maintenance_total = str(fields.get("维护总项") or "").strip()
+        title = f"EA118机房{building}{maintenance_total}" if maintenance_total else ""
+        return self._work_status_fallback_key(
+            title=title,
+            building=building,
+            plan_month=str(fields.get("计划维护月份") or "").strip(),
+        )
+
+    def _record_legacy_summary_key(self, record: dict[str, Any]) -> str:
+        fields = record.get("display_fields") or {}
+        building = str(fields.get("楼栋") or "").strip()
+        maintenance_total = str(fields.get("维护总项") or "").strip()
+        title = f"EA118机房{building}{maintenance_total}" if maintenance_total else ""
+        return self._summary_key(title=title, building=building)
+
+    def _work_status_path(self, building: str = "", building_code: str = "") -> Path:
+        code = str(building_code or self._building_code_from_value(building) or "").strip()
+        if code:
+            name = code
+        else:
+            raw = str(building or "").strip()
+            name = re.sub(r"[^\w\u4e00-\u9fff.-]+", "_", raw).strip("._") or "unknown"
+            name = f"{name[:70]}_{hashlib.sha1(raw.encode('utf-8')).hexdigest()[:10]}"
+        return self._work_status_dir / f"{name}.json"
+
+    def _load_work_status_locked(self, building: str = "", building_code: str = "") -> dict[str, Any]:
+        path = self._work_status_path(building, building_code)
+        if not path.exists():
+            code = str(building_code or self._building_code_from_value(building) or "").strip()
+            return {"version": 1, "building": building, "building_code": code, "items": []}
+        try:
+            with path.open("r", encoding="utf-8") as fp:
+                payload = json.load(fp)
+            if not isinstance(payload, dict):
+                payload = {}
+        except Exception:
+            payload = {}
+        if not isinstance(payload.get("items"), list):
+            payload["items"] = []
+        payload["version"] = int(payload.get("version") or 1)
+        payload["building"] = str(payload.get("building") or building or "")
+        payload["building_code"] = str(
+            payload.get("building_code")
+            or building_code
+            or self._building_code_from_value(payload.get("building") or building)
+            or ""
+        )
+        return payload
+
+    def _save_work_status_locked(
+        self, payload: dict[str, Any], *, building: str = "", building_code: str = ""
+    ) -> None:
+        path = self._work_status_path(
+            building or payload.get("building") or "",
+            building_code or payload.get("building_code") or "",
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        with tmp_path.open("w", encoding="utf-8") as fp:
+            json.dump(payload, fp, ensure_ascii=False, indent=2)
+        tmp_path.replace(path)
+
     def _find_summary_item(
         self,
         items: list[dict[str, Any]],
@@ -457,6 +532,154 @@ class MaintenancePortalService:
                 if str(item.get("fallback_key") or "") == fallback_key:
                     return item
         return None
+
+    def _find_work_status_item(
+        self,
+        items: list[dict[str, Any]],
+        *,
+        source_record_id: str = "",
+        active_item_id: str = "",
+        key: str = "",
+        fallback_key: str = "",
+        work_fallback_key: str = "",
+    ) -> dict[str, Any] | None:
+        source_record_id = str(source_record_id or "").strip()
+        active_item_id = str(active_item_id or "").strip()
+        key = str(key or "").strip()
+        fallback_key = str(fallback_key or "").strip()
+        work_fallback_key = str(work_fallback_key or "").strip()
+        if source_record_id:
+            for item in items:
+                if str(item.get("source_record_id") or "").strip() == source_record_id:
+                    return item
+        if active_item_id:
+            for item in items:
+                if str(item.get("active_item_id") or "").strip() == active_item_id:
+                    return item
+        if key:
+            for item in items:
+                if str(item.get("key") or "").strip() == key:
+                    return item
+        if fallback_key:
+            for item in items:
+                if str(item.get("fallback_key") or "").strip() == fallback_key:
+                    return item
+        if work_fallback_key:
+            for item in items:
+                if str(item.get("work_fallback_key") or "").strip() == work_fallback_key:
+                    return item
+        return None
+
+    @staticmethod
+    def _date_part(value: Any) -> str:
+        match = re.search(r"\d{4}-\d{1,2}-\d{1,2}", str(value or ""))
+        return match.group(0) if match else ""
+
+    def _upsert_work_status_item_locked(
+        self,
+        incoming: dict[str, Any],
+        *,
+        action: str = "",
+        now: str = "",
+    ) -> None:
+        if not isinstance(incoming, dict):
+            return
+        action = str(action or "").strip().lower()
+        now = str(now or dt.datetime.now().strftime("%Y-%m-%d %H:%M"))
+        building = str(incoming.get("building") or "").strip()
+        building_code = str(incoming.get("building_code") or "").strip()
+        payload = self._load_work_status_locked(building, building_code)
+        if building and not payload.get("building"):
+            payload["building"] = building
+        if building_code and not payload.get("building_code"):
+            payload["building_code"] = building_code
+        items = payload.setdefault("items", [])
+        source_record_id = str(incoming.get("source_record_id") or "").strip()
+        active_item_id = str(incoming.get("active_item_id") or "").strip()
+        key = str(incoming.get("key") or "").strip()
+        fallback_key = str(incoming.get("fallback_key") or "").strip()
+        work_fallback_key = str(incoming.get("work_fallback_key") or "").strip()
+        work_fallback_key = work_fallback_key or self._work_status_fallback_key(
+            title=str(incoming.get("title") or ""),
+            building=building,
+            plan_month=str(incoming.get("plan_month") or ""),
+        )
+        item = self._find_work_status_item(
+            items,
+            source_record_id=source_record_id,
+            active_item_id=active_item_id,
+            key=key,
+            fallback_key=fallback_key,
+            work_fallback_key=work_fallback_key,
+        )
+        if item is None:
+            item = {
+                "key": key or fallback_key or uuid.uuid4().hex,
+                "fallback_key": fallback_key,
+                "work_fallback_key": work_fallback_key,
+                "source_record_id": source_record_id,
+                "active_item_id": active_item_id,
+                "actions": [],
+            }
+            items.append(item)
+        if work_fallback_key and not item.get("work_fallback_key"):
+            item["work_fallback_key"] = work_fallback_key
+        for field in (
+            "key",
+            "fallback_key",
+            "work_fallback_key",
+            "source_record_id",
+            "active_item_id",
+            "feishu_record_id",
+            "title",
+            "building",
+            "building_code",
+            "specialty",
+            "plan_month",
+            "maintenance_total",
+            "maintenance_no",
+            "maintenance_project",
+            "start_time",
+            "end_time",
+            "location",
+            "content",
+            "reason",
+            "impact",
+            "progress",
+            "text",
+        ):
+            value = incoming.get(field)
+            if value not in (None, ""):
+                item[field] = value
+        if incoming.get("started_at") and not item.get("started_at"):
+            item["started_at"] = incoming["started_at"]
+        if incoming.get("started_at"):
+            item["started_date"] = self._date_part(incoming.get("started_at"))
+        if incoming.get("last_updated_at"):
+            item["last_updated_at"] = incoming["last_updated_at"]
+        if incoming.get("ended_at"):
+            item["ended_at"] = incoming["ended_at"]
+            item["completed_date"] = self._date_part(incoming.get("ended_at"))
+        if action == "end":
+            item["status"] = "已结束"
+            item["ended_at"] = str(incoming.get("ended_at") or now)
+            item["completed_date"] = self._date_part(item.get("ended_at"))
+        elif action in {"start", "update"}:
+            if item.get("status") != "已结束":
+                item["status"] = "进行中"
+        elif incoming.get("status"):
+            item["status"] = incoming["status"]
+        for incoming_action in incoming.get("actions") or []:
+            if not isinstance(incoming_action, dict):
+                continue
+            job_id = str(incoming_action.get("job_id") or "").strip()
+            actions = item.setdefault("actions", [])
+            if job_id and any(str(existing.get("job_id") or "").strip() == job_id for existing in actions):
+                continue
+            actions.append(copy.deepcopy(incoming_action))
+        item["updated_at"] = now
+        payload["updated_at"] = now
+        self._save_work_status_locked(payload, building=building, building_code=building_code)
 
     def mark_action_upload_result(
         self,
@@ -546,6 +769,10 @@ class MaintenancePortalService:
                 "impact",
                 "progress",
                 "text",
+                "plan_month",
+                "maintenance_total",
+                "maintenance_no",
+                "maintenance_project",
             ):
                 value = prepared.get(field)
                 if value not in (None, ""):
@@ -574,6 +801,7 @@ class MaintenancePortalService:
             )
             payload["updated_at"] = now
             self._save_day_summary_locked(payload)
+            self._upsert_work_status_item_locked(item, action=action, now=now)
 
     def get_daily_summary(
         self, *, scope: str = "ALL", ongoing_items: list[dict[str, Any]] | None = None
@@ -613,6 +841,100 @@ class MaintenancePortalService:
             record_id = str(item.get("source_record_id") or "").strip()
             if record_id:
                 result[record_id] = item
+        return result
+
+    def _backfill_work_status_from_daily_summaries_locked(self) -> None:
+        if self._work_status_backfilled:
+            return
+        self._work_status_backfilled = True
+        for path in sorted(self._summary_dir.glob("*.json")):
+            try:
+                with path.open("r", encoding="utf-8") as fp:
+                    payload = json.load(fp)
+            except Exception:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            day = str(payload.get("date") or path.stem)
+            for raw_item in payload.get("items") or []:
+                if not isinstance(raw_item, dict):
+                    continue
+                item = copy.deepcopy(raw_item)
+                actions = [action for action in item.get("actions") or [] if isinstance(action, dict)]
+                last_action = str(actions[-1].get("action") or "").strip().lower() if actions else ""
+                if not item.get("started_at") and last_action == "start":
+                    item["started_at"] = f"{day} 00:00"
+                if item.get("status") == "已结束" and not item.get("ended_at"):
+                    item["ended_at"] = f"{day} 00:00"
+                self._upsert_work_status_item_locked(
+                    item,
+                    action=last_action,
+                    now=str(payload.get("updated_at") or item.get("updated_at") or day),
+                )
+
+    def _load_work_status_items_locked(self, scope: str = "ALL") -> list[dict[str, Any]]:
+        self._backfill_work_status_from_daily_summaries_locked()
+        scope = self._normalize_scope(scope)
+        items: list[dict[str, Any]] = []
+        for path in sorted(self._work_status_dir.glob("*.json")):
+            try:
+                with path.open("r", encoding="utf-8") as fp:
+                    payload = json.load(fp)
+            except Exception:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            for item in payload.get("items") or []:
+                if not isinstance(item, dict):
+                    continue
+                if self._scope_matches_building(scope, item.get("building")):
+                    items.append(copy.deepcopy(item))
+        return items
+
+    def _work_status_by_records(
+        self,
+        records: list[dict[str, Any]],
+        *,
+        scope: str = "ALL",
+        daily_items: list[dict[str, Any]] | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        with self._summary_lock:
+            status_items = self._load_work_status_items_locked(scope)
+        by_source = {
+            str(item.get("source_record_id") or "").strip(): item
+            for item in status_items
+            if str(item.get("source_record_id") or "").strip()
+        }
+        by_fallback: dict[str, dict[str, Any]] = {}
+        for item in status_items:
+            for key_name in ("work_fallback_key", "fallback_key"):
+                fallback_key = str(item.get(key_name) or "").strip()
+                if fallback_key and fallback_key not in by_fallback:
+                    by_fallback[fallback_key] = item
+        for item in daily_items or []:
+            if not isinstance(item, dict):
+                continue
+            source_record_id = str(item.get("source_record_id") or "").strip()
+            if source_record_id and source_record_id not in by_source:
+                by_source[source_record_id] = copy.deepcopy(item)
+            fallback_key = str(item.get("fallback_key") or "").strip()
+            if fallback_key and fallback_key not in by_fallback:
+                by_fallback[fallback_key] = copy.deepcopy(item)
+            work_fallback_key = str(item.get("work_fallback_key") or "").strip()
+            if work_fallback_key and work_fallback_key not in by_fallback:
+                by_fallback[work_fallback_key] = copy.deepcopy(item)
+        result: dict[str, dict[str, Any]] = {}
+        for record in records:
+            record_id = str(record.get("record_id") or "").strip()
+            if not record_id:
+                continue
+            item = by_source.get(record_id)
+            if item is None:
+                item = by_fallback.get(self._record_fallback_key(record))
+            if item is None:
+                item = by_fallback.get(self._record_legacy_summary_key(record))
+            if item is not None:
+                result[record_id] = copy.deepcopy(item)
         return result
 
     def _get_record_memory(self, record: dict[str, Any]) -> dict[str, str]:
@@ -691,7 +1013,11 @@ class MaintenancePortalService:
         daily_summary = self.get_daily_summary(
             scope=scope, ongoing_items=ongoing_items or []
         )
-        summary_by_record = self._summary_by_record_id(daily_summary.get("items") or [])
+        summary_by_record = self._work_status_by_records(
+            filtered_records,
+            scope=scope,
+            daily_items=daily_summary.get("items") or [],
+        )
         return {
             "app_token": self.app_token,
             "table_id": self.table_id,
@@ -763,7 +1089,11 @@ class MaintenancePortalService:
         daily_summary = self.get_daily_summary(
             scope=scope, ongoing_items=ongoing_items or []
         )
-        summary_by_record = self._summary_by_record_id(daily_summary.get("items") or [])
+        summary_by_record = self._work_status_by_records(
+            filtered_records,
+            scope=scope,
+            daily_items=daily_summary.get("items") or [],
+        )
         return {
             "maintenance_status": DEFAULT_MAINTENANCE_STATUS,
             "scope": scope,
@@ -1038,6 +1368,10 @@ class MaintenancePortalService:
         record = None
         fields: dict[str, Any] = {}
         record_id = str(request_payload.get("record_id") or "").strip()
+        plan_month = ""
+        maintenance_total = ""
+        maintenance_no = ""
+        maintenance_project = ""
         if action == "start":
             if not record_id:
                 raise PortalError("开始通告缺少计划记录ID。")
@@ -1050,6 +1384,9 @@ class MaintenancePortalService:
                 )
             building = str(fields.get("楼栋") or "").strip()
             maintenance_total = str(fields.get("维护总项") or "").strip()
+            plan_month = str(fields.get("计划维护月份") or "").strip()
+            maintenance_no = str(fields.get("维护编号") or "").strip()
+            maintenance_project = str(fields.get("维护项目") or "").strip()
             if not specialty or specialty == "全部":
                 specialty = str(fields.get("专业类别") or "").strip()
             if not specialty or specialty == "全部":
@@ -1118,6 +1455,10 @@ class MaintenancePortalService:
             "building_code": building_code,
             "target_building": self._scope_label(building_code),
             "specialty": specialty,
+            "plan_month": plan_month,
+            "maintenance_total": maintenance_total,
+            "maintenance_no": maintenance_no,
+            "maintenance_project": maintenance_project,
             "start_time": start_time,
             "end_time": end_time,
             "location": location,

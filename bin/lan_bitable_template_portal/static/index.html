@@ -639,6 +639,16 @@
     };
     const dt = (value) => String(value || "").replace("T", " ");
     const opId = () => `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const datePart = (value) => {
+      const match = String(value || "").match(/\d{4}-\d{1,2}-\d{1,2}/);
+      return match ? match[0] : "";
+    };
+    const dayLabel = (value) => {
+      const day = datePart(value);
+      if (!day) return "";
+      const today = datePart(state.dailySummary?.date || "");
+      return day === today ? "今日" : day.slice(5);
+    };
     const opFor = (key) => {
       if (!state.actionOps.has(key)) state.actionOps.set(key, opId());
       return state.actionOps.get(key);
@@ -824,12 +834,14 @@
     }
 
     function summaryDetailHtml(item, actions) {
+      const completedDate = item.completed_date || datePart(item.ended_at);
       const actionText = (actions || []).map((action) => {
         const line = `${action.time || "-"} ${action.label || action.action || ""}${action.progress ? "：" + action.progress : ""}`;
         return html(line);
       }).join("<br>");
       return `
         <strong>计划时间：</strong>${html(item.start_time || "-")} ~ ${html(item.end_time || "-")}<br>
+        <strong>完成日期：</strong>${html(completedDate || "-")}<br>
         <strong>多维记录：</strong>${html(item.feishu_record_id || "-")}<br>
         <strong>位置：</strong>${html(item.location || "-")}<br>
         <strong>进度轨迹：</strong><br>${actionText || "-"}
@@ -860,7 +872,17 @@
         const started = Boolean(summary.started_at);
         const disabled = ongoing || started;
         const expanded = state.expandedRecordId === record.record_id;
-        const tagText = selected ? "已选择" : completed ? "今日已完成" : ongoing ? "已开始" : started ? "今日已开始" : "可发起";
+        const completedLabel = dayLabel(summary.completed_date || summary.ended_at);
+        const startedLabel = dayLabel(summary.started_date || summary.started_at);
+        const tagText = selected
+          ? "已选择"
+          : completed
+            ? (completedLabel ? `${completedLabel}已完成` : "已完成")
+            : ongoing
+              ? "已开始"
+              : started
+                ? (startedLabel ? `${startedLabel}已开始` : "已开始")
+                : "可发起";
         const tagClass = selected ? "green" : completed ? "green" : ongoing ? "amber" : started ? "amber" : "blue";
         return `
           <article class="record-card ${selected ? "selected" : ""} ${disabled ? "disabled" : ""} ${completed ? "completed" : ""}" data-record-id="${html(record.record_id)}">
