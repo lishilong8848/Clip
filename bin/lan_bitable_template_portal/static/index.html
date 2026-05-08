@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>局域网维保工作台</title>
+  <title>局域网工作台</title>
   <style>
     :root {
       --bg: #eef3f5;
@@ -89,6 +89,23 @@
       transition: transform 0.14s ease, box-shadow 0.14s ease, border-color 0.14s ease;
     }
 
+    .scope-metrics {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 5px;
+      margin-top: 10px;
+    }
+
+    .scope-metric {
+      min-height: 24px;
+      padding: 4px 6px;
+      border-radius: 6px;
+      background: var(--panel-2);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
     .scope-btn:hover {
       transform: translateY(-2px);
       border-color: rgba(11, 107, 88, 0.55);
@@ -109,7 +126,7 @@
     .app {
       height: 100vh;
       display: grid;
-      grid-template-rows: 58px auto minmax(0, 1fr);
+      grid-template-rows: auto auto minmax(0, 1fr);
     }
 
     .topbar {
@@ -154,6 +171,13 @@
       flex-wrap: wrap;
     }
 
+    .sync-status {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
     .pill {
       min-height: 30px;
       display: inline-flex;
@@ -165,6 +189,12 @@
       background: var(--panel-2);
       color: var(--muted);
       font-size: 12px;
+    }
+
+    .pill.warning {
+      background: var(--soft-amber);
+      color: var(--amber);
+      border-color: #f0d393;
     }
 
     .workspace {
@@ -288,6 +318,38 @@
       grid-template-columns: 1fr;
       gap: 10px;
       margin-bottom: 12px;
+    }
+
+    .type-tabs {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .type-tab {
+      min-height: 38px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: #fff;
+      color: var(--ink);
+      font-weight: 800;
+    }
+
+    .type-tab.active {
+      border-color: var(--green);
+      background: var(--soft-green);
+      color: var(--green-2);
+    }
+
+    .inline-hint {
+      margin-top: 8px;
+      padding: 8px;
+      border: 1px solid #c8dbea;
+      border-radius: 7px;
+      background: var(--soft-blue);
+      color: var(--blue);
+      font-size: 12px;
+      line-height: 1.45;
     }
 
     label {
@@ -517,8 +579,8 @@
 <body>
   <section id="gate" class="gate">
     <div class="gate-inner">
-      <h1>局域网维保工作台</h1>
-      <p>选择楼栋后进入对应工作台，页面内只展示该范围的未开始维护项和主界面进行中通告。</p>
+      <h1>局域网工作台</h1>
+      <p>选择楼栋或园区后进入对应工作台，页面内展示该范围的待发起和进行中通告。</p>
       <div id="scopeGrid" class="scope-grid"></div>
     </div>
   </section>
@@ -526,14 +588,18 @@
   <main id="app" class="app hidden">
     <header class="topbar">
       <div class="brand">
-        <h1>维保工作台</h1>
+        <h1>工作台</h1>
         <span id="scopeLabel" class="scope">全部</span>
-        <span id="loadInfo" class="pill">未加载</span>
+        <div class="sync-status">
+          <span id="syncTime" class="pill">数据未加载</span>
+          <span id="syncWarning" class="pill warning hidden"></span>
+        </div>
       </div>
       <div class="statusbar">
-        <span id="recordCount" class="pill">未开始 0</span>
+        <span id="recordCount" class="pill">待发起 0</span>
         <span id="ongoingCount" class="pill">进行中 0</span>
-        <button id="refreshBtn" class="btn ghost">刷新</button>
+        <button id="refreshBtn" class="btn ghost">刷新本页</button>
+        <button id="syncSourceBtn" class="btn ghost">同步源表</button>
         <button id="switchScopeBtn" class="btn ghost">切换楼栋</button>
       </div>
     </header>
@@ -558,11 +624,16 @@
     <section class="workspace">
       <aside class="panel">
         <div class="panel-head">
-          <h2>未开始维护项</h2>
+          <h2>待发起事项</h2>
           <button id="clearSelectionBtn" class="btn ghost">清空</button>
         </div>
         <div class="panel-body">
           <div class="filters">
+            <div>
+              <label>通告类型</label>
+              <div id="workTypeTabs" class="type-tabs"></div>
+              <div id="workTypeHint" class="inline-hint hidden"></div>
+            </div>
             <div>
               <label for="monthSelect">计划维护月份</label>
               <select id="monthSelect"></select>
@@ -572,8 +643,8 @@
               <select id="specialtySelect"></select>
             </div>
             <div>
-              <label for="searchInput">维护总项搜索</label>
-              <input id="searchInput" type="search" placeholder="输入维护总项或编号" />
+              <label for="searchInput">事项搜索</label>
+              <input id="searchInput" type="search" placeholder="输入名称、编号或变更简述" />
             </div>
           </div>
           <div id="recordList" class="record-list"></div>
@@ -614,16 +685,21 @@
         { value: "D", label: "D楼" },
         { value: "E", label: "E楼" },
         { value: "H", label: "H楼" },
+        { value: "CAMPUS", label: "园区" },
         { value: "ALL", label: "全部" },
       ],
       records: [],
       ongoing: [],
       dailySummary: { date: "", items: [], stats: {} },
+      scopeOverview: {},
+      lastLoadedAt: "",
+      warnings: [],
       filters: { month: "", specialty: "", search: "" },
+      workType: "maintenance",
       defaults: { impact: "对IT业务无影响，不会触发BA和BMS系统相关告警", progress: "准备工作已完成，人员已就位，可否开始操作？" },
       selected: new Set(),
       drafts: new Map(),
-      jobs: new Map(),
+      jobStates: new Map(),
       actionOps: new Map(),
       jobToOpKey: new Map(),
       polling: new Set(),
@@ -654,6 +730,82 @@
       return state.actionOps.get(key);
     };
     const scopeLabel = (value) => (state.scopeOptions.find((x) => x.value === value) || {}).label || value || "全部";
+    const workTypeLabel = (value) => value === "change" ? "变更" : "维保";
+    const recordKey = (record) => `${record.work_type || "maintenance"}:${record.record_id}`;
+    const storageKey = () => `lan-workbench:${state.scope || "ALL"}`;
+    const jobStorageKey = () => `lan-workbench-jobs:${state.scope || "ALL"}`;
+    const safeJsonParse = (value, fallback) => {
+      try { return JSON.parse(value); } catch { return fallback; }
+    };
+
+    function loadDraftState() {
+      const saved = safeJsonParse(localStorage.getItem(storageKey()) || "{}", {});
+      state.selected = new Set(Array.isArray(saved.selected) ? saved.selected : []);
+      state.drafts = new Map(Object.entries(saved.drafts || {}));
+    }
+
+    function saveDraftState() {
+      const drafts = {};
+      for (const [key, value] of state.drafts.entries()) drafts[key] = value;
+      localStorage.setItem(storageKey(), JSON.stringify({
+        selected: Array.from(state.selected),
+        drafts,
+      }));
+    }
+
+    function loadJobState() {
+      const saved = safeJsonParse(localStorage.getItem(jobStorageKey()) || "{}", {});
+      state.jobStates = new Map(Object.entries(saved.jobs || {}));
+    }
+
+    function saveJobState() {
+      const jobs = {};
+      for (const [key, value] of state.jobStates.entries()) jobs[key] = value;
+      localStorage.setItem(jobStorageKey(), JSON.stringify({ jobs }));
+    }
+
+    function jobLocalKey(payload, lineKey) {
+      const workType = payload?.work_type || "maintenance";
+      const action = payload?.action || "";
+      const source = payload?.source_record_id || payload?.record_id || payload?.active_item_id || lineKey || "";
+      return [state.scope || "ALL", workType, action, source].join(":");
+    }
+
+    function rememberJobState(localKey, patch) {
+      const existing = state.jobStates.get(localKey) || {};
+      state.jobStates.set(localKey, { ...existing, ...patch, updated_at: new Date().toISOString() });
+      saveJobState();
+    }
+
+    function forgetJobState(localKey) {
+      if (!localKey) return;
+      state.jobStates.delete(localKey);
+      saveJobState();
+    }
+
+    function forgetJobsForLine(lineKey) {
+      for (const [key, value] of Array.from(state.jobStates.entries())) {
+        if (value.line_key === lineKey) state.jobStates.delete(key);
+      }
+      saveJobState();
+    }
+
+    function cleanupDraftState() {
+      const recordsByKey = new Map(state.records.map((record) => [recordKey(record), record]));
+      const isUnavailable = (key) => {
+        const record = recordsByKey.get(key);
+        if (!record) return false;
+        const summary = record.work_summary || {};
+        return Boolean(summary.started_at) || isRecordOngoing(record);
+      };
+      for (const key of Array.from(state.selected)) {
+        if (isUnavailable(key)) state.selected.delete(key);
+      }
+      for (const key of Array.from(state.drafts.keys())) {
+        if (isUnavailable(key)) state.drafts.delete(key);
+      }
+      saveDraftState();
+    }
 
     async function api(path, options = {}) {
       const res = await fetch(path, {
@@ -663,6 +815,33 @@
       const payload = await res.json().catch(() => ({}));
       if (!res.ok || !payload.ok) throw new Error(payload.error || `请求失败 ${res.status}`);
       return payload.data;
+    }
+
+    function setSyncStatus(text, warnings = state.warnings) {
+      $("syncTime").textContent = text || "数据未加载";
+      const warning = (warnings || []).filter(Boolean)[0] || "";
+      $("syncWarning").textContent = warning;
+      $("syncWarning").classList.toggle("hidden", !warning);
+    }
+
+    function recordTypeCounts() {
+      return state.records.reduce((counts, record) => {
+        const summary = record.work_summary || {};
+        if (summary.started_at || isRecordOngoing(record)) return counts;
+        const type = record.work_type || "maintenance";
+        if (type === "change") counts.change += 1;
+        else counts.maintenance += 1;
+        return counts;
+      }, { maintenance: 0, change: 0 });
+    }
+
+    function ongoingTypeCounts() {
+      return state.ongoing.reduce((counts, item) => {
+        const type = item.work_type || "maintenance";
+        if (type === "change") counts.change += 1;
+        else counts.maintenance += 1;
+        return counts;
+      }, { maintenance: 0, change: 0 });
     }
 
     function splitTimeRange(text) {
@@ -683,28 +862,52 @@
 
     function titleForRecord(record) {
       const f = fieldsOf(record);
+      if ((record.work_type || "maintenance") === "change") return f["变更简述"] || record.record_id;
       return `EA118机房${f["楼栋"] || ""}${f["维护总项"] || ""}`;
+    }
+
+    function specialtyForRecord(record) {
+      const f = fieldsOf(record);
+      return (record.work_type || "maintenance") === "change" ? (f["专业"] || "") : (f["专业类别"] || "");
+    }
+
+    function buildingForRecord(record) {
+      const f = fieldsOf(record);
+      if ((record.work_type || "maintenance") === "change") return f["变更楼栋"] || "";
+      return f["楼栋"] || "";
+    }
+
+    function levelForRecord(record) {
+      return fieldsOf(record)["变更等级（阿里）"] || "";
     }
 
     function isRecordOngoing(record) {
       const title = titleForRecord(record).replace(/\s+/g, "");
-      return state.ongoing.some((item) => String(item.title || "").replace(/\s+/g, "") === title);
+      const sourceId = record.source_record_id || record.record_id;
+      return state.ongoing.some((item) => {
+        if ((item.work_type || "maintenance") !== (record.work_type || "maintenance")) return false;
+        if (sourceId && item.source_record_id && item.source_record_id === sourceId) return true;
+        return String(item.title || "").replace(/\s+/g, "") === title;
+      });
     }
 
     function getDraft(record) {
-      const id = record.record_id;
+      const id = recordKey(record);
       if (!state.drafts.has(id)) {
         const memory = record.memory || {};
+        const f = fieldsOf(record);
+        const isChange = (record.work_type || "maintenance") === "change";
         state.drafts.set(id, {
-          start_time: todayInput(9, 30),
-          end_time: todayInput(18, 30),
+          start_time: isChange ? toDatetimeLocal(f["变更开始日期（阿里）"]) : todayInput(9, 30),
+          end_time: isChange ? toDatetimeLocal(f["变更结束日期（阿里）"]) : todayInput(18, 30),
           location: memory.location || "",
-          content: memory.content || "",
+          content: isChange ? titleForRecord(record) : (memory.content || ""),
           reason: memory.reason || "",
           impact: memory.impact || state.defaults.impact,
           progress: state.defaults.progress,
           job_id: "",
         });
+        saveDraftState();
       }
       return state.drafts.get(id);
     }
@@ -716,16 +919,55 @@
       el.textContent = text || "";
     }
 
+    function setActionButtonsDisabled(lineKey, disabled) {
+      document.querySelectorAll(
+        `[data-send-start="${CSS.escape(lineKey)}"], [data-send-update="${CSS.escape(lineKey)}"], [data-send-end="${CSS.escape(lineKey)}"]`
+      ).forEach((btn) => {
+        btn.disabled = Boolean(disabled);
+      });
+    }
+
     function renderGate() {
       $("scopeGrid").innerHTML = state.scopeOptions.map((item) => `
         <button class="scope-btn" data-scope="${item.value}">
           <strong>${html(item.label)}</strong>
-          <span>${item.value === "ALL" ? "查看所有楼栋维护工作" : "只进入该范围维护工作台"}</span>
+          <span>${item.value === "ALL" ? "查看所有通告" : "只进入该范围工作台"}</span>
+          ${scopeMetricHtml(item.value)}
         </button>
       `).join("");
       document.querySelectorAll("[data-scope]").forEach((btn) => {
         btn.addEventListener("click", () => selectScope(btn.dataset.scope));
       });
+    }
+
+    function scopeMetricHtml(scope) {
+      const item = state.scopeOverview[scope] || {};
+      const maintenance = item.maintenance_pending ?? "-";
+      const change = item.change_pending ?? "-";
+      const ongoing = (Number(item.maintenance_ongoing || 0) + Number(item.change_ongoing || 0)) || 0;
+      const closedToday = item.closed_today ?? "-";
+      return `
+        <div class="scope-metrics">
+          <div class="scope-metric">维保 ${html(maintenance)}</div>
+          <div class="scope-metric">变更 ${html(change)}</div>
+          <div class="scope-metric">进行中 ${html(ongoing)}</div>
+          <div class="scope-metric">今日完成 ${html(closedToday)}</div>
+        </div>
+      `;
+    }
+
+    async function loadScopeOverview() {
+      try {
+        const data = await api("/api/scope-overview");
+        state.scopeOptions = data.scope_options || state.scopeOptions;
+        state.scopeOverview = data.scopes || {};
+        state.lastLoadedAt = data.last_loaded_at || state.lastLoadedAt;
+        state.warnings = data.warnings || [];
+        renderGate();
+      } catch (err) {
+        state.scopeOverview = {};
+        renderGate();
+      }
     }
 
     async function selectScope(scope, { replace = false } = {}) {
@@ -740,19 +982,26 @@
     }
 
     async function loadBootstrap() {
-      $("loadInfo").textContent = "加载中";
+      setSyncStatus("加载中", []);
       const data = await api(`/api/bootstrap?scope=${encodeURIComponent(state.scope)}`);
       state.scopeOptions = data.scope_options || state.scopeOptions;
       state.records = data.records || [];
       state.ongoing = data.ongoing || [];
       state.dailySummary = data.daily_summary || { date: "", items: [], stats: {} };
       state.defaults = data.defaults || state.defaults;
+      state.lastLoadedAt = data.last_loaded_at || "";
+      state.warnings = data.warnings || [];
+      state.workType = data.default_work_type || state.workType || "maintenance";
       state.filters.month = state.filters.month || data.filters?.default_month || "";
       $("scopeLabel").textContent = data.scope_label || scopeLabel(state.scope);
       fillSelect("monthSelect", data.filters?.months || [], state.filters.month, false);
       fillSelect("specialtySelect", data.filters?.specialties || [], state.filters.specialty, true);
-      $("loadInfo").textContent = data.last_loaded_at ? `同步 ${data.last_loaded_at}` : "已加载";
+      setSyncStatus(data.last_loaded_at ? `数据更新时间 ${data.last_loaded_at}` : "已加载", state.warnings);
+      loadDraftState();
+      loadJobState();
+      cleanupDraftState();
       render();
+      restoreJobState();
     }
 
     function fillSelect(id, options, selected, includeAll) {
@@ -773,22 +1022,81 @@
         month: state.filters.month || "",
         specialty: state.filters.specialty === "全部" ? "" : state.filters.specialty,
       });
-      $("loadInfo").textContent = "刷新中";
+      setSyncStatus("刷新本页中", []);
       const data = await api(`/api/workbench?${params}`);
       state.records = data.records || [];
       state.ongoing = data.ongoing || [];
       state.dailySummary = data.daily_summary || { date: "", items: [], stats: {} };
-      $("loadInfo").textContent = "已刷新";
+      state.lastLoadedAt = data.last_loaded_at || state.lastLoadedAt;
+      state.warnings = data.warnings || [];
+      setSyncStatus(data.last_loaded_at ? `数据更新时间 ${data.last_loaded_at}` : "已刷新", state.warnings);
+      cleanupDraftState();
       render();
+      restoreJobState();
+    }
+
+    async function syncSource() {
+      setSyncStatus("同步源表中", []);
+      const data = await api(`/api/refresh?scope=${encodeURIComponent(state.scope || "ALL")}`);
+      state.scopeOptions = data.scope_options || state.scopeOptions;
+      state.records = data.records || [];
+      state.ongoing = data.ongoing || [];
+      state.dailySummary = data.daily_summary || { date: "", items: [], stats: {} };
+      state.defaults = data.defaults || state.defaults;
+      state.lastLoadedAt = data.last_loaded_at || "";
+      state.warnings = data.warnings || [];
+      setSyncStatus(data.last_loaded_at ? `数据更新时间 ${data.last_loaded_at}` : "已同步", state.warnings);
+      cleanupDraftState();
+      render();
+      restoreJobState();
+      loadScopeOverview();
     }
 
     function render() {
+      renderWorkTypeTabs();
       renderSummary();
       renderRecords();
       renderDrafts();
       renderOngoing();
-      $("recordCount").textContent = `未开始 ${visibleRecords().length}`;
-      $("ongoingCount").textContent = `进行中 ${state.ongoing.length}`;
+      const recordCounts = recordTypeCounts();
+      const ongoingCounts = ongoingTypeCounts();
+      $("recordCount").textContent = `待发起 维保 ${recordCounts.maintenance} / 变更 ${recordCounts.change}`;
+      $("ongoingCount").textContent = `进行中 维保 ${ongoingCounts.maintenance} / 变更 ${ongoingCounts.change}`;
+    }
+
+    function renderWorkTypeTabs() {
+      const counts = recordTypeCounts();
+      $("workTypeTabs").innerHTML = [
+        ["maintenance", `维保 ${counts.maintenance}`],
+        ["change", `变更 ${counts.change}`],
+      ].map(([type, label]) => `
+        <button class="type-tab ${state.workType === type ? "active" : ""}" data-work-type="${type}">
+          ${html(label)}
+        </button>
+      `).join("");
+      document.querySelectorAll("[data-work-type]").forEach((btn) => {
+        btn.addEventListener("click", () => setWorkType(btn.dataset.workType));
+      });
+      const otherType = state.workType === "change" ? "maintenance" : "change";
+      const currentCount = counts[state.workType] || 0;
+      const otherCount = counts[otherType] || 0;
+      let hint = "";
+      if (!currentCount && otherCount) {
+        hint = `当前${workTypeLabel(state.workType)}没有待发起事项，${workTypeLabel(otherType)}有 ${otherCount} 条。`;
+      }
+      $("workTypeHint").textContent = hint;
+      $("workTypeHint").classList.toggle("hidden", !hint);
+    }
+
+    function setWorkType(type) {
+      type = type === "change" ? "change" : "maintenance";
+      if (state.workType === type) return;
+      saveDraftState();
+      state.workType = type;
+      loadDraftState();
+      cleanupDraftState();
+      render();
+      restoreJobState();
     }
 
     function renderSummary() {
@@ -819,7 +1127,7 @@
         return `
           <article class="timeline-item" data-summary-key="${html(key)}">
             <div class="timeline-title">${html(item.title || "未命名通告")}</div>
-            <div class="record-meta">${html([item.building, item.specialty, item.status].filter(Boolean).join(" | "))}</div>
+            <div class="record-meta">${html([workTypeLabel(item.work_type), item.building, item.specialty, item.status].filter(Boolean).join(" | "))}</div>
             <div class="record-meta">开始 ${html(item.started_at || "-")}；结束 ${html(item.ended_at || "-")}</div>
             ${open ? `<div class="work-detail">${summaryDetailHtml(item, actions)}</div>` : ""}
           </article>
@@ -852,20 +1160,74 @@
       const q = state.filters.search.trim().toLowerCase();
       return state.records.filter((record) => {
         const f = fieldsOf(record);
-        const text = `${f["维护总项"] || ""} ${f["维护编号"] || ""} ${f["维护项目"] || ""}`.toLowerCase();
+        if ((record.work_type || "maintenance") !== state.workType) return false;
+        const text = [
+          titleForRecord(record),
+          f["维护总项"] || "",
+          f["维护编号"] || "",
+          f["维护项目"] || "",
+          f["变更简述"] || "",
+          f["变更编码&描述"] || "",
+          f["专业"] || "",
+        ].join(" ").toLowerCase();
         return !q || text.includes(q);
       });
+    }
+
+    function recordMetaText(record) {
+      const f = fieldsOf(record);
+      if ((record.work_type || "maintenance") === "change") {
+        const start = f["变更开始日期（阿里）"] || "";
+        const end = f["变更结束日期（阿里）"] || "";
+        return [
+          `楼栋 ${buildingForRecord(record) || "-"}`,
+          `专业 ${specialtyForRecord(record) || "-"}`,
+          `等级 ${levelForRecord(record) || "-"}`,
+          `计划 ${start || "-"} ~ ${end || "-"}`,
+          `进度 ${f["变更进度"] || "-"}`,
+          `源ID ${record.source_record_id || record.record_id || "-"}`,
+        ].join(" | ");
+      }
+      return [
+        buildingForRecord(record),
+        specialtyForRecord(record),
+        f["计划维护月份"],
+        f["维护编号"],
+        f["维护项目"],
+      ].filter(Boolean).join(" | ");
+    }
+
+    function emptyRecordHtml() {
+      const counts = recordTypeCounts();
+      const otherType = state.workType === "change" ? "maintenance" : "change";
+      const otherCount = counts[otherType] || 0;
+      let message = "";
+      if (state.workType === "change" && (state.scope || "ALL") === "CAMPUS") {
+        message = "当前园区无多楼栋变更；单楼栋变更请进入对应楼栋或查看全部。";
+      } else if (state.workType === "change") {
+        message = "当前楼栋没有未开始变更。";
+      } else {
+        message = "当前范围没有待发起维保事项，请检查计划维护月份或专业类别筛选。";
+      }
+      const switchButton = otherCount
+        ? `<button class="btn blue" data-empty-switch-type="${html(otherType)}">查看${html(workTypeLabel(otherType))} ${html(otherCount)}</button>`
+        : "";
+      return `<div class="empty">${html(message)}${switchButton ? `<div style="margin-top:10px">${switchButton}</div>` : ""}</div>`;
     }
 
     function renderRecords() {
       const records = visibleRecords();
       if (!records.length) {
-        $("recordList").innerHTML = `<div class="empty">当前范围没有未开始维护项</div>`;
+        $("recordList").innerHTML = emptyRecordHtml();
+        document.querySelectorAll("[data-empty-switch-type]").forEach((btn) => {
+          btn.addEventListener("click", () => setWorkType(btn.dataset.emptySwitchType));
+        });
         return;
       }
       $("recordList").innerHTML = records.map((record) => {
         const f = fieldsOf(record);
-        const selected = state.selected.has(record.record_id);
+        const key = recordKey(record);
+        const selected = state.selected.has(key);
         const ongoing = isRecordOngoing(record);
         const summary = record.work_summary || {};
         const completed = summary.status === "已结束";
@@ -885,19 +1247,19 @@
                 : "可发起";
         const tagClass = selected ? "green" : completed ? "green" : ongoing ? "amber" : started ? "amber" : "blue";
         return `
-          <article class="record-card ${selected ? "selected" : ""} ${disabled ? "disabled" : ""} ${completed ? "completed" : ""}" data-record-id="${html(record.record_id)}">
+          <article class="record-card ${selected ? "selected" : ""} ${disabled ? "disabled" : ""} ${completed ? "completed" : ""}" data-record-key="${html(key)}">
             <div class="record-title">
-              <span>${html(f["维护总项"] || record.record_id)}</span>
-              <span class="tag ${tagClass}">${html(tagText)}</span>
+              <span>${html(titleForRecord(record))}</span>
+              <span class="tag ${tagClass}">${html(workTypeLabel(record.work_type))} · ${html(tagText)}</span>
             </div>
-            <div class="record-meta">${html([f["楼栋"], f["专业类别"], f["计划维护月份"], f["维护编号"]].filter(Boolean).join(" | "))}</div>
+            <div class="record-meta">${html(recordMetaText(record))}</div>
             ${started ? `<div class="work-detail ${expanded ? "" : "hidden"}">${summaryDetailHtml(summary, summary.actions || [])}</div>` : ""}
           </article>
         `;
       }).join("");
-      document.querySelectorAll("[data-record-id]").forEach((el) => {
+      document.querySelectorAll("[data-record-key]").forEach((el) => {
         el.addEventListener("click", () => {
-          const record = state.records.find((x) => x.record_id === el.dataset.recordId);
+          const record = state.records.find((x) => recordKey(x) === el.dataset.recordKey);
           if (!record) return;
           const summary = record.work_summary || {};
           if (isRecordOngoing(record) || summary.started_at) {
@@ -905,32 +1267,35 @@
             renderRecords();
             return;
           }
-          if (state.selected.has(record.record_id)) state.selected.delete(record.record_id);
+          const key = recordKey(record);
+          if (state.selected.has(key)) state.selected.delete(key);
           else {
-            state.selected.add(record.record_id);
+            state.selected.add(key);
             getDraft(record);
           }
+          saveDraftState();
           render();
         });
       });
     }
 
     function renderDrafts() {
-      const selectedRecords = state.records.filter((r) => state.selected.has(r.record_id));
+      const selectedRecords = state.records.filter((r) => state.selected.has(recordKey(r)));
       if (!selectedRecords.length) {
-        $("draftList").innerHTML = `<div class="empty">从左侧选择维护总项后，在这里填写开始通告字段</div>`;
+        $("draftList").innerHTML = `<div class="empty">从左侧选择事项后，在这里填写开始通告字段</div>`;
         return;
       }
       $("draftList").innerHTML = selectedRecords.map((record) => {
         const f = fieldsOf(record);
         const draft = getDraft(record);
-        const id = record.record_id;
+        const id = recordKey(record);
+        const isChange = (record.work_type || "maintenance") === "change";
         return `
           <article class="draft-card active" data-draft-card="${html(id)}">
             <div class="card-head">
               <div>
                 <h3 class="card-title">${html(titleForRecord(record))}</h3>
-                <div class="record-meta">${html([f["楼栋"], f["专业类别"], f["计划维护月份"]].filter(Boolean).join(" | "))}</div>
+                <div class="record-meta">${html([workTypeLabel(record.work_type), buildingForRecord(record), specialtyForRecord(record), isChange ? levelForRecord(record) : f["计划维护月份"]].filter(Boolean).join(" | "))}</div>
               </div>
               <button class="btn danger" data-remove-draft="${html(id)}">移除</button>
             </div>
@@ -964,13 +1329,18 @@
     function bindDraftEvents() {
       document.querySelectorAll("[data-draft-field]").forEach((el) => {
         el.addEventListener("input", () => {
-          const [id, key] = el.dataset.draftField.split(":");
+          const marker = el.dataset.draftField.lastIndexOf(":");
+          const id = el.dataset.draftField.slice(0, marker);
+          const key = el.dataset.draftField.slice(marker + 1);
           const draft = state.drafts.get(id);
           if (draft) {
             draft[key] = el.value;
             draft.job_id = "";
             draft.operation_id = "";
             state.actionOps.delete(`${id}:start`);
+            forgetJobsForLine(id);
+            setActionButtonsDisabled(id, false);
+            saveDraftState();
             const line = document.querySelector(`[data-job-line="${CSS.escape(id)}"]`);
             if (line) {
               line.className = "job-line";
@@ -982,6 +1352,8 @@
       document.querySelectorAll("[data-remove-draft]").forEach((btn) => {
         btn.addEventListener("click", () => {
           state.selected.delete(btn.dataset.removeDraft);
+          state.drafts.delete(btn.dataset.removeDraft);
+          saveDraftState();
           render();
         });
       });
@@ -998,20 +1370,23 @@
       $("ongoingList").innerHTML = state.ongoing.map((item) => {
         const id = item.active_item_id;
         const range = splitTimeRange(item.time);
+        const readonly = Boolean(item.source_only);
+        const readonlyReason = "该变更来自源表进行中，但本地没有目标表 record_id，不能通过网页更新或结束。";
+        const tagText = readonly ? "源表进行中 / 未绑定目标记录 / 只读" : (item.can_update ? "可操作" : "等待");
         return `
           <article class="ongoing-card" data-ongoing="${html(id)}">
             <div class="card-head">
               <div>
-                <h3 class="card-title">${html(item.title || "未命名维保通告")}</h3>
-                <div class="record-meta">${html([item.building, item.specialty, item.time, item.upload_state].filter(Boolean).join(" | "))}</div>
+                <h3 class="card-title">${html(item.title || "未命名通告")}</h3>
+                <div class="record-meta">${html([workTypeLabel(item.work_type), item.building, item.specialty, item.level, item.time, item.upload_state, item.source_record_id ? "源ID " + item.source_record_id : ""].filter(Boolean).join(" | "))}</div>
               </div>
-              <span class="tag ${item.can_update ? "green" : "amber"}">${item.can_update ? "可操作" : "等待"}</span>
+              <span class="tag ${item.can_update ? "green" : "amber"}">${html(tagText)}</span>
             </div>
-            <div class="form-grid">
+            <div class="form-grid ${readonly ? "hidden" : ""}">
               <div>${textField(id, "progress", "进度", item.progress || "")}</div>
               <div>${textField(id, "location", "位置", item.location || "")}</div>
             </div>
-            <details>
+            <details class="${readonly ? "hidden" : ""}">
               <summary>编辑完整通告字段</summary>
               <div class="form-grid">
                 ${inputField(id, "start_time", "开始时间", toDatetimeLocal(range.start), "datetime-local")}
@@ -1021,12 +1396,12 @@
                 ${textField(id, "impact", "影响", item.impact || state.defaults.impact)}
               </div>
             </details>
-            ${item.block_reason ? `<div class="job-line failed">${html(item.block_reason)}</div>` : ""}
-            <div class="row-actions" style="margin-top:10px">
+            ${readonly ? `<div class="job-line failed">${html(readonlyReason)}</div>` : (item.block_reason ? `<div class="job-line failed">${html(item.block_reason)}</div>` : "")}
+            <div class="row-actions ${readonly ? "hidden" : ""}" style="margin-top:10px">
               <button class="btn blue" data-send-update="${html(id)}" ${item.can_update ? "" : "disabled"}>发送更新并上传</button>
               <button class="btn danger" data-send-end="${html(id)}" ${item.can_end ? "" : "disabled"}>发送结束并上传</button>
             </div>
-            <div class="job-line" data-job-line="${html(id)}">待操作</div>
+            <div class="job-line ${readonly ? "hidden" : ""}" data-job-line="${html(id)}">待操作</div>
           </article>
         `;
       }).join("");
@@ -1051,10 +1426,18 @@
       return {
         action,
         scope: state.scope,
+        work_type: item?.work_type || "maintenance",
+        notice_type: item?.notice_type || "",
+        source_record_id: item?.source_record_id || "",
+        source_app_token: item?.source_app_token || "",
+        source_table_id: item?.source_table_id || "",
         specialty: state.filters.specialty === "全部" ? (item?.specialty || "") : state.filters.specialty,
         active_item_id: activeItemId,
         title: item?.title || "",
         building: item?.building || "",
+        building_codes: item?.building_codes || [],
+        level: item?.level || "",
+        source_progress: item?.source_progress || "",
         start_time: get("start_time") || range.start,
         end_time: get("end_time") || range.end,
         location: get("location") || item?.location || "",
@@ -1072,6 +1455,8 @@
           const [id] = el.dataset.draftField.split(":");
           state.actionOps.delete(`${id}:update`);
           state.actionOps.delete(`${id}:end`);
+          forgetJobsForLine(id);
+          setActionButtonsDisabled(id, false);
           const line = document.querySelector(`[data-job-line="${CSS.escape(id)}"]`);
           if (line) {
             line.className = "job-line";
@@ -1088,22 +1473,29 @@
     }
 
     async function sendStart(recordId) {
-      const record = state.records.find((x) => x.record_id === recordId);
+      const record = state.records.find((x) => recordKey(x) === recordId);
       const draft = state.drafts.get(recordId);
       if (!record || !draft) return;
-      const recordSpecialty = String(fieldsOf(record)["专业类别"] || "").trim();
+      const isChange = (record.work_type || "maintenance") === "change";
+      const recordSpecialty = String(specialtyForRecord(record) || "").trim();
       const uploadSpecialty = state.filters.specialty && state.filters.specialty !== "全部"
         ? state.filters.specialty
         : recordSpecialty;
       if (!uploadSpecialty || uploadSpecialty === "全部") {
-        setJobLine(recordId, "该维护项缺少专业类别，无法上传", "failed");
+        setJobLine(recordId, "该事项缺少专业类别，无法上传", "failed");
         return;
       }
       await sendAction({
         action: "start",
         scope: state.scope,
+        work_type: record.work_type || "maintenance",
+        notice_type: record.notice_type || "",
+        source_app_token: record.source_app_token || "",
+        source_table_id: record.source_table_id || "",
         specialty: uploadSpecialty,
-        record_id: recordId,
+        record_id: record.record_id,
+        building_codes: record.building_codes || [],
+        level: isChange ? levelForRecord(record) : "",
         start_time: draft.start_time,
         end_time: draft.end_time,
         location: draft.location,
@@ -1113,25 +1505,50 @@
         progress: draft.progress,
         operation_id: draft.operation_id || (draft.operation_id = opFor(`${recordId}:start`)),
       }, recordId);
+      saveDraftState();
     }
 
     async function sendAction(payload, lineKey) {
+      const localKey = jobLocalKey(payload, lineKey);
       try {
+        setActionButtonsDisabled(lineKey, true);
         setJobLine(lineKey, "提交中，准备加入上传队列", "busy");
-        const data = await api("/api/maintenance-actions", {
+        const data = await api("/api/workbench-actions", {
           method: "POST",
           body: JSON.stringify(payload),
         });
         const jobId = data.job_id;
         if (payload.operation_id) state.jobToOpKey.set(jobId, payload.operation_id);
+        rememberJobState(localKey, {
+          job_id: jobId,
+          line_key: lineKey,
+          payload,
+          operation_id: payload.operation_id || "",
+          phase: "queued",
+          text: `已加入上传队列 ${jobId.slice(0, 8)}`,
+          status: "busy",
+        });
+        const draft = state.drafts.get(lineKey);
+        if (draft) {
+          draft.job_id = jobId;
+          saveDraftState();
+        }
         setJobLine(lineKey, `已加入上传队列 ${jobId.slice(0, 8)}`, "busy");
-        pollJob(jobId, lineKey);
+        pollJob(jobId, lineKey, localKey);
       } catch (err) {
         setJobLine(lineKey, err.message || "提交失败", "failed");
+        setActionButtonsDisabled(lineKey, false);
+        rememberJobState(localKey, {
+          line_key: lineKey,
+          payload,
+          phase: "failed",
+          text: err.message || "提交失败",
+          status: "failed",
+        });
       }
     }
 
-    function pollJob(jobId, lineKey) {
+    function pollJob(jobId, lineKey, localKey = "") {
       if (state.polling.has(jobId)) return;
       state.polling.add(jobId);
       const tick = async () => {
@@ -1140,9 +1557,11 @@
           const phase = job.phase || "";
           if (phase === "success") {
             setJobLine(lineKey, `已完成，多维记录 ${job.record_id || ""}`, "success");
+            setActionButtonsDisabled(lineKey, true);
             if (state.drafts.has(lineKey)) {
               state.selected.delete(lineKey);
               state.drafts.delete(lineKey);
+              saveDraftState();
             }
             const operationId = state.jobToOpKey.get(jobId);
             if (operationId) {
@@ -1152,12 +1571,24 @@
               state.jobToOpKey.delete(jobId);
             }
             state.polling.delete(jobId);
+            forgetJobState(localKey);
             await refreshWorkbench();
             return;
           }
           if (phase === "failed") {
-            const prefix = job.message_sent ? "消息已发送，上传失败" : "操作失败";
-            setJobLine(lineKey, `${prefix}: ${job.error || job.upload_message || ""}`, "failed");
+            const isChangeJob = job.prepared?.work_type === "change";
+            const prefix = isChangeJob ? "变更上传失败" : (job.message_sent ? "消息已发送，上传失败" : "操作失败");
+            const text = `${prefix}: ${job.error || job.upload_message || ""}`;
+            setJobLine(lineKey, text, "failed");
+            setActionButtonsDisabled(lineKey, false);
+            rememberJobState(localKey, {
+              job_id: jobId,
+              line_key: lineKey,
+              phase: "failed",
+              text,
+              status: "failed",
+              message_sent: Boolean(job.message_sent),
+            });
             if (!job.message_sent) {
               const operationId = state.jobToOpKey.get(jobId);
               if (operationId) {
@@ -1175,16 +1606,50 @@
           const label = {
             queued: queuedLabel,
             sending_message: "队列已轮到，正在发送个人飞书消息",
-            uploading: "个人消息已发送，正在上传多维",
+            uploading: (job.prepared?.work_type === "change" ? "正在上传变更多维" : "个人消息已发送，正在上传多维"),
           }[phase] || "处理中";
           setJobLine(lineKey, label, "busy");
+          setActionButtonsDisabled(lineKey, true);
+          rememberJobState(localKey, {
+            job_id: jobId,
+            line_key: lineKey,
+            phase,
+            text: label,
+            status: "busy",
+          });
           setTimeout(tick, 1200);
         } catch (err) {
-          setJobLine(lineKey, err.message || "任务查询失败", "failed");
+          const lost = /任务不存在|404/.test(err.message || "");
+          const text = lost ? "任务状态已丢失，请核对多维后重试" : (err.message || "任务查询失败");
+          setJobLine(lineKey, text, "failed");
+          setActionButtonsDisabled(lineKey, false);
+          rememberJobState(localKey, {
+            job_id: jobId,
+            line_key: lineKey,
+            phase: lost ? "lost" : "failed",
+            text,
+            status: "failed",
+          });
           state.polling.delete(jobId);
         }
       };
       setTimeout(tick, 700);
+    }
+
+    function restoreJobState() {
+      for (const [localKey, saved] of Array.from(state.jobStates.entries())) {
+        const lineKey = saved.line_key || "";
+        const jobId = saved.job_id || "";
+        if (!lineKey) continue;
+        if (!document.querySelector(`[data-job-line="${CSS.escape(lineKey)}"]`)) continue;
+        setJobLine(lineKey, saved.text || "任务处理中", saved.status || "busy");
+        if (["queued", "sending_message", "uploading"].includes(saved.phase || "") && jobId) {
+          setActionButtonsDisabled(lineKey, true);
+          pollJob(jobId, lineKey, localKey);
+        } else if (["failed", "lost"].includes(saved.phase || "")) {
+          setActionButtonsDisabled(lineKey, false);
+        }
+      }
     }
 
     async function sendAllStart() {
@@ -1196,6 +1661,7 @@
 
     $("refreshBtn").addEventListener("click", refreshWorkbench);
     $("refreshOngoingBtn").addEventListener("click", refreshWorkbench);
+    $("syncSourceBtn").addEventListener("click", syncSource);
     $("switchScopeBtn").addEventListener("click", () => {
       state.scope = "";
       const url = new URL(window.location.href);
@@ -1204,9 +1670,12 @@
       $("app").classList.add("hidden");
       $("gate").classList.remove("hidden");
       renderGate();
+      loadScopeOverview();
     });
     $("clearSelectionBtn").addEventListener("click", () => {
       state.selected.clear();
+      state.drafts.clear();
+      saveDraftState();
       render();
     });
     $("sendAllStartBtn").addEventListener("click", sendAllStart);
@@ -1221,10 +1690,11 @@
     $("searchInput").addEventListener("input", (e) => {
       state.filters.search = e.target.value || "";
       renderRecords();
-      $("recordCount").textContent = `未开始 ${visibleRecords().length}`;
+      renderWorkTypeTabs();
     });
 
     renderGate();
+    loadScopeOverview();
     window.addEventListener("popstate", () => {
       const scope = urlScope();
       state.scope = scope;
@@ -1232,16 +1702,17 @@
         $("gate").classList.add("hidden");
         $("app").classList.remove("hidden");
         loadBootstrap().catch((err) => {
-          $("loadInfo").textContent = err.message || "加载失败";
+          setSyncStatus(err.message || "加载失败", []);
         });
       } else {
         $("app").classList.add("hidden");
         $("gate").classList.remove("hidden");
         renderGate();
+        loadScopeOverview();
       }
     });
     if (state.scope) selectScope(state.scope, { replace: true }).catch((err) => {
-      $("loadInfo").textContent = err.message || "加载失败";
+      setSyncStatus(err.message || "加载失败", []);
     });
   </script>
 </body>

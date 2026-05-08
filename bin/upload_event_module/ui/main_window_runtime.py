@@ -293,28 +293,43 @@ class MainWindowRuntimeMixin:
         text = str(value or "").strip().upper()
         if text in {"ALL", "全部"}:
             return "ALL"
+        if text in {"CAMPUS", "园区", "PARK"}:
+            return "CAMPUS"
         if "110" in text:
             return "110"
         match = re.search(r"[ABCDEH]", text)
         return match.group(0) if match else ""
 
     @classmethod
+    def _lan_building_codes(cls, value) -> list[str]:
+        values = value if isinstance(value, (list, tuple, set)) else [value]
+        codes: list[str] = []
+        for raw in values:
+            text = str(raw or "").strip().upper()
+            if not text:
+                continue
+            if "110" in text and "110" not in codes:
+                codes.append("110")
+            for code in re.findall(r"[ABCDEH]", text):
+                if code not in codes:
+                    codes.append(code)
+        return [code for code in ("110", "A", "B", "C", "D", "E", "H") if code in codes]
+
+    @classmethod
     def _lan_scope_matches(cls, scope, building) -> bool:
         scope_code = cls._lan_scope_code(scope)
         if not scope_code or scope_code == "ALL":
             return True
-        if str(scope or "").strip().upper() in {"ALL", "全部"}:
-            return True
-        values = building if isinstance(building, (list, tuple, set)) else [building]
-        for value in values:
-            if cls._lan_scope_code(value) == scope_code:
-                return True
-        return False
+        codes = cls._lan_building_codes(building)
+        if scope_code == "CAMPUS":
+            return len(codes) >= 2
+        return len(codes) == 1 and codes[0] == scope_code
 
     def _lan_notice_sections(self, text: str) -> dict:
         return {
             "title": self._extract_section_text(text, ("名称", "标题")),
             "time": self._extract_section_text(text, ("时间",)),
+            "level": self._extract_section_text(text, ("等级",)),
             "location": self._extract_section_text(text, ("位置", "地点")),
             "content": self._extract_section_text(text, ("内容",)),
             "reason": self._extract_section_text(text, ("原因",)),
@@ -364,7 +379,8 @@ class MainWindowRuntimeMixin:
                 continue
             if not isinstance(data, dict):
                 continue
-            if str(data.get("notice_type") or "").strip() != "维保通告":
+            notice_type = str(data.get("notice_type") or "").strip()
+            if notice_type not in {"维保通告", "设备变更", "变更通告"}:
                 continue
             text = str(data.get("text") or "").strip()
             info = extract_event_info(text) or {}
@@ -406,10 +422,16 @@ class MainWindowRuntimeMixin:
                     "record_id": "" if self._is_placeholder_record(data) else record_id,
                     "raw_record_id": record_id,
                     "source_record_id": str(data.get("lan_source_record_id") or ""),
+                    "source_app_token": str(data.get("lan_source_app_token") or ""),
+                    "source_table_id": str(data.get("lan_source_table_id") or ""),
+                    "work_type": "change" if notice_type in {"设备变更", "变更通告"} else "maintenance",
+                    "notice_type": notice_type,
                     "title": sections["title"] or info.get("title") or "",
                     "status": info.get("status") or "",
                     "building": building,
+                    "building_codes": self._lan_building_codes(buildings or building),
                     "specialty": str(data.get("specialty") or ""),
+                    "level": str(data.get("level") or sections.get("level") or info.get("level") or ""),
                     "time": sections["time"] or info.get("time_str") or "",
                     "start_time": "",
                     "end_time": "",
@@ -556,10 +578,11 @@ class MainWindowRuntimeMixin:
         )
 
     def _find_lan_maintenance_duplicate_start(
-        self, source_record_id: str = "", title: str = ""
+        self, source_record_id: str = "", title: str = "", notice_type: str = "维保通告"
     ) -> dict | None:
         source_record_id = str(source_record_id or "").strip()
         normalized_title = re.sub(r"\s+", "", str(title or ""))
+        notice_type = str(notice_type or "维保通告").strip()
         for _, item in self._iter_active_items():
             try:
                 data = item.data(Qt.ItemDataRole.UserRole) or {}
@@ -567,7 +590,7 @@ class MainWindowRuntimeMixin:
                 continue
             if not isinstance(data, dict):
                 continue
-            if str(data.get("notice_type") or "").strip() != "维保通告":
+            if str(data.get("notice_type") or "").strip() != notice_type:
                 continue
             text = str(data.get("text") or "")
             info = extract_event_info(text) or {}
@@ -592,42 +615,62 @@ class MainWindowRuntimeMixin:
         if not text:
             raise RuntimeError("通告文本为空。")
         info = extract_event_info(text) or {}
-        if info.get("notice_type") != "维保通告":
-            raise RuntimeError("只能处理维保通告。")
+        notice_type = str(info.get("notice_type") or "").strip()
+        if notice_type not in {"维保通告", "设备变更", "变更通告"}:
+            raise RuntimeError("只能处理维保或变更通告。")
+        work_type = "change" if notice_type in {"设备变更", "变更通告"} else "maintenance"
         response_time = str(payload.get("response_time") or "").strip()
         building = str(payload.get("building") or "").strip()
         specialty = str(payload.get("specialty") or "").strip()
-        buildings = self._normalize_buildings_value([building])
+        payload_building_codes = [
+            str(code or "").strip().upper()
+            for code in (payload.get("building_codes") or [])
+            if str(code or "").strip()
+        ]
+        if payload_building_codes:
+            buildings = [
+                "110站" if code == "110" else f"{code}楼"
+                for code in payload_building_codes
+            ]
+        else:
+            buildings = self._normalize_buildings_value([building])
         if not buildings:
             buildings = [building] if building else []
+        level = str(payload.get("level") or info.get("level") or "").strip()
 
         if action == "start":
             duplicate = self._find_lan_maintenance_duplicate_start(
-                str(payload.get("record_id") or ""), str(payload.get("title") or "")
+                str(payload.get("record_id") or ""),
+                str(payload.get("title") or ""),
+                notice_type,
             )
             if duplicate:
                 duplicate_id = str(duplicate.get("record_id") or "").strip()
                 if self._is_placeholder_record(duplicate):
-                    raise RuntimeError("该维护项已在主界面发起，开始上传未完成。")
-                raise RuntimeError(f"该维护项已存在进行中通告: {duplicate_id}")
+                    raise RuntimeError("该通告已在主界面发起，开始上传未完成。")
+                raise RuntimeError(f"该通告已存在进行中记录: {duplicate_id}")
             placeholder_id = uuid.uuid4().hex
             data = {
                 "record_id": placeholder_id,
                 "_is_placeholder_record": True,
                 "text": info.get("content") or text,
-                "notice_type": "维保通告",
+                "notice_type": notice_type,
                 "time_str": info.get("time_str") or "",
                 "buildings": buildings,
                 "specialty": specialty,
+                "level": level,
                 "_has_unuploaded_changes": False,
                 "_pending_upload_hash": None,
                 "_upload_in_progress": False,
                 "lan_source_record_id": str(payload.get("record_id") or ""),
+                "lan_source_app_token": str(payload.get("source_app_token") or ""),
+                "lan_source_table_id": str(payload.get("source_table_id") or ""),
+                "lan_work_type": work_type,
             }
             self._ensure_payload_for_data(data)
             item, _ = self.add_active_item(data)
             if not item:
-                raise RuntimeError("主界面创建维保条目失败。")
+                raise RuntimeError("主界面创建通告条目失败。")
             committed = item.data(Qt.ItemDataRole.UserRole) or data
             active_item_id = str(committed.get("active_item_id") or "")
             self._register_lan_portal_upload_job(job_id, placeholder_id, active_item_id)
@@ -638,6 +681,7 @@ class MainWindowRuntimeMixin:
                 response_time=response_time,
                 buildings=buildings,
                 specialty=specialty,
+                change_level=level if work_type == "change" else "",
                 robot_group_choice="auto",
             )
             return
@@ -645,8 +689,10 @@ class MainWindowRuntimeMixin:
         active_item_id = str(payload.get("active_item_id") or "").strip()
         list_widget, item = self._find_active_item_by_active_item_id(active_item_id)
         if not item or not self._is_valid_list_item(item):
-            raise RuntimeError("未找到主界面进行中的维保条目。")
+            raise RuntimeError("未找到主界面进行中的通告条目。")
         data = dict(item.data(Qt.ItemDataRole.UserRole) or {})
+        if str(data.get("notice_type") or "").strip() != notice_type:
+            raise RuntimeError("请求通告类型与主界面当前条目不一致。")
         if self._is_placeholder_record(data):
             raise RuntimeError("开始上传未完成，暂不能更新/结束。")
         if self._is_record_binding_conflicted(data):
@@ -661,7 +707,7 @@ class MainWindowRuntimeMixin:
         current_info = extract_event_info(str(data.get("text") or "")) or {}
         current_status = str(current_info.get("status") or "").strip()
         if current_status == "结束":
-            raise RuntimeError("该维保通告已结束，不能继续更新。")
+            raise RuntimeError("该通告已结束，不能继续更新。")
         requested_title = re.sub(r"\s+", "", str(payload.get("title") or ""))
         current_title = re.sub(
             r"\s+",
@@ -679,14 +725,25 @@ class MainWindowRuntimeMixin:
             current_buildings = self._infer_buildings_from_notice_text(
                 str(data.get("text") or "")
             )
-        if current_buildings and not self._lan_scope_matches(building, current_buildings):
+        requested_codes = self._lan_building_codes(buildings)
+        current_codes = self._lan_building_codes(current_buildings)
+        if requested_codes and current_codes and requested_codes != current_codes:
             raise RuntimeError("请求楼栋与主界面当前条目不一致。")
         data["text"] = info.get("content") or text
-        data["notice_type"] = "维保通告"
+        data["notice_type"] = notice_type
         data["time_str"] = info.get("time_str") or data.get("time_str") or ""
         data["buildings"] = buildings
         if specialty:
             data["specialty"] = specialty
+        if level:
+            data["level"] = level
+        data["lan_work_type"] = work_type
+        if payload.get("source_record_id") and not data.get("lan_source_record_id"):
+            data["lan_source_record_id"] = str(payload.get("source_record_id") or "")
+        if payload.get("source_app_token") and not data.get("lan_source_app_token"):
+            data["lan_source_app_token"] = str(payload.get("source_app_token") or "")
+        if payload.get("source_table_id") and not data.get("lan_source_table_id"):
+            data["lan_source_table_id"] = str(payload.get("source_table_id") or "")
         data["_has_unuploaded_changes"] = False
         data["_pending_upload_hash"] = None
         data["_upload_in_progress"] = False
@@ -706,6 +763,7 @@ class MainWindowRuntimeMixin:
             response_time=response_time,
             buildings=buildings,
             specialty=specialty,
+            change_level=level if work_type == "change" else "",
             robot_group_choice="auto",
         )
 

@@ -90,6 +90,31 @@ class PortalHandler(BaseHTTPRequestHandler):
                 )
             except PortalError as exc:
                 return self._send_json(500, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/scope-overview":
+            try:
+                ongoing = self._get_ongoing("ALL")
+                return self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "data": self.service.get_scope_overview(
+                            ongoing_items=ongoing
+                        ),
+                    },
+                )
+            except PortalError as exc:
+                return self._send_json(500, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/history-summary":
+            qs = parse_qs(parsed.query)
+            try:
+                payload = self.service.get_history_summary(
+                    scope=(qs.get("scope") or ["ALL"])[0],
+                    month=(qs.get("month") or [""])[0],
+                    work_type=(qs.get("work_type") or ["all"])[0],
+                )
+                return self._send_json(200, {"ok": True, "data": payload})
+            except PortalError as exc:
+                return self._send_json(400, {"ok": False, "error": str(exc)})
         if parsed.path == "/api/records":
             qs = parse_qs(parsed.query)
             try:
@@ -142,7 +167,7 @@ class PortalHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
-        if parsed.path == "/api/maintenance-actions":
+        if parsed.path in {"/api/maintenance-actions", "/api/workbench-actions"}:
             if PortalHandler.maintenance_action_callback is None:
                 return self._send_json(
                     503,
@@ -288,12 +313,21 @@ class PortalHandler(BaseHTTPRequestHandler):
     def _process_maintenance_action_job(cls, job_id: str) -> None:
         try:
             prepared = cls.service.prepare_action_job(job_id)
-            cls.service.mark_job(
-                job_id,
-                phase="sending_message",
-                queue_position=0,
-            )
-            if not prepared.get("message_sent"):
+            if prepared.get("skip_personal_message"):
+                cls.service.mark_job(
+                    job_id,
+                    phase="uploading",
+                    queue_position=0,
+                    message_sent=True,
+                    message_signature=str(prepared.get("message_signature") or ""),
+                )
+            else:
+                cls.service.mark_job(
+                    job_id,
+                    phase="sending_message",
+                    queue_position=0,
+                )
+            if not prepared.get("skip_personal_message") and not prepared.get("message_sent"):
                 ok, message = cls.service.send_action_personal_message(prepared)
                 if not ok:
                     cls.service.mark_job(
@@ -303,12 +337,19 @@ class PortalHandler(BaseHTTPRequestHandler):
                         message_sent=False,
                     )
                     return
-            cls.service.mark_job(
-                job_id,
-                phase="uploading",
-                message_sent=True,
-                message_signature=str(prepared.get("message_signature") or ""),
-            )
+                cls.service.mark_job(
+                    job_id,
+                    phase="uploading",
+                    message_sent=True,
+                    message_signature=str(prepared.get("message_signature") or ""),
+                )
+            elif not prepared.get("skip_personal_message"):
+                cls.service.mark_job(
+                    job_id,
+                    phase="uploading",
+                    message_sent=True,
+                    message_signature=str(prepared.get("message_signature") or ""),
+                )
             callback = cls.maintenance_action_callback
             if callback is None:
                 cls.service.mark_job(
