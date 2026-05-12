@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import mimetypes
 import socket
 import threading
@@ -23,6 +24,7 @@ from .portal_service import (
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 18766
+CLIENT_DISCONNECT_WINERRORS = {10053, 10054, 10058}
 
 
 def find_available_port(host: str, preferred_port: int) -> int:
@@ -43,6 +45,7 @@ class PortalHandler(BaseHTTPRequestHandler):
     notice_callback = None
     ongoing_callback = None
     maintenance_action_callback = None
+    last_ongoing_error = ""
     action_queue: list[str] = []
     action_queue_lock = threading.RLock()
     action_queue_event = threading.Event()
@@ -50,21 +53,47 @@ class PortalHandler(BaseHTTPRequestHandler):
     action_worker_stop = False
     action_upload_timeout_s = 30 * 60
 
+    @staticmethod
+    def _is_client_disconnect(exc: BaseException) -> bool:
+        if isinstance(exc, (BrokenPipeError, ConnectionAbortedError, ConnectionResetError)):
+            return True
+        return isinstance(exc, OSError) and getattr(exc, "winerror", None) in CLIENT_DISCONNECT_WINERRORS
+
+    def _write_response(self, status: int, headers: dict[str, str], body: bytes) -> None:
+        try:
+            self.send_response(status)
+            for name, value in headers.items():
+                self.send_header(name, value)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except OSError as exc:
+            if not self._is_client_disconnect(exc):
+                raise
+
     def _send_json(self, status: int, payload: dict) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        self._write_response(
+            status,
+            {"Content-Type": "application/json; charset=utf-8"},
+            body,
+        )
+
+    @classmethod
+    def _with_runtime_warnings(cls, payload: dict) -> dict:
+        if cls.last_ongoing_error and isinstance(payload, dict):
+            warnings = payload.setdefault("warnings", [])
+            if isinstance(warnings, list) and cls.last_ongoing_error not in warnings:
+                warnings.append(cls.last_ongoing_error)
+        return payload
 
     def _send_html(self, path: Path) -> None:
         body = path.read_bytes()
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        self._write_response(
+            HTTPStatus.OK,
+            {"Content-Type": "text/html; charset=utf-8"},
+            body,
+        )
 
     def _send_static_file(self, path: Path) -> None:
         resolved = path.resolve()
@@ -77,12 +106,14 @@ class PortalHandler(BaseHTTPRequestHandler):
             return self._send_json(404, {"ok": False, "error": "Not Found"})
         body = resolved.read_bytes()
         content_type = mimetypes.guess_type(str(resolved))[0] or "application/octet-stream"
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "public, max-age=86400")
-        self.end_headers()
-        self.wfile.write(body)
+        self._write_response(
+            HTTPStatus.OK,
+            {
+                "Content-Type": content_type,
+                "Cache-Control": "public, max-age=86400",
+            },
+            body,
+        )
 
     def _read_json_body(self) -> dict:
         length = int(self.headers.get("Content-Length", "0") or "0")
@@ -101,13 +132,12 @@ class PortalHandler(BaseHTTPRequestHandler):
             scope = (qs.get("scope") or ["ALL"])[0]
             try:
                 ongoing = self._get_ongoing(scope)
+                data = self.service.get_bootstrap(scope=scope, ongoing_items=ongoing)
                 return self._send_json(
                     200,
                     {
                         "ok": True,
-                        "data": self.service.get_bootstrap(
-                            scope=scope, ongoing_items=ongoing
-                        ),
+                        "data": self._with_runtime_warnings(data),
                     },
                 )
             except PortalError as exc:
@@ -115,13 +145,12 @@ class PortalHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/scope-overview":
             try:
                 ongoing = self._get_ongoing("ALL")
+                data = self.service.get_scope_overview(ongoing_items=ongoing)
                 return self._send_json(
                     200,
                     {
                         "ok": True,
-                        "data": self.service.get_scope_overview(
-                            ongoing_items=ongoing
-                        ),
+                        "data": self._with_runtime_warnings(data),
                     },
                 )
             except PortalError as exc:
@@ -134,9 +163,19 @@ class PortalHandler(BaseHTTPRequestHandler):
                     month=(qs.get("month") or [""])[0],
                     work_type=(qs.get("work_type") or ["all"])[0],
                 )
-                return self._send_json(200, {"ok": True, "data": payload})
+                return self._send_json(
+                    200, {"ok": True, "data": self._with_runtime_warnings(payload)}
+                )
             except PortalError as exc:
                 return self._send_json(400, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/handover-links":
+            try:
+                return self._send_json(
+                    200,
+                    {"ok": True, "data": self.service.get_handover_links()},
+                )
+            except PortalError as exc:
+                return self._send_json(500, {"ok": False, "error": str(exc)})
         if parsed.path == "/api/records":
             qs = parse_qs(parsed.query)
             try:
@@ -147,7 +186,9 @@ class PortalHandler(BaseHTTPRequestHandler):
                     scope=scope,
                     ongoing_items=self._get_ongoing(scope),
                 )
-                return self._send_json(200, {"ok": True, "data": payload})
+                return self._send_json(
+                    200, {"ok": True, "data": self._with_runtime_warnings(payload)}
+                )
             except PortalError as exc:
                 return self._send_json(500, {"ok": False, "error": str(exc)})
         if parsed.path == "/api/workbench":
@@ -160,7 +201,9 @@ class PortalHandler(BaseHTTPRequestHandler):
                     scope=scope,
                     ongoing_items=self._get_ongoing(scope),
                 )
-                return self._send_json(200, {"ok": True, "data": payload})
+                return self._send_json(
+                    200, {"ok": True, "data": self._with_runtime_warnings(payload)}
+                )
             except PortalError as exc:
                 return self._send_json(500, {"ok": False, "error": str(exc)})
         if parsed.path == "/api/refresh":
@@ -168,13 +211,14 @@ class PortalHandler(BaseHTTPRequestHandler):
             scope = (qs.get("scope") or ["ALL"])[0]
             try:
                 self.service.refresh()
+                data = self.service.get_bootstrap(
+                    scope=scope, ongoing_items=self._get_ongoing(scope)
+                )
                 return self._send_json(
                     200,
                     {
                         "ok": True,
-                        "data": self.service.get_bootstrap(
-                            scope=scope, ongoing_items=self._get_ongoing(scope)
-                        ),
+                        "data": self._with_runtime_warnings(data),
                     },
                 )
             except PortalError as exc:
@@ -201,6 +245,44 @@ class PortalHandler(BaseHTTPRequestHandler):
                 if should_start:
                     PortalHandler.enqueue_action_job(job_id)
                 return self._send_json(202, {"ok": True, "data": {"job_id": job_id}})
+            except (PortalError, ValueError, json.JSONDecodeError) as exc:
+                return self._send_json(400, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/handover-links":
+            try:
+                payload = self._read_json_body()
+                data = self.service.save_handover_links(
+                    payload.get("links") or {},
+                    password=str(payload.get("password") or ""),
+                )
+                return self._send_json(200, {"ok": True, "data": data})
+            except (PortalError, ValueError, json.JSONDecodeError) as exc:
+                return self._send_json(400, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/handover-links-auth":
+            try:
+                payload = self._read_json_body()
+                ok = self.service.verify_handover_settings_password(
+                    str(payload.get("password") or "")
+                )
+                if not ok:
+                    return self._send_json(403, {"ok": False, "error": "设置密码错误。"})
+                return self._send_json(200, {"ok": True, "data": {"authorized": True}})
+            except (PortalError, ValueError, json.JSONDecodeError) as exc:
+                return self._send_json(400, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/handover-password-reset/request":
+            try:
+                data = self.service.request_handover_password_reset()
+                return self._send_json(200, {"ok": True, "data": data})
+            except (PortalError, ValueError, json.JSONDecodeError) as exc:
+                return self._send_json(400, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/handover-password-reset/confirm":
+            try:
+                payload = self._read_json_body()
+                data = self.service.reset_handover_password_with_code(
+                    reset_id=str(payload.get("reset_id") or ""),
+                    code=str(payload.get("code") or ""),
+                    new_password=str(payload.get("new_password") or ""),
+                )
+                return self._send_json(200, {"ok": True, "data": data})
             except (PortalError, ValueError, json.JSONDecodeError) as exc:
                 return self._send_json(400, {"ok": False, "error": str(exc)})
         if parsed.path == "/api/generate":
@@ -234,10 +316,15 @@ class PortalHandler(BaseHTTPRequestHandler):
     def _get_ongoing(self, scope: str) -> list[dict]:
         callback = PortalHandler.ongoing_callback
         if callback is None:
+            PortalHandler.last_ongoing_error = ""
             return []
         try:
             result = callback(scope)
-        except Exception:
+            PortalHandler.last_ongoing_error = ""
+        except Exception as exc:
+            warning = f"主界面进行中状态读取失败: {exc}"
+            PortalHandler.last_ongoing_error = warning
+            logging.warning(warning)
             return []
         return result if isinstance(result, list) else []
 

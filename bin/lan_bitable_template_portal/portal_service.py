@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import hmac
 import json
 import re
+import secrets
 import threading
+import time
 import uuid
 import copy
 from dataclasses import dataclass
@@ -24,13 +27,18 @@ DEFAULT_APP_TOKEN = "HU38bc1vnamMK9sCeOgclUvXnFc"
 DEFAULT_TABLE_ID = "tblzk7WrXxNWQy6V"
 CHANGE_SOURCE_APP_TOKEN = "JhiVwgfoIimAqEk8YwEc09sknGd"
 CHANGE_SOURCE_TABLE_ID = "tblBvg6wCYSX3hcg"
+REPAIR_SOURCE_APP_TOKEN = "AnEBwJlvGiJfDdkOB32cUPuknzg"
+REPAIR_SOURCE_TABLE_ID = "tblschT48zXwigUG"
+REPAIR_SOURCE_VIEW_ID = "vewn2xWBED"
 DEFAULT_IMPACT_TEXT = "对IT业务无影响，不会触发BA和BMS系统相关告警"
 DEFAULT_PROGRESS_TEXT = "准备工作已完成，人员已就位，可否开始操作？"
 DEFAULT_MAINTENANCE_STATUS = "未开始"
 WORK_TYPE_MAINTENANCE = "maintenance"
 WORK_TYPE_CHANGE = "change"
+WORK_TYPE_REPAIR = "repair"
 NOTICE_TYPE_MAINTENANCE = "维保通告"
 NOTICE_TYPE_CHANGE = "设备变更"
+NOTICE_TYPE_REPAIR = "设备检修"
 CHANGE_PROGRESS_NOT_STARTED = "未开始"
 CHANGE_PROGRESS_ONGOING = "进行中"
 CHANGE_PROGRESS_OPTION_FALLBACK = {
@@ -39,7 +47,37 @@ CHANGE_PROGRESS_OPTION_FALLBACK = {
     "optZtdlcZy": "已结束",
     "optqGq0YcR": "退回",
 }
+REPAIR_BUILDING_OPTION_FALLBACK = {
+    "optjAjpfmQ": "A楼",
+    "optHCxNMDk": "B楼",
+    "opt2iUueLp": "C楼",
+    "optTUZGlCA": "D楼",
+    "opthJp8Wnt": "E楼",
+}
+REPAIR_SPECIALTY_OPTION_FALLBACK = {
+    "optAssNaw3": "电气",
+    "opt3jdJJb7": "暖通",
+    "opt509Mxgr": "弱电",
+    "optyLRPdQS": "消防",
+}
+FIELD_OPTION_FALLBACK = {
+    "所属数据中心/楼栋-使用": REPAIR_BUILDING_OPTION_FALLBACK,
+    "专业（推送消息用）": REPAIR_SPECIALTY_OPTION_FALLBACK,
+}
+REPAIR_DATETIME_FIELDS = {
+    "故障发生时间",
+    "发现故障时间",
+    "维修开始时间",
+    "维修结束时间",
+    "维修结束时间（2026）",
+    "期望完成时间",
+}
+PLACEHOLDER_TEXT_VALUES = {"", "-", "--", "—", "——", "/", "无", "暂无"}
+SOURCE_CACHE_TTL_SECONDS = 5 * 60
 LI_SHILONG_OPEN_ID = "ou_902e364a6c2c6c20893c02abe505a7b2"
+MA_JINYU_OPEN_ID = "ou_a6644e62a43b916c6bc26148cf74f208"
+HANDOVER_PASSWORD_RESET_TTL_SECONDS = 10 * 60
+HANDOVER_PASSWORD_RESET_MAX_ATTEMPTS = 5
 BUILDING_OPEN_ID_MAP = {
     "110": "ou_913ff495ae8f5a0a55ae5670fd148bbd",
     "A": "ou_3e0a9399a037276f8449cc778f18bb8a",
@@ -82,6 +120,8 @@ class FieldMeta:
 class MaintenancePortalService:
     _memory_lock = threading.RLock()
     _summary_lock = threading.RLock()
+    _handover_lock = threading.RLock()
+    _handover_reset_lock = threading.RLock()
 
     def __init__(
         self,
@@ -98,19 +138,30 @@ class MaintenancePortalService:
         self._change_field_meta_list: list[FieldMeta] = []
         self._change_field_meta_by_name: dict[str, FieldMeta] = {}
         self._change_records: list[dict[str, Any]] = []
+        self._repair_field_meta_list: list[FieldMeta] = []
+        self._repair_field_meta_by_name: dict[str, FieldMeta] = {}
+        self._repair_records: list[dict[str, Any]] = []
         self._maintenance_loaded_once = False
         self._change_loaded_once = False
+        self._repair_loaded_once = False
         self._load_warnings: list[str] = []
         self._last_loaded_at = ""
+        self._last_loaded_ts = 0.0
+        self._refresh_lock = threading.RLock()
         self._memory_dir = Path(get_data_file_path("lan_template_memory"))
         self._memory_dir.mkdir(parents=True, exist_ok=True)
         self._summary_dir = Path(get_data_file_path("lan_template_daily_summary"))
         self._summary_dir.mkdir(parents=True, exist_ok=True)
         self._work_status_dir = Path(get_data_file_path("lan_template_work_status"))
         self._work_status_dir.mkdir(parents=True, exist_ok=True)
+        self._handover_links_path = Path(get_data_file_path("lan_handover_links.json"))
+        self._handover_links_path.parent.mkdir(parents=True, exist_ok=True)
         self._work_status_backfilled = False
+        self._work_status_cache_signature: tuple[tuple[str, int, int], ...] | None = None
+        self._work_status_cache_items: list[dict[str, Any]] | None = None
         self._jobs: dict[str, dict[str, Any]] = {}
         self._jobs_lock = threading.RLock()
+        self._handover_password_reset: dict[str, Any] | None = None
 
     def _auth_headers(self) -> dict[str, str]:
         if not config.user_token:
@@ -190,6 +241,18 @@ class MaintenancePortalService:
         self._change_field_meta_by_name = {meta.field_name: meta for meta in metas}
         return metas
 
+    def _load_repair_fields(self) -> list[FieldMeta]:
+        payload = self._request_json(
+            "fields",
+            params={"page_size": 500},
+            app_token=REPAIR_SOURCE_APP_TOKEN,
+            table_id=REPAIR_SOURCE_TABLE_ID,
+        )
+        metas = self._parse_field_meta(payload)
+        self._repair_field_meta_list = metas
+        self._repair_field_meta_by_name = {meta.field_name: meta for meta in metas}
+        return metas
+
     def _parse_field_meta(self, payload: dict[str, Any]) -> list[FieldMeta]:
         items = payload.get("data", {}).get("items") or []
         metas: list[FieldMeta] = []
@@ -241,7 +304,6 @@ class MaintenancePortalService:
                 break
         self._records = records
         self._maintenance_loaded_once = True
-        self._last_loaded_at = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         return records
 
     def _load_change_records(self) -> list[dict[str, Any]]:
@@ -278,36 +340,112 @@ class MaintenancePortalService:
         self._change_loaded_once = True
         return records
 
-    def refresh(self) -> None:
-        warnings: list[str] = []
-        self._load_fields()
-        self._load_records()
-        try:
-            self._load_change_fields()
-            self._load_change_records()
-        except Exception as exc:
-            self._change_loaded_once = True
-            if not self._change_field_meta_list:
-                self._change_field_meta_list = []
-                self._change_field_meta_by_name = {}
-            if not self._change_records:
-                self._change_records = []
-            warnings.append(f"变更源表同步失败: {exc}")
-        self._load_warnings = warnings
+    def _load_repair_records(self) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        page_token = ""
+        while True:
+            params = {"page_size": 500, "view_id": REPAIR_SOURCE_VIEW_ID}
+            if page_token:
+                params["page_token"] = page_token
+            payload = self._request_json(
+                "records",
+                params=params,
+                app_token=REPAIR_SOURCE_APP_TOKEN,
+                table_id=REPAIR_SOURCE_TABLE_ID,
+            )
+            data = payload.get("data", {})
+            for item in data.get("items") or []:
+                records.append(
+                    self._normalize_record(
+                        item,
+                        meta_by_name=self._repair_field_meta_by_name,
+                        work_type=WORK_TYPE_REPAIR,
+                        notice_type=NOTICE_TYPE_REPAIR,
+                        source_app_token=REPAIR_SOURCE_APP_TOKEN,
+                        source_table_id=REPAIR_SOURCE_TABLE_ID,
+                    )
+                )
+            if not data.get("has_more"):
+                break
+            page_token = str(data.get("page_token") or "").strip()
+            if not page_token:
+                break
+        self._repair_records = records
+        self._repair_loaded_once = True
+        return records
 
-    def ensure_loaded(self) -> None:
-        if not self._field_meta_list or not self._maintenance_loaded_once:
-            self.refresh()
-            return
-        if not self._change_loaded_once:
+    def _source_cache_expired(self) -> bool:
+        try:
+            ttl = int(getattr(config, "lan_template_source_cache_ttl_seconds", 0) or 0)
+        except (TypeError, ValueError):
+            ttl = 0
+        if ttl <= 0:
+            ttl = SOURCE_CACHE_TTL_SECONDS
+        if not self._last_loaded_ts:
+            return True
+        return (time.time() - self._last_loaded_ts) >= ttl
+
+    def refresh(self) -> None:
+        with self._refresh_lock:
             warnings: list[str] = []
+            self._load_fields()
+            self._load_records()
             try:
                 self._load_change_fields()
                 self._load_change_records()
             except Exception as exc:
                 self._change_loaded_once = True
+                if not self._change_field_meta_list:
+                    self._change_field_meta_list = []
+                    self._change_field_meta_by_name = {}
+                if not self._change_records:
+                    self._change_records = []
                 warnings.append(f"变更源表同步失败: {exc}")
+            try:
+                self._load_repair_fields()
+                self._load_repair_records()
+            except Exception as exc:
+                self._repair_loaded_once = True
+                if not self._repair_field_meta_list:
+                    self._repair_field_meta_list = []
+                    self._repair_field_meta_by_name = {}
+                if not self._repair_records:
+                    self._repair_records = []
+                warnings.append(f"检修源表同步失败: {exc}")
+            now = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self._last_loaded_at = now
+            self._last_loaded_ts = time.time()
             self._load_warnings = warnings
+
+    def ensure_loaded(self, *, refresh_if_expired: bool = True) -> None:
+        with self._refresh_lock:
+            if (
+                not self._field_meta_list
+                or not self._maintenance_loaded_once
+                or (refresh_if_expired and self._source_cache_expired())
+            ):
+                self.refresh()
+                return
+            warnings: list[str] = []
+            attempted_optional_load = False
+            if not self._change_loaded_once:
+                attempted_optional_load = True
+                try:
+                    self._load_change_fields()
+                    self._load_change_records()
+                except Exception as exc:
+                    self._change_loaded_once = True
+                    warnings.append(f"变更源表同步失败: {exc}")
+            if not self._repair_loaded_once:
+                attempted_optional_load = True
+                try:
+                    self._load_repair_fields()
+                    self._load_repair_records()
+                except Exception as exc:
+                    self._repair_loaded_once = True
+                    warnings.append(f"检修源表同步失败: {exc}")
+            if attempted_optional_load:
+                self._load_warnings = warnings
 
     def _normalize_field_value(
         self,
@@ -320,12 +458,31 @@ class MaintenancePortalService:
         option_map = meta.options_map if meta else {}
         if raw_value is None:
             return ""
-        if isinstance(raw_value, str):
-            text = raw_value.strip()
+
+        fallback_map = FIELD_OPTION_FALLBACK.get(field_name, {})
+
+        def normalize_option_text(value: Any) -> str:
+            text = str(value or "").strip()
+            if not text:
+                return ""
             if field_name == "变更进度" and CHANGE_PROGRESS_OPTION_FALLBACK.get(text):
                 return CHANGE_PROGRESS_OPTION_FALLBACK[text]
+            if fallback_map.get(text):
+                return fallback_map[text]
             return option_map.get(text, text)
+
+        if isinstance(raw_value, str):
+            text = raw_value.strip()
+            if field_name in REPAIR_DATETIME_FIELDS:
+                formatted = self._format_source_datetime(text)
+                if formatted:
+                    return formatted
+            return normalize_option_text(text)
         if isinstance(raw_value, (int, float)):
+            if field_name in REPAIR_DATETIME_FIELDS:
+                formatted = self._format_source_datetime(raw_value)
+                if formatted:
+                    return formatted
             if meta and meta.ui_type in {
                 "DateTime",
                 "CreatedTime",
@@ -346,51 +503,39 @@ class MaintenancePortalService:
             for key in ("name", "text", "value"):
                 value = str(raw_value.get(key) or "").strip()
                 if value:
-                    if field_name == "变更进度" and CHANGE_PROGRESS_OPTION_FALLBACK.get(value):
-                        return CHANGE_PROGRESS_OPTION_FALLBACK[value]
-                    return option_map.get(value, value)
+                    return normalize_option_text(value)
             option_id = str(raw_value.get("id") or "").strip()
             if option_id:
-                if field_name == "变更进度" and CHANGE_PROGRESS_OPTION_FALLBACK.get(option_id):
-                    return CHANGE_PROGRESS_OPTION_FALLBACK[option_id]
-                if option_map.get(option_id):
-                    return option_map[option_id]
+                resolved = normalize_option_text(option_id)
+                if resolved:
+                    return resolved
             return json.dumps(raw_value, ensure_ascii=False)
         if isinstance(raw_value, list):
             normalized_items: list[str] = []
             for item in raw_value:
                 if isinstance(item, dict):
                     if "text" in item:
-                        value = str(item.get("text") or "").strip()
+                        value = normalize_option_text(item.get("text"))
                     elif "name" in item:
-                        value = str(item.get("name") or "").strip()
-                    elif "id" in item and option_map.get(str(item.get("id"))):
-                        value = option_map[str(item.get("id"))]
-                    elif (
-                        field_name == "变更进度"
-                        and "id" in item
-                        and CHANGE_PROGRESS_OPTION_FALLBACK.get(str(item.get("id")))
-                    ):
-                        value = CHANGE_PROGRESS_OPTION_FALLBACK[str(item.get("id"))]
+                        value = normalize_option_text(item.get("name"))
+                    elif "value" in item:
+                        value = normalize_option_text(item.get("value"))
+                    elif "id" in item:
+                        value = normalize_option_text(item.get("id"))
                     else:
                         value = ""
                     if value:
-                        if (
-                            field_name == "变更进度"
-                            and CHANGE_PROGRESS_OPTION_FALLBACK.get(value)
-                        ):
-                            value = CHANGE_PROGRESS_OPTION_FALLBACK[value]
-                        elif option_map.get(value):
-                            value = option_map[value]
                         normalized_items.append(value)
                     continue
+                if isinstance(item, (int, float)) and field_name in REPAIR_DATETIME_FIELDS:
+                    item_text = self._format_source_datetime(item)
+                    if item_text:
+                        normalized_items.append(item_text)
+                    continue
                 item_text = str(item or "").strip()
-                if field_name == "变更进度" and CHANGE_PROGRESS_OPTION_FALLBACK.get(item_text):
-                    normalized_items.append(CHANGE_PROGRESS_OPTION_FALLBACK[item_text])
-                elif option_map.get(item_text):
-                    normalized_items.append(option_map[item_text])
-                elif item_text:
-                    normalized_items.append(item_text)
+                value = normalize_option_text(item_text)
+                if value:
+                    normalized_items.append(value)
             return "、".join(normalized_items)
         return str(raw_value)
 
@@ -431,6 +576,41 @@ class MaintenancePortalService:
         return text.replace("T", " ")
 
     @staticmethod
+    def _format_source_datetime(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return ""
+            if re.fullmatch(r"\d+(\.\d+)?", text):
+                try:
+                    value = float(text)
+                except Exception:
+                    return text.replace("T", " ")
+            else:
+                return text.replace("T", " ")
+        if isinstance(value, (int, float)):
+            numeric = float(value)
+            try:
+                if numeric > 10_000_000_000:
+                    return dt.datetime.fromtimestamp(numeric / 1000).strftime(
+                        "%Y-%m-%d %H:%M"
+                    )
+                if numeric > 1_000_000_000:
+                    return dt.datetime.fromtimestamp(numeric).strftime(
+                        "%Y-%m-%d %H:%M"
+                    )
+                if 20_000 <= numeric <= 80_000:
+                    base = dt.datetime(1899, 12, 30)
+                    return (base + dt.timedelta(days=numeric)).strftime(
+                        "%Y-%m-%d %H:%M"
+                    )
+            except Exception:
+                return str(value)
+        return str(value or "").strip()
+
+    @staticmethod
     def _building_code_from_value(value: Any) -> str:
         text = str(value or "").strip().upper()
         if "110" in text:
@@ -443,7 +623,9 @@ class MaintenancePortalService:
         values = value if isinstance(value, (list, tuple, set)) else [value]
         codes: list[str] = []
         for raw in values:
-            text = str(raw or "").strip().upper()
+            raw_text = str(raw or "").strip()
+            mapped = REPAIR_BUILDING_OPTION_FALLBACK.get(raw_text)
+            text = str(mapped or raw_text).upper()
             if not text:
                 continue
             if "110" in text and "110" not in codes:
@@ -502,6 +684,13 @@ class MaintenancePortalService:
         return f"{normalized}楼"
 
     @classmethod
+    def _handover_scope_options(cls) -> list[dict[str, str]]:
+        return [
+            {"value": code, "label": cls._scope_label(code)}
+            for code in BUILDING_SCOPE_CODES
+        ]
+
+    @classmethod
     def _scope_matches_building(cls, scope: Any, building: Any) -> bool:
         return cls._scope_matches_buildings(scope, cls._building_codes_from_value(building))
 
@@ -555,6 +744,13 @@ class MaintenancePortalService:
                 in {CHANGE_PROGRESS_NOT_STARTED, CHANGE_PROGRESS_ONGOING}
             }
         )
+        values.update(
+            {
+                self._repair_specialty(record)
+                for record in self._repair_records
+                if self._is_valid_repair_record(record)
+            }
+        )
         return sorted([value for value in values if value])
 
     def _filter_records(
@@ -590,6 +786,150 @@ class MaintenancePortalService:
         raw_building = fields.get("变更楼栋") or fields.get("楼栋") or ""
         return self._building_codes_from_value(raw_building)
 
+    @classmethod
+    def _repair_building_codes_from_value(cls, value: Any) -> list[str]:
+        values = value if isinstance(value, (list, tuple, set)) else [value]
+        codes: list[str] = []
+        for raw in values:
+            text = str(raw or "").strip().upper()
+            if not text:
+                continue
+            if re.search(r"110\s*(?:站|楼|机房|数据中心)?", text) and "110" not in codes:
+                codes.append("110")
+            for code in ("A", "B", "C", "D", "E", "H"):
+                patterns = (
+                    rf"(?<![A-Z0-9]){code}\s*(?:楼|栋|座|区|机房|数据中心|DC)",
+                    rf"(?:楼栋|楼宇|数据中心)\s*{code}(?![A-Z0-9])",
+                    rf"^(?:南通)?{code}$",
+                )
+                if any(re.search(pattern, text) for pattern in patterns) and code not in codes:
+                    codes.append(code)
+        return [code for code in BUILDING_SCOPE_CODES if code in codes]
+
+    @staticmethod
+    def _clean_source_text(value: Any) -> str:
+        text = str(value or "").strip()
+        return "" if text in PLACEHOLDER_TEXT_VALUES else text
+
+    def _repair_title(self, record: dict[str, Any]) -> str:
+        fields = record.get("display_fields") or {}
+        return (
+            self._clean_source_text(fields.get("事件描述"))
+            or self._clean_source_text(fields.get("维修名称"))
+            or self._clean_source_text(record.get("record_id"))
+        )
+
+    @staticmethod
+    def _repair_level_from_event_level(value: Any) -> str:
+        text = str(value or "").strip().upper()
+        if re.search(r"(^|[^A-Z0-9])I3([^A-Z0-9]|$)", text) or text == "低":
+            return "低"
+        if re.search(r"(^|[^A-Z0-9])I2([^A-Z0-9]|$)", text) or text == "中":
+            return "中"
+        return ""
+
+    def _repair_level(self, fields: dict[str, Any]) -> str:
+        return self._repair_level_from_event_level(fields.get("对应事件等级"))
+
+    def _repair_specialty(self, record: dict[str, Any]) -> str:
+        fields = record.get("display_fields") or {}
+        specialty = self._clean_source_text(
+            fields.get("所属专业") or fields.get("专业（推送消息用）") or ""
+        )
+        return REPAIR_SPECIALTY_OPTION_FALLBACK.get(specialty, specialty)
+
+    def _repair_record_building_codes(self, record: dict[str, Any]) -> list[str]:
+        fields = record.get("display_fields") or {}
+        for field_name in (
+            "所属数据中心/楼栋-使用",
+            "所属数据中心/楼栋（关联CMDB唯一ID关联,DE不选）",
+        ):
+            codes = self._repair_building_codes_from_value(fields.get(field_name))
+            if codes:
+                return codes
+        return (
+            self._repair_building_codes_from_value(self._repair_title(record))
+            or self._repair_building_codes_from_value(fields.get("维修名称"))
+        )
+
+    def _is_valid_repair_record(self, record: dict[str, Any]) -> bool:
+        fields = record.get("display_fields") or {}
+        repair_name = self._clean_source_text(fields.get("维修名称"))
+        if not repair_name or repair_name in PLACEHOLDER_TEXT_VALUES:
+            return False
+        return bool(self._repair_record_building_codes(record))
+
+    def _repair_time_range(self, record: dict[str, Any]) -> tuple[str, str, str]:
+        fields = record.get("display_fields") or {}
+        start_time = self._clean_source_text(
+            fields.get("维修开始时间")
+            or fields.get("故障发生时间")
+            or fields.get("发现故障时间")
+        )
+        end_time = self._clean_source_text(
+            fields.get("维修结束时间")
+            or fields.get("维修结束时间（2026）")
+            or fields.get("期望完成时间")
+        )
+        time_text = f"{start_time}~{end_time}" if start_time or end_time else ""
+        return start_time, end_time, time_text
+
+    def _repair_first_field(self, fields: dict[str, Any], *field_names: str) -> str:
+        for field_name in field_names:
+            value = self._clean_source_text(fields.get(field_name))
+            if value:
+                return value
+        return ""
+
+    def _repair_device_text(self, fields: dict[str, Any]) -> str:
+        device_no = self._clean_source_text(fields.get("设备编号"))
+        device_name = self._clean_source_text(fields.get("设备名称"))
+        if device_no and device_name:
+            return f"{device_no}{device_name}"
+        if device_no or device_name:
+            return device_no or device_name
+        return self._repair_first_field(fields, "维修设备", "资产名称", "设备")
+
+    def _repair_location_text(self, fields: dict[str, Any]) -> str:
+        return self._repair_first_field(
+            fields,
+            "地点",
+            "位置",
+            "区域",
+            "数据中心",
+            "所属数据中心/楼栋（关联CMDB唯一ID关联,DE不选）",
+            "所属数据中心/楼栋-使用",
+        )
+
+    def _repair_target_record_id(self, record: dict[str, Any]) -> str:
+        raw_value = (record.get("raw_fields") or {}).get("设备检修关联")
+        values = raw_value if isinstance(raw_value, list) else [raw_value]
+        for item in values:
+            if not isinstance(item, dict):
+                continue
+            record_ids = item.get("record_ids")
+            if isinstance(record_ids, list):
+                for record_id in record_ids:
+                    text = str(record_id or "").strip()
+                    if text:
+                        return text
+            text = str(item.get("record_id") or item.get("id") or "").strip()
+            if text:
+                return text
+        return ""
+
+    def _repair_has_started(self, record: dict[str, Any]) -> bool:
+        fields = record.get("display_fields") or {}
+        return bool(self._clean_source_text(fields.get("维修开始时间")))
+
+    def _repair_has_ended(self, record: dict[str, Any]) -> bool:
+        fields = record.get("display_fields") or {}
+        return bool(
+            self._clean_source_text(
+                fields.get("维修结束时间") or fields.get("维修结束时间（2026）")
+            )
+        )
+
     def _filter_change_records(
         self,
         *,
@@ -613,6 +953,32 @@ class MaintenancePortalService:
                 continue
             codes = self._change_record_building_codes(record)
             if not self._scope_matches_buildings(scope, codes):
+                continue
+            filtered.append(record)
+        return filtered
+
+    def _filter_repair_records(
+        self,
+        *,
+        specialty: str = "",
+        scope: str = "ALL",
+        include_started: bool = False,
+    ) -> list[dict[str, Any]]:
+        specialty = str(specialty or "").strip()
+        scope = self._normalize_scope(scope)
+        filtered: list[dict[str, Any]] = []
+        for record in self._repair_records:
+            if not self._is_valid_repair_record(record):
+                continue
+            if self._repair_has_started(record) != bool(include_started):
+                continue
+            if include_started and self._repair_has_ended(record):
+                continue
+            if specialty and specialty != self._repair_specialty(record):
+                continue
+            if not self._scope_matches_buildings(
+                scope, self._repair_record_building_codes(record)
+            ):
                 continue
             filtered.append(record)
         return filtered
@@ -721,6 +1087,14 @@ class MaintenancePortalService:
                 building=str(fields.get("变更楼栋") or ""),
                 plan_month="",
             )
+        if record.get("work_type") == WORK_TYPE_REPAIR:
+            return self._work_status_fallback_key(
+                title=self._repair_title(record),
+                building=self._building_label_from_codes(
+                    self._repair_record_building_codes(record)
+                ),
+                plan_month="",
+            )
         return self._work_status_fallback_key(
             title=title,
             building=building,
@@ -780,6 +1154,8 @@ class MaintenancePortalService:
         with tmp_path.open("w", encoding="utf-8") as fp:
             json.dump(payload, fp, ensure_ascii=False, indent=2)
         tmp_path.replace(path)
+        self._work_status_cache_signature = None
+        self._work_status_cache_items = None
 
     def _find_summary_item(
         self,
@@ -943,6 +1319,7 @@ class MaintenancePortalService:
             "source_app_token",
             "source_table_id",
             "source_record_id",
+            "target_record_id",
             "active_item_id",
             "feishu_record_id",
             "title",
@@ -963,6 +1340,15 @@ class MaintenancePortalService:
             "reason",
             "impact",
             "progress",
+            "repair_device",
+            "repair_fault",
+            "fault_type",
+            "repair_mode",
+            "discovery",
+            "symptom",
+            "solution",
+            "fault_time",
+            "expected_time",
             "text",
         ):
             value = incoming.get(field)
@@ -1069,6 +1455,7 @@ class MaintenancePortalService:
                     "source_app_token": str(prepared.get("source_app_token") or ""),
                     "source_table_id": str(prepared.get("source_table_id") or ""),
                     "source_record_id": source_record_id,
+                    "target_record_id": str(prepared.get("target_record_id") or ""),
                     "active_item_id": active_item_id,
                     "feishu_record_id": feishu_record_id,
                     "title": title,
@@ -1088,6 +1475,7 @@ class MaintenancePortalService:
                 "source_table_id",
                 "building_code",
                 "building_codes",
+                "target_record_id",
                 "level",
                 "source_progress",
             ):
@@ -1119,6 +1507,15 @@ class MaintenancePortalService:
                 "maintenance_project",
                 "level",
                 "source_progress",
+                "repair_device",
+                "repair_fault",
+                "fault_type",
+                "repair_mode",
+                "discovery",
+                "symptom",
+                "solution",
+                "fault_time",
+                "expected_time",
             ):
                 value = prepared.get(field)
                 if value not in (None, ""):
@@ -1183,7 +1580,11 @@ class MaintenancePortalService:
 
     @staticmethod
     def _work_type_counts(items: list[dict[str, Any]]) -> dict[str, int]:
-        counts = {WORK_TYPE_MAINTENANCE: 0, WORK_TYPE_CHANGE: 0}
+        counts = {
+            WORK_TYPE_MAINTENANCE: 0,
+            WORK_TYPE_CHANGE: 0,
+            WORK_TYPE_REPAIR: 0,
+        }
         for item in items or []:
             work_type = str(item.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
             if work_type not in counts:
@@ -1235,8 +1636,10 @@ class MaintenancePortalService:
                 "scope_label": self._scope_label(scope),
                 "maintenance_pending": pending_counts[WORK_TYPE_MAINTENANCE],
                 "change_pending": pending_counts[WORK_TYPE_CHANGE],
+                "repair_pending": pending_counts[WORK_TYPE_REPAIR],
                 "maintenance_ongoing": ongoing_counts[WORK_TYPE_MAINTENANCE],
                 "change_ongoing": ongoing_counts[WORK_TYPE_CHANGE],
+                "repair_ongoing": ongoing_counts[WORK_TYPE_REPAIR],
                 "closed_today": int(stats.get("ended") or 0),
             }
         return {
@@ -1245,6 +1648,173 @@ class MaintenancePortalService:
             "last_loaded_at": self._last_loaded_at,
             "warnings": list(self._load_warnings),
         }
+
+    def get_handover_links(self) -> dict[str, Any]:
+        options = self._handover_scope_options()
+        with self._handover_lock:
+            payload = self._load_handover_payload_locked()
+        links = payload.get("links") if isinstance(payload, dict) else {}
+        if not isinstance(links, dict):
+            links = {}
+        normalized_links = {
+            option["value"]: str(links.get(option["value"]) or "").strip()
+            for option in options
+        }
+        return {
+            "scope_options": options,
+            "links": normalized_links,
+            "updated_at": str(payload.get("updated_at") or "") if isinstance(payload, dict) else "",
+        }
+
+    def _load_handover_payload_locked(self) -> dict[str, Any]:
+        try:
+            with self._handover_links_path.open("r", encoding="utf-8") as fp:
+                payload = json.load(fp)
+        except FileNotFoundError:
+            return {}
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _save_handover_payload_locked(self, payload: dict[str, Any]) -> None:
+        with self._handover_links_path.open("w", encoding="utf-8") as fp:
+            json.dump(payload, fp, ensure_ascii=False, indent=2)
+
+    @staticmethod
+    def _hash_handover_password(password: str, salt: str) -> str:
+        raw = f"{salt}:{password}".encode("utf-8")
+        return hashlib.sha256(raw).hexdigest()
+
+    @staticmethod
+    def _new_handover_password_salt() -> str:
+        return secrets.token_hex(16)
+
+    def _set_handover_password_locked(self, payload: dict[str, Any], password: str) -> None:
+        salt = self._new_handover_password_salt()
+        payload["password_salt"] = salt
+        payload["password_hash"] = self._hash_handover_password(password, salt)
+        payload["password_updated_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def verify_handover_settings_password(self, password: str) -> bool:
+        password = str(password or "")
+        with self._handover_lock:
+            payload = self._load_handover_payload_locked()
+        salt = str(payload.get("password_salt") or "")
+        password_hash = str(payload.get("password_hash") or "")
+        if salt and password_hash:
+            digest = self._hash_handover_password(password, salt)
+            return hmac.compare_digest(digest, password_hash)
+        expected = str(getattr(config, "lan_handover_settings_password", "") or "").strip()
+        if not expected:
+            return False
+        return hmac.compare_digest(password, expected)
+
+    def save_handover_links(self, links: dict[str, Any], *, password: str = "") -> dict[str, Any]:
+        if not self.verify_handover_settings_password(password):
+            raise PortalError("设置密码错误。")
+        if not isinstance(links, dict):
+            raise PortalError("交接班链接配置格式错误。")
+        options = self._handover_scope_options()
+        allowed = {option["value"] for option in options}
+        normalized_links: dict[str, str] = {}
+        for code in allowed:
+            url = str(links.get(code) or "").strip()
+            if url and not re.match(r"^https?://", url, flags=re.IGNORECASE):
+                raise PortalError(f"{self._scope_label(code)} 链接必须以 http:// 或 https:// 开头。")
+            normalized_links[code] = url
+        with self._handover_lock:
+            payload = self._load_handover_payload_locked()
+            payload["updated_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            payload["links"] = normalized_links
+            self._save_handover_payload_locked(payload)
+        return self.get_handover_links()
+
+    def _handover_reset_open_ids(self) -> list[str]:
+        configured = getattr(config, "lan_handover_reset_open_ids", None)
+        recipients: list[str]
+        if isinstance(configured, str):
+            recipients = re.split(r"[,，;\s]+", configured)
+        elif isinstance(configured, (list, tuple, set)):
+            recipients = [str(item or "") for item in configured]
+        else:
+            recipients = [LI_SHILONG_OPEN_ID, MA_JINYU_OPEN_ID]
+        recipients = list(dict.fromkeys([str(item or "").strip() for item in recipients]))
+        recipients = [item for item in recipients if item]
+        if len(recipients) < 2:
+            raise PortalError("未配置李世龙和马进宇两个 openid，无法发送改密验证码。")
+        return recipients
+
+    def _clear_expired_handover_reset_locked(self) -> None:
+        reset = self._handover_password_reset or {}
+        expires_at = float(reset.get("expires_at_ts") or 0)
+        if expires_at and time.time() >= expires_at:
+            self._handover_password_reset = None
+
+    def request_handover_password_reset(self) -> dict[str, Any]:
+        recipients = self._handover_reset_open_ids()
+        with self._handover_reset_lock:
+            self._clear_expired_handover_reset_locked()
+            if self._handover_password_reset:
+                raise PortalError("已有密码修改流程进行中，请稍后再试。")
+            code = f"{secrets.randbelow(1000000):06d}"
+            reset_id = secrets.token_urlsafe(18)
+            now = dt.datetime.now()
+            expires_at = now + dt.timedelta(seconds=HANDOVER_PASSWORD_RESET_TTL_SECONDS)
+            self._handover_password_reset = {
+                "reset_id": reset_id,
+                "code": code,
+                "created_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+                "expires_at": expires_at.strftime("%Y-%m-%d %H:%M:%S"),
+                "expires_at_ts": time.time() + HANDOVER_PASSWORD_RESET_TTL_SECONDS,
+                "attempts": 0,
+            }
+        text = (
+            "南通基地-运维灯塔工作台交接班链接设置密码重置验证码：\n"
+            f"{code}\n"
+            f"有效期至：{expires_at.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            "如果不是本人操作，请忽略。"
+        )
+        ok, message, _ = send_text_to_open_ids(text, recipients)
+        if not ok:
+            with self._handover_reset_lock:
+                reset = self._handover_password_reset or {}
+                if reset.get("reset_id") == reset_id:
+                    self._handover_password_reset = None
+            raise PortalError(f"验证码发送失败: {message}")
+        return {
+            "reset_id": reset_id,
+            "expires_at": expires_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "recipients_count": len(recipients),
+        }
+
+    def reset_handover_password_with_code(
+        self, *, reset_id: str, code: str, new_password: str
+    ) -> dict[str, Any]:
+        reset_id = str(reset_id or "").strip()
+        code = str(code or "").strip()
+        new_password = str(new_password or "")
+        if len(new_password) < 6:
+            raise PortalError("新密码长度不能少于 6 位。")
+        with self._handover_reset_lock:
+            self._clear_expired_handover_reset_locked()
+            reset = self._handover_password_reset
+            if not reset:
+                raise PortalError("当前没有有效的密码修改流程，请重新获取验证码。")
+            if str(reset.get("reset_id") or "") != reset_id:
+                raise PortalError("密码修改会话不匹配，请重新获取验证码。")
+            attempts = int(reset.get("attempts") or 0) + 1
+            reset["attempts"] = attempts
+            if attempts > HANDOVER_PASSWORD_RESET_MAX_ATTEMPTS:
+                self._handover_password_reset = None
+                raise PortalError("验证码错误次数过多，请重新获取验证码。")
+            if not hmac.compare_digest(str(reset.get("code") or ""), code):
+                raise PortalError("验证码错误。")
+            with self._handover_lock:
+                payload = self._load_handover_payload_locked()
+                self._set_handover_password_locked(payload, new_password)
+                self._save_handover_payload_locked(payload)
+            self._handover_password_reset = None
+        return {"password_updated": True}
 
     @staticmethod
     def _summary_item_work_type(item: dict[str, Any]) -> str:
@@ -1272,8 +1842,13 @@ class MaintenancePortalService:
         if not re.fullmatch(r"\d{4}-\d{2}", month):
             raise PortalError("历史月份格式必须是 YYYY-MM。")
         work_type = str(work_type or "all").strip()
-        if work_type not in {"all", WORK_TYPE_MAINTENANCE, WORK_TYPE_CHANGE}:
-            raise PortalError("历史通告类型必须是 all/maintenance/change。")
+        if work_type not in {
+            "all",
+            WORK_TYPE_MAINTENANCE,
+            WORK_TYPE_CHANGE,
+            WORK_TYPE_REPAIR,
+        }:
+            raise PortalError("历史通告类型必须是 all/maintenance/change/repair。")
 
         days: list[dict[str, Any]] = []
         with self._summary_lock:
@@ -1380,21 +1955,37 @@ class MaintenancePortalService:
     def _load_work_status_items_locked(self, scope: str = "ALL") -> list[dict[str, Any]]:
         self._backfill_work_status_from_daily_summaries_locked()
         scope = self._normalize_scope(scope)
-        items: list[dict[str, Any]] = []
-        for path in sorted(self._work_status_dir.glob("*.json")):
+        paths = sorted(self._work_status_dir.glob("*.json"))
+        signature_items: list[tuple[str, int, int]] = []
+        for path in paths:
             try:
-                with path.open("r", encoding="utf-8") as fp:
-                    payload = json.load(fp)
-            except Exception:
+                stat = path.stat()
+                signature_items.append((path.name, int(stat.st_mtime_ns), int(stat.st_size)))
+            except OSError:
                 continue
-            if not isinstance(payload, dict):
-                continue
-            for item in payload.get("items") or []:
-                if not isinstance(item, dict):
+        signature = tuple(signature_items)
+        if self._work_status_cache_signature == signature and self._work_status_cache_items is not None:
+            all_items = self._work_status_cache_items
+        else:
+            all_items: list[dict[str, Any]] = []
+            for path in paths:
+                try:
+                    with path.open("r", encoding="utf-8") as fp:
+                        payload = json.load(fp)
+                except Exception:
                     continue
-                if self._scope_matches_item(scope, item):
-                    items.append(copy.deepcopy(item))
-        return items
+                if not isinstance(payload, dict):
+                    continue
+                for item in payload.get("items") or []:
+                    if isinstance(item, dict):
+                        all_items.append(copy.deepcopy(item))
+            self._work_status_cache_signature = signature
+            self._work_status_cache_items = all_items
+        return [
+            copy.deepcopy(item)
+            for item in all_items
+            if self._scope_matches_item(scope, item)
+        ]
 
     def _work_status_by_records(
         self,
@@ -1519,6 +2110,8 @@ class MaintenancePortalService:
             "building_codes": (
                 self._change_record_building_codes(record)
                 if record.get("work_type") == WORK_TYPE_CHANGE
+                else self._repair_record_building_codes(record)
+                if record.get("work_type") == WORK_TYPE_REPAIR
                 else self._building_codes_from_value(
                     (record.get("display_fields") or {}).get("楼栋")
                 )
@@ -1610,6 +2203,82 @@ class MaintenancePortalService:
                     "upload_state": "源表进行中",
                 }
             )
+        for record in self._filter_repair_records(scope=scope, include_started=True):
+            fields = record.get("display_fields") or {}
+            source_record_id = str(record.get("record_id") or "").strip()
+            title = self._repair_title(record)
+            if source_record_id and source_record_id in seen_sources:
+                continue
+            title_key = re.sub(r"\s+", "", title)
+            if title_key and title_key in seen_titles:
+                continue
+            codes = self._repair_record_building_codes(record)
+            target_record_id = self._repair_target_record_id(record)
+            start_time, end_time, time_text = self._repair_time_range(record)
+            can_operate = bool(target_record_id)
+            progress = (
+                self._repair_first_field(fields, "维修进展描述", "当前维修进度")
+                or "源表显示已开始"
+            )
+            merged.append(
+                {
+                    "active_item_id": f"source-repair-{source_record_id}",
+                    "record_id": target_record_id,
+                    "raw_record_id": target_record_id,
+                    "target_record_id": target_record_id,
+                    "source_record_id": source_record_id,
+                    "source_app_token": REPAIR_SOURCE_APP_TOKEN,
+                    "source_table_id": REPAIR_SOURCE_TABLE_ID,
+                    "work_type": WORK_TYPE_REPAIR,
+                    "notice_type": NOTICE_TYPE_REPAIR,
+                    "source_only": not can_operate,
+                    "title": title,
+                    "status": "进行中",
+                    "source_progress": self._repair_first_field(
+                        fields, "流程", "当前维修进度"
+                    ),
+                    "building": self._building_label_from_codes(codes),
+                    "building_codes": codes,
+                    "specialty": self._repair_specialty(record),
+                    "level": self._repair_level(fields),
+                    "time": time_text,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "location": "",
+                    "content": title,
+                    "reason": self._repair_first_field(
+                        fields, "故障维修原因", "故障原因"
+                    ),
+                    "impact": "",
+                    "progress": progress,
+                    "repair_device": self._repair_device_text(fields),
+                    "repair_fault": self._repair_first_field(
+                        fields, "故障维修原因", "维修故障", "故障原因"
+                    ),
+                    "fault_type": self._repair_first_field(fields, "故障类型")
+                    or "设备故障",
+                    "repair_mode": self._repair_first_field(
+                        fields, "维修方式", "维修方", "供应商名称"
+                    ),
+                    "discovery": self._repair_first_field(fields, "对应来源"),
+                    "symptom": self._repair_first_field(
+                        fields, "故障发生现象描述", "故障现象"
+                    ),
+                    "solution": self._repair_first_field(
+                        fields, "解决方案", "维修方案", "后续整改措施"
+                    ),
+                    "fault_time": self._repair_first_field(
+                        fields, "故障发生时间", "发现故障时间"
+                    ),
+                    "expected_time": end_time,
+                    "can_update": can_operate,
+                    "can_end": can_operate,
+                    "block_reason": ""
+                    if can_operate
+                    else "源表显示已开始；但设备检修关联未返回目标 record_id，不能更新/结束",
+                    "upload_state": "源表已开始" if can_operate else "源表已开始 / 未绑定目标记录",
+                }
+            )
         return merged
 
     def _workbench_records(
@@ -1623,7 +2292,8 @@ class MaintenancePortalService:
             scope=scope,
             progress_values={CHANGE_PROGRESS_NOT_STARTED},
         )
-        return maintenance_records + change_records
+        repair_records = self._filter_repair_records(specialty=specialty, scope=scope)
+        return maintenance_records + change_records + repair_records
 
     def _maintenance_options_for_records(self, records: list[dict[str, Any]]) -> list[dict[str, str]]:
         options = []
@@ -1767,7 +2437,12 @@ class MaintenancePortalService:
         }
 
     def _find_record_by_id(self, record_id: str, work_type: str = WORK_TYPE_MAINTENANCE) -> dict[str, Any]:
-        records = self._change_records if work_type == WORK_TYPE_CHANGE else self._records
+        if work_type == WORK_TYPE_CHANGE:
+            records = self._change_records
+        elif work_type == WORK_TYPE_REPAIR:
+            records = self._repair_records
+        else:
+            records = self._records
         for record in records:
             if record["record_id"] == record_id:
                 return record
@@ -2005,6 +2680,8 @@ class MaintenancePortalService:
         ).strip()
         if work_type == WORK_TYPE_CHANGE:
             return self.prepare_change_action(request_payload, job_id=job_id)
+        if work_type == WORK_TYPE_REPAIR:
+            return self.prepare_repair_action(request_payload, job_id=job_id)
         return self.prepare_maintenance_action(request_payload, job_id=job_id)
 
     def prepare_maintenance_action(
@@ -2015,10 +2692,7 @@ class MaintenancePortalService:
         status = status_map.get(action)
         if not status:
             raise PortalError("动作必须是 start/update/end。")
-        if action == "start":
-            self.refresh()
-        else:
-            self.ensure_loaded()
+        self.ensure_loaded()
         scope = self._normalize_scope(request_payload.get("scope"))
         specialty = str(request_payload.get("specialty") or "").strip()
 
@@ -2170,10 +2844,7 @@ class MaintenancePortalService:
         status = status_map.get(action)
         if not status:
             raise PortalError("动作必须是 start/update/end。")
-        if action == "start":
-            self.refresh()
-        else:
-            self.ensure_loaded()
+        self.ensure_loaded()
         scope = self._normalize_scope(request_payload.get("scope"))
 
         record_id = str(request_payload.get("record_id") or "").strip()
@@ -2281,6 +2952,276 @@ class MaintenancePortalService:
             "reason": reason,
             "impact": impact,
             "progress": progress,
+            "text": text,
+            "recipients": [],
+            "skip_personal_message": True,
+            "response_time": response_time,
+            "operation_id": str(request_payload.get("operation_id") or "").strip()
+            or job_id,
+        }
+
+    @staticmethod
+    def build_repair_notice_text(
+        *,
+        status: str,
+        title: str,
+        specialty: str,
+        level: str,
+        start_time: str,
+        end_time: str,
+        location: str,
+        content: str,
+        reason: str,
+        impact: str,
+        progress: str,
+        repair_device: str,
+        repair_fault: str,
+        fault_type: str,
+        repair_mode: str,
+        discovery: str,
+        symptom: str,
+        solution: str,
+        fault_time: str,
+        expected_time: str,
+    ) -> str:
+        progress_text = str(progress or "").strip()
+        reason_text = str(reason or "").strip()
+        impact_text = str(impact or "").strip()
+        sections = [
+            ("标题", title),
+            ("地点", location),
+            ("紧急程度", level),
+            ("专业", specialty),
+            ("发现故障时间", fault_time),
+            ("期望完成时间", expected_time),
+            ("维修设备", repair_device),
+            ("维修故障", repair_fault),
+            ("故障类型", fault_type),
+            ("维修方式", repair_mode),
+            ("影响范围", impact_text),
+            ("故障发现方式", discovery),
+            ("故障现象", symptom),
+            ("故障原因", reason_text),
+            ("解决方案", solution),
+            ("完成情况", progress_text),
+        ]
+        lines = [f"【设备检修】状态：{str(status or '').strip()}"]
+        for label, value in sections:
+            lines.append(f"【{label}】{str(value or '').strip()}")
+        return "\n\n".join(lines)
+
+    def prepare_repair_action(
+        self, request_payload: dict[str, Any], *, job_id: str
+    ) -> dict[str, Any]:
+        action = str(request_payload.get("action") or "").strip().lower()
+        status_map = {"start": "开始", "update": "更新", "end": "结束"}
+        status = status_map.get(action)
+        if not status:
+            raise PortalError("动作必须是 start/update/end。")
+        self.ensure_loaded()
+        scope = self._normalize_scope(request_payload.get("scope"))
+
+        def request_text(name: str, default: str = "") -> str:
+            if name in request_payload:
+                return str(request_payload.get(name) or "").strip()
+            return str(default or "").strip()
+
+        def request_first_text(names: tuple[str, ...], default: str = "") -> str:
+            for name in names:
+                if name in request_payload:
+                    value = str(request_payload.get(name) or "").strip()
+                    if value:
+                        return value
+            return str(default or "").strip()
+
+        record_id = str(request_payload.get("record_id") or "").strip()
+        fields: dict[str, Any] = {}
+        if action == "start":
+            if not record_id:
+                raise PortalError("开始通告缺少检修源记录ID。")
+            record = self._find_record_by_id(record_id, WORK_TYPE_REPAIR)
+            fields = record.get("display_fields") or {}
+            if not self._is_valid_repair_record(record):
+                raise PortalError("该检修记录缺少有效维修名称或楼栋，不能发起。")
+            title = request_first_text(
+                ("title", "content"), default=self._repair_title(record)
+            )
+            building_codes = self._repair_record_building_codes(record)
+            building = self._building_label_from_codes(building_codes)
+            specialty = str(request_payload.get("specialty") or "").strip()
+            if not specialty or specialty == "全部":
+                specialty = self._repair_specialty(record)
+            level = request_text("level", self._repair_level(fields))
+            default_start, default_end, _ = self._repair_time_range(record)
+            repair_device = request_text("repair_device", self._repair_device_text(fields))
+            repair_fault = request_text(
+                "repair_fault",
+                self._repair_first_field(fields, "维修故障", "故障维修原因"),
+            )
+            fault_type = request_text(
+                "fault_type", self._repair_first_field(fields, "故障类型") or "设备故障"
+            )
+            repair_mode = request_text(
+                "repair_mode",
+                self._repair_first_field(fields, "维修方式", "维修方", "供应商名称"),
+            )
+            discovery = request_text(
+                "discovery", self._repair_first_field(fields, "对应来源")
+            )
+            symptom = request_text(
+                "symptom", self._repair_first_field(fields, "故障发生现象描述", "故障现象")
+            )
+            solution = request_text(
+                "solution",
+                self._repair_first_field(fields, "解决方案", "维修方案", "后续整改措施"),
+            )
+            source_fault_time = self._repair_first_field(
+                fields, "故障发生时间", "发现故障时间"
+            )
+            fault_time = request_text("fault_time", source_fault_time)
+            target_record_id = self._repair_target_record_id(record)
+        else:
+            title = str(request_payload.get("title") or "").strip()
+            if not title:
+                raise PortalError("更新/结束通告缺少名称。")
+            building_codes = [
+                str(code or "").strip().upper()
+                for code in (request_payload.get("building_codes") or [])
+                if str(code or "").strip()
+            ]
+            if not building_codes:
+                building_codes = self._repair_building_codes_from_value(
+                    request_payload.get("building")
+                )
+            building = (
+                str(request_payload.get("building") or "").strip()
+                or self._building_label_from_codes(building_codes)
+            )
+            specialty = str(request_payload.get("specialty") or "").strip()
+            level = str(request_payload.get("level") or "").strip()
+            default_start = ""
+            default_end = ""
+            record_id = str(request_payload.get("source_record_id") or "").strip()
+            target_record_id = str(
+                request_payload.get("target_record_id")
+                or request_payload.get("record_id")
+                or ""
+            ).strip()
+            repair_device = request_text("repair_device")
+            repair_fault = request_text("repair_fault")
+            fault_type = (
+                request_text("fault_type")
+                if "fault_type" in request_payload
+                else "设备故障"
+            )
+            repair_mode = request_text("repair_mode")
+            discovery = request_text("discovery")
+            symptom = request_text("symptom")
+            solution = request_text("solution")
+            fault_time = request_text("fault_time")
+
+        if not self._scope_matches_buildings(scope, building_codes):
+            raise PortalError(f"当前入口与通告楼栋不匹配: {building or '-'}")
+        if action != "start" and not target_record_id:
+            raise PortalError("该检修缺少目标设备检修表 record_id，不能更新/结束。")
+
+        requested_expected_time = self._format_input_datetime(
+            request_payload.get("expected_time")
+        )
+        requested_fault_time = self._format_input_datetime(
+            request_payload.get("fault_time")
+        )
+        requested_start_time = self._format_input_datetime(
+            request_payload.get("start_time")
+        )
+        requested_end_time = self._format_input_datetime(request_payload.get("end_time"))
+        expected_time = requested_expected_time or requested_start_time or default_end
+        fault_time = requested_fault_time or requested_end_time or self._format_input_datetime(fault_time)
+        start_time = expected_time or default_start
+        end_time = fault_time or default_end
+        now_text = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+        if not start_time:
+            start_time = now_text
+        if not end_time and action == "end":
+            end_time = now_text
+        location = request_text("location")
+        content = request_first_text(("content", "title"), default=title)
+        reason = request_text(
+            "reason", self._repair_first_field(fields, "故障原因", "故障维修原因")
+        )
+        impact = request_text("impact")
+        progress = request_text(
+            "progress", self._repair_first_field(fields, "维修进展描述", "当前维修进度")
+        )
+        building_code = (
+            "CAMPUS"
+            if len(building_codes) >= 2
+            else (building_codes[0] if building_codes else "")
+        )
+        text = self.build_repair_notice_text(
+            status=status,
+            title=title,
+            specialty=specialty,
+            level=level,
+            start_time=start_time,
+            end_time=end_time,
+            location=location,
+            content=content,
+            reason=reason,
+            impact=impact,
+            progress=progress,
+            repair_device=repair_device,
+            repair_fault=repair_fault,
+            fault_type=fault_type,
+            repair_mode=repair_mode,
+            discovery=discovery,
+            symptom=symptom,
+            solution=solution,
+            fault_time=fault_time,
+            expected_time=expected_time,
+        )
+        response_time = now_text
+        return {
+            "job_id": job_id,
+            "work_type": WORK_TYPE_REPAIR,
+            "notice_type": NOTICE_TYPE_REPAIR,
+            "source_app_token": REPAIR_SOURCE_APP_TOKEN,
+            "source_table_id": REPAIR_SOURCE_TABLE_ID,
+            "action": action,
+            "status": status,
+            "scope": scope,
+            "scope_label": self._scope_label(scope),
+            "record_id": record_id,
+            "target_record_id": target_record_id,
+            "active_item_id": str(request_payload.get("active_item_id") or "").strip(),
+            "title": title,
+            "building": building,
+            "building_code": building_code,
+            "building_codes": building_codes,
+            "target_building": self._building_label_from_code(building_code),
+            "specialty": specialty,
+            "level": level,
+            "source_progress": str(
+                request_payload.get("source_progress")
+                or self._repair_first_field(fields, "流程", "当前维修进度")
+                or ""
+            ),
+            "start_time": start_time,
+            "end_time": end_time,
+            "location": location,
+            "content": content,
+            "reason": reason,
+            "impact": impact,
+            "progress": progress,
+            "repair_device": repair_device,
+            "repair_fault": repair_fault,
+            "fault_type": fault_type,
+            "repair_mode": repair_mode,
+            "discovery": discovery,
+            "symptom": symptom,
+            "solution": solution,
+            "fault_time": fault_time,
+            "expected_time": expected_time,
             "text": text,
             "recipients": [],
             "skip_personal_message": True,

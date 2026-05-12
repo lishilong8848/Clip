@@ -332,9 +332,18 @@ class MainWindowRuntimeMixin:
             "level": self._extract_section_text(text, ("等级",)),
             "location": self._extract_section_text(text, ("位置", "地点")),
             "content": self._extract_section_text(text, ("内容",)),
-            "reason": self._extract_section_text(text, ("原因",)),
-            "impact": self._extract_section_text(text, ("影响",)),
-            "progress": self._extract_section_text(text, ("进度",)),
+            "reason": self._extract_section_text(text, ("原因", "故障原因")),
+            "impact": self._extract_section_text(text, ("影响", "影响范围")),
+            "progress": self._extract_section_text(text, ("进度", "完成情况")),
+            "repair_device": self._extract_section_text(text, ("维修设备",)),
+            "repair_fault": self._extract_section_text(text, ("维修故障",)),
+            "fault_type": self._extract_section_text(text, ("故障类型",)),
+            "repair_mode": self._extract_section_text(text, ("维修方式",)),
+            "discovery": self._extract_section_text(text, ("故障发现方式",)),
+            "symptom": self._extract_section_text(text, ("故障现象",)),
+            "solution": self._extract_section_text(text, ("解决方案",)),
+            "fault_time": self._extract_section_text(text, ("发现故障时间",)),
+            "expected_time": self._extract_section_text(text, ("期望完成时间",)),
         }
 
     def get_lan_maintenance_ongoing_notices(self, scope: str = "ALL") -> list[dict]:
@@ -380,7 +389,7 @@ class MainWindowRuntimeMixin:
             if not isinstance(data, dict):
                 continue
             notice_type = str(data.get("notice_type") or "").strip()
-            if notice_type not in {"维保通告", "设备变更", "变更通告"}:
+            if notice_type not in {"维保通告", "设备变更", "变更通告", "设备检修"}:
                 continue
             text = str(data.get("text") or "").strip()
             info = extract_event_info(text) or {}
@@ -424,7 +433,13 @@ class MainWindowRuntimeMixin:
                     "source_record_id": str(data.get("lan_source_record_id") or ""),
                     "source_app_token": str(data.get("lan_source_app_token") or ""),
                     "source_table_id": str(data.get("lan_source_table_id") or ""),
-                    "work_type": "change" if notice_type in {"设备变更", "变更通告"} else "maintenance",
+                    "work_type": (
+                        "change"
+                        if notice_type in {"设备变更", "变更通告"}
+                        else "repair"
+                        if notice_type == "设备检修"
+                        else "maintenance"
+                    ),
                     "notice_type": notice_type,
                     "title": sections["title"] or info.get("title") or "",
                     "status": info.get("status") or "",
@@ -440,6 +455,15 @@ class MainWindowRuntimeMixin:
                     "reason": sections["reason"],
                     "impact": sections["impact"],
                     "progress": sections["progress"],
+                    "repair_device": sections.get("repair_device", ""),
+                    "repair_fault": sections.get("repair_fault", ""),
+                    "fault_type": sections.get("fault_type", ""),
+                    "repair_mode": sections.get("repair_mode", ""),
+                    "discovery": sections.get("discovery", ""),
+                    "symptom": sections.get("symptom", ""),
+                    "solution": sections.get("solution", ""),
+                    "fault_time": sections.get("fault_time", ""),
+                    "expected_time": sections.get("expected_time", ""),
                     "can_update": not blocked,
                     "can_end": not blocked,
                     "block_reason": block_reason,
@@ -616,9 +640,15 @@ class MainWindowRuntimeMixin:
             raise RuntimeError("通告文本为空。")
         info = extract_event_info(text) or {}
         notice_type = str(info.get("notice_type") or "").strip()
-        if notice_type not in {"维保通告", "设备变更", "变更通告"}:
-            raise RuntimeError("只能处理维保或变更通告。")
-        work_type = "change" if notice_type in {"设备变更", "变更通告"} else "maintenance"
+        if notice_type not in {"维保通告", "设备变更", "变更通告", "设备检修"}:
+            raise RuntimeError("只能处理维保、变更或检修通告。")
+        work_type = (
+            "change"
+            if notice_type in {"设备变更", "变更通告"}
+            else "repair"
+            if notice_type == "设备检修"
+            else "maintenance"
+        )
         response_time = str(payload.get("response_time") or "").strip()
         building = str(payload.get("building") or "").strip()
         specialty = str(payload.get("specialty") or "").strip()
@@ -688,6 +718,53 @@ class MainWindowRuntimeMixin:
 
         active_item_id = str(payload.get("active_item_id") or "").strip()
         list_widget, item = self._find_active_item_by_active_item_id(active_item_id)
+        if (
+            (not item or not self._is_valid_list_item(item))
+            and work_type == "repair"
+            and str(payload.get("target_record_id") or payload.get("record_id") or "").strip()
+        ):
+            target_record_id = str(
+                payload.get("target_record_id") or payload.get("record_id") or ""
+            ).strip()
+            list_widget, item = self._find_active_item_by_record_id(target_record_id)
+            if item and self._is_valid_list_item(item):
+                data = item.data(Qt.ItemDataRole.UserRole) or {}
+                active_item_id = str(data.get("active_item_id") or active_item_id)
+            else:
+                item = None
+                list_widget = None
+        if (
+            (not item or not self._is_valid_list_item(item))
+            and work_type == "repair"
+            and str(payload.get("target_record_id") or payload.get("record_id") or "").strip()
+        ):
+            target_record_id = str(
+                payload.get("target_record_id") or payload.get("record_id") or ""
+            ).strip()
+            data = {
+                "record_id": target_record_id,
+                "text": info.get("content") or text,
+                "notice_type": notice_type,
+                "time_str": info.get("time_str") or "",
+                "buildings": buildings,
+                "specialty": specialty,
+                "level": level,
+                "_has_unuploaded_changes": False,
+                "_pending_upload_hash": None,
+                "_upload_in_progress": False,
+                "lan_source_record_id": str(payload.get("source_record_id") or ""),
+                "lan_source_app_token": str(payload.get("source_app_token") or ""),
+                "lan_source_table_id": str(payload.get("source_table_id") or ""),
+                "lan_work_type": work_type,
+            }
+            self._ensure_payload_for_data(data)
+            item, _ = self.add_active_item(data)
+            if item and self._is_valid_list_item(item):
+                data = item.data(Qt.ItemDataRole.UserRole) or data
+                active_item_id = str(data.get("active_item_id") or active_item_id)
+                list_widget, item = self._find_active_item_by_active_item_id(
+                    active_item_id
+                )
         if not item or not self._is_valid_list_item(item):
             raise RuntimeError("未找到主界面进行中的通告条目。")
         data = dict(item.data(Qt.ItemDataRole.UserRole) or {})
