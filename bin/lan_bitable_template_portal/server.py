@@ -523,24 +523,34 @@ class PortalHandler(BaseHTTPRequestHandler):
                     or (session.get("user") or {}).get("en_name")
                     or ""
                 )
+                self.service.validate_ongoing_delete_item(payload, scope=scope)
+                callback = PortalHandler.ongoing_delete_callback
+                if callback is None:
+                    return self._send_json(
+                        503,
+                        {"ok": False, "error": "主窗口未连接，无法删除进行中通告。"},
+                    )
+                try:
+                    accepted = callback(payload)
+                except Exception as exc:
+                    return self._send_json(500, {"ok": False, "error": str(exc)})
+                if isinstance(accepted, dict):
+                    qt_deleted = bool(accepted.get("ok"))
+                    error = str(accepted.get("error") or "").strip()
+                else:
+                    qt_deleted = bool(accepted)
+                    error = ""
+                if not qt_deleted:
+                    return self._send_json(
+                        409,
+                        {"ok": False, "error": error or "Qt 主界面拒绝删除该条目。"},
+                    )
                 data = self.service.hide_ongoing_item(
                     payload,
                     scope=scope,
                     deleted_by=payload["_auth_open_id"],
                 )
-                callback = PortalHandler.ongoing_delete_callback
-                if callback is not None:
-                    try:
-                        accepted = callback(payload)
-                        if isinstance(accepted, dict):
-                            data["qt_deleted"] = bool(accepted.get("ok"))
-                            if accepted.get("error"):
-                                data["qt_delete_warning"] = str(accepted.get("error") or "")
-                        else:
-                            data["qt_deleted"] = bool(accepted)
-                    except Exception as exc:
-                        data["qt_deleted"] = False
-                        data["qt_delete_warning"] = str(exc)
+                data["qt_deleted"] = True
                 return self._send_json(200, {"ok": True, "data": data})
             except (PortalError, ValueError, json.JSONDecodeError) as exc:
                 return self._send_json(403, {"ok": False, "error": str(exc)})

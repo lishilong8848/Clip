@@ -12,6 +12,7 @@ if str(BIN_DIR) not in sys.path:
     sys.path.insert(0, str(BIN_DIR))
 
 from lan_bitable_template_portal.portal_service import MaintenancePortalService  # noqa: E402
+from lan_bitable_template_portal.portal_service import PortalError  # noqa: E402
 from lan_bitable_template_portal.portal_service import WORK_TYPE_CHANGE  # noqa: E402
 from lan_bitable_template_portal.portal_service import WORK_TYPE_REPAIR  # noqa: E402
 from lan_bitable_template_portal.portal_auth import PortalAuthManager  # noqa: E402
@@ -41,6 +42,16 @@ class _ChangeSourceFailureService(MaintenancePortalService):
 
     def _load_change_fields(self):
         raise RuntimeError("mock change source down")
+
+    def _load_zhihang_change_fields(self):
+        self._zhihang_change_field_meta_list = []
+        self._zhihang_change_field_meta_by_name = {}
+        return []
+
+    def _load_zhihang_change_records(self):
+        self._zhihang_change_records = []
+        self._zhihang_change_loaded_once = True
+        return []
 
     def _load_repair_fields(self):
         self._repair_field_meta_list = []
@@ -142,6 +153,30 @@ def _build_repair_record(
             "维修进展描述": "维修准备中",
             "流程": "流程",
             "区域": "D-UPS间",
+        },
+    }
+
+
+def _build_zhihang_change_record(
+    record_id: str,
+    *,
+    title: str,
+    progress: str = "未开始",
+):
+    return {
+        "record_id": record_id,
+        "raw_fields": {},
+        "work_type": "change",
+        "notice_type": "设备变更",
+        "source_app_token": "IrIibPkUOa6udGsMhu2cbOqhnWg",
+        "source_table_id": "tblqMJvYW5dxFFfU",
+        "display_fields": {
+            "标题": title,
+            "进度": progress,
+            "变更等级": "低",
+            "变更类型": "普通变更",
+            "计划开始": "2026-05-08 09:00",
+            "计划结束": "2026-05-08 18:00",
         },
     }
 
@@ -677,6 +712,109 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
             self.assertEqual(merged, [])
 
+    def test_zhihang_change_records_filter_by_progress_and_title_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            service._zhihang_change_records = [
+                _build_zhihang_change_record("z-a", title="EA118机房A楼网络割接"),
+                _build_zhihang_change_record("z-campus", title="ABC楼链路调整"),
+                _build_zhihang_change_record("z-ab", title="AB楼网络调整"),
+                _build_zhihang_change_record("z-abc", title="ABC网络调整"),
+                _build_zhihang_change_record("z-all", title="通用平台升级"),
+                _build_zhihang_change_record(
+                    "z-ended", title="EA118机房A楼已结束割接", progress="已结束"
+                ),
+            ]
+
+            a_records = service._filter_zhihang_change_records(scope="A")
+            campus_records = service._filter_zhihang_change_records(scope="CAMPUS")
+
+            self.assertEqual([record["record_id"] for record in a_records], ["z-a", "z-all"])
+            self.assertEqual(
+                [record["record_id"] for record in campus_records],
+                ["z-campus", "z-ab", "z-abc", "z-all"],
+            )
+
+    def test_zhihang_binding_is_hidden_after_local_work_status_link(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            service._zhihang_change_records = [
+                _build_zhihang_change_record("z-c", title="EA118机房C楼链路调整")
+            ]
+            with service._summary_lock:
+                service._upsert_work_status_item_locked(
+                    {
+                        "work_type": WORK_TYPE_CHANGE,
+                        "notice_type": "设备变更",
+                        "source_record_id": "ali-c",
+                        "title": "C楼阿里侧变更",
+                        "building": "C楼",
+                        "building_code": "C",
+                        "building_codes": ["C"],
+                        "zhihang_record_id": "z-c",
+                        "zhihang_title": "EA118机房C楼链路调整",
+                    },
+                    action="start",
+                    now="2026-05-08 09:00",
+                )
+
+            linked = service._linked_zhihang_record_ids([])
+            records = service._filter_zhihang_change_records(
+                scope="C", exclude_record_ids=linked
+            )
+
+            self.assertEqual(linked, {"z-c"})
+            self.assertEqual(records, [])
+
+    def test_prepare_change_action_requires_and_keeps_zhihang_binding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            service._change_records = [
+                _build_change_record(
+                    "ali-c",
+                    building="C楼",
+                    progress="未开始",
+                    title="C楼阿里侧变更",
+                )
+            ]
+            service._zhihang_change_records = [
+                _build_zhihang_change_record("z-c", title="EA118机房C楼链路调整")
+            ]
+            base_payload = {
+                "action": "start",
+                "scope": "C",
+                "work_type": WORK_TYPE_CHANGE,
+                "record_id": "ali-c",
+                "specialty": "电气",
+                "start_time": "2026-05-08T09:00",
+                "end_time": "2026-05-08T18:00",
+                "location": "C楼",
+                "content": "测试内容",
+                "reason": "测试原因",
+                "impact": "测试影响",
+                "progress": "准备开始",
+                "zhihang_involved": True,
+            }
+
+            with self.assertRaises(PortalError):
+                service.prepare_change_action(base_payload, job_id="job-z-missing")
+
+            not_involved = service.prepare_change_action(
+                {**base_payload, "zhihang_involved": "false"},
+                job_id="job-z-not-involved",
+            )
+            self.assertFalse(not_involved["zhihang_involved"])
+            self.assertEqual(not_involved["zhihang_record_id"], "")
+
+            prepared = service.prepare_change_action(
+                {**base_payload, "zhihang_record_id": "z-c"},
+                job_id="job-z-ok",
+            )
+
+            self.assertTrue(prepared["zhihang_involved"])
+            self.assertEqual(prepared["zhihang_record_id"], "z-c")
+            self.assertEqual(prepared["zhihang_title"], "EA118机房C楼链路调整")
+
     def test_source_ongoing_repair_is_not_surfaced_without_qt_item(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
@@ -738,6 +876,63 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 merged = service._merge_ongoing_items("C", [])
 
             self.assertEqual(merged, [])
+
+    def test_hidden_ongoing_uses_active_item_identity_for_qt_items(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            service.hide_ongoing_item(
+                {
+                    "scope": "C",
+                    "work_type": WORK_TYPE_CHANGE,
+                    "notice_type": "设备变更",
+                    "active_item_id": "active-old",
+                    "record_id": "target-same",
+                    "building": "C楼",
+                    "building_codes": ["C"],
+                    "title": "C楼同一目标记录",
+                },
+                scope="C",
+                deleted_by="tester",
+            )
+
+            merged = service._merge_ongoing_items(
+                "C",
+                [
+                    {
+                        "active_item_id": "active-new",
+                        "work_type": WORK_TYPE_CHANGE,
+                        "notice_type": "设备变更",
+                        "record_id": "target-same",
+                        "title": "C楼同一目标记录",
+                        "building": "C楼",
+                        "building_codes": ["C"],
+                    }
+                ],
+            )
+
+            self.assertEqual(len(merged), 1)
+            self.assertEqual(merged[0]["active_item_id"], "active-new")
+
+    def test_validate_ongoing_delete_rejects_wrong_scope_before_side_effect(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+
+            with self.assertRaises(PortalError):
+                service.validate_ongoing_delete_item(
+                    {
+                        "active_item_id": "active-a",
+                        "work_type": WORK_TYPE_CHANGE,
+                        "notice_type": "设备变更",
+                        "record_id": "target-a",
+                        "title": "A楼变更",
+                        "building": "A楼",
+                        "building_codes": ["A"],
+                    },
+                    scope="C",
+                )
+
+            hidden_file = Path(tmp) / "lan_template_hidden_ongoing.json"
+            self.assertFalse(hidden_file.exists())
 
     def test_qt_ongoing_item_is_kept_even_if_target_record_is_completed(self):
         with tempfile.TemporaryDirectory() as tmp:

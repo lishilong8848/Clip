@@ -548,6 +548,30 @@
       gap: 8px;
     }
 
+    .change-pair-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(180px, 0.92fr);
+      gap: 10px;
+      align-items: start;
+    }
+
+    .change-pair-column {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .pair-column-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
     .record-card {
       border: 1px solid var(--line);
       border-radius: 7px;
@@ -577,6 +601,45 @@
     .record-card.completed {
       border-color: rgba(11, 107, 88, 0.42);
       background: linear-gradient(180deg, #ffffff 0%, #f0faf6 100%);
+    }
+
+    .zhihang-card {
+      border: 1px solid rgba(31, 95, 153, 0.22);
+      border-radius: 7px;
+      background: #fbfdff;
+      padding: 9px;
+      cursor: pointer;
+      transition: border-color 0.14s ease, background 0.14s ease, box-shadow 0.14s ease;
+    }
+
+    .zhihang-card:hover {
+      border-color: rgba(31, 95, 153, 0.58);
+      background: #f3f8ff;
+      box-shadow: 0 8px 18px rgba(31, 95, 153, 0.08);
+    }
+
+    .zhihang-card.disabled {
+      cursor: default;
+      opacity: 0.64;
+      background: #f5f7f8;
+    }
+
+    .zhihang-card.disabled:hover {
+      border-color: rgba(31, 95, 153, 0.22);
+      box-shadow: none;
+    }
+
+    .zhihang-binding {
+      border: 1px dashed rgba(31, 95, 153, 0.28);
+      border-radius: 7px;
+      padding: 10px;
+      background: #f8fbff;
+    }
+
+    .zhihang-binding .row-actions { margin-top: 6px; }
+
+    @media (max-width: 760px) {
+      .change-pair-grid { grid-template-columns: 1fr; }
     }
 
     .record-title {
@@ -858,6 +921,7 @@
         error: "",
       },
       records: [],
+      zhihangRecords: [],
       ongoing: [],
       dailySummary: { date: "", items: [], stats: {} },
       handover: {
@@ -882,6 +946,7 @@
       actionOps: new Map(),
       jobToOpKey: new Map(),
       polling: new Set(),
+      activeDraftKey: "",
       autoRefresh: {
         timerId: 0,
         intervalMs: 3 * 60 * 1000,
@@ -1021,6 +1086,9 @@
       }
       for (const key of Array.from(state.drafts.keys())) {
         if (isUnavailable(key)) state.drafts.delete(key);
+      }
+      if (state.activeDraftKey && !state.selected.has(state.activeDraftKey)) {
+        state.activeDraftKey = "";
       }
       saveDraftState();
     }
@@ -1249,6 +1317,28 @@
       return `EA118机房${f["楼栋"] || ""}${f["维护总项"] || ""}`;
     }
 
+    function zhihangTitle(record) {
+      return record?.title || record?.display_fields?.["标题"] || record?.record_id || "";
+    }
+
+    function zhihangMetaText(record) {
+      const fields = record?.display_fields || {};
+      return [
+        record?.scope_label ? `范围 ${record.scope_label}` : "",
+        record?.progress ? `进度 ${record.progress}` : "",
+        record?.level ? `等级 ${record.level}` : "",
+        record?.change_type ? `类型 ${record.change_type}` : "",
+        record?.plan_start || fields["计划开始"] ? `计划 ${record.plan_start || fields["计划开始"]}` : "",
+        record?.plan_end || fields["计划结束"] ? `结束 ${record.plan_end || fields["计划结束"]}` : "",
+        record?.record_id ? `源ID ${record.record_id}` : "",
+      ].filter(Boolean).join(" | ");
+    }
+
+    function findZhihangRecord(recordId) {
+      recordId = String(recordId || "");
+      return state.zhihangRecords.find((item) => String(item.record_id || "") === recordId) || null;
+    }
+
     function specialtyForRecord(record) {
       const f = fieldsOf(record);
       const type = record.work_type || "maintenance";
@@ -1376,6 +1466,10 @@
           reason: memory.reason || "",
           impact: memory.impact || state.defaults.impact,
           progress: state.defaults.progress,
+          zhihang_involved: false,
+          zhihang_record_id: "",
+          zhihang_title: "",
+          zhihang_progress: "",
           job_id: "",
         };
         state.drafts.set(id, draft);
@@ -1907,6 +2001,7 @@
       updateAuthFromPayload(data);
       state.scopeOptions = data.scope_options || state.scopeOptions;
       state.records = data.records || [];
+      state.zhihangRecords = data.zhihang_change_records || [];
       state.ongoing = data.ongoing || [];
       state.dailySummary = data.daily_summary || { date: "", items: [], stats: {} };
       state.defaults = data.defaults || state.defaults;
@@ -1951,6 +2046,7 @@
       const data = await api(`/api/workbench?${params}`);
       updateAuthFromPayload(data);
       state.records = data.records || [];
+      state.zhihangRecords = data.zhihang_change_records || [];
       state.ongoing = data.ongoing || [];
       state.dailySummary = data.daily_summary || { date: "", items: [], stats: {} };
       state.lastLoadedAt = data.last_loaded_at || state.lastLoadedAt;
@@ -1969,6 +2065,7 @@
       updateAuthFromPayload(data);
       state.scopeOptions = data.scope_options || state.scopeOptions;
       state.records = data.records || [];
+      state.zhihangRecords = data.zhihang_change_records || [];
       state.ongoing = data.ongoing || [];
       state.dailySummary = data.daily_summary || { date: "", items: [], stats: {} };
       state.defaults = data.defaults || state.defaults;
@@ -2174,17 +2271,7 @@
       return `<div class="empty">${html(message)}${switchButton ? `<div style="margin-top:10px">${switchButton}</div>` : ""}</div>`;
     }
 
-    function renderRecords() {
-      const records = visibleRecords();
-      if (!records.length) {
-        $("recordList").innerHTML = emptyRecordHtml();
-        document.querySelectorAll("[data-empty-switch-type]").forEach((btn) => {
-          btn.addEventListener("click", () => setWorkType(btn.dataset.emptySwitchType));
-        });
-        return;
-      }
-      $("recordList").innerHTML = records.map((record) => {
-        const f = fieldsOf(record);
+    function recordCardHtml(record) {
         const key = recordKey(record);
         const selected = state.selected.has(key);
         const ongoing = isRecordOngoing(record);
@@ -2215,7 +2302,9 @@
             ${started ? `<div class="work-detail ${expanded ? "" : "hidden"}">${summaryDetailHtml(summary, summary.actions || [])}</div>` : ""}
           </article>
         `;
-      }).join("");
+    }
+
+    function bindRecordEvents() {
       document.querySelectorAll("[data-record-key]").forEach((el) => {
         el.addEventListener("click", () => {
           const record = state.records.find((x) => recordKey(x) === el.dataset.recordKey);
@@ -2227,15 +2316,149 @@
             return;
           }
           const key = recordKey(record);
-          if (state.selected.has(key)) state.selected.delete(key);
+          if (state.selected.has(key)) {
+            state.selected.delete(key);
+            if (state.activeDraftKey === key) state.activeDraftKey = "";
+          }
           else {
             state.selected.add(key);
+            state.activeDraftKey = key;
             getDraft(record);
           }
           saveDraftState();
           render();
         });
       });
+    }
+
+    function selectedZhihangIds() {
+      const ids = new Set();
+      for (const draft of state.drafts.values()) {
+        if (draft?.zhihang_involved && draft?.zhihang_record_id) {
+          ids.add(String(draft.zhihang_record_id));
+        }
+      }
+      return ids;
+    }
+
+    function activeChangeDraftKey() {
+      if (state.activeDraftKey && state.selected.has(state.activeDraftKey) && state.activeDraftKey.startsWith("change:")) {
+        return state.activeDraftKey;
+      }
+      return Array.from(state.selected).find((key) => key.startsWith("change:")) || "";
+    }
+
+    function visibleZhihangRecords() {
+      const q = state.filters.search.trim().toLowerCase();
+      const selectedIds = selectedZhihangIds();
+      return (state.zhihangRecords || []).filter((record) => {
+        if (selectedIds.has(String(record.record_id || ""))) return false;
+        const f = record.display_fields || {};
+        const text = [
+          zhihangTitle(record),
+          record.progress || "",
+          record.scope_label || "",
+          record.level || "",
+          record.change_type || "",
+          f["工单号"] || "",
+          f["编码"] || "",
+          f["楼栋"] || "",
+        ].join(" ").toLowerCase();
+        return !q || text.includes(q);
+      });
+    }
+
+    function assignZhihangRecord(recordId) {
+      const draftKey = activeChangeDraftKey();
+      const draft = draftKey ? state.drafts.get(draftKey) : null;
+      const record = findZhihangRecord(recordId);
+      if (!draft || !draft.zhihang_involved || !record) return;
+      draft.zhihang_involved = true;
+      draft.zhihang_record_id = record.record_id || "";
+      draft.zhihang_title = zhihangTitle(record);
+      draft.zhihang_progress = record.progress || "";
+      draft.job_id = "";
+      draft.operation_id = "";
+      state.activeDraftKey = draftKey;
+      forgetJobsForLine(draftKey);
+      saveDraftState();
+      render();
+    }
+
+    function bindZhihangEvents() {
+      document.querySelectorAll("[data-zhihang-record]").forEach((el) => {
+        el.addEventListener("click", () => {
+          if (el.classList.contains("disabled")) return;
+          assignZhihangRecord(el.dataset.zhihangRecord);
+        });
+      });
+    }
+
+    function renderZhihangColumn() {
+      const records = visibleZhihangRecords();
+      const activeKey = activeChangeDraftKey();
+      const activeDraft = activeKey ? state.drafts.get(activeKey) : null;
+      const canBind = Boolean(activeDraft && activeDraft.zhihang_involved);
+      const body = records.length
+        ? records.map((record) => `
+            <article class="zhihang-card ${canBind ? "" : "disabled"}" data-zhihang-record="${html(record.record_id)}">
+              <div class="record-title">
+                <span>${html(zhihangTitle(record))}</span>
+                <span class="tag blue">智航</span>
+              </div>
+              <div class="record-meta">${html(zhihangMetaText(record))}</div>
+            </article>
+          `).join("")
+        : `<div class="empty">当前范围没有可绑定的智航侧未结束变更</div>`;
+      const hint = canBind
+        ? "选择后会绑定到中间当前阿里侧变更"
+        : "先选择左侧阿里侧变更并打开“涉及智航”";
+      return `
+        <div class="change-pair-column">
+          <div class="pair-column-title">
+            <span>智航侧变更</span>
+            <span>${html(records.length)}条</span>
+          </div>
+          <div class="inline-hint">${html(hint)}</div>
+          ${body}
+        </div>
+      `;
+    }
+
+    function renderRecords() {
+      const records = visibleRecords();
+      if (state.workType === "change") {
+        const left = records.length
+          ? records.map(recordCardHtml).join("")
+          : emptyRecordHtml();
+        $("recordList").innerHTML = `
+          <div class="change-pair-grid">
+            <div class="change-pair-column">
+              <div class="pair-column-title">
+                <span>阿里侧变更</span>
+                <span>${html(records.length)}条</span>
+              </div>
+              ${left}
+            </div>
+            ${renderZhihangColumn()}
+          </div>
+        `;
+        bindRecordEvents();
+        bindZhihangEvents();
+        document.querySelectorAll("[data-empty-switch-type]").forEach((btn) => {
+          btn.addEventListener("click", () => setWorkType(btn.dataset.emptySwitchType));
+        });
+        return;
+      }
+      if (!records.length) {
+        $("recordList").innerHTML = emptyRecordHtml();
+        document.querySelectorAll("[data-empty-switch-type]").forEach((btn) => {
+          btn.addEventListener("click", () => setWorkType(btn.dataset.emptySwitchType));
+        });
+        return;
+      }
+      $("recordList").innerHTML = records.map(recordCardHtml).join("");
+      bindRecordEvents();
     }
 
     function draftFieldsHtml(record, id, draft) {
@@ -2259,6 +2482,8 @@
           <div class="wide">${textField(id, "progress", "完成情况", draft.progress)}</div>
         `;
       }
+      const type = record.work_type || "maintenance";
+      const zhihangBinding = type === "change" ? zhihangBindingHtml(id, draft) : "";
       return `
         ${inputField(id, "start_time", "开始时间", draft.start_time, "datetime-local")}
         ${inputField(id, "end_time", "结束时间", draft.end_time, "datetime-local")}
@@ -2267,6 +2492,29 @@
         ${textField(id, "reason", "原因", draft.reason)}
         ${textField(id, "impact", "影响", draft.impact)}
         <div class="wide">${textField(id, "progress", "进度", draft.progress)}</div>
+        ${zhihangBinding}
+      `;
+    }
+
+    function zhihangBindingHtml(id, draft) {
+      const involved = Boolean(draft.zhihang_involved);
+      const selectedTitle = draft.zhihang_record_id
+        ? (draft.zhihang_title || zhihangTitle(findZhihangRecord(draft.zhihang_record_id)) || draft.zhihang_record_id)
+        : "";
+      const selectedMeta = draft.zhihang_record_id
+        ? `已绑定：${selectedTitle}`
+        : "涉及智航时，请从左侧右栏选择一个智航侧变更";
+      return `
+        <div class="wide zhihang-binding">
+          <label>智航关联</label>
+          <div class="row-actions">
+            <button type="button" class="btn ${involved ? "blue" : "ghost"}" data-toggle-zhihang="${html(id)}">
+              是否涉及智航：${involved ? "是" : "否"}
+            </button>
+            ${involved && draft.zhihang_record_id ? `<button type="button" class="btn ghost" data-clear-zhihang="${html(id)}">重新选择</button>` : ""}
+          </div>
+          <div class="record-meta">${html(selectedMeta)}</div>
+        </div>
       `;
     }
 
@@ -2276,18 +2524,22 @@
         $("draftList").innerHTML = `<div class="empty">从左侧选择事项后，在这里填写开始通告字段</div>`;
         return;
       }
+      if (!state.activeDraftKey || !state.selected.has(state.activeDraftKey)) {
+        state.activeDraftKey = recordKey(selectedRecords[0]);
+      }
       $("draftList").innerHTML = selectedRecords.map((record) => {
         const f = fieldsOf(record);
         const draft = getDraft(record);
         const id = recordKey(record);
         const type = record.work_type || "maintenance";
+        const active = state.activeDraftKey === id;
         const extraMeta = type === "change"
           ? levelForRecord(record)
           : type === "repair"
             ? [repairDeviceText(record), f["流程"]].filter(Boolean).join(" | ")
             : f["计划维护月份"];
         return `
-          <article class="draft-card active" data-draft-card="${html(id)}">
+          <article class="draft-card ${active ? "active" : ""}" data-draft-card="${html(id)}">
             <div class="card-head">
               <div>
                 <h3 class="card-title">${html(titleForRecord(record))}</h3>
@@ -2367,10 +2619,55 @@
           }
         });
       });
+      document.querySelectorAll("[data-draft-card]").forEach((card) => {
+        card.addEventListener("click", (event) => {
+          if (event.target.closest("button, input, textarea, select")) return;
+          state.activeDraftKey = card.dataset.draftCard || "";
+          renderRecords();
+          renderDrafts();
+        });
+      });
+      document.querySelectorAll("[data-toggle-zhihang]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const id = btn.dataset.toggleZhihang;
+          const draft = state.drafts.get(id);
+          if (!draft) return;
+          const next = !draft.zhihang_involved;
+          draft.zhihang_involved = next;
+          if (!next) {
+            draft.zhihang_record_id = "";
+            draft.zhihang_title = "";
+            draft.zhihang_progress = "";
+          }
+          draft.job_id = "";
+          draft.operation_id = "";
+          state.activeDraftKey = id;
+          forgetJobsForLine(id);
+          saveDraftState();
+          render();
+        });
+      });
+      document.querySelectorAll("[data-clear-zhihang]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const id = btn.dataset.clearZhihang;
+          const draft = state.drafts.get(id);
+          if (!draft) return;
+          draft.zhihang_record_id = "";
+          draft.zhihang_title = "";
+          draft.zhihang_progress = "";
+          draft.job_id = "";
+          draft.operation_id = "";
+          state.activeDraftKey = id;
+          forgetJobsForLine(id);
+          saveDraftState();
+          render();
+        });
+      });
       document.querySelectorAll("[data-remove-draft]").forEach((btn) => {
         btn.addEventListener("click", () => {
           state.selected.delete(btn.dataset.removeDraft);
           state.drafts.delete(btn.dataset.removeDraft);
+          if (state.activeDraftKey === btn.dataset.removeDraft) state.activeDraftKey = "";
           saveDraftState();
           render();
         });
@@ -2397,7 +2694,7 @@
             <div class="card-head">
               <div>
                 <h3 class="card-title">${html(item.title || "未命名通告")}</h3>
-                <div class="record-meta">${html([workTypeLabel(item.work_type), item.origin_label, item.building, item.specialty, item.level, item.time, item.upload_state, item.source_record_id ? "源ID " + item.source_record_id : "", item.active_item_id ? "本地ID " + item.active_item_id : ""].filter(Boolean).join(" | "))}</div>
+                <div class="record-meta">${html([workTypeLabel(item.work_type), item.origin_label, item.building, item.specialty, item.level, item.time, item.upload_state, item.zhihang_title ? "智航 " + item.zhihang_title : "", item.source_record_id ? "源ID " + item.source_record_id : "", item.active_item_id ? "本地ID " + item.active_item_id : ""].filter(Boolean).join(" | "))}</div>
               </div>
               <div class="card-actions">
                 <span class="tag ${item.can_update ? "green" : "amber"}">${html(tagText)}</span>
@@ -2483,6 +2780,10 @@
         solution: isRepair ? read("solution", item?.solution || "") : (item?.solution || ""),
         fault_time: isRepair ? faultTime : (item?.fault_time || ""),
         expected_time: isRepair ? expectedTime : (item?.expected_time || ""),
+        zhihang_involved: Boolean(item?.zhihang_involved || item?.zhihang_record_id),
+        zhihang_record_id: item?.zhihang_record_id || "",
+        zhihang_title: item?.zhihang_title || "",
+        zhihang_progress: item?.zhihang_progress || "",
         operation_id: opFor(`${activeItemId}:${action}`),
       };
     }
@@ -2505,6 +2806,10 @@
           source_record_id: item.source_record_id || "",
           source_app_token: item.source_app_token || "",
           source_table_id: item.source_table_id || "",
+          zhihang_involved: Boolean(item.zhihang_involved || item.zhihang_record_id),
+          zhihang_record_id: item.zhihang_record_id || "",
+          zhihang_title: item.zhihang_title || "",
+          zhihang_progress: item.zhihang_progress || "",
           source_only: Boolean(item.source_only),
           title: item.title || "",
           building: item.building || "",
@@ -2569,6 +2874,12 @@
         setJobLine(recordId, "该事项缺少专业类别，无法上传", "failed");
         return;
       }
+      if (type === "change" && draft.zhihang_involved && !draft.zhihang_record_id) {
+        setJobLine(recordId, "该变更已标记涉及智航，请先选择右侧智航侧变更", "failed");
+        state.activeDraftKey = recordId;
+        renderRecords();
+        return;
+      }
       await sendAction({
         action: "start",
         scope: state.scope,
@@ -2588,6 +2899,10 @@
         reason: draft.reason,
         impact: draft.impact,
         progress: draft.progress,
+        zhihang_involved: type === "change" ? Boolean(draft.zhihang_involved) : false,
+        zhihang_record_id: type === "change" ? (draft.zhihang_record_id || "") : "",
+        zhihang_title: type === "change" ? (draft.zhihang_title || "") : "",
+        zhihang_progress: type === "change" ? (draft.zhihang_progress || "") : "",
         repair_device: type === "repair" ? (draft.repair_device || "") : "",
         repair_fault: type === "repair" ? (draft.repair_fault || "") : "",
         fault_type: type === "repair" ? (draft.fault_type || "") : "",

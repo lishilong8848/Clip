@@ -466,6 +466,13 @@ class MainWindowRuntimeMixin:
         if not item or not self._is_valid_list_item(item):
             return {"ok": False, "error": "主界面未找到对应进行中条目。"}
         data = dict(item.data(Qt.ItemDataRole.UserRole) or {})
+        scope = str((payload or {}).get("scope") or "ALL").strip()
+        text = str(data.get("text") or "")
+        buildings = self._normalize_buildings_value(data.get("buildings"))
+        if not buildings:
+            buildings = self._infer_buildings_from_notice_text(text)
+        if not self._lan_scope_matches(scope, buildings):
+            return {"ok": False, "error": "当前账号无权删除该楼栋的进行中通告。"}
         record_id = str(data.get("record_id") or "").strip()
         if bool(data.get("_upload_in_progress")) or (
             record_id and self._has_pending_upload(record_id)
@@ -547,6 +554,10 @@ class MainWindowRuntimeMixin:
                     "source_record_id": str(data.get("lan_source_record_id") or ""),
                     "source_app_token": str(data.get("lan_source_app_token") or ""),
                     "source_table_id": str(data.get("lan_source_table_id") or ""),
+                    "zhihang_involved": bool(data.get("lan_zhihang_record_id")),
+                    "zhihang_record_id": str(data.get("lan_zhihang_record_id") or ""),
+                    "zhihang_title": str(data.get("lan_zhihang_title") or ""),
+                    "zhihang_progress": str(data.get("lan_zhihang_progress") or ""),
                     "origin": "frontend" if data.get("lan_created_from_portal") else "qt",
                     "origin_label": origin_label,
                     "work_type": (
@@ -821,6 +832,9 @@ class MainWindowRuntimeMixin:
                 "lan_source_table_id": str(payload.get("source_table_id") or ""),
                 "lan_work_type": work_type,
                 "lan_created_from_portal": True,
+                "lan_zhihang_record_id": str(payload.get("zhihang_record_id") or ""),
+                "lan_zhihang_title": str(payload.get("zhihang_title") or ""),
+                "lan_zhihang_progress": str(payload.get("zhihang_progress") or ""),
             }
             self._ensure_payload_for_data(data)
             item, _ = self.add_active_item(data)
@@ -882,6 +896,9 @@ class MainWindowRuntimeMixin:
                 "lan_source_table_id": str(payload.get("source_table_id") or ""),
                 "lan_work_type": work_type,
                 "lan_created_from_portal": True,
+                "lan_zhihang_record_id": str(payload.get("zhihang_record_id") or ""),
+                "lan_zhihang_title": str(payload.get("zhihang_title") or ""),
+                "lan_zhihang_progress": str(payload.get("zhihang_progress") or ""),
             }
             self._ensure_payload_for_data(data)
             item, _ = self.add_active_item(data)
@@ -947,6 +964,12 @@ class MainWindowRuntimeMixin:
             data["lan_source_app_token"] = str(payload.get("source_app_token") or "")
         if payload.get("source_table_id") and not data.get("lan_source_table_id"):
             data["lan_source_table_id"] = str(payload.get("source_table_id") or "")
+        if payload.get("zhihang_record_id"):
+            data["lan_zhihang_record_id"] = str(payload.get("zhihang_record_id") or "")
+        if payload.get("zhihang_title"):
+            data["lan_zhihang_title"] = str(payload.get("zhihang_title") or "")
+        if payload.get("zhihang_progress"):
+            data["lan_zhihang_progress"] = str(payload.get("zhihang_progress") or "")
         data["_has_unuploaded_changes"] = False
         data["_pending_upload_hash"] = None
         data["_upload_in_progress"] = False

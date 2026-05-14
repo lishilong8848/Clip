@@ -27,6 +27,8 @@ DEFAULT_APP_TOKEN = "HU38bc1vnamMK9sCeOgclUvXnFc"
 DEFAULT_TABLE_ID = "tblzk7WrXxNWQy6V"
 CHANGE_SOURCE_APP_TOKEN = "JhiVwgfoIimAqEk8YwEc09sknGd"
 CHANGE_SOURCE_TABLE_ID = "tblBvg6wCYSX3hcg"
+ZHIHANG_CHANGE_APP_TOKEN = "IrIibPkUOa6udGsMhu2cbOqhnWg"
+ZHIHANG_CHANGE_TABLE_ID = "tblqMJvYW5dxFFfU"
 REPAIR_SOURCE_APP_TOKEN = "AnEBwJlvGiJfDdkOB32cUPuknzg"
 REPAIR_SOURCE_TABLE_ID = "tblschT48zXwigUG"
 REPAIR_SOURCE_VIEW_ID = "vewn2xWBED"
@@ -47,6 +49,7 @@ CHANGE_PROGRESS_OPTION_FALLBACK = {
     "optZtdlcZy": "已结束",
     "optqGq0YcR": "退回",
 }
+ZHIHANG_PROGRESS_ENDED = "已结束"
 REPAIR_BUILDING_OPTION_FALLBACK = {
     "optjAjpfmQ": "A楼",
     "optHCxNMDk": "B楼",
@@ -139,11 +142,15 @@ class MaintenancePortalService:
         self._change_field_meta_list: list[FieldMeta] = []
         self._change_field_meta_by_name: dict[str, FieldMeta] = {}
         self._change_records: list[dict[str, Any]] = []
+        self._zhihang_change_field_meta_list: list[FieldMeta] = []
+        self._zhihang_change_field_meta_by_name: dict[str, FieldMeta] = {}
+        self._zhihang_change_records: list[dict[str, Any]] = []
         self._repair_field_meta_list: list[FieldMeta] = []
         self._repair_field_meta_by_name: dict[str, FieldMeta] = {}
         self._repair_records: list[dict[str, Any]] = []
         self._maintenance_loaded_once = False
         self._change_loaded_once = False
+        self._zhihang_change_loaded_once = False
         self._repair_loaded_once = False
         self._load_warnings: list[str] = []
         self._last_loaded_at = ""
@@ -245,6 +252,20 @@ class MaintenancePortalService:
         self._change_field_meta_by_name = {meta.field_name: meta for meta in metas}
         return metas
 
+    def _load_zhihang_change_fields(self) -> list[FieldMeta]:
+        payload = self._request_json(
+            "fields",
+            params={"page_size": 500},
+            app_token=ZHIHANG_CHANGE_APP_TOKEN,
+            table_id=ZHIHANG_CHANGE_TABLE_ID,
+        )
+        metas = self._parse_field_meta(payload)
+        self._zhihang_change_field_meta_list = metas
+        self._zhihang_change_field_meta_by_name = {
+            meta.field_name: meta for meta in metas
+        }
+        return metas
+
     def _load_repair_fields(self) -> list[FieldMeta]:
         payload = self._request_json(
             "fields",
@@ -342,6 +363,40 @@ class MaintenancePortalService:
                 break
         self._change_records = records
         self._change_loaded_once = True
+        return records
+
+    def _load_zhihang_change_records(self) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        page_token = ""
+        while True:
+            params = {"page_size": 500}
+            if page_token:
+                params["page_token"] = page_token
+            payload = self._request_json(
+                "records",
+                params=params,
+                app_token=ZHIHANG_CHANGE_APP_TOKEN,
+                table_id=ZHIHANG_CHANGE_TABLE_ID,
+            )
+            data = payload.get("data", {})
+            for item in data.get("items") or []:
+                records.append(
+                    self._normalize_record(
+                        item,
+                        meta_by_name=self._zhihang_change_field_meta_by_name,
+                        work_type=WORK_TYPE_CHANGE,
+                        notice_type=NOTICE_TYPE_CHANGE,
+                        source_app_token=ZHIHANG_CHANGE_APP_TOKEN,
+                        source_table_id=ZHIHANG_CHANGE_TABLE_ID,
+                    )
+                )
+            if not data.get("has_more"):
+                break
+            page_token = str(data.get("page_token") or "").strip()
+            if not page_token:
+                break
+        self._zhihang_change_records = records
+        self._zhihang_change_loaded_once = True
         return records
 
     def _load_repair_records(self) -> list[dict[str, Any]]:
@@ -467,6 +522,17 @@ class MaintenancePortalService:
                     self._change_records = []
                 warnings.append(f"变更源表同步失败: {exc}")
             try:
+                self._load_zhihang_change_fields()
+                self._load_zhihang_change_records()
+            except Exception as exc:
+                self._zhihang_change_loaded_once = True
+                if not self._zhihang_change_field_meta_list:
+                    self._zhihang_change_field_meta_list = []
+                    self._zhihang_change_field_meta_by_name = {}
+                if not self._zhihang_change_records:
+                    self._zhihang_change_records = []
+                warnings.append(f"智航变更源表同步失败: {exc}")
+            try:
                 self._load_repair_fields()
                 self._load_repair_records()
             except Exception as exc:
@@ -501,6 +567,14 @@ class MaintenancePortalService:
                 except Exception as exc:
                     self._change_loaded_once = True
                     warnings.append(f"变更源表同步失败: {exc}")
+            if not self._zhihang_change_loaded_once:
+                attempted_optional_load = True
+                try:
+                    self._load_zhihang_change_fields()
+                    self._load_zhihang_change_records()
+                except Exception as exc:
+                    self._zhihang_change_loaded_once = True
+                    warnings.append(f"智航变更源表同步失败: {exc}")
             if not self._repair_loaded_once:
                 attempted_optional_load = True
                 try:
@@ -1022,6 +1096,118 @@ class MaintenancePortalService:
             filtered.append(record)
         return filtered
 
+    def _zhihang_change_primary_field_name(self) -> str:
+        for meta in self._zhihang_change_field_meta_list:
+            if meta.is_primary:
+                return meta.field_name
+        return ""
+
+    def _zhihang_change_title(self, record: dict[str, Any]) -> str:
+        fields = record.get("display_fields") or {}
+        for name in (
+            "标题",
+            "名称",
+            "变更名称",
+            "变更标题",
+            "变更简述",
+            "工作内容",
+            self._zhihang_change_primary_field_name(),
+        ):
+            value = str(fields.get(name) or "").strip()
+            if value:
+                return value
+        return str(record.get("record_id") or "").strip()
+
+    def _zhihang_change_progress(self, record: dict[str, Any]) -> str:
+        fields = record.get("display_fields") or {}
+        return str(fields.get("进度") or fields.get("进展") or "").strip()
+
+    def _zhihang_change_building_codes(self, record: dict[str, Any]) -> list[str]:
+        title = self._zhihang_change_title(record).upper()
+        if not title:
+            return []
+        codes: list[str] = []
+        if "110" in title:
+            codes.append("110")
+        for match in re.findall(
+            r"(?<![A-Z0-9])([ABCDEH]{2,})(?=楼|栋|座|区|园区|[^A-Z0-9]|$)",
+            title,
+        ):
+            for code in match:
+                if code not in codes:
+                    codes.append(code)
+        for code in ("A", "B", "C", "D", "E", "H"):
+            if (
+                f"{code}楼" in title
+                or f"{code}栋" in title
+                or f"{code}座" in title
+            ) and code not in codes:
+                codes.append(code)
+        if "园区" in title and len(codes) < 2:
+            codes.extend([code for code in ("A", "B", "C") if code not in codes])
+        return [code for code in BUILDING_SCOPE_CODES if code in codes]
+
+    def _zhihang_change_scope_all(self, record: dict[str, Any]) -> bool:
+        return not self._zhihang_change_building_codes(record)
+
+    def _scope_matches_zhihang_change_record(
+        self, scope: Any, record: dict[str, Any]
+    ) -> bool:
+        scope = self._normalize_scope(scope)
+        if scope == "ALL":
+            return True
+        if self._zhihang_change_scope_all(record):
+            return True
+        return self._scope_matches_buildings(
+            scope, self._zhihang_change_building_codes(record)
+        )
+
+    def _linked_zhihang_record_ids(
+        self, ongoing_items: list[dict[str, Any]] | None = None
+    ) -> set[str]:
+        linked: set[str] = set()
+        for item in ongoing_items or []:
+            if not isinstance(item, dict):
+                continue
+            for field in ("zhihang_record_id", "lan_zhihang_record_id"):
+                value = str(item.get(field) or "").strip()
+                if value:
+                    linked.add(value)
+        with self._summary_lock:
+            status_items = self._load_work_status_items_locked("ALL")
+        for item in status_items:
+            value = str(item.get("zhihang_record_id") or "").strip()
+            if value:
+                linked.add(value)
+        return linked
+
+    def _filter_zhihang_change_records(
+        self,
+        *,
+        scope: str = "ALL",
+        exclude_record_ids: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        excluded = {str(value or "").strip() for value in (exclude_record_ids or set())}
+        filtered: list[dict[str, Any]] = []
+        for record in self._zhihang_change_records:
+            record_id = str(record.get("record_id") or "").strip()
+            if record_id and record_id in excluded:
+                continue
+            progress = self._zhihang_change_progress(record)
+            if progress == ZHIHANG_PROGRESS_ENDED:
+                continue
+            if not self._scope_matches_zhihang_change_record(scope, record):
+                continue
+            filtered.append(record)
+        return filtered
+
+    def _find_zhihang_change_record_by_id(self, record_id: str) -> dict[str, Any]:
+        record_id = str(record_id or "").strip()
+        for record in self._zhihang_change_records:
+            if str(record.get("record_id") or "").strip() == record_id:
+                return record
+        raise PortalError(f"未找到智航侧变更记录: {record_id}")
+
     def _filter_repair_records(
         self,
         *,
@@ -1394,6 +1580,12 @@ class MaintenancePortalService:
             "specialty",
             "level",
             "source_progress",
+            "zhihang_involved",
+            "zhihang_record_id",
+            "zhihang_title",
+            "zhihang_progress",
+            "zhihang_source_app_token",
+            "zhihang_source_table_id",
             "plan_month",
             "maintenance_total",
             "maintenance_no",
@@ -1572,6 +1764,12 @@ class MaintenancePortalService:
                 "maintenance_project",
                 "level",
                 "source_progress",
+                "zhihang_involved",
+                "zhihang_record_id",
+                "zhihang_title",
+                "zhihang_progress",
+                "zhihang_source_app_token",
+                "zhihang_source_table_id",
                 "repair_device",
                 "repair_fault",
                 "fault_type",
@@ -2184,6 +2382,28 @@ class MaintenancePortalService:
             ),
         }
 
+    def _serialize_zhihang_change_record(self, record: dict[str, Any]) -> dict[str, Any]:
+        fields = record.get("display_fields") or {}
+        codes = self._zhihang_change_building_codes(record)
+        scope_all = not codes
+        return {
+            "record_id": str(record.get("record_id") or ""),
+            "source_record_id": str(record.get("record_id") or ""),
+            "source_app_token": ZHIHANG_CHANGE_APP_TOKEN,
+            "source_table_id": ZHIHANG_CHANGE_TABLE_ID,
+            "title": self._zhihang_change_title(record),
+            "progress": self._zhihang_change_progress(record),
+            "building": str(fields.get("楼栋") or ""),
+            "building_codes": codes,
+            "scope_all": scope_all,
+            "scope_label": "全部楼栋" if scope_all else self._building_label_from_codes(codes),
+            "level": str(fields.get("变更等级") or ""),
+            "change_type": str(fields.get("变更类型") or fields.get("变更类别") or ""),
+            "plan_start": str(fields.get("计划开始") or fields.get("计划开始时间") or ""),
+            "plan_end": str(fields.get("计划结束") or fields.get("计划结束时间") or ""),
+            "display_fields": fields,
+        }
+
     @staticmethod
     def _record_work_type(record: dict[str, Any]) -> str:
         return str(record.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
@@ -2203,6 +2423,15 @@ class MaintenancePortalService:
     def _match_text(value: Any) -> str:
         return re.sub(r"\s+", "", str(value or "")).strip()
 
+    @staticmethod
+    def _truthy_flag(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value or "").strip().lower()
+        return text in {"1", "true", "yes", "y", "on", "是", "涉及"}
+
     def _date_keys_from_values(self, *values: Any) -> set[str]:
         keys: set[str] = set()
         for value in values:
@@ -2221,9 +2450,11 @@ class MaintenancePortalService:
         if not isinstance(item, dict):
             return []
         work_type = str(item.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
+        active_item_id = str(item.get("active_item_id") or "").strip()
+        if active_item_id:
+            return [f"{work_type}:active:{active_item_id}"]
         values = {
             "source": str(item.get("source_record_id") or "").strip(),
-            "active": str(item.get("active_item_id") or "").strip(),
             "record": str(
                 item.get("target_record_id") or item.get("record_id") or ""
             ).strip(),
@@ -2273,11 +2504,7 @@ class MaintenancePortalService:
         item = copy.deepcopy(item)
         item.setdefault("work_type", WORK_TYPE_MAINTENANCE)
         item.setdefault("notice_type", NOTICE_TYPE_MAINTENANCE)
-        if not self._scope_matches_item(scope, item):
-            raise PortalError("当前账号无权删除该楼栋的进行中通告。")
-        keys = self._ongoing_hidden_keys(item)
-        if not keys:
-            raise PortalError("该进行中通告缺少可删除身份。")
+        keys = self.validate_ongoing_delete_item(item, scope=scope)
         now = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with self._hidden_ongoing_lock:
             payload = self._load_hidden_ongoing_locked()
@@ -2298,6 +2525,22 @@ class MaintenancePortalService:
                 }
             self._save_hidden_ongoing_locked(payload)
         return {"deleted": True, "keys": keys, "deleted_at": now}
+
+    def validate_ongoing_delete_item(
+        self, item: dict[str, Any], *, scope: str = "ALL"
+    ) -> list[str]:
+        if not isinstance(item, dict):
+            raise PortalError("删除参数格式错误。")
+        scope = self._normalize_scope(scope)
+        item = copy.deepcopy(item)
+        item.setdefault("work_type", WORK_TYPE_MAINTENANCE)
+        item.setdefault("notice_type", NOTICE_TYPE_MAINTENANCE)
+        if not self._scope_matches_item(scope, item):
+            raise PortalError("当前账号无权删除该楼栋的进行中通告。")
+        keys = self._ongoing_hidden_keys(item)
+        if not keys:
+            raise PortalError("该进行中通告缺少可删除身份。")
+        return keys
 
     def _target_record_is_finished(
         self, *, work_type: str, notice_type: str, record_id: str
@@ -2581,6 +2824,10 @@ class MaintenancePortalService:
         scope = self._normalize_scope(scope)
         merged_ongoing = self._merge_ongoing_items(scope, ongoing_items or [])
         filtered_records = self._workbench_records(month=default_month, scope=scope)
+        linked_zhihang_ids = self._linked_zhihang_record_ids(merged_ongoing)
+        zhihang_records = self._filter_zhihang_change_records(
+            scope=scope, exclude_record_ids=linked_zhihang_ids
+        )
         daily_summary = self.get_daily_summary(
             scope=scope, ongoing_items=merged_ongoing
         )
@@ -2626,6 +2873,10 @@ class MaintenancePortalService:
                 self._serialize_record(record, summary_by_record)
                 for record in filtered_records
             ],
+            "zhihang_change_records": [
+                self._serialize_zhihang_change_record(record)
+                for record in zhihang_records
+            ],
             "ongoing": merged_ongoing,
             "daily_summary": daily_summary,
             "record_type_counts": record_type_counts,
@@ -2651,6 +2902,10 @@ class MaintenancePortalService:
         merged_ongoing = self._merge_ongoing_items(scope, ongoing_items or [])
         filtered_records = self._workbench_records(
             month=month, specialty=specialty, scope=scope
+        )
+        linked_zhihang_ids = self._linked_zhihang_record_ids(merged_ongoing)
+        zhihang_records = self._filter_zhihang_change_records(
+            scope=scope, exclude_record_ids=linked_zhihang_ids
         )
         if building:
             filtered_records = [
@@ -2681,6 +2936,10 @@ class MaintenancePortalService:
             "records": [
                 self._serialize_record(record, summary_by_record)
                 for record in filtered_records
+            ],
+            "zhihang_change_records": [
+                self._serialize_zhihang_change_record(record)
+                for record in zhihang_records
             ],
             "ongoing": merged_ongoing,
             "daily_summary": daily_summary,
@@ -3154,6 +3413,22 @@ class MaintenancePortalService:
             raise PortalError(f"当前入口与通告楼栋不匹配: {building or '-'}")
         if action != "start" and not target_record_id:
             raise PortalError("该变更缺少目标设备变更表 record_id，不能更新/结束。")
+        zhihang_involved = self._truthy_flag(request_payload.get("zhihang_involved"))
+        zhihang_record_id = str(request_payload.get("zhihang_record_id") or "").strip()
+        zhihang_title = str(request_payload.get("zhihang_title") or "").strip()
+        zhihang_progress = str(request_payload.get("zhihang_progress") or "").strip()
+        if action == "start" and zhihang_involved:
+            if not zhihang_record_id:
+                raise PortalError("该变更已标记涉及智航，请选择右侧智航侧变更记录。")
+            zhihang_record = self._find_zhihang_change_record_by_id(zhihang_record_id)
+            zhihang_progress = self._zhihang_change_progress(zhihang_record)
+            if zhihang_progress == ZHIHANG_PROGRESS_ENDED:
+                raise PortalError("所选智航侧变更已结束，不能绑定。")
+            if not self._scope_matches_zhihang_change_record(scope, zhihang_record):
+                raise PortalError("所选智航侧变更与当前入口不匹配。")
+            if zhihang_record_id in self._linked_zhihang_record_ids():
+                raise PortalError("所选智航侧变更已绑定到其他阿里侧变更。")
+            zhihang_title = self._zhihang_change_title(zhihang_record)
 
         start_time = (
             self._format_input_datetime(request_payload.get("start_time"))
@@ -3208,6 +3483,12 @@ class MaintenancePortalService:
             "specialty": specialty,
             "level": level,
             "source_progress": source_progress,
+            "zhihang_involved": zhihang_involved,
+            "zhihang_record_id": zhihang_record_id,
+            "zhihang_title": zhihang_title,
+            "zhihang_progress": zhihang_progress,
+            "zhihang_source_app_token": ZHIHANG_CHANGE_APP_TOKEN if zhihang_record_id else "",
+            "zhihang_source_table_id": ZHIHANG_CHANGE_TABLE_ID if zhihang_record_id else "",
             "start_time": start_time,
             "end_time": end_time,
             "location": location,
