@@ -45,6 +45,7 @@ class ClipboardTool(
     lan_template_notice_received = pyqtSignal(dict)
     lan_maintenance_action_received = pyqtSignal(dict)
     lan_maintenance_ongoing_query_received = pyqtSignal(dict)
+    lan_ongoing_delete_received = pyqtSignal(dict)
 
     def __init__(self):
         super().__init__()
@@ -377,6 +378,13 @@ class ClipboardTool(
             self,
             "lan_maintenance_ongoing_query_received",
             self._on_lan_maintenance_ongoing_query_received,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self.connection_registry.connect(
+            "main_window",
+            self,
+            "lan_ongoing_delete_received",
+            self._on_lan_ongoing_delete_received,
             Qt.ConnectionType.QueuedConnection,
         )
 

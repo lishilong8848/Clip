@@ -215,6 +215,9 @@ def build_notice_display_snapshot(data_dict: dict | None) -> dict:
     if str(normalized.get("routing_state") or "").strip().lower() == "conflicted":
         subtitle = f"{subtitle} | 条目路由冲突" if subtitle else "条目路由冲突"
 
+    if normalized.get("lan_created_from_portal"):
+        subtitle = f"{subtitle} | 网页工作台" if subtitle else "网页工作台"
+
     return {
         "title": title,
         "subtitle": subtitle,

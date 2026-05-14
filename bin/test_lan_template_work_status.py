@@ -1,6 +1,7 @@
 import os
 import sys
 import tempfile
+import time
 import unittest
 import json
 from pathlib import Path
@@ -13,6 +14,7 @@ if str(BIN_DIR) not in sys.path:
 from lan_bitable_template_portal.portal_service import MaintenancePortalService  # noqa: E402
 from lan_bitable_template_portal.portal_service import WORK_TYPE_CHANGE  # noqa: E402
 from lan_bitable_template_portal.portal_service import WORK_TYPE_REPAIR  # noqa: E402
+from lan_bitable_template_portal.portal_auth import PortalAuthManager  # noqa: E402
 from lan_bitable_template_portal.server import PortalHandler  # noqa: E402
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -266,7 +268,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(summary["completed_date"], "2026-04-30")
             self.assertEqual(summary["ended_at"], "2026-04-30 18:30")
 
-    def test_change_records_use_precise_scope_and_source_ongoing_is_readonly(self):
+    def test_change_records_use_precise_scope_and_source_ongoing_is_not_displayed(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
             service._records = [_build_record("m1", "A楼", "过滤网维护", "5月")]
@@ -277,17 +279,20 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 _build_change_record("c4", building="A楼、B楼", progress="退回", title="退回变更"),
             ]
 
-            campus = service.query_records(month="5月", scope="CAMPUS")
+            with patch.object(
+                service, "_target_records_for_notice_type", return_value=[]
+            ):
+                campus = service.query_records(month="5月", scope="CAMPUS")
             self.assertEqual(
                 [item["record_id"] for item in campus["records"]],
                 ["c2"],
             )
-            self.assertEqual(len(campus["ongoing"]), 1)
-            self.assertEqual(campus["ongoing"][0]["source_record_id"], "c3")
-            self.assertTrue(campus["ongoing"][0]["source_only"])
-            self.assertFalse(campus["ongoing"][0]["can_update"])
+            self.assertEqual(campus["ongoing"], [])
 
-            single = service.query_records(month="5月", scope="A")
+            with patch.object(
+                service, "_target_records_for_notice_type", return_value=[]
+            ):
+                single = service.query_records(month="5月", scope="A")
             self.assertEqual(
                 [item["record_id"] for item in single["records"]],
                 ["m1", "c1"],
@@ -449,7 +454,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertIn("【紧急程度】中", prepared["text"])
             self.assertIn("【故障发现方式】监控发现", prepared["text"])
 
-    def test_started_repair_source_record_moves_to_ongoing_with_target_record(self):
+    def test_started_repair_source_record_is_not_displayed_without_qt_item(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
             service._repair_records = [
@@ -465,14 +470,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             result = service.query_records(month="5月", scope="D")
 
             self.assertEqual(result["records"], [])
-            self.assertEqual(len(result["ongoing"]), 1)
-            ongoing = result["ongoing"][0]
-            self.assertEqual(ongoing["work_type"], WORK_TYPE_REPAIR)
-            self.assertEqual(ongoing["source_record_id"], "r1")
-            self.assertEqual(ongoing["record_id"], "target-r1")
-            self.assertEqual(ongoing["target_record_id"], "target-r1")
-            self.assertTrue(ongoing["can_update"])
-            self.assertFalse(ongoing["source_only"])
+            self.assertEqual(result["ongoing"], [])
 
     def test_change_source_failure_does_not_block_maintenance_records(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -600,7 +598,14 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "not-a-number",
                 create=True,
             ):
+                self.assertEqual(service._source_cache_ttl_seconds(), 300)
                 self.assertTrue(service._source_cache_expired())
+            with patch(
+                "lan_bitable_template_portal.portal_service.config.lan_template_source_cache_ttl_seconds",
+                120,
+                create=True,
+            ):
+                self.assertEqual(service._source_cache_ttl_seconds(), 120)
 
     def test_scope_overview_counts_pending_and_ongoing_by_work_type(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -619,25 +624,186 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 _build_repair_record("r1", building="D楼", title="D楼UPS检修")
             ]
 
-            result = service.get_scope_overview(
-                ongoing_items=[
-                    {
-                        "active_item_id": "active-m",
-                        "work_type": "maintenance",
-                        "notice_type": "维保通告",
-                        "title": "EA118机房D楼过滤网维护",
-                        "building": "D楼",
-                        "building_codes": ["D"],
-                    }
-                ]
-            )
+            with patch.object(
+                service, "_target_records_for_notice_type", return_value=[]
+            ):
+                result = service.get_scope_overview(
+                    ongoing_items=[
+                        {
+                            "active_item_id": "active-m",
+                            "work_type": "maintenance",
+                            "notice_type": "维保通告",
+                            "title": "EA118机房D楼过滤网维护",
+                            "building": "D楼",
+                            "building_codes": ["D"],
+                        }
+                    ]
+                )
 
             self.assertEqual(result["scopes"]["D"]["maintenance_pending"], 1)
             self.assertEqual(result["scopes"]["D"]["change_pending"], 1)
             self.assertEqual(result["scopes"]["D"]["repair_pending"], 1)
             self.assertEqual(result["scopes"]["D"]["maintenance_ongoing"], 1)
             self.assertEqual(result["scopes"]["CAMPUS"]["change_pending"], 1)
-            self.assertEqual(result["scopes"]["B"]["change_ongoing"], 1)
+            self.assertEqual(result["scopes"]["B"]["change_ongoing"], 0)
+
+    def test_source_ongoing_change_is_not_surfaced_without_qt_item(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            service._change_records = [
+                _build_change_record(
+                    "source-change-1",
+                    building="C楼",
+                    progress="进行中",
+                    title="C楼柴油发电机测试变更",
+                )
+            ]
+            target_records = [
+                {
+                    "record_id": "target-change-1",
+                    "display_fields": {
+                        "名称": "C楼柴油发电机测试变更",
+                        "变更状态": "开始",
+                        "变更开始时间": "2026-05-08 09:00",
+                        "楼栋": "C楼",
+                    },
+                }
+            ]
+
+            with patch.object(
+                service, "_target_records_for_notice_type", return_value=target_records
+            ):
+                merged = service._merge_ongoing_items("C", [])
+
+            self.assertEqual(merged, [])
+
+    def test_source_ongoing_repair_is_not_surfaced_without_qt_item(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            service._repair_records = [
+                _build_repair_record(
+                    "source-repair-1",
+                    title="D楼UPS故障检修",
+                    building="D楼",
+                    started=True,
+                    target_record_id="",
+                )
+            ]
+            target_records = [
+                {
+                    "record_id": "target-repair-1",
+                    "display_fields": {
+                        "名称（标题）": "D楼UPS故障检修",
+                        "检修状态": "开始",
+                        "实际开始时间": "2026-05-08 09:00",
+                        "楼栋": "D楼",
+                    },
+                }
+            ]
+
+            with patch.object(
+                service, "_target_records_for_notice_type", return_value=target_records
+            ):
+                merged = service._merge_ongoing_items("D", [])
+
+            self.assertEqual(merged, [])
+
+    def test_hidden_ongoing_item_is_removed_from_refresh_results(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            service._change_records = [
+                _build_change_record(
+                    "source-change-hide",
+                    building="C楼",
+                    progress="进行中",
+                    title="C楼需隐藏变更",
+                )
+            ]
+            service.hide_ongoing_item(
+                {
+                    "scope": "C",
+                    "work_type": WORK_TYPE_CHANGE,
+                    "notice_type": "设备变更",
+                    "active_item_id": "source-change-source-change-hide",
+                    "source_record_id": "source-change-hide",
+                    "building": "C楼",
+                    "building_codes": ["C"],
+                    "title": "C楼需隐藏变更",
+                },
+                scope="C",
+                deleted_by="tester",
+            )
+
+            with patch.object(service, "_target_records_for_notice_type", return_value=[]):
+                merged = service._merge_ongoing_items("C", [])
+
+            self.assertEqual(merged, [])
+
+    def test_qt_ongoing_item_is_kept_even_if_target_record_is_completed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            target_records = [
+                {
+                    "record_id": "target-change-ended",
+                    "display_fields": {
+                        "名称": "C楼已完成变更",
+                        "变更状态": "已结束",
+                        "变更开始时间": "2026-05-08 09:00",
+                        "楼栋": "C楼",
+                    },
+                }
+            ]
+
+            with patch.object(
+                service, "_target_records_for_notice_type", return_value=target_records
+            ):
+                merged = service._merge_ongoing_items(
+                    "C",
+                    [
+                        {
+                            "active_item_id": "active-ended",
+                            "work_type": WORK_TYPE_CHANGE,
+                            "notice_type": "设备变更",
+                            "record_id": "target-change-ended",
+                            "title": "C楼已完成变更",
+                            "building": "C楼",
+                            "building_codes": ["C"],
+                        }
+                    ],
+                )
+
+            self.assertEqual(len(merged), 1)
+            self.assertEqual(merged[0]["active_item_id"], "active-ended")
+
+    def test_source_ongoing_with_completed_target_match_is_not_displayed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            service._change_records = [
+                _build_change_record(
+                    "source-change-ended",
+                    building="C楼",
+                    progress="进行中",
+                    title="C楼目标已完成变更",
+                )
+            ]
+            target_records = [
+                {
+                    "record_id": "target-change-ended",
+                    "display_fields": {
+                        "名称": "C楼目标已完成变更",
+                        "变更状态": "已结束",
+                        "变更开始时间": "2026-05-08 09:00",
+                        "楼栋": "C楼",
+                    },
+                }
+            ]
+
+            with patch.object(
+                service, "_target_records_for_notice_type", return_value=target_records
+            ):
+                merged = service._merge_ongoing_items("C", [])
+
+            self.assertEqual(merged, [])
 
     def test_history_summary_filters_month_scope_and_work_type(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -774,6 +940,100 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 password="new-pass-123",
             )
             self.assertEqual(saved["links"]["A"], "https://example.com/a")
+
+    def test_portal_auth_reloads_permissions_and_backs_up_corrupt_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            def fake_data_path(name):
+                return str(root / name)
+
+            with patch(
+                "lan_bitable_template_portal.portal_auth.get_data_file_path",
+                side_effect=fake_data_path,
+            ):
+                manager = PortalAuthManager()
+                permission_path = root / "lan_portal_auth.json"
+                permission_path.write_text(
+                    json.dumps(
+                        {
+                            "version": 1,
+                            "default_scopes": [],
+                            "users": {
+                                "ou_test": {
+                                    "name": "测试用户",
+                                    "role": "building",
+                                    "scopes": ["A"],
+                                }
+                            },
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+                with manager._lock:
+                    manager._sessions["sid"] = {
+                        "session_id": "sid",
+                        "user": {"open_id": "ou_test", "name": "测试用户"},
+                        "allowed_scopes": ["A"],
+                        "expires_at": time.time() + 3600,
+                    }
+
+                session = manager.get_session("sid")
+                self.assertEqual(manager.session_scopes(session), ["A"])
+
+                permission_path.write_text(
+                    json.dumps(
+                        {
+                            "version": 1,
+                            "default_scopes": [],
+                            "users": {
+                                "ou_test": {
+                                    "name": "测试用户",
+                                    "role": "building",
+                                    "scopes": ["B"],
+                                }
+                            },
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+                session = manager.get_session("sid")
+                self.assertEqual(manager.session_scopes(session), ["B"])
+
+                permission_path.write_text("{bad json", encoding="utf-8")
+                self.assertEqual(manager.scopes_for_open_id("ou_unknown"), [])
+                self.assertTrue(permission_path.exists())
+                self.assertTrue(list(root.glob("lan_portal_auth.bad.*.json")))
+
+    def test_portal_auth_redirect_host_sanitization(self):
+        self.assertEqual(
+            PortalHandler._safe_host_value("127.0.0.1:18766", "fallback:1"),
+            "127.0.0.1:18766",
+        )
+        self.assertEqual(
+            PortalHandler._safe_host_value("[::1]:18766", "fallback:1"),
+            "[::1]:18766",
+        )
+        self.assertEqual(
+            PortalHandler._safe_host_value("evil.example\r\nX-Test: 1", "fallback:1"),
+            "fallback:1",
+        )
+        self.assertEqual(
+            PortalHandler._safe_host_value("evil.example/path", "fallback:1"),
+            "fallback:1",
+        )
+        self.assertEqual(
+            PortalHandler._safe_host_value("evil.example@127.0.0.1", "fallback:1"),
+            "fallback:1",
+        )
+        self.assertEqual(
+            PortalHandler._safe_host_value("0.0.0.0:18766", "fallback:1"),
+            "fallback:1",
+        )
+        self.assertEqual(PortalHandler._safe_proto_value("https, http"), "https")
+        self.assertEqual(PortalHandler._safe_proto_value("javascript"), "http")
 
 
 if __name__ == "__main__":

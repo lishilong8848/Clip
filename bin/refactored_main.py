@@ -215,6 +215,10 @@ def main():
             portal_controller.set_ongoing_callback(
                 window.get_lan_maintenance_ongoing_notices
             )
+            if hasattr(portal_controller, "set_ongoing_delete_callback"):
+                portal_controller.set_ongoing_delete_callback(
+                    window.delete_lan_ongoing_notice
+                )
             portal_controller.set_maintenance_action_callback(
                 window.enqueue_lan_maintenance_action
             )

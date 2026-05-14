@@ -17,7 +17,7 @@ from typing import Any, Callable
 
 import requests
 
-from upload_event_module.config import config
+from upload_event_module.config import config, get_field_config
 from upload_event_module.services.feishu_service import refresh_feishu_token
 from upload_event_module.services.robot_webhook import send_text_to_open_ids
 from upload_event_module.utils import get_data_file_path
@@ -122,6 +122,7 @@ class MaintenancePortalService:
     _summary_lock = threading.RLock()
     _handover_lock = threading.RLock()
     _handover_reset_lock = threading.RLock()
+    _hidden_ongoing_lock = threading.RLock()
 
     def __init__(
         self,
@@ -156,9 +157,12 @@ class MaintenancePortalService:
         self._work_status_dir.mkdir(parents=True, exist_ok=True)
         self._handover_links_path = Path(get_data_file_path("lan_handover_links.json"))
         self._handover_links_path.parent.mkdir(parents=True, exist_ok=True)
+        self._hidden_ongoing_path = Path(get_data_file_path("lan_template_hidden_ongoing.json"))
+        self._hidden_ongoing_path.parent.mkdir(parents=True, exist_ok=True)
         self._work_status_backfilled = False
         self._work_status_cache_signature: tuple[tuple[str, int, int], ...] | None = None
         self._work_status_cache_items: list[dict[str, Any]] | None = None
+        self._target_record_cache: dict[tuple[str, str], dict[str, Any]] = {}
         self._jobs: dict[str, dict[str, Any]] = {}
         self._jobs_lock = threading.RLock()
         self._handover_password_reset: dict[str, Any] | None = None
@@ -374,20 +378,81 @@ class MaintenancePortalService:
         self._repair_loaded_once = True
         return records
 
-    def _source_cache_expired(self) -> bool:
+    def _load_table_fields(
+        self, *, app_token: str, table_id: str
+    ) -> tuple[list[FieldMeta], dict[str, FieldMeta]]:
+        payload = self._request_json(
+            "fields",
+            params={"page_size": 500},
+            app_token=app_token,
+            table_id=table_id,
+        )
+        metas = self._parse_field_metas(payload.get("data", {}).get("items") or [])
+        return metas, {meta.field_name: meta for meta in metas}
+
+    def _load_table_records(
+        self,
+        *,
+        app_token: str,
+        table_id: str,
+        meta_by_name: dict[str, FieldMeta],
+        work_type: str,
+        notice_type: str,
+    ) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        page_token = ""
+        while True:
+            params = {"page_size": 500}
+            if page_token:
+                params["page_token"] = page_token
+            payload = self._request_json(
+                "records",
+                params=params,
+                app_token=app_token,
+                table_id=table_id,
+            )
+            data = payload.get("data", {})
+            for item in data.get("items") or []:
+                records.append(
+                    self._normalize_record(
+                        item,
+                        meta_by_name=meta_by_name,
+                        work_type=work_type,
+                        notice_type=notice_type,
+                        source_app_token=app_token,
+                        source_table_id=table_id,
+                    )
+                )
+            if not data.get("has_more"):
+                break
+            page_token = str(data.get("page_token") or "").strip()
+            if not page_token:
+                break
+        return records
+
+    def _source_cache_ttl_seconds(self) -> int:
         try:
             ttl = int(getattr(config, "lan_template_source_cache_ttl_seconds", 0) or 0)
         except (TypeError, ValueError):
             ttl = 0
         if ttl <= 0:
             ttl = SOURCE_CACHE_TTL_SECONDS
+        return ttl
+
+    def _source_cache_expired(self) -> bool:
+        ttl = self._source_cache_ttl_seconds()
         if not self._last_loaded_ts:
             return True
         return (time.time() - self._last_loaded_ts) >= ttl
 
+    def clear_target_record_cache(self) -> None:
+        with self._refresh_lock:
+            self._target_record_cache.clear()
+
     def refresh(self) -> None:
         with self._refresh_lock:
             warnings: list[str] = []
+            self._target_record_cache.clear()
             self._load_fields()
             self._load_records()
             try:
@@ -1646,6 +1711,7 @@ class MaintenancePortalService:
             "scope_options": SCOPE_OPTIONS,
             "scopes": overview,
             "last_loaded_at": self._last_loaded_at,
+            "source_cache_ttl_seconds": self._source_cache_ttl_seconds(),
             "warnings": list(self._load_warnings),
         }
 
@@ -2133,6 +2199,288 @@ class MaintenancePortalService:
         time_text = f"{start_time}至{end_time}" if start_time or end_time else ""
         return start_time, end_time, time_text
 
+    @staticmethod
+    def _match_text(value: Any) -> str:
+        return re.sub(r"\s+", "", str(value or "")).strip()
+
+    def _date_keys_from_values(self, *values: Any) -> set[str]:
+        keys: set[str] = set()
+        for value in values:
+            formatted = self._format_source_datetime(value)
+            for year, month, day in re.findall(
+                r"(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})", formatted
+            ):
+                keys.add(f"{int(year):04d}-{int(month):02d}-{int(day):02d}")
+        return keys
+
+    @staticmethod
+    def _target_status_is_finished(status: Any) -> bool:
+        return "结束" in str(status or "").strip()
+
+    def _ongoing_hidden_keys(self, item: dict[str, Any]) -> list[str]:
+        if not isinstance(item, dict):
+            return []
+        work_type = str(item.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
+        values = {
+            "source": str(item.get("source_record_id") or "").strip(),
+            "active": str(item.get("active_item_id") or "").strip(),
+            "record": str(
+                item.get("target_record_id") or item.get("record_id") or ""
+            ).strip(),
+        }
+        return [
+            f"{work_type}:{kind}:{value}"
+            for kind, value in values.items()
+            if value
+        ]
+
+    def _load_hidden_ongoing_locked(self) -> dict[str, Any]:
+        try:
+            with self._hidden_ongoing_path.open("r", encoding="utf-8") as fp:
+                payload = json.load(fp)
+        except FileNotFoundError:
+            payload = {}
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        hidden = payload.get("hidden")
+        if not isinstance(hidden, dict):
+            hidden = {}
+        payload["hidden"] = hidden
+        return payload
+
+    def _save_hidden_ongoing_locked(self, payload: dict[str, Any]) -> None:
+        payload["updated_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self._hidden_ongoing_path.open("w", encoding="utf-8") as fp:
+            json.dump(payload, fp, ensure_ascii=False, indent=2)
+
+    def _is_ongoing_hidden(self, item: dict[str, Any]) -> bool:
+        keys = self._ongoing_hidden_keys(item)
+        if not keys:
+            return False
+        with self._hidden_ongoing_lock:
+            payload = self._load_hidden_ongoing_locked()
+            hidden = payload.get("hidden") or {}
+            return any(key in hidden for key in keys)
+
+    def hide_ongoing_item(
+        self, item: dict[str, Any], *, scope: str = "ALL", deleted_by: str = ""
+    ) -> dict[str, Any]:
+        if not isinstance(item, dict):
+            raise PortalError("删除参数格式错误。")
+        scope = self._normalize_scope(scope)
+        item = copy.deepcopy(item)
+        item.setdefault("work_type", WORK_TYPE_MAINTENANCE)
+        item.setdefault("notice_type", NOTICE_TYPE_MAINTENANCE)
+        if not self._scope_matches_item(scope, item):
+            raise PortalError("当前账号无权删除该楼栋的进行中通告。")
+        keys = self._ongoing_hidden_keys(item)
+        if not keys:
+            raise PortalError("该进行中通告缺少可删除身份。")
+        now = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self._hidden_ongoing_lock:
+            payload = self._load_hidden_ongoing_locked()
+            hidden = payload.setdefault("hidden", {})
+            for key in keys:
+                hidden[key] = {
+                    "deleted_at": now,
+                    "deleted_by": str(deleted_by or ""),
+                    "scope": scope,
+                    "work_type": str(item.get("work_type") or WORK_TYPE_MAINTENANCE),
+                    "notice_type": str(item.get("notice_type") or ""),
+                    "title": str(item.get("title") or ""),
+                    "source_record_id": str(item.get("source_record_id") or ""),
+                    "active_item_id": str(item.get("active_item_id") or ""),
+                    "record_id": str(
+                        item.get("target_record_id") or item.get("record_id") or ""
+                    ),
+                }
+            self._save_hidden_ongoing_locked(payload)
+        return {"deleted": True, "keys": keys, "deleted_at": now}
+
+    def _target_record_is_finished(
+        self, *, work_type: str, notice_type: str, record_id: str
+    ) -> bool:
+        record_id = str(record_id or "").strip()
+        if not record_id:
+            return False
+        field_config = get_field_config(notice_type)
+        status_field = field_config.get("status", "")
+        if not status_field:
+            return False
+        try:
+            target_records = self._target_records_for_notice_type(notice_type, work_type)
+        except Exception as exc:
+            warning = f"{notice_type}目标表完成状态检查失败: {exc}"
+            if warning not in self._load_warnings:
+                self._load_warnings.append(warning)
+            return False
+        for target in target_records:
+            if str(target.get("record_id") or "").strip() != record_id:
+                continue
+            fields = target.get("display_fields") or {}
+            return self._target_status_is_finished(fields.get(status_field))
+        return False
+
+    def _target_record_building_codes(
+        self, fields: dict[str, Any], field_config: dict[str, str]
+    ) -> list[str]:
+        building_field = (
+            field_config.get("building")
+            or field_config.get("building_codes")
+            or "楼栋"
+        )
+        return self._building_codes_from_value(fields.get(building_field))
+
+    def _source_target_match_profile(
+        self, work_type: str, record: dict[str, Any]
+    ) -> tuple[str, set[str], list[str]]:
+        fields = record.get("display_fields") or {}
+        if work_type == WORK_TYPE_CHANGE:
+            start_time, end_time, _ = self._change_time_range(record)
+            return (
+                self._change_title(record),
+                self._date_keys_from_values(start_time, end_time),
+                self._change_record_building_codes(record),
+            )
+        if work_type == WORK_TYPE_REPAIR:
+            return (
+                self._repair_title(record),
+                self._date_keys_from_values(
+                    fields.get("维修开始时间"),
+                    fields.get("故障发生时间"),
+                    fields.get("期望完成时间"),
+                    fields.get("维修结束时间"),
+                    fields.get("维修结束时间（2026）"),
+                ),
+                self._repair_record_building_codes(record),
+            )
+        building = str(fields.get("楼栋") or "").strip()
+        title = f"EA118机房{building}{str(fields.get('维护总项') or '').strip()}"
+        return (
+            title,
+            self._date_keys_from_values(
+                fields.get("计划开始时间"),
+                fields.get("计划结束时间"),
+                fields.get("实际开始时间"),
+            ),
+            self._building_codes_from_value(building),
+        )
+
+    def _target_match_date_fields(
+        self, work_type: str, field_config: dict[str, str]
+    ) -> list[str]:
+        if work_type == WORK_TYPE_CHANGE:
+            return [
+                field_config.get("start_time", ""),
+                field_config.get("end_time", ""),
+                field_config.get("update_time", ""),
+            ]
+        if work_type == WORK_TYPE_REPAIR:
+            return [
+                field_config.get("actual_start", ""),
+                field_config.get("fault_time", ""),
+                field_config.get("expected_time", ""),
+            ]
+        return [
+            field_config.get("actual_start", ""),
+            field_config.get("plan_start", ""),
+            field_config.get("plan_end", ""),
+        ]
+
+    def _target_records_for_notice_type(
+        self, notice_type: str, work_type: str
+    ) -> list[dict[str, Any]]:
+        table_id = str(config.get_table_id(notice_type) or "").strip()
+        app_token = str(config.app_token or "").strip()
+        if not app_token or not table_id:
+            return []
+        cache_key = (notice_type, table_id)
+        with self._refresh_lock:
+            cached = self._target_record_cache.get(cache_key) or {}
+            if (
+                cached.get("records") is not None
+                and time.time() - float(cached.get("loaded_ts") or 0)
+                < self._source_cache_ttl_seconds()
+            ):
+                return list(cached.get("records") or [])
+            _metas, meta_by_name = self._load_table_fields(
+                app_token=app_token, table_id=table_id
+            )
+            records = self._load_table_records(
+                app_token=app_token,
+                table_id=table_id,
+                meta_by_name=meta_by_name,
+                work_type=work_type,
+                notice_type=notice_type,
+            )
+            self._target_record_cache[cache_key] = {
+                "loaded_ts": time.time(),
+                "records": records,
+            }
+            return list(records)
+
+    def _resolve_target_record_reference(
+        self,
+        *,
+        work_type: str,
+        notice_type: str,
+        source_record: dict[str, Any],
+        include_finished: bool = False,
+        only_finished: bool = False,
+    ) -> str:
+        field_config = get_field_config(notice_type)
+        title_field = (
+            field_config.get("title")
+            or field_config.get("name")
+            or "名称"
+        )
+        status_field = field_config.get("status", "")
+        source_title, source_dates, source_codes = self._source_target_match_profile(
+            work_type, source_record
+        )
+        source_title_key = self._match_text(source_title)
+        if not source_title_key or not source_dates:
+            return ""
+        date_fields = [
+            field_name
+            for field_name in self._target_match_date_fields(work_type, field_config)
+            if field_name
+        ]
+        matches: list[str] = []
+        try:
+            target_records = self._target_records_for_notice_type(notice_type, work_type)
+        except Exception as exc:
+            self._load_warnings = list(self._load_warnings or [])
+            warning = f"{notice_type}目标表自动引用失败: {exc}"
+            if warning not in self._load_warnings:
+                self._load_warnings.append(warning)
+            return ""
+        for target in target_records:
+            fields = target.get("display_fields") or {}
+            target_finished = bool(
+                status_field and self._target_status_is_finished(fields.get(status_field))
+            )
+            if only_finished and not target_finished:
+                continue
+            if target_finished and not include_finished and not only_finished:
+                continue
+            if self._match_text(fields.get(title_field)) != source_title_key:
+                continue
+            target_dates = self._date_keys_from_values(
+                *[fields.get(field_name) for field_name in date_fields]
+            )
+            if not target_dates or not (source_dates & target_dates):
+                continue
+            target_codes = self._target_record_building_codes(fields, field_config)
+            if source_codes and target_codes and source_codes != target_codes:
+                continue
+            record_id = str(target.get("record_id") or "").strip()
+            if record_id:
+                matches.append(record_id)
+        return matches[0] if len(set(matches)) == 1 else ""
+
     def _merge_ongoing_items(
         self,
         scope: str,
@@ -2140,8 +2488,6 @@ class MaintenancePortalService:
     ) -> list[dict[str, Any]]:
         scope = self._normalize_scope(scope)
         merged: list[dict[str, Any]] = []
-        seen_sources: set[str] = set()
-        seen_titles: set[str] = set()
         for item in ongoing_items or []:
             if not isinstance(item, dict):
                 continue
@@ -2150,135 +2496,9 @@ class MaintenancePortalService:
             copied = copy.deepcopy(item)
             copied.setdefault("work_type", WORK_TYPE_MAINTENANCE)
             copied.setdefault("notice_type", NOTICE_TYPE_MAINTENANCE)
+            if self._is_ongoing_hidden(copied):
+                continue
             merged.append(copied)
-            source_id = str(copied.get("source_record_id") or "").strip()
-            if source_id:
-                seen_sources.add(source_id)
-            title_key = re.sub(r"\s+", "", str(copied.get("title") or ""))
-            if title_key:
-                seen_titles.add(title_key)
-
-        for record in self._filter_change_records(
-            scope=scope, progress_values={CHANGE_PROGRESS_ONGOING}
-        ):
-            fields = record.get("display_fields") or {}
-            record_id = str(record.get("record_id") or "").strip()
-            title = self._change_title(record)
-            if record_id and record_id in seen_sources:
-                continue
-            title_key = re.sub(r"\s+", "", title)
-            if title_key and title_key in seen_titles:
-                continue
-            codes = self._change_record_building_codes(record)
-            start_time, end_time, time_text = self._change_time_range(record)
-            merged.append(
-                {
-                    "active_item_id": f"source-change-{record_id}",
-                    "record_id": "",
-                    "raw_record_id": "",
-                    "source_record_id": record_id,
-                    "source_app_token": CHANGE_SOURCE_APP_TOKEN,
-                    "source_table_id": CHANGE_SOURCE_TABLE_ID,
-                    "work_type": WORK_TYPE_CHANGE,
-                    "notice_type": NOTICE_TYPE_CHANGE,
-                    "source_only": True,
-                    "title": title,
-                    "status": CHANGE_PROGRESS_ONGOING,
-                    "source_progress": CHANGE_PROGRESS_ONGOING,
-                    "building": self._building_label_from_codes(codes),
-                    "building_codes": codes,
-                    "specialty": str(fields.get("专业") or ""),
-                    "level": str(fields.get("变更等级（阿里）") or ""),
-                    "time": time_text,
-                    "start_time": start_time,
-                    "end_time": end_time,
-                    "location": "",
-                    "content": title,
-                    "reason": "",
-                    "impact": DEFAULT_IMPACT_TEXT,
-                    "progress": "源表显示进行中",
-                    "can_update": False,
-                    "can_end": False,
-                    "block_reason": "源表显示进行中；本地未发起，不能更新/结束",
-                    "upload_state": "源表进行中",
-                }
-            )
-        for record in self._filter_repair_records(scope=scope, include_started=True):
-            fields = record.get("display_fields") or {}
-            source_record_id = str(record.get("record_id") or "").strip()
-            title = self._repair_title(record)
-            if source_record_id and source_record_id in seen_sources:
-                continue
-            title_key = re.sub(r"\s+", "", title)
-            if title_key and title_key in seen_titles:
-                continue
-            codes = self._repair_record_building_codes(record)
-            target_record_id = self._repair_target_record_id(record)
-            start_time, end_time, time_text = self._repair_time_range(record)
-            can_operate = bool(target_record_id)
-            progress = (
-                self._repair_first_field(fields, "维修进展描述", "当前维修进度")
-                or "源表显示已开始"
-            )
-            merged.append(
-                {
-                    "active_item_id": f"source-repair-{source_record_id}",
-                    "record_id": target_record_id,
-                    "raw_record_id": target_record_id,
-                    "target_record_id": target_record_id,
-                    "source_record_id": source_record_id,
-                    "source_app_token": REPAIR_SOURCE_APP_TOKEN,
-                    "source_table_id": REPAIR_SOURCE_TABLE_ID,
-                    "work_type": WORK_TYPE_REPAIR,
-                    "notice_type": NOTICE_TYPE_REPAIR,
-                    "source_only": not can_operate,
-                    "title": title,
-                    "status": "进行中",
-                    "source_progress": self._repair_first_field(
-                        fields, "流程", "当前维修进度"
-                    ),
-                    "building": self._building_label_from_codes(codes),
-                    "building_codes": codes,
-                    "specialty": self._repair_specialty(record),
-                    "level": self._repair_level(fields),
-                    "time": time_text,
-                    "start_time": start_time,
-                    "end_time": end_time,
-                    "location": "",
-                    "content": title,
-                    "reason": self._repair_first_field(
-                        fields, "故障维修原因", "故障原因"
-                    ),
-                    "impact": "",
-                    "progress": progress,
-                    "repair_device": self._repair_device_text(fields),
-                    "repair_fault": self._repair_first_field(
-                        fields, "故障维修原因", "维修故障", "故障原因"
-                    ),
-                    "fault_type": self._repair_first_field(fields, "故障类型")
-                    or "设备故障",
-                    "repair_mode": self._repair_first_field(
-                        fields, "维修方式", "维修方", "供应商名称"
-                    ),
-                    "discovery": self._repair_first_field(fields, "对应来源"),
-                    "symptom": self._repair_first_field(
-                        fields, "故障发生现象描述", "故障现象"
-                    ),
-                    "solution": self._repair_first_field(
-                        fields, "解决方案", "维修方案", "后续整改措施"
-                    ),
-                    "fault_time": self._repair_first_field(
-                        fields, "故障发生时间", "发现故障时间"
-                    ),
-                    "expected_time": end_time,
-                    "can_update": can_operate,
-                    "can_end": can_operate,
-                    "block_reason": ""
-                    if can_operate
-                    else "源表显示已开始；但设备检修关联未返回目标 record_id，不能更新/结束",
-                    "upload_state": "源表已开始" if can_operate else "源表已开始 / 未绑定目标记录",
-                }
-            )
         return merged
 
     def _workbench_records(
@@ -2318,6 +2538,38 @@ class MaintenancePortalService:
             )
         return options
 
+    def assert_generated_drafts_allowed(
+        self, drafts: list[dict[str, Any]], *, scope: str = "ALL"
+    ) -> None:
+        self.ensure_loaded()
+        scope = self._normalize_scope(scope)
+        for draft in drafts or []:
+            record_id = str((draft or {}).get("record_id") or "").strip()
+            if not record_id:
+                raise PortalError("存在缺少 record_id 的待生成记录。")
+            record = self._find_record_by_id(record_id)
+            fields = record.get("display_fields") or {}
+            if not self._scope_matches_building(scope, fields.get("楼栋")):
+                raise PortalError(
+                    f"当前账号无权生成 {record_id} 对应楼栋的通告。"
+                )
+
+    def assert_generated_items_allowed(
+        self, items: list[dict[str, Any]], *, scope: str = "ALL"
+    ) -> None:
+        self.ensure_loaded()
+        scope = self._normalize_scope(scope)
+        for item in items or []:
+            record_id = str((item or {}).get("record_id") or "").strip()
+            if not record_id:
+                raise PortalError("存在缺少 record_id 的待发送通告。")
+            record = self._find_record_by_id(record_id)
+            fields = record.get("display_fields") or {}
+            if not self._scope_matches_building(scope, fields.get("楼栋")):
+                raise PortalError(
+                    f"当前账号无权发送 {record_id} 对应楼栋的通告。"
+                )
+
     def get_bootstrap(
         self,
         *,
@@ -2349,6 +2601,7 @@ class MaintenancePortalService:
                 WORK_TYPE_CHANGE if scope == "CAMPUS" else WORK_TYPE_MAINTENANCE
             ),
             "last_loaded_at": self._last_loaded_at,
+            "source_cache_ttl_seconds": self._source_cache_ttl_seconds(),
             "warnings": list(self._load_warnings),
             "maintenance_status": DEFAULT_MAINTENANCE_STATUS,
             "field_order": [meta.field_name for meta in self._field_meta_list],
@@ -2423,6 +2676,7 @@ class MaintenancePortalService:
                 WORK_TYPE_CHANGE if scope == "CAMPUS" else WORK_TYPE_MAINTENANCE
             ),
             "last_loaded_at": self._last_loaded_at,
+            "source_cache_ttl_seconds": self._source_cache_ttl_seconds(),
             "warnings": list(self._load_warnings),
             "records": [
                 self._serialize_record(record, summary_by_record)
@@ -2848,6 +3102,7 @@ class MaintenancePortalService:
         scope = self._normalize_scope(request_payload.get("scope"))
 
         record_id = str(request_payload.get("record_id") or "").strip()
+        target_record_id = ""
         fields: dict[str, Any] = {}
         if action == "start":
             if not record_id:
@@ -2889,9 +3144,16 @@ class MaintenancePortalService:
             default_start = ""
             default_end = ""
             record_id = str(request_payload.get("source_record_id") or "").strip()
+            target_record_id = str(
+                request_payload.get("target_record_id")
+                or request_payload.get("record_id")
+                or ""
+            ).strip()
 
         if not self._scope_matches_buildings(scope, building_codes):
             raise PortalError(f"当前入口与通告楼栋不匹配: {building or '-'}")
+        if action != "start" and not target_record_id:
+            raise PortalError("该变更缺少目标设备变更表 record_id，不能更新/结束。")
 
         start_time = (
             self._format_input_datetime(request_payload.get("start_time"))
@@ -2936,6 +3198,7 @@ class MaintenancePortalService:
             "scope": scope,
             "scope_label": self._scope_label(scope),
             "record_id": record_id,
+            "target_record_id": target_record_id,
             "active_item_id": str(request_payload.get("active_item_id") or "").strip(),
             "title": title,
             "building": building,

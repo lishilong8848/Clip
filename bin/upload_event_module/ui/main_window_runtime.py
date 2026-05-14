@@ -379,6 +379,119 @@ class MainWindowRuntimeMixin:
             except Exception:
                 pass
 
+    def delete_lan_ongoing_notice(self, payload: dict):
+        if getattr(self, "_closing", False):
+            return {"ok": False, "error": "主程序正在关闭。"}
+        if not isinstance(payload, dict):
+            return {"ok": False, "error": "请求格式错误。"}
+        try:
+            if QThread.currentThread() == self.thread():
+                return self._execute_lan_ongoing_delete(payload)
+        except Exception:
+            pass
+        event = threading.Event()
+        result = {"ok": False, "error": "主界面删除请求超时。"}
+        self.lan_ongoing_delete_received.emit(
+            {"payload": dict(payload), "event": event, "result": result}
+        )
+        event.wait(timeout=5)
+        return result
+
+    def _on_lan_ongoing_delete_received(self, payload: dict):
+        result = (payload or {}).get("result")
+        event = (payload or {}).get("event")
+        try:
+            action_payload = (payload or {}).get("payload") or {}
+            outcome = self._execute_lan_ongoing_delete(action_payload)
+            if isinstance(result, dict):
+                result.clear()
+                result.update(outcome)
+        except Exception as exc:
+            if isinstance(result, dict):
+                result.clear()
+                result.update({"ok": False, "error": str(exc)})
+        finally:
+            try:
+                if event:
+                    event.set()
+            except Exception:
+                pass
+
+    def _find_lan_ongoing_item_for_payload(self, payload: dict):
+        active_item_id = str((payload or {}).get("active_item_id") or "").strip()
+        if active_item_id:
+            list_widget, item = self._find_active_item_by_active_item_id(active_item_id)
+            if item and self._is_valid_list_item(item):
+                return list_widget, item
+
+        for key in ("target_record_id", "record_id", "raw_record_id"):
+            record_id = str((payload or {}).get(key) or "").strip()
+            if not record_id:
+                continue
+            list_widget, item = self._find_active_item_by_record_id(record_id)
+            if item and self._is_valid_list_item(item):
+                return list_widget, item
+
+        source_record_id = str((payload or {}).get("source_record_id") or "").strip()
+        notice_type = str((payload or {}).get("notice_type") or "").strip()
+        title_key = re.sub(r"\s+", "", str((payload or {}).get("title") or ""))
+        for list_widget, item in self._iter_active_items():
+            try:
+                if not self._is_valid_list_item(item):
+                    continue
+                data = item.data(Qt.ItemDataRole.UserRole) or {}
+            except Exception:
+                continue
+            if notice_type and str(data.get("notice_type") or "").strip() != notice_type:
+                continue
+            if source_record_id and str(data.get("lan_source_record_id") or "") == source_record_id:
+                return list_widget, item
+            if not title_key:
+                continue
+            text = str(data.get("text") or "")
+            info = extract_event_info(text) or {}
+            current_title = re.sub(
+                r"\s+",
+                "",
+                str(info.get("title") or self._lan_notice_sections(text)["title"] or ""),
+            )
+            if current_title and current_title == title_key:
+                return list_widget, item
+        return None, None
+
+    def _execute_lan_ongoing_delete(self, payload: dict):
+        if self._is_screenshot_dialog_active():
+            return {"ok": False, "error": "截图上传进行中，暂时不能删除条目。"}
+        list_widget, item = self._find_lan_ongoing_item_for_payload(payload or {})
+        if not item or not self._is_valid_list_item(item):
+            return {"ok": False, "error": "主界面未找到对应进行中条目。"}
+        data = dict(item.data(Qt.ItemDataRole.UserRole) or {})
+        record_id = str(data.get("record_id") or "").strip()
+        if bool(data.get("_upload_in_progress")) or (
+            record_id and self._has_pending_upload(record_id)
+        ):
+            return {"ok": False, "error": "该条目正在上传，请等待完成后再删除。"}
+        self._clear_upload_queue(record_id)
+        self._today_in_progress_pending_record_ids.discard(record_id)
+        self._today_in_progress_synced_record_ids.discard(record_id)
+        self.pending_new_by_record_id.pop(record_id, None)
+        self.pending_replace_by_record_id.pop(record_id, None)
+        self.pending_update_after_upload.pop(record_id, None)
+        self.pending_action_record_ids.discard(record_id)
+        self.pending_action_types.pop(record_id, None)
+        if list_widget is None:
+            try:
+                list_widget = item.listWidget()
+            except Exception:
+                list_widget = None
+        self._remove_active_item_widget_only(list_widget, item)
+        self.save_active_cache()
+        log_info(
+            "局域网页面删除进行中条目: "
+            f"record_id={record_id or '-'} active_item_id={data.get('active_item_id') or '-'}"
+        )
+        return {"ok": True}
+
     def _collect_lan_maintenance_ongoing_notices(self, scope: str = "ALL") -> list[dict]:
         items: list[dict] = []
         for _, item in self._iter_active_items():
@@ -425,6 +538,7 @@ class MainWindowRuntimeMixin:
                 block_reason = self._record_binding_error_text(data)
             elif self._is_routing_conflicted(data):
                 block_reason = self._routing_error_text(data)
+            origin_label = "网页工作台" if data.get("lan_created_from_portal") else "Qt主界面"
             items.append(
                 {
                     "active_item_id": active_item_id,
@@ -433,6 +547,8 @@ class MainWindowRuntimeMixin:
                     "source_record_id": str(data.get("lan_source_record_id") or ""),
                     "source_app_token": str(data.get("lan_source_app_token") or ""),
                     "source_table_id": str(data.get("lan_source_table_id") or ""),
+                    "origin": "frontend" if data.get("lan_created_from_portal") else "qt",
+                    "origin_label": origin_label,
                     "work_type": (
                         "change"
                         if notice_type in {"设备变更", "变更通告"}
@@ -467,7 +583,15 @@ class MainWindowRuntimeMixin:
                     "can_update": not blocked,
                     "can_end": not blocked,
                     "block_reason": block_reason,
-                    "upload_state": "上传中" if upload_busy else ("已上传" if record_id and not self._is_placeholder_record(data) else "未上传"),
+                    "upload_state": (
+                        f"{origin_label} / 上传中"
+                        if upload_busy
+                        else (
+                            f"{origin_label} / 已上传"
+                            if record_id and not self._is_placeholder_record(data)
+                            else f"{origin_label} / 未上传"
+                        )
+                    ),
                 }
             )
         return items
@@ -696,6 +820,7 @@ class MainWindowRuntimeMixin:
                 "lan_source_app_token": str(payload.get("source_app_token") or ""),
                 "lan_source_table_id": str(payload.get("source_table_id") or ""),
                 "lan_work_type": work_type,
+                "lan_created_from_portal": True,
             }
             self._ensure_payload_for_data(data)
             item, _ = self.add_active_item(data)
@@ -720,7 +845,7 @@ class MainWindowRuntimeMixin:
         list_widget, item = self._find_active_item_by_active_item_id(active_item_id)
         if (
             (not item or not self._is_valid_list_item(item))
-            and work_type == "repair"
+            and work_type in {"maintenance", "change", "repair"}
             and str(payload.get("target_record_id") or payload.get("record_id") or "").strip()
         ):
             target_record_id = str(
@@ -735,7 +860,7 @@ class MainWindowRuntimeMixin:
                 list_widget = None
         if (
             (not item or not self._is_valid_list_item(item))
-            and work_type == "repair"
+            and work_type in {"maintenance", "change", "repair"}
             and str(payload.get("target_record_id") or payload.get("record_id") or "").strip()
         ):
             target_record_id = str(
@@ -756,6 +881,7 @@ class MainWindowRuntimeMixin:
                 "lan_source_app_token": str(payload.get("source_app_token") or ""),
                 "lan_source_table_id": str(payload.get("source_table_id") or ""),
                 "lan_work_type": work_type,
+                "lan_created_from_portal": True,
             }
             self._ensure_payload_for_data(data)
             item, _ = self.add_active_item(data)
@@ -876,6 +1002,10 @@ class MainWindowRuntimeMixin:
                         controller.set_ongoing_callback(
                             self.get_lan_maintenance_ongoing_notices
                         )
+                    if hasattr(controller, "set_ongoing_delete_callback"):
+                        controller.set_ongoing_delete_callback(
+                            self.delete_lan_ongoing_notice
+                        )
                     if hasattr(controller, "set_maintenance_action_callback"):
                         controller.set_maintenance_action_callback(
                             self.enqueue_lan_maintenance_action
@@ -892,6 +1022,10 @@ class MainWindowRuntimeMixin:
                         if hasattr(controller, "set_ongoing_callback"):
                             controller.set_ongoing_callback(
                                 self.get_lan_maintenance_ongoing_notices
+                            )
+                        if hasattr(controller, "set_ongoing_delete_callback"):
+                            controller.set_ongoing_delete_callback(
+                                self.delete_lan_ongoing_notice
                             )
                         if hasattr(controller, "set_maintenance_action_callback"):
                             controller.set_maintenance_action_callback(

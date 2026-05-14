@@ -88,6 +88,29 @@
       color: var(--muted);
     }
 
+    .auth-panel {
+      margin: 0 0 16px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel-2);
+      padding: 12px;
+      color: var(--muted);
+      line-height: 1.55;
+    }
+
+    .auth-panel strong { color: var(--ink); }
+
+    .auth-panel .row-actions {
+      margin-top: 10px;
+    }
+
+    .auth-user {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
     .scope-grid {
       display: grid;
       grid-template-columns: repeat(4, minmax(130px, 1fr));
@@ -593,6 +616,13 @@
       border-radius: 7px;
       background: #fff;
       padding: 12px;
+      transition: opacity 0.18s ease, transform 0.18s ease;
+    }
+
+    .ongoing-card.removing {
+      opacity: 0;
+      transform: translateX(18px);
+      pointer-events: none;
     }
 
     .draft-card.active {
@@ -606,6 +636,13 @@
       gap: 10px;
       align-items: flex-start;
       margin-bottom: 10px;
+    }
+
+    .card-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex: none;
     }
 
     .card-title {
@@ -690,6 +727,7 @@
         <h1 id="gateTitle">南通基地-运维灯塔工作台</h1>
       </div>
       <p id="gateDesc">选择需要进入的功能。</p>
+      <div id="authPanel" class="auth-panel hidden"></div>
       <div id="featureGrid" class="feature-grid"></div>
       <div id="scopeGrid" class="scope-grid hidden"></div>
       <div id="handoverSettings" class="settings-panel hidden"></div>
@@ -709,12 +747,15 @@
         </div>
       </div>
       <div class="statusbar">
+        <span id="userPill" class="pill hidden"></span>
         <span id="recordCount" class="pill">待发起 0</span>
         <span id="ongoingCount" class="pill">进行中 0</span>
+        <span id="autoRefreshPill" class="pill hidden">自动刷新已关闭</span>
         <button id="refreshBtn" class="btn ghost">刷新本页</button>
         <button id="syncSourceBtn" class="btn ghost">同步源表</button>
         <button id="switchScopeBtn" class="btn ghost">切换楼栋</button>
         <button id="homeBtn" class="btn ghost">功能选择</button>
+        <button id="logoutBtn" class="btn ghost hidden">退出登录</button>
       </div>
     </header>
 
@@ -804,6 +845,18 @@
         { value: "CAMPUS", label: "园区" },
         { value: "ALL", label: "全部" },
       ],
+      auth: {
+        loaded: false,
+        configured: true,
+        loggedIn: false,
+        user: null,
+        allowedScopes: [],
+        scopeOptions: [],
+        defaultScope: "",
+        loginUrl: "/api/auth/login",
+        redirectUri: "",
+        error: "",
+      },
       records: [],
       ongoing: [],
       dailySummary: { date: "", items: [], stats: {} },
@@ -829,6 +882,12 @@
       actionOps: new Map(),
       jobToOpKey: new Map(),
       polling: new Set(),
+      autoRefresh: {
+        timerId: 0,
+        intervalMs: 3 * 60 * 1000,
+        inFlight: false,
+        lastAutoAt: "",
+      },
       expandedRecordId: "",
       expandedSummaryKey: "",
     };
@@ -841,6 +900,9 @@
     const WORK_TYPE_VALUES = WORK_TYPES.map((item) => item.value);
     const JOB_STATE_TTL_MS = 24 * 60 * 60 * 1000;
     const JOB_STATE_LIMIT = 80;
+    const AUTO_REFRESH_DEFAULT_MS = 60 * 1000;
+    const AUTO_REFRESH_MIN_MS = 60 * 1000;
+    const AUTO_REFRESH_MAX_MS = 10 * 60 * 1000;
 
     const $ = (id) => document.getElementById(id);
     const pad = (n) => String(n).padStart(2, "0");
@@ -965,12 +1027,96 @@
 
     async function api(path, options = {}) {
       const res = await fetch(path, {
+        credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
         ...options,
       });
       const payload = await res.json().catch(() => ({}));
+      if (res.status === 401) {
+        state.auth.loggedIn = false;
+        state.auth.user = null;
+        state.auth.allowedScopes = [];
+        state.auth.scopeOptions = [];
+        state.scopeOptions = [];
+        $("app").classList.add("hidden");
+        $("gate").classList.remove("hidden");
+        renderGate();
+      }
       if (!res.ok || !payload.ok) throw new Error(payload.error || `请求失败 ${res.status}`);
       return payload.data;
+    }
+
+    function authNextPath() {
+      return `${window.location.pathname}${window.location.search || ""}`;
+    }
+
+    function hasPortalAccess() {
+      return Boolean(state.auth.loggedIn && (state.auth.scopeOptions || []).length);
+    }
+
+    async function loadAuthStatus() {
+      try {
+        const data = await api(`/api/auth/status?next=${encodeURIComponent(authNextPath())}`);
+        state.auth = {
+          ...state.auth,
+          loaded: true,
+          configured: Boolean(data.configured),
+          loggedIn: Boolean(data.logged_in),
+          user: data.user || null,
+          allowedScopes: data.allowed_scopes || [],
+          scopeOptions: data.scope_options || [],
+          defaultScope: data.default_scope || "",
+          loginUrl: data.login_url || "/api/auth/login",
+          redirectUri: data.redirect_uri || "",
+          error: "",
+        };
+        if (state.auth.scopeOptions.length) state.scopeOptions = state.auth.scopeOptions;
+      } catch (err) {
+        state.auth = {
+          ...state.auth,
+          loaded: true,
+          loggedIn: false,
+          user: null,
+          allowedScopes: [],
+          scopeOptions: [],
+          error: err.message || "登录状态读取失败",
+        };
+      }
+      updateUserChrome();
+      return state.auth;
+    }
+
+    function updateAuthFromPayload(data) {
+      if (!data || !data.auth) return;
+      state.auth = {
+        ...state.auth,
+        loaded: true,
+        configured: Boolean(data.auth.configured),
+        loggedIn: Boolean(data.auth.logged_in),
+        user: data.auth.user || null,
+        allowedScopes: data.auth.allowed_scopes || [],
+        scopeOptions: data.auth.scope_options || state.auth.scopeOptions || [],
+        defaultScope: data.auth.default_scope || state.auth.defaultScope || "",
+        loginUrl: data.auth.login_url || state.auth.loginUrl || "/api/auth/login",
+        redirectUri: data.auth.redirect_uri || state.auth.redirectUri || "",
+        error: "",
+      };
+      if (state.auth.scopeOptions.length) state.scopeOptions = state.auth.scopeOptions;
+      updateUserChrome();
+    }
+
+    function updateUserChrome() {
+      const user = state.auth.user || {};
+      const label = state.auth.loggedIn
+        ? `${user.name || "飞书用户"} · ${user.role === "admin" ? "全权限" : "楼栋权限"}`
+        : "";
+      $("userPill").textContent = label;
+      $("userPill").classList.toggle("hidden", !label);
+      $("logoutBtn").classList.toggle("hidden", !state.auth.loggedIn);
+    }
+
+    function scopeAllowed(scope) {
+      return (state.scopeOptions || []).some((item) => item.value === scope);
     }
 
     function setSyncStatus(text, warnings = state.warnings) {
@@ -978,6 +1124,80 @@
       const warning = (warnings || []).filter(Boolean)[0] || "";
       $("syncWarning").textContent = warning;
       $("syncWarning").classList.toggle("hidden", !warning);
+    }
+
+    function formatRefreshInterval(ms) {
+      const minutes = Math.max(1, Math.round(Number(ms || 0) / 60000));
+      return `${minutes}分钟`;
+    }
+
+    function updateAutoRefreshInterval(data) {
+      const ttlSeconds = Number(data?.source_cache_ttl_seconds || 0);
+      const fromCacheTtl = Number.isFinite(ttlSeconds) && ttlSeconds > 0
+        ? ttlSeconds * 1000
+        : AUTO_REFRESH_DEFAULT_MS;
+      const preferredMs = Math.min(fromCacheTtl, AUTO_REFRESH_DEFAULT_MS);
+      state.autoRefresh.intervalMs = Math.max(
+        AUTO_REFRESH_MIN_MS,
+        Math.min(AUTO_REFRESH_MAX_MS, preferredMs)
+      );
+      updateAutoRefreshPill();
+    }
+
+    function updateAutoRefreshPill() {
+      const active = Boolean(
+        state.auth.loggedIn
+        && state.scope
+        && !$("app").classList.contains("hidden")
+      );
+      const pill = $("autoRefreshPill");
+      pill.classList.toggle("hidden", !active);
+      if (!active) return;
+      const suffix = state.autoRefresh.lastAutoAt
+        ? `，上次 ${state.autoRefresh.lastAutoAt}`
+        : "";
+      pill.textContent = `自动刷新 ${formatRefreshInterval(state.autoRefresh.intervalMs)}${suffix}`;
+    }
+
+    function stopAutoRefresh() {
+      if (state.autoRefresh.timerId) {
+        clearTimeout(state.autoRefresh.timerId);
+        state.autoRefresh.timerId = 0;
+      }
+      updateAutoRefreshPill();
+    }
+
+    function startAutoRefresh() {
+      stopAutoRefresh();
+      if (!state.auth.loggedIn || !state.scope || $("app").classList.contains("hidden")) return;
+      state.autoRefresh.timerId = window.setTimeout(runAutoRefresh, state.autoRefresh.intervalMs);
+      updateAutoRefreshPill();
+    }
+
+    async function runAutoRefresh() {
+      if (state.autoRefresh.timerId) clearTimeout(state.autoRefresh.timerId);
+      state.autoRefresh.timerId = 0;
+      if (!state.auth.loggedIn || !state.scope || $("app").classList.contains("hidden")) {
+        updateAutoRefreshPill();
+        return;
+      }
+      if (document.visibilityState === "hidden" || state.autoRefresh.inFlight) {
+        startAutoRefresh();
+        return;
+      }
+      state.autoRefresh.inFlight = true;
+      try {
+        await refreshWorkbench({ automatic: true });
+        state.autoRefresh.lastAutoAt = new Date().toLocaleTimeString("zh-CN", {
+          hour: "2-digit",
+          minute: "2-digit",
+        });
+      } catch (err) {
+        setSyncStatus(`自动刷新失败: ${err.message || "未知错误"}`, state.warnings);
+      } finally {
+        state.autoRefresh.inFlight = false;
+        startAutoRefresh();
+      }
     }
 
     function recordTypeCounts() {
@@ -1177,21 +1397,80 @@
 
     function setActionButtonsDisabled(lineKey, disabled) {
       document.querySelectorAll(
-        `[data-send-start="${CSS.escape(lineKey)}"], [data-send-update="${CSS.escape(lineKey)}"], [data-send-end="${CSS.escape(lineKey)}"]`
+        `[data-send-start="${CSS.escape(lineKey)}"], [data-send-update="${CSS.escape(lineKey)}"], [data-send-end="${CSS.escape(lineKey)}"], [data-delete-ongoing="${CSS.escape(lineKey)}"]`
       ).forEach((btn) => {
         btn.disabled = Boolean(disabled);
       });
     }
 
     function renderGate() {
+      if (!state.auth.loaded || !hasPortalAccess()) return renderAuthGate();
       if (state.gateMode === "maintenance") return renderMaintenanceGate();
       if (state.gateMode === "handover") return renderHandoverGate();
       return renderFeatureGate();
     }
 
+    function renderAuthGate() {
+      $("gateTitle").textContent = "南通基地-运维灯塔工作台";
+      $("gateDesc").textContent = state.auth.loaded ? "请先完成飞书扫码登录。" : "正在读取登录状态。";
+      $("featureGrid").classList.add("hidden");
+      $("scopeGrid").classList.add("hidden");
+      $("handoverSettings").classList.add("hidden");
+      $("gateActions").innerHTML = "";
+      const panel = $("authPanel");
+      panel.classList.remove("hidden");
+      if (!state.auth.loaded) {
+        panel.innerHTML = `<strong>登录状态检查中</strong><br>正在确认当前浏览器是否已有有效会话。`;
+        return;
+      }
+      if (!state.auth.configured) {
+        panel.innerHTML = `
+          <strong>飞书扫码登录未配置</strong><br>
+          请先在主程序配置飞书 App ID 和 App Secret，并在飞书开放平台加入回调地址。
+          ${state.auth.redirectUri ? `<div class="job-line">当前回调地址：${html(state.auth.redirectUri)}</div>` : ""}
+        `;
+        return;
+      }
+      if (state.auth.loggedIn && !(state.auth.scopeOptions || []).length) {
+        const user = state.auth.user || {};
+        panel.innerHTML = `
+          <strong>当前账号暂无门户权限</strong><br>
+          已登录：${html(user.name || user.open_id || "飞书用户")}。请管理员在本机
+          <code>bin/data/lan_portal_auth.json</code> 中为该 open_id 配置可访问楼栋。
+          <div class="row-actions">
+            <button class="btn ghost" data-auth-logout>退出登录</button>
+          </div>
+        `;
+      } else {
+        panel.innerHTML = `
+          <strong>飞书扫码登录</strong><br>
+          登录后只能查看和操作已授权楼栋的数据；未授权楼栋接口会被服务端拒绝。
+          ${state.auth.redirectUri ? `<div class="job-line">飞书开放平台需要配置的重定向 URL：${html(state.auth.redirectUri)}</div>` : ""}
+          ${state.auth.error ? `<div class="job-line failed">${html(state.auth.error)}</div>` : ""}
+          <div class="row-actions">
+            <button class="btn primary" data-auth-login>使用飞书扫码登录</button>
+          </div>
+        `;
+      }
+      document.querySelector("[data-auth-login]")?.addEventListener("click", () => {
+        window.location.href = state.auth.loginUrl || "/api/auth/login";
+      });
+      document.querySelector("[data-auth-logout]")?.addEventListener("click", logout);
+    }
+
     function renderFeatureGate() {
       $("gateTitle").textContent = "南通基地-运维灯塔工作台";
       $("gateDesc").textContent = "选择需要进入的功能。";
+      $("authPanel").classList.remove("hidden");
+      const user = state.auth.user || {};
+      $("authPanel").innerHTML = `
+        <div class="auth-user">
+          <strong>${html(user.name || "飞书用户")}</strong>
+          <span class="tag green">已登录</span>
+          <span>${html((state.scopeOptions || []).map((item) => item.label).join("、") || "暂无楼栋权限")}</span>
+          <button class="btn ghost" data-auth-logout>退出登录</button>
+        </div>
+      `;
       $("featureGrid").classList.remove("hidden");
       $("scopeGrid").classList.add("hidden");
       $("handoverSettings").classList.add("hidden");
@@ -1210,11 +1489,13 @@
       document.querySelectorAll("[data-feature]").forEach((btn) => {
         btn.addEventListener("click", () => showGate(btn.dataset.feature));
       });
+      document.querySelector("[data-auth-logout]")?.addEventListener("click", logout);
     }
 
     function renderMaintenanceGate() {
       $("gateTitle").textContent = "维保变更检修相关";
       $("gateDesc").textContent = "选择楼栋或园区后进入对应工作台，页面内展示该范围的待发起和进行中通告。";
+      $("authPanel").classList.add("hidden");
       $("featureGrid").classList.add("hidden");
       $("scopeGrid").classList.remove("hidden");
       $("handoverSettings").classList.add("hidden");
@@ -1235,6 +1516,7 @@
     function renderHandoverGate() {
       $("gateTitle").textContent = "各楼交接班相关";
       $("gateDesc").textContent = "选择楼栋后直接打开已配置的交接班网页链接。";
+      $("authPanel").classList.add("hidden");
       $("featureGrid").classList.add("hidden");
       $("scopeGrid").classList.remove("hidden");
       const options = state.handover.scopeOptions.length
@@ -1249,9 +1531,10 @@
           </button>
         `;
       }).join("");
+      const canManageLinks = (state.auth.user || {}).role === "admin";
       $("gateActions").innerHTML = `
         <button class="btn ghost" data-back-home>返回功能选择</button>
-        <button class="btn ghost icon-btn" data-toggle-handover-settings aria-label="交接班链接设置" title="交接班链接设置">&#9881;</button>
+        ${canManageLinks ? `<button class="btn ghost icon-btn" data-toggle-handover-settings aria-label="交接班链接设置" title="交接班链接设置">&#9881;</button>` : ""}
       `;
       renderHandoverSettings();
       document.querySelectorAll("[data-handover-scope]").forEach((btn) => {
@@ -1447,6 +1730,7 @@
     }
 
     function showGate(mode, { replace = false } = {}) {
+      stopAutoRefresh();
       state.gateMode = ["maintenance", "handover"].includes(mode) ? mode : "home";
       state.scope = "";
       const url = new URL(window.location.href);
@@ -1460,6 +1744,40 @@
       renderGate();
       if (state.gateMode === "maintenance") loadScopeOverview();
       if (state.gateMode === "handover") loadHandoverLinks();
+    }
+
+    async function logout() {
+      stopAutoRefresh();
+      try {
+        await fetch("/api/auth/logout", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        });
+      } catch {}
+      state.auth = {
+        ...state.auth,
+        loaded: true,
+        loggedIn: false,
+        user: null,
+        allowedScopes: [],
+        scopeOptions: [],
+      };
+      state.scope = "";
+      state.records = [];
+      state.ongoing = [];
+      state.selected.clear();
+      state.drafts.clear();
+      state.scopeOptions = [];
+      updateUserChrome();
+      const url = new URL(window.location.href);
+      url.searchParams.delete("scope");
+      url.searchParams.delete("mode");
+      window.history.replaceState({}, "", url);
+      $("app").classList.add("hidden");
+      $("gate").classList.remove("hidden");
+      renderGate();
     }
 
     function scopeMetricHtml(scope) {
@@ -1487,11 +1805,13 @@
     async function loadScopeOverview() {
       try {
         const data = await api("/api/scope-overview");
-        state.scopeOptions = data.scope_options || state.scopeOptions;
-        state.scopeOverview = data.scopes || {};
-        state.lastLoadedAt = data.last_loaded_at || state.lastLoadedAt;
-        state.warnings = data.warnings || [];
-        renderGate();
+      updateAuthFromPayload(data);
+      state.scopeOptions = data.scope_options || state.scopeOptions;
+      state.scopeOverview = data.scopes || {};
+      state.lastLoadedAt = data.last_loaded_at || state.lastLoadedAt;
+      updateAutoRefreshInterval(data);
+      state.warnings = data.warnings || [];
+      renderGate();
       } catch (err) {
         state.scopeOverview = {};
         renderGate();
@@ -1501,6 +1821,7 @@
     async function loadHandoverLinks() {
       try {
         const data = await api("/api/handover-links");
+        updateAuthFromPayload(data);
         state.handover.scopeOptions = data.scope_options || state.handover.scopeOptions || [];
         state.handover.links = data.links || {};
         state.handover.updatedAt = data.updated_at || "";
@@ -1514,6 +1835,10 @@
     function openHandoverLink(scope) {
       const url = String(state.handover.links[scope] || "").trim();
       if (!url) {
+        if ((state.auth.user || {}).role !== "admin") {
+          alert("该楼栋尚未配置交接班链接，请联系管理员。");
+          return;
+        }
         state.handover.authOpen = true;
         renderGate();
         const line = $("handoverAuthLine");
@@ -1541,6 +1866,7 @@
           method: "POST",
           body: JSON.stringify({ links, password: state.handover.settingsPassword || "" }),
         });
+        updateAuthFromPayload(data);
         state.handover.scopeOptions = data.scope_options || state.handover.scopeOptions;
         state.handover.links = data.links || {};
         state.handover.updatedAt = data.updated_at || "";
@@ -1557,6 +1883,14 @@
 
     async function selectScope(scope, { replace = false } = {}) {
       state.scope = scope || "ALL";
+      if (!scopeAllowed(state.scope)) {
+        state.scope = "";
+        state.gateMode = "maintenance";
+        $("app").classList.add("hidden");
+        $("gate").classList.remove("hidden");
+        renderGate();
+        return;
+      }
       const url = new URL(window.location.href);
       url.searchParams.set("scope", state.scope);
       url.searchParams.delete("mode");
@@ -1570,12 +1904,14 @@
     async function loadBootstrap() {
       setSyncStatus("加载中", []);
       const data = await api(`/api/bootstrap?scope=${encodeURIComponent(state.scope)}`);
+      updateAuthFromPayload(data);
       state.scopeOptions = data.scope_options || state.scopeOptions;
       state.records = data.records || [];
       state.ongoing = data.ongoing || [];
       state.dailySummary = data.daily_summary || { date: "", items: [], stats: {} };
       state.defaults = data.defaults || state.defaults;
       state.lastLoadedAt = data.last_loaded_at || "";
+      updateAutoRefreshInterval(data);
       state.warnings = data.warnings || [];
       state.workType = WORK_TYPE_VALUES.includes(data.default_work_type)
         ? data.default_work_type
@@ -1590,6 +1926,7 @@
       cleanupDraftState();
       render();
       restoreJobState();
+      startAutoRefresh();
     }
 
     function fillSelect(id, options, selected, includeAll) {
@@ -1604,40 +1941,46 @@
       }
     }
 
-    async function refreshWorkbench() {
+    async function refreshWorkbench({ automatic = false } = {}) {
       const params = new URLSearchParams({
         scope: state.scope || "ALL",
         month: state.filters.month || "",
         specialty: state.filters.specialty === "全部" ? "" : state.filters.specialty,
       });
-      setSyncStatus("刷新本页中", []);
+      setSyncStatus(automatic ? "自动刷新中" : "刷新本页中", []);
       const data = await api(`/api/workbench?${params}`);
+      updateAuthFromPayload(data);
       state.records = data.records || [];
       state.ongoing = data.ongoing || [];
       state.dailySummary = data.daily_summary || { date: "", items: [], stats: {} };
       state.lastLoadedAt = data.last_loaded_at || state.lastLoadedAt;
+      updateAutoRefreshInterval(data);
       state.warnings = data.warnings || [];
-      setSyncStatus(data.last_loaded_at ? `数据更新时间 ${data.last_loaded_at}` : "已刷新", state.warnings);
+      setSyncStatus(data.last_loaded_at ? `数据更新时间 ${data.last_loaded_at}` : (automatic ? "已自动刷新" : "已刷新"), state.warnings);
       cleanupDraftState();
       render();
       restoreJobState();
+      if (!automatic) startAutoRefresh();
     }
 
     async function syncSource() {
       setSyncStatus("同步源表中", []);
       const data = await api(`/api/refresh?scope=${encodeURIComponent(state.scope || "ALL")}`);
+      updateAuthFromPayload(data);
       state.scopeOptions = data.scope_options || state.scopeOptions;
       state.records = data.records || [];
       state.ongoing = data.ongoing || [];
       state.dailySummary = data.daily_summary || { date: "", items: [], stats: {} };
       state.defaults = data.defaults || state.defaults;
       state.lastLoadedAt = data.last_loaded_at || "";
+      updateAutoRefreshInterval(data);
       state.warnings = data.warnings || [];
       setSyncStatus(data.last_loaded_at ? `数据更新时间 ${data.last_loaded_at}` : "已同步", state.warnings);
       cleanupDraftState();
       render();
       restoreJobState();
       loadScopeOverview();
+      startAutoRefresh();
     }
 
     function render() {
@@ -2046,17 +2389,20 @@
         const id = item.active_item_id;
         const range = splitTimeRange(item.time);
         const readonly = Boolean(item.source_only);
-        const readonlyReason = `该${workTypeLabel(item.work_type)}来自源表进行中，但本地没有目标表 record_id，不能通过网页更新或结束。`;
-        const tagText = readonly ? "源表进行中 / 未绑定目标记录 / 只读" : (item.can_update ? "可操作" : "等待");
+        const readonlyReason = item.block_reason || `该${workTypeLabel(item.work_type)}当前不可通过网页更新或结束。`;
+        const tagText = readonly ? "只读" : (item.can_update ? "可操作" : "等待");
         const isRepair = (item.work_type || "maintenance") === "repair";
         return `
           <article class="ongoing-card" data-ongoing="${html(id)}">
             <div class="card-head">
               <div>
                 <h3 class="card-title">${html(item.title || "未命名通告")}</h3>
-                <div class="record-meta">${html([workTypeLabel(item.work_type), item.building, item.specialty, item.level, item.time, item.upload_state, item.source_record_id ? "源ID " + item.source_record_id : ""].filter(Boolean).join(" | "))}</div>
+                <div class="record-meta">${html([workTypeLabel(item.work_type), item.origin_label, item.building, item.specialty, item.level, item.time, item.upload_state, item.source_record_id ? "源ID " + item.source_record_id : "", item.active_item_id ? "本地ID " + item.active_item_id : ""].filter(Boolean).join(" | "))}</div>
               </div>
-              <span class="tag ${item.can_update ? "green" : "amber"}">${html(tagText)}</span>
+              <div class="card-actions">
+                <span class="tag ${item.can_update ? "green" : "amber"}">${html(tagText)}</span>
+                <button class="btn danger icon-btn" data-delete-ongoing="${html(id)}" title="删除此进行中卡片">×</button>
+              </div>
             </div>
             <div class="form-grid ${readonly ? "hidden" : ""}">
               <div>${textField(id, "progress", isRepair ? "完成情况" : "进度", item.progress || "")}</div>
@@ -2141,6 +2487,46 @@
       };
     }
 
+    async function deleteOngoing(activeItemId) {
+      const item = state.ongoing.find((x) => x.active_item_id === activeItemId);
+      if (!item) return;
+      const card = document.querySelector(`[data-ongoing="${CSS.escape(activeItemId)}"]`);
+      try {
+        setActionButtonsDisabled(activeItemId, true);
+        setJobLine(activeItemId, "正在删除进行中卡片", "busy");
+        const payload = {
+          scope: state.scope,
+          work_type: item.work_type || "maintenance",
+          notice_type: item.notice_type || "",
+          active_item_id: item.active_item_id || "",
+          record_id: item.record_id || "",
+          raw_record_id: item.raw_record_id || "",
+          target_record_id: item.target_record_id || item.record_id || "",
+          source_record_id: item.source_record_id || "",
+          source_app_token: item.source_app_token || "",
+          source_table_id: item.source_table_id || "",
+          source_only: Boolean(item.source_only),
+          title: item.title || "",
+          building: item.building || "",
+          building_codes: item.building_codes || [],
+          specialty: item.specialty || "",
+        };
+        await api("/api/ongoing-items/delete", {
+          method: "POST",
+          body: JSON.stringify(payload),
+        });
+        if (card) card.classList.add("removing");
+        await new Promise((resolve) => setTimeout(resolve, 180));
+        state.ongoing = state.ongoing.filter((x) => x.active_item_id !== activeItemId);
+        render();
+        await refreshWorkbench({ automatic: true });
+      } catch (err) {
+        if (card) card.classList.remove("removing");
+        setJobLine(activeItemId, err.message || "删除失败", "failed");
+        setActionButtonsDisabled(activeItemId, false);
+      }
+    }
+
     function bindOngoingEvents() {
       document.querySelectorAll(".ongoing-card [data-draft-field]").forEach((el) => {
         el.addEventListener("input", () => {
@@ -2161,6 +2547,9 @@
       });
       document.querySelectorAll("[data-send-end]").forEach((btn) => {
         btn.addEventListener("click", () => sendAction(readOngoingPayload(btn.dataset.sendEnd, "end"), btn.dataset.sendEnd));
+      });
+      document.querySelectorAll("[data-delete-ongoing]").forEach((btn) => {
+        btn.addEventListener("click", () => deleteOngoing(btn.dataset.deleteOngoing));
       });
     }
 
@@ -2395,17 +2784,57 @@
       const workspace = $("workspace");
       if (!workspace) return;
       const focusClasses = ["focus-left", "focus-middle", "focus-right"];
+      const hoverDelayMs = 1500;
+      let hoverTimer = 0;
+      let hoveredZone = "";
+      let lastPointerDownAt = 0;
+      const clearHoverTimer = () => {
+        if (hoverTimer) {
+          clearTimeout(hoverTimer);
+          hoverTimer = 0;
+        }
+      };
       const setFocus = (zone) => {
         workspace.classList.remove(...focusClasses);
         if (zone) workspace.classList.add(`focus-${zone}`);
       };
+      const scheduleFocus = (zone) => {
+        clearHoverTimer();
+        hoverTimer = window.setTimeout(() => {
+          hoverTimer = 0;
+          if (hoveredZone === zone) setFocus(zone);
+        }, hoverDelayMs);
+      };
       workspace.querySelectorAll("[data-workspace-zone]").forEach((panel) => {
-        panel.addEventListener("mouseenter", () => setFocus(panel.dataset.workspaceZone || ""));
-        panel.addEventListener("focusin", () => setFocus(panel.dataset.workspaceZone || ""));
+        const zone = panel.dataset.workspaceZone || "";
+        panel.addEventListener("mouseenter", () => {
+          hoveredZone = zone;
+          scheduleFocus(zone);
+        });
+        panel.addEventListener("mouseleave", () => {
+          if (hoveredZone === zone) hoveredZone = "";
+          clearHoverTimer();
+          setFocus("");
+        });
+        panel.addEventListener("pointerdown", () => {
+          lastPointerDownAt = Date.now();
+        });
+        panel.addEventListener("focusin", () => {
+          if (Date.now() - lastPointerDownAt < 600) return;
+          clearHoverTimer();
+          setFocus(zone);
+        });
       });
-      workspace.addEventListener("mouseleave", () => setFocus(""));
+      workspace.addEventListener("mouseleave", () => {
+        hoveredZone = "";
+        clearHoverTimer();
+        setFocus("");
+      });
       workspace.addEventListener("focusout", (event) => {
-        if (!workspace.contains(event.relatedTarget)) setFocus("");
+        if (!workspace.contains(event.relatedTarget) && !hoveredZone) {
+          clearHoverTimer();
+          setFocus("");
+        }
       });
     }
 
@@ -2414,6 +2843,7 @@
     $("syncSourceBtn").addEventListener("click", syncSource);
     $("switchScopeBtn").addEventListener("click", () => showGate("maintenance"));
     $("homeBtn").addEventListener("click", () => showGate("home"));
+    $("logoutBtn").addEventListener("click", logout);
     $("clearSelectionBtn").addEventListener("click", () => {
       state.selected.clear();
       state.drafts.clear();
@@ -2435,21 +2865,51 @@
       renderWorkTypeTabs();
     });
 
-    renderGate();
-    bindWorkspaceHover();
-    if (state.gateMode === "maintenance") loadScopeOverview();
-    if (state.gateMode === "handover") loadHandoverLinks();
+    async function initApp() {
+      bindWorkspaceHover();
+      await loadAuthStatus();
+      if (!hasPortalAccess()) {
+        stopAutoRefresh();
+        $("app").classList.add("hidden");
+        $("gate").classList.remove("hidden");
+        renderGate();
+        return;
+      }
+      if (state.scope && scopeAllowed(state.scope)) {
+        await selectScope(state.scope, { replace: true }).catch((err) => {
+          setSyncStatus(err.message || "加载失败", []);
+        });
+        return;
+      }
+      if (state.scope && !scopeAllowed(state.scope)) {
+        state.scope = "";
+        state.gateMode = "maintenance";
+      }
+      renderGate();
+      if (state.gateMode === "maintenance") loadScopeOverview();
+      if (state.gateMode === "handover") loadHandoverLinks();
+    }
+
     window.addEventListener("popstate", () => {
       const scope = urlScope();
       const mode = urlMode();
       state.scope = scope;
       if (scope) {
+        if (!scopeAllowed(scope)) {
+          state.scope = "";
+          state.gateMode = "maintenance";
+          $("app").classList.add("hidden");
+          $("gate").classList.remove("hidden");
+          renderGate();
+          return;
+        }
         $("gate").classList.add("hidden");
         $("app").classList.remove("hidden");
         loadBootstrap().catch((err) => {
           setSyncStatus(err.message || "加载失败", []);
         });
       } else {
+        stopAutoRefresh();
         state.gateMode = ["maintenance", "handover"].includes(mode) ? mode : "home";
         $("app").classList.add("hidden");
         $("gate").classList.remove("hidden");
@@ -2458,9 +2918,12 @@
         if (state.gateMode === "handover") loadHandoverLinks();
       }
     });
-    if (state.scope) selectScope(state.scope, { replace: true }).catch((err) => {
-      setSyncStatus(err.message || "加载失败", []);
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible" && state.scope && !$("app").classList.contains("hidden")) {
+        runAutoRefresh();
+      }
     });
+    initApp();
   </script>
 </body>
 </html>

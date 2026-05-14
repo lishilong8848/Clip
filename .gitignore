@@ -27,6 +27,8 @@ __pycache__/
 /scheduler_first_launch_done.flag
 /build_meta.json
 /build_version_state.json
+/bin/data/
+/bin/upload_event_module/config.json
 
 # Temporary runtime and test artifacts
 /.tmp_runtime/
