@@ -711,6 +711,8 @@ class MainWindowWorkflowMixin:
                 self._update_payload_from_entry(payload, entry)
             if "transfer_to_overhaul" in data_dict:
                 payload.transfer_to_overhaul = data_dict.get("transfer_to_overhaul")
+            if "maintenance_cycle" in data_dict:
+                payload.maintenance_cycle = data_dict.get("maintenance_cycle")
             data_dict["payload_key"] = payload_key
             return payload
         payload = NoticePayload(
@@ -721,6 +723,7 @@ class MainWindowWorkflowMixin:
             event_source=data_dict.get("source"),
             occurrence_date=data_dict.get("time_str"),
             transfer_to_overhaul=data_dict.get("transfer_to_overhaul"),
+            maintenance_cycle=data_dict.get("maintenance_cycle"),
         )
         self._payload_store[payload_key] = payload
         data_dict["payload_key"] = payload_key
@@ -1248,6 +1251,7 @@ class MainWindowWorkflowMixin:
         event_source = str(resolved_fields.get("event_source") or "").strip()
         _buildings = self._normalize_buildings_value(resolved_fields.get("buildings"))
         resolved_level = str(resolved_fields.get("level") or "").strip()
+        maintenance_cycle = str(data_dict.get("maintenance_cycle") or "").strip()
         route_payload = NoticePayload(
             text=data_dict.get("text", ""),
             level=resolved_level or data_dict.get("level"),
@@ -1257,6 +1261,7 @@ class MainWindowWorkflowMixin:
             occurrence_date=data_dict.get("time_str"),
             transfer_to_overhaul=data_dict.get("transfer_to_overhaul"),
             robot_group_choice=str(robot_group_choice or "auto").strip() or "auto",
+            maintenance_cycle=maintenance_cycle,
         )
         robot_group_choice = self._resolve_robot_group_choice_for_upload(
             notice_type,
@@ -1314,6 +1319,10 @@ class MainWindowWorkflowMixin:
                 data_dict["event_source"] = event_source
             else:
                 data_dict.pop("event_source", None)
+        if maintenance_cycle:
+            data_dict["maintenance_cycle"] = maintenance_cycle
+        else:
+            data_dict.pop("maintenance_cycle", None)
         if response_time:
             data_dict["last_response_time"] = response_time
         self._update_active_item_data(data_dict.get("record_id"), data_dict)

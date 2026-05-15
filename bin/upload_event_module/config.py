@@ -928,6 +928,7 @@ MAINTENANCE_NOTICE_FIELDS = {
     "name": "名称",
     "specialty": "专业",
     "building": "楼栋",
+    "maintenance_cycle": "维保周期",
     "content": "内容",
     "impact": "影响",
     "progress": "进度",

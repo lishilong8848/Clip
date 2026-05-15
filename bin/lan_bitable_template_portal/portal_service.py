@@ -1792,6 +1792,7 @@ class MaintenancePortalService:
                 "maintenance_total",
                 "maintenance_no",
                 "maintenance_project",
+                "maintenance_cycle",
                 "level",
                 "source_progress",
                 "zhihang_involved",
@@ -3399,6 +3400,9 @@ class MaintenancePortalService:
         ).strip()
         if action == "start":
             record_id = str((request_payload or {}).get("record_id") or "").strip()
+            manual_id = str((request_payload or {}).get("manual_id") or "").strip()
+            if MaintenancePortalService._truthy_flag((request_payload or {}).get("manual")) and manual_id:
+                return f"{work_type}:manual-start:{manual_id}"
             return f"{work_type}:start:{record_id}" if record_id else ""
         if action in {"update", "end"}:
             active_item_id = str(
@@ -3419,7 +3423,13 @@ class MaintenancePortalService:
         action = str(request_payload.get("action") or "").strip().lower()
         if action not in {"start", "update", "end"}:
             raise PortalError("动作必须是 start/update/end。")
-        if action == "start" and not str(request_payload.get("record_id") or "").strip():
+        if action == "start" and not (
+            str(request_payload.get("record_id") or "").strip()
+            or (
+                self._truthy_flag(request_payload.get("manual"))
+                and str(request_payload.get("manual_id") or "").strip()
+            )
+        ):
             raise PortalError("开始通告缺少计划记录ID。")
         if action == "update" and not (
             str(request_payload.get("active_item_id") or "").strip()
@@ -3545,10 +3555,15 @@ class MaintenancePortalService:
         self.ensure_loaded()
         scope = self._normalize_scope(request_payload.get("scope"))
         specialty = str(request_payload.get("specialty") or "").strip()
+        manual = self._truthy_flag(request_payload.get("manual"))
 
         record = None
         fields: dict[str, Any] = {}
-        record_id = str(request_payload.get("record_id") or "").strip()
+        record_id = str(
+            request_payload.get("record_id")
+            or (request_payload.get("manual_id") if manual else "")
+            or ""
+        ).strip()
         source_record_id = str(request_payload.get("source_record_id") or "").strip()
         target_record_id = str(request_payload.get("target_record_id") or "").strip()
         active_item_id = str(request_payload.get("active_item_id") or "").strip()
@@ -3556,26 +3571,40 @@ class MaintenancePortalService:
         maintenance_total = ""
         maintenance_no = ""
         maintenance_project = ""
+        maintenance_cycle = str(request_payload.get("maintenance_cycle") or "").strip()
         if action == "start":
             if not record_id:
                 raise PortalError("开始通告缺少计划记录ID。")
-            record = self._find_record_by_id(record_id)
-            fields = record.get("display_fields") or {}
-            current_status = str(fields.get("维护实施状态") or "").strip()
-            if current_status != DEFAULT_MAINTENANCE_STATUS:
-                raise PortalError(
-                    f"该计划维护项当前状态不是{DEFAULT_MAINTENANCE_STATUS}: {current_status or '-'}"
-                )
-            building = str(fields.get("楼栋") or "").strip()
-            maintenance_total = str(fields.get("维护总项") or "").strip()
-            plan_month = str(fields.get("计划维护月份") or "").strip()
-            maintenance_no = str(fields.get("维护编号") or "").strip()
-            maintenance_project = str(fields.get("维护项目") or "").strip()
-            if not specialty or specialty == "全部":
-                specialty = str(fields.get("专业类别") or "").strip()
-            if not specialty or specialty == "全部":
-                raise PortalError("该计划维护项缺少专业类别，无法上传。")
-            title = f"EA118机房{building}{maintenance_total}"
+            if manual:
+                building = str(request_payload.get("building") or "").strip()
+                title = str(request_payload.get("title") or "").strip()
+                if not title:
+                    raise PortalError("纯手填维保通告缺少名称。")
+                if not building:
+                    raise PortalError("纯手填维保通告缺少楼栋。")
+                if not specialty or specialty == "全部":
+                    raise PortalError("纯手填维保通告缺少专业。")
+                if not maintenance_cycle:
+                    raise PortalError("纯手填维保通告必须选择维保周期。")
+            else:
+                record = self._find_record_by_id(record_id)
+                fields = record.get("display_fields") or {}
+                current_status = str(fields.get("维护实施状态") or "").strip()
+                if current_status != DEFAULT_MAINTENANCE_STATUS:
+                    raise PortalError(
+                        f"该计划维护项当前状态不是{DEFAULT_MAINTENANCE_STATUS}: {current_status or '-'}"
+                    )
+                building = str(fields.get("楼栋") or "").strip()
+                maintenance_total = str(fields.get("维护总项") or "").strip()
+                plan_month = str(fields.get("计划维护月份") or "").strip()
+                maintenance_no = str(fields.get("维护编号") or "").strip()
+                maintenance_project = str(fields.get("维护项目") or "").strip()
+                maintenance_cycle = str(fields.get("维护周期") or maintenance_cycle).strip()
+                if not specialty or specialty == "全部":
+                    specialty = str(fields.get("专业类别") or "").strip()
+                if not specialty or specialty == "全部":
+                    raise PortalError("该计划维护项缺少专业类别，无法上传。")
+                title = f"EA118机房{building}{maintenance_total}"
         else:
             if source_record_id:
                 try:
@@ -3590,6 +3619,7 @@ class MaintenancePortalService:
                 plan_month = str(fields.get("计划维护月份") or "").strip()
                 maintenance_no = str(fields.get("维护编号") or "").strip()
                 maintenance_project = str(fields.get("维护项目") or "").strip()
+                maintenance_cycle = str(fields.get("维护周期") or maintenance_cycle).strip()
                 if not target_record_id:
                     target_record_id = self._resolve_target_record_id_for_source_update(
                         work_type=WORK_TYPE_MAINTENANCE,
@@ -3663,8 +3693,9 @@ class MaintenancePortalService:
             "job_id": job_id,
             "work_type": WORK_TYPE_MAINTENANCE,
             "notice_type": NOTICE_TYPE_MAINTENANCE,
-            "source_app_token": self.app_token,
-            "source_table_id": self.table_id,
+            "source_app_token": "" if manual else self.app_token,
+            "source_table_id": "" if manual else self.table_id,
+            "manual": manual,
             "action": action,
             "status": status,
             "scope": scope,
@@ -3682,6 +3713,7 @@ class MaintenancePortalService:
             "maintenance_total": maintenance_total,
             "maintenance_no": maintenance_no,
             "maintenance_project": maintenance_project,
+            "maintenance_cycle": maintenance_cycle,
             "source_progress": (
                 self._maintenance_status_value(record)
                 if record is not None
@@ -3738,26 +3770,54 @@ class MaintenancePortalService:
             raise PortalError("动作必须是 start/update/end。")
         self.ensure_loaded()
         scope = self._normalize_scope(request_payload.get("scope"))
+        manual = self._truthy_flag(request_payload.get("manual"))
 
-        record_id = str(request_payload.get("record_id") or "").strip()
+        record_id = str(
+            request_payload.get("record_id")
+            or (request_payload.get("manual_id") if manual else "")
+            or ""
+        ).strip()
         target_record_id = ""
         fields: dict[str, Any] = {}
         if action == "start":
             if not record_id:
                 raise PortalError("开始通告缺少变更源记录ID。")
-            record = self._find_record_by_id(record_id, WORK_TYPE_CHANGE)
-            fields = record.get("display_fields") or {}
-            source_progress = self._change_progress_value(record)
-            if source_progress != CHANGE_PROGRESS_NOT_STARTED:
-                raise PortalError(
-                    f"该变更当前源进度不是{CHANGE_PROGRESS_NOT_STARTED}: {source_progress or '-'}"
+            if manual:
+                title = str(request_payload.get("title") or "").strip()
+                if not title:
+                    raise PortalError("纯手填变更通告缺少名称。")
+                building_codes = [
+                    str(code or "").strip().upper()
+                    for code in (request_payload.get("building_codes") or [])
+                    if str(code or "").strip()
+                ]
+                if not building_codes:
+                    building_codes = self._building_codes_from_value(
+                        request_payload.get("building")
+                    )
+                building = (
+                    str(request_payload.get("building") or "").strip()
+                    or self._building_label_from_codes(building_codes)
                 )
-            title = self._change_title(record)
-            building_codes = self._change_record_building_codes(record)
-            building = self._building_label_from_codes(building_codes)
-            specialty = str(fields.get("专业") or "").strip()
-            level = str(fields.get("变更等级（阿里）") or "").strip()
-            default_start, default_end, _ = self._change_time_range(record)
+                specialty = str(request_payload.get("specialty") or "").strip()
+                level = str(request_payload.get("level") or "").strip()
+                default_start = ""
+                default_end = ""
+                source_progress = ""
+            else:
+                record = self._find_record_by_id(record_id, WORK_TYPE_CHANGE)
+                fields = record.get("display_fields") or {}
+                source_progress = self._change_progress_value(record)
+                if source_progress != CHANGE_PROGRESS_NOT_STARTED:
+                    raise PortalError(
+                        f"该变更当前源进度不是{CHANGE_PROGRESS_NOT_STARTED}: {source_progress or '-'}"
+                    )
+                title = self._change_title(record)
+                building_codes = self._change_record_building_codes(record)
+                building = self._building_label_from_codes(building_codes)
+                specialty = str(fields.get("专业") or "").strip()
+                level = str(fields.get("变更等级（阿里）") or "").strip()
+                default_start, default_end, _ = self._change_time_range(record)
         else:
             source_record_id = str(request_payload.get("source_record_id") or "").strip()
             source_record = None
@@ -3871,8 +3931,9 @@ class MaintenancePortalService:
             "job_id": job_id,
             "work_type": WORK_TYPE_CHANGE,
             "notice_type": NOTICE_TYPE_CHANGE,
-            "source_app_token": CHANGE_SOURCE_APP_TOKEN,
-            "source_table_id": CHANGE_SOURCE_TABLE_ID,
+            "source_app_token": "" if manual else CHANGE_SOURCE_APP_TOKEN,
+            "source_table_id": "" if manual else CHANGE_SOURCE_TABLE_ID,
+            "manual": manual,
             "action": action,
             "status": status,
             "scope": scope,
@@ -3984,57 +4045,92 @@ class MaintenancePortalService:
             return str(default or "").strip()
 
         record_id = str(request_payload.get("record_id") or "").strip()
+        manual = self._truthy_flag(request_payload.get("manual"))
+        if manual and not record_id:
+            record_id = str(request_payload.get("manual_id") or "").strip()
         fields: dict[str, Any] = {}
+        record = None
         source_record = None
         if action == "start":
             if not record_id:
                 raise PortalError("开始通告缺少检修源记录ID。")
-            record = self._find_record_by_id(record_id, WORK_TYPE_REPAIR)
-            fields = record.get("display_fields") or {}
-            if not self._is_valid_repair_record(record):
-                raise PortalError("该检修记录缺少有效维修名称或楼栋，不能发起。")
-            source_progress = self._repair_source_status(record)
-            if source_progress != DEFAULT_MAINTENANCE_STATUS:
-                raise PortalError(
-                    f"该检修当前源状态不是{DEFAULT_MAINTENANCE_STATUS}: {source_progress or '-'}"
+            if manual:
+                title = request_first_text(("title", "content"))
+                if not title:
+                    raise PortalError("纯手填检修通告缺少标题。")
+                building_codes = [
+                    str(code or "").strip().upper()
+                    for code in (request_payload.get("building_codes") or [])
+                    if str(code or "").strip()
+                ]
+                if not building_codes:
+                    building_codes = self._repair_building_codes_from_value(
+                        request_payload.get("building")
+                    )
+                building = (
+                    str(request_payload.get("building") or "").strip()
+                    or self._building_label_from_codes(building_codes)
                 )
-            title = request_first_text(
-                ("title", "content"), default=self._repair_title(record)
-            )
-            building_codes = self._repair_record_building_codes(record)
-            building = self._building_label_from_codes(building_codes)
-            specialty = str(request_payload.get("specialty") or "").strip()
-            if not specialty or specialty == "全部":
-                specialty = self._repair_specialty(record)
-            level = request_text("level", self._repair_level(fields))
-            default_start, default_end, _ = self._repair_time_range(record)
-            repair_device = request_text("repair_device", self._repair_device_text(fields))
-            repair_fault = request_text(
-                "repair_fault",
-                self._repair_first_field(fields, "维修故障", "故障维修原因"),
-            )
-            fault_type = request_text(
-                "fault_type", self._repair_first_field(fields, "故障类型") or "设备故障"
-            )
-            repair_mode = request_text(
-                "repair_mode",
-                self._repair_first_field(fields, "维修方式", "维修方", "供应商名称"),
-            )
-            discovery = request_text(
-                "discovery", self._repair_first_field(fields, "对应来源")
-            )
-            symptom = request_text(
-                "symptom", self._repair_first_field(fields, "故障发生现象描述", "故障现象")
-            )
-            solution = request_text(
-                "solution",
-                self._repair_first_field(fields, "解决方案", "维修方案", "后续整改措施"),
-            )
-            source_fault_time = self._repair_first_field(
-                fields, "故障发生时间", "发现故障时间"
-            )
-            fault_time = request_text("fault_time", source_fault_time)
-            target_record_id = self._repair_target_record_id(record)
+                specialty = str(request_payload.get("specialty") or "").strip()
+                level = request_text("level")
+                default_start = ""
+                default_end = ""
+                repair_device = request_text("repair_device")
+                repair_fault = request_text("repair_fault")
+                fault_type = request_text("fault_type")
+                repair_mode = request_text("repair_mode")
+                discovery = request_text("discovery")
+                symptom = request_text("symptom")
+                solution = request_text("solution")
+                fault_time = request_text("fault_time")
+                target_record_id = ""
+            else:
+                record = self._find_record_by_id(record_id, WORK_TYPE_REPAIR)
+                fields = record.get("display_fields") or {}
+                if not self._is_valid_repair_record(record):
+                    raise PortalError("该检修记录缺少有效维修名称或楼栋，不能发起。")
+                source_progress = self._repair_source_status(record)
+                if source_progress != DEFAULT_MAINTENANCE_STATUS:
+                    raise PortalError(
+                        f"该检修当前源状态不是{DEFAULT_MAINTENANCE_STATUS}: {source_progress or '-'}"
+                    )
+                title = request_first_text(
+                    ("title", "content"), default=self._repair_title(record)
+                )
+                building_codes = self._repair_record_building_codes(record)
+                building = self._building_label_from_codes(building_codes)
+                specialty = str(request_payload.get("specialty") or "").strip()
+                if not specialty or specialty == "全部":
+                    specialty = self._repair_specialty(record)
+                level = request_text("level", self._repair_level(fields))
+                default_start, default_end, _ = self._repair_time_range(record)
+                repair_device = request_text("repair_device", self._repair_device_text(fields))
+                repair_fault = request_text(
+                    "repair_fault",
+                    self._repair_first_field(fields, "维修故障", "故障维修原因"),
+                )
+                fault_type = request_text(
+                    "fault_type", self._repair_first_field(fields, "故障类型") or "设备故障"
+                )
+                repair_mode = request_text(
+                    "repair_mode",
+                    self._repair_first_field(fields, "维修方式", "维修方", "供应商名称"),
+                )
+                discovery = request_text(
+                    "discovery", self._repair_first_field(fields, "对应来源")
+                )
+                symptom = request_text(
+                    "symptom", self._repair_first_field(fields, "故障发生现象描述", "故障现象")
+                )
+                solution = request_text(
+                    "solution",
+                    self._repair_first_field(fields, "解决方案", "维修方案", "后续整改措施"),
+                )
+                source_fault_time = self._repair_first_field(
+                    fields, "故障发生时间", "发现故障时间"
+                )
+                fault_time = request_text("fault_time", source_fault_time)
+                target_record_id = self._repair_target_record_id(record)
         else:
             source_record_id = str(request_payload.get("source_record_id") or "").strip()
             if source_record_id:
@@ -4180,8 +4276,9 @@ class MaintenancePortalService:
             "job_id": job_id,
             "work_type": WORK_TYPE_REPAIR,
             "notice_type": NOTICE_TYPE_REPAIR,
-            "source_app_token": REPAIR_SOURCE_APP_TOKEN,
-            "source_table_id": REPAIR_SOURCE_TABLE_ID,
+            "source_app_token": "" if manual else REPAIR_SOURCE_APP_TOKEN,
+            "source_table_id": "" if manual else REPAIR_SOURCE_TABLE_ID,
+            "manual": manual,
             "action": action,
             "status": status,
             "scope": scope,

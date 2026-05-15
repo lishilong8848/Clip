@@ -854,7 +854,10 @@
       <aside class="panel work-panel records-panel" data-workspace-zone="left">
         <div class="panel-head">
           <h2>待发起事项</h2>
-          <button id="clearSelectionBtn" class="btn ghost">清空</button>
+          <div class="row-actions">
+            <button id="addManualDraftBtn" class="btn blue">纯手填</button>
+            <button id="clearSelectionBtn" class="btn ghost">清空</button>
+          </div>
         </div>
         <div class="panel-body">
           <div class="filters">
@@ -1003,6 +1006,17 @@
       { value: "repair", label: "检修" },
     ];
     const WORK_TYPE_VALUES = WORK_TYPES.map((item) => item.value);
+    const MANUAL_DRAFT_PREFIX = "manual:";
+    const MAINTENANCE_CYCLE_OPTIONS = [
+      "每月",
+      "每季",
+      "每年",
+      "半年",
+      "每两年",
+      "每三年",
+      "每五年",
+      "冬季保温每日",
+    ];
     const JOB_STATE_TTL_MS = 24 * 60 * 60 * 1000;
     const JOB_STATE_LIMIT = 80;
     const AUTO_REFRESH_DEFAULT_MS = 60 * 1000;
@@ -1040,7 +1054,9 @@
       ).label || (normalized === "CAMPUS" ? "园区" : normalized === "ALL" ? "全部" : normalized === "110" ? "110站" : `${normalized}楼`);
     };
     const workTypeLabel = (value) => (WORK_TYPES.find((item) => item.value === value) || WORK_TYPES[0]).label;
-    const recordKey = (record) => `${record.work_type || "maintenance"}:${record.record_id}`;
+    const isManualDraftKey = (key) => String(key || "").startsWith(MANUAL_DRAFT_PREFIX);
+    const manualDraftKey = (type) => `${MANUAL_DRAFT_PREFIX}${type || "maintenance"}:${opId()}`;
+    const recordKey = (record) => record?.manual_key || `${record.work_type || "maintenance"}:${record.record_id}`;
     const storageKey = () => `lan-workbench:${state.scope || "ALL"}`;
     const jobStorageKey = () => `lan-workbench-jobs:${state.scope || "ALL"}`;
     const safeJsonParse = (value, fallback) => {
@@ -1123,8 +1139,9 @@
     function cleanupDraftState() {
       const recordsByKey = new Map(state.records.map((record) => [recordKey(record), record]));
       const isUnavailable = (key) => {
+        if (isManualDraftKey(key)) return !state.drafts.has(key);
         const record = recordsByKey.get(key);
-        if (!record) return false;
+        if (!record) return true;
         return isRecordUnavailableForSelection(record);
       };
       for (const key of Array.from(state.selected)) {
@@ -1355,6 +1372,7 @@
     }
 
     function sourceProgressForRecord(record) {
+      if (record?.manual) return "未开始";
       const f = fieldsOf(record);
       const type = record.work_type || "maintenance";
       if (record.source_progress || record.source_status) return record.source_progress || record.source_status;
@@ -1399,11 +1417,21 @@
     }
 
     function titleForRecord(record) {
+      if (record?.manual) {
+        return fieldsOf(record)["手动标题"] || `手动${workTypeLabel(record.work_type)}通告`;
+      }
       const f = fieldsOf(record);
       const type = record.work_type || "maintenance";
       if (type === "change") return f["变更简述"] || record.record_id;
       if (type === "repair") return repairTitleForRecord(record);
       return `EA118机房${f["楼栋"] || ""}${f["维护总项"] || ""}`;
+    }
+
+    function recordCardTitle(record) {
+      const title = titleForRecord(record);
+      if ((record.work_type || "maintenance") !== "maintenance") return title;
+      const period = String(fieldsOf(record)["维护周期"] || "").trim();
+      return period ? `${title}-${period}` : title;
     }
 
     function zhihangTitle(record) {
@@ -1430,6 +1458,7 @@
 
     function specialtyForRecord(record) {
       const f = fieldsOf(record);
+      if (record?.manual) return f["专业类别"] || f["专业"] || f["所属专业"] || "";
       const type = record.work_type || "maintenance";
       if (type === "change") return f["专业"] || "";
       if (type === "repair") return f["所属专业"] || f["专业（推送消息用）"] || "";
@@ -1438,6 +1467,7 @@
 
     function buildingForRecord(record) {
       const f = fieldsOf(record);
+      if (record?.manual) return f["楼栋"] || f["变更楼栋"] || f["所属数据中心/楼栋-使用"] || "";
       const type = record.work_type || "maintenance";
       if (type === "change") return f["变更楼栋"] || "";
       if (type === "repair") return f["所属数据中心/楼栋-使用"] || f["所属数据中心/楼栋（关联CMDB唯一ID关联,DE不选）"] || "";
@@ -1535,8 +1565,89 @@
       return draft;
     }
 
+    function manualDraftDefaults(type) {
+      return {
+        manual: true,
+        work_type: WORK_TYPE_VALUES.includes(type) ? type : "maintenance",
+        title: "",
+        building: "",
+        specialty: "",
+        level: "",
+        maintenance_cycle: "",
+        start_time: "",
+        end_time: "",
+        location: "",
+        content: "",
+        reason: "",
+        impact: "",
+        progress: "",
+        zhihang_involved: false,
+        zhihang_record_id: "",
+        zhihang_title: "",
+        zhihang_progress: "",
+        repair_device: "",
+        repair_fault: "",
+        fault_type: "",
+        repair_mode: "",
+        discovery: "",
+        symptom: "",
+        solution: "",
+        job_id: "",
+      };
+    }
+
+    function manualRecordFromDraft(key, draft) {
+      const type = WORK_TYPE_VALUES.includes(draft?.work_type) ? draft.work_type : "maintenance";
+      const title = String(draft?.title || draft?.content || "").trim();
+      const building = String(draft?.building || "").trim();
+      const specialty = String(draft?.specialty || "").trim();
+      return {
+        manual: true,
+        manual_key: key,
+        record_id: key,
+        work_type: type,
+        notice_type: type === "change" ? "设备变更" : type === "repair" ? "设备检修" : "维保通告",
+        building_codes: [],
+        display_fields: {
+          "手动标题": title,
+          "楼栋": building,
+          "变更楼栋": building,
+          "所属数据中心/楼栋-使用": building,
+          "专业类别": specialty,
+          "专业": specialty,
+          "所属专业": specialty,
+          "维护周期": draft?.maintenance_cycle || "",
+        },
+      };
+    }
+
+    function draftRecordForKey(key) {
+      const record = state.records.find((item) => recordKey(item) === key);
+      if (record) return record;
+      const draft = state.drafts.get(key);
+      if (isManualDraftKey(key) && draft) return manualRecordFromDraft(key, draft);
+      return null;
+    }
+
+    function addManualDraft() {
+      const type = WORK_TYPE_VALUES.includes(state.workType) ? state.workType : "maintenance";
+      const key = manualDraftKey(type);
+      state.drafts.set(key, manualDraftDefaults(type));
+      state.selected.add(key);
+      state.activeDraftKey = key;
+      saveDraftState();
+      render();
+    }
+
     function getDraft(record) {
       const id = recordKey(record);
+      if (record.manual) {
+        if (!state.drafts.has(id)) {
+          state.drafts.set(id, manualDraftDefaults(record.work_type));
+          saveDraftState();
+        }
+        return state.drafts.get(id);
+      }
       if (!state.drafts.has(id)) {
         const memory = record.memory || {};
         const f = fieldsOf(record);
@@ -2316,6 +2427,7 @@
         if ((record.work_type || "maintenance") !== state.workType) return false;
         const text = [
           titleForRecord(record),
+          f["维护周期"] || "",
           f["维护总项"] || "",
           f["维护编号"] || "",
           f["维护项目"] || "",
@@ -2425,7 +2537,7 @@
         return `
           <article class="record-card ${selected ? "selected" : ""} ${disabled ? "disabled" : ""} ${completed ? "completed" : ""}" data-record-key="${html(key)}">
             <div class="record-title">
-              <span>${html(titleForRecord(record))}</span>
+              <span>${html(recordCardTitle(record))}</span>
               <span class="tag ${tagClass}">${html(workTypeLabel(record.work_type))} · ${html(tagText)}</span>
             </div>
             <div class="record-meta">${html(recordMetaText(record))}</div>
@@ -2471,11 +2583,22 @@
       return ids;
     }
 
+    function draftWorkType(key) {
+      const draft = state.drafts.get(key);
+      if (draft?.work_type) return draft.work_type;
+      const record = state.records.find((item) => recordKey(item) === key);
+      return record?.work_type || "";
+    }
+
     function activeChangeDraftKey() {
-      if (state.activeDraftKey && state.selected.has(state.activeDraftKey) && state.activeDraftKey.startsWith("change:")) {
+      if (
+        state.activeDraftKey
+        && state.selected.has(state.activeDraftKey)
+        && draftWorkType(state.activeDraftKey) === "change"
+      ) {
         return state.activeDraftKey;
       }
-      return Array.from(state.selected).find((key) => key.startsWith("change:")) || "";
+      return Array.from(state.selected).find((key) => draftWorkType(key) === "change") || "";
     }
 
     function visibleZhihangRecords() {
@@ -2592,6 +2715,7 @@
     }
 
     function draftFieldsHtml(record, id, draft) {
+      if (record.manual) return manualDraftFieldsHtml(record, id, draft);
       if ((record.work_type || "maintenance") === "repair") {
         return `
           ${inputField(id, "start_time", "期望完成时间", draft.start_time, "datetime-local")}
@@ -2626,6 +2750,66 @@
       `;
     }
 
+    function selectField(id, key, label, value, options, placeholder = "请选择") {
+      const current = String(value || "");
+      return `
+        <div>
+          <label>${label}</label>
+          <select data-draft-field="${html(id)}:${key}">
+            <option value="">${html(placeholder)}</option>
+            ${(options || []).map((option) => `
+              <option value="${html(option)}" ${current === option ? "selected" : ""}>${html(option)}</option>
+            `).join("")}
+          </select>
+        </div>
+      `;
+    }
+
+    function manualDraftFieldsHtml(record, id, draft) {
+      const type = record.work_type || "maintenance";
+      const titleLabel = type === "repair" ? "标题" : "名称";
+      const timeStartLabel = type === "repair" ? "期望完成时间" : "开始时间";
+      const timeEndLabel = type === "repair" ? "故障发生时间" : "结束时间";
+      const levelField = type !== "maintenance"
+        ? textField(id, "level", type === "repair" ? "紧急程度" : "等级", draft.level || "")
+        : "";
+      const cycleField = type === "maintenance"
+        ? selectField(id, "maintenance_cycle", "维保周期", draft.maintenance_cycle || "", MAINTENANCE_CYCLE_OPTIONS)
+        : "";
+      const zhihangBinding = type === "change" ? zhihangBindingHtml(id, draft) : "";
+      const repairFields = type === "repair"
+        ? `
+          ${textField(id, "repair_device", "维修设备", draft.repair_device || "")}
+          ${textField(id, "repair_fault", "维修故障", draft.repair_fault || "")}
+          ${textField(id, "fault_type", "故障类型", draft.fault_type || "")}
+          ${textField(id, "repair_mode", "维修方式", draft.repair_mode || "")}
+          <div class="wide">${textField(id, "impact", "影响范围", draft.impact || "")}</div>
+          ${textField(id, "discovery", "故障发现方式", draft.discovery || "")}
+          ${textField(id, "symptom", "故障现象", draft.symptom || "")}
+          ${textField(id, "reason", "故障原因", draft.reason || "")}
+          <div class="wide">${textField(id, "solution", "解决方案", draft.solution || "")}</div>
+          <div class="wide">${textField(id, "progress", "完成情况", draft.progress || "")}</div>
+        `
+        : `
+          ${textField(id, "reason", "原因", draft.reason || "")}
+          ${textField(id, "impact", "影响", draft.impact || "")}
+          <div class="wide">${textField(id, "progress", "进度", draft.progress || "")}</div>
+          ${zhihangBinding}
+        `;
+      return `
+        <div class="wide">${textField(id, "title", titleLabel, draft.title || "")}</div>
+        ${inputField(id, "start_time", timeStartLabel, draft.start_time || "", "datetime-local")}
+        ${inputField(id, "end_time", timeEndLabel, draft.end_time || "", "datetime-local")}
+        ${textField(id, "building", "楼栋", draft.building || "")}
+        ${textField(id, "specialty", "专业", draft.specialty || "")}
+        ${levelField}
+        ${cycleField}
+        ${textField(id, "location", type === "repair" ? "地点" : "位置", draft.location || "")}
+        <div class="wide">${textField(id, "content", type === "repair" ? "补充内容" : "内容", draft.content || "")}</div>
+        ${repairFields}
+      `;
+    }
+
     function zhihangBindingHtml(id, draft) {
       const involved = Boolean(draft.zhihang_involved);
       const selectedTitle = draft.zhihang_record_id
@@ -2649,9 +2833,11 @@
     }
 
     function renderDrafts() {
-      const selectedRecords = state.records.filter((r) => state.selected.has(recordKey(r)));
+      const selectedRecords = Array.from(state.selected)
+        .map((key) => draftRecordForKey(key))
+        .filter(Boolean);
       if (!selectedRecords.length) {
-        $("draftList").innerHTML = `<div class="empty">从左侧选择事项后，在这里填写开始通告字段</div>`;
+        $("draftList").innerHTML = `<div class="empty">从左侧选择事项，或点击“纯手填”创建空白通告</div>`;
         return;
       }
       if (!state.activeDraftKey || !state.selected.has(state.activeDraftKey)) {
@@ -2664,7 +2850,9 @@
         const type = record.work_type || "maintenance";
         const active = state.activeDraftKey === id;
         const actionLabel = sourceActionLabel(record);
-        const extraMeta = type === "change"
+        const extraMeta = record.manual
+          ? "纯手动填写"
+          : type === "change"
           ? [levelForRecord(record), `源进度 ${sourceProgressForRecord(record) || "-"}`].filter(Boolean).join(" | ")
           : type === "repair"
             ? [repairDeviceText(record), `源状态 ${sourceProgressForRecord(record) || "-"}`, f["流程"]].filter(Boolean).join(" | ")
@@ -2673,7 +2861,7 @@
           <article class="draft-card ${active ? "active" : ""}" data-draft-card="${html(id)}">
             <div class="card-head">
               <div>
-                <h3 class="card-title">${html(titleForRecord(record))}</h3>
+                <h3 class="card-title">${html(record.manual ? `纯手填${workTypeLabel(type)}通告` : titleForRecord(record))}</h3>
                 <div class="record-meta">${html([workTypeLabel(record.work_type), buildingForRecord(record), specialtyForRecord(record), extraMeta].filter(Boolean).join(" | "))}</div>
               </div>
               <button class="btn danger" data-remove-draft="${html(id)}">移除</button>
@@ -2729,7 +2917,7 @@
 
     function bindDraftEvents() {
       document.querySelectorAll("[data-draft-field]").forEach((el) => {
-        el.addEventListener("input", () => {
+        const updateDraftField = () => {
           const marker = el.dataset.draftField.lastIndexOf(":");
           const id = el.dataset.draftField.slice(0, marker);
           const key = el.dataset.draftField.slice(marker + 1);
@@ -2748,7 +2936,9 @@
               line.textContent = "内容已修改，请重新发送";
             }
           }
-        });
+        };
+        el.addEventListener("input", updateDraftField);
+        el.addEventListener("change", updateDraftField);
       });
       document.querySelectorAll("[data-draft-card]").forEach((card) => {
         card.addEventListener("click", (event) => {
@@ -2892,6 +3082,7 @@
         source_record_id: item?.source_record_id || "",
         source_app_token: item?.source_app_token || "",
         source_table_id: item?.source_table_id || "",
+        maintenance_cycle: item?.maintenance_cycle || "",
         specialty: isRepair
           ? read("specialty", item?.specialty || "")
           : (state.filters.specialty === "全部" ? (item?.specialty || "") : state.filters.specialty),
@@ -2997,13 +3188,15 @@
     }
 
     async function sendStart(recordId) {
-      const record = state.records.find((x) => recordKey(x) === recordId);
+      const record = draftRecordForKey(recordId);
       const draft = state.drafts.get(recordId);
       if (!record || !draft) return;
       const type = record.work_type || "maintenance";
       const draftSpecialty = String(draft.specialty || "").trim();
-      const recordSpecialty = String((type === "repair" && draftSpecialty) ? draftSpecialty : specialtyForRecord(record) || "").trim();
+      const recordSpecialty = String((record.manual || (type === "repair" && draftSpecialty)) ? draftSpecialty : specialtyForRecord(record) || "").trim();
       const uploadSpecialty = type === "repair"
+        ? recordSpecialty
+        : record.manual
         ? recordSpecialty
         : state.filters.specialty && state.filters.specialty !== "全部"
         ? state.filters.specialty
@@ -3012,30 +3205,37 @@
         setJobLine(recordId, "该事项缺少专业类别，无法上传", "failed");
         return;
       }
+      if (record.manual && type === "maintenance" && !String(draft.maintenance_cycle || "").trim()) {
+        setJobLine(recordId, "纯手填维保必须选择维保周期", "failed");
+        return;
+      }
       if (type === "change" && draft.zhihang_involved && !draft.zhihang_record_id) {
         setJobLine(recordId, "该变更已标记涉及智航，请先选择右侧智航侧变更", "failed");
         state.activeDraftKey = recordId;
         renderRecords();
         return;
       }
-      const action = sourceActionForRecord(record);
+      const action = record.manual ? "start" : sourceActionForRecord(record);
       const targetRecordId = targetRecordIdForRecord(record);
       await sendAction({
         action,
         scope: state.scope,
         work_type: record.work_type || "maintenance",
         notice_type: record.notice_type || "",
-        source_app_token: record.source_app_token || "",
-        source_table_id: record.source_table_id || "",
+        manual: Boolean(record.manual),
+        manual_id: record.manual ? recordId : "",
+        source_app_token: record.manual ? "" : (record.source_app_token || ""),
+        source_table_id: record.manual ? "" : (record.source_table_id || ""),
+        maintenance_cycle: record.manual ? (draft.maintenance_cycle || "") : (fieldsOf(record)["维护周期"] || ""),
         specialty: uploadSpecialty,
         record_id: action === "start" ? record.record_id : targetRecordId,
-        source_record_id: record.record_id,
+        source_record_id: record.manual ? "" : record.record_id,
         target_record_id: action === "update" ? targetRecordId : "",
         source_progress: sourceProgressForRecord(record),
-        building_codes: record.building_codes || [],
-        building: buildingForRecord(record),
-        title: type === "repair" ? draft.content : titleForRecord(record),
-        level: type === "repair" ? (draft.level || "") : (type === "change" ? levelForRecord(record) : ""),
+        building_codes: record.manual ? [] : (record.building_codes || []),
+        building: record.manual ? (draft.building || "") : buildingForRecord(record),
+        title: record.manual ? (draft.title || "") : (type === "repair" ? draft.content : titleForRecord(record)),
+        level: record.manual ? (draft.level || "") : (type === "repair" ? (draft.level || "") : (type === "change" ? levelForRecord(record) : "")),
         start_time: draft.start_time,
         end_time: draft.end_time,
         location: draft.location,
@@ -3239,66 +3439,26 @@
       }
     }
 
-    function bindWorkspaceHover() {
+    function bindWorkspaceClickFocus() {
       const workspace = $("workspace");
       if (!workspace) return;
       const focusClasses = ["focus-left", "focus-middle", "focus-right"];
-      const hoverDelayMs = 1500;
-      let hoverTimer = 0;
-      let hoveredZone = "";
-      let lastPointerDownAt = 0;
-      const clearHoverTimer = () => {
-        if (hoverTimer) {
-          clearTimeout(hoverTimer);
-          hoverTimer = 0;
-        }
-      };
       const setFocus = (zone) => {
         workspace.classList.remove(...focusClasses);
         if (zone && zone !== "left") workspace.classList.add(`focus-${zone}`);
       };
-      const scheduleFocus = (zone) => {
-        clearHoverTimer();
+      workspace.addEventListener("click", (event) => {
+        if (event.target.closest("button, input, textarea, select, a, summary, details")) return;
+        const panel = event.target.closest("[data-workspace-zone]");
+        if (!panel || !workspace.contains(panel)) return;
+        const zone = panel.dataset.workspaceZone || "";
         if (zone === "left") {
           setFocus("");
           return;
         }
-        hoverTimer = window.setTimeout(() => {
-          hoverTimer = 0;
-          if (hoveredZone === zone) setFocus(zone);
-        }, hoverDelayMs);
-      };
-      workspace.querySelectorAll("[data-workspace-zone]").forEach((panel) => {
-        const zone = panel.dataset.workspaceZone || "";
-        panel.addEventListener("mouseenter", () => {
-          hoveredZone = zone;
-          scheduleFocus(zone);
-        });
-        panel.addEventListener("mouseleave", () => {
-          if (hoveredZone === zone) hoveredZone = "";
-          clearHoverTimer();
-          setFocus("");
-        });
-        panel.addEventListener("pointerdown", () => {
-          lastPointerDownAt = Date.now();
-        });
-        panel.addEventListener("focusin", () => {
-          if (Date.now() - lastPointerDownAt < 600) return;
-          clearHoverTimer();
-          setFocus(zone);
-        });
-      });
-      workspace.addEventListener("mouseleave", () => {
-        hoveredZone = "";
-        clearHoverTimer();
-        setFocus("");
-      });
-      workspace.addEventListener("focusout", (event) => {
-        if (!workspace.contains(event.relatedTarget) && !hoveredZone) {
-          clearHoverTimer();
-          setFocus("");
-        }
-      });
+        const focusClass = `focus-${zone}`;
+        setFocus(workspace.classList.contains(focusClass) ? "" : zone);
+      }, true);
     }
 
     $("refreshBtn").addEventListener("click", refreshWorkbench);
@@ -3313,6 +3473,7 @@
       saveDraftState();
       render();
     });
+    $("addManualDraftBtn").addEventListener("click", addManualDraft);
     $("sendAllStartBtn").addEventListener("click", sendAllStart);
     $("monthSelect").addEventListener("change", (e) => {
       state.filters.month = e.target.value;
@@ -3330,7 +3491,7 @@
 
     async function initApp() {
       if (oauthRedirecting) return;
-      bindWorkspaceHover();
+      bindWorkspaceClickFocus();
       await loadAuthStatus();
       if (!hasPortalAccess()) {
         stopAutoRefresh();

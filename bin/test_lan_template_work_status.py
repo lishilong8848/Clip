@@ -17,6 +17,11 @@ from lan_bitable_template_portal.portal_service import WORK_TYPE_CHANGE  # noqa:
 from lan_bitable_template_portal.portal_service import WORK_TYPE_REPAIR  # noqa: E402
 from lan_bitable_template_portal.portal_auth import PortalAuthManager  # noqa: E402
 from lan_bitable_template_portal.server import PortalHandler  # noqa: E402
+from upload_event_module.config import MAINTENANCE_NOTICE_FIELDS  # noqa: E402
+from upload_event_module.services.handlers.base import NoticePayload  # noqa: E402
+from upload_event_module.services.handlers.maintenance_notice import (  # noqa: E402
+    MaintenanceNoticeHandler,
+)
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -87,6 +92,7 @@ def _build_record(
     maintenance_total: str,
     month: str,
     status: str = "未开始",
+    maintenance_cycle: str = "",
 ):
     return {
         "record_id": record_id,
@@ -99,6 +105,7 @@ def _build_record(
             "专业类别": "电气",
             "维护编号": "WB-001",
             "维护项目": "例行维护",
+            "维护周期": maintenance_cycle,
         },
     }
 
@@ -1585,6 +1592,100 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(len(metas), 1)
         self.assertEqual(metas[0].field_name, "进展")
         self.assertEqual(metas[0].options_map["opt1"], "进行中")
+
+    def test_maintenance_cycle_written_to_target_fields(self):
+        handler = MaintenanceNoticeHandler("维保通告")
+        fields = handler.build_create_fields(
+            NoticePayload(
+                text=(
+                    "【维保通告】状态：开始\n"
+                    "【名称】EA118机房A楼测试维保\n"
+                    "【时间】2026-05-15 09:30~2026-05-15 18:30\n"
+                    "【位置】A楼\n"
+                    "【内容】测试\n"
+                    "【原因】测试\n"
+                    "【影响】无\n"
+                    "【进度】准备开始"
+                ),
+                buildings=["A楼"],
+                specialty="电气",
+                maintenance_cycle="月度",
+            )
+        )
+        self.assertEqual(
+            fields[MAINTENANCE_NOTICE_FIELDS["maintenance_cycle"]],
+            "月度",
+        )
+
+    def test_manual_maintenance_requires_and_carries_cycle(self):
+        service = _TestMaintenancePortalService()
+        payload = {
+            "manual": True,
+            "manual_id": "manual:maintenance:1",
+            "action": "start",
+            "scope": "A",
+            "work_type": "maintenance",
+            "title": "手动维保",
+            "building": "A楼",
+            "specialty": "电气",
+            "maintenance_cycle": "每月",
+            "start_time": "2026-05-15T09:30",
+            "end_time": "2026-05-15T18:30",
+            "location": "A楼",
+            "content": "手动内容",
+            "reason": "手动原因",
+            "impact": "无",
+            "progress": "准备开始",
+        }
+        prepared = service.prepare_maintenance_action(payload, job_id="job1")
+        self.assertTrue(prepared["manual"])
+        self.assertEqual(prepared["record_id"], "manual:maintenance:1")
+        self.assertEqual(prepared["maintenance_cycle"], "每月")
+        self.assertEqual(prepared["source_app_token"], "")
+
+        payload["maintenance_cycle"] = ""
+        with self.assertRaises(PortalError):
+            service.prepare_maintenance_action(payload, job_id="job2")
+
+    def test_manual_change_and_repair_do_not_require_source_records(self):
+        service = _TestMaintenancePortalService()
+        change = service.prepare_change_action(
+            {
+                "manual": True,
+                "manual_id": "manual:change:1",
+                "action": "start",
+                "scope": "A",
+                "title": "手动变更",
+                "building": "A楼",
+                "specialty": "电气",
+                "start_time": "2026-05-15T09:30",
+                "end_time": "2026-05-15T18:30",
+                "location": "A楼",
+            },
+            job_id="job3",
+        )
+        self.assertTrue(change["manual"])
+        self.assertEqual(change["record_id"], "manual:change:1")
+        self.assertEqual(change["source_app_token"], "")
+
+        repair = service.prepare_repair_action(
+            {
+                "manual": True,
+                "manual_id": "manual:repair:1",
+                "action": "start",
+                "scope": "A",
+                "title": "手动检修",
+                "building": "A楼",
+                "specialty": "暖通",
+                "expected_time": "2026-05-15T23:50",
+                "fault_time": "2026-05-15T08:00",
+                "location": "A楼",
+            },
+            job_id="job4",
+        )
+        self.assertTrue(repair["manual"])
+        self.assertEqual(repair["record_id"], "manual:repair:1")
+        self.assertEqual(repair["source_app_token"], "")
 
 
 if __name__ == "__main__":

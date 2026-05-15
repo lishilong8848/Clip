@@ -645,6 +645,7 @@ class MainWindowRuntimeMixin:
                     "source_record_id": str(data.get("lan_source_record_id") or ""),
                     "source_app_token": str(data.get("lan_source_app_token") or ""),
                     "source_table_id": str(data.get("lan_source_table_id") or ""),
+                    "maintenance_cycle": str(data.get("maintenance_cycle") or ""),
                     "zhihang_involved": bool(data.get("lan_zhihang_record_id")),
                     "zhihang_record_id": str(data.get("lan_zhihang_record_id") or ""),
                     "zhihang_title": str(data.get("lan_zhihang_title") or ""),
@@ -915,6 +916,7 @@ class MainWindowRuntimeMixin:
                 "buildings": buildings,
                 "specialty": specialty,
                 "level": level,
+                "maintenance_cycle": str(payload.get("maintenance_cycle") or ""),
                 "_has_unuploaded_changes": False,
                 "_pending_upload_hash": None,
                 "_upload_in_progress": False,
@@ -979,6 +981,7 @@ class MainWindowRuntimeMixin:
                 "buildings": buildings,
                 "specialty": specialty,
                 "level": level,
+                "maintenance_cycle": str(payload.get("maintenance_cycle") or ""),
                 "_has_unuploaded_changes": False,
                 "_pending_upload_hash": None,
                 "_upload_in_progress": False,
@@ -1048,6 +1051,8 @@ class MainWindowRuntimeMixin:
             data["specialty"] = specialty
         if level:
             data["level"] = level
+        if payload.get("maintenance_cycle"):
+            data["maintenance_cycle"] = str(payload.get("maintenance_cycle") or "")
         data["lan_work_type"] = work_type
         if payload.get("source_record_id") and not data.get("lan_source_record_id"):
             data["lan_source_record_id"] = str(payload.get("source_record_id") or "")
