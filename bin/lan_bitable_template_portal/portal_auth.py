@@ -9,7 +9,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import requests
 
@@ -72,9 +72,18 @@ class PortalAuthManager:
         text = str(next_path or "/").strip()
         if not text.startswith("/") or text.startswith("//"):
             return "/"
-        if text.startswith("/api/auth/"):
+        parts = urlsplit(text)
+        path = parts.path or "/"
+        if path.startswith("/api/auth/"):
             return "/"
-        return text
+        query = urlencode(
+            [
+                (key, value)
+                for key, value in parse_qsl(parts.query, keep_blank_values=True)
+                if key not in {"code", "state"}
+            ]
+        )
+        return urlunsplit(("", "", path, query, parts.fragment)) or "/"
 
     @staticmethod
     def normalize_scope(scope: Any) -> str:

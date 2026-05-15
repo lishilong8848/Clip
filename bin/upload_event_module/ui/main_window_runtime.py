@@ -15,8 +15,10 @@ from ..logger import log_info, log_error, log_warning, write_crash_trace_message
 from ..utils import BASE_DIR
 from ..hot_reload.manager import HotReloadManager
 from ..services.system_alert_webhook import send_system_alert
+from ..services.feishu_service import delete_bitable_record
 from ..core.parser import extract_event_info
 from ..core.speech import speech_manager
+from ..time_parser import parse_time_range
 
 _QT_MESSAGE_HANDLER_INSTALLED = False
 DEFAULT_DISPLAY_VERSION = "V1.0.20260210"
@@ -327,12 +329,21 @@ class MainWindowRuntimeMixin:
 
     def _lan_notice_sections(self, text: str) -> dict:
         return {
-            "title": self._extract_section_text(text, ("名称", "标题")),
-            "time": self._extract_section_text(text, ("时间",)),
-            "level": self._extract_section_text(text, ("等级",)),
+            "title": self._extract_section_text(text, ("名称", "标题", "事件描述", "维修名称")),
+            "time": self._extract_section_text(text, ("时间", "计划时间", "变更时间", "维护时间")),
+            "start_time": self._extract_section_text(
+                text,
+                ("开始时间", "计划开始时间", "维护开始时间", "变更开始时间", "维修开始时间"),
+            ),
+            "end_time": self._extract_section_text(
+                text,
+                ("结束时间", "计划结束时间", "维护结束时间", "变更结束时间", "维修结束时间"),
+            ),
+            "level": self._extract_section_text(text, ("等级", "紧急程度")),
+            "specialty": self._extract_section_text(text, ("专业", "专业类别")),
             "location": self._extract_section_text(text, ("位置", "地点")),
             "content": self._extract_section_text(text, ("内容",)),
-            "reason": self._extract_section_text(text, ("原因", "故障原因")),
+            "reason": self._extract_section_text(text, ("原因", "故障原因", "故障维修原因")),
             "impact": self._extract_section_text(text, ("影响", "影响范围")),
             "progress": self._extract_section_text(text, ("进度", "完成情况")),
             "repair_device": self._extract_section_text(text, ("维修设备",)),
@@ -340,11 +351,67 @@ class MainWindowRuntimeMixin:
             "fault_type": self._extract_section_text(text, ("故障类型",)),
             "repair_mode": self._extract_section_text(text, ("维修方式",)),
             "discovery": self._extract_section_text(text, ("故障发现方式",)),
-            "symptom": self._extract_section_text(text, ("故障现象",)),
+            "symptom": self._extract_section_text(text, ("故障现象", "故障发生现象描述")),
             "solution": self._extract_section_text(text, ("解决方案",)),
-            "fault_time": self._extract_section_text(text, ("发现故障时间",)),
+            "fault_time": self._extract_section_text(text, ("发现故障时间", "故障发生时间")),
             "expected_time": self._extract_section_text(text, ("期望完成时间",)),
         }
+
+    @staticmethod
+    def _lan_normalize_datetime_text(value) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        try:
+            start_dt, _ = parse_time_range(text)
+        except Exception:
+            start_dt = None
+        if start_dt is not None:
+            try:
+                return start_dt.strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                return text
+        return text
+
+    def _lan_notice_time_fields(self, sections: dict, info: dict, data: dict) -> tuple[str, str, str]:
+        raw_time = str(
+            (sections or {}).get("time")
+            or (info or {}).get("time_str")
+            or (data or {}).get("time_str")
+            or ""
+        ).strip()
+        raw_start = str(
+            (sections or {}).get("start_time")
+            or (data or {}).get("start_time")
+            or ""
+        ).strip()
+        raw_end = str(
+            (sections or {}).get("end_time")
+            or (data or {}).get("end_time")
+            or ""
+        ).strip()
+
+        start_time = ""
+        end_time = ""
+        if raw_time:
+            try:
+                start_dt, end_dt = parse_time_range(raw_time)
+            except Exception:
+                start_dt, end_dt = None, None
+            if start_dt is not None:
+                start_time = start_dt.strftime("%Y-%m-%d %H:%M")
+            if end_dt is not None:
+                end_time = end_dt.strftime("%Y-%m-%d %H:%M")
+
+        if not start_time and raw_start:
+            start_time = self._lan_normalize_datetime_text(raw_start)
+        if not end_time and raw_end:
+            end_time = self._lan_normalize_datetime_text(raw_end)
+
+        time_text = raw_time
+        if start_time or end_time:
+            time_text = f"{start_time}~{end_time}" if end_time else start_time
+        return start_time, end_time, time_text
 
     def get_lan_maintenance_ongoing_notices(self, scope: str = "ALL") -> list[dict]:
         try:
@@ -478,6 +545,17 @@ class MainWindowRuntimeMixin:
             record_id and self._has_pending_upload(record_id)
         ):
             return {"ok": False, "error": "该条目正在上传，请等待完成后再删除。"}
+        remote_deleted = False
+        remote_message = ""
+        notice_type = str(data.get("notice_type") or "").strip()
+        if record_id and not self._is_placeholder_record(data):
+            ok, remote_message = delete_bitable_record(record_id, notice_type)
+            if not ok:
+                return {
+                    "ok": False,
+                    "error": f"多维记录删除失败，Qt 条目已保留：{remote_message}",
+                }
+            remote_deleted = True
         self._clear_upload_queue(record_id)
         self._today_in_progress_pending_record_ids.discard(record_id)
         self._today_in_progress_synced_record_ids.discard(record_id)
@@ -495,9 +573,14 @@ class MainWindowRuntimeMixin:
         self.save_active_cache()
         log_info(
             "局域网页面删除进行中条目: "
-            f"record_id={record_id or '-'} active_item_id={data.get('active_item_id') or '-'}"
+            f"record_id={record_id or '-'} active_item_id={data.get('active_item_id') or '-'} "
+            f"remote_deleted={remote_deleted}"
         )
-        return {"ok": True}
+        return {
+            "ok": True,
+            "remote_deleted": remote_deleted,
+            "remote_message": remote_message,
+        }
 
     def _collect_lan_maintenance_ongoing_notices(self, scope: str = "ALL") -> list[dict]:
         items: list[dict] = []
@@ -522,6 +605,14 @@ class MainWindowRuntimeMixin:
             building = "、".join(buildings) if buildings else ""
             if not self._lan_scope_matches(scope, buildings or building):
                 continue
+            start_time, end_time, time_text = self._lan_notice_time_fields(sections, info, data)
+            fault_time = self._lan_normalize_datetime_text(sections.get("fault_time", ""))
+            expected_time = self._lan_normalize_datetime_text(sections.get("expected_time", ""))
+            if notice_type == "设备检修":
+                if expected_time or fault_time:
+                    start_time = expected_time or start_time
+                    end_time = fault_time or end_time
+                    time_text = f"{fault_time}~{expected_time}" if fault_time or expected_time else time_text
             record_id = str(data.get("record_id") or "").strip()
             active_item_id = str(data.get("active_item_id") or "")
             upload_busy = bool(data.get("_upload_in_progress")) or (
@@ -572,11 +663,11 @@ class MainWindowRuntimeMixin:
                     "status": info.get("status") or "",
                     "building": building,
                     "building_codes": self._lan_building_codes(buildings or building),
-                    "specialty": str(data.get("specialty") or ""),
+                    "specialty": str(data.get("specialty") or sections.get("specialty") or ""),
                     "level": str(data.get("level") or sections.get("level") or info.get("level") or ""),
-                    "time": sections["time"] or info.get("time_str") or "",
-                    "start_time": "",
-                    "end_time": "",
+                    "time": time_text,
+                    "start_time": start_time,
+                    "end_time": end_time,
                     "location": sections["location"],
                     "content": sections["content"],
                     "reason": sections["reason"],
@@ -589,8 +680,8 @@ class MainWindowRuntimeMixin:
                     "discovery": sections.get("discovery", ""),
                     "symptom": sections.get("symptom", ""),
                     "solution": sections.get("solution", ""),
-                    "fault_time": sections.get("fault_time", ""),
-                    "expected_time": sections.get("expected_time", ""),
+                    "fault_time": fault_time,
+                    "expected_time": expected_time,
                     "can_update": not blocked,
                     "can_end": not blocked,
                     "block_reason": block_reason,

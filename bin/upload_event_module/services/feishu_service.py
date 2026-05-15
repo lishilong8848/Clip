@@ -12,6 +12,7 @@ from lark_oapi.api.auth.v3 import (
 from lark_oapi.api.bitable.v1 import (
     AppTableRecord,
     CreateAppTableRecordRequest,
+    DeleteAppTableRecordRequest,
     GetAppTableRecordRequest,
     UpdateAppTableRecordRequest,
     ListAppTableFieldRequest,
@@ -580,6 +581,51 @@ def query_record_by_id(record_id, notice_type):
     record_data = {"record_id": record.record_id, "fields": record.fields}
     log_info(f"飞书查询记录: 成功, record_id={record.record_id}")
     return True, record_data
+
+
+def delete_bitable_record(record_id: str, notice_type: str):
+    """
+    Delete a target bitable record by Record ID.
+    Missing records are treated as already deleted so local cleanup can proceed.
+    """
+    check_token_status()
+
+    record_id = str(record_id or "").strip()
+    if not record_id:
+        return False, "缺少 record_id"
+    if not config.user_token:
+        return False, "未配置飞书用户令牌"
+
+    _handler, table_id, err = _resolve_handler(notice_type)
+    if err:
+        return False, err
+
+    client = _build_client()
+    request = (
+        DeleteAppTableRecordRequest.builder()
+        .app_token(config.app_token)
+        .table_id(table_id)
+        .record_id(record_id)
+        .build()
+    )
+
+    def do_delete(token: str):
+        option = lark.RequestOption.builder().user_access_token(token).build()
+        return client.bitable.v1.app_table_record.delete(request, option)
+
+    response = _with_token_retry(do_delete)
+
+    if not response.success():
+        if response.code == 1254043:
+            log_info(f"飞书删除记录: 记录已不存在, record_id={record_id}")
+            return True, record_id
+        error_msg = f"删除记录失败: {response.code} - {response.msg}"
+        log_error(f"飞书删除记录: {error_msg}")
+        return False, error_msg
+
+    log_info(f"飞书删除记录: 成功, record_id={record_id}")
+    _log_record_action("删除", notice_type, record_id, {}, "")
+    return True, record_id
 
 
 def update_bitable_record(

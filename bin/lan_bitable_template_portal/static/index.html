@@ -53,6 +53,7 @@
     }
 
     .gate-inner {
+      position: relative;
       width: min(980px, 100%);
       background: rgba(255, 255, 255, 0.92);
       border: 1px solid var(--line);
@@ -71,15 +72,19 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      gap: 16px;
+      min-height: 50px;
+      padding: 0 150px;
       margin-bottom: 12px;
       text-align: center;
     }
 
     .gate-logo {
-      width: 132px;
+      position: absolute;
+      top: 18px;
+      right: 18px;
+      width: 118px;
+      max-width: 24%;
       height: auto;
-      flex: none;
       object-fit: contain;
     }
 
@@ -278,22 +283,22 @@
     .workspace {
       min-height: 0;
       display: grid;
-      grid-template-columns: minmax(250px, 0.74fr) minmax(500px, 1.34fr) minmax(360px, 0.95fr);
+      grid-template-columns: clamp(250px, 24vw, 340px) minmax(500px, 1.34fr) minmax(360px, 0.95fr);
       gap: 12px;
       padding: 12px;
       transition: grid-template-columns 320ms cubic-bezier(0.2, 0.8, 0.2, 1);
     }
 
     .workspace.focus-left {
-      grid-template-columns: minmax(420px, 1.45fr) minmax(340px, 0.86fr) minmax(280px, 0.68fr);
+      grid-template-columns: clamp(250px, 24vw, 340px) minmax(500px, 1.34fr) minmax(360px, 0.95fr);
     }
 
     .workspace.focus-middle {
-      grid-template-columns: minmax(220px, 0.58fr) minmax(680px, 1.78fr) minmax(280px, 0.64fr);
+      grid-template-columns: clamp(250px, 24vw, 340px) minmax(680px, 1.78fr) minmax(260px, 0.58fr);
     }
 
     .workspace.focus-right {
-      grid-template-columns: minmax(220px, 0.56fr) minmax(340px, 0.82fr) minmax(650px, 1.72fr);
+      grid-template-columns: clamp(250px, 24vw, 340px) minmax(340px, 0.82fr) minmax(650px, 1.72fr);
     }
 
     .summary-strip {
@@ -385,7 +390,6 @@
       transition: box-shadow 260ms ease, border-color 260ms ease, opacity 260ms ease, transform 260ms ease;
     }
 
-    .workspace.focus-left .records-panel,
     .workspace.focus-middle .drafts-panel,
     .workspace.focus-right .ongoing-panel {
       border-color: rgba(11, 107, 88, 0.42);
@@ -393,8 +397,6 @@
       transform: translateY(-1px);
     }
 
-    .workspace.focus-left .drafts-panel,
-    .workspace.focus-left .ongoing-panel,
     .workspace.focus-middle .records-panel,
     .workspace.focus-middle .ongoing-panel,
     .workspace.focus-right .records-panel,
@@ -769,8 +771,17 @@
 
     @media (max-width: 620px) {
       .topbar { align-items: flex-start; flex-direction: column; }
-      .gate-brand { flex-direction: column; gap: 10px; }
-      .gate-logo { width: 118px; }
+      .gate-inner { padding: 22px 16px 18px; }
+      .gate-brand {
+        min-height: 44px;
+        padding: 0 88px;
+      }
+      .gate-logo {
+        top: 14px;
+        right: 14px;
+        width: 76px;
+        max-width: 28%;
+      }
       .brand-logo { width: 76px; }
       .workspace { padding: 8px; gap: 8px; }
       .summary-strip { padding: 8px 8px 0; }
@@ -892,7 +903,36 @@
   </main>
 
   <script>
-    const urlScope = () => new URLSearchParams(window.location.search).get("scope") || "";
+    function normalizeScopeValue(value, fallback = "") {
+      const text = String(value || "").trim().toUpperCase();
+      if (!text) return fallback;
+      if (["ALL", "全部"].includes(text)) return "ALL";
+      if (["CAMPUS", "PARK", "园区"].includes(text)) return "CAMPUS";
+      if (text.includes("110")) return "110";
+      const match = text.match(/[ABCDEH]/);
+      return match ? match[0] : fallback;
+    }
+
+    function stripTransientUrlParams(url) {
+      url.searchParams.delete("code");
+      url.searchParams.delete("state");
+      return url;
+    }
+
+    function redirectRootOAuthCallback() {
+      const url = new URL(window.location.href);
+      const code = url.searchParams.get("code") || "";
+      const stateValue = url.searchParams.get("state") || "";
+      if (url.pathname !== "/" || !code || !stateValue) return false;
+      const callback = new URL("/api/auth/feishu/callback", url.origin);
+      callback.searchParams.set("code", code);
+      callback.searchParams.set("state", stateValue);
+      window.location.replace(callback.toString());
+      return true;
+    }
+
+    const oauthRedirecting = redirectRootOAuthCallback();
+    const urlScope = () => normalizeScopeValue(new URLSearchParams(window.location.search).get("scope") || "", "");
     const urlMode = () => new URLSearchParams(window.location.search).get("mode") || "";
     const state = {
       scope: urlScope(),
@@ -991,7 +1031,14 @@
       if (!state.actionOps.has(key)) state.actionOps.set(key, opId());
       return state.actionOps.get(key);
     };
-    const scopeLabel = (value) => (state.scopeOptions.find((x) => x.value === value) || {}).label || value || "全部";
+    const scopeLabel = (value) => {
+      const normalized = normalizeScopeValue(value, "ALL");
+      return (
+        state.scopeOptions.find((x) => normalizeScopeValue(x.value, "") === normalized)
+        || state.auth.scopeOptions.find((x) => normalizeScopeValue(x.value, "") === normalized)
+        || {}
+      ).label || (normalized === "CAMPUS" ? "园区" : normalized === "ALL" ? "全部" : normalized === "110" ? "110站" : `${normalized}楼`);
+    };
     const workTypeLabel = (value) => (WORK_TYPES.find((item) => item.value === value) || WORK_TYPES[0]).label;
     const recordKey = (record) => `${record.work_type || "maintenance"}:${record.record_id}`;
     const storageKey = () => `lan-workbench:${state.scope || "ALL"}`;
@@ -1078,8 +1125,7 @@
       const isUnavailable = (key) => {
         const record = recordsByKey.get(key);
         if (!record) return false;
-        const summary = record.work_summary || {};
-        return Boolean(summary.started_at) || isRecordOngoing(record);
+        return isRecordUnavailableForSelection(record);
       };
       for (const key of Array.from(state.selected)) {
         if (isUnavailable(key)) state.selected.delete(key);
@@ -1115,7 +1161,9 @@
     }
 
     function authNextPath() {
-      return `${window.location.pathname}${window.location.search || ""}`;
+      const url = stripTransientUrlParams(new URL(window.location.href));
+      if (url.pathname.startsWith("/api/auth/")) return "/";
+      return `${url.pathname}${url.search || ""}`;
     }
 
     function hasPortalAccess() {
@@ -1184,7 +1232,8 @@
     }
 
     function scopeAllowed(scope) {
-      return (state.scopeOptions || []).some((item) => item.value === scope);
+      const normalized = normalizeScopeValue(scope, "");
+      return (state.scopeOptions || []).some((item) => normalizeScopeValue(item.value, "") === normalized);
     }
 
     function setSyncStatus(text, warnings = state.warnings) {
@@ -1271,8 +1320,6 @@
     function recordTypeCounts() {
       const initial = Object.fromEntries(WORK_TYPES.map((item) => [item.value, 0]));
       return state.records.reduce((counts, record) => {
-        const summary = record.work_summary || {};
-        if (summary.started_at || isRecordOngoing(record)) return counts;
         const type = record.work_type || "maintenance";
         if (Object.prototype.hasOwnProperty.call(counts, type)) counts[type] += 1;
         return counts;
@@ -1288,10 +1335,13 @@
       }, initial);
     }
 
-    function splitTimeRange(text) {
+    function splitTimeRange(text, fallbackStart = "", fallbackEnd = "") {
       const raw = String(text || "");
       const parts = raw.split(/~|至|到/).map((x) => x.trim()).filter(Boolean);
-      return { start: parts[0] || "", end: parts[1] || "" };
+      return {
+        start: String(fallbackStart || parts[0] || "").trim(),
+        end: String(fallbackEnd || parts[1] || "").trim(),
+      };
     }
 
     function html(text) {
@@ -1302,6 +1352,45 @@
 
     function fieldsOf(record) {
       return record.display_fields || {};
+    }
+
+    function sourceProgressForRecord(record) {
+      const f = fieldsOf(record);
+      const type = record.work_type || "maintenance";
+      if (record.source_progress || record.source_status) return record.source_progress || record.source_status;
+      if (type === "change") return f["变更进度"] || "";
+      if (type === "repair") return firstRepairField(record, ["维修开始时间"]) ? "进行中" : "未开始";
+      return f["维护实施状态"] || "";
+    }
+
+    function sourceActionForRecord(record) {
+      return sourceProgressForRecord(record) === "未开始" ? "start" : "update";
+    }
+
+    function sourceActionLabel(record) {
+      return sourceActionForRecord(record) === "start" ? "开始" : "更新";
+    }
+
+    function targetRecordIdForRecord(record) {
+      const summary = record?.work_summary || {};
+      return String(
+        summary.target_record_id
+        || summary.feishu_record_id
+        || summary.record_id
+        || record?.target_record_id
+        || ""
+      ).trim();
+    }
+
+    function isSourceOngoingRecord(record) {
+      return sourceActionForRecord(record) === "update";
+    }
+
+    function isRecordUnavailableForSelection(record) {
+      const summary = record?.work_summary || {};
+      if (summary.status === "已结束") return true;
+      if (isRecordOngoing(record)) return true;
+      return Boolean(summary.started_at) && !isSourceOngoingRecord(record);
     }
 
     function repairTitleForRecord(record) {
@@ -1593,13 +1682,16 @@
       $("featureGrid").classList.add("hidden");
       $("scopeGrid").classList.remove("hidden");
       $("handoverSettings").classList.add("hidden");
-      $("scopeGrid").innerHTML = state.scopeOptions.map((item) => `
-        <button class="scope-btn" data-scope="${item.value}">
-          <strong>${html(item.label)}</strong>
-          <span>${item.value === "ALL" ? "查看所有通告" : "只进入该范围工作台"}</span>
-          ${scopeMetricHtml(item.value)}
-        </button>
-      `).join("");
+      $("scopeGrid").innerHTML = state.scopeOptions.map((item) => {
+        const itemScope = normalizeScopeValue(item.value, "ALL");
+        return `
+          <button class="scope-btn" data-scope="${html(itemScope)}">
+            <strong>${html(item.label)}</strong>
+            <span>${itemScope === "ALL" ? "查看所有通告" : "只进入该范围工作台"}</span>
+            ${scopeMetricHtml(itemScope)}
+          </button>
+        `;
+      }).join("");
       $("gateActions").innerHTML = `<button class="btn ghost" data-back-home>返回功能选择</button>`;
       document.querySelectorAll("[data-scope]").forEach((btn) => {
         btn.addEventListener("click", () => selectScope(btn.dataset.scope));
@@ -1615,11 +1707,12 @@
       $("scopeGrid").classList.remove("hidden");
       const options = state.handover.scopeOptions.length
         ? state.handover.scopeOptions
-        : state.scopeOptions.filter((item) => !["CAMPUS", "ALL"].includes(item.value));
+        : state.scopeOptions.filter((item) => !["CAMPUS", "ALL"].includes(normalizeScopeValue(item.value, "")));
       $("scopeGrid").innerHTML = options.map((item) => {
-        const url = state.handover.links[item.value] || "";
+        const itemScope = normalizeScopeValue(item.value, "");
+        const url = state.handover.links[itemScope] || "";
         return `
-          <button class="scope-btn" data-handover-scope="${html(item.value)}">
+          <button class="scope-btn" data-handover-scope="${html(itemScope)}">
             <strong>${html(item.label)}</strong>
             <span>${url ? "打开交接班网页" : "未配置链接，请先在下方设置"}</span>
           </button>
@@ -1712,19 +1805,22 @@
       }
       const options = state.handover.scopeOptions.length
         ? state.handover.scopeOptions
-        : state.scopeOptions.filter((item) => !["CAMPUS", "ALL"].includes(item.value));
+        : state.scopeOptions.filter((item) => !["CAMPUS", "ALL"].includes(normalizeScopeValue(item.value, "")));
       panel.innerHTML = `
         <div class="record-title">
           <span>交接班链接配置</span>
           <span class="tag blue">${html(state.handover.updatedAt || "未保存")}</span>
         </div>
         <div class="link-settings" style="margin-top:10px">
-          ${options.map((item) => `
-            <div>
-              <label for="handover-${html(item.value)}">${html(item.label)}</label>
-              <input id="handover-${html(item.value)}" data-handover-link="${html(item.value)}" type="url" placeholder="https://..." value="${html(state.handover.links[item.value] || "")}" />
-            </div>
-          `).join("")}
+          ${options.map((item) => {
+            const itemScope = normalizeScopeValue(item.value, "");
+            return `
+              <div>
+                <label for="handover-${html(itemScope)}">${html(item.label)}</label>
+                <input id="handover-${html(itemScope)}" data-handover-link="${html(itemScope)}" type="url" placeholder="https://..." value="${html(state.handover.links[itemScope] || "")}" />
+              </div>
+            `;
+          }).join("")}
         </div>
         <div class="row-actions" style="margin-top:12px">
           <button class="btn primary" data-save-handover-links>保存链接配置</button>
@@ -1827,7 +1923,7 @@
       stopAutoRefresh();
       state.gateMode = ["maintenance", "handover"].includes(mode) ? mode : "home";
       state.scope = "";
-      const url = new URL(window.location.href);
+      const url = stripTransientUrlParams(new URL(window.location.href));
       url.searchParams.delete("scope");
       if (state.gateMode === "home") url.searchParams.delete("mode");
       else url.searchParams.set("mode", state.gateMode);
@@ -1866,6 +1962,7 @@
       state.scopeOptions = [];
       updateUserChrome();
       const url = new URL(window.location.href);
+      stripTransientUrlParams(url);
       url.searchParams.delete("scope");
       url.searchParams.delete("mode");
       window.history.replaceState({}, "", url);
@@ -1927,6 +2024,7 @@
     }
 
     function openHandoverLink(scope) {
+      scope = normalizeScopeValue(scope, "");
       const url = String(state.handover.links[scope] || "").trim();
       if (!url) {
         if ((state.auth.user || {}).role !== "admin") {
@@ -1943,6 +2041,21 @@
         return;
       }
       window.open(url, "_blank", "noopener");
+    }
+
+    function clearWorkbenchViewForScope(scope) {
+      state.records = [];
+      state.zhihangRecords = [];
+      state.ongoing = [];
+      state.dailySummary = { date: "", items: [], stats: {} };
+      state.selected = new Set();
+      state.drafts = new Map();
+      state.activeDraftKey = "";
+      state.expandedRecordId = "";
+      state.expandedSummaryKey = "";
+      $("scopeLabel").textContent = scopeLabel(scope);
+      setSyncStatus(`正在加载${scopeLabel(scope)}数据`, []);
+      render();
     }
 
     async function saveHandoverLinks() {
@@ -1976,7 +2089,7 @@
     }
 
     async function selectScope(scope, { replace = false } = {}) {
-      state.scope = scope || "ALL";
+      state.scope = normalizeScopeValue(scope, "ALL");
       if (!scopeAllowed(state.scope)) {
         state.scope = "";
         state.gateMode = "maintenance";
@@ -1985,19 +2098,27 @@
         renderGate();
         return;
       }
-      const url = new URL(window.location.href);
+      const url = stripTransientUrlParams(new URL(window.location.href));
       url.searchParams.set("scope", state.scope);
       url.searchParams.delete("mode");
       if (replace) window.history.replaceState({ scope: state.scope }, "", url);
       else window.history.pushState({ scope: state.scope }, "", url);
       $("gate").classList.add("hidden");
       $("app").classList.remove("hidden");
-      await loadBootstrap();
+      const selectedScope = state.scope;
+      clearWorkbenchViewForScope(selectedScope);
+      try {
+        await loadBootstrap();
+      } catch (err) {
+        if (state.scope === selectedScope) setSyncStatus(err.message || "加载失败", []);
+      }
     }
 
     async function loadBootstrap() {
+      const requestScope = normalizeScopeValue(state.scope || "ALL", "ALL");
       setSyncStatus("加载中", []);
-      const data = await api(`/api/bootstrap?scope=${encodeURIComponent(state.scope)}`);
+      const data = await api(`/api/bootstrap?scope=${encodeURIComponent(requestScope)}`);
+      if (normalizeScopeValue(state.scope || "ALL", "ALL") !== requestScope) return;
       updateAuthFromPayload(data);
       state.scopeOptions = data.scope_options || state.scopeOptions;
       state.records = data.records || [];
@@ -2037,13 +2158,15 @@
     }
 
     async function refreshWorkbench({ automatic = false } = {}) {
+      const requestScope = normalizeScopeValue(state.scope || "ALL", "ALL");
       const params = new URLSearchParams({
-        scope: state.scope || "ALL",
+        scope: requestScope,
         month: state.filters.month || "",
         specialty: state.filters.specialty === "全部" ? "" : state.filters.specialty,
       });
       setSyncStatus(automatic ? "自动刷新中" : "刷新本页中", []);
       const data = await api(`/api/workbench?${params}`);
+      if (normalizeScopeValue(state.scope || "ALL", "ALL") !== requestScope) return;
       updateAuthFromPayload(data);
       state.records = data.records || [];
       state.zhihangRecords = data.zhihang_change_records || [];
@@ -2060,8 +2183,10 @@
     }
 
     async function syncSource() {
+      const requestScope = normalizeScopeValue(state.scope || "ALL", "ALL");
       setSyncStatus("同步源表中", []);
-      const data = await api(`/api/refresh?scope=${encodeURIComponent(state.scope || "ALL")}`);
+      const data = await api(`/api/refresh?scope=${encodeURIComponent(requestScope)}`);
+      if (normalizeScopeValue(state.scope || "ALL", "ALL") !== requestScope) return;
       updateAuthFromPayload(data);
       state.scopeOptions = data.scope_options || state.scopeOptions;
       state.records = data.records || [];
@@ -2243,6 +2368,7 @@
         buildingForRecord(record),
         specialtyForRecord(record),
         f["计划维护月份"],
+        `源状态 ${sourceProgressForRecord(record) || "-"}`,
         f["维护编号"],
         f["维护项目"],
       ].filter(Boolean).join(" | ");
@@ -2278,20 +2404,24 @@
         const summary = record.work_summary || {};
         const completed = summary.status === "已结束";
         const started = Boolean(summary.started_at);
-        const disabled = ongoing || started;
+        const sourceUpdate = isSourceOngoingRecord(record);
+        const disabled = isRecordUnavailableForSelection(record);
         const expanded = state.expandedRecordId === record.record_id;
         const completedLabel = dayLabel(summary.completed_date || summary.ended_at);
         const startedLabel = dayLabel(summary.started_date || summary.started_at);
+        const sourceActionText = sourceActionLabel(record);
         const tagText = selected
           ? "已选择"
           : completed
             ? (completedLabel ? `${completedLabel}已完成` : "已完成")
             : ongoing
-              ? "已开始"
-              : started
+              ? "右侧操作"
+              : sourceUpdate
+                ? "可更新"
+                : started
                 ? (startedLabel ? `${startedLabel}已开始` : "已开始")
-                : "可发起";
-        const tagClass = selected ? "green" : completed ? "green" : ongoing ? "amber" : started ? "amber" : "blue";
+                : `可${sourceActionText}`;
+        const tagClass = selected ? "green" : completed ? "green" : ongoing ? "amber" : sourceUpdate ? "blue" : started ? "amber" : "blue";
         return `
           <article class="record-card ${selected ? "selected" : ""} ${disabled ? "disabled" : ""} ${completed ? "completed" : ""}" data-record-key="${html(key)}">
             <div class="record-title">
@@ -2310,7 +2440,7 @@
           const record = state.records.find((x) => recordKey(x) === el.dataset.recordKey);
           if (!record) return;
           const summary = record.work_summary || {};
-          if (isRecordOngoing(record) || summary.started_at) {
+          if (isRecordUnavailableForSelection(record)) {
             state.expandedRecordId = state.expandedRecordId === record.record_id ? "" : record.record_id;
             renderRecords();
             return;
@@ -2533,11 +2663,12 @@
         const id = recordKey(record);
         const type = record.work_type || "maintenance";
         const active = state.activeDraftKey === id;
+        const actionLabel = sourceActionLabel(record);
         const extraMeta = type === "change"
-          ? levelForRecord(record)
+          ? [levelForRecord(record), `源进度 ${sourceProgressForRecord(record) || "-"}`].filter(Boolean).join(" | ")
           : type === "repair"
-            ? [repairDeviceText(record), f["流程"]].filter(Boolean).join(" | ")
-            : f["计划维护月份"];
+            ? [repairDeviceText(record), `源状态 ${sourceProgressForRecord(record) || "-"}`, f["流程"]].filter(Boolean).join(" | ")
+            : [f["计划维护月份"], `源状态 ${sourceProgressForRecord(record) || "-"}`].filter(Boolean).join(" | ");
         return `
           <article class="draft-card ${active ? "active" : ""}" data-draft-card="${html(id)}">
             <div class="card-head">
@@ -2551,9 +2682,9 @@
               ${draftFieldsHtml(record, id, draft)}
             </div>
             <div class="row-actions" style="margin-top:10px">
-              <button class="btn primary" data-send-start="${html(id)}">发送开始通报并上传</button>
+              <button class="btn primary" data-send-start="${html(id)}">发送${html(actionLabel)}通报并上传</button>
             </div>
-            <div class="job-line" data-job-line="${html(id)}">${draft.job_id ? "任务处理中" : "待发送至飞书并上传多维"}</div>
+            <div class="job-line" data-job-line="${html(id)}">${draft.job_id ? "任务处理中" : `待发送${html(actionLabel)}通报并上传多维`}</div>
           </article>
         `;
       }).join("");
@@ -2571,8 +2702,8 @@
     function ongoingFieldsHtml(item, id, range) {
       if ((item.work_type || "maintenance") === "repair") {
         return `
-          ${inputField(id, "expected_time", "期望完成时间", toDatetimeLocal(item.expected_time || range.end), "datetime-local")}
-          ${inputField(id, "fault_time", "故障发生时间", toDatetimeLocal(item.fault_time), "datetime-local")}
+          ${inputField(id, "expected_time", "期望完成时间", toDatetimeLocal(item.expected_time || item.start_time || range.end), "datetime-local")}
+          ${inputField(id, "fault_time", "故障发生时间", toDatetimeLocal(item.fault_time || item.end_time || range.start), "datetime-local")}
           ${textField(id, "content", "标题", item.content || item.title || "")}
           ${textField(id, "level", "紧急程度", item.level || "")}
           ${textField(id, "specialty", "专业", item.specialty || "")}
@@ -2588,8 +2719,8 @@
         `;
       }
       return `
-        ${inputField(id, "start_time", "开始时间", toDatetimeLocal(range.start), "datetime-local")}
-        ${inputField(id, "end_time", "结束时间", toDatetimeLocal(range.end), "datetime-local")}
+        ${inputField(id, "start_time", "开始时间", toDatetimeLocal(item.start_time || range.start), "datetime-local")}
+        ${inputField(id, "end_time", "结束时间", toDatetimeLocal(item.end_time || range.end), "datetime-local")}
         ${textField(id, "content", "内容", item.content || "")}
         ${textField(id, "reason", "原因", item.reason || "")}
         ${textField(id, "impact", "影响", item.impact || state.defaults.impact)}
@@ -2684,17 +2815,18 @@
       }
       $("ongoingList").innerHTML = state.ongoing.map((item) => {
         const id = item.active_item_id;
-        const range = splitTimeRange(item.time);
+        const range = splitTimeRange(item.time, item.start_time, item.end_time);
         const readonly = Boolean(item.source_only);
         const readonlyReason = item.block_reason || `该${workTypeLabel(item.work_type)}当前不可通过网页更新或结束。`;
         const tagText = readonly ? "只读" : (item.can_update ? "可操作" : "等待");
         const isRepair = (item.work_type || "maintenance") === "repair";
+        const timeLabel = item.time || [range.start, range.end].filter(Boolean).join(" ~ ");
         return `
           <article class="ongoing-card" data-ongoing="${html(id)}">
             <div class="card-head">
               <div>
                 <h3 class="card-title">${html(item.title || "未命名通告")}</h3>
-                <div class="record-meta">${html([workTypeLabel(item.work_type), item.origin_label, item.building, item.specialty, item.level, item.time, item.upload_state, item.zhihang_title ? "智航 " + item.zhihang_title : "", item.source_record_id ? "源ID " + item.source_record_id : "", item.active_item_id ? "本地ID " + item.active_item_id : ""].filter(Boolean).join(" | "))}</div>
+                <div class="record-meta">${html([workTypeLabel(item.work_type), item.origin_label, item.building, item.specialty, item.level, timeLabel, item.upload_state, item.zhihang_title ? "智航 " + item.zhihang_title : "", item.source_record_id ? "源ID " + item.source_record_id : "", item.active_item_id ? "本地ID " + item.active_item_id : ""].filter(Boolean).join(" | "))}</div>
               </div>
               <div class="card-actions">
                 <span class="tag ${item.can_update ? "green" : "amber"}">${html(tagText)}</span>
@@ -2724,7 +2856,12 @@
     }
 
     function toDatetimeLocal(text) {
-      const normalized = String(text || "").trim().replace(/\//g, "-").replace(" ", "T");
+      const raw = String(text || "").trim();
+      const chinese = raw.match(/(\d{4})\D+(\d{1,2})\D+(\d{1,2})\D+(\d{1,2})(?:\D+(\d{1,2}))?/);
+      if (chinese) {
+        return `${pad(chinese[1])}-${pad(chinese[2])}-${pad(chinese[3])}T${pad(chinese[4])}:${pad(chinese[5] || "00")}`;
+      }
+      const normalized = raw.replace(/\//g, "-").replace(" ", "T");
       if (/^\d{4}-\d{1,2}-\d{1,2}T\d{1,2}:\d{2}/.test(normalized)) {
         const [date, time] = normalized.split("T");
         const [y, m, d] = date.split("-").map((x) => pad(x));
@@ -2741,10 +2878,10 @@
         const el = field(key);
         return el ? el.value : fallback;
       };
-      const range = splitTimeRange(item?.time || "");
+      const range = splitTimeRange(item?.time || "", item?.start_time || "", item?.end_time || "");
       const isRepair = (item?.work_type || "maintenance") === "repair";
-      const expectedTime = read("expected_time", item?.expected_time || range.end || "");
-      const faultTime = read("fault_time", item?.fault_time || range.start || "");
+      const expectedTime = read("expected_time", item?.expected_time || item?.start_time || range.end || "");
+      const faultTime = read("fault_time", item?.fault_time || item?.end_time || range.start || "");
       return {
         action,
         scope: state.scope,
@@ -2794,7 +2931,8 @@
       const card = document.querySelector(`[data-ongoing="${CSS.escape(activeItemId)}"]`);
       try {
         setActionButtonsDisabled(activeItemId, true);
-        setJobLine(activeItemId, "正在删除进行中卡片", "busy");
+        const hasRemoteRecord = Boolean(item.record_id || item.target_record_id);
+        setJobLine(activeItemId, hasRemoteRecord ? "正在删除多维记录和 Qt 条目" : "正在删除 Qt 条目", "busy");
         const payload = {
           scope: state.scope,
           work_type: item.work_type || "maintenance",
@@ -2880,16 +3018,22 @@
         renderRecords();
         return;
       }
+      const action = sourceActionForRecord(record);
+      const targetRecordId = targetRecordIdForRecord(record);
       await sendAction({
-        action: "start",
+        action,
         scope: state.scope,
         work_type: record.work_type || "maintenance",
         notice_type: record.notice_type || "",
         source_app_token: record.source_app_token || "",
         source_table_id: record.source_table_id || "",
         specialty: uploadSpecialty,
-        record_id: record.record_id,
+        record_id: action === "start" ? record.record_id : targetRecordId,
+        source_record_id: record.record_id,
+        target_record_id: action === "update" ? targetRecordId : "",
+        source_progress: sourceProgressForRecord(record),
         building_codes: record.building_codes || [],
+        building: buildingForRecord(record),
         title: type === "repair" ? draft.content : titleForRecord(record),
         level: type === "repair" ? (draft.level || "") : (type === "change" ? levelForRecord(record) : ""),
         start_time: draft.start_time,
@@ -2912,7 +3056,7 @@
         solution: type === "repair" ? (draft.solution || "") : "",
         fault_time: type === "repair" ? (draft.end_time || "") : "",
         expected_time: type === "repair" ? (draft.start_time || "") : "",
-        operation_id: draft.operation_id || (draft.operation_id = opFor(`${recordId}:start`)),
+        operation_id: draft.operation_id || (draft.operation_id = opFor(`${recordId}:${action}`)),
       }, recordId);
       saveDraftState();
     }
@@ -3111,10 +3255,14 @@
       };
       const setFocus = (zone) => {
         workspace.classList.remove(...focusClasses);
-        if (zone) workspace.classList.add(`focus-${zone}`);
+        if (zone && zone !== "left") workspace.classList.add(`focus-${zone}`);
       };
       const scheduleFocus = (zone) => {
         clearHoverTimer();
+        if (zone === "left") {
+          setFocus("");
+          return;
+        }
         hoverTimer = window.setTimeout(() => {
           hoverTimer = 0;
           if (hoveredZone === zone) setFocus(zone);
@@ -3181,6 +3329,7 @@
     });
 
     async function initApp() {
+      if (oauthRedirecting) return;
       bindWorkspaceHover();
       await loadAuthStatus();
       if (!hasPortalAccess()) {
@@ -3220,8 +3369,10 @@
         }
         $("gate").classList.add("hidden");
         $("app").classList.remove("hidden");
+        const selectedScope = state.scope;
+        clearWorkbenchViewForScope(selectedScope);
         loadBootstrap().catch((err) => {
-          setSyncStatus(err.message || "加载失败", []);
+          if (state.scope === selectedScope) setSyncStatus(err.message || "加载失败", []);
         });
       } else {
         stopAutoRefresh();

@@ -12,7 +12,7 @@ import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 from .portal_auth import AUTH_COOKIE_NAME, PortalAuthManager
 from .portal_service import (
@@ -197,6 +197,41 @@ class PortalHandler(BaseHTTPRequestHandler):
             headers["Set-Cookie"] = set_cookie
         self._write_response(302, headers, b"")
 
+    def _redirect_root_oauth_callback(self, parsed) -> bool:
+        if parsed.path != "/":
+            return False
+        qs = parse_qs(parsed.query)
+        code = (qs.get("code") or [""])[0]
+        state = (qs.get("state") or [""])[0]
+        if not code or not state:
+            return False
+        sanitized_query = {
+            key: value
+            for key, value in qs.items()
+            if key not in {"code", "state"}
+        }
+        sanitized = "/"
+        if sanitized_query:
+            sanitized = f"/?{urlencode(sanitized_query, doseq=True)}"
+        if self._current_session() is not None:
+            self._send_redirect(sanitized)
+            return True
+        redirect_uri = f"{self._request_base_url()}/api/auth/feishu/callback"
+        try:
+            session_id, next_path = PortalHandler.auth_manager.complete_login(
+                code=code,
+                state=state,
+                redirect_uri=redirect_uri,
+            )
+        except PortalError as exc:
+            self._send_html_message(400, "飞书登录失败", str(exc))
+            return True
+        self._send_redirect(
+            next_path or sanitized,
+            set_cookie=PortalHandler.auth_manager.cookie_header(session_id),
+        )
+        return True
+
     def _send_html_message(self, status: int, title: str, message: str) -> None:
         body = (
             "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
@@ -267,8 +302,22 @@ class PortalHandler(BaseHTTPRequestHandler):
         request = job.get("request") if isinstance(job.get("request"), dict) else {}
         return bool(open_id and str(request.get("_auth_open_id") or "") == open_id)
 
+    def _reconcile_orphan_started_items(
+        self, scope: str, ongoing: list[dict] | None
+    ) -> None:
+        try:
+            self.service.reconcile_orphan_started_items(
+                scope=scope, ongoing_items=ongoing or []
+            )
+        except Exception as exc:
+            warning = f"本地已开始状态清理失败: {exc}"
+            if warning not in self.service._load_warnings:
+                self.service._load_warnings.append(warning)
+
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if self._redirect_root_oauth_callback(parsed):
+            return
         if parsed.path == "/":
             return self._send_html(STATIC_DIR / "index.html")
         if parsed.path.startswith("/assets/"):
@@ -328,6 +377,7 @@ class PortalHandler(BaseHTTPRequestHandler):
             try:
                 scope = self._authorized_scope_or_error(session, scope)
                 ongoing = self._get_ongoing(scope)
+                self._reconcile_orphan_started_items(scope, ongoing)
                 data = self.service.get_bootstrap(scope=scope, ongoing_items=ongoing)
                 return self._send_json(
                     200,
@@ -343,6 +393,7 @@ class PortalHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/scope-overview":
             try:
                 ongoing = self._get_ongoing("ALL")
+                self._reconcile_orphan_started_items("ALL", ongoing)
                 data = self.service.get_scope_overview(ongoing_items=ongoing)
                 data = PortalHandler.auth_manager.filter_scope_overview(data, session)
                 return self._send_json(
@@ -395,11 +446,13 @@ class PortalHandler(BaseHTTPRequestHandler):
                 scope = self._authorized_scope_or_error(
                     session, (qs.get("scope") or ["ALL"])[0]
                 )
+                ongoing = self._get_ongoing(scope)
+                self._reconcile_orphan_started_items(scope, ongoing)
                 payload = self.service.query_records(
                     month=(qs.get("month") or [""])[0],
                     specialty=(qs.get("specialty") or [""])[0],
                     scope=scope,
-                    ongoing_items=self._get_ongoing(scope),
+                    ongoing_items=ongoing,
                 )
                 return self._send_json(
                     200,
@@ -418,11 +471,13 @@ class PortalHandler(BaseHTTPRequestHandler):
                 scope = self._authorized_scope_or_error(
                     session, (qs.get("scope") or ["ALL"])[0]
                 )
+                ongoing = self._get_ongoing(scope)
+                self._reconcile_orphan_started_items(scope, ongoing)
                 payload = self.service.query_records(
                     month=(qs.get("month") or [""])[0],
                     specialty=(qs.get("specialty") or [""])[0],
                     scope=scope,
-                    ongoing_items=self._get_ongoing(scope),
+                    ongoing_items=ongoing,
                 )
                 return self._send_json(
                     200,
@@ -442,8 +497,10 @@ class PortalHandler(BaseHTTPRequestHandler):
                     session, (qs.get("scope") or ["ALL"])[0]
                 )
                 self.service.refresh()
+                ongoing = self._get_ongoing(scope)
+                self._reconcile_orphan_started_items(scope, ongoing)
                 data = self.service.get_bootstrap(
-                    scope=scope, ongoing_items=self._get_ongoing(scope)
+                    scope=scope, ongoing_items=ongoing
                 )
                 return self._send_json(
                     200,
@@ -550,7 +607,15 @@ class PortalHandler(BaseHTTPRequestHandler):
                     scope=scope,
                     deleted_by=payload["_auth_open_id"],
                 )
+                data.update(
+                    self.service.discard_deleted_ongoing_state(payload, scope=scope)
+                )
                 data["qt_deleted"] = True
+                data["remote_deleted"] = bool(
+                    accepted.get("remote_deleted")
+                    if isinstance(accepted, dict)
+                    else False
+                )
                 return self._send_json(200, {"ok": True, "data": data})
             except (PortalError, ValueError, json.JSONDecodeError) as exc:
                 return self._send_json(403, {"ok": False, "error": str(exc)})

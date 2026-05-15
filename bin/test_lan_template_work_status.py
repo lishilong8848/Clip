@@ -29,6 +29,23 @@ class _TestMaintenancePortalService(MaintenancePortalService):
         return
 
 
+class _TargetLookupService(_TestMaintenancePortalService):
+    def __init__(self):
+        super().__init__()
+        self.target_record_ids: set[str] = set()
+
+    def _target_record_exists_for_status_item(self, item, target_cache):
+        target_record_id = str(
+            item.get("target_record_id")
+            or item.get("feishu_record_id")
+            or item.get("record_id")
+            or ""
+        ).strip()
+        if not target_record_id:
+            return None
+        return target_record_id in self.target_record_ids
+
+
 class _ChangeSourceFailureService(MaintenancePortalService):
     def _load_fields(self):
         self._field_meta_list = []
@@ -64,14 +81,20 @@ class _ChangeSourceFailureService(MaintenancePortalService):
         return []
 
 
-def _build_record(record_id: str, building: str, maintenance_total: str, month: str):
+def _build_record(
+    record_id: str,
+    building: str,
+    maintenance_total: str,
+    month: str,
+    status: str = "未开始",
+):
     return {
         "record_id": record_id,
         "raw_fields": {},
         "display_fields": {
             "楼栋": building,
             "维护总项": maintenance_total,
-            "维护实施状态": "未开始",
+            "维护实施状态": status,
             "计划维护月份": month,
             "专业类别": "电气",
             "维护编号": "WB-001",
@@ -149,7 +172,7 @@ def _build_repair_record(
             "故障发生现象描述": "测试故障现象",
             "故障发生时间": "2026-05-08 08:20",
             "维修开始时间": "2026-05-08 09:00" if started else "",
-            "维修结束时间": "2026-05-08 18:00" if (not started or ended) else "",
+            "维修结束时间": "2026-05-08 18:00" if ended else "",
             "维修进展描述": "维修准备中",
             "流程": "流程",
             "区域": "D-UPS间",
@@ -261,6 +284,136 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(summary["completed_date"], summary["ended_at"][:10])
             self.assertEqual([item["action"] for item in summary["actions"]], ["start", "end"])
 
+    def test_orphan_started_item_is_pruned_when_qt_and_target_record_are_gone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp), service_cls=_TargetLookupService)
+            service._records = [_build_record("rec1", "A楼", "过滤网维护", "5月")]
+
+            start_job_id, should_start = service.create_action_job(
+                {
+                    "action": "start",
+                    "scope": "A",
+                    "record_id": "rec1",
+                    "specialty": "全部",
+                    "start_time": "2026-05-15T09:30",
+                    "end_time": "2026-05-15T18:30",
+                    "location": "误发位置",
+                    "content": "误发内容",
+                    "reason": "误发原因",
+                    "impact": "测试影响",
+                    "progress": "准备开始",
+                    "operation_id": "orphan-start",
+                }
+            )
+            self.assertTrue(should_start)
+            service.prepare_action_job(start_job_id)
+            service.mark_action_upload_result(
+                start_job_id,
+                success=True,
+                record_id="target-deleted",
+                active_item_id="active-deleted",
+            )
+
+            removed = service.reconcile_orphan_started_items(
+                scope="A", ongoing_items=[]
+            )
+            result = service.query_records(month="5月", scope="A", ongoing_items=[])
+            daily = service.get_daily_summary(scope="A", ongoing_items=[])
+
+            self.assertEqual(removed["removed"], 1)
+            self.assertEqual(result["records"][0]["work_summary"], {})
+            self.assertEqual(daily["items"], [])
+
+    def test_started_item_is_kept_when_target_record_still_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp), service_cls=_TargetLookupService)
+            service._records = [_build_record("rec1", "A楼", "过滤网维护", "5月")]
+            service.target_record_ids = {"target-existing"}
+
+            start_job_id, should_start = service.create_action_job(
+                {
+                    "action": "start",
+                    "scope": "A",
+                    "record_id": "rec1",
+                    "specialty": "全部",
+                    "start_time": "2026-05-15T09:30",
+                    "end_time": "2026-05-15T18:30",
+                    "location": "测试位置",
+                    "content": "测试内容",
+                    "reason": "测试原因",
+                    "impact": "测试影响",
+                    "progress": "准备开始",
+                    "operation_id": "kept-start",
+                }
+            )
+            self.assertTrue(should_start)
+            service.prepare_action_job(start_job_id)
+            service.mark_action_upload_result(
+                start_job_id,
+                success=True,
+                record_id="target-existing",
+                active_item_id="active-missing",
+            )
+
+            removed = service.reconcile_orphan_started_items(
+                scope="A", ongoing_items=[]
+            )
+            result = service.query_records(month="5月", scope="A", ongoing_items=[])
+
+            self.assertEqual(removed["removed"], 0)
+            self.assertEqual(result["records"][0]["work_summary"]["status"], "进行中")
+
+    def test_deleted_ongoing_item_clears_today_summary_and_work_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            service._records = [_build_record("rec1", "A楼", "过滤网维护", "5月")]
+
+            start_job_id, should_start = service.create_action_job(
+                {
+                    "action": "start",
+                    "scope": "A",
+                    "record_id": "rec1",
+                    "specialty": "全部",
+                    "start_time": "2026-05-15T09:30",
+                    "end_time": "2026-05-15T18:30",
+                    "location": "误发位置",
+                    "content": "误发内容",
+                    "reason": "误发原因",
+                    "impact": "测试影响",
+                    "progress": "准备开始",
+                    "operation_id": "delete-cleanup-start",
+                }
+            )
+            self.assertTrue(should_start)
+            service.prepare_action_job(start_job_id)
+            service.mark_action_upload_result(
+                start_job_id,
+                success=True,
+                record_id="target-delete-cleanup",
+                active_item_id="active-delete-cleanup",
+            )
+
+            removed = service.discard_deleted_ongoing_state(
+                {
+                    "scope": "A",
+                    "work_type": "maintenance",
+                    "notice_type": "维保通告",
+                    "active_item_id": "active-delete-cleanup",
+                    "source_record_id": "rec1",
+                    "record_id": "target-delete-cleanup",
+                    "building": "A楼",
+                    "building_codes": ["A"],
+                },
+                scope="A",
+            )
+            result = service.query_records(month="5月", scope="A", ongoing_items=[])
+            daily = service.get_daily_summary(scope="A", ongoing_items=[])
+
+            self.assertEqual(removed["work_status_removed"], 1)
+            self.assertEqual(removed["daily_summary_removed"], 1)
+            self.assertEqual(result["records"][0]["work_summary"], {})
+            self.assertEqual(daily["items"], [])
+
     def test_daily_summary_backfills_historical_completion_date(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -303,7 +456,59 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(summary["completed_date"], "2026-04-30")
             self.assertEqual(summary["ended_at"], "2026-04-30 18:30")
 
-    def test_change_records_use_precise_scope_and_source_ongoing_is_not_displayed(self):
+    def test_maintenance_source_ongoing_is_displayed_and_updates_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            service._records = [
+                _build_record("m-running", "A楼", "过滤网维护", "5月", status="进行中")
+            ]
+            service._upsert_work_status_item_locked(
+                {
+                    "source_record_id": "m-running",
+                    "work_type": "maintenance",
+                    "notice_type": "维保通告",
+                    "target_record_id": "target-m-running",
+                    "feishu_record_id": "target-m-running",
+                    "title": "EA118机房A楼过滤网维护",
+                    "building": "A楼",
+                    "building_code": "A",
+                    "building_codes": ["A"],
+                    "specialty": "电气",
+                    "started_at": "2026-05-08 09:30",
+                },
+                action="start",
+                now="2026-05-08 09:30",
+            )
+
+            result = service.query_records(month="5月", scope="A", ongoing_items=[])
+            self.assertEqual([item["record_id"] for item in result["records"]], ["m-running"])
+            self.assertEqual(result["records"][0]["source_progress"], "进行中")
+
+            job_id, should_start = service.create_action_job(
+                {
+                    "action": "update",
+                    "scope": "A",
+                    "source_record_id": "m-running",
+                    "title": "EA118机房A楼过滤网维护",
+                    "building": "A楼",
+                    "specialty": "电气",
+                    "start_time": "2026-05-08T09:30",
+                    "end_time": "2026-05-08T18:30",
+                    "location": "A楼",
+                    "content": "更新内容",
+                    "reason": "测试原因",
+                    "impact": "测试影响",
+                    "progress": "更新进展",
+                    "operation_id": "maintenance-update",
+                }
+            )
+            self.assertTrue(should_start)
+            prepared = service.prepare_action_job(job_id)
+            self.assertEqual(prepared["action"], "update")
+            self.assertEqual(prepared["record_id"], "m-running")
+            self.assertEqual(prepared["target_record_id"], "target-m-running")
+
+    def test_change_records_use_precise_scope_and_allowed_progress(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
             service._records = [_build_record("m1", "A楼", "过滤网维护", "5月")]
@@ -312,6 +517,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 _build_change_record("c2", building="A楼、B楼", progress="未开始", title="园区变更"),
                 _build_change_record("c3", building="A楼、B楼", progress="进行中", title="进行中园区变更"),
                 _build_change_record("c4", building="A楼、B楼", progress="退回", title="退回变更"),
+                _build_change_record("c5", building="A楼、B楼", progress="已结束", title="已结束变更"),
             ]
 
             with patch.object(
@@ -320,7 +526,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 campus = service.query_records(month="5月", scope="CAMPUS")
             self.assertEqual(
                 [item["record_id"] for item in campus["records"]],
-                ["c2"],
+                ["c2", "c3"],
             )
             self.assertEqual(campus["ongoing"], [])
 
@@ -332,6 +538,74 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 [item["record_id"] for item in single["records"]],
                 ["m1", "c1"],
             )
+
+    def test_change_start_rejects_source_progress_that_is_not_not_started(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            service._change_records = [
+                _build_change_record("c-e", building="E楼", progress="进行中", title="E楼进行中变更")
+            ]
+
+            result = service.query_records(month="5月", scope="E")
+            self.assertEqual([item["record_id"] for item in result["records"]], ["c-e"])
+
+            job_id, should_start = service.create_action_job(
+                {
+                    "action": "start",
+                    "work_type": "change",
+                    "scope": "E",
+                    "record_id": "c-e",
+                    "operation_id": "change-e-start",
+                }
+            )
+            self.assertTrue(should_start)
+            with self.assertRaises(PortalError):
+                service.prepare_action_job(job_id)
+
+    def test_change_source_ongoing_update_resolves_target_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            service._change_records = [
+                _build_change_record("c-e", building="E楼", progress="进行中", title="E楼进行中变更")
+            ]
+            target_records = [
+                {
+                    "record_id": "target-change-e",
+                    "display_fields": {
+                        "名称": "E楼进行中变更",
+                        "变更状态": "开始",
+                        "变更开始时间": "2026-05-08 09:00",
+                        "楼栋": "E楼",
+                    },
+                }
+            ]
+
+            with patch.object(
+                service, "_target_records_for_notice_type", return_value=target_records
+            ):
+                job_id, should_start = service.create_action_job(
+                    {
+                        "action": "update",
+                        "work_type": "change",
+                        "scope": "E",
+                        "source_record_id": "c-e",
+                        "title": "E楼进行中变更",
+                        "building": "E楼",
+                        "building_codes": ["E"],
+                        "start_time": "2026-05-08T09:00",
+                        "end_time": "2026-05-08T18:00",
+                        "content": "更新内容",
+                        "progress": "更新进展",
+                        "operation_id": "change-e-update",
+                    }
+                )
+                self.assertTrue(should_start)
+                prepared = service.prepare_action_job(job_id)
+
+            self.assertEqual(prepared["action"], "update")
+            self.assertEqual(prepared["record_id"], "c-e")
+            self.assertEqual(prepared["target_record_id"], "target-change-e")
+            self.assertEqual(prepared["source_progress"], "进行中")
 
     def test_change_successful_action_persists_work_type_and_completion(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -489,7 +763,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertIn("【紧急程度】中", prepared["text"])
             self.assertIn("【故障发现方式】监控发现", prepared["text"])
 
-    def test_started_repair_source_record_is_not_displayed_without_qt_item(self):
+    def test_started_repair_source_record_is_displayed_as_update_candidate(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
             service._repair_records = [
@@ -504,8 +778,47 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
             result = service.query_records(month="5月", scope="D")
 
-            self.assertEqual(result["records"], [])
+            self.assertEqual([item["record_id"] for item in result["records"]], ["r1"])
+            self.assertEqual(result["records"][0]["source_progress"], "进行中")
             self.assertEqual(result["ongoing"], [])
+
+    def test_repair_source_ongoing_update_uses_linked_target_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            service._repair_records = [
+                _build_repair_record(
+                    "r1",
+                    building="D楼",
+                    title="D楼UPS检修",
+                    started=True,
+                    target_record_id="target-r1",
+                )
+            ]
+
+            job_id, should_start = service.create_action_job(
+                {
+                    "action": "update",
+                    "work_type": "repair",
+                    "scope": "D",
+                    "source_record_id": "r1",
+                    "title": "D楼UPS检修",
+                    "building": "D楼",
+                    "building_codes": ["D"],
+                    "specialty": "电气",
+                    "start_time": "2026-05-08T23:50",
+                    "end_time": "2026-05-08T08:20",
+                    "content": "D楼UPS检修",
+                    "progress": "维修更新",
+                    "operation_id": "repair-update",
+                }
+            )
+            self.assertTrue(should_start)
+            prepared = service.prepare_action_job(job_id)
+
+            self.assertEqual(prepared["action"], "update")
+            self.assertEqual(prepared["record_id"], "r1")
+            self.assertEqual(prepared["target_record_id"], "target-r1")
+            self.assertEqual(prepared["source_progress"], "进行中")
 
     def test_change_source_failure_does_not_block_maintenance_records(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1203,6 +1516,18 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 self.assertTrue(list(root.glob("lan_portal_auth.bad.*.json")))
 
     def test_portal_auth_redirect_host_sanitization(self):
+        self.assertEqual(
+            PortalAuthManager._normalize_next_path("/?code=old&state=old&scope=E"),
+            "/?scope=E",
+        )
+        self.assertEqual(
+            PortalAuthManager._normalize_next_path("/?code=old&state=old"),
+            "/",
+        )
+        self.assertEqual(
+            PortalAuthManager._normalize_next_path("/api/auth/feishu/callback?code=x&state=y"),
+            "/",
+        )
         self.assertEqual(
             PortalHandler._safe_host_value("127.0.0.1:18766", "fallback:1"),
             "127.0.0.1:18766",
