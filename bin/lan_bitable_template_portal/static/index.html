@@ -283,22 +283,75 @@
     .workspace {
       min-height: 0;
       display: grid;
-      grid-template-columns: clamp(250px, 24vw, 340px) minmax(500px, 1.34fr) minmax(360px, 0.95fr);
-      gap: 12px;
+      grid-template-columns:
+        var(--records-col, clamp(320px, 28vw, 460px))
+        8px
+        var(--drafts-col, minmax(460px, 1.28fr))
+        8px
+        var(--ongoing-col, minmax(360px, 0.92fr));
+      gap: 8px;
       padding: 12px;
-      transition: grid-template-columns 320ms cubic-bezier(0.2, 0.8, 0.2, 1);
+      transition: grid-template-columns 140ms ease;
     }
 
-    .workspace.focus-left {
-      grid-template-columns: clamp(250px, 24vw, 340px) minmax(500px, 1.34fr) minmax(360px, 0.95fr);
-    }
-
+    .workspace.focus-left,
     .workspace.focus-middle {
-      grid-template-columns: clamp(250px, 24vw, 340px) minmax(680px, 1.78fr) minmax(260px, 0.58fr);
+      grid-template-columns:
+        var(--records-col, clamp(320px, 28vw, 460px))
+        8px
+        var(--drafts-col, minmax(460px, 1.28fr))
+        8px
+        var(--ongoing-col, minmax(360px, 0.92fr));
     }
 
     .workspace.focus-right {
-      grid-template-columns: clamp(250px, 24vw, 340px) minmax(340px, 0.82fr) minmax(650px, 1.72fr);
+      grid-template-columns:
+        var(--records-col, clamp(320px, 28vw, 460px))
+        8px
+        var(--drafts-col, minmax(460px, 1.28fr))
+        8px
+        var(--ongoing-col, minmax(360px, 0.92fr));
+    }
+
+    .workspace.resizing,
+    .workspace.resizing * {
+      cursor: col-resize;
+      user-select: none;
+    }
+
+    .workspace-resizer {
+      width: 8px;
+      min-width: 8px;
+      align-self: stretch;
+      border-radius: 999px;
+      cursor: col-resize;
+      position: relative;
+      background: transparent;
+      transition: background 0.16s ease;
+    }
+
+    .workspace-resizer::before {
+      content: "";
+      position: absolute;
+      top: 12px;
+      bottom: 12px;
+      left: 3px;
+      width: 2px;
+      border-radius: 999px;
+      background: rgba(108, 119, 132, 0.18);
+      transition: background 0.16s ease, width 0.16s ease, left 0.16s ease;
+    }
+
+    .workspace-resizer:hover,
+    .workspace-resizer.active {
+      background: rgba(31, 95, 153, 0.06);
+    }
+
+    .workspace-resizer:hover::before,
+    .workspace-resizer.active::before {
+      left: 2px;
+      width: 4px;
+      background: rgba(31, 95, 153, 0.38);
     }
 
     .summary-strip {
@@ -552,7 +605,7 @@
 
     .change-pair-grid {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(180px, 0.92fr);
+      grid-template-columns: minmax(0, 1.04fr) minmax(0, 0.96fr);
       gap: 10px;
       align-items: start;
     }
@@ -631,6 +684,15 @@
       box-shadow: none;
     }
 
+    .zhihang-card .record-title {
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .zhihang-card .tag {
+      align-self: flex-start;
+    }
+
     .zhihang-binding {
       border: 1px dashed rgba(31, 95, 153, 0.28);
       border-radius: 7px;
@@ -649,6 +711,14 @@
       justify-content: space-between;
       gap: 8px;
       font-weight: 800;
+      min-width: 0;
+      align-items: flex-start;
+    }
+
+    .record-title > span:first-child {
+      min-width: 0;
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }
 
     .record-meta {
@@ -656,6 +726,51 @@
       color: var(--muted);
       font-size: 12px;
       line-height: 1.45;
+    }
+
+    .change-record-card {
+      padding: 9px;
+    }
+
+    .change-record-card .record-title {
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .change-record-card .tag {
+      align-self: flex-start;
+    }
+
+    .change-card-title {
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .change-chip-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      margin-top: 8px;
+    }
+
+    .mini-chip {
+      display: inline-flex;
+      align-items: center;
+      max-width: 100%;
+      min-height: 22px;
+      padding: 2px 7px;
+      border-radius: 6px;
+      border: 1px solid rgba(108, 119, 132, 0.18);
+      background: var(--panel-2);
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+    }
+
+    .change-time-line,
+    .change-source-line {
+      overflow-wrap: anywhere;
     }
 
     .tag {
@@ -764,6 +879,7 @@
       .workspace.focus-left,
       .workspace.focus-middle,
       .workspace.focus-right { grid-template-columns: 1fr; }
+      .workspace-resizer { display: none; }
       .summary-strip { grid-template-columns: 1fr; }
       .panel { min-height: 420px; }
       .scope-grid { grid-template-columns: repeat(2, minmax(130px, 1fr)); }
@@ -883,6 +999,8 @@
         </div>
       </aside>
 
+      <div class="workspace-resizer" data-workspace-resizer="records-drafts" role="separator" aria-label="拖拽调整待发起事项和待发起通告宽度" aria-orientation="vertical"></div>
+
       <section class="panel work-panel drafts-panel" data-workspace-zone="middle">
         <div class="panel-head">
           <h2>待发起通告</h2>
@@ -892,6 +1010,8 @@
           <div id="draftList" class="draft-list"></div>
         </div>
       </section>
+
+      <div class="workspace-resizer" data-workspace-resizer="drafts-ongoing" role="separator" aria-label="拖拽调整待发起通告和已开始未结束宽度" aria-orientation="vertical"></div>
 
       <aside class="panel work-panel ongoing-panel" data-workspace-zone="right">
         <div class="panel-head">
@@ -1022,6 +1142,8 @@
     const AUTO_REFRESH_DEFAULT_MS = 60 * 1000;
     const AUTO_REFRESH_MIN_MS = 60 * 1000;
     const AUTO_REFRESH_MAX_MS = 10 * 60 * 1000;
+    const WORKSPACE_LAYOUT_KEY = "lan-workbench-layout:v1";
+    const WORKSPACE_MIN_WIDTHS = { records: 300, drafts: 360, ongoing: 320 };
 
     const $ = (id) => document.getElementById(id);
     const pad = (n) => String(n).padStart(2, "0");
@@ -2509,6 +2631,31 @@
       return `<div class="empty">${html(message)}${switchButton ? `<div style="margin-top:10px">${switchButton}</div>` : ""}</div>`;
     }
 
+    function changeRecordCardHtml(record, view) {
+      const f = fieldsOf(record);
+      const start = f["变更开始日期（阿里）"] || "";
+      const end = f["变更结束日期（阿里）"] || "";
+      const chips = [
+        ["楼栋", buildingForRecord(record) || "-"],
+        ["等级", levelForRecord(record) || "-"],
+        ["专业", specialtyForRecord(record) || "-"],
+        ["进度", f["变更进度"] || "-"],
+      ].map(([label, value]) => `<span class="mini-chip">${html(label)} ${html(value)}</span>`).join("");
+      const sourceId = record.source_record_id || record.record_id || "-";
+      return `
+        <article class="record-card change-record-card ${view.selected ? "selected" : ""} ${view.disabled ? "disabled" : ""} ${view.completed ? "completed" : ""}" data-record-key="${html(view.key)}">
+          <div class="record-title">
+            <span class="change-card-title">${html(recordCardTitle(record))}</span>
+            <span class="tag ${view.tagClass}">${html(workTypeLabel(record.work_type || "change"))} · ${html(view.tagText)}</span>
+          </div>
+          <div class="change-chip-row">${chips}</div>
+          <div class="record-meta change-time-line">计划 ${html(start || "-")} ~ ${html(end || "-")}</div>
+          <div class="record-meta change-source-line">源ID ${html(sourceId)}</div>
+          ${view.started ? `<div class="work-detail ${view.expanded ? "" : "hidden"}">${summaryDetailHtml(view.summary, view.summary.actions || [])}</div>` : ""}
+        </article>
+      `;
+    }
+
     function recordCardHtml(record) {
         const key = recordKey(record);
         const selected = state.selected.has(key);
@@ -2534,6 +2681,19 @@
                 ? (startedLabel ? `${startedLabel}已开始` : "已开始")
                 : `可${sourceActionText}`;
         const tagClass = selected ? "green" : completed ? "green" : ongoing ? "amber" : sourceUpdate ? "blue" : started ? "amber" : "blue";
+        if ((record.work_type || "maintenance") === "change") {
+          return changeRecordCardHtml(record, {
+            key,
+            selected,
+            disabled,
+            completed,
+            started,
+            expanded,
+            summary,
+            tagText,
+            tagClass,
+          });
+        }
         return `
           <article class="record-card ${selected ? "selected" : ""} ${disabled ? "disabled" : ""} ${completed ? "completed" : ""}" data-record-key="${html(key)}">
             <div class="record-title">
@@ -3439,26 +3599,102 @@
       }
     }
 
-    function bindWorkspaceClickFocus() {
+    function bindWorkspaceResize() {
       const workspace = $("workspace");
       if (!workspace) return;
-      const focusClasses = ["focus-left", "focus-middle", "focus-right"];
-      const setFocus = (zone) => {
-        workspace.classList.remove(...focusClasses);
-        if (zone && zone !== "left") workspace.classList.add(`focus-${zone}`);
+      const handles = Array.from(workspace.querySelectorAll("[data-workspace-resizer]"));
+      const panelSelectors = {
+        records: ".records-panel",
+        drafts: ".drafts-panel",
+        ongoing: ".ongoing-panel",
       };
-      workspace.addEventListener("click", (event) => {
-        if (event.target.closest("button, input, textarea, select, a, summary, details")) return;
-        const panel = event.target.closest("[data-workspace-zone]");
-        if (!panel || !workspace.contains(panel)) return;
-        const zone = panel.dataset.workspaceZone || "";
-        if (zone === "left") {
-          setFocus("");
-          return;
-        }
-        const focusClass = `focus-${zone}`;
-        setFocus(workspace.classList.contains(focusClass) ? "" : zone);
-      }, true);
+
+      const setColumns = (widths) => {
+        Object.entries(widths).forEach(([name, value]) => {
+          if (Number.isFinite(value) && value > 0) {
+            workspace.style.setProperty(`--${name}-col`, `${Math.round(value)}px`);
+          }
+        });
+      };
+
+      const measureColumns = () => Object.fromEntries(
+        Object.entries(panelSelectors).map(([name, selector]) => {
+          const node = workspace.querySelector(selector);
+          return [name, node ? node.getBoundingClientRect().width : 0];
+        })
+      );
+
+      const stored = safeJsonParse(localStorage.getItem(WORKSPACE_LAYOUT_KEY) || "{}", {});
+      if (stored && ["records", "drafts", "ongoing"].every((name) => Number.isFinite(Number(stored[name])))) {
+        setColumns({
+          records: Number(stored.records),
+          drafts: Number(stored.drafts),
+          ongoing: Number(stored.ongoing),
+        });
+      }
+
+      const resizePair = (firstWidth, secondWidth, delta, firstMin, secondMin) => {
+        const total = firstWidth + secondWidth;
+        if (total <= firstMin + secondMin) return [firstWidth, secondWidth];
+        const nextFirst = Math.min(Math.max(firstWidth + delta, firstMin), total - secondMin);
+        return [nextFirst, total - nextFirst];
+      };
+
+      handles.forEach((handle) => {
+        handle.addEventListener("pointerdown", (event) => {
+          if (window.matchMedia("(max-width: 1240px)").matches) return;
+          event.preventDefault();
+          const pair = handle.dataset.workspaceResizer || "";
+          const startX = event.clientX;
+          const start = measureColumns();
+          let current = { ...start };
+          setColumns(start);
+          workspace.classList.remove("focus-left", "focus-middle", "focus-right");
+          workspace.classList.add("resizing");
+          handle.classList.add("active");
+
+          const onMove = (moveEvent) => {
+            const delta = moveEvent.clientX - startX;
+            const next = { ...start };
+            if (pair === "records-drafts") {
+              const [records, drafts] = resizePair(
+                start.records,
+                start.drafts,
+                delta,
+                WORKSPACE_MIN_WIDTHS.records,
+                WORKSPACE_MIN_WIDTHS.drafts
+              );
+              next.records = records;
+              next.drafts = drafts;
+            } else if (pair === "drafts-ongoing") {
+              const [drafts, ongoing] = resizePair(
+                start.drafts,
+                start.ongoing,
+                delta,
+                WORKSPACE_MIN_WIDTHS.drafts,
+                WORKSPACE_MIN_WIDTHS.ongoing
+              );
+              next.drafts = drafts;
+              next.ongoing = ongoing;
+            }
+            current = next;
+            setColumns(next);
+          };
+
+          const finish = () => {
+            workspace.classList.remove("resizing");
+            handle.classList.remove("active");
+            localStorage.setItem(WORKSPACE_LAYOUT_KEY, JSON.stringify(current));
+            window.removeEventListener("pointermove", onMove);
+            window.removeEventListener("pointerup", finish);
+            window.removeEventListener("pointercancel", finish);
+          };
+
+          window.addEventListener("pointermove", onMove);
+          window.addEventListener("pointerup", finish, { once: true });
+          window.addEventListener("pointercancel", finish, { once: true });
+        });
+      });
     }
 
     $("refreshBtn").addEventListener("click", refreshWorkbench);
@@ -3491,7 +3727,7 @@
 
     async function initApp() {
       if (oauthRedirecting) return;
-      bindWorkspaceClickFocus();
+      bindWorkspaceResize();
       await loadAuthStatus();
       if (!hasPortalAccess()) {
         stopAutoRefresh();
