@@ -1529,6 +1529,14 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             "/",
         )
         self.assertEqual(
+            PortalAuthManager._normalize_next_path("/api/auth/status?next=/"),
+            "/",
+        )
+        self.assertEqual(
+            PortalAuthManager._normalize_next_path("/api/bootstrap?scope=E"),
+            "/",
+        )
+        self.assertEqual(
             PortalHandler._safe_host_value("127.0.0.1:18766", "fallback:1"),
             "127.0.0.1:18766",
         )
@@ -1554,6 +1562,29 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         )
         self.assertEqual(PortalHandler._safe_proto_value("https, http"), "https")
         self.assertEqual(PortalHandler._safe_proto_value("javascript"), "http")
+
+    def test_parse_field_metas_accepts_items_list(self):
+        service = _TestMaintenancePortalService()
+        metas = service._parse_field_metas(
+            [
+                {
+                    "field_id": "fld1",
+                    "field_name": "进展",
+                    "ui_type": "SingleSelect",
+                    "type": 3,
+                    "property": {
+                        "options": [
+                            {"id": "opt1", "name": "进行中"},
+                            {"id": "opt2", "name": "已结束"},
+                        ]
+                    },
+                    "is_primary": False,
+                }
+            ]
+        )
+        self.assertEqual(len(metas), 1)
+        self.assertEqual(metas[0].field_name, "进展")
+        self.assertEqual(metas[0].options_map["opt1"], "进行中")
 
 
 if __name__ == "__main__":

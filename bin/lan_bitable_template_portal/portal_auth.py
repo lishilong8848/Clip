@@ -74,7 +74,7 @@ class PortalAuthManager:
             return "/"
         parts = urlsplit(text)
         path = parts.path or "/"
-        if path.startswith("/api/auth/"):
+        if path.startswith("/api/"):
             return "/"
         query = urlencode(
             [

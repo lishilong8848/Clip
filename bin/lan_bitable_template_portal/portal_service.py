@@ -284,8 +284,13 @@ class MaintenancePortalService:
 
     def _parse_field_meta(self, payload: dict[str, Any]) -> list[FieldMeta]:
         items = payload.get("data", {}).get("items") or []
+        return self._parse_field_metas(items)
+
+    def _parse_field_metas(self, items: list[dict[str, Any]]) -> list[FieldMeta]:
         metas: list[FieldMeta] = []
         for item in items:
+            if not isinstance(item, dict):
+                continue
             option_map, option_names = self._extract_option_map(item)
             prop = item.get("property") or {}
             metas.append(
