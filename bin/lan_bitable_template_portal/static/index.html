@@ -517,6 +517,55 @@
       line-height: 1.45;
     }
 
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 1000;
+      display: grid;
+      place-items: center;
+      padding: 22px;
+      background: rgba(19, 35, 49, 0.42);
+    }
+
+    .modal-card {
+      width: min(760px, 100%);
+      max-height: min(720px, 92vh);
+      display: flex;
+      flex-direction: column;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #fff;
+      box-shadow: 0 28px 70px rgba(18, 35, 49, 0.24);
+      overflow: hidden;
+    }
+
+    .modal-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .modal-head h2 {
+      margin: 0;
+      font-size: 16px;
+    }
+
+    .modal-body {
+      overflow: auto;
+      padding: 14px 16px;
+    }
+
+    .paste-textarea {
+      min-height: 280px;
+      height: 36vh;
+      line-height: 1.55;
+      resize: vertical;
+      white-space: pre-wrap;
+    }
+
     label {
       display: block;
       margin-bottom: 5px;
@@ -971,6 +1020,7 @@
         <div class="panel-head">
           <h2>待发起事项</h2>
           <div class="row-actions">
+            <button id="parseNoticeBtn" class="btn blue">粘贴解析</button>
             <button id="addManualDraftBtn" class="btn blue">纯手填</button>
             <button id="clearSelectionBtn" class="btn ghost">清空</button>
           </div>
@@ -1024,6 +1074,27 @@
       </aside>
     </section>
   </main>
+
+  <section id="noticePasteModal" class="modal-backdrop hidden" aria-modal="true" role="dialog" aria-labelledby="noticePasteTitle">
+    <div class="modal-card">
+      <div class="modal-head">
+        <div>
+          <h2 id="noticePasteTitle">粘贴完整通告文本</h2>
+          <div class="record-meta">支持维保通告、设备变更、设备检修；解析后会生成可编辑的待发起通告。</div>
+        </div>
+        <button id="closeNoticePasteBtn" class="btn ghost icon-btn" aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body">
+        <label for="noticePasteText">通告文本</label>
+        <textarea id="noticePasteText" class="paste-textarea" placeholder="在这里粘贴完整通告，例如：【设备检修】状态：开始..."></textarea>
+        <div class="row-actions" style="margin-top:10px">
+          <button id="readClipboardNoticeBtn" class="btn ghost">读取剪贴板</button>
+          <button id="confirmParseNoticeBtn" class="btn primary">解析到待发起通告</button>
+        </div>
+        <div id="noticePasteLine" class="job-line">等待粘贴通告文本</div>
+      </div>
+    </div>
+  </section>
 
   <script>
     function normalizeScopeValue(value, fallback = "") {
@@ -1144,6 +1215,7 @@
     const AUTO_REFRESH_MAX_MS = 10 * 60 * 1000;
     const WORKSPACE_LAYOUT_KEY = "lan-workbench-layout:v1";
     const WORKSPACE_MIN_WIDTHS = { records: 300, drafts: 360, ongoing: 320 };
+    let normalizeWorkspaceLayout = () => {};
 
     const $ = (id) => document.getElementById(id);
     const pad = (n) => String(n).padStart(2, "0");
@@ -1716,6 +1788,207 @@
         solution: "",
         job_id: "",
       };
+    }
+
+    function normalizeNoticeSectionLabel(label) {
+      return String(label || "").replace(/\s+/g, "").replace(/[：:]/g, "");
+    }
+
+    function parseNoticeSections(text) {
+      const raw = String(text || "").replace(/\r\n?/g, "\n").trim();
+      const sections = {};
+      const order = [];
+      const re = /【([^】]+)】([\s\S]*?)(?=(?:\n\s*)*【[^】]+】|$)/g;
+      let match;
+      while ((match = re.exec(raw))) {
+        const label = normalizeNoticeSectionLabel(match[1]);
+        const value = String(match[2] || "").trim();
+        if (!label) continue;
+        sections[label] = value;
+        order.push(label);
+      }
+      return { raw, sections, order };
+    }
+
+    function noticeSection(sections, names, fallback = "") {
+      for (const name of names || []) {
+        const value = sections[normalizeNoticeSectionLabel(name)];
+        if (value !== undefined && String(value).trim()) return String(value).trim();
+      }
+      return fallback;
+    }
+
+    function noticeStatusFromText(parsed) {
+      const firstLabel = parsed.order[0] || "";
+      const firstValue = parsed.sections[firstLabel] || "";
+      const text = `${firstValue}\n${parsed.raw}`;
+      const match = text.match(/状态\s*[：:]\s*([^\s【】]+)/);
+      return match ? match[1].trim() : "";
+    }
+
+    function noticeWorkTypeFromText(parsed) {
+      const firstLabel = parsed.order[0] || "";
+      const raw = parsed.raw;
+      if (/设备检修|检修通告/.test(firstLabel) || /【设备检修】|【检修通告】/.test(raw)) return "repair";
+      if (/设备变更|变更通告/.test(firstLabel) || /【设备变更】|【变更通告】/.test(raw)) return "change";
+      if (/维保通告|维护通告/.test(firstLabel) || /【维保通告】|【维护通告】/.test(raw)) return "maintenance";
+      if (noticeSection(parsed.sections, ["维修设备", "维修故障", "故障现象", "解决方案"])) return "repair";
+      if (noticeSection(parsed.sections, ["等级", "变更等级", "变更楼栋"])) return "change";
+      return "maintenance";
+    }
+
+    function noticeTimeRange(value) {
+      const text = String(value || "").trim();
+      const parts = text.split(/~|至|到/).map((item) => item.trim()).filter(Boolean);
+      return {
+        start: toDatetimeLocal(parts[0] || text),
+        end: toDatetimeLocal(parts[1] || ""),
+      };
+    }
+
+    function labelForBuildingCodes(codes) {
+      const labels = {
+        "110": "110站",
+        A: "A楼",
+        B: "B楼",
+        C: "C楼",
+        D: "D楼",
+        E: "E楼",
+        H: "H楼",
+      };
+      return (codes || []).map((code) => labels[code] || code).filter(Boolean).join("、");
+    }
+
+    function inferBuildingFromText(text, type) {
+      const source = String(text || "").toUpperCase();
+      const codes = [];
+      const add = (code) => {
+        if (code && !codes.includes(code)) codes.push(code);
+      };
+      if (/110/.test(source)) add("110");
+      for (const match of source.matchAll(/(?<![A-Z0-9])([ABCDEH]{2,})(?=楼|栋|座|区|园区|[^A-Z0-9]|$)/g)) {
+        for (const code of match[1]) add(code);
+      }
+      for (const code of ["A", "B", "C", "D", "E", "H"]) {
+        const patterns = [
+          new RegExp(`${code}\\s*(楼|栋|座)`),
+          new RegExp(`(?<![A-Z0-9])${code}[-_]\\d`),
+        ];
+        if (patterns.some((pattern) => pattern.test(source))) add(code);
+      }
+      if (source.includes("园区") && codes.length < 2 && type !== "maintenance") {
+        ["A", "B", "C"].forEach(add);
+      }
+      if (codes.length) return labelForBuildingCodes(codes);
+      const scope = normalizeScopeValue(state.scope || "", "");
+      if (BUILDING_SCOPE_VALUES.includes(scope)) return scopeLabel(scope);
+      return "";
+    }
+
+    const BUILDING_SCOPE_VALUES = ["110", "A", "B", "C", "D", "E", "H"];
+
+    function parsedNoticeDraft(text) {
+      const parsed = parseNoticeSections(text);
+      if (!parsed.raw || !parsed.order.length) {
+        throw new Error("未识别到【字段】格式，请粘贴完整通告文本。");
+      }
+      const type = noticeWorkTypeFromText(parsed);
+      const sections = parsed.sections;
+      const status = noticeStatusFromText(parsed);
+      const draft = manualDraftDefaults(type);
+      const title = noticeSection(sections, ["名称", "标题", "变更简述", "维修名称"]);
+      const location = noticeSection(sections, ["位置", "地点"]);
+      const specialty = noticeSection(sections, ["专业", "专业类别", "所属专业"]);
+      const building = noticeSection(sections, ["楼栋", "变更楼栋", "所属数据中心/楼栋-使用"])
+        || inferBuildingFromText([title, location, parsed.raw].filter(Boolean).join("\n"), type);
+      draft.title = title;
+      draft.building = building;
+      draft.specialty = specialty;
+      draft.location = location;
+      draft.reason = noticeSection(sections, ["原因", "故障原因"]);
+      draft.impact = noticeSection(sections, ["影响", "影响范围"]);
+      draft.progress = noticeSection(sections, ["进度", "完成情况"]);
+      draft.maintenance_cycle = noticeSection(sections, ["维保周期", "维护周期"]);
+      draft.level = noticeSection(sections, ["等级", "变更等级", "紧急程度"]);
+      if (type === "repair") {
+        draft.start_time = toDatetimeLocal(noticeSection(sections, ["期望完成时间"]));
+        draft.end_time = toDatetimeLocal(noticeSection(sections, ["发现故障时间", "故障发生时间"]));
+        draft.content = "";
+        draft.repair_device = noticeSection(sections, ["维修设备"]);
+        draft.repair_fault = noticeSection(sections, ["维修故障"]);
+        draft.fault_type = noticeSection(sections, ["故障类型"]);
+        draft.repair_mode = noticeSection(sections, ["维修方式"]);
+        draft.discovery = noticeSection(sections, ["故障发现方式"]);
+        draft.symptom = noticeSection(sections, ["故障现象"]);
+        draft.solution = noticeSection(sections, ["解决方案"]);
+      } else {
+        const range = noticeTimeRange(noticeSection(sections, ["时间", "计划时间"]));
+        draft.start_time = range.start;
+        draft.end_time = range.end;
+        draft.content = noticeSection(sections, ["内容"], type === "change" ? title : "");
+      }
+      return { type, status, draft };
+    }
+
+    function addParsedNoticeDraft(text) {
+      const parsed = parsedNoticeDraft(text);
+      const key = manualDraftKey(parsed.type);
+      state.drafts.set(key, parsed.draft);
+      state.selected.add(key);
+      state.activeDraftKey = key;
+      state.workType = parsed.type;
+      forgetJobsForLine(key);
+      saveDraftState();
+      render();
+      return { ...parsed, key };
+    }
+
+    function setNoticePasteLine(text, status = "") {
+      const line = $("noticePasteLine");
+      if (!line) return;
+      line.className = `job-line ${status}`;
+      line.textContent = text || "";
+    }
+
+    function openNoticePasteModal() {
+      $("noticePasteModal").classList.remove("hidden");
+      setNoticePasteLine("等待粘贴通告文本");
+      setTimeout(() => $("noticePasteText")?.focus(), 0);
+    }
+
+    function closeNoticePasteModal() {
+      $("noticePasteModal").classList.add("hidden");
+      $("noticePasteText").value = "";
+      setNoticePasteLine("等待粘贴通告文本");
+    }
+
+    async function readNoticeClipboard() {
+      const textarea = $("noticePasteText");
+      if (!navigator.clipboard?.readText) {
+        setNoticePasteLine("当前浏览器不支持直接读取剪贴板，请手动粘贴。", "failed");
+        return;
+      }
+      try {
+        const text = await navigator.clipboard.readText();
+        textarea.value = text || "";
+        setNoticePasteLine(text ? "已读取剪贴板，可以解析。" : "剪贴板为空。", text ? "success" : "failed");
+      } catch (err) {
+        setNoticePasteLine("读取剪贴板失败，请手动粘贴。", "failed");
+      }
+    }
+
+    function confirmParseNoticeText() {
+      const text = $("noticePasteText").value || "";
+      try {
+        const parsed = addParsedNoticeDraft(text);
+        const statusHint = parsed.status && parsed.status !== "开始"
+          ? ` 原文状态为“${parsed.status}”，已按待发起手填草稿导入。`
+          : "";
+        setNoticePasteLine(`已解析为${workTypeLabel(parsed.type)}通告，请在中间卡片检查字段后发送。${statusHint}`, "success");
+        setTimeout(() => closeNoticePasteModal(), 650);
+      } catch (err) {
+        setNoticePasteLine(err.message || "解析失败，请检查文本格式。", "failed");
+      }
     }
 
     function manualRecordFromDraft(key, draft) {
@@ -2448,6 +2721,7 @@
       const ongoingCounts = ongoingTypeCounts();
       $("recordCount").textContent = `待发起 ${WORK_TYPES.map((item) => `${item.label} ${recordCounts[item.value] || 0}`).join(" / ")}`;
       $("ongoingCount").textContent = `进行中 ${WORK_TYPES.map((item) => `${item.label} ${ongoingCounts[item.value] || 0}`).join(" / ")}`;
+      normalizeWorkspaceLayout();
     }
 
     function renderWorkTypeTabs() {
@@ -3602,7 +3876,10 @@
     function bindWorkspaceResize() {
       const workspace = $("workspace");
       if (!workspace) return;
+      if (workspace.dataset.resizeBound === "1") return;
+      workspace.dataset.resizeBound = "1";
       const handles = Array.from(workspace.querySelectorAll("[data-workspace-resizer]"));
+      const desktopQuery = window.matchMedia("(min-width: 1241px)");
       const panelSelectors = {
         records: ".records-panel",
         drafts: ".drafts-panel",
@@ -3624,14 +3901,84 @@
         })
       );
 
+      const panelBudget = () => {
+        const rect = workspace.getBoundingClientRect();
+        if (!rect.width) return 0;
+        const style = window.getComputedStyle(workspace);
+        const padding = (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.paddingRight) || 0);
+        const gap = parseFloat(style.columnGap || style.gap) || 0;
+        const handleWidth = handles.reduce((sum, handle) => {
+          const box = handle.getBoundingClientRect();
+          return sum + (box.width || 0);
+        }, 0);
+        return Math.max(0, rect.width - padding - handleWidth - gap * 4);
+      };
+
+      const normalizeColumns = (widths) => {
+        const current = {
+          records: Number(widths?.records || 0),
+          drafts: Number(widths?.drafts || 0),
+          ongoing: Number(widths?.ongoing || 0),
+        };
+        if (!Object.values(current).every((value) => Number.isFinite(value) && value > 0)) {
+          return null;
+        }
+        const budget = panelBudget();
+        const minTotal = WORKSPACE_MIN_WIDTHS.records + WORKSPACE_MIN_WIDTHS.drafts + WORKSPACE_MIN_WIDTHS.ongoing;
+        if (!budget || budget <= minTotal) return current;
+        const next = {
+          records: Math.max(current.records, WORKSPACE_MIN_WIDTHS.records),
+          drafts: Math.max(current.drafts, WORKSPACE_MIN_WIDTHS.drafts),
+          ongoing: Math.max(current.ongoing, WORKSPACE_MIN_WIDTHS.ongoing),
+        };
+        let total = next.records + next.drafts + next.ongoing;
+        if (Math.abs(total - budget) < 1) return next;
+        if (total < budget) {
+          const extra = budget - total;
+          const weights = {
+            records: next.records / total,
+            drafts: next.drafts / total,
+            ongoing: next.ongoing / total,
+          };
+          return {
+            records: next.records + extra * weights.records,
+            drafts: next.drafts + extra * weights.drafts,
+            ongoing: next.ongoing + extra * weights.ongoing,
+          };
+        }
+        const shrink = total - budget;
+        const surplus = {
+          records: next.records - WORKSPACE_MIN_WIDTHS.records,
+          drafts: next.drafts - WORKSPACE_MIN_WIDTHS.drafts,
+          ongoing: next.ongoing - WORKSPACE_MIN_WIDTHS.ongoing,
+        };
+        const surplusTotal = surplus.records + surplus.drafts + surplus.ongoing;
+        if (surplusTotal <= 0) return next;
+        return {
+          records: next.records - shrink * (surplus.records / surplusTotal),
+          drafts: next.drafts - shrink * (surplus.drafts / surplusTotal),
+          ongoing: next.ongoing - shrink * (surplus.ongoing / surplusTotal),
+        };
+      };
+
       const stored = safeJsonParse(localStorage.getItem(WORKSPACE_LAYOUT_KEY) || "{}", {});
       if (stored && ["records", "drafts", "ongoing"].every((name) => Number.isFinite(Number(stored[name])))) {
-        setColumns({
+        setColumns(normalizeColumns({
           records: Number(stored.records),
           drafts: Number(stored.drafts),
           ongoing: Number(stored.ongoing),
-        });
+        }) || stored);
       }
+
+      normalizeWorkspaceLayout = () => {
+        if (!desktopQuery.matches) return;
+        const measured = measureColumns();
+        const total = measured.records + measured.drafts + measured.ongoing;
+        const normalized = normalizeColumns(total > 0 ? measured : stored);
+        if (normalized) setColumns(normalized);
+      };
+
+      window.addEventListener("resize", normalizeWorkspaceLayout);
 
       const resizePair = (firstWidth, secondWidth, delta, firstMin, secondMin) => {
         const total = firstWidth + secondWidth;
@@ -3642,11 +3989,11 @@
 
       handles.forEach((handle) => {
         handle.addEventListener("pointerdown", (event) => {
-          if (window.matchMedia("(max-width: 1240px)").matches) return;
+          if (!desktopQuery.matches) return;
           event.preventDefault();
           const pair = handle.dataset.workspaceResizer || "";
           const startX = event.clientX;
-          const start = measureColumns();
+          const start = normalizeColumns(measureColumns()) || measureColumns();
           let current = { ...start };
           setColumns(start);
           workspace.classList.remove("focus-left", "focus-middle", "focus-right");
@@ -3708,6 +4055,18 @@
       state.drafts.clear();
       saveDraftState();
       render();
+    });
+    $("parseNoticeBtn").addEventListener("click", openNoticePasteModal);
+    $("closeNoticePasteBtn").addEventListener("click", closeNoticePasteModal);
+    $("readClipboardNoticeBtn").addEventListener("click", readNoticeClipboard);
+    $("confirmParseNoticeBtn").addEventListener("click", confirmParseNoticeText);
+    $("noticePasteModal").addEventListener("click", (event) => {
+      if (event.target === $("noticePasteModal")) closeNoticePasteModal();
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && !$("noticePasteModal").classList.contains("hidden")) {
+        closeNoticePasteModal();
+      }
     });
     $("addManualDraftBtn").addEventListener("click", addManualDraft);
     $("sendAllStartBtn").addEventListener("click", sendAllStart);

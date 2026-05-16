@@ -621,7 +621,31 @@ class ClipboardItemWidget(QWidget):
 
         self.update_labels(self.data["text"])
 
-        text_layout.addWidget(self.title_label)
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(6)
+
+        self.portal_origin_badge = QLabel("★")
+        self.portal_origin_badge.setObjectName("PortalOriginBadge")
+        self.portal_origin_badge.setFixedSize(18, 18)
+        self.portal_origin_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.portal_origin_badge.setToolTip("来自网页工作台")
+        self.portal_origin_badge.setStyleSheet("""
+            QLabel#PortalOriginBadge {
+                background: #FBBF24;
+                color: #111827;
+                border: 1px solid #F59E0B;
+                border-radius: 9px;
+                font-size: 12px;
+                font-weight: 800;
+            }
+        """)
+        self._refresh_portal_origin_badge()
+
+        title_row.addWidget(self.portal_origin_badge, 0, Qt.AlignmentFlag.AlignTop)
+        title_row.addWidget(self.title_label, 1)
+
+        text_layout.addLayout(title_row)
 
         text_layout.addWidget(self.subtitle_label)
 
@@ -1050,6 +1074,18 @@ class ClipboardItemWidget(QWidget):
         self.subtitle_label.setText(subtitle_text)
         self.subtitle_label.setToolTip(snapshot.get("text") or text or "")
 
+    def _refresh_portal_origin_badge(self):
+        badge = getattr(self, "portal_origin_badge", None)
+        if not badge:
+            return
+        try:
+            if sip.isdeleted(badge):
+                return
+        except Exception:
+            return
+        is_portal_item = bool(self.data.get("lan_created_from_portal"))
+        badge.setVisible(is_portal_item)
+
 
     def set_record_id(self, new_record_id):
         self.data["record_id"] = new_record_id
@@ -1063,6 +1099,7 @@ class ClipboardItemWidget(QWidget):
             new_data_dict.get("today_in_progress_state")
         )
         self.update_labels(new_data_dict["text"])
+        self._refresh_portal_origin_badge()
         if self.timer_widget:
             self.timer_widget.update_context(
                 text=new_data_dict.get("text"),
