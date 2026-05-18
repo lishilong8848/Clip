@@ -147,16 +147,27 @@ class EventRelayServer:
         self.enable_proxy_dingtalk = bool(enable_proxy_dingtalk)
         self._thread: Optional[threading.Thread] = None
         self._server = None
+        self._legacy_event_log_imported = False
         self._manager = ConnectionManager()
         self._app = self._build_app()
 
+    def _ensure_legacy_event_log_imported(self, store) -> None:
+        if self._legacy_event_log_imported:
+            return
+        try:
+            store.import_jsonl_events_once("event_relay", self._event_log_path)
+        except Exception as exc:
+            log_warning(f"[EventRelay] legacy log import failed: {exc}")
+        finally:
+            self._legacy_event_log_imported = True
+
     def _append_event_log(self, event: dict) -> None:
         try:
-            path = self._event_log_path
-            path.parent.mkdir(parents=True, exist_ok=True)
-            line = json.dumps(event, ensure_ascii=False)
-            with path.open("a", encoding="utf-8") as f:
-                f.write(line + "\n")
+            from lan_bitable_template_portal.state_store import LanPortalStateStore
+
+            store = LanPortalStateStore()
+            self._ensure_legacy_event_log_imported(store)
+            store.append_event("event_relay", event)
         except Exception as exc:
             log_warning(f"[EventRelay] write log failed: {exc}")
 

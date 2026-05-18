@@ -102,6 +102,8 @@ EXCLUDE_TOP_LEVEL = {
 
     "build_output",
 
+    "data",
+
 } | EXCLUDE_FILES
 
 
@@ -116,6 +118,24 @@ EXCLUDE_DIR_NAMES = {
 
     "__pycache__",
 
+}
+
+
+RUNTIME_DATA_DIR_PARTS = (
+    ("bin", "data"),
+    ("data",),
+)
+
+RUNTIME_DATA_SUFFIXES = {
+    ".db",
+    ".sqlite",
+    ".sqlite3",
+    ".db-wal",
+    ".db-shm",
+    ".sqlite-wal",
+    ".sqlite-shm",
+    ".sqlite3-wal",
+    ".sqlite3-shm",
 }
 
 
@@ -1094,6 +1114,12 @@ def _ignore_names(dirpath: str, names: list[str]) -> set[str]:
 
             continue
 
+        if name == "data" and base.name in {"bin", PROJECT_ROOT.name}:
+
+            ignore.add(name)
+
+            continue
+
 
 
         if name.endswith((".pyc", ".pyo")):
@@ -1108,6 +1134,44 @@ def _ignore_names(dirpath: str, names: list[str]) -> set[str]:
 
 
 
+
+
+def _has_relative_prefix(parts: tuple[str, ...], prefix: tuple[str, ...]) -> bool:
+
+    if not prefix or len(parts) < len(prefix):
+
+        return False
+
+    lowered = tuple(str(part).lower() for part in parts)
+
+    lowered_prefix = tuple(str(part).lower() for part in prefix)
+
+    return lowered[: len(lowered_prefix)] == lowered_prefix
+
+
+def _is_runtime_data_path(path: Path, root: Path | None = None) -> bool:
+
+    try:
+
+        parts = path.resolve().relative_to((root or PROJECT_ROOT).resolve()).parts
+
+    except Exception:
+
+        parts = path.parts
+
+    if any(_has_relative_prefix(parts, prefix) for prefix in RUNTIME_DATA_DIR_PARTS):
+
+        return True
+
+    lowered_parts = tuple(str(part).lower() for part in parts)
+
+    for index, part in enumerate(lowered_parts[:-1]):
+
+        if part == "bin" and lowered_parts[index + 1] == "data":
+
+            return True
+
+    return path.name.lower().endswith(tuple(RUNTIME_DATA_SUFFIXES))
 
 
 def _is_under_bin_build_or_dist(path: Path) -> bool:
@@ -1135,6 +1199,10 @@ def _is_under_bin_build_or_dist(path: Path) -> bool:
 def _is_excluded(path: Path, *, exclude_venv: bool = False) -> bool:
 
     parts = set(path.parts)
+
+    if _is_runtime_data_path(path, PROJECT_ROOT):
+
+        return True
 
     if parts & EXCLUDE_DIR_NAMES:
 
@@ -1166,9 +1234,15 @@ def _is_excluded(path: Path, *, exclude_venv: bool = False) -> bool:
 
 
 
-def _is_baseline_excluded(path: Path, *, exclude_venv: bool = False) -> bool:
+def _is_baseline_excluded(
+    path: Path, *, exclude_venv: bool = False, root: Path | None = None
+) -> bool:
 
     parts = set(path.parts)
+
+    if _is_runtime_data_path(path, root):
+
+        return True
 
     if parts & EXCLUDE_DIR_NAMES:
 
@@ -1940,7 +2014,9 @@ def build_patch(
 
             rel = path.relative_to(baseline_dir)
 
-            if _is_baseline_excluded(path, exclude_venv=exclude_venv):
+            if _is_baseline_excluded(
+                path, exclude_venv=exclude_venv, root=baseline_dir
+            ):
 
                 continue
 

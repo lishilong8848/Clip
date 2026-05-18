@@ -36,6 +36,7 @@ from ..logger import log_info, log_error, log_warning
 from ..utils import HISTORY_FILE, ICON_FILE
 from ..core.parser import extract_event_info
 from ..core.speech import speech_manager
+from lan_bitable_template_portal.state_store import LanPortalStateStore
 from .styles import get_stylesheet
 from .widgets import HistoryItemWidget
 from .dialogs import AddDialog
@@ -43,6 +44,8 @@ from .display_state import normalize_active_item_data
 
 HISTORY_RETENTION_DAYS = 7
 HISTORY_RETENTION_MS = HISTORY_RETENTION_DAYS * 24 * 60 * 60 * 1000
+HISTORY_STATE_NAMESPACE = "qt_notice_history"
+HISTORY_STATE_KEY = "history"
 
 class MainWindowUiMixin:
     def init_ui(self):
@@ -816,6 +819,53 @@ class MainWindowUiMixin:
         self._try_process_pending_force_uploads()
         self._try_process_deferred_events()
 
+    def _get_history_state_store(self):
+        store = getattr(self, "_lan_portal_state_store", None)
+        if store is None:
+            store = LanPortalStateStore()
+            self._lan_portal_state_store = store
+        return store
+
+    def _load_history_payload(self):
+        try:
+            stored = self._get_history_state_store().get_document(
+                HISTORY_STATE_NAMESPACE, HISTORY_STATE_KEY
+            )
+        except Exception:
+            stored = None
+        if isinstance(stored, dict):
+            items = stored.get("items")
+            if isinstance(items, list):
+                return items
+        if not os.path.exists(HISTORY_FILE):
+            return []
+        try:
+            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                history_data = json.load(f)
+        except Exception:
+            return []
+        if not isinstance(history_data, list):
+            return []
+        self._save_history_payload(history_data)
+        return history_data
+
+    def _save_history_payload(self, history_data):
+        payload = {
+            "version": 1,
+            "saved_at": int(time.time() * 1000),
+            "items": history_data if isinstance(history_data, list) else [],
+        }
+        self._get_history_state_store().put_document(
+            HISTORY_STATE_NAMESPACE, HISTORY_STATE_KEY, payload
+        )
+        self.last_history_mtime = payload["saved_at"]
+
+    def _delete_history_payload(self):
+        self._get_history_state_store().delete_document(
+            HISTORY_STATE_NAMESPACE, HISTORY_STATE_KEY
+        )
+        self.last_history_mtime = int(time.time() * 1000)
+
     def save_to_history_file(self, d):
         h = self.load_all_history()
         record = dict(d or {}) if isinstance(d, dict) else {}
@@ -826,8 +876,7 @@ class MainWindowUiMixin:
         h.insert(0, record)
         h = self._trim_history_by_age(h)
         try:
-            with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-                json.dump(h, f, ensure_ascii=False, indent=2)
+            self._save_history_payload(h)
         except Exception:
             pass
 
@@ -860,13 +909,7 @@ class MainWindowUiMixin:
         return trimmed
 
     def load_all_history(self):
-        if not os.path.exists(HISTORY_FILE):
-            return []
-        try:
-            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-                history_data = json.load(f)
-        except Exception:
-            return []
+        history_data = self._load_history_payload()
         updated = False
         for item in history_data:
             if not isinstance(item, dict):
@@ -893,8 +936,7 @@ class MainWindowUiMixin:
             history_data = trimmed_history
         if updated:
             try:
-                with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-                    json.dump(history_data, f, ensure_ascii=False, indent=2)
+                self._save_history_payload(history_data)
             except Exception:
                 pass
         return history_data
@@ -912,15 +954,10 @@ class MainWindowUiMixin:
                 continue
 
     def reload_history_view(self):
-        if not os.path.exists(HISTORY_FILE):
-            return
-        m = os.path.getmtime(HISTORY_FILE)
-        if m <= self.last_history_mtime:
-            return
-        self.last_history_mtime = m
+        history_items = self.load_all_history()
         self.list_history_event.clear()
         self.list_history_other.clear()
-        for d in self.load_all_history():
+        for d in history_items:
             list_widget = self._get_history_list_for_notice(self._get_notice_type(d))
             info = extract_event_info(d.get("text", ""))
             display_data = d
@@ -938,8 +975,10 @@ class MainWindowUiMixin:
     def clear_history_action(self):
         self.list_history_event.clear()
         self.list_history_other.clear()
-        if os.path.exists(HISTORY_FILE):
-            os.remove(HISTORY_FILE)
+        try:
+            self._delete_history_payload()
+        except Exception:
+            pass
 
     def show_context_menu(self, pos, src):
         # 已移除右键删除功能，改为滑动删除

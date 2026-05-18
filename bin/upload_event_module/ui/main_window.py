@@ -287,6 +287,11 @@ class ClipboardTool(
         self._upload_lock = threading.Lock()
         self._upload_key_alias = {}
         self._feishu_request_lock = threading.Lock()
+        self._lan_ongoing_snapshot_lock = threading.RLock()
+        self._lan_ongoing_snapshot_all = []
+        self._lan_ongoing_snapshot_at = 0.0
+        self._lan_ongoing_snapshot_refresh_pending = False
+        self._lan_portal_state_store = None
         self._is_restoring_cache = False
         self.clipboard_paused = False
         self._deferred_events = []
@@ -406,6 +411,7 @@ class ClipboardTool(
         self._apply_event_relay_setting(force_reload=False)
         self._init_hot_reload()
         QTimer.singleShot(0, lambda: self._log_runtime_health_snapshot("startup"))
+        QTimer.singleShot(0, self._refresh_lan_ongoing_snapshot_now)
         QTimer.singleShot(0, self._restore_update_overlay_state)
         QTimer.singleShot(600, self._close_restart_overlay_window)
         QTimer.singleShot(1500, self._check_ocr_lang_pack)

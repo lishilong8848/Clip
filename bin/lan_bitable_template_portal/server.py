@@ -20,7 +20,9 @@ from .portal_service import (
     DEFAULT_TABLE_ID,
     MaintenancePortalService,
     PortalError,
+    SCOPE_OPTIONS,
 )
+from .state_store import LanPortalStateStore
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -45,6 +47,7 @@ def find_available_port(host: str, preferred_port: int) -> int:
 class PortalHandler(BaseHTTPRequestHandler):
     service = MaintenancePortalService()
     auth_manager = PortalAuthManager()
+    state_store = LanPortalStateStore()
     notice_callback = None
     ongoing_callback = None
     ongoing_delete_callback = None
@@ -394,7 +397,19 @@ class PortalHandler(BaseHTTPRequestHandler):
             try:
                 ongoing = self._get_ongoing("ALL")
                 self._reconcile_orphan_started_items("ALL", ongoing)
-                data = self.service.get_scope_overview(ongoing_items=ongoing)
+                allowed_options = PortalHandler.auth_manager.filter_scope_options(
+                    SCOPE_OPTIONS, session
+                )
+                allowed_scopes = [
+                    str(option.get("value") or "")
+                    for option in allowed_options
+                    if str(option.get("value") or "").strip()
+                ]
+                data = self.service.get_scope_overview(
+                    ongoing_items=ongoing,
+                    scopes=allowed_scopes,
+                    include_prepared=True,
+                )
                 data = PortalHandler.auth_manager.filter_scope_overview(data, session)
                 return self._send_json(
                     200,
@@ -705,19 +720,45 @@ class PortalHandler(BaseHTTPRequestHandler):
         return self._send_json(404, {"ok": False, "error": "Not Found"})
 
     def _get_ongoing(self, scope: str) -> list[dict]:
+        try:
+            snapshot = PortalHandler.state_store.get_ongoing_snapshot()
+            if snapshot.get("exists"):
+                PortalHandler.last_ongoing_error = ""
+                return [
+                    dict(item)
+                    for item in snapshot.get("items", [])
+                    if isinstance(item, dict)
+                    and self.service._scope_matches_item(scope, item)
+                ]
+        except Exception as exc:
+            warning = f"SQLite 进行中状态读取失败: {exc}"
+            PortalHandler.last_ongoing_error = warning
+            logging.warning(warning)
         callback = PortalHandler.ongoing_callback
         if callback is None:
-            PortalHandler.last_ongoing_error = ""
+            if not PortalHandler.last_ongoing_error:
+                PortalHandler.last_ongoing_error = ""
             return []
         try:
-            result = callback(scope)
+            result = callback("ALL")
+            if isinstance(result, list):
+                try:
+                    PortalHandler.state_store.replace_ongoing_items(result)
+                except Exception as store_exc:
+                    logging.warning(f"SQLite 进行中状态写入失败: {store_exc}")
             PortalHandler.last_ongoing_error = ""
         except Exception as exc:
             warning = f"主界面进行中状态读取失败: {exc}"
             PortalHandler.last_ongoing_error = warning
             logging.warning(warning)
             return []
-        return result if isinstance(result, list) else []
+        if not isinstance(result, list):
+            return []
+        return [
+            dict(item)
+            for item in result
+            if isinstance(item, dict) and self.service._scope_matches_item(scope, item)
+        ]
 
     @classmethod
     def ensure_action_worker(cls) -> None:
@@ -907,6 +948,7 @@ class PortalServerController:
             table_id=self.table_id,
         )
         PortalHandler.auth_manager = PortalAuthManager()
+        PortalHandler.state_store = LanPortalStateStore()
         PortalHandler.notice_callback = self.notice_callback
         PortalHandler.ongoing_callback = self.ongoing_callback
         PortalHandler.ongoing_delete_callback = self.ongoing_delete_callback

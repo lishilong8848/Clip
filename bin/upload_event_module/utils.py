@@ -53,6 +53,7 @@ LEGACY_RUNTIME_FILES = [
     "update_overlay_state.json",
     "clipboard_events.jsonl",
     "event_relay_events.jsonl",
+    "system_alerts.jsonl",
 ]
 
 

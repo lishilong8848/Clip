@@ -9,6 +9,7 @@ from PyQt6.QtCore import Qt, QTimer, QProcess, QProcessEnvironment
 from ..config import config
 from ..logger import log_info, log_error, log_warning
 from ..core.parser import extract_event_info
+from lan_bitable_template_portal.state_store import LanPortalStateStore
 
 class MainWindowClipboardMixin:
     def _remember_clipboard_failure(self, reason: str):
@@ -554,10 +555,23 @@ class MainWindowClipboardMixin:
     def _init_clipboard_ipc(self):
         try:
             self.clipboard_event_file.parent.mkdir(parents=True, exist_ok=True)
-            self.clipboard_event_file.write_text("", encoding="utf-8")
         except Exception:
             pass
-        self._clipboard_file_index = 0
+        self._clipboard_state_store = LanPortalStateStore()
+        try:
+            self._clipboard_state_store.import_jsonl_events_once(
+                "clipboard", self.clipboard_event_file
+            )
+            self._clipboard_sqlite_last_event_id = (
+                self._clipboard_state_store.get_last_event_id("clipboard")
+            )
+        except Exception as exc:
+            log_warning(f"剪贴板监听: 旧事件导入失败: {exc}")
+            self._clipboard_sqlite_last_event_id = 0
+        try:
+            self._clipboard_file_index = self.clipboard_event_file.stat().st_size
+        except Exception:
+            self._clipboard_file_index = 0
         self._clipboard_partial_line = ""
 
         self.clipboard_file_timer = QTimer(self)
@@ -610,6 +624,12 @@ class MainWindowClipboardMixin:
             env = QProcessEnvironment.systemEnvironment()
             env.insert("CLIPFLOW_CLIPBOARD_FILE", str(self.clipboard_event_file))
             env.insert("CLIPFLOW_CLIPBOARD_TRACE_FILE", str(self._clipboard_trace_file))
+            try:
+                state_store = getattr(self, "_clipboard_state_store", None) or LanPortalStateStore()
+                self._clipboard_state_store = state_store
+                env.insert("CLIPFLOW_STATE_DB", str(state_store.db_path))
+            except Exception:
+                pass
             env.insert("PYTHONIOENCODING", "utf-8")
             env.insert("PYTHONUTF8", "1")
             self._clipboard_process.setProcessEnvironment(env)
@@ -879,6 +899,32 @@ class MainWindowClipboardMixin:
         if self._ui_update_in_progress:
             return
         cooldown = self._is_in_clipboard_cooldown()
+        try:
+            store = getattr(self, "_clipboard_state_store", None)
+            if store is None:
+                store = LanPortalStateStore()
+                self._clipboard_state_store = store
+            events = store.list_events_after(
+                "clipboard", int(getattr(self, "_clipboard_sqlite_last_event_id", 0) or 0), limit=100
+            )
+        except Exception:
+            events = []
+        if events:
+            self._clipboard_sqlite_last_event_id = int(
+                events[-1].get("id") or getattr(self, "_clipboard_sqlite_last_event_id", 0) or 0
+            )
+            for event in events:
+                data = event.get("payload") if isinstance(event, dict) else {}
+                if not isinstance(data, dict):
+                    continue
+                content = (data.get("content") or "").strip()
+                if not content:
+                    continue
+                self._update_last_clipboard_snapshot(content, data.get("ts"))
+                self._clipboard_pending_lines.append(content)
+            if self._clipboard_pending_lines and not cooldown:
+                self._drain_clipboard_pending_lines()
+            return
         path = self.clipboard_event_file
         if not path.exists():
             if self._clipboard_pending_lines and not cooldown:
@@ -897,12 +943,7 @@ class MainWindowClipboardMixin:
                 self._drain_clipboard_pending_lines()
             return
         if file_size > int(self._clipboard_file_max_bytes or 0):
-            try:
-                path.write_text("", encoding="utf-8")
-                file_size = 0
-            except Exception:
-                pass
-            self._clipboard_file_index = 0
+            self._clipboard_file_index = file_size
             self._clipboard_partial_line = ""
             return
         if self._clipboard_file_index > file_size:

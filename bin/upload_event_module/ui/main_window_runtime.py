@@ -22,6 +22,7 @@ from ..time_parser import parse_time_range
 
 _QT_MESSAGE_HANDLER_INSTALLED = False
 DEFAULT_DISPLAY_VERSION = "V1.0.20260210"
+LAN_ONGOING_SNAPSHOT_REFRESH_MS = 500
 
 class MainWindowRuntimeMixin:
     def _build_display_version(self) -> str:
@@ -413,12 +414,135 @@ class MainWindowRuntimeMixin:
             time_text = f"{start_time}~{end_time}" if end_time else start_time
         return start_time, end_time, time_text
 
+    def _copy_lan_ongoing_items(self, items) -> list[dict]:
+        return [dict(item) for item in (items or []) if isinstance(item, dict)]
+
+    def _filter_lan_ongoing_items_for_scope(self, items, scope: str = "ALL") -> list[dict]:
+        scoped: list[dict] = []
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            building_value = item.get("building_codes") or item.get("building") or ""
+            if self._lan_scope_matches(scope, building_value):
+                scoped.append(dict(item))
+        return scoped
+
+    def _get_lan_ongoing_snapshot(self) -> tuple[list[dict], float]:
+        lock = getattr(self, "_lan_ongoing_snapshot_lock", None)
+        if lock is None:
+            return [], 0.0
+        with lock:
+            return (
+                self._copy_lan_ongoing_items(
+                    getattr(self, "_lan_ongoing_snapshot_all", [])
+                ),
+                float(getattr(self, "_lan_ongoing_snapshot_at", 0.0) or 0.0),
+            )
+
+    def _set_lan_ongoing_snapshot(self, items) -> list[dict]:
+        copied = self._copy_lan_ongoing_items(items)
+        lock = getattr(self, "_lan_ongoing_snapshot_lock", None)
+        if lock is None:
+            return copied
+        with lock:
+            self._lan_ongoing_snapshot_all = copied
+            self._lan_ongoing_snapshot_at = time.time()
+        try:
+            store = getattr(self, "_lan_portal_state_store", None)
+            if store is None:
+                from lan_bitable_template_portal.state_store import (
+                    LanPortalStateStore,
+                )
+
+                store = LanPortalStateStore()
+                self._lan_portal_state_store = store
+            store.replace_ongoing_items(copied)
+        except Exception as exc:
+            log_warning(f"SQLite 进行中状态写入失败: {exc}")
+        return copied
+
+    def _refresh_lan_ongoing_snapshot_now(self) -> list[dict]:
+        if getattr(self, "_closing", False):
+            return []
+        try:
+            if QThread.currentThread() != self.thread():
+                self._request_lan_ongoing_snapshot_refresh()
+                items, _ = self._get_lan_ongoing_snapshot()
+                return items
+        except Exception:
+            pass
+        try:
+            return self._set_lan_ongoing_snapshot(
+                self._collect_lan_maintenance_ongoing_notices("ALL")
+            )
+        except Exception as exc:
+            log_warning(f"刷新局域网进行中快照失败: {exc}")
+            items, _ = self._get_lan_ongoing_snapshot()
+            return items
+
+    def _request_lan_ongoing_snapshot_refresh(self):
+        lock = getattr(self, "_lan_ongoing_snapshot_lock", None)
+        if lock is not None:
+            with lock:
+                if getattr(self, "_lan_ongoing_snapshot_refresh_pending", False):
+                    return
+                self._lan_ongoing_snapshot_refresh_pending = True
+        try:
+            self.lan_maintenance_ongoing_query_received.emit(
+                {"scope": "ALL", "snapshot_refresh": True}
+            )
+        except Exception:
+            if lock is not None:
+                with lock:
+                    self._lan_ongoing_snapshot_refresh_pending = False
+            pass
+
+    def _schedule_lan_ongoing_snapshot_refresh(self, delay_ms: int = LAN_ONGOING_SNAPSHOT_REFRESH_MS):
+        if getattr(self, "_closing", False):
+            return
+        lock = getattr(self, "_lan_ongoing_snapshot_lock", None)
+        if lock is not None:
+            with lock:
+                if getattr(self, "_lan_ongoing_snapshot_refresh_pending", False):
+                    return
+                self._lan_ongoing_snapshot_refresh_pending = True
+        elif getattr(self, "_lan_ongoing_snapshot_refresh_pending", False):
+            return
+        else:
+            self._lan_ongoing_snapshot_refresh_pending = True
+
+        def _run():
+            try:
+                self._refresh_lan_ongoing_snapshot_now()
+            finally:
+                lock_inner = getattr(self, "_lan_ongoing_snapshot_lock", None)
+                if lock_inner is not None:
+                    with lock_inner:
+                        self._lan_ongoing_snapshot_refresh_pending = False
+                else:
+                    self._lan_ongoing_snapshot_refresh_pending = False
+
+        try:
+            QTimer.singleShot(max(0, int(delay_ms)), _run)
+        except Exception:
+            if lock is not None:
+                with lock:
+                    self._lan_ongoing_snapshot_refresh_pending = False
+            else:
+                self._lan_ongoing_snapshot_refresh_pending = False
+
     def get_lan_maintenance_ongoing_notices(self, scope: str = "ALL") -> list[dict]:
         try:
             if QThread.currentThread() == self.thread():
-                return self._collect_lan_maintenance_ongoing_notices(scope)
+                return self._filter_lan_ongoing_items_for_scope(
+                    self._refresh_lan_ongoing_snapshot_now(), scope
+                )
         except Exception:
             pass
+        cached_items, cached_at = self._get_lan_ongoing_snapshot()
+        if cached_at:
+            self._request_lan_ongoing_snapshot_refresh()
+            return self._filter_lan_ongoing_items_for_scope(cached_items, scope)
         event = threading.Event()
         result = {"items": []}
         self.lan_maintenance_ongoing_query_received.emit(
@@ -431,15 +555,26 @@ class MainWindowRuntimeMixin:
     def _on_lan_maintenance_ongoing_query_received(self, payload: dict):
         result = (payload or {}).get("result")
         event = (payload or {}).get("event")
+        snapshot_refresh = bool((payload or {}).get("snapshot_refresh"))
         try:
             scope = (payload or {}).get("scope", "ALL")
+            items = self._refresh_lan_ongoing_snapshot_now()
+            if snapshot_refresh:
+                return
             if isinstance(result, dict):
-                result["items"] = self._collect_lan_maintenance_ongoing_notices(scope)
+                result["items"] = self._filter_lan_ongoing_items_for_scope(items, scope)
         except Exception as exc:
             if isinstance(result, dict):
                 result["items"] = []
                 result["error"] = str(exc)
         finally:
+            if snapshot_refresh:
+                lock = getattr(self, "_lan_ongoing_snapshot_lock", None)
+                if lock is not None:
+                    with lock:
+                        self._lan_ongoing_snapshot_refresh_pending = False
+                else:
+                    self._lan_ongoing_snapshot_refresh_pending = False
             try:
                 if event:
                     event.set()

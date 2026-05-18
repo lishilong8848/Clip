@@ -7,9 +7,11 @@ from pathlib import Path
 from typing import Any
 
 from ..logger import log_error, log_info
+from lan_bitable_template_portal.state_store import LanPortalStateStore
 
 
 STATE_SCHEMA_VERSION = 1
+RUNTIME_STATE_NAMESPACE = "runtime_state"
 
 
 def get_user_data_dir(app_name: str = "ClipFlow") -> Path:
@@ -46,26 +48,37 @@ def migrate_legacy_state_file(path: Path) -> None:
 
 
 def write_state_atomic(path: Path, state: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(path.name + ".tmp")
     try:
-        with tmp_path.open("w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, path)
+        LanPortalStateStore().put_document(
+            RUNTIME_STATE_NAMESPACE, path.name, dict(state or {})
+        )
     except Exception as exc:
-        log_error(f"StateStore: 写入失败 {path}: {exc}")
+        log_error(f"StateStore: SQLite写入失败 {path.name}: {exc}")
         raise
 
 
 def read_state_safe(path: Path) -> dict[str, Any] | None:
+    try:
+        stored = LanPortalStateStore().get_document(RUNTIME_STATE_NAMESPACE, path.name)
+        if isinstance(stored, dict):
+            return stored
+    except Exception as exc:
+        log_error(f"StateStore: SQLite读取失败 {path.name}: {exc}")
     migrate_legacy_state_file(path)
     if not path.exists():
         return None
     try:
         with path.open("r", encoding="utf-8") as f:
-            return json.load(f)
+            payload = json.load(f)
+        if isinstance(payload, dict):
+            try:
+                LanPortalStateStore().put_document(
+                    RUNTIME_STATE_NAMESPACE, path.name, payload
+                )
+            except Exception:
+                pass
+            return payload
+        return None
     except Exception as exc:
         log_error(f"StateStore: 读取失败 {path}: {exc}")
         return None
@@ -73,11 +86,10 @@ def read_state_safe(path: Path) -> dict[str, Any] | None:
 
 def cleanup_state(path: Path) -> None:
     try:
-        if path.exists():
-            path.unlink()
-            log_info(f"StateStore: 已清理 {path}")
+        LanPortalStateStore().delete_document(RUNTIME_STATE_NAMESPACE, path.name)
+        log_info(f"StateStore: 已清理SQLite状态 {path.name}")
     except Exception as exc:
-        log_error(f"StateStore: 清理失败 {path}: {exc}")
+        log_error(f"StateStore: 清理失败 {path.name}: {exc}")
 
 
 def build_state_payload(data: dict[str, Any], app_version: str | None = None) -> dict[str, Any]:

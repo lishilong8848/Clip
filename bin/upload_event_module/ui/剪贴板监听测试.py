@@ -5,6 +5,7 @@ import json
 import sys
 import ctypes
 import hashlib
+import sqlite3
 import traceback
 import win32gui
 import win32con
@@ -16,6 +17,7 @@ class StableClipboardMonitor:
         self.last_hash = None
         self.hwnd = None
         self.output_path = output_path or os.environ.get("CLIPFLOW_CLIPBOARD_FILE", "")
+        self.db_path = os.environ.get("CLIPFLOW_STATE_DB", "").strip()
 
         wc = win32gui.WNDCLASS()
         wc.lpfnWndProc = self._wnd_proc
@@ -86,17 +88,44 @@ class StableClipboardMonitor:
         return None
 
     def _output_result(self, text):
-        if not self.output_path:
-            return
         payload = {"content": text.strip(), "ts": int(time.time() * 1000)}
+        self._write_sqlite_event(payload)
+
+    def _write_sqlite_event(self, payload):
         try:
-            dir_path = os.path.dirname(self.output_path)
-            if dir_path:
-                os.makedirs(dir_path, exist_ok=True)
-            with open(self.output_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            db_dir = os.path.dirname(self.db_path)
+            if db_dir:
+                os.makedirs(db_dir, exist_ok=True)
+            conn = sqlite3.connect(self.db_path, timeout=5.0)
+            try:
+                conn.execute("PRAGMA busy_timeout = 5000")
+                conn.execute("PRAGMA journal_mode = WAL")
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS append_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        source TEXT NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        created_at REAL NOT NULL
+                    )
+                    """
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_append_events_source_id ON append_events(source, id)"
+                )
+                conn.execute(
+                    """
+                    INSERT INTO append_events(source, payload_json, created_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    ("clipboard", json.dumps(payload, ensure_ascii=False), time.time()),
+                )
+                conn.commit()
+                return True
+            finally:
+                conn.close()
         except Exception:
-            pass
+            return False
 
     def run(self):
         try:

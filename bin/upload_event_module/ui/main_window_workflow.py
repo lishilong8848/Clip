@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
-import os
 import copy
-import json
 import threading
 import queue
 import time
@@ -10,7 +8,7 @@ import uuid
 from PyQt6.QtCore import Qt, QTimer
 
 from ..logger import log_info, log_error, log_warning
-from ..utils import HISTORY_FILE, WHITESPACE_TRANSLATOR
+from ..utils import WHITESPACE_TRANSLATOR
 from ..services.service_registry import (
     upload_media_to_feishu,
     query_record_by_id,
@@ -1935,13 +1933,9 @@ class MainWindowWorkflowMixin:
         self.save_active_cache()
 
     def _remove_history_record(self, record_id):
-        if not record_id or not os.path.exists(HISTORY_FILE):
+        if not record_id:
             return
-        try:
-            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-                history_data = json.load(f)
-        except Exception:
-            return
+        history_data = self.load_all_history() if hasattr(self, "load_all_history") else []
         if not isinstance(history_data, list):
             return
         updated = False
@@ -1960,8 +1954,7 @@ class MainWindowWorkflowMixin:
         if not updated:
             return
         try:
-            with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-                json.dump(new_history, f, ensure_ascii=False, indent=2)
+            self._save_history_payload(new_history)
         except Exception:
             return
         try:

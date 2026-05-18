@@ -134,12 +134,37 @@ class ConfigManager:
         }
         return table_map.get(notice_type, "")
 
+    def _load_config_from_sqlite(self):
+        try:
+            from lan_bitable_template_portal.state_store import LanPortalStateStore
+
+            return LanPortalStateStore().get_settings()
+        except Exception as exc:
+            log_error(f"系统: SQLite配置读取失败: {exc}")
+            return None
+
+    def _save_config_to_sqlite(self, config_data: dict) -> bool:
+        if not isinstance(config_data, dict):
+            return False
+        try:
+            from lan_bitable_template_portal.state_store import LanPortalStateStore
+
+            LanPortalStateStore().put_settings(config_data)
+            return True
+        except Exception as exc:
+            log_error(f"系统: SQLite配置保存失败: {exc}")
+            return False
+
     def load(self):
         """加载配置文件"""
         try:
-            if os.path.exists(CONFIG_FILE):
+            config_data = self._load_config_from_sqlite()
+            if config_data is None and os.path.exists(CONFIG_FILE):
                 with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                     config_data = json.load(f)
+                if isinstance(config_data, dict):
+                    self._save_config_to_sqlite(config_data)
+            if isinstance(config_data, dict):
                     self.app_token = config_data.get(
                         "feishu_app_token", self.app_token
                     )
@@ -312,9 +337,9 @@ class ConfigManager:
                         self.lan_template_portal_port = DEFAULT_LAN_TEMPLATE_PORTAL_PORT
                     if self.lan_template_portal_port <= 0:
                         self.lan_template_portal_port = DEFAULT_LAN_TEMPLATE_PORTAL_PORT
-                    log_info("系统: 配置文件加载成功")
+                    log_info("系统: SQLite配置加载成功")
         except Exception as e:
-            log_error(f"系统: 配置文件加载失败: {e}")
+            log_error(f"系统: 配置加载失败: {e}")
 
     def save(
         self,
@@ -603,8 +628,8 @@ class ConfigManager:
                     new_dependency_bootstrap_allow_get_pip
                 ),
             }
-            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-                json.dump(cfg, f, ensure_ascii=False, indent=2)
+            if not self._save_config_to_sqlite(cfg):
+                return False
 
             # 更新实例变量
             self.app_token = new_app_token
@@ -655,10 +680,10 @@ class ConfigManager:
                 new_dependency_bootstrap_allow_get_pip
             )
 
-            log_info("系统: 配置文件保存成功")
+            log_info("系统: SQLite配置保存成功")
             return True
         except Exception as e:
-            log_error(f"系统: 配置文件保存失败: {e}")
+            log_error(f"系统: 配置保存失败: {e}")
             return False
 
 # ========== UI Constants ==========

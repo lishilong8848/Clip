@@ -98,19 +98,21 @@ class ActiveCacheMixin:
         payload = self._collect_active_cache()
         has_clipboard_queue = bool(payload.get("clipboard_queue"))
         if not payload["event"] and not payload["other"] and not has_clipboard_queue:
-            if os.path.exists(ACTIVE_CACHE_FILE):
+            store = getattr(self, "cache_store", None)
+            if store:
                 try:
-                    os.remove(ACTIVE_CACHE_FILE)
+                    store.replace_payload(payload)
                 except Exception:
                     pass
+            if hasattr(self, "_schedule_lan_ongoing_snapshot_refresh"):
+                self._schedule_lan_ongoing_snapshot_refresh()
             return
         try:
             store = getattr(self, "cache_store", None)
             if store:
                 store.replace_payload(payload)
-            else:
-                with open(ACTIVE_CACHE_FILE, "w", encoding="utf-8") as f:
-                    json.dump(payload, f, ensure_ascii=False, indent=2)
+            if hasattr(self, "_schedule_lan_ongoing_snapshot_refresh"):
+                self._schedule_lan_ongoing_snapshot_refresh()
         except Exception:
             pass
 

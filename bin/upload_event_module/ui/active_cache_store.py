@@ -5,6 +5,8 @@ import time
 import uuid
 from typing import Any
 
+from lan_bitable_template_portal.state_store import LanPortalStateStore
+
 from ..building_normalizer import normalize_buildings_value as normalize_buildings_list
 from .display_state import (
     detect_level_from_notice_text,
@@ -14,12 +16,15 @@ from .display_state import (
 
 
 class ActiveCacheStore:
-    """Thread-safe JSON store wrapper for ACTIVE_CACHE_FILE."""
+    """Thread-safe SQLite-backed store wrapper for active notice cache."""
 
     _SECTIONS = ("event", "other")
+    _STATE_NAMESPACE = "qt_active_cache"
+    _STATE_KEY = "active_cache"
 
-    def __init__(self, cache_file: str):
+    def __init__(self, cache_file: str, state_store: LanPortalStateStore | None = None):
         self.cache_file = str(cache_file or "")
+        self._state_store = state_store or LanPortalStateStore()
         self._lock = threading.RLock()
 
     def _default_payload(self) -> dict:
@@ -36,6 +41,14 @@ class ActiveCacheStore:
         return str(value or "").strip()
 
     def _load_payload_unlocked(self) -> dict:
+        try:
+            stored = self._state_store.get_document(
+                self._STATE_NAMESPACE, self._STATE_KEY
+            )
+        except Exception:
+            stored = None
+        if isinstance(stored, dict):
+            return self._normalize_payload(stored)
         if not self.cache_file or not os.path.exists(self.cache_file):
             return self._default_payload()
         try:
@@ -43,40 +56,38 @@ class ActiveCacheStore:
                 payload = json.load(f)
             if not isinstance(payload, dict):
                 return self._default_payload()
-            for section in self._SECTIONS:
-                if not isinstance(payload.get(section), list):
-                    payload[section] = []
-            if not isinstance(payload.get("clipboard_queue"), list):
-                payload["clipboard_queue"] = []
+            payload = self._normalize_payload(payload)
+            try:
+                self._state_store.put_document(
+                    self._STATE_NAMESPACE, self._STATE_KEY, payload
+                )
+            except Exception:
+                pass
             return payload
         except Exception:
             return self._default_payload()
+
+    def _normalize_payload(self, payload: dict) -> dict:
+        payload = dict(payload or {})
+        payload["version"] = int(payload.get("version") or 2)
+        for section in self._SECTIONS:
+            if not isinstance(payload.get(section), list):
+                payload[section] = []
+        if not isinstance(payload.get("clipboard_queue"), list):
+            payload["clipboard_queue"] = []
+        return payload
 
     def load_payload(self) -> dict:
         with self._lock:
             return self._load_payload_unlocked()
 
     def _save_payload_unlocked(self, payload: dict) -> bool:
-        if not self.cache_file:
-            return False
         try:
-            os.makedirs(os.path.dirname(self.cache_file), exist_ok=True)
-        except Exception:
-            return False
-        tmp_path = (
-            f"{self.cache_file}.tmp.{os.getpid()}.{threading.get_ident()}.{int(time.time() * 1000)}"
-        )
-        try:
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
-            os.replace(tmp_path, self.cache_file)
+            self._state_store.put_document(
+                self._STATE_NAMESPACE, self._STATE_KEY, self._normalize_payload(payload)
+            )
             return True
         except Exception:
-            try:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
-            except Exception:
-                pass
             return False
 
     def save_payload(self, payload: dict) -> bool:

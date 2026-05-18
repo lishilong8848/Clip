@@ -17,11 +17,16 @@ from lan_bitable_template_portal.portal_service import WORK_TYPE_CHANGE  # noqa:
 from lan_bitable_template_portal.portal_service import WORK_TYPE_REPAIR  # noqa: E402
 from lan_bitable_template_portal.portal_auth import PortalAuthManager  # noqa: E402
 from lan_bitable_template_portal.server import PortalHandler  # noqa: E402
+from lan_bitable_template_portal.state_store import LanPortalStateStore  # noqa: E402
+import upload_event_module.config as config_module  # noqa: E402
+from upload_event_module.config import ConfigManager  # noqa: E402
 from upload_event_module.config import MAINTENANCE_NOTICE_FIELDS  # noqa: E402
 from upload_event_module.services.handlers.base import NoticePayload  # noqa: E402
 from upload_event_module.services.handlers.maintenance_notice import (  # noqa: E402
     MaintenanceNoticeHandler,
 )
+from upload_event_module.ui.active_cache_store import ActiveCacheStore  # noqa: E402
+from upload_event_module.ui.main_window_ui import MainWindowUiMixin  # noqa: E402
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -84,6 +89,10 @@ class _ChangeSourceFailureService(MaintenancePortalService):
         self._repair_records = []
         self._repair_loaded_once = True
         return []
+
+
+class _HistoryHarness(MainWindowUiMixin):
+    pass
 
 
 def _build_record(
@@ -220,9 +229,420 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             "lan_bitable_template_portal.portal_service.get_data_file_path",
             side_effect=fake_data_path,
         )
+        store_patcher = patch(
+            "lan_bitable_template_portal.state_store.get_data_file_path",
+            side_effect=fake_data_path,
+        )
         patcher.start()
+        store_patcher.start()
         self.addCleanup(patcher.stop)
+        self.addCleanup(store_patcher.stop)
         return service_cls()
+
+    def test_lan_portal_state_store_replaces_ongoing_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            item = {
+                "active_item_id": "active-1",
+                "record_id": "target-1",
+                "source_record_id": "source-1",
+                "work_type": "change",
+                "notice_type": "设备变更",
+                "title": "A楼变更",
+                "building": "A楼",
+                "building_codes": ["A"],
+            }
+
+            result = store.replace_ongoing_items([item])
+            snapshot = store.get_ongoing_snapshot()
+
+            self.assertEqual(result["count"], 1)
+            self.assertTrue(snapshot["exists"])
+            self.assertEqual(snapshot["count"], 1)
+            self.assertEqual(snapshot["items"][0]["title"], "A楼变更")
+            self.assertEqual(snapshot["items"][0]["building_codes"], ["A"])
+
+            store.replace_ongoing_items([])
+            snapshot = store.get_ongoing_snapshot()
+            self.assertTrue(snapshot["exists"])
+            self.assertEqual(snapshot["items"], [])
+
+    def test_server_get_ongoing_reads_sqlite_before_qt_callback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            store.replace_ongoing_items(
+                [
+                    {
+                        "active_item_id": "active-a",
+                        "work_type": "maintenance",
+                        "notice_type": "维保通告",
+                        "title": "A楼维保",
+                        "building": "A楼",
+                        "building_codes": ["A"],
+                    },
+                    {
+                        "active_item_id": "active-b",
+                        "work_type": "maintenance",
+                        "notice_type": "维保通告",
+                        "title": "B楼维保",
+                        "building": "B楼",
+                        "building_codes": ["B"],
+                    },
+                ]
+            )
+
+            def unexpected_callback(scope):
+                raise AssertionError(f"Qt callback should not be called: {scope}")
+
+            dummy = type(
+                "_DummyPortalHandler",
+                (),
+                {"service": _TestMaintenancePortalService()},
+            )()
+            with patch.object(PortalHandler, "state_store", store), patch.object(
+                PortalHandler, "ongoing_callback", unexpected_callback
+            ):
+                result = PortalHandler._get_ongoing(dummy, "A")
+
+            self.assertEqual([item["active_item_id"] for item in result], ["active-a"])
+
+    def test_append_events_import_legacy_jsonl_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            event_path = root / "system_alerts.jsonl"
+            event_path.write_text(
+                "\n".join(
+                    [
+                        json.dumps({"ts": 1716000000000, "event_code": "old-1"}),
+                        "{bad json",
+                        json.dumps({"ts": 1716000001000, "event_code": "old-2"}),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            store = LanPortalStateStore(root / "lan_portal_state.sqlite3")
+
+            first = store.import_jsonl_events_once("system_alerts", event_path)
+            second = store.import_jsonl_events_once("system_alerts", event_path)
+            events = store.list_events_after("system_alerts", 0)
+
+            self.assertEqual(first["imported"], 2)
+            self.assertEqual(first["skipped"], 1)
+            self.assertTrue(second["already_imported"])
+            self.assertEqual([item["payload"]["event_code"] for item in events], ["old-1", "old-2"])
+            self.assertEqual(store.get_last_event_id("system_alerts"), events[-1]["id"])
+
+    def test_notice_daily_summary_migrates_to_sqlite_without_overwriting_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            service = self._new_temp_service(root)
+            summary_dir = root / "lan_template_daily_summary"
+            summary_dir.mkdir(parents=True, exist_ok=True)
+            legacy_path = summary_dir / "2026-05-18.json"
+            legacy_payload = {
+                "date": "2026-05-18",
+                "items": [
+                    {
+                        "work_type": "maintenance",
+                        "title": "旧维保",
+                        "building": "A楼",
+                        "building_codes": ["A"],
+                        "started_at": "2026-05-18 09:30",
+                    }
+                ],
+            }
+            original = json.dumps(legacy_payload, ensure_ascii=False, indent=2)
+            legacy_path.write_text(original, encoding="utf-8")
+
+            loaded = service._load_day_summary_locked("2026-05-18")
+            loaded["items"].append(
+                {
+                    "work_type": "change",
+                    "title": "SQLite 新变更",
+                    "building": "A楼",
+                    "building_codes": ["A"],
+                    "started_at": "2026-05-18 10:30",
+                }
+            )
+            service._save_day_summary_locked(loaded, "2026-05-18")
+
+            stored = service._state_store.get_document(
+                "notice_daily_summary", "2026-05-18"
+            )
+            self.assertEqual(len(stored["items"]), 2)
+            self.assertEqual(legacy_path.read_text(encoding="utf-8"), original)
+
+    def test_notice_memory_and_work_status_migrate_to_sqlite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            service = self._new_temp_service(root)
+
+            memory_dir = root / "lan_template_memory"
+            memory_dir.mkdir(parents=True, exist_ok=True)
+            memory_path = service._building_memory_path("A楼")
+            memory_payload = {
+                "building": "A楼",
+                "items": {
+                    "过滤网维护": {
+                        "maintenance_total": "过滤网维护",
+                        "location": "旧位置",
+                        "content": "旧内容",
+                        "reason": "旧原因",
+                        "impact": "旧影响",
+                    }
+                },
+            }
+            memory_path.write_text(
+                json.dumps(memory_payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+            service._records = [_build_record("m1", "A楼", "过滤网维护", "5月")]
+            memory = service._get_record_memory(service._records[0])
+            self.assertEqual(memory["location"], "旧位置")
+
+            service._remember_draft_fields(
+                building="A楼",
+                maintenance_total="过滤网维护",
+                location="新位置",
+                content="新内容",
+                reason="新原因",
+                impact="新影响",
+            )
+            stored_memory = service._state_store.get_document(
+                "notice_memory", service._building_memory_key("A楼")
+            )
+            self.assertEqual(
+                stored_memory["items"]["过滤网维护"]["location"], "新位置"
+            )
+
+            status_dir = root / "lan_template_work_status"
+            status_dir.mkdir(parents=True, exist_ok=True)
+            status_path = status_dir / "A.json"
+            original = json.dumps(
+                {
+                    "version": 1,
+                    "building": "A楼",
+                    "building_code": "A",
+                    "items": [
+                        {
+                            "work_type": "maintenance",
+                            "source_record_id": "m1",
+                            "title": "EA118机房A楼过滤网维护",
+                            "building": "A楼",
+                            "building_codes": ["A"],
+                            "started_at": "2026-05-18 09:30",
+                            "status": "进行中",
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            status_path.write_text(original, encoding="utf-8")
+            items = service._load_work_status_items_locked("A")
+            self.assertEqual(items[0]["source_record_id"], "m1")
+            service._upsert_work_status_item_locked(
+                {
+                    "work_type": "maintenance",
+                    "source_record_id": "m1",
+                    "title": "EA118机房A楼过滤网维护",
+                    "building": "A楼",
+                    "building_code": "A",
+                    "building_codes": ["A"],
+                    "ended_at": "2026-05-18 18:30",
+                },
+                action="end",
+                now="2026-05-18 18:30",
+            )
+            stored_status = service._state_store.get_document("notice_work_status", "A")
+            self.assertEqual(stored_status["items"][0]["status"], "已结束")
+            self.assertEqual(status_path.read_text(encoding="utf-8"), original)
+
+    def test_action_jobs_persist_in_sqlite_and_restart_marks_active_failed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            service = self._new_temp_service(root)
+            job_id, should_start = service.create_action_job(
+                {
+                    "action": "start",
+                    "scope": "A",
+                    "record_id": "m1",
+                    "work_type": "maintenance",
+                    "operation_id": "job-persist",
+                }
+            )
+            self.assertTrue(should_start)
+            self.assertEqual(service.get_job(job_id)["phase"], "queued")
+
+            restarted = self._new_temp_service(root)
+            restored = restarted.get_job(job_id)
+            self.assertEqual(restored["phase"], "failed")
+            self.assertIn("程序已重启", restored["error"])
+
+    def test_qt_active_cache_migrates_to_sqlite_without_overwriting_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cache_file = root / "active_cache.json"
+            legacy_payload = {
+                "version": 2,
+                "saved_at": 1,
+                "event": [],
+                "other": [
+                    {
+                        "data": {
+                            "record_id": "active-1",
+                            "notice_type": "维保通告",
+                            "text": "旧通告",
+                        }
+                    }
+                ],
+                "clipboard_queue": [],
+            }
+            original = json.dumps(legacy_payload, ensure_ascii=False, indent=2)
+            cache_file.write_text(original, encoding="utf-8")
+            store = LanPortalStateStore(root / "lan_portal_state.sqlite3")
+            cache_store = ActiveCacheStore(str(cache_file), state_store=store)
+
+            payload = cache_store.load_payload()
+            self.assertEqual(payload["other"][0]["data"]["record_id"], "active-1")
+            self.assertTrue(
+                cache_store.patch_record_fields(
+                    record_id="active-1", patch={"text": "SQLite 通告"}
+                )
+            )
+            stored = store.get_document("qt_active_cache", "active_cache")
+
+            self.assertEqual(
+                stored["other"][0]["data"]["text"],
+                "SQLite 通告",
+            )
+            self.assertEqual(cache_file.read_text(encoding="utf-8"), original)
+
+    def test_qt_history_migrates_to_sqlite_without_overwriting_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            history_file = root / "history.json"
+            legacy_payload = [
+                {
+                    "record_id": "history-1",
+                    "notice_type": "维保通告",
+                    "text": "旧历史",
+                    "history_saved_at": int(time.time() * 1000),
+                }
+            ]
+            original = json.dumps(legacy_payload, ensure_ascii=False, indent=2)
+            history_file.write_text(original, encoding="utf-8")
+            harness = _HistoryHarness()
+            harness._lan_portal_state_store = LanPortalStateStore(
+                root / "lan_portal_state.sqlite3"
+            )
+            harness.last_history_mtime = 0
+
+            with patch(
+                "upload_event_module.ui.main_window_ui.HISTORY_FILE",
+                str(history_file),
+            ):
+                loaded = harness.load_all_history()
+                harness.save_to_history_file(
+                    {
+                        "record_id": "history-2",
+                        "notice_type": "设备变更",
+                        "text": "SQLite 历史",
+                    }
+                )
+
+            stored = harness._lan_portal_state_store.get_document(
+                "qt_notice_history", "history"
+            )
+            self.assertEqual(loaded[0]["record_id"], "history-1")
+            self.assertEqual(stored["items"][0]["record_id"], "history-2")
+            self.assertEqual(stored["items"][1]["record_id"], "history-1")
+            self.assertEqual(history_file.read_text(encoding="utf-8"), original)
+
+    def test_config_migrates_to_sqlite_and_stops_writing_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_file = root / "config.json"
+            original_payload = {
+                "feishu_app_id": "legacy-app",
+                "feishu_app_secret": "legacy-secret",
+                "lan_template_portal_port": 18888,
+            }
+            original_text = json.dumps(original_payload, ensure_ascii=False, indent=2)
+            config_file.write_text(original_text, encoding="utf-8")
+
+            def fake_data_path(name):
+                return str(root / name)
+
+            with patch.object(config_module, "CONFIG_FILE", str(config_file)), patch.object(
+                config_module,
+                "migrate_legacy_data_file",
+                side_effect=lambda name: str(root / name),
+            ), patch(
+                "lan_bitable_template_portal.state_store.get_data_file_path",
+                side_effect=fake_data_path,
+            ):
+                manager = ConfigManager()
+                self.assertEqual(manager.app_id, "legacy-app")
+                store = LanPortalStateStore(root / "lan_portal_state.sqlite3")
+                self.assertEqual(store.get_settings()["feishu_app_id"], "legacy-app")
+
+                changed_legacy = {
+                    "feishu_app_id": "changed-json",
+                    "lan_template_portal_port": 19999,
+                }
+                changed_text = json.dumps(changed_legacy, ensure_ascii=False, indent=2)
+                config_file.write_text(changed_text, encoding="utf-8")
+
+                manager.load()
+                self.assertEqual(manager.app_id, "legacy-app")
+                self.assertEqual(manager.lan_template_portal_port, 18888)
+
+                self.assertTrue(manager.save(app_id="sqlite-app"))
+                self.assertEqual(store.get_settings()["feishu_app_id"], "sqlite-app")
+                self.assertEqual(config_file.read_text(encoding="utf-8"), changed_text)
+
+    def test_reconcile_orphan_started_items_migrates_legacy_work_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            service = self._new_temp_service(root, service_cls=_TargetLookupService)
+            status_dir = root / "lan_template_work_status"
+            status_dir.mkdir(parents=True, exist_ok=True)
+            (status_dir / "A.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "building": "A楼",
+                        "building_code": "A",
+                        "items": [
+                            {
+                                "work_type": "maintenance",
+                                "notice_type": "维保通告",
+                                "source_record_id": "legacy-m1",
+                                "target_record_id": "missing-target",
+                                "title": "A楼遗留维保",
+                                "building": "A楼",
+                                "building_codes": ["A"],
+                                "started_at": "2026-05-18 09:30",
+                                "status": "进行中",
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+            removed = service.reconcile_orphan_started_items(
+                scope="A", ongoing_items=[]
+            )
+            items = service._load_work_status_items_locked("A")
+
+            self.assertEqual(removed["removed"], 1)
+            self.assertEqual(items, [])
 
     def test_successful_actions_persist_building_work_status_for_month_query(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -872,18 +1292,24 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         def fail_ongoing(scope):
             raise RuntimeError(f"{scope} unavailable")
 
+        old_state_store = PortalHandler.state_store
         try:
-            PortalHandler.ongoing_callback = fail_ongoing
-            result = handler._get_ongoing("ALL")
-            payload = PortalHandler._with_runtime_warnings({"warnings": []})
+            with tempfile.TemporaryDirectory() as tmp:
+                PortalHandler.state_store = LanPortalStateStore(
+                    Path(tmp) / "lan_portal_state.sqlite3"
+                )
+                PortalHandler.ongoing_callback = fail_ongoing
+                result = handler._get_ongoing("ALL")
+                payload = PortalHandler._with_runtime_warnings({"warnings": []})
         finally:
+            PortalHandler.state_store = old_state_store
             PortalHandler.ongoing_callback = None
             PortalHandler.last_ongoing_error = ""
 
         self.assertEqual(result, [])
         self.assertIn("主界面进行中状态读取失败", payload["warnings"][0])
 
-    def test_work_status_reads_are_cached_by_file_signature(self):
+    def test_work_status_reads_use_sqlite_after_legacy_import(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             service = self._new_temp_service(root)
@@ -941,7 +1367,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             ) as reload_mock:
                 third = service._load_work_status_items_locked("D")
 
-            self.assertGreaterEqual(reload_mock.call_count, 1)
+            self.assertEqual(reload_mock.call_count, 0)
             self.assertTrue(any(item["title"] == "D楼维保已更新" for item in third))
 
     def test_invalid_source_cache_ttl_falls_back_to_default(self):
@@ -961,6 +1387,66 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 create=True,
             ):
                 self.assertEqual(service._source_cache_ttl_seconds(), 120)
+
+    def test_workbench_queries_reuse_expired_source_cache_until_explicit_refresh(self):
+        class CountingSourceService(MaintenancePortalService):
+            def __init__(self):
+                super().__init__()
+                self.record_load_count = 0
+
+            def _load_fields(self):
+                self._field_meta_list = [object()]
+                self._field_meta_by_name = {}
+                return self._field_meta_list
+
+            def _load_records(self):
+                self.record_load_count += 1
+                self._records = [_build_record("m1", "A楼", "过滤网维护", "5月")]
+                self._maintenance_loaded_once = True
+                return self._records
+
+            def _load_change_fields(self):
+                self._change_field_meta_list = []
+                self._change_field_meta_by_name = {}
+                return []
+
+            def _load_change_records(self):
+                self._change_records = []
+                self._change_loaded_once = True
+                return []
+
+            def _load_zhihang_change_fields(self):
+                self._zhihang_change_field_meta_list = []
+                self._zhihang_change_field_meta_by_name = {}
+                return []
+
+            def _load_zhihang_change_records(self):
+                self._zhihang_change_records = []
+                self._zhihang_change_loaded_once = True
+                return []
+
+            def _load_repair_fields(self):
+                self._repair_field_meta_list = []
+                self._repair_field_meta_by_name = {}
+                return []
+
+            def _load_repair_records(self):
+                self._repair_records = []
+                self._repair_loaded_once = True
+                return []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp), CountingSourceService)
+            service.refresh()
+            service._last_loaded_ts = time.time() - 9999
+
+            result = service.query_records(month="5月", scope="A")
+
+            self.assertEqual([item["record_id"] for item in result["records"]], ["m1"])
+            self.assertEqual(service.record_load_count, 1)
+
+            service.ensure_loaded(refresh_if_expired=True)
+            self.assertEqual(service.record_load_count, 2)
 
     def test_scope_overview_counts_pending_and_ongoing_by_work_type(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1001,6 +1487,30 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(result["scopes"]["D"]["maintenance_ongoing"], 1)
             self.assertEqual(result["scopes"]["CAMPUS"]["change_pending"], 1)
             self.assertEqual(result["scopes"]["B"]["change_ongoing"], 0)
+
+    def test_scope_overview_can_preload_authorized_workbenches(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            current_month = service._current_month_label()
+            service._records = [
+                _build_record("m1", "D楼", "过滤网维护", current_month),
+                _build_record("m2", "E楼", "照明维护", current_month),
+            ]
+            service._change_records = []
+            service._repair_records = []
+
+            result = service.get_scope_overview(
+                scopes=["D"],
+                include_prepared=True,
+                ongoing_items=[],
+            )
+
+            self.assertEqual(set(result["scopes"].keys()), {"D"})
+            self.assertEqual(set(result["prepared_workbenches"].keys()), {"D"})
+            self.assertEqual(
+                [item["record_id"] for item in result["prepared_workbenches"]["D"]["records"]],
+                ["m1"],
+            )
 
     def test_source_ongoing_change_is_not_surfaced_without_qt_item(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1456,7 +1966,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             )
             self.assertEqual(saved["links"]["A"], "https://example.com/a")
 
-    def test_portal_auth_reloads_permissions_and_backs_up_corrupt_file(self):
+    def test_portal_auth_migrates_permissions_to_sqlite_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
 
@@ -1497,6 +2007,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 session = manager.get_session("sid")
                 self.assertEqual(manager.session_scopes(session), ["A"])
 
+                stored = manager._state_store.get_auth_permissions()
+                self.assertEqual(stored["users"]["ou_test"]["scopes"], ["A"])
+
                 permission_path.write_text(
                     json.dumps(
                         {
@@ -1515,12 +2028,77 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     encoding="utf-8",
                 )
                 session = manager.get_session("sid")
-                self.assertEqual(manager.session_scopes(session), ["B"])
+                self.assertEqual(manager.session_scopes(session), ["A"])
 
                 permission_path.write_text("{bad json", encoding="utf-8")
                 self.assertEqual(manager.scopes_for_open_id("ou_unknown"), [])
                 self.assertTrue(permission_path.exists())
-                self.assertTrue(list(root.glob("lan_portal_auth.bad.*.json")))
+                self.assertFalse(list(root.glob("lan_portal_auth.bad.*.json")))
+
+    def test_h_building_has_all_scope_access_without_admin_role(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            def fake_data_path(name):
+                return str(root / name)
+
+            with patch(
+                "lan_bitable_template_portal.portal_auth.get_data_file_path",
+                side_effect=fake_data_path,
+            ):
+                manager = PortalAuthManager()
+                h_open_id = "ou_55647926b7fbfe46507ef7e8afa76315"
+                scopes = manager.scopes_for_open_id(h_open_id)
+                self.assertNotIn("ALL", scopes)
+                for scope in ["CAMPUS", "110", "A", "B", "C", "D", "E", "H"]:
+                    self.assertIn(scope, scopes)
+
+                session = {
+                    "user": {"open_id": h_open_id, "name": "H楼"},
+                    "role": manager.role_for_open_id(h_open_id),
+                    "allowed_scopes": scopes,
+                }
+                self.assertFalse(manager.is_admin(session))
+                self.assertTrue(manager.scope_allowed(session, "ALL"))
+                self.assertEqual(manager.default_scope(session), "ALL")
+
+    def test_scope_overview_filter_removes_unauthorized_preloaded_workbenches(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            def fake_data_path(name):
+                return str(root / name)
+
+            with patch(
+                "lan_bitable_template_portal.portal_auth.get_data_file_path",
+                side_effect=fake_data_path,
+            ):
+                manager = PortalAuthManager()
+                session = {
+                    "user": {"open_id": "ou_a", "name": "A楼"},
+                    "role": "building",
+                    "allowed_scopes": ["A"],
+                }
+                payload = {
+                    "scope_options": [
+                        {"value": "A", "label": "A楼"},
+                        {"value": "B", "label": "B楼"},
+                    ],
+                    "scopes": {"A": {"change_pending": 1}, "B": {"change_pending": 2}},
+                    "prepared_workbenches": {
+                        "A": {"records": [{"record_id": "a1"}], "scope_options": []},
+                        "B": {"records": [{"record_id": "b1"}], "scope_options": []},
+                    },
+                }
+
+                result = manager.filter_scope_overview(payload, session)
+
+            self.assertEqual(set(result["scopes"].keys()), {"A"})
+            self.assertEqual(set(result["prepared_workbenches"].keys()), {"A"})
+            self.assertEqual(
+                result["prepared_workbenches"]["A"]["scope_options"],
+                result["scope_options"],
+            )
 
     def test_portal_auth_redirect_host_sanitization(self):
         self.assertEqual(

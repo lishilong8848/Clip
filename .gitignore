@@ -29,6 +29,15 @@ __pycache__/
 /build_version_state.json
 /bin/data/
 /bin/upload_event_module/config.json
+*.db
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-wal
+*.sqlite3-shm
 
 # Temporary runtime and test artifacts
 /.tmp_runtime/

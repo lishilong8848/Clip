@@ -41,6 +41,19 @@ from ..services.dependency_bootstrap import (
 from ..services.system_alert_webhook import send_system_alert
 
 
+RUNTIME_PATCH_DATA_SUFFIXES = (
+    ".db",
+    ".sqlite",
+    ".sqlite3",
+    ".db-wal",
+    ".db-shm",
+    ".sqlite-wal",
+    ".sqlite-shm",
+    ".sqlite3-wal",
+    ".sqlite3-shm",
+)
+
+
 class PatchUpdateMixin:
     def _init_remote_patch_updater(self):
         self._remote_ui_manifest = None
@@ -493,8 +506,22 @@ class PatchUpdateMixin:
             line = line.strip()
             if not line:
                 continue
-            deleted.append(Path(line))
+            rel = Path(line)
+            if self._is_runtime_data_patch_path(rel):
+                continue
+            deleted.append(rel)
         return deleted
+
+    @staticmethod
+    def _is_runtime_data_patch_path(rel: Path) -> bool:
+        parts = tuple(str(part).replace("\\", "/").strip("/").lower() for part in rel.parts)
+        if not parts:
+            return False
+        if parts[0] == "data":
+            return True
+        if len(parts) >= 2 and parts[0] == "bin" and parts[1] == "data":
+            return True
+        return rel.name.lower().endswith(RUNTIME_PATCH_DATA_SUFFIXES)
 
     def _collect_patch_files(self, patch_dir: Path) -> list[Path]:
         files = []
@@ -502,6 +529,8 @@ class PatchUpdateMixin:
             if src.is_dir():
                 continue
             if src.name in ("patch_manifest.txt", "patch_meta.json"):
+                continue
+            if self._is_runtime_data_patch_path(src.relative_to(patch_dir)):
                 continue
             files.append(src)
         return files
@@ -727,14 +756,10 @@ class PatchUpdateMixin:
             event_file = getattr(self, "clipboard_event_file", None)
             if event_file is not None:
                 try:
-                    event_file.write_text("", encoding="utf-8")
-                    self._clipboard_file_index = 0
+                    self._clipboard_file_index = event_file.stat().st_size
                     self._clipboard_partial_line = ""
                 except Exception:
-                    try:
-                        self._clipboard_file_index = event_file.stat().st_size
-                    except Exception:
-                        pass
+                    pass
             if hasattr(self, "_stop_clipboard_process"):
                 self._stop_clipboard_process()
             self._clipboard_paused_for_patch_update = True

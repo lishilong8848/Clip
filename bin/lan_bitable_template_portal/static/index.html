@@ -280,6 +280,27 @@
       border-color: #f0d393;
     }
 
+    .pill.busy {
+      background: var(--soft-blue);
+      color: var(--blue);
+      border-color: rgba(31, 95, 153, 0.32);
+      font-weight: 700;
+    }
+
+    .pill.busy::before {
+      content: "";
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      border: 2px solid rgba(31, 95, 153, 0.22);
+      border-top-color: var(--blue);
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
     .workspace {
       min-height: 0;
       display: grid;
@@ -476,6 +497,37 @@
       min-height: 0;
       overflow: auto;
       padding: 12px;
+    }
+
+    .app.loading .panel-body {
+      position: relative;
+    }
+
+    .app.loading .record-list,
+    .app.loading .draft-list,
+    .app.loading .ongoing-list,
+    .app.loading .timeline,
+    .app.loading .summary-metrics {
+      opacity: 0.45;
+      pointer-events: none;
+    }
+
+    .app.loading .panel-body::after {
+      content: "正在加载最新数据...";
+      position: sticky;
+      top: 0;
+      z-index: 6;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 48px;
+      margin-bottom: 8px;
+      border: 1px solid rgba(31, 95, 153, 0.22);
+      border-radius: 7px;
+      background: rgba(230, 240, 248, 0.94);
+      color: var(--blue);
+      font-weight: 800;
+      box-shadow: 0 10px 24px rgba(31, 95, 153, 0.10);
     }
 
     .filters {
@@ -1169,6 +1221,7 @@
       },
       handoverSettingsOpen: false,
       scopeOverview: {},
+      preloadedWorkbenches: {},
       lastLoadedAt: "",
       warnings: [],
       filters: { month: "", specialty: "", search: "" },
@@ -1184,8 +1237,13 @@
       autoRefresh: {
         timerId: 0,
         intervalMs: 3 * 60 * 1000,
+        nextDelayMs: 0,
         inFlight: false,
         lastAutoAt: "",
+      },
+      loading: {
+        active: false,
+        automatic: false,
       },
       expandedRecordId: "",
       expandedSummaryKey: "",
@@ -1210,9 +1268,10 @@
     ];
     const JOB_STATE_TTL_MS = 24 * 60 * 60 * 1000;
     const JOB_STATE_LIMIT = 80;
-    const AUTO_REFRESH_DEFAULT_MS = 60 * 1000;
-    const AUTO_REFRESH_MIN_MS = 60 * 1000;
+    const AUTO_REFRESH_DEFAULT_MS = 3 * 60 * 1000;
+    const AUTO_REFRESH_MIN_MS = 2 * 60 * 1000;
     const AUTO_REFRESH_MAX_MS = 10 * 60 * 1000;
+    const AUTO_REFRESH_JITTER_MS = 45 * 1000;
     const WORKSPACE_LAYOUT_KEY = "lan-workbench-layout:v1";
     const WORKSPACE_MIN_WIDTHS = { records: 300, drafts: 360, ongoing: 320 };
     let normalizeWorkspaceLayout = () => {};
@@ -1454,6 +1513,19 @@
       $("syncWarning").classList.toggle("hidden", !warning);
     }
 
+    function setLoadingState(active, text = "", { automatic = false } = {}) {
+      if (automatic) return;
+      state.loading.active = Boolean(active);
+      state.loading.automatic = Boolean(automatic);
+      $("app").classList.toggle("loading", state.loading.active && !state.loading.automatic);
+      $("syncTime").classList.toggle("busy", state.loading.active);
+      if (text) $("syncTime").textContent = text;
+      ["refreshBtn", "refreshOngoingBtn", "syncSourceBtn"].forEach((id) => {
+        const btn = $(id);
+        if (btn) btn.disabled = state.loading.active;
+      });
+    }
+
     function formatRefreshInterval(ms) {
       const minutes = Math.max(1, Math.round(Number(ms || 0) / 60000));
       return `${minutes}分钟`;
@@ -1473,18 +1545,16 @@
     }
 
     function updateAutoRefreshPill() {
-      const active = Boolean(
-        state.auth.loggedIn
-        && state.scope
-        && !$("app").classList.contains("hidden")
-      );
       const pill = $("autoRefreshPill");
-      pill.classList.toggle("hidden", !active);
-      if (!active) return;
-      const suffix = state.autoRefresh.lastAutoAt
-        ? `，上次 ${state.autoRefresh.lastAutoAt}`
-        : "";
-      pill.textContent = `自动刷新 ${formatRefreshInterval(state.autoRefresh.intervalMs)}${suffix}`;
+      if (!pill) return;
+      pill.textContent = "";
+      pill.classList.add("hidden");
+    }
+
+    function nextAutoRefreshDelay() {
+      const base = Math.max(AUTO_REFRESH_MIN_MS, Number(state.autoRefresh.intervalMs || AUTO_REFRESH_DEFAULT_MS));
+      const jitter = Math.floor(Math.random() * AUTO_REFRESH_JITTER_MS);
+      return Math.min(AUTO_REFRESH_MAX_MS + AUTO_REFRESH_JITTER_MS, base + jitter);
     }
 
     function stopAutoRefresh() {
@@ -1498,7 +1568,8 @@
     function startAutoRefresh() {
       stopAutoRefresh();
       if (!state.auth.loggedIn || !state.scope || $("app").classList.contains("hidden")) return;
-      state.autoRefresh.timerId = window.setTimeout(runAutoRefresh, state.autoRefresh.intervalMs);
+      state.autoRefresh.nextDelayMs = nextAutoRefreshDelay();
+      state.autoRefresh.timerId = window.setTimeout(runAutoRefresh, state.autoRefresh.nextDelayMs);
       updateAutoRefreshPill();
     }
 
@@ -1520,8 +1591,7 @@
           hour: "2-digit",
           minute: "2-digit",
         });
-      } catch (err) {
-        setSyncStatus(`自动刷新失败: ${err.message || "未知错误"}`, state.warnings);
+      } catch {
       } finally {
         state.autoRefresh.inFlight = false;
         startAutoRefresh();
@@ -2124,8 +2194,7 @@
         const user = state.auth.user || {};
         panel.innerHTML = `
           <strong>当前账号暂无门户权限</strong><br>
-          已登录：${html(user.name || user.open_id || "飞书用户")}。请管理员在本机
-          <code>bin/data/lan_portal_auth.json</code> 中为该 open_id 配置可访问楼栋。
+          已登录：${html(user.name || user.open_id || "飞书用户")}。请管理员在权限设置中为该 open_id 配置可访问楼栋。
           <div class="row-actions">
             <button class="btn ghost" data-auth-logout>退出登录</button>
           </div>
@@ -2505,6 +2574,7 @@
       updateAuthFromPayload(data);
       state.scopeOptions = data.scope_options || state.scopeOptions;
       state.scopeOverview = data.scopes || {};
+      state.preloadedWorkbenches = data.prepared_workbenches || {};
       state.lastLoadedAt = data.last_loaded_at || state.lastLoadedAt;
       updateAutoRefreshInterval(data);
       state.warnings = data.warnings || [];
@@ -2564,6 +2634,37 @@
       render();
     }
 
+    function applyBootstrapPayload(data, { fromPreload = false } = {}) {
+      updateAuthFromPayload(data);
+      state.scopeOptions = data.scope_options || state.scopeOptions;
+      state.records = data.records || [];
+      state.zhihangRecords = data.zhihang_change_records || [];
+      state.ongoing = data.ongoing || [];
+      state.dailySummary = data.daily_summary || { date: "", items: [], stats: {} };
+      state.defaults = data.defaults || state.defaults;
+      state.lastLoadedAt = data.last_loaded_at || "";
+      updateAutoRefreshInterval(data);
+      state.warnings = data.warnings || [];
+      state.workType = WORK_TYPE_VALUES.includes(data.default_work_type)
+        ? data.default_work_type
+        : (WORK_TYPE_VALUES.includes(state.workType) ? state.workType : "maintenance");
+      if (data.filters) {
+        state.filters.month = state.filters.month || data.filters.default_month || "";
+        fillSelect("monthSelect", data.filters.months || [], state.filters.month, false);
+        fillSelect("specialtySelect", data.filters.specialties || [], state.filters.specialty, true);
+      }
+      $("scopeLabel").textContent = data.scope_label || scopeLabel(state.scope);
+      const suffix = fromPreload ? "（已预加载）" : "";
+      setSyncStatus(data.last_loaded_at ? `数据更新时间 ${data.last_loaded_at}${suffix}` : (fromPreload ? "已显示预加载数据" : "已加载"), state.warnings);
+      loadDraftState();
+      loadJobState();
+      cleanupDraftState();
+      render();
+      restoreJobState();
+      const payloadScope = normalizeScopeValue(data.scope || state.scope || "", "");
+      if (payloadScope) state.preloadedWorkbenches[payloadScope] = data;
+    }
+
     async function saveHandoverLinks() {
       const links = {};
       document.querySelectorAll("[data-handover-link]").forEach((input) => {
@@ -2613,6 +2714,13 @@
       $("app").classList.remove("hidden");
       const selectedScope = state.scope;
       clearWorkbenchViewForScope(selectedScope);
+      const prepared = state.preloadedWorkbenches[selectedScope];
+      if (prepared) {
+        applyBootstrapPayload(prepared, { fromPreload: true });
+        startAutoRefresh();
+        refreshWorkbench({ automatic: true }).catch(() => {});
+        return;
+      }
       try {
         await loadBootstrap();
       } catch (err) {
@@ -2622,33 +2730,15 @@
 
     async function loadBootstrap() {
       const requestScope = normalizeScopeValue(state.scope || "ALL", "ALL");
-      setSyncStatus("加载中", []);
-      const data = await api(`/api/bootstrap?scope=${encodeURIComponent(requestScope)}`);
-      if (normalizeScopeValue(state.scope || "ALL", "ALL") !== requestScope) return;
-      updateAuthFromPayload(data);
-      state.scopeOptions = data.scope_options || state.scopeOptions;
-      state.records = data.records || [];
-      state.zhihangRecords = data.zhihang_change_records || [];
-      state.ongoing = data.ongoing || [];
-      state.dailySummary = data.daily_summary || { date: "", items: [], stats: {} };
-      state.defaults = data.defaults || state.defaults;
-      state.lastLoadedAt = data.last_loaded_at || "";
-      updateAutoRefreshInterval(data);
-      state.warnings = data.warnings || [];
-      state.workType = WORK_TYPE_VALUES.includes(data.default_work_type)
-        ? data.default_work_type
-        : (WORK_TYPE_VALUES.includes(state.workType) ? state.workType : "maintenance");
-      state.filters.month = state.filters.month || data.filters?.default_month || "";
-      $("scopeLabel").textContent = data.scope_label || scopeLabel(state.scope);
-      fillSelect("monthSelect", data.filters?.months || [], state.filters.month, false);
-      fillSelect("specialtySelect", data.filters?.specialties || [], state.filters.specialty, true);
-      setSyncStatus(data.last_loaded_at ? `数据更新时间 ${data.last_loaded_at}` : "已加载", state.warnings);
-      loadDraftState();
-      loadJobState();
-      cleanupDraftState();
-      render();
-      restoreJobState();
-      startAutoRefresh();
+      setLoadingState(true, `正在加载${scopeLabel(requestScope)}数据`);
+      try {
+        const data = await api(`/api/bootstrap?scope=${encodeURIComponent(requestScope)}`);
+        if (normalizeScopeValue(state.scope || "ALL", "ALL") !== requestScope) return;
+        applyBootstrapPayload(data);
+        startAutoRefresh();
+      } finally {
+        setLoadingState(false);
+      }
     }
 
     function fillSelect(id, options, selected, includeAll) {
@@ -2670,45 +2760,66 @@
         month: state.filters.month || "",
         specialty: state.filters.specialty === "全部" ? "" : state.filters.specialty,
       });
-      setSyncStatus(automatic ? "自动刷新中" : "刷新本页中", []);
-      const data = await api(`/api/workbench?${params}`);
-      if (normalizeScopeValue(state.scope || "ALL", "ALL") !== requestScope) return;
-      updateAuthFromPayload(data);
-      state.records = data.records || [];
-      state.zhihangRecords = data.zhihang_change_records || [];
-      state.ongoing = data.ongoing || [];
-      state.dailySummary = data.daily_summary || { date: "", items: [], stats: {} };
-      state.lastLoadedAt = data.last_loaded_at || state.lastLoadedAt;
-      updateAutoRefreshInterval(data);
-      state.warnings = data.warnings || [];
-      setSyncStatus(data.last_loaded_at ? `数据更新时间 ${data.last_loaded_at}` : (automatic ? "已自动刷新" : "已刷新"), state.warnings);
-      cleanupDraftState();
-      render();
-      restoreJobState();
-      if (!automatic) startAutoRefresh();
+      setLoadingState(true, "刷新本页中", { automatic });
+      try {
+        const data = await api(`/api/workbench?${params}`);
+        if (normalizeScopeValue(state.scope || "ALL", "ALL") !== requestScope) return;
+        updateAuthFromPayload(data);
+        state.records = data.records || [];
+        state.zhihangRecords = data.zhihang_change_records || [];
+        state.ongoing = data.ongoing || [];
+        state.dailySummary = data.daily_summary || { date: "", items: [], stats: {} };
+        state.lastLoadedAt = data.last_loaded_at || state.lastLoadedAt;
+        updateAutoRefreshInterval(data);
+        state.warnings = data.warnings || [];
+        if (data.last_loaded_at) {
+          setSyncStatus(`数据更新时间 ${data.last_loaded_at}`, state.warnings);
+        } else if (!automatic) {
+          setSyncStatus("已刷新", state.warnings);
+        }
+        cleanupDraftState();
+        render();
+        restoreJobState();
+        if (!automatic) startAutoRefresh();
+      } catch (err) {
+        if (!automatic) {
+          setSyncStatus(`刷新失败: ${err.message || "未知错误"}`, state.warnings);
+        }
+        throw err;
+      } finally {
+        if (!automatic) setLoadingState(false);
+      }
     }
 
     async function syncSource() {
       const requestScope = normalizeScopeValue(state.scope || "ALL", "ALL");
-      setSyncStatus("同步源表中", []);
-      const data = await api(`/api/refresh?scope=${encodeURIComponent(requestScope)}`);
-      if (normalizeScopeValue(state.scope || "ALL", "ALL") !== requestScope) return;
-      updateAuthFromPayload(data);
-      state.scopeOptions = data.scope_options || state.scopeOptions;
-      state.records = data.records || [];
-      state.zhihangRecords = data.zhihang_change_records || [];
-      state.ongoing = data.ongoing || [];
-      state.dailySummary = data.daily_summary || { date: "", items: [], stats: {} };
-      state.defaults = data.defaults || state.defaults;
-      state.lastLoadedAt = data.last_loaded_at || "";
-      updateAutoRefreshInterval(data);
-      state.warnings = data.warnings || [];
-      setSyncStatus(data.last_loaded_at ? `数据更新时间 ${data.last_loaded_at}` : "已同步", state.warnings);
-      cleanupDraftState();
-      render();
-      restoreJobState();
-      loadScopeOverview();
-      startAutoRefresh();
+      setLoadingState(true, "同步源表中");
+      try {
+        const data = await api(`/api/refresh?scope=${encodeURIComponent(requestScope)}`);
+        if (normalizeScopeValue(state.scope || "ALL", "ALL") !== requestScope) return;
+        updateAuthFromPayload(data);
+        state.scopeOptions = data.scope_options || state.scopeOptions;
+        state.records = data.records || [];
+        state.zhihangRecords = data.zhihang_change_records || [];
+        state.ongoing = data.ongoing || [];
+        state.dailySummary = data.daily_summary || { date: "", items: [], stats: {} };
+        state.defaults = data.defaults || state.defaults;
+        state.lastLoadedAt = data.last_loaded_at || "";
+        state.preloadedWorkbenches[requestScope] = data;
+        updateAutoRefreshInterval(data);
+        state.warnings = data.warnings || [];
+        setSyncStatus(data.last_loaded_at ? `数据更新时间 ${data.last_loaded_at}` : "已同步", state.warnings);
+        cleanupDraftState();
+        render();
+        restoreJobState();
+        loadScopeOverview();
+        startAutoRefresh();
+      } catch (err) {
+        setSyncStatus(`同步源表失败: ${err.message || "未知错误"}`, state.warnings);
+        throw err;
+      } finally {
+        setLoadingState(false);
+      }
     }
 
     function render() {
@@ -4044,9 +4155,9 @@
       });
     }
 
-    $("refreshBtn").addEventListener("click", refreshWorkbench);
-    $("refreshOngoingBtn").addEventListener("click", refreshWorkbench);
-    $("syncSourceBtn").addEventListener("click", syncSource);
+    $("refreshBtn").addEventListener("click", () => refreshWorkbench().catch(() => {}));
+    $("refreshOngoingBtn").addEventListener("click", () => refreshWorkbench().catch(() => {}));
+    $("syncSourceBtn").addEventListener("click", () => syncSource().catch(() => {}));
     $("switchScopeBtn").addEventListener("click", () => showGate("maintenance"));
     $("homeBtn").addEventListener("click", () => showGate("home"));
     $("logoutBtn").addEventListener("click", logout);
@@ -4072,11 +4183,11 @@
     $("sendAllStartBtn").addEventListener("click", sendAllStart);
     $("monthSelect").addEventListener("change", (e) => {
       state.filters.month = e.target.value;
-      refreshWorkbench();
+      refreshWorkbench().catch(() => {});
     });
     $("specialtySelect").addEventListener("change", (e) => {
       state.filters.specialty = e.target.value;
-      refreshWorkbench();
+      refreshWorkbench().catch(() => {});
     });
     $("searchInput").addEventListener("input", (e) => {
       state.filters.search = e.target.value || "";

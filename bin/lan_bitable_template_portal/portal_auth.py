@@ -25,6 +25,7 @@ from .portal_service import (
     MaintenancePortalService,
     PortalError,
 )
+from .state_store import DEFAULT_STATE_DB_NAME, LanPortalStateStore
 
 
 AUTH_COOKIE_NAME = "lan_portal_session"
@@ -51,6 +52,9 @@ class PortalAuthManager:
         self._app_token_cache: dict[str, Any] = {"token": "", "expires_at": 0.0}
         self._permission_path = Path(get_data_file_path("lan_portal_auth.json"))
         self._permission_path.parent.mkdir(parents=True, exist_ok=True)
+        self._state_store = LanPortalStateStore(
+            self._permission_path.parent / DEFAULT_STATE_DB_NAME
+        )
 
     @staticmethod
     def configured() -> bool:
@@ -102,7 +106,7 @@ class PortalAuthManager:
             users[open_id] = {
                 "name": self.scope_label(code),
                 "role": "building",
-                "scopes": [code],
+                "scopes": ["CAMPUS", *BUILDING_SCOPE_CODES] if code == "H" else [code],
             }
         users[LI_SHILONG_OPEN_ID] = {
             "name": "李世龙",
@@ -122,20 +126,24 @@ class PortalAuthManager:
         }
 
     def _load_permissions_locked(self) -> dict[str, Any]:
-        if not self._permission_path.exists():
+        stored = self._state_store.get_auth_permissions()
+        if isinstance(stored, dict):
+            payload = stored
+        elif not self._permission_path.exists():
             payload = self._default_permissions()
             self._save_permissions_locked(payload)
             return payload
-        try:
-            with self._permission_path.open("r", encoding="utf-8") as fp:
-                payload = json.load(fp)
-            if not isinstance(payload, dict):
-                raise ValueError("payload is not object")
-        except Exception:
-            self._backup_corrupt_permissions_locked()
-            payload = self._default_permissions()
-            self._save_permissions_locked(payload)
-            return payload
+        else:
+            try:
+                with self._permission_path.open("r", encoding="utf-8") as fp:
+                    payload = json.load(fp)
+                if not isinstance(payload, dict):
+                    raise ValueError("payload is not object")
+                self._save_permissions_locked(payload)
+            except Exception:
+                payload = self._default_permissions()
+                self._save_permissions_locked(payload)
+                return payload
         users = payload.get("users")
         if not isinstance(users, dict):
             payload["users"] = {}
@@ -145,10 +153,7 @@ class PortalAuthManager:
         return payload
 
     def _save_permissions_locked(self, payload: dict[str, Any]) -> None:
-        tmp_path = self._permission_path.with_suffix(self._permission_path.suffix + ".tmp")
-        with tmp_path.open("w", encoding="utf-8") as fp:
-            json.dump(payload, fp, ensure_ascii=False, indent=2)
-        tmp_path.replace(self._permission_path)
+        self._state_store.put_auth_permissions(payload)
 
     def _backup_corrupt_permissions_locked(self) -> None:
         if not self._permission_path.exists():
@@ -197,6 +202,11 @@ class PortalAuthManager:
         valid = {"ALL", "CAMPUS", *BUILDING_SCOPE_CODES}
         return [scope for scope in normalized if scope in valid]
 
+    @staticmethod
+    def _has_full_scope_access(scopes: list[str]) -> bool:
+        required = {"CAMPUS", *BUILDING_SCOPE_CODES}
+        return required.issubset(set(scopes))
+
     def scopes_for_open_id(self, open_id: str) -> list[str]:
         open_id = str(open_id or "").strip()
         with self._lock:
@@ -207,9 +217,22 @@ class PortalAuthManager:
                 return self._scopes_from_raw(user_cfg.get("scopes"))
             return self._scopes_from_raw(payload.get("default_scopes"))
 
+    def role_for_open_id(self, open_id: str) -> str:
+        open_id = str(open_id or "").strip()
+        with self._lock:
+            payload = self._load_permissions_locked()
+            users = payload.get("users") or {}
+            user_cfg = users.get(open_id) if isinstance(users, dict) else None
+            role = str((user_cfg or {}).get("role") or "").strip().lower()
+            return "admin" if role == "admin" else "building"
+
     def is_admin(self, session: dict[str, Any] | None) -> bool:
-        scopes = self.session_scopes(session)
-        return "ALL" in scopes
+        if not isinstance(session, dict):
+            return False
+        role = str(session.get("role") or "").strip().lower()
+        if not role:
+            role = str((session.get("user") or {}).get("role") or "").strip().lower()
+        return role == "admin"
 
     def session_scopes(self, session: dict[str, Any] | None) -> list[str]:
         if not isinstance(session, dict):
@@ -219,11 +242,13 @@ class PortalAuthManager:
     def scope_allowed(self, session: dict[str, Any] | None, scope: str) -> bool:
         requested = self.normalize_scope(scope)
         scopes = self.session_scopes(session)
+        if requested == "ALL":
+            return "ALL" in scopes or self._has_full_scope_access(scopes)
         return "ALL" in scopes or requested in scopes
 
     def default_scope(self, session: dict[str, Any] | None) -> str:
         scopes = self.session_scopes(session)
-        if "ALL" in scopes:
+        if "ALL" in scopes or self._has_full_scope_access(scopes):
             return "ALL"
         for scope in scopes:
             if scope in BUILDING_SCOPE_CODES or scope == "CAMPUS":
@@ -252,6 +277,23 @@ class PortalAuthManager:
             for scope, value in scopes.items()
             if self.normalize_scope(scope) in allowed_values
         }
+        prepared = (
+            result.get("prepared_workbenches")
+            if isinstance(result.get("prepared_workbenches"), dict)
+            else {}
+        )
+        filtered_prepared: dict[str, Any] = {}
+        for scope, value in prepared.items():
+            normalized = self.normalize_scope(scope)
+            if normalized not in allowed_values or not isinstance(value, dict):
+                continue
+            prepared_value = copy.deepcopy(value)
+            nested_options = prepared_value.get("scope_options")
+            if isinstance(nested_options, list):
+                prepared_value["scope_options"] = options
+            filtered_prepared[normalized] = prepared_value
+        if prepared:
+            result["prepared_workbenches"] = filtered_prepared
         return result
 
     def filter_handover_links(
@@ -353,11 +395,13 @@ class PortalAuthManager:
         if not open_id:
             raise PortalError("飞书登录未返回 open_id。")
         allowed_scopes = self.scopes_for_open_id(open_id)
+        role = self.role_for_open_id(open_id)
         session_id = secrets.token_urlsafe(32)
         now = time.time()
         session = {
             "session_id": session_id,
             "user": user,
+            "role": role,
             "allowed_scopes": allowed_scopes,
             "created_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "expires_at": now + AUTH_SESSION_TTL_SECONDS,
@@ -383,6 +427,7 @@ class PortalAuthManager:
             open_id = str((session.get("user") or {}).get("open_id") or "").strip()
             if open_id:
                 session["allowed_scopes"] = self.scopes_for_open_id(open_id)
+                session["role"] = self.role_for_open_id(open_id)
             session["expires_at"] = time.time() + AUTH_SESSION_TTL_SECONDS
             return copy.deepcopy(session)
 

@@ -32,6 +32,7 @@ _send_queue: "queue.Queue[dict[str, Any]]" = queue.Queue(maxsize=200)
 _worker_started = False
 _fail_streak = 0
 _circuit_open_until = 0.0
+_legacy_alert_log_imported = False
 
 
 def _now() -> float:
@@ -61,10 +62,17 @@ def _get_display_version() -> str:
 
 
 def _append_local_record(record: dict[str, Any]) -> None:
+    global _legacy_alert_log_imported
     try:
-        _ALERT_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with _ALERT_LOG_FILE.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        from lan_bitable_template_portal.state_store import LanPortalStateStore
+
+        store = LanPortalStateStore()
+        if not _legacy_alert_log_imported:
+            try:
+                store.import_jsonl_events_once("system_alerts", _ALERT_LOG_FILE)
+            finally:
+                _legacy_alert_log_imported = True
+        store.append_event("system_alerts", record)
     except Exception:
         pass
 

@@ -22,6 +22,8 @@ from upload_event_module.services.feishu_service import refresh_feishu_token
 from upload_event_module.services.robot_webhook import send_text_to_open_ids
 from upload_event_module.utils import get_data_file_path
 
+from .state_store import LanPortalStateStore
+
 
 DEFAULT_APP_TOKEN = "HU38bc1vnamMK9sCeOgclUvXnFc"
 DEFAULT_TABLE_ID = "tblzk7WrXxNWQy6V"
@@ -81,6 +83,11 @@ REPAIR_DATETIME_FIELDS = {
 }
 PLACEHOLDER_TEXT_VALUES = {"", "-", "--", "—", "——", "/", "无", "暂无"}
 SOURCE_CACHE_TTL_SECONDS = 5 * 60
+STATE_NS_MEMORY = "notice_memory"
+STATE_NS_DAILY_SUMMARY = "notice_daily_summary"
+STATE_NS_WORK_STATUS = "notice_work_status"
+STATE_NS_HIDDEN_ONGOING = "notice_hidden_ongoing"
+STATE_NS_ACTION_JOB = "notice_action_job"
 LI_SHILONG_OPEN_ID = "ou_902e364a6c2c6c20893c02abe505a7b2"
 MA_JINYU_OPEN_ID = "ou_a6644e62a43b916c6bc26148cf74f208"
 HANDOVER_PASSWORD_RESET_TTL_SECONDS = 10 * 60
@@ -170,12 +177,15 @@ class MaintenancePortalService:
         self._handover_links_path.parent.mkdir(parents=True, exist_ok=True)
         self._hidden_ongoing_path = Path(get_data_file_path("lan_template_hidden_ongoing.json"))
         self._hidden_ongoing_path.parent.mkdir(parents=True, exist_ok=True)
+        self._state_store = LanPortalStateStore()
+        self._legacy_summary_migrated = False
+        self._legacy_work_status_migrated = False
         self._work_status_backfilled = False
         self._work_status_cache_signature: tuple[tuple[str, int, int], ...] | None = None
         self._work_status_cache_items: list[dict[str, Any]] | None = None
         self._target_record_cache: dict[tuple[str, str], dict[str, Any]] = {}
-        self._jobs: dict[str, dict[str, Any]] = {}
         self._jobs_lock = threading.RLock()
+        self._jobs: dict[str, dict[str, Any]] = self._load_action_jobs_from_state()
         self._handover_password_reset: dict[str, Any] | None = None
 
     def _auth_headers(self) -> dict[str, str]:
@@ -557,7 +567,7 @@ class MaintenancePortalService:
             self._last_loaded_ts = time.time()
             self._load_warnings = warnings
 
-    def ensure_loaded(self, *, refresh_if_expired: bool = True) -> None:
+    def ensure_loaded(self, *, refresh_if_expired: bool = False) -> None:
         with self._refresh_lock:
             if (
                 not self._field_meta_list
@@ -1279,7 +1289,20 @@ class MaintenancePortalService:
     def _building_memory_path(self, building: str) -> Path:
         return self._memory_dir / self._safe_memory_filename(building)
 
+    def _building_memory_key(self, building: str) -> str:
+        raw = str(building or "").strip()
+        digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:10]
+        return raw or f"unknown:{digest}"
+
     def _load_building_memory_locked(self, building: str) -> dict[str, Any]:
+        key = self._building_memory_key(building)
+        stored = self._state_store.get_document(STATE_NS_MEMORY, key)
+        if isinstance(stored, dict):
+            items = stored.get("items")
+            if not isinstance(items, dict):
+                stored["items"] = {}
+            stored["building"] = str(stored.get("building") or building or "")
+            return stored
         path = self._building_memory_path(building)
         if not path.exists():
             return {"building": building, "items": {}}
@@ -1291,17 +1314,15 @@ class MaintenancePortalService:
             items = payload.get("items")
             if not isinstance(items, dict):
                 payload["items"] = {}
+            self._state_store.put_document(STATE_NS_MEMORY, key, payload)
             return payload
         except Exception:
             return {"building": building, "items": {}}
 
     def _save_building_memory_locked(self, building: str, payload: dict[str, Any]) -> None:
-        path = self._building_memory_path(building)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = path.with_suffix(path.suffix + ".tmp")
-        with tmp_path.open("w", encoding="utf-8") as fp:
-            json.dump(payload, fp, ensure_ascii=False, indent=2)
-        tmp_path.replace(path)
+        self._state_store.put_document(
+            STATE_NS_MEMORY, self._building_memory_key(building), payload
+        )
 
     def _summary_path(self, day: str | None = None) -> Path:
         day = str(day or dt.datetime.now().strftime("%Y-%m-%d")).strip()
@@ -1310,6 +1331,12 @@ class MaintenancePortalService:
 
     def _load_day_summary_locked(self, day: str | None = None) -> dict[str, Any]:
         path = self._summary_path(day)
+        stored = self._state_store.get_document(STATE_NS_DAILY_SUMMARY, path.stem)
+        if isinstance(stored, dict):
+            if not isinstance(stored.get("items"), list):
+                stored["items"] = []
+            stored["date"] = str(stored.get("date") or path.stem)
+            return stored
         if not path.exists():
             return {"date": path.stem, "items": []}
         try:
@@ -1320,17 +1347,14 @@ class MaintenancePortalService:
             if not isinstance(payload.get("items"), list):
                 payload["items"] = []
             payload["date"] = str(payload.get("date") or path.stem)
+            self._state_store.put_document(STATE_NS_DAILY_SUMMARY, path.stem, payload)
             return payload
         except Exception:
             return {"date": path.stem, "items": []}
 
     def _save_day_summary_locked(self, payload: dict[str, Any], day: str | None = None) -> None:
         path = self._summary_path(day or payload.get("date"))
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = path.with_suffix(path.suffix + ".tmp")
-        with tmp_path.open("w", encoding="utf-8") as fp:
-            json.dump(payload, fp, ensure_ascii=False, indent=2)
-        tmp_path.replace(path)
+        self._state_store.put_document(STATE_NS_DAILY_SUMMARY, path.stem, payload)
 
     @staticmethod
     def _summary_key(
@@ -1401,6 +1425,19 @@ class MaintenancePortalService:
 
     def _load_work_status_locked(self, building: str = "", building_code: str = "") -> dict[str, Any]:
         path = self._work_status_path(building, building_code)
+        stored = self._state_store.get_document(STATE_NS_WORK_STATUS, path.stem)
+        if isinstance(stored, dict):
+            if not isinstance(stored.get("items"), list):
+                stored["items"] = []
+            stored["version"] = int(stored.get("version") or 1)
+            stored["building"] = str(stored.get("building") or building or "")
+            stored["building_code"] = str(
+                stored.get("building_code")
+                or building_code
+                or self._building_code_from_value(stored.get("building") or building)
+                or ""
+            )
+            return stored
         if not path.exists():
             code = str(building_code or self._building_code_from_value(building) or "").strip()
             return {"version": 1, "building": building, "building_code": code, "items": []}
@@ -1421,6 +1458,7 @@ class MaintenancePortalService:
             or self._building_code_from_value(payload.get("building") or building)
             or ""
         )
+        self._state_store.put_document(STATE_NS_WORK_STATUS, path.stem, payload)
         return payload
 
     def _save_work_status_locked(
@@ -1430,13 +1468,79 @@ class MaintenancePortalService:
             building or payload.get("building") or "",
             building_code or payload.get("building_code") or "",
         )
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = path.with_suffix(path.suffix + ".tmp")
-        with tmp_path.open("w", encoding="utf-8") as fp:
-            json.dump(payload, fp, ensure_ascii=False, indent=2)
-        tmp_path.replace(path)
+        self._state_store.put_document(STATE_NS_WORK_STATUS, path.stem, payload)
         self._work_status_cache_signature = None
         self._work_status_cache_items = None
+
+    def _migrate_legacy_day_summaries_locked(self) -> None:
+        if self._legacy_summary_migrated:
+            return
+        self._legacy_summary_migrated = True
+        for path in sorted(self._summary_dir.glob("*.json")):
+            key = path.stem
+            if self._state_store.get_document(STATE_NS_DAILY_SUMMARY, key):
+                continue
+            try:
+                with path.open("r", encoding="utf-8") as fp:
+                    payload = json.load(fp)
+            except Exception:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            if not isinstance(payload.get("items"), list):
+                payload["items"] = []
+            payload["date"] = str(payload.get("date") or key)
+            self._state_store.put_document(STATE_NS_DAILY_SUMMARY, key, payload)
+
+    def _iter_day_summary_payloads_locked(
+        self, *, month: str = ""
+    ) -> list[dict[str, Any]]:
+        self._migrate_legacy_day_summaries_locked()
+        documents = self._state_store.list_documents(
+            STATE_NS_DAILY_SUMMARY, key_prefix=month
+        )
+        payloads: list[dict[str, Any]] = []
+        for document in documents:
+            payload = document.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            if not isinstance(payload.get("items"), list):
+                payload["items"] = []
+            payload["date"] = str(payload.get("date") or document.get("key") or "")
+            payloads.append(payload)
+        return payloads
+
+    def _migrate_legacy_work_status_locked(self) -> None:
+        if self._legacy_work_status_migrated:
+            return
+        self._legacy_work_status_migrated = True
+        for path in sorted(self._work_status_dir.glob("*.json")):
+            key = path.stem
+            if self._state_store.get_document(STATE_NS_WORK_STATUS, key):
+                continue
+            try:
+                with path.open("r", encoding="utf-8") as fp:
+                    payload = json.load(fp)
+            except Exception:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            if not isinstance(payload.get("items"), list):
+                payload["items"] = []
+            payload["version"] = int(payload.get("version") or 1)
+            self._state_store.put_document(STATE_NS_WORK_STATUS, key, payload)
+
+    def _iter_work_status_payloads_locked(self) -> list[dict[str, Any]]:
+        self._migrate_legacy_work_status_locked()
+        payloads: list[dict[str, Any]] = []
+        for document in self._state_store.list_documents(STATE_NS_WORK_STATUS):
+            payload = document.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            if not isinstance(payload.get("items"), list):
+                payload["items"] = []
+            payloads.append(payload)
+        return payloads
 
     def _find_summary_item(
         self,
@@ -1887,13 +1991,26 @@ class MaintenancePortalService:
         return counts
 
     def get_scope_overview(
-        self, *, ongoing_items: list[dict[str, Any]] | None = None
+        self,
+        *,
+        ongoing_items: list[dict[str, Any]] | None = None,
+        scopes: list[str] | tuple[str, ...] | set[str] | None = None,
+        include_prepared: bool = False,
     ) -> dict[str, Any]:
         self.ensure_loaded()
         default_month = self._current_month_label()
         overview: dict[str, dict[str, Any]] = {}
+        prepared_workbenches: dict[str, dict[str, Any]] = {}
+        has_scope_filter = scopes is not None
+        requested_scopes = {
+            self._normalize_scope(scope)
+            for scope in (scopes or [])
+            if str(scope or "").strip()
+        }
         for option in SCOPE_OPTIONS:
             scope = self._normalize_scope(option.get("value"))
+            if has_scope_filter and scope not in requested_scopes:
+                continue
             records = self._workbench_records(month=default_month, scope=scope)
             merged_ongoing = self._merge_ongoing_items(scope, ongoing_items or [])
             daily_summary = self.get_daily_summary(
@@ -1936,13 +2053,20 @@ class MaintenancePortalService:
                 "repair_ongoing": ongoing_counts[WORK_TYPE_REPAIR],
                 "closed_today": int(stats.get("ended") or 0),
             }
-        return {
+            if include_prepared:
+                prepared_workbenches[scope] = self.get_bootstrap(
+                    scope=scope, ongoing_items=ongoing_items or []
+                )
+        payload = {
             "scope_options": SCOPE_OPTIONS,
             "scopes": overview,
             "last_loaded_at": self._last_loaded_at,
             "source_cache_ttl_seconds": self._source_cache_ttl_seconds(),
             "warnings": list(self._load_warnings),
         }
+        if include_prepared:
+            payload["prepared_workbenches"] = prepared_workbenches
+        return payload
 
     def get_handover_links(self) -> dict[str, Any]:
         options = self._handover_scope_options()
@@ -1962,6 +2086,9 @@ class MaintenancePortalService:
         }
 
     def _load_handover_payload_locked(self) -> dict[str, Any]:
+        stored = self._state_store.get_handover_payload()
+        if isinstance(stored, dict):
+            return stored
         try:
             with self._handover_links_path.open("r", encoding="utf-8") as fp:
                 payload = json.load(fp)
@@ -1969,11 +2096,13 @@ class MaintenancePortalService:
             return {}
         except Exception:
             return {}
-        return payload if isinstance(payload, dict) else {}
+        if not isinstance(payload, dict):
+            return {}
+        self._state_store.put_handover_payload(payload)
+        return payload
 
     def _save_handover_payload_locked(self, payload: dict[str, Any]) -> None:
-        with self._handover_links_path.open("w", encoding="utf-8") as fp:
-            json.dump(payload, fp, ensure_ascii=False, indent=2)
+        self._state_store.put_handover_payload(payload)
 
     @staticmethod
     def _hash_handover_password(password: str, salt: str) -> str:
@@ -2147,16 +2276,8 @@ class MaintenancePortalService:
 
         days: list[dict[str, Any]] = []
         with self._summary_lock:
-            paths = sorted(self._summary_dir.glob(f"{month}-*.json"))
-            for path in paths:
-                try:
-                    with path.open("r", encoding="utf-8") as fp:
-                        payload = json.load(fp)
-                except Exception:
-                    continue
-                if not isinstance(payload, dict):
-                    continue
-                day = str(payload.get("date") or path.stem)
+            for payload in self._iter_day_summary_payloads_locked(month=f"{month}-"):
+                day = str(payload.get("date") or "")
                 items = []
                 for raw_item in payload.get("items") or []:
                     if not isinstance(raw_item, dict):
@@ -2222,15 +2343,8 @@ class MaintenancePortalService:
         if self._work_status_backfilled:
             return
         self._work_status_backfilled = True
-        for path in sorted(self._summary_dir.glob("*.json")):
-            try:
-                with path.open("r", encoding="utf-8") as fp:
-                    payload = json.load(fp)
-            except Exception:
-                continue
-            if not isinstance(payload, dict):
-                continue
-            day = str(payload.get("date") or path.stem)
+        for payload in self._iter_day_summary_payloads_locked():
+            day = str(payload.get("date") or "")
             for raw_item in payload.get("items") or []:
                 if not isinstance(raw_item, dict):
                     continue
@@ -2250,25 +2364,28 @@ class MaintenancePortalService:
     def _load_work_status_items_locked(self, scope: str = "ALL") -> list[dict[str, Any]]:
         self._backfill_work_status_from_daily_summaries_locked()
         scope = self._normalize_scope(scope)
-        paths = sorted(self._work_status_dir.glob("*.json"))
-        signature_items: list[tuple[str, int, int]] = []
-        for path in paths:
-            try:
-                stat = path.stat()
-                signature_items.append((path.name, int(stat.st_mtime_ns), int(stat.st_size)))
-            except OSError:
-                continue
-        signature = tuple(signature_items)
-        if self._work_status_cache_signature == signature and self._work_status_cache_items is not None:
+        documents = self._state_store.list_documents(STATE_NS_WORK_STATUS)
+        signature = tuple(
+            sorted(
+                (
+                    str(document.get("key") or ""),
+                    int(float(document.get("updated_at") or 0) * 1000000),
+                    len(json.dumps(document.get("payload") or {}, ensure_ascii=False)),
+                )
+                for document in documents
+            )
+        )
+        if (
+            self._work_status_cache_signature == signature
+            and self._work_status_cache_items is not None
+        ):
             all_items = self._work_status_cache_items
         else:
+            self._migrate_legacy_work_status_locked()
+            documents = self._state_store.list_documents(STATE_NS_WORK_STATUS)
             all_items: list[dict[str, Any]] = []
-            for path in paths:
-                try:
-                    with path.open("r", encoding="utf-8") as fp:
-                        payload = json.load(fp)
-                except Exception:
-                    continue
+            for document in documents:
+                payload = document.get("payload")
                 if not isinstance(payload, dict):
                     continue
                 for item in payload.get("items") or []:
@@ -2433,12 +2550,9 @@ class MaintenancePortalService:
         removed_count = 0
         with self._summary_lock:
             self._backfill_work_status_from_daily_summaries_locked()
-            for path in sorted(self._work_status_dir.glob("*.json")):
-                try:
-                    with path.open("r", encoding="utf-8") as fp:
-                        payload = json.load(fp)
-                except Exception:
-                    continue
+            self._migrate_legacy_work_status_locked()
+            for document in self._state_store.list_documents(STATE_NS_WORK_STATUS):
+                payload = document.get("payload")
                 if not isinstance(payload, dict):
                     continue
                 items = payload.get("items")
@@ -2464,15 +2578,11 @@ class MaintenancePortalService:
                 if changed:
                     payload["items"] = kept
                     payload["updated_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
-                    with path.open("w", encoding="utf-8") as fp:
-                        json.dump(payload, fp, ensure_ascii=False, indent=2)
+                    self._state_store.put_document(
+                        STATE_NS_WORK_STATUS, str(document.get("key") or ""), payload
+                    )
             if removed_keys:
-                for path in sorted(self._summary_dir.glob("*.json")):
-                    try:
-                        with path.open("r", encoding="utf-8") as fp:
-                            payload = json.load(fp)
-                    except Exception:
-                        continue
+                for payload in self._iter_day_summary_payloads_locked():
                     if not isinstance(payload, dict):
                         continue
                     items = payload.get("items")
@@ -2493,8 +2603,7 @@ class MaintenancePortalService:
                     if changed:
                         payload["items"] = kept
                         payload["updated_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
-                        with path.open("w", encoding="utf-8") as fp:
-                            json.dump(payload, fp, ensure_ascii=False, indent=2)
+                        self._save_day_summary_locked(payload)
                 self._work_status_cache_signature = None
                 self._work_status_cache_items = None
         return {"removed": removed_count}
@@ -2669,6 +2778,12 @@ class MaintenancePortalService:
         ]
 
     def _load_hidden_ongoing_locked(self) -> dict[str, Any]:
+        stored = self._state_store.get_document(STATE_NS_HIDDEN_ONGOING, "global")
+        if isinstance(stored, dict):
+            hidden = stored.get("hidden")
+            if not isinstance(hidden, dict):
+                stored["hidden"] = {}
+            return stored
         try:
             with self._hidden_ongoing_path.open("r", encoding="utf-8") as fp:
                 payload = json.load(fp)
@@ -2682,12 +2797,12 @@ class MaintenancePortalService:
         if not isinstance(hidden, dict):
             hidden = {}
         payload["hidden"] = hidden
+        self._state_store.put_document(STATE_NS_HIDDEN_ONGOING, "global", payload)
         return payload
 
     def _save_hidden_ongoing_locked(self, payload: dict[str, Any]) -> None:
         payload["updated_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with self._hidden_ongoing_path.open("w", encoding="utf-8") as fp:
-            json.dump(payload, fp, ensure_ascii=False, indent=2)
+        self._state_store.put_document(STATE_NS_HIDDEN_ONGOING, "global", payload)
 
     def _is_ongoing_hidden(self, item: dict[str, Any]) -> bool:
         keys = self._ongoing_hidden_keys(item)
@@ -2744,12 +2859,9 @@ class MaintenancePortalService:
         work_status_removed = 0
         daily_summary_removed = 0
         with self._summary_lock:
-            for path in sorted(self._work_status_dir.glob("*.json")):
-                try:
-                    with path.open("r", encoding="utf-8") as fp:
-                        payload = json.load(fp)
-                except Exception:
-                    continue
+            self._migrate_legacy_work_status_locked()
+            for document in self._state_store.list_documents(STATE_NS_WORK_STATUS):
+                payload = document.get("payload")
                 if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
                     continue
                 kept: list[dict[str, Any]] = []
@@ -2767,8 +2879,9 @@ class MaintenancePortalService:
                 if changed:
                     payload["items"] = kept
                     payload["updated_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
-                    with path.open("w", encoding="utf-8") as fp:
-                        json.dump(payload, fp, ensure_ascii=False, indent=2)
+                    self._state_store.put_document(
+                        STATE_NS_WORK_STATUS, str(document.get("key") or ""), payload
+                    )
 
             summary_payload = self._load_day_summary_locked()
             summary_items = summary_payload.get("items")
@@ -3417,6 +3530,39 @@ class MaintenancePortalService:
                 return f"{work_type}:source-update:{source_record_id}"
         return ""
 
+    def _load_action_jobs_from_state(self) -> dict[str, dict[str, Any]]:
+        jobs: dict[str, dict[str, Any]] = {}
+        for document in self._state_store.list_documents(STATE_NS_ACTION_JOB):
+            job = document.get("payload")
+            if not isinstance(job, dict):
+                continue
+            job_id = str(job.get("job_id") or document.get("key") or "").strip()
+            if not job_id:
+                continue
+            job["job_id"] = job_id
+            phase = str(job.get("phase") or "").strip()
+            if phase in {"queued", "sending_message", "uploading"}:
+                job["phase"] = "failed"
+                job["error"] = "程序已重启，任务未完成，请核对多维后重试。"
+                job["updated_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+                self._state_store.put_document(STATE_NS_ACTION_JOB, job_id, job)
+            jobs[job_id] = job
+        if len(jobs) > 300:
+            ordered = sorted(
+                jobs.values(), key=lambda item: str(item.get("created_at") or "")
+            )
+            for job in ordered[: len(jobs) - 300]:
+                job_id = str(job.get("job_id") or "")
+                jobs.pop(job_id, None)
+                self._state_store.delete_document(STATE_NS_ACTION_JOB, job_id)
+        return jobs
+
+    def _persist_action_job_locked(self, job: dict[str, Any]) -> None:
+        job_id = str((job or {}).get("job_id") or "").strip()
+        if not job_id:
+            return
+        self._state_store.put_document(STATE_NS_ACTION_JOB, job_id, job)
+
     def create_action_job(self, request_payload: dict[str, Any]) -> tuple[str, bool]:
         if not isinstance(request_payload, dict):
             raise PortalError("请求体格式错误。")
@@ -3455,6 +3601,7 @@ class MaintenancePortalService:
                         existing["updated_at"] = dt.datetime.now().strftime(
                             "%Y-%m-%d %H:%M"
                         )
+                        self._persist_action_job_locked(existing)
                         return str(existing.get("job_id") or ""), True
             target_key = str(job.get("target_key") or "")
             if target_key:
@@ -3465,6 +3612,7 @@ class MaintenancePortalService:
                     if phase in {"queued", "sending_message", "uploading"}:
                         raise PortalError("该通告已有进行中的发送/上传任务，请等待完成后再操作。")
             self._jobs[job["job_id"]] = job
+            self._persist_action_job_locked(job)
             self._trim_jobs_locked()
         return job["job_id"], True
 
@@ -3475,7 +3623,9 @@ class MaintenancePortalService:
             self._jobs.values(), key=lambda item: str(item.get("created_at") or "")
         )
         for job in ordered[: len(self._jobs) - 300]:
-            self._jobs.pop(str(job.get("job_id") or ""), None)
+            job_id = str(job.get("job_id") or "")
+            self._jobs.pop(job_id, None)
+            self._state_store.delete_document(STATE_NS_ACTION_JOB, job_id)
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
         job_id = str(job_id or "").strip()
@@ -3483,6 +3633,12 @@ class MaintenancePortalService:
             return None
         with self._jobs_lock:
             job = self._jobs.get(job_id)
+            if not job:
+                stored = self._state_store.get_document(STATE_NS_ACTION_JOB, job_id)
+                if isinstance(stored, dict):
+                    stored["job_id"] = str(stored.get("job_id") or job_id)
+                    self._jobs[job_id] = stored
+                    job = stored
             return copy.deepcopy(job) if job else None
 
     def mark_job(self, job_id: str, **patch: Any) -> None:
@@ -3495,6 +3651,7 @@ class MaintenancePortalService:
                 return
             job.update(patch)
             job["updated_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+            self._persist_action_job_locked(job)
 
     @staticmethod
     def _action_message_signature(prepared: dict[str, Any]) -> str:
