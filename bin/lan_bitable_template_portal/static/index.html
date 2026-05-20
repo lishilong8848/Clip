@@ -1107,7 +1107,7 @@
         <span id="ongoingCount" class="pill">进行中 0</span>
         <span id="autoRefreshPill" class="pill hidden">自动刷新已关闭</span>
         <button id="refreshBtn" class="btn ghost">刷新本页</button>
-        <button id="syncSourceBtn" class="btn ghost">同步源表</button>
+        <button id="syncSourceBtn" class="btn ghost hidden" title="管理员手动触发后台同步源表">同步源表</button>
         <button id="switchScopeBtn" class="btn ghost">切换楼栋</button>
         <button id="homeBtn" class="btn ghost">功能选择</button>
         <button id="logoutBtn" class="btn ghost hidden">退出登录</button>
@@ -1319,6 +1319,7 @@
       jobToOpKey: new Map(),
       polling: new Set(),
       refreshDebounceTimerId: 0,
+      searchRenderTimerId: 0,
       draftSaveTimerId: 0,
       draftSaveScope: "",
       viewRequestSeq: 0,
@@ -1339,7 +1340,7 @@
         active: false,
         automatic: false,
       },
-      renderSeq: { records: 0, ongoing: 0 },
+      renderSeq: { records: 0, ongoing: 0, zhihang: 0 },
       expandedRecordId: "",
       expandedSummaryKey: "",
     };
@@ -1363,10 +1364,12 @@
     ];
     const JOB_STATE_TTL_MS = 24 * 60 * 60 * 1000;
     const JOB_STATE_LIMIT = 80;
-    const AUTO_REFRESH_DEFAULT_MS = 5 * 60 * 1000;
-    const AUTO_REFRESH_MIN_MS = 5 * 60 * 1000;
-    const AUTO_REFRESH_MAX_MS = 15 * 60 * 1000;
-    const AUTO_REFRESH_JITTER_MS = 90 * 1000;
+    const RENDER_CHUNK_SIZE = 32;
+    const BULK_SEND_CONCURRENCY = 5;
+    const AUTO_REFRESH_DEFAULT_MS = 10 * 60 * 1000;
+    const AUTO_REFRESH_MIN_MS = 10 * 60 * 1000;
+    const AUTO_REFRESH_MAX_MS = 10 * 60 * 1000;
+    const AUTO_REFRESH_JITTER_MS = 0;
     const DRAFT_SAVE_DEBOUNCE_MS = 450;
     const DEFERRED_REFRESH_RETRY_MS = 900;
     const WORKSPACE_LAYOUT_KEY = "lan-workbench-layout:v1";
@@ -1661,6 +1664,10 @@
       });
     }
 
+    function isAdminUser() {
+      return (state.auth.user || {}).role === "admin";
+    }
+
     function updateUserChrome() {
       const user = state.auth.user || {};
       const label = state.auth.loggedIn
@@ -1669,6 +1676,7 @@
       $("userPill").textContent = label;
       $("userPill").classList.toggle("hidden", !label);
       $("logoutBtn").classList.toggle("hidden", !state.auth.loggedIn);
+      $("syncSourceBtn").classList.toggle("hidden", !isAdminUser());
     }
 
     function scopeAllowed(scope) {
@@ -3438,6 +3446,10 @@
     }
 
     async function syncSource() {
+      if (!isAdminUser()) {
+        setSyncStatus("源表由后台自动同步，当前账号无需手动同步", state.warnings);
+        return;
+      }
       const requestScope = normalizeScopeValue(state.scope || "ALL", "ALL");
       const requestSeq = nextViewRequestSeq();
       setLoadingState(true, "同步源表中");
@@ -3468,6 +3480,15 @@
       } finally {
         if (isLatestViewRequest(requestSeq)) setLoadingState(false);
       }
+    }
+
+    function scheduleSearchRender() {
+      if (state.searchRenderTimerId) clearTimeout(state.searchRenderTimerId);
+      state.searchRenderTimerId = window.setTimeout(() => {
+        state.searchRenderTimerId = 0;
+        renderRecords();
+        renderWorkTypeTabs();
+      }, 120);
     }
 
     function render() {
@@ -3690,6 +3711,28 @@
       `;
     }
 
+    function handleRecordCardClick(recordKeyValue) {
+      const record = state.records.find((x) => recordKey(x) === recordKeyValue);
+      if (!record) return;
+      if (isRecordUnavailableForSelection(record)) {
+        state.expandedRecordId = state.expandedRecordId === record.record_id ? "" : record.record_id;
+        renderRecords();
+        return;
+      }
+      const key = recordKey(record);
+      if (state.selected.has(key)) {
+        state.selected.delete(key);
+        if (state.activeDraftKey === key) state.activeDraftKey = "";
+      }
+      else {
+        state.selected.add(key);
+        state.activeDraftKey = key;
+        getDraft(record);
+      }
+      saveDraftState();
+      render();
+    }
+
     function recordCardHtml(record) {
         const key = recordKey(record);
         const selected = state.selected.has(key);
@@ -3741,30 +3784,16 @@
     }
 
     function bindRecordEvents() {
-      document.querySelectorAll("[data-record-key]").forEach((el) => {
-        el.addEventListener("click", () => {
-          const record = state.records.find((x) => recordKey(x) === el.dataset.recordKey);
-          if (!record) return;
-          const summary = record.work_summary || {};
-          if (isRecordUnavailableForSelection(record)) {
-            state.expandedRecordId = state.expandedRecordId === record.record_id ? "" : record.record_id;
-            renderRecords();
-            return;
-          }
-          const key = recordKey(record);
-          if (state.selected.has(key)) {
-            state.selected.delete(key);
-            if (state.activeDraftKey === key) state.activeDraftKey = "";
-          }
-          else {
-            state.selected.add(key);
-            state.activeDraftKey = key;
-            getDraft(record);
-          }
-          saveDraftState();
-          render();
+      const bindContainer = (container) => {
+        if (!container || container.dataset.recordEventsBound === "1") return;
+        container.dataset.recordEventsBound = "1";
+        container.addEventListener("click", (event) => {
+          const card = event.target.closest("[data-record-key]");
+          if (!card || !container.contains(card)) return;
+          handleRecordCardClick(card.dataset.recordKey || "");
         });
-      });
+      };
+      bindContainer($("recordList"));
     }
 
     function selectedZhihangIds() {
@@ -3832,31 +3861,36 @@
       render();
     }
 
+    function zhihangRecordCardHtml(record, canBind) {
+      return `
+        <article class="zhihang-card ${canBind ? "" : "disabled"}" data-zhihang-record="${html(record.record_id)}">
+          <div class="record-title">
+            <span>${html(zhihangTitle(record))}</span>
+            <span class="tag blue">智航</span>
+          </div>
+          <div class="record-meta">${html(zhihangMetaText(record))}</div>
+        </article>
+      `;
+    }
+
     function bindZhihangEvents() {
-      document.querySelectorAll("[data-zhihang-record]").forEach((el) => {
-        el.addEventListener("click", () => {
-          if (el.classList.contains("disabled")) return;
-          assignZhihangRecord(el.dataset.zhihangRecord);
-        });
+      const container = $("zhihangRecordList");
+      if (!container || container.dataset.zhihangEventsBound === "1") return;
+      container.dataset.zhihangEventsBound = "1";
+      container.addEventListener("click", (event) => {
+        const card = event.target.closest("[data-zhihang-record]");
+        if (!card || !container.contains(card) || card.classList.contains("disabled")) return;
+        assignZhihangRecord(card.dataset.zhihangRecord || "");
       });
     }
 
-    function renderZhihangColumn() {
-      const records = visibleZhihangRecords();
+    function renderZhihangColumn(recordsOverride = null, canBindOverride = null) {
+      const records = Array.isArray(recordsOverride) ? recordsOverride : visibleZhihangRecords();
       const activeKey = activeChangeDraftKey();
       const activeDraft = activeKey ? state.drafts.get(activeKey) : null;
-      const canBind = Boolean(activeDraft && activeDraft.zhihang_involved);
-      const body = records.length
-        ? records.map((record) => `
-            <article class="zhihang-card ${canBind ? "" : "disabled"}" data-zhihang-record="${html(record.record_id)}">
-              <div class="record-title">
-                <span>${html(zhihangTitle(record))}</span>
-                <span class="tag blue">智航</span>
-              </div>
-              <div class="record-meta">${html(zhihangMetaText(record))}</div>
-            </article>
-          `).join("")
-        : `<div class="empty">当前范围没有可绑定的智航侧未结束变更</div>`;
+      const canBind = typeof canBindOverride === "boolean"
+        ? canBindOverride
+        : Boolean(activeDraft && activeDraft.zhihang_involved);
       const hint = canBind
         ? "选择后会绑定到中间当前阿里侧变更"
         : "先选择左侧阿里侧变更并打开“涉及智航”";
@@ -3867,7 +3901,7 @@
             <span>${html(records.length)}条</span>
           </div>
           <div class="inline-hint">${html(hint)}</div>
-          ${body}
+          <div id="zhihangRecordList"></div>
         </div>
       `;
     }
@@ -3877,13 +3911,12 @@
       const seq = (state.renderSeq[kind] || 0) + 1;
       state.renderSeq[kind] = seq;
       container.innerHTML = "";
-      const chunkSize = 32;
       let index = 0;
       const step = () => {
         if (state.renderSeq[kind] !== seq) return;
-        const htmlChunk = items.slice(index, index + chunkSize).map(itemToHtml).join("");
+        const htmlChunk = items.slice(index, index + RENDER_CHUNK_SIZE).map(itemToHtml).join("");
         if (htmlChunk) container.insertAdjacentHTML("beforeend", htmlChunk);
-        index += chunkSize;
+        index += RENDER_CHUNK_SIZE;
         if (index < items.length) {
           window.requestAnimationFrame(step);
           return;
@@ -3896,6 +3929,10 @@
     function renderRecords() {
       const records = visibleRecords();
       if (state.workType === "change") {
+        const zhihangRecords = visibleZhihangRecords();
+        const activeKey = activeChangeDraftKey();
+        const activeDraft = activeKey ? state.drafts.get(activeKey) : null;
+        const canBindZhihang = Boolean(activeDraft && activeDraft.zhihang_involved);
         $("recordList").innerHTML = `
           <div class="change-pair-grid">
             <div class="change-pair-column">
@@ -3905,21 +3942,33 @@
               </div>
               <div id="aliChangeRecordList"></div>
             </div>
-            ${renderZhihangColumn()}
+            ${renderZhihangColumn(zhihangRecords, canBindZhihang)}
           </div>
         `;
         const aliList = $("aliChangeRecordList");
+        const zhihangList = $("zhihangRecordList");
+        if (!zhihangRecords.length) {
+          zhihangList.innerHTML = `<div class="empty">当前范围没有可绑定的智航侧未结束变更</div>`;
+        } else {
+          renderHtmlInChunks(
+            "zhihang",
+            zhihangList,
+            zhihangRecords,
+            (record) => zhihangRecordCardHtml(record, canBindZhihang),
+            bindZhihangEvents
+          );
+        }
         if (!records.length) {
           aliList.innerHTML = emptyRecordHtml();
           document.querySelectorAll("[data-empty-switch-type]").forEach((btn) => {
             btn.addEventListener("click", () => setWorkType(btn.dataset.emptySwitchType));
           });
-          bindZhihangEvents();
+          if (!zhihangRecords.length) bindZhihangEvents();
           return;
         }
         renderHtmlInChunks("records", aliList, records, recordCardHtml, () => {
           bindRecordEvents();
-          bindZhihangEvents();
+          if (!zhihangRecords.length) bindZhihangEvents();
         });
         return;
       }
@@ -4687,11 +4736,12 @@
       state.bulkDone = 0;
       updateBulkSendButton();
       try {
-        for (const id of ids) {
+        const queue = ids.slice();
+        const runOne = async (id) => {
           if (!state.selected.has(id)) {
             state.bulkDone += 1;
             updateBulkSendButton();
-            continue;
+            return;
           }
           try {
             await sendStart(id);
@@ -4701,8 +4751,18 @@
           }
           state.bulkDone += 1;
           updateBulkSendButton();
-          await new Promise((resolve) => setTimeout(resolve, 120));
-        }
+          await new Promise((resolve) => setTimeout(resolve, 40));
+        };
+        const workers = Array.from(
+          { length: Math.min(BULK_SEND_CONCURRENCY, queue.length) },
+          async () => {
+            while (queue.length) {
+              const id = queue.shift();
+              if (id) await runOne(id);
+            }
+          }
+        );
+        await Promise.all(workers);
       } finally {
         state.bulkSending = false;
         state.bulkTotal = 0;
@@ -4925,8 +4985,7 @@
     });
     $("searchInput").addEventListener("input", (e) => {
       state.filters.search = e.target.value || "";
-      renderRecords();
-      renderWorkTypeTabs();
+      scheduleSearchRender();
     });
 
     async function initApp() {

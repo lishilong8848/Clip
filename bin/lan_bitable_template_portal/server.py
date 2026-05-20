@@ -785,6 +785,8 @@ class PortalHandler(BaseHTTPRequestHandler):
             except PortalError as exc:
                 return self._send_json(403, {"ok": False, "error": str(exc)})
         if parsed.path == "/api/refresh":
+            if not self._require_admin_json(session):
+                return
             qs = parse_qs(parsed.query)
             try:
                 scope = self._authorized_scope_or_error(

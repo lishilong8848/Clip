@@ -90,7 +90,7 @@ REPAIR_DATETIME_FIELDS = {
     "期望完成时间",
 }
 PLACEHOLDER_TEXT_VALUES = {"", "-", "--", "—", "——", "/", "无", "暂无"}
-SOURCE_CACHE_TTL_SECONDS = 5 * 60
+SOURCE_CACHE_TTL_SECONDS = 30 * 60
 RECENT_MONTH_FILTER_LABEL = "本月+上月"
 STATE_NS_MEMORY = "notice_memory"
 STATE_NS_DAILY_SUMMARY = "notice_daily_summary"

@@ -1751,7 +1751,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "not-a-number",
                 create=True,
             ):
-                self.assertEqual(service._source_cache_ttl_seconds(), 300)
+                self.assertEqual(service._source_cache_ttl_seconds(), 1800)
                 self.assertTrue(service._source_cache_expired())
             with patch(
                 "lan_bitable_template_portal.portal_service.config.lan_template_source_cache_ttl_seconds",
