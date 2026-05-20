@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import copy
+import hashlib
 import html
 import json
 import logging
@@ -21,14 +23,17 @@ from .portal_service import (
     MaintenancePortalService,
     PortalError,
     SCOPE_OPTIONS,
+    SOURCE_CACHE_TTL_SECONDS,
 )
 from .state_store import LanPortalStateStore
+from upload_event_module.services.robot_webhook import send_text_to_open_ids
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 18766
 CLIENT_DISCONNECT_WINERRORS = {10053, 10054, 10058}
+MAX_JSON_BODY_BYTES = 512 * 1024
 
 
 def find_available_port(host: str, preferred_port: int) -> int:
@@ -59,6 +64,19 @@ class PortalHandler(BaseHTTPRequestHandler):
     action_worker_thread: threading.Thread | None = None
     action_worker_stop = False
     action_upload_timeout_s = 30 * 60
+    payload_cache_lock = threading.RLock()
+    payload_cache: dict[tuple, tuple[float, dict]] = {}
+    payload_cache_ttl_s = 45
+    payload_cache_max_entries = 32
+    payload_cache_max_payload_bytes = 256 * 1024
+    orphan_reconcile_lock = threading.RLock()
+    orphan_reconcile_last: dict[str, float] = {}
+    orphan_reconcile_pending: set[str] = set()
+    orphan_reconcile_interval_s = 15 * 60
+    source_refresh_thread: threading.Thread | None = None
+    source_refresh_stop = False
+    source_refresh_event = threading.Event()
+    source_refresh_lock = threading.RLock()
 
     @staticmethod
     def _is_client_disconnect(exc: BaseException) -> bool:
@@ -126,9 +144,23 @@ class PortalHandler(BaseHTTPRequestHandler):
         )
 
     def _read_json_body(self) -> dict:
-        length = int(self.headers.get("Content-Length", "0") or "0")
+        raw_length = self.headers.get("Content-Length", "0") or "0"
+        try:
+            length = int(raw_length)
+        except ValueError as exc:
+            raise ValueError("请求体长度无效。") from exc
+        if length < 0:
+            raise ValueError("请求体长度无效。")
+        if length > MAX_JSON_BODY_BYTES:
+            raise ValueError("请求体过大，请减少粘贴内容后重试。")
         raw = self.rfile.read(length) if length > 0 else b"{}"
-        return json.loads(raw.decode("utf-8"))
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except UnicodeDecodeError as exc:
+            raise ValueError("请求体必须是 UTF-8 JSON。") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("请求体必须是 JSON 对象。")
+        return payload
 
     def _cookie_value(self, name: str) -> str:
         raw_cookie = self.headers.get("Cookie", "") or ""
@@ -305,15 +337,148 @@ class PortalHandler(BaseHTTPRequestHandler):
         request = job.get("request") if isinstance(job.get("request"), dict) else {}
         return bool(open_id and str(request.get("_auth_open_id") or "") == open_id)
 
-    def _reconcile_orphan_started_items(
-        self, scope: str, ongoing: list[dict] | None
-    ) -> None:
-        try:
-            self.service.reconcile_orphan_started_items(
-                scope=scope, ongoing_items=ongoing or []
+    @classmethod
+    def clear_payload_cache(cls) -> None:
+        with cls.payload_cache_lock:
+            cls.payload_cache.clear()
+
+    @classmethod
+    def _prune_payload_cache_locked(cls, now: float) -> None:
+        expired_keys = [
+            key for key, (expires_at, _payload) in cls.payload_cache.items()
+            if expires_at <= now
+        ]
+        for key in expired_keys:
+            cls.payload_cache.pop(key, None)
+        extra = len(cls.payload_cache) - int(cls.payload_cache_max_entries)
+        if extra <= 0:
+            return
+        ordered = sorted(
+            cls.payload_cache.items(),
+            key=lambda item: item[1][0],
+        )
+        for key, _value in ordered[:extra]:
+            cls.payload_cache.pop(key, None)
+
+    @staticmethod
+    def _ongoing_items_marker(ongoing: list[dict] | None) -> tuple:
+        marker = []
+        for item in ongoing or []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                payload_hash = hashlib.sha1(
+                    json.dumps(
+                        item,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        default=str,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+            except Exception:
+                payload_hash = hashlib.sha1(
+                    str(item).encode("utf-8", errors="ignore")
+                ).hexdigest()
+            marker.append(
+                (
+                    str(item.get("work_type") or ""),
+                    str(item.get("active_item_id") or ""),
+                    str(item.get("record_id") or item.get("target_record_id") or ""),
+                    str(item.get("source_record_id") or ""),
+                    str(item.get("status") or ""),
+                    str(item.get("updated_at") or item.get("last_updated_at") or ""),
+                    payload_hash,
+                )
             )
+        return tuple(sorted(marker))
+
+    def _cached_service_payload(self, key_parts: tuple, builder) -> dict:
+        service_version = 0
+        try:
+            service_version = self.service.state_cache_version()
+        except Exception:
+            pass
+        key = (
+            service_version,
+            str(getattr(self.service, "_last_loaded_at", "") or ""),
+            *key_parts,
+        )
+        now = time.monotonic()
+        with PortalHandler.payload_cache_lock:
+            PortalHandler._prune_payload_cache_locked(now)
+            cached = PortalHandler.payload_cache.get(key)
+            if cached and cached[0] > now:
+                return copy.deepcopy(cached[1])
+        payload = builder()
+        if not isinstance(payload, dict):
+            return payload
+        try:
+            payload_size = len(
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    default=str,
+                ).encode("utf-8")
+            )
+        except Exception:
+            payload_size = 0
+        if (
+            payload_size
+            and payload_size > int(PortalHandler.payload_cache_max_payload_bytes)
+        ):
+            return payload
+        with PortalHandler.payload_cache_lock:
+            PortalHandler.payload_cache[key] = (
+                now + float(PortalHandler.payload_cache_ttl_s),
+                copy.deepcopy(payload),
+            )
+            PortalHandler._prune_payload_cache_locked(now)
+        return payload
+
+    def _reconcile_orphan_started_items(
+        self, scope: str, ongoing: list[dict] | None, *, force: bool = False
+    ) -> None:
+        scope = PortalHandler.auth_manager.normalize_scope(scope)
+        now = time.monotonic()
+        with PortalHandler.orphan_reconcile_lock:
+            if scope in PortalHandler.orphan_reconcile_pending:
+                return
+            last = float(PortalHandler.orphan_reconcile_last.get(scope) or 0)
+            if not force and now - last < PortalHandler.orphan_reconcile_interval_s:
+                return
+            PortalHandler.orphan_reconcile_pending.add(scope)
+            PortalHandler.orphan_reconcile_last[scope] = now
+        ongoing_copy = [
+            dict(item) for item in (ongoing or []) if isinstance(item, dict)
+        ]
+
+        def _worker() -> None:
+            try:
+                result = self.service.reconcile_orphan_started_items(
+                    scope=scope, ongoing_items=ongoing_copy
+                )
+                if int((result or {}).get("removed") or 0) > 0:
+                    PortalHandler.clear_payload_cache()
+            except Exception as exc:
+                warning = f"本地已开始状态清理失败: {exc}"
+                if warning not in self.service._load_warnings:
+                    self.service._load_warnings.append(warning)
+            finally:
+                with PortalHandler.orphan_reconcile_lock:
+                    PortalHandler.orphan_reconcile_pending.discard(scope)
+
+        try:
+            threading.Thread(
+                target=_worker,
+                name=f"LANOrphanReconcile-{scope}",
+                daemon=True,
+            ).start()
         except Exception as exc:
-            warning = f"本地已开始状态清理失败: {exc}"
+            with PortalHandler.orphan_reconcile_lock:
+                PortalHandler.orphan_reconcile_pending.discard(scope)
+            warning = f"本地已开始状态清理启动失败: {exc}"
             if warning not in self.service._load_warnings:
                 self.service._load_warnings.append(warning)
 
@@ -381,7 +546,9 @@ class PortalHandler(BaseHTTPRequestHandler):
                 scope = self._authorized_scope_or_error(session, scope)
                 ongoing = self._get_ongoing(scope)
                 self._reconcile_orphan_started_items(scope, ongoing)
-                data = self.service.get_bootstrap(scope=scope, ongoing_items=ongoing)
+                data = self.service.get_bootstrap(
+                    scope=scope, ongoing_items=ongoing
+                )
                 return self._send_json(
                     200,
                     {
@@ -408,7 +575,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                 data = self.service.get_scope_overview(
                     ongoing_items=ongoing,
                     scopes=allowed_scopes,
-                    include_prepared=True,
+                    include_prepared=False,
                 )
                 data = PortalHandler.auth_manager.filter_scope_overview(data, session)
                 return self._send_json(
@@ -455,6 +622,24 @@ class PortalHandler(BaseHTTPRequestHandler):
                 )
             except PortalError as exc:
                 return self._send_json(500, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/auth/permissions":
+            if not self._require_admin_json(session):
+                return
+            data = PortalHandler.auth_manager.get_permissions_payload()
+            return self._send_json(
+                200,
+                {"ok": True, "data": self._with_auth_context(data, session)},
+            )
+        if parsed.path == "/api/auth/permission-requests/current":
+            user = session.get("user") if isinstance(session.get("user"), dict) else {}
+            request = PortalHandler.auth_manager.get_current_permission_request(
+                str(user.get("open_id") or "")
+            )
+            data = {"request": request or None}
+            return self._send_json(
+                200,
+                {"ok": True, "data": self._with_auth_context(data, session)},
+            )
         if parsed.path == "/api/records":
             qs = parse_qs(parsed.query)
             try:
@@ -463,9 +648,11 @@ class PortalHandler(BaseHTTPRequestHandler):
                 )
                 ongoing = self._get_ongoing(scope)
                 self._reconcile_orphan_started_items(scope, ongoing)
+                month = (qs.get("month") or [""])[0]
+                specialty = (qs.get("specialty") or [""])[0]
                 payload = self.service.query_records(
-                    month=(qs.get("month") or [""])[0],
-                    specialty=(qs.get("specialty") or [""])[0],
+                    month=month,
+                    specialty=specialty,
                     scope=scope,
                     ongoing_items=ongoing,
                 )
@@ -488,9 +675,11 @@ class PortalHandler(BaseHTTPRequestHandler):
                 )
                 ongoing = self._get_ongoing(scope)
                 self._reconcile_orphan_started_items(scope, ongoing)
+                month = (qs.get("month") or [""])[0]
+                specialty = (qs.get("specialty") or [""])[0]
                 payload = self.service.query_records(
-                    month=(qs.get("month") or [""])[0],
-                    specialty=(qs.get("specialty") or [""])[0],
+                    month=month,
+                    specialty=specialty,
                     scope=scope,
                     ongoing_items=ongoing,
                 )
@@ -511,12 +700,16 @@ class PortalHandler(BaseHTTPRequestHandler):
                 scope = self._authorized_scope_or_error(
                     session, (qs.get("scope") or ["ALL"])[0]
                 )
-                self.service.refresh()
+                PortalHandler.clear_payload_cache()
+                refreshed = self.service.refresh_if_interval_elapsed(
+                    min_interval_seconds=60
+                )
                 ongoing = self._get_ongoing(scope)
-                self._reconcile_orphan_started_items(scope, ongoing)
+                self._reconcile_orphan_started_items(scope, ongoing, force=True)
                 data = self.service.get_bootstrap(
                     scope=scope, ongoing_items=ongoing
                 )
+                data["source_refresh_triggered"] = refreshed
                 return self._send_json(
                     200,
                     {
@@ -578,6 +771,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                 )
                 job_id, should_start = self.service.create_action_job(payload)
                 if should_start:
+                    PortalHandler.clear_payload_cache()
                     PortalHandler.enqueue_action_job(job_id)
                 return self._send_json(202, {"ok": True, "data": {"job_id": job_id}})
             except (PortalError, ValueError, json.JSONDecodeError) as exc:
@@ -625,6 +819,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                 data.update(
                     self.service.discard_deleted_ongoing_state(payload, scope=scope)
                 )
+                PortalHandler.clear_payload_cache()
                 data["qt_deleted"] = True
                 data["remote_deleted"] = bool(
                     accepted.get("remote_deleted")
@@ -681,6 +876,118 @@ class PortalHandler(BaseHTTPRequestHandler):
                     new_password=str(payload.get("new_password") or ""),
                 )
                 return self._send_json(200, {"ok": True, "data": data})
+            except (PortalError, ValueError, json.JSONDecodeError) as exc:
+                return self._send_json(400, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/auth/permission-requests":
+            try:
+                payload = self._read_json_body()
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                data = PortalHandler.auth_manager.create_permission_request(
+                    open_id=str(user.get("open_id") or ""),
+                    name=str(user.get("name") or user.get("en_name") or "飞书用户"),
+                    scopes=payload.get("scopes") or [],
+                    reason=str(payload.get("reason") or ""),
+                )
+                code = str(data.pop("code") or "")
+                recipients = PortalHandler.auth_manager.admin_open_ids()
+                labels = "、".join(data.get("requested_scope_labels") or [])
+                reason = str(data.get("reason") or "").strip() or "未填写"
+                text = (
+                    "南通基地-运维灯塔工作台权限申请。\n"
+                    f"申请人：{data.get('name') or '飞书用户'}\n"
+                    f"openid：{data.get('open_id') or ''}\n"
+                    f"申请范围：{labels}\n"
+                    f"申请原因：{reason}\n"
+                    f"申请编号：{data.get('request_id') or ''}\n"
+                    f"验证码：{code}\n"
+                    f"有效期至：{data.get('expires_at') or ''}\n"
+                    "请管理员确认申请人身份和申请范围后，再将验证码告知申请人。"
+                )
+                ok, message, _ = send_text_to_open_ids(text, recipients)
+                if not ok:
+                    PortalHandler.auth_manager.mark_permission_request_notify_failed(
+                        str(data.get("request_id") or "")
+                    )
+                    raise PortalError(f"通知管理员失败: {message}")
+                activated = PortalHandler.auth_manager.activate_permission_request(
+                    str(data.get("request_id") or "")
+                )
+                data.update(activated)
+                PortalHandler.auth_manager.supersede_other_permission_requests(
+                    open_id=str(data.get("open_id") or ""),
+                    keep_request_id=str(data.get("request_id") or ""),
+                )
+                data["notification"] = {
+                    "ok": True,
+                    "recipients_count": len(recipients),
+                    "message": "已发送给管理员",
+                }
+                return self._send_json(
+                    200,
+                    {"ok": True, "data": self._with_auth_context({"request": data}, session)},
+                )
+            except (PortalError, ValueError, json.JSONDecodeError) as exc:
+                return self._send_json(400, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/auth/permission-requests/confirm":
+            try:
+                payload = self._read_json_body()
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                permissions = PortalHandler.auth_manager.confirm_permission_request(
+                    open_id=str(user.get("open_id") or ""),
+                    request_id=str(payload.get("request_id") or ""),
+                    code=str(payload.get("code") or ""),
+                    updated_by=str(user.get("open_id") or "permission_request"),
+                )
+                refreshed_session = self._current_session() or session
+                data = {
+                    "approved": True,
+                    "permissions": permissions,
+                }
+                return self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "data": self._with_auth_context(data, refreshed_session),
+                    },
+                )
+            except (PortalError, ValueError, json.JSONDecodeError) as exc:
+                return self._send_json(400, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/auth/permissions":
+            if not self._require_admin_json(session):
+                return
+            try:
+                payload = self._read_json_body()
+                actor = session.get("user") if isinstance(session.get("user"), dict) else {}
+                data, changed_open_ids = PortalHandler.auth_manager.save_permissions_payload(
+                    payload.get("users") or [],
+                    updated_by=str(actor.get("open_id") or ""),
+                )
+                if changed_open_ids:
+                    actor_name = str(actor.get("name") or actor.get("en_name") or "管理员")
+                    text = (
+                        "南通基地-运维灯塔工作台权限已更新。\n"
+                        f"操作人：{actor_name}\n"
+                        "请重新进入门户或刷新页面查看最新楼栋权限。"
+                    )
+                    threading.Thread(
+                        target=send_text_to_open_ids,
+                        args=(text, changed_open_ids),
+                        name="LANPortalPermissionNotify",
+                        daemon=True,
+                    ).start()
+                    notify_message = "已加入飞书通知队列"
+                else:
+                    notify_message = "无权限变更通知"
+                data["changed_open_ids"] = changed_open_ids
+                data["notification"] = {
+                    "ok": True,
+                    "message": notify_message,
+                    "recipients_count": len(changed_open_ids),
+                }
+                return self._send_json(
+                    200,
+                    {"ok": True, "data": self._with_auth_context(data, session)},
+                )
             except (PortalError, ValueError, json.JSONDecodeError) as exc:
                 return self._send_json(400, {"ok": False, "error": str(exc)})
         if parsed.path == "/api/generate":
@@ -761,6 +1068,64 @@ class PortalHandler(BaseHTTPRequestHandler):
         ]
 
     @classmethod
+    def ensure_source_refresh_worker(cls) -> None:
+        with cls.source_refresh_lock:
+            if cls.source_refresh_thread and cls.source_refresh_thread.is_alive():
+                return
+            cls.source_refresh_stop = False
+            cls.source_refresh_event.clear()
+            cls.source_refresh_thread = threading.Thread(
+                target=cls._source_refresh_loop,
+                name="LANSourceSnapshotRefresh",
+                daemon=True,
+            )
+            cls.source_refresh_thread.start()
+
+    @classmethod
+    def stop_source_refresh_worker(cls) -> None:
+        with cls.source_refresh_lock:
+            cls.source_refresh_stop = True
+            cls.source_refresh_event.set()
+            worker = cls.source_refresh_thread
+        if worker and worker.is_alive():
+            try:
+                worker.join(timeout=2)
+            except Exception:
+                pass
+
+    @classmethod
+    def wake_source_refresh_worker(cls) -> None:
+        cls.source_refresh_event.set()
+
+    @classmethod
+    def _source_refresh_loop(cls) -> None:
+        next_wait = 0.0
+        while True:
+            if cls.source_refresh_event.wait(timeout=next_wait):
+                cls.source_refresh_event.clear()
+            with cls.source_refresh_lock:
+                if cls.source_refresh_stop:
+                    return
+            try:
+                cls.service.refresh()
+                cls.clear_payload_cache()
+            except Exception as exc:
+                warning = f"源表后台同步失败: {exc}"
+                if warning not in cls.service._load_warnings:
+                    cls.service._load_warnings.append(warning)
+            try:
+                cls.service.process_due_repair_link_tasks(limit=3)
+            except Exception as exc:
+                warning = f"检修源表关联补写失败: {exc}"
+                if warning not in cls.service._load_warnings:
+                    cls.service._load_warnings.append(warning)
+            try:
+                ttl = int(cls.service._source_cache_ttl_seconds())
+            except Exception:
+                ttl = SOURCE_CACHE_TTL_SECONDS
+            next_wait = max(60.0, float(ttl or SOURCE_CACHE_TTL_SECONDS))
+
+    @classmethod
     def ensure_action_worker(cls) -> None:
         with cls.action_queue_lock:
             if cls.action_worker_thread and cls.action_worker_thread.is_alive():
@@ -809,6 +1174,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                 phase="queued",
                 queue_position=index,
                 queue_size=total,
+                _persist=False,
             )
 
     @classmethod
@@ -843,7 +1209,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                 return
             if cls.action_worker_stop:
                 return
-            time.sleep(0.5)
+            time.sleep(1.2)
         cls.service.mark_job(
             job_id,
             phase="failed",
@@ -965,6 +1331,7 @@ class PortalServerController:
         )
         self.thread.start()
         PortalHandler.ensure_action_worker()
+        PortalHandler.ensure_source_refresh_worker()
         self.bound_port = bound_port
         return self.get_url()
 
@@ -1031,6 +1398,7 @@ class PortalServerController:
         self.thread = None
         self.bound_port = None
         PortalHandler.stop_action_worker()
+        PortalHandler.stop_source_refresh_worker()
         PortalHandler.notice_callback = None
         PortalHandler.ongoing_callback = None
         PortalHandler.ongoing_delete_callback = None

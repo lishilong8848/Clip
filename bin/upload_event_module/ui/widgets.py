@@ -31,6 +31,10 @@ from .display_state import build_notice_display_snapshot
 
 # from ..utils import extract_hms  # 已迁移到 extract_datetime
 
+TIMER_WIDGET_REFRESH_MS = 5000
+TIMER_NORMAL_STYLE = "font-size: 18px; font-weight: bold; color: #6366F1;"
+TIMER_OVERTIME_STYLE = "font-size: 18px; font-weight: bold; color: #EF4444;"
+
 
 
 
@@ -120,6 +124,7 @@ class TimerWidget(QWidget):
         self.building_text = ""
         self.last_update_response_time = None
         self.alerted_milestones = set()
+        self._timer_visual_state = ""
 
         self.setFixedWidth(110)
         layout = QVBoxLayout(self)
@@ -128,9 +133,7 @@ class TimerWidget(QWidget):
 
         self.timer_label = QLabel("--:--")
         self.timer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.timer_label.setStyleSheet(
-            "font-size: 18px; font-weight: bold; color: #6366F1;"
-        )
+        self.timer_label.setStyleSheet(TIMER_NORMAL_STYLE)
 
         self.milestone_label = QLabel("▼ --分钟")
         self.milestone_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -286,7 +289,7 @@ class TimerWidget(QWidget):
         self.is_running = True
         self.is_overtime = False
         self.update_display()
-        self.update_timer.start(1000)
+        self.update_timer.start(TIMER_WIDGET_REFRESH_MS)
 
     def stop(self):
         self.is_running = False
@@ -305,9 +308,9 @@ class TimerWidget(QWidget):
             secs = remaining_seconds % 60
             self.timer_label.setText(f"{mins:02d}:{secs:02d}")
             self.milestone_label.setText(f"▼ {self.target_minutes}分钟")
-            self.timer_label.setStyleSheet(
-                "font-size: 18px; font-weight: bold; color: #6366F1;"
-            )
+            if self._timer_visual_state != "normal":
+                self.timer_label.setStyleSheet(TIMER_NORMAL_STYLE)
+                self._timer_visual_state = "normal"
             self.is_overtime = False
             self._check_and_alert(remaining_seconds)
         else:
@@ -318,9 +321,9 @@ class TimerWidget(QWidget):
             secs = overtime_seconds % 60
             self.timer_label.setText(f"+{mins:02d}:{secs:02d}")
             self.milestone_label.setText("已超时")
-            self.timer_label.setStyleSheet(
-                "font-size: 18px; font-weight: bold; color: #EF4444;"
-            )
+            if self._timer_visual_state != "overtime":
+                self.timer_label.setStyleSheet(TIMER_OVERTIME_STYLE)
+                self._timer_visual_state = "overtime"
             self.is_overtime = True
 
     def _update_labels(self):
@@ -335,7 +338,7 @@ class TimerWidget(QWidget):
         from ..services.robot_webhook import send_event_prompt_message
 
         one_min_key = f"one_min_{self.stage}_{self.target_minutes}"
-        if 58 <= remaining_seconds <= 62 and one_min_key not in self.alerted_milestones:
+        if 45 <= remaining_seconds <= 75 and one_min_key not in self.alerted_milestones:
             log_info(
                 f"触发1分钟提醒: stage={self.stage}, 目标={self.target_minutes}分钟"
             )

@@ -4,6 +4,8 @@ import tempfile
 import time
 import unittest
 import json
+import datetime as dt
+import base64
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,6 +15,7 @@ if str(BIN_DIR) not in sys.path:
 
 from lan_bitable_template_portal.portal_service import MaintenancePortalService  # noqa: E402
 from lan_bitable_template_portal.portal_service import PortalError  # noqa: E402
+from lan_bitable_template_portal.portal_service import RECENT_MONTH_FILTER_LABEL  # noqa: E402
 from lan_bitable_template_portal.portal_service import WORK_TYPE_CHANGE  # noqa: E402
 from lan_bitable_template_portal.portal_service import WORK_TYPE_REPAIR  # noqa: E402
 from lan_bitable_template_portal.portal_auth import PortalAuthManager  # noqa: E402
@@ -125,6 +128,8 @@ def _build_change_record(
     building: str,
     progress: str,
     title: str = "测试变更",
+    start_time: str = "2026-05-08 09:00",
+    end_time: str = "2026-05-08 18:00",
 ):
     return {
         "record_id": record_id,
@@ -139,8 +144,8 @@ def _build_change_record(
             "变更楼栋": building,
             "专业": "电气",
             "变更等级（阿里）": "低",
-            "变更开始日期（阿里）": "2026-05-08 09:00",
-            "变更结束日期（阿里）": "2026-05-08 18:00",
+            "变更开始日期（阿里）": start_time,
+            "变更结束日期（阿里）": end_time,
         },
     }
 
@@ -154,6 +159,8 @@ def _build_repair_record(
     source: str = "",
     building: str = "D楼",
     specialty: str = "电气",
+    fault_time: str = "2026-05-08 08:20",
+    expected_time: str = "",
     started: bool = False,
     ended: bool = False,
     target_record_id: str = "",
@@ -186,7 +193,8 @@ def _build_repair_record(
             "设备编号": "UPS-01",
             "故障维修原因": "测试故障原因",
             "故障发生现象描述": "测试故障现象",
-            "故障发生时间": "2026-05-08 08:20",
+            "故障发生时间": fault_time,
+            "期望完成时间": expected_time,
             "维修开始时间": "2026-05-08 09:00" if started else "",
             "维修结束时间": "2026-05-08 18:00" if ended else "",
             "维修进展描述": "维修准备中",
@@ -201,6 +209,8 @@ def _build_zhihang_change_record(
     *,
     title: str,
     progress: str = "未开始",
+    plan_start: str = "2026-05-08 09:00",
+    plan_end: str = "2026-05-08 18:00",
 ):
     return {
         "record_id": record_id,
@@ -214,8 +224,8 @@ def _build_zhihang_change_record(
             "进度": progress,
             "变更等级": "低",
             "变更类型": "普通变更",
-            "计划开始": "2026-05-08 09:00",
-            "计划结束": "2026-05-08 18:00",
+            "计划开始": plan_start,
+            "计划结束": plan_end,
         },
     }
 
@@ -266,6 +276,249 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             snapshot = store.get_ongoing_snapshot()
             self.assertTrue(snapshot["exists"])
             self.assertEqual(snapshot["items"], [])
+
+    def test_lan_portal_state_store_replaces_source_scope_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            record = _build_record(
+                "rec-a",
+                "A楼",
+                "过滤网维护",
+                f"{dt.datetime.now().month}月",
+                maintenance_cycle="每月",
+            )
+            zhihang = _build_zhihang_change_record(
+                "zh-a", title="A楼智航变更"
+            )
+
+            store.replace_source_scope_snapshot(
+                "A",
+                records=[record],
+                zhihang_records=[zhihang],
+                meta={"last_loaded_at": "2026-05-20 19:00:00"},
+            )
+            snapshot = store.get_source_scope_snapshot("A")
+
+            self.assertTrue(snapshot["exists"])
+            self.assertEqual(snapshot["records"][0]["record_id"], "rec-a")
+            self.assertEqual(snapshot["zhihang_records"][0]["record_id"], "zh-a")
+            self.assertEqual(
+                snapshot["meta"]["last_loaded_at"], "2026-05-20 19:00:00"
+            )
+
+            store.replace_source_scope_snapshot("A", records=[], zhihang_records=[])
+            snapshot = store.get_source_scope_snapshot("A")
+            self.assertTrue(snapshot["exists"])
+            self.assertEqual(snapshot["records"], [])
+            self.assertEqual(snapshot["zhihang_records"], [])
+
+    def test_query_records_reads_sqlite_scope_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            record = _build_record(
+                "rec-a",
+                "A楼",
+                "过滤网维护",
+                f"{dt.datetime.now().month}月",
+                maintenance_cycle="每月",
+            )
+            service._state_store.replace_source_scope_snapshot(
+                "A",
+                records=[record],
+                zhihang_records=[],
+                meta={"last_loaded_at": "2026-05-20 19:00:00"},
+            )
+            service._records = []
+
+            payload = service.query_records(scope="A", ongoing_items=[])
+
+            self.assertEqual(payload["records"][0]["record_id"], "rec-a")
+            self.assertEqual(payload["records"][0]["display_fields"]["维护周期"], "每月")
+            self.assertEqual(payload["last_loaded_at"], "2026-05-20 19:00:00")
+
+    def test_repair_link_task_is_scheduled_after_repair_start_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            prepared = {
+                "action": "start",
+                "work_type": "repair",
+                "record_id": "source-repair-1",
+                "source_app_token": "source-app",
+                "source_table_id": "source-table",
+            }
+
+            service._schedule_repair_link_task_after_success(
+                prepared,
+                action="start",
+                target_record_id="target-repair-1",
+                job_id="job-1",
+            )
+
+            tasks = service._state_store.list_due_repair_link_tasks(
+                now=time.time() + 71 * 60,
+                limit=10,
+            )
+            self.assertEqual(len(tasks), 1)
+            self.assertEqual(tasks[0]["source_record_id"], "source-repair-1")
+            self.assertEqual(tasks[0]["target_record_id"], "target-repair-1")
+            self.assertEqual(tasks[0]["sync_table_id"], "tblSA9euoote8aCA")
+
+    def test_process_due_repair_link_task_links_source_record_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            source_record_id = "source-repair-1"
+            target_record_id = "target-repair-1"
+            sync_record_id = "sync-repair-1"
+            encoded_source_id = base64.b64encode(
+                f"7612849140323470524:{target_record_id}:hash:1".encode("utf-8")
+            ).decode("ascii")
+            service._state_store.upsert_repair_link_task(
+                {
+                    "task_key": f"repair_link:{source_record_id}:{target_record_id}",
+                    "status": "pending",
+                    "source_app_token": "source-app",
+                    "source_table_id": "source-table",
+                    "source_record_id": source_record_id,
+                    "sync_app_token": "source-app",
+                    "sync_table_id": "sync-table",
+                    "target_app_token": "target-app",
+                    "target_table_id": "target-table",
+                    "target_record_id": target_record_id,
+                    "link_field_name": "设备检修关联",
+                    "due_at": time.time() - 1,
+                    "attempts": 0,
+                    "max_attempts": 12,
+                }
+            )
+            updates = []
+
+            def fake_request(path, *, params=None, app_token=None, table_id=None):
+                if path == "records":
+                    return {
+                        "data": {
+                            "items": [
+                                {
+                                    "record_id": sync_record_id,
+                                    "fields": {"SourceID": encoded_source_id},
+                                }
+                            ],
+                            "has_more": False,
+                        }
+                    }
+                if path == f"records/{source_record_id}":
+                    return {
+                        "data": {
+                            "record": {
+                                "record_id": source_record_id,
+                                "fields": {"设备检修关联": []},
+                            }
+                        }
+                    }
+                raise AssertionError(path)
+
+            def fake_patch(**kwargs):
+                updates.append(kwargs)
+                return {"code": 0, "msg": "success"}
+
+            service._request_json = fake_request
+            service._patch_record_fields = fake_patch
+
+            stats = service.process_due_repair_link_tasks(limit=3)
+
+            self.assertEqual(stats["linked"], 1)
+            self.assertEqual(len(updates), 1)
+            self.assertEqual(updates[0]["record_id"], source_record_id)
+            self.assertEqual(
+                updates[0]["fields"],
+                {"设备检修关联": {"link_record_ids": [sync_record_id]}},
+            )
+            self.assertEqual(
+                service._state_store.list_due_repair_link_tasks(
+                    now=time.time() + 3600,
+                    limit=10,
+                ),
+                [],
+            )
+
+    def test_repair_link_task_claim_has_recoverable_lease(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            store.upsert_repair_link_task(
+                {
+                    "task_key": "repair_link:source-1:target-1",
+                    "status": "pending",
+                    "source_app_token": "source-app",
+                    "source_table_id": "source-table",
+                    "source_record_id": "source-1",
+                    "sync_app_token": "source-app",
+                    "sync_table_id": "sync-table",
+                    "target_app_token": "target-app",
+                    "target_table_id": "target-table",
+                    "target_record_id": "target-1",
+                    "link_field_name": "设备检修关联",
+                    "due_at": 999,
+                    "attempts": 0,
+                    "max_attempts": 18,
+                }
+            )
+
+            first = store.claim_due_repair_link_tasks(now=1000, lease_seconds=300)
+            second = store.claim_due_repair_link_tasks(now=1001, lease_seconds=300)
+            recovered = store.claim_due_repair_link_tasks(now=1301, lease_seconds=300)
+
+            self.assertEqual(len(first), 1)
+            self.assertEqual(second, [])
+            self.assertEqual(len(recovered), 1)
+
+    def test_repair_link_task_reschedules_when_sync_record_is_not_ready(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            source_record_id = "source-repair-1"
+            target_record_id = "target-repair-1"
+            service._state_store.upsert_repair_link_task(
+                {
+                    "task_key": f"repair_link:{source_record_id}:{target_record_id}",
+                    "status": "pending",
+                    "source_app_token": "source-app",
+                    "source_table_id": "source-table",
+                    "source_record_id": source_record_id,
+                    "sync_app_token": "source-app",
+                    "sync_table_id": "sync-table",
+                    "target_app_token": "target-app",
+                    "target_table_id": "target-table",
+                    "target_record_id": target_record_id,
+                    "link_field_name": "设备检修关联",
+                    "due_at": time.time() - 1,
+                    "attempts": 0,
+                    "max_attempts": 18,
+                }
+            )
+
+            def fake_request(path, *, params=None, app_token=None, table_id=None):
+                if path == "records":
+                    return {"data": {"items": [], "has_more": False}}
+                raise AssertionError(path)
+
+            service._request_json = fake_request
+            before = time.time()
+
+            stats = service.process_due_repair_link_tasks(limit=3)
+
+            self.assertEqual(stats["rescheduled"], 1)
+            self.assertEqual(
+                service._state_store.list_due_repair_link_tasks(
+                    now=before + 9 * 60,
+                    limit=10,
+                ),
+                [],
+            )
+            tasks = service._state_store.list_due_repair_link_tasks(
+                now=before + 11 * 60,
+                limit=10,
+            )
+            self.assertEqual(len(tasks), 1)
+            self.assertEqual(tasks[0]["attempts"], 1)
+            self.assertIn("同步表尚未出现目标检修记录", tasks[0]["last_error"])
 
     def test_server_get_ongoing_reads_sqlite_before_qt_callback(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -647,7 +900,15 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
     def test_successful_actions_persist_building_work_status_for_month_query(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
-            service._records = [_build_record("rec1", "A楼", "过滤网维护", "4月")]
+            service._records = [
+                _build_record(
+                    "rec1",
+                    "A楼",
+                    "过滤网维护",
+                    "4月",
+                    maintenance_cycle="每月",
+                )
+            ]
 
             start_job_id, should_start = service.create_action_job(
                 {
@@ -707,8 +968,11 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(summary["source_record_id"], "rec1")
             self.assertEqual(summary["active_item_id"], "active-1")
             self.assertEqual(summary["feishu_record_id"], "bitable-rec-1")
+            self.assertEqual(summary["maintenance_cycle"], "每月")
             self.assertRegex(summary["completed_date"], r"^\d{4}-\d{2}-\d{2}$")
             self.assertEqual(summary["completed_date"], summary["ended_at"][:10])
+            work_status_items = service._load_work_status_items_locked("A")
+            self.assertEqual(work_status_items[0]["maintenance_cycle"], "每月")
             self.assertEqual([item["action"] for item in summary["actions"]], ["start", "end"])
 
     def test_orphan_started_item_is_pruned_when_qt_and_target_record_are_gone(self):
@@ -789,6 +1053,50 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
             self.assertEqual(removed["removed"], 0)
             self.assertEqual(result["records"][0]["work_summary"]["status"], "进行中")
+
+    def test_orphan_reconcile_suppresses_transient_feishu_fail_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            service._records = [_build_record("rec1", "A楼", "过滤网维护", "5月")]
+            start_job_id, _ = service.create_action_job(
+                {
+                    "action": "start",
+                    "scope": "A",
+                    "record_id": "rec1",
+                    "specialty": "全部",
+                    "start_time": "2026-05-15T09:30",
+                    "end_time": "2026-05-15T18:30",
+                    "location": "测试位置",
+                    "content": "测试内容",
+                    "reason": "测试原因",
+                    "impact": "测试影响",
+                    "progress": "准备开始",
+                    "operation_id": "transient-fail-start",
+                }
+            )
+            service.prepare_action_job(start_job_id)
+            service.mark_action_upload_result(
+                start_job_id,
+                success=True,
+                record_id="target-unknown",
+                active_item_id="active-missing",
+            )
+
+            with patch.object(
+                service,
+                "_target_records_for_notice_type",
+                side_effect=PortalError("飞书接口失败: code=1254002, msg=Fail"),
+            ):
+                removed = service.reconcile_orphan_started_items(
+                    scope="A", ongoing_items=[]
+                )
+
+            result = service.query_records(month="5月", scope="A", ongoing_items=[])
+            self.assertEqual(removed["removed"], 0)
+            self.assertEqual(result["records"][0]["work_summary"]["status"], "进行中")
+            self.assertFalse(
+                any("目标表孤儿状态校验失败" in item for item in service._load_warnings)
+            )
 
     def test_deleted_ongoing_item_clears_today_summary_and_work_status(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -964,6 +1272,70 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(
                 [item["record_id"] for item in single["records"]],
                 ["m1", "c1"],
+            )
+
+    def test_workbench_records_are_limited_to_current_and_previous_month(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            current_start, previous_start = service._recent_month_starts()
+            old_start = previous_start - dt.timedelta(days=1)
+            current_label = f"{current_start.month}月"
+            previous_label = f"{previous_start.month}月"
+            old_label = f"{old_start.month}月"
+            current_key = current_start.strftime("%Y-%m")
+            previous_key = previous_start.strftime("%Y-%m")
+            old_key = old_start.strftime("%Y-%m")
+            service._records = [
+                _build_record("m-current", "A楼", "当前月维保", current_label),
+                _build_record("m-previous", "A楼", "上月维保", previous_label),
+                _build_record("m-old", "A楼", "旧月维保", old_label),
+            ]
+            service._change_records = [
+                _build_change_record(
+                    "c-current",
+                    building="A楼",
+                    progress="未开始",
+                    start_time=f"{current_key}-08 09:00",
+                    end_time=f"{current_key}-08 18:00",
+                ),
+                _build_change_record(
+                    "c-previous",
+                    building="A楼",
+                    progress="未开始",
+                    start_time=f"{previous_key}-08 09:00",
+                    end_time=f"{previous_key}-08 18:00",
+                ),
+                _build_change_record(
+                    "c-old",
+                    building="A楼",
+                    progress="未开始",
+                    start_time=f"{old_key}-08 09:00",
+                    end_time=f"{old_key}-08 18:00",
+                ),
+            ]
+            service._repair_records = [
+                _build_repair_record("r-current", building="A楼", fault_time=f"{current_key}-08 08:20"),
+                _build_repair_record("r-previous", building="A楼", fault_time=f"{previous_key}-08 08:20"),
+                _build_repair_record("r-old", building="A楼", fault_time=f"{old_key}-08 08:20"),
+            ]
+
+            result = service.query_records(month=RECENT_MONTH_FILTER_LABEL, scope="A")
+            self.assertEqual(
+                [item["record_id"] for item in result["records"]],
+                [
+                    "m-current",
+                    "m-previous",
+                    "c-current",
+                    "c-previous",
+                    "r-current",
+                    "r-previous",
+                ],
+            )
+
+            previous = service.query_records(month=previous_label, scope="A")
+            self.assertEqual(
+                [item["record_id"] for item in previous["records"]],
+                ["m-previous", "c-previous", "r-previous"],
             )
 
     def test_change_start_rejects_source_progress_that_is_not_not_started(self):
@@ -2061,6 +2433,262 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 self.assertFalse(manager.is_admin(session))
                 self.assertTrue(manager.scope_allowed(session, "ALL"))
                 self.assertEqual(manager.default_scope(session), "ALL")
+
+    def test_portal_auth_required_admins_and_disabled_user_permissions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            def fake_data_path(name):
+                return str(root / name)
+
+            with patch(
+                "lan_bitable_template_portal.portal_auth.get_data_file_path",
+                side_effect=fake_data_path,
+            ):
+                manager = PortalAuthManager()
+                payload, changed = manager.save_permissions_payload(
+                    [
+                        {
+                            "open_id": "ou_disabled",
+                            "name": "禁用用户",
+                            "role": "building",
+                            "scopes": ["A"],
+                            "enabled": False,
+                        },
+                        {
+                            "open_id": "ou_admin",
+                            "name": "新增管理员",
+                            "role": "admin",
+                            "scopes": [],
+                            "enabled": True,
+                        },
+                    ],
+                    updated_by="ou_actor",
+                )
+
+                users = {item["open_id"]: item for item in payload["users"]}
+                self.assertIn("ou_902e364a6c2c6c20893c02abe505a7b2", users)
+                self.assertIn("ou_a6644e62a43b916c6bc26148cf74f208", users)
+                self.assertTrue(users["ou_902e364a6c2c6c20893c02abe505a7b2"]["locked"])
+                self.assertEqual(manager.scopes_for_open_id("ou_disabled"), [])
+                self.assertEqual(manager.role_for_open_id("ou_admin"), "admin")
+                self.assertTrue(manager.scope_allowed({
+                    "role": "admin",
+                    "allowed_scopes": users["ou_admin"]["scopes"],
+                }, "ALL"))
+                self.assertIn("ou_disabled", changed)
+
+    def test_portal_auth_permission_request_code_approves_user(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            def fake_data_path(name):
+                return str(root / name)
+
+            with patch(
+                "lan_bitable_template_portal.portal_auth.get_data_file_path",
+                side_effect=fake_data_path,
+            ):
+                manager = PortalAuthManager()
+                request = manager.create_permission_request(
+                    open_id="ou_requester",
+                    name="申请人",
+                    scopes=["A", "CAMPUS", "ALL"],
+                    reason="值班需要",
+                )
+                self.assertEqual(manager.get_current_permission_request("ou_requester"), {})
+                manager.activate_permission_request(request["request_id"])
+                self.assertEqual(
+                    manager.get_current_permission_request("ou_requester")["request_id"],
+                    request["request_id"],
+                )
+                self.assertEqual(request["requested_scopes"], ["A", "CAMPUS"])
+                code = request["code"]
+                stored = manager._state_store.get_permission_request(request["request_id"])
+                self.assertNotIn("code", stored)
+                self.assertNotEqual(stored.get("code_hash"), code)
+
+                with self.assertRaises(PortalError):
+                    manager.confirm_permission_request(
+                        open_id="ou_requester",
+                        request_id=request["request_id"],
+                        code="000000",
+                    )
+                stored = manager._state_store.get_permission_request(request["request_id"])
+                self.assertEqual(stored["attempts"], 1)
+
+                with self.assertRaises(PortalError):
+                    manager.confirm_permission_request(
+                        open_id="ou_other",
+                        request_id=request["request_id"],
+                        code=code,
+                    )
+
+                manager.confirm_permission_request(
+                    open_id="ou_requester",
+                    request_id=request["request_id"],
+                    code=code,
+                )
+                self.assertEqual(manager.scopes_for_open_id("ou_requester"), ["A", "CAMPUS"])
+                approved = manager._state_store.get_permission_request(request["request_id"])
+                self.assertEqual(approved["status"], "approved")
+
+    def test_portal_auth_permission_request_replaces_and_expires(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            def fake_data_path(name):
+                return str(root / name)
+
+            with patch(
+                "lan_bitable_template_portal.portal_auth.get_data_file_path",
+                side_effect=fake_data_path,
+            ):
+                manager = PortalAuthManager()
+                old_request = manager.create_permission_request(
+                    open_id="ou_pending",
+                    name="申请人",
+                    scopes=["B"],
+                    reason="第一次",
+                )
+                manager.activate_permission_request(old_request["request_id"])
+                new_request = manager.create_permission_request(
+                    open_id="ou_pending",
+                    name="申请人",
+                    scopes=["C"],
+                    reason="第二次",
+                )
+                manager.activate_permission_request(new_request["request_id"])
+                manager.supersede_other_permission_requests(
+                    open_id="ou_pending",
+                    keep_request_id=new_request["request_id"],
+                )
+                current = manager.get_current_permission_request("ou_pending")
+                self.assertEqual(current["request_id"], new_request["request_id"])
+                with self.assertRaises(PortalError):
+                    manager.confirm_permission_request(
+                        open_id="ou_pending",
+                        request_id=old_request["request_id"],
+                        code=old_request["code"],
+                    )
+
+                expired_request = manager.create_permission_request(
+                    open_id="ou_expired",
+                    name="过期申请人",
+                    scopes=["D"],
+                    reason="过期",
+                )
+                manager.activate_permission_request(expired_request["request_id"])
+                payload = manager._state_store.get_permission_request(
+                    expired_request["request_id"]
+                )
+                payload["expires_at_ts"] = time.time() - 1
+                manager._state_store.put_permission_request(payload)
+                with self.assertRaises(PortalError):
+                    manager.confirm_permission_request(
+                        open_id="ou_expired",
+                        request_id=expired_request["request_id"],
+                        code=expired_request["code"],
+                )
+                self.assertEqual(manager.scopes_for_open_id("ou_expired"), [])
+
+    def test_portal_auth_permission_request_notify_failure_keeps_old_code(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            def fake_data_path(name):
+                return str(root / name)
+
+            with patch(
+                "lan_bitable_template_portal.portal_auth.get_data_file_path",
+                side_effect=fake_data_path,
+            ):
+                manager = PortalAuthManager()
+                old_request = manager.create_permission_request(
+                    open_id="ou_retry",
+                    name="申请人",
+                    scopes=["B"],
+                    reason="第一次",
+                )
+                manager.activate_permission_request(old_request["request_id"])
+                failed_request = manager.create_permission_request(
+                    open_id="ou_retry",
+                    name="申请人",
+                    scopes=["C"],
+                    reason="通知失败",
+                )
+                manager.mark_permission_request_notify_failed(failed_request["request_id"])
+                current = manager.get_current_permission_request("ou_retry")
+                self.assertEqual(current["request_id"], old_request["request_id"])
+                manager.confirm_permission_request(
+                    open_id="ou_retry",
+                    request_id=old_request["request_id"],
+                    code=old_request["code"],
+                )
+                self.assertEqual(manager.scopes_for_open_id("ou_retry"), ["B"])
+
+    def test_portal_auth_permission_request_reenables_disabled_user(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            def fake_data_path(name):
+                return str(root / name)
+
+            with patch(
+                "lan_bitable_template_portal.portal_auth.get_data_file_path",
+                side_effect=fake_data_path,
+            ):
+                manager = PortalAuthManager()
+                manager.save_permissions_payload(
+                    [
+                        {
+                            "open_id": "ou_disabled_apply",
+                            "name": "禁用后申请",
+                            "role": "building",
+                            "scopes": ["A"],
+                            "enabled": False,
+                        }
+                    ],
+                    updated_by="ou_actor",
+                )
+                request = manager.create_permission_request(
+                    open_id="ou_disabled_apply",
+                    name="禁用后申请",
+                    scopes=["E"],
+                    reason="恢复权限",
+                )
+                manager.activate_permission_request(request["request_id"])
+                manager.confirm_permission_request(
+                    open_id="ou_disabled_apply",
+                    request_id=request["request_id"],
+                    code=request["code"],
+                )
+                self.assertEqual(manager.scopes_for_open_id("ou_disabled_apply"), ["E"])
+
+    def test_portal_auth_rejects_reserved_meta_open_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            def fake_data_path(name):
+                return str(root / name)
+
+            with patch(
+                "lan_bitable_template_portal.portal_auth.get_data_file_path",
+                side_effect=fake_data_path,
+            ):
+                manager = PortalAuthManager()
+                with self.assertRaises(PortalError):
+                    manager.save_permissions_payload(
+                        [
+                            {
+                                "open_id": "__meta__",
+                                "name": "错误用户",
+                                "role": "building",
+                                "scopes": ["A"],
+                            }
+                        ],
+                        updated_by="ou_actor",
+                    )
 
     def test_scope_overview_filter_removes_unauthorized_preloaded_workbenches(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import copy
 import datetime as dt
+import hashlib
+import hmac
 import json
 import secrets
 import threading
@@ -33,6 +35,8 @@ AUTH_SESSION_TTL_SECONDS = 12 * 60 * 60
 AUTH_STATE_TTL_SECONDS = 10 * 60
 AUTH_MAX_PENDING_STATES = 200
 AUTH_MAX_SESSIONS = 500
+PERMISSION_REQUEST_TTL_SECONDS = 15 * 60
+PERMISSION_REQUEST_MAX_ATTEMPTS = 5
 FEISHU_APP_TOKEN_TTL_FALLBACK_SECONDS = 90 * 60
 FEISHU_AUTH_INDEX_URL = "https://open.feishu.cn/open-apis/authen/v1/index"
 FEISHU_APP_ACCESS_TOKEN_URL = (
@@ -40,6 +44,10 @@ FEISHU_APP_ACCESS_TOKEN_URL = (
 )
 FEISHU_USER_ACCESS_TOKEN_URL = "https://open.feishu.cn/open-apis/authen/v1/access_token"
 FEISHU_USER_INFO_URL = "https://open.feishu.cn/open-apis/authen/v1/user_info"
+REQUIRED_ADMIN_USERS = {
+    LI_SHILONG_OPEN_ID: "李世龙",
+    MA_JINYU_OPEN_ID: "马进宇",
+}
 
 
 class PortalAuthManager:
@@ -125,6 +133,30 @@ class PortalAuthManager:
             "users": users,
         }
 
+    def _ensure_required_admins_locked(self, payload: dict[str, Any]) -> dict[str, Any]:
+        users = payload.get("users")
+        if not isinstance(users, dict):
+            users = {}
+            payload["users"] = users
+        changed = False
+        for open_id, name in REQUIRED_ADMIN_USERS.items():
+            existing = users.get(open_id) if isinstance(users.get(open_id), dict) else {}
+            desired = {
+                **existing,
+                "name": str(existing.get("name") or name),
+                "role": "admin",
+                "scopes": self._admin_scopes(),
+                "enabled": True,
+                "locked": True,
+            }
+            if users.get(open_id) != desired:
+                users[open_id] = desired
+                changed = True
+        if changed:
+            payload["updated_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self._save_permissions_locked(payload)
+        return payload
+
     def _load_permissions_locked(self) -> dict[str, Any]:
         stored = self._state_store.get_auth_permissions()
         if isinstance(stored, dict):
@@ -150,7 +182,7 @@ class PortalAuthManager:
         default_scopes = payload.get("default_scopes")
         if not isinstance(default_scopes, list):
             payload["default_scopes"] = []
-        return payload
+        return self._ensure_required_admins_locked(payload)
 
     def _save_permissions_locked(self, payload: dict[str, Any]) -> None:
         self._state_store.put_auth_permissions(payload)
@@ -202,6 +234,18 @@ class PortalAuthManager:
         valid = {"ALL", "CAMPUS", *BUILDING_SCOPE_CODES}
         return [scope for scope in normalized if scope in valid]
 
+    def _permission_request_scopes_from_raw(self, raw_scopes: Any) -> list[str]:
+        scopes = raw_scopes if isinstance(raw_scopes, list) else []
+        normalized: list[str] = []
+        valid = {"CAMPUS", *BUILDING_SCOPE_CODES}
+        for raw in scopes:
+            scope = self.normalize_scope(raw)
+            if scope == "ALL":
+                continue
+            if scope in valid and scope not in normalized:
+                normalized.append(scope)
+        return normalized
+
     @staticmethod
     def _has_full_scope_access(scopes: list[str]) -> bool:
         required = {"CAMPUS", *BUILDING_SCOPE_CODES}
@@ -214,6 +258,8 @@ class PortalAuthManager:
             users = payload.get("users") or {}
             user_cfg = users.get(open_id) if isinstance(users, dict) else None
             if isinstance(user_cfg, dict):
+                if user_cfg.get("enabled") is False:
+                    return []
                 return self._scopes_from_raw(user_cfg.get("scopes"))
             return self._scopes_from_raw(payload.get("default_scopes"))
 
@@ -223,8 +269,338 @@ class PortalAuthManager:
             payload = self._load_permissions_locked()
             users = payload.get("users") or {}
             user_cfg = users.get(open_id) if isinstance(users, dict) else None
+            if isinstance(user_cfg, dict) and user_cfg.get("enabled") is False:
+                return "building"
             role = str((user_cfg or {}).get("role") or "").strip().lower()
             return "admin" if role == "admin" else "building"
+
+    def get_permissions_payload(self) -> dict[str, Any]:
+        with self._lock:
+            payload = copy.deepcopy(self._load_permissions_locked())
+        users = payload.get("users") if isinstance(payload.get("users"), dict) else {}
+        user_list = []
+        for open_id, user_cfg in users.items():
+            if not isinstance(user_cfg, dict):
+                continue
+            scopes = self._scopes_from_raw(user_cfg.get("scopes"))
+            role = "admin" if str(user_cfg.get("role") or "").lower() == "admin" else "building"
+            if role == "admin":
+                scopes = self._admin_scopes()
+            user_list.append(
+                {
+                    "open_id": str(open_id or "").strip(),
+                    "name": str(user_cfg.get("name") or ""),
+                    "role": role,
+                    "scopes": scopes,
+                    "enabled": user_cfg.get("enabled") is not False,
+                    "locked": str(open_id or "").strip() in REQUIRED_ADMIN_USERS,
+                }
+            )
+        user_list.sort(key=lambda item: (0 if item["locked"] else 1, item["name"], item["open_id"]))
+        return {
+            "updated_at": str(payload.get("updated_at") or ""),
+            "default_scopes": self._scopes_from_raw(payload.get("default_scopes")),
+            "scope_options": copy.deepcopy(SCOPE_OPTIONS),
+            "users": user_list,
+            "required_admin_open_ids": list(REQUIRED_ADMIN_USERS.keys()),
+        }
+
+    def save_permissions_payload(
+        self,
+        raw_users: Any,
+        *,
+        updated_by: str = "",
+    ) -> tuple[dict[str, Any], list[str]]:
+        if not isinstance(raw_users, list):
+            raise PortalError("权限用户列表格式错误。")
+        if len(raw_users) > 300:
+            raise PortalError("权限用户数量过多，请控制在 300 人以内。")
+        with self._lock:
+            previous = self._load_permissions_locked()
+            previous_users = previous.get("users") if isinstance(previous.get("users"), dict) else {}
+            users: dict[str, dict[str, Any]] = {}
+            for raw in raw_users:
+                if not isinstance(raw, dict):
+                    continue
+                open_id = str(raw.get("open_id") or "").strip()
+                if not open_id:
+                    continue
+                if open_id == "__meta__":
+                    raise PortalError("__meta__ 是系统保留 open_id，不能作为用户。")
+                name = str(raw.get("name") or "").strip()[:80]
+                role = str(raw.get("role") or "").strip().lower()
+                role = "admin" if role == "admin" else "building"
+                enabled = raw.get("enabled") is not False
+                scopes = self._admin_scopes() if role == "admin" else self._scopes_from_raw(raw.get("scopes"))
+                if enabled and role != "admin" and not scopes:
+                    raise PortalError(f"{name or open_id} 未选择可访问楼栋。")
+                users[open_id] = {
+                    "name": name or open_id,
+                    "role": role,
+                    "scopes": scopes,
+                    "enabled": enabled,
+                }
+            payload = {
+                "version": 1,
+                "updated_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "default_scopes": [],
+                "users": users,
+                "updated_by": str(updated_by or ""),
+            }
+            payload = self._ensure_required_admins_locked(payload)
+            self._save_permissions_locked(payload)
+
+            changed_open_ids: list[str] = []
+            for open_id, user_cfg in payload["users"].items():
+                if previous_users.get(open_id) != user_cfg:
+                    changed_open_ids.append(open_id)
+            for open_id in previous_users:
+                if open_id not in payload["users"]:
+                    changed_open_ids.append(open_id)
+            changed_open_ids = list(dict.fromkeys([item for item in changed_open_ids if item]))
+            return self.get_permissions_payload(), changed_open_ids
+
+    def upsert_permission_user(
+        self,
+        *,
+        open_id: str,
+        name: str = "",
+        role: str = "building",
+        scopes: Any = None,
+        enabled: bool = True,
+        updated_by: str = "",
+    ) -> dict[str, Any]:
+        open_id = str(open_id or "").strip()
+        if not open_id:
+            raise PortalError("缺少 open_id，无法写入门户权限。")
+        if open_id == "__meta__":
+            raise PortalError("__meta__ 是系统保留 open_id，不能作为用户。")
+        if open_id in REQUIRED_ADMIN_USERS:
+            return self.get_permissions_payload()
+        role = "admin" if str(role or "").strip().lower() == "admin" else "building"
+        normalized_scopes = (
+            self._admin_scopes() if role == "admin" else self._scopes_from_raw(scopes)
+        )
+        if enabled and role != "admin" and not normalized_scopes:
+            raise PortalError("未选择可访问楼栋，无法写入门户权限。")
+        with self._lock:
+            payload = self._load_permissions_locked()
+            users = payload.get("users") if isinstance(payload.get("users"), dict) else {}
+            payload["users"] = users
+            users[open_id] = {
+                "name": str(name or open_id).strip()[:80] or open_id,
+                "role": role,
+                "scopes": normalized_scopes,
+                "enabled": bool(enabled),
+            }
+            payload["updated_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            payload["updated_by"] = str(updated_by or "")
+            self._save_permissions_locked(payload)
+        return self.get_permissions_payload()
+
+    def admin_open_ids(self) -> list[str]:
+        with self._lock:
+            payload = self._load_permissions_locked()
+            users = payload.get("users") if isinstance(payload.get("users"), dict) else {}
+            recipients = list(REQUIRED_ADMIN_USERS.keys())
+            for open_id, user_cfg in users.items():
+                if not isinstance(user_cfg, dict):
+                    continue
+                if user_cfg.get("enabled") is False:
+                    continue
+                role = str(user_cfg.get("role") or "").strip().lower()
+                if role == "admin":
+                    recipients.append(str(open_id or "").strip())
+        return [item for item in dict.fromkeys(recipients) if item]
+
+    @staticmethod
+    def _permission_code_hash(code: str, salt: str) -> str:
+        return hashlib.sha256(f"{salt}:{code}".encode("utf-8")).hexdigest()
+
+    def _public_permission_request(self, payload: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            return {}
+        attempts = int(payload.get("attempts") or 0)
+        max_attempts = int(payload.get("max_attempts") or PERMISSION_REQUEST_MAX_ATTEMPTS)
+        scopes = self._permission_request_scopes_from_raw(payload.get("requested_scopes"))
+        return {
+            "request_id": str(payload.get("request_id") or ""),
+            "open_id": str(payload.get("open_id") or ""),
+            "name": str(payload.get("name") or ""),
+            "requested_scopes": scopes,
+            "requested_scope_labels": [self.scope_label(scope) for scope in scopes],
+            "reason": str(payload.get("reason") or ""),
+            "status": str(payload.get("status") or ""),
+            "created_at": str(payload.get("created_at") or ""),
+            "expires_at": str(payload.get("expires_at") or ""),
+            "attempts": attempts,
+            "max_attempts": max_attempts,
+            "remaining_attempts": max(0, max_attempts - attempts),
+        }
+
+    def get_current_permission_request(self, open_id: str) -> dict[str, Any]:
+        open_id = str(open_id or "").strip()
+        if not open_id:
+            return {}
+        with self._lock:
+            payload = self._state_store.get_active_permission_request(open_id)
+        return self._public_permission_request(payload)
+
+    def create_permission_request(
+        self,
+        *,
+        open_id: str,
+        name: str = "",
+        scopes: Any = None,
+        reason: str = "",
+    ) -> dict[str, Any]:
+        open_id = str(open_id or "").strip()
+        if not open_id:
+            raise PortalError("缺少 open_id，无法提交权限申请。")
+        if self.scopes_for_open_id(open_id):
+            raise PortalError("当前账号已经有门户权限，无需重复申请。")
+        requested_scopes = self._permission_request_scopes_from_raw(scopes)
+        if not requested_scopes:
+            raise PortalError("请至少选择一个需要访问的楼栋或园区。")
+        reason = str(reason or "").strip()[:500]
+        code = f"{secrets.randbelow(1000000):06d}"
+        salt = secrets.token_urlsafe(18)
+        request_id = secrets.token_urlsafe(18)
+        now_ts = time.time()
+        expires_at_ts = now_ts + PERMISSION_REQUEST_TTL_SECONDS
+        now = dt.datetime.now()
+        expires_at = now + dt.timedelta(seconds=PERMISSION_REQUEST_TTL_SECONDS)
+        payload = {
+            "request_id": request_id,
+            "open_id": open_id,
+            "name": str(name or "飞书用户").strip()[:80] or "飞书用户",
+            "requested_scopes": requested_scopes,
+            "reason": reason,
+            "status": "notifying",
+            "code_hash": self._permission_code_hash(code, salt),
+            "code_salt": salt,
+            "attempts": 0,
+            "max_attempts": PERMISSION_REQUEST_MAX_ATTEMPTS,
+            "created_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+            "created_at_ts": now_ts,
+            "updated_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+            "updated_at_ts": now_ts,
+            "expires_at": expires_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "expires_at_ts": expires_at_ts,
+        }
+        with self._lock:
+            self._state_store.put_permission_request(payload)
+        result = self._public_permission_request(payload)
+        result["code"] = code
+        return result
+
+    def supersede_other_permission_requests(self, *, open_id: str, keep_request_id: str) -> None:
+        open_id = str(open_id or "").strip()
+        keep_request_id = str(keep_request_id or "").strip()
+        if not open_id or not keep_request_id:
+            return
+        with self._lock:
+            self._state_store.mark_permission_requests_for_open_id(
+                open_id,
+                from_status="pending",
+                to_status="superseded",
+                exclude_request_id=keep_request_id,
+            )
+
+    def activate_permission_request(self, request_id: str) -> dict[str, Any]:
+        request_id = str(request_id or "").strip()
+        if not request_id:
+            raise PortalError("权限申请编号为空。")
+        with self._lock:
+            payload = self._state_store.get_permission_request(request_id)
+            if not isinstance(payload, dict):
+                raise PortalError("权限申请不存在或已失效，请重新申请。")
+            if str(payload.get("status") or "") != "notifying":
+                return self._public_permission_request(payload)
+            payload["status"] = "pending"
+            payload["updated_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            payload["updated_at_ts"] = time.time()
+            self._state_store.put_permission_request(payload)
+        return self._public_permission_request(payload)
+
+    def mark_permission_request_notify_failed(self, request_id: str) -> None:
+        with self._lock:
+            payload = self._state_store.get_permission_request(request_id)
+            if not isinstance(payload, dict):
+                return
+            payload["status"] = "notify_failed"
+            payload["updated_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            payload["updated_at_ts"] = time.time()
+            self._state_store.put_permission_request(payload)
+
+    def confirm_permission_request(
+        self,
+        *,
+        open_id: str,
+        request_id: str,
+        code: str,
+        updated_by: str = "permission_request",
+    ) -> dict[str, Any]:
+        open_id = str(open_id or "").strip()
+        request_id = str(request_id or "").strip()
+        code = str(code or "").strip()
+        if not open_id or not request_id or not code:
+            raise PortalError("缺少申请编号或验证码。")
+        with self._lock:
+            payload = self._state_store.get_permission_request(request_id)
+            if not isinstance(payload, dict):
+                raise PortalError("权限申请不存在或已失效，请重新申请。")
+            if str(payload.get("open_id") or "").strip() != open_id:
+                raise PortalError("该验证码不属于当前登录账号。")
+            if str(payload.get("status") or "") != "pending":
+                raise PortalError("该权限申请已处理或已失效，请重新申请。")
+            now_ts = time.time()
+            if now_ts >= float(payload.get("expires_at_ts") or 0):
+                payload["status"] = "expired"
+                payload["updated_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                payload["updated_at_ts"] = now_ts
+                self._state_store.put_permission_request(payload)
+                raise PortalError("验证码已过期，请重新申请。")
+            attempts = int(payload.get("attempts") or 0)
+            max_attempts = int(payload.get("max_attempts") or PERMISSION_REQUEST_MAX_ATTEMPTS)
+            if attempts >= max_attempts:
+                payload["status"] = "failed"
+                payload["updated_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                payload["updated_at_ts"] = now_ts
+                self._state_store.put_permission_request(payload)
+                raise PortalError("验证码错误次数过多，请重新申请。")
+            attempts += 1
+            payload["attempts"] = attempts
+            payload["updated_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            payload["updated_at_ts"] = now_ts
+            expected = str(payload.get("code_hash") or "")
+            actual = self._permission_code_hash(code, str(payload.get("code_salt") or ""))
+            if not hmac.compare_digest(expected, actual):
+                if attempts >= max_attempts:
+                    payload["status"] = "failed"
+                    self._state_store.put_permission_request(payload)
+                    raise PortalError("验证码错误次数过多，请重新申请。")
+                self._state_store.put_permission_request(payload)
+                raise PortalError(f"验证码错误，还可尝试 {max_attempts - attempts} 次。")
+            requested_scopes = self._permission_request_scopes_from_raw(
+                payload.get("requested_scopes")
+            )
+            if not requested_scopes:
+                payload["status"] = "failed"
+                self._state_store.put_permission_request(payload)
+                raise PortalError("申请楼栋为空，请重新申请。")
+            payload["status"] = "approved"
+            payload["approved_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            payload["approved_at_ts"] = now_ts
+            self._state_store.put_permission_request(payload)
+            return self.upsert_permission_user(
+                open_id=open_id,
+                name=str(payload.get("name") or open_id),
+                role="building",
+                scopes=requested_scopes,
+                enabled=True,
+                updated_by=updated_by,
+            )
 
     def is_admin(self, session: dict[str, Any] | None) -> bool:
         if not isinstance(session, dict):

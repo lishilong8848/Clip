@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import tempfile
 import time
@@ -43,6 +44,10 @@ FEISHU_ERROR_SUGGESTIONS = {
     99991664: "Token 已过期，正在自动刷新",
     99991665: "Token 已过期，正在自动刷新",
 }
+
+
+def _info_logging_enabled() -> bool:
+    return logging.getLogger().isEnabledFor(logging.INFO)
 
 
 def _is_token_error(response) -> bool:
@@ -199,6 +204,8 @@ def _extract_status_from_fields(fields: dict) -> str:
 def _log_record_action(
     action: str, notice_type: str, record_id: str, fields: dict, text: str
 ) -> None:
+    if not _info_logging_enabled():
+        return
     status = _extract_status_from_fields(fields)
     payload = {
         "action": action,
@@ -446,6 +453,7 @@ def create_bitable_record(
     response_time=None,
     occurrence_date=None,
     recover=False,
+    maintenance_cycle=None,
 ):
     """
     创建多维表格记录
@@ -471,9 +479,11 @@ def create_bitable_record(
         response_time=response_time,
         occurrence_date=occurrence_date,
         recover=recover,
+        maintenance_cycle=maintenance_cycle,
     )
     fields = handler.build_create_fields(payload)
-    log_info(f"Creating record({notice_type}) with fields: {fields}")
+    if _info_logging_enabled():
+        log_info(f"Creating record({notice_type}) with fields: {fields}")
 
     client = _build_client()
     request = (
@@ -516,7 +526,8 @@ def create_bitable_record_by_payload(notice_type: str, payload: NoticePayload):
         return False, err
 
     fields = handler.build_create_fields(payload)
-    log_info(f"Creating record({notice_type}) with fields: {fields}")
+    if _info_logging_enabled():
+        log_info(f"Creating record({notice_type}) with fields: {fields}")
 
     client = _build_client()
     request = (
@@ -643,6 +654,7 @@ def update_bitable_record(
     existing_response_time="",
     level=None,
     recover=False,
+    maintenance_cycle=None,
 ):
     """
     更新多维表格记录
@@ -670,9 +682,11 @@ def update_bitable_record(
         response_time=response_time,
         existing_response_time=existing_response_time,
         recover=recover,
+        maintenance_cycle=maintenance_cycle,
     )
     fields = handler.build_update_fields(payload)
-    log_info(f"Updating record({notice_type}) {record_id} with fields: {fields}")
+    if _info_logging_enabled():
+        log_info(f"Updating record({notice_type}) {record_id} with fields: {fields}")
 
     client = _build_client()
     request = (
@@ -716,7 +730,8 @@ def update_bitable_record_by_payload(record_id: str, notice_type: str, payload: 
         return False, err
 
     fields = handler.build_update_fields(payload)
-    log_info(f"Updating record({notice_type}) {record_id} with fields: {fields}")
+    if _info_logging_enabled():
+        log_info(f"Updating record({notice_type}) {record_id} with fields: {fields}")
 
     client = _build_client()
     request = (
@@ -763,7 +778,8 @@ def update_bitable_record_fields(record_id: str, notice_type: str, fields: dict)
     if err:
         return False, err
 
-    log_info(f"Updating record fields({notice_type}) {record_id} with fields: {fields}")
+    if _info_logging_enabled():
+        log_info(f"Updating record fields({notice_type}) {record_id} with fields: {fields}")
 
     client = _build_client()
     request = (

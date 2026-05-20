@@ -287,7 +287,7 @@ def setup_logging():
     )
     console_handler = SafeConsoleHandler(console_stream)
     logging.basicConfig(
-        level=logging.DEBUG,
+        level=logging.ERROR,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         handlers=[file_handler, console_handler],
         force=True,
@@ -381,11 +381,13 @@ def handle_exception(exc_type, exc_value, exc_traceback):
 
 
 def log_info(message):
-    logging.info(message)
+    if logging.getLogger().isEnabledFor(logging.INFO):
+        logging.info(message)
 
 
 def log_warning(message):
-    logging.warning(message)
+    if logging.getLogger().isEnabledFor(logging.WARNING):
+        logging.warning(message)
 
 
 def log_error(message, exc_info=False):

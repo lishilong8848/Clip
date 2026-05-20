@@ -109,6 +109,32 @@
       margin-top: 10px;
     }
 
+    .permission-request-box {
+      display: grid;
+      gap: 10px;
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px solid var(--line);
+    }
+
+    .permission-request-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 14px;
+      color: var(--ink);
+      font-size: 13px;
+    }
+
+    .permission-request-grid label {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      margin: 0;
+      color: var(--ink);
+      font-size: 13px;
+      font-weight: 700;
+    }
+
     .auth-user {
       display: flex;
       align-items: center;
@@ -197,6 +223,42 @@
       display: grid;
       grid-template-columns: repeat(2, minmax(220px, 1fr));
       gap: 10px;
+    }
+
+    .permission-list {
+      display: grid;
+      gap: 10px;
+      margin-top: 10px;
+    }
+
+    .permission-card {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #fff;
+      padding: 10px;
+    }
+
+    .permission-grid {
+      display: grid;
+      grid-template-columns: minmax(220px, 1.25fr) minmax(140px, 0.8fr) minmax(120px, 0.6fr);
+      gap: 10px;
+      align-items: end;
+    }
+
+    .scope-checks {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px 12px;
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .scope-checks label,
+    .inline-check {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
     }
 
     .app {
@@ -1007,6 +1069,7 @@
       .scope-grid { grid-template-columns: 1fr; }
       .feature-grid { grid-template-columns: 1fr; }
       .link-settings { grid-template-columns: 1fr; }
+      .permission-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -1022,6 +1085,7 @@
       <div id="featureGrid" class="feature-grid"></div>
       <div id="scopeGrid" class="scope-grid hidden"></div>
       <div id="handoverSettings" class="settings-panel hidden"></div>
+      <div id="permissionSettings" class="settings-panel hidden"></div>
       <div id="gateActions" class="gate-actions"></div>
     </div>
   </section>
@@ -1085,7 +1149,7 @@
               <div id="workTypeHint" class="inline-hint hidden"></div>
             </div>
             <div>
-              <label for="monthSelect">计划维护月份</label>
+              <label for="monthSelect">显示月份</label>
               <select id="monthSelect"></select>
             </div>
             <div>
@@ -1220,6 +1284,26 @@
         resetMessage: "",
       },
       handoverSettingsOpen: false,
+      permissions: {
+        users: [],
+        scopeOptions: [],
+        updatedAt: "",
+        message: "",
+        loaded: false,
+        loading: false,
+        saving: false,
+      },
+      permissionRequest: {
+        request: null,
+        requestedScopes: [],
+        reason: "",
+        code: "",
+        message: "",
+        error: "",
+        loading: false,
+        submitting: false,
+        confirming: false,
+      },
       scopeOverview: {},
       preloadedWorkbenches: {},
       lastLoadedAt: "",
@@ -1233,10 +1317,19 @@
       actionOps: new Map(),
       jobToOpKey: new Map(),
       polling: new Set(),
+      refreshDebounceTimerId: 0,
+      draftSaveTimerId: 0,
+      draftSaveScope: "",
+      viewRequestSeq: 0,
+      deferredWorkbenchPayload: null,
+      deferredWorkbenchTimerId: 0,
       activeDraftKey: "",
+      bulkSending: false,
+      bulkTotal: 0,
+      bulkDone: 0,
       autoRefresh: {
         timerId: 0,
-        intervalMs: 3 * 60 * 1000,
+        intervalMs: 5 * 60 * 1000,
         nextDelayMs: 0,
         inFlight: false,
         lastAutoAt: "",
@@ -1268,10 +1361,12 @@
     ];
     const JOB_STATE_TTL_MS = 24 * 60 * 60 * 1000;
     const JOB_STATE_LIMIT = 80;
-    const AUTO_REFRESH_DEFAULT_MS = 3 * 60 * 1000;
-    const AUTO_REFRESH_MIN_MS = 2 * 60 * 1000;
-    const AUTO_REFRESH_MAX_MS = 10 * 60 * 1000;
-    const AUTO_REFRESH_JITTER_MS = 45 * 1000;
+    const AUTO_REFRESH_DEFAULT_MS = 5 * 60 * 1000;
+    const AUTO_REFRESH_MIN_MS = 5 * 60 * 1000;
+    const AUTO_REFRESH_MAX_MS = 15 * 60 * 1000;
+    const AUTO_REFRESH_JITTER_MS = 90 * 1000;
+    const DRAFT_SAVE_DEBOUNCE_MS = 450;
+    const DEFERRED_REFRESH_RETRY_MS = 900;
     const WORKSPACE_LAYOUT_KEY = "lan-workbench-layout:v1";
     const WORKSPACE_MIN_WIDTHS = { records: 300, drafts: 360, ongoing: 320 };
     let normalizeWorkspaceLayout = () => {};
@@ -1310,25 +1405,53 @@
     const isManualDraftKey = (key) => String(key || "").startsWith(MANUAL_DRAFT_PREFIX);
     const manualDraftKey = (type) => `${MANUAL_DRAFT_PREFIX}${type || "maintenance"}:${opId()}`;
     const recordKey = (record) => record?.manual_key || `${record.work_type || "maintenance"}:${record.record_id}`;
-    const storageKey = () => `lan-workbench:${state.scope || "ALL"}`;
+    const storageKeyForScope = (scope) => `lan-workbench:${scope || "ALL"}`;
+    const storageKey = () => storageKeyForScope(state.scope || "ALL");
     const jobStorageKey = () => `lan-workbench-jobs:${state.scope || "ALL"}`;
     const safeJsonParse = (value, fallback) => {
       try { return JSON.parse(value); } catch { return fallback; }
     };
 
     function loadDraftState() {
+      flushDraftState();
       const saved = safeJsonParse(localStorage.getItem(storageKey()) || "{}", {});
       state.selected = new Set(Array.isArray(saved.selected) ? saved.selected : []);
       state.drafts = new Map(Object.entries(saved.drafts || {}));
     }
 
-    function saveDraftState() {
+    function persistDraftState() {
+      if (state.draftSaveTimerId) {
+        clearTimeout(state.draftSaveTimerId);
+        state.draftSaveTimerId = 0;
+      }
       const drafts = {};
       for (const [key, value] of state.drafts.entries()) drafts[key] = value;
-      localStorage.setItem(storageKey(), JSON.stringify({
-        selected: Array.from(state.selected),
-        drafts,
-      }));
+      const targetScope = state.draftSaveScope || state.scope || "ALL";
+      try {
+        localStorage.setItem(storageKeyForScope(targetScope), JSON.stringify({
+          selected: Array.from(state.selected),
+          drafts,
+        }));
+      } catch (err) {
+        setSyncStatus("浏览器本地草稿保存失败，请减少草稿数量或检查浏览器存储权限", state.warnings);
+      } finally {
+        state.draftSaveScope = "";
+      }
+    }
+
+    function scheduleDraftStateSave() {
+      if (state.draftSaveTimerId) clearTimeout(state.draftSaveTimerId);
+      if (!state.draftSaveScope) state.draftSaveScope = state.scope || "ALL";
+      state.draftSaveTimerId = window.setTimeout(persistDraftState, DRAFT_SAVE_DEBOUNCE_MS);
+    }
+
+    function flushDraftState() {
+      if (state.draftSaveTimerId) persistDraftState();
+    }
+
+    function saveDraftState(options = {}) {
+      if (options.defer) scheduleDraftStateSave();
+      else persistDraftState();
     }
 
     function loadJobState() {
@@ -1360,7 +1483,10 @@
         .slice(0, JOB_STATE_LIMIT);
       state.jobStates = new Map(entries);
       for (const [key, value] of entries) jobs[key] = value;
-      localStorage.setItem(jobStorageKey(), JSON.stringify({ jobs }));
+      try {
+        localStorage.setItem(jobStorageKey(), JSON.stringify({ jobs }));
+      } catch {
+      }
     }
 
     function jobLocalKey(payload, lineKey) {
@@ -1457,6 +1583,9 @@
           error: "",
         };
         if (state.auth.scopeOptions.length) state.scopeOptions = state.auth.scopeOptions;
+        if (state.auth.loggedIn && !state.auth.scopeOptions.length) {
+          await loadCurrentPermissionRequest();
+        }
       } catch (err) {
         state.auth = {
           ...state.auth,
@@ -1489,6 +1618,45 @@
       };
       if (state.auth.scopeOptions.length) state.scopeOptions = state.auth.scopeOptions;
       updateUserChrome();
+    }
+
+    async function loadCurrentPermissionRequest() {
+      if (!state.auth.loggedIn) return;
+      state.permissionRequest.loading = true;
+      try {
+        const data = await api("/api/auth/permission-requests/current");
+        updateAuthFromPayload(data);
+        state.permissionRequest.request = data.request || null;
+        if (data.request) {
+          state.permissionRequest.requestedScopes = Array.isArray(data.request.requested_scopes)
+            ? data.request.requested_scopes
+            : [];
+          state.permissionRequest.reason = data.request.reason || state.permissionRequest.reason || "";
+        }
+        state.permissionRequest.error = "";
+      } catch (err) {
+        state.permissionRequest.error = err.message || "权限申请状态读取失败";
+      } finally {
+        state.permissionRequest.loading = false;
+      }
+    }
+
+    function permissionRequestScopeOptions() {
+      const fallbackOptions = [
+        { value: "110", label: "110站" },
+        { value: "A", label: "A楼" },
+        { value: "B", label: "B楼" },
+        { value: "C", label: "C楼" },
+        { value: "D", label: "D楼" },
+        { value: "E", label: "E楼" },
+        { value: "H", label: "H楼" },
+        { value: "CAMPUS", label: "园区" },
+      ];
+      const source = (state.scopeOptions || []).length ? state.scopeOptions : fallbackOptions;
+      return source.filter((item) => {
+        const scope = normalizeScopeValue(item.value, "");
+        return scope && scope !== "ALL";
+      });
     }
 
     function updateUserChrome() {
@@ -1524,6 +1692,23 @@
         const btn = $(id);
         if (btn) btn.disabled = state.loading.active;
       });
+    }
+
+    function nextViewRequestSeq() {
+      state.viewRequestSeq += 1;
+      return state.viewRequestSeq;
+    }
+
+    function isLatestViewRequest(seq) {
+      return seq === state.viewRequestSeq;
+    }
+
+    function isEditingWorkbenchField() {
+      const el = document.activeElement;
+      if (!el || !el.closest) return false;
+      if (!$("app") || $("app").classList.contains("hidden")) return false;
+      if (!el.closest("#workspace")) return false;
+      return ["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName);
     }
 
     function formatRefreshInterval(ms) {
@@ -1580,7 +1765,7 @@
         updateAutoRefreshPill();
         return;
       }
-      if (document.visibilityState === "hidden" || state.autoRefresh.inFlight) {
+      if (document.visibilityState === "hidden" || state.autoRefresh.inFlight || state.loading.active) {
         startAutoRefresh();
         return;
       }
@@ -1632,7 +1817,7 @@
     }
 
     function fieldsOf(record) {
-      return record.display_fields || {};
+      return record?.display_fields || {};
     }
 
     function sourceProgressForRecord(record) {
@@ -1718,6 +1903,24 @@
     function findZhihangRecord(recordId) {
       recordId = String(recordId || "");
       return state.zhihangRecords.find((item) => String(item.record_id || "") === recordId) || null;
+    }
+
+    function findSourceRecord(recordId, workType = "") {
+      recordId = String(recordId || "").trim();
+      workType = String(workType || "").trim();
+      if (!recordId) return null;
+      return state.records.find((item) => {
+        const itemType = item.work_type || "maintenance";
+        if (workType && itemType !== workType) return false;
+        return [item.record_id, item.source_record_id].some((value) => String(value || "").trim() === recordId);
+      }) || null;
+    }
+
+    function maintenanceCycleForItem(item) {
+      const direct = String(item?.maintenance_cycle || "").trim();
+      if (direct) return direct;
+      const source = findSourceRecord(item?.source_record_id || item?.record_id, "maintenance");
+      return String(fieldsOf(source)["维护周期"] || "").trim();
     }
 
     function specialtyForRecord(record) {
@@ -2162,10 +2365,23 @@
       });
     }
 
+    function updateBulkSendButton() {
+      const btn = $("sendAllStartBtn");
+      if (!btn) return;
+      if (state.bulkSending) {
+        btn.disabled = true;
+        btn.textContent = `正在加入队列 ${state.bulkDone}/${state.bulkTotal}`;
+        return;
+      }
+      btn.disabled = state.selected.size === 0;
+      btn.textContent = "一键发送全部开始通报并上传";
+    }
+
     function renderGate() {
       if (!state.auth.loaded || !hasPortalAccess()) return renderAuthGate();
       if (state.gateMode === "maintenance") return renderMaintenanceGate();
       if (state.gateMode === "handover") return renderHandoverGate();
+      if (state.gateMode === "permissions") return renderPermissionsGate();
       return renderFeatureGate();
     }
 
@@ -2175,6 +2391,7 @@
       $("featureGrid").classList.add("hidden");
       $("scopeGrid").classList.add("hidden");
       $("handoverSettings").classList.add("hidden");
+      $("permissionSettings").classList.add("hidden");
       $("gateActions").innerHTML = "";
       const panel = $("authPanel");
       panel.classList.remove("hidden");
@@ -2194,11 +2411,14 @@
         const user = state.auth.user || {};
         panel.innerHTML = `
           <strong>当前账号暂无门户权限</strong><br>
-          已登录：${html(user.name || user.open_id || "飞书用户")}。请管理员在权限设置中为该 open_id 配置可访问楼栋。
+          已登录：${html(user.name || user.open_id || "飞书用户")}
+          ${user.open_id ? `<div class="job-line">openid：${html(user.open_id)}</div>` : ""}
+          ${permissionRequestPanelHtml()}
           <div class="row-actions">
             <button class="btn ghost" data-auth-logout>退出登录</button>
           </div>
         `;
+        bindPermissionRequestEvents();
       } else {
         panel.innerHTML = `
           <strong>飞书扫码登录</strong><br>
@@ -2214,6 +2434,162 @@
         window.location.href = state.auth.loginUrl || "/api/auth/login";
       });
       document.querySelector("[data-auth-logout]")?.addEventListener("click", logout);
+    }
+
+    function permissionRequestPanelHtml() {
+      const reqState = state.permissionRequest;
+      const request = reqState.request || null;
+      const selected = new Set(
+        reqState.requestedScopes.length
+          ? reqState.requestedScopes
+          : (request?.requested_scopes || [])
+      );
+      const scopeOptions = permissionRequestScopeOptions();
+      const scopeChecks = scopeOptions.map((item) => {
+        const scope = normalizeScopeValue(item.value, "");
+        return `
+          <label>
+            <input type="checkbox" data-permission-request-scope="${html(scope)}" ${selected.has(scope) ? "checked" : ""} />
+            ${html(item.label || scope)}
+          </label>
+        `;
+      }).join("");
+      const requestLine = request ? `
+        <div class="job-line success">
+          申请已发送给管理员，有效期至：${html(request.expires_at || "-")}；
+          剩余尝试 ${html(String(request.remaining_attempts ?? "-"))} 次。
+        </div>
+      ` : "";
+      const messageLine = reqState.message
+        ? `<div class="job-line success">${html(reqState.message)}</div>`
+        : "";
+      const errorLine = reqState.error
+        ? `<div class="job-line failed">${html(reqState.error)}</div>`
+        : "";
+      return `
+        <div class="permission-request-box">
+          <div>
+            <label>申请楼栋权限</label>
+            <div class="permission-request-grid">
+              ${scopeChecks || `<span class="muted">暂无可申请范围</span>`}
+            </div>
+          </div>
+          <div>
+            <label for="permissionRequestReason">申请原因</label>
+            <textarea id="permissionRequestReason" placeholder="例如：负责 A 楼值班，需要查看和处理通告">${html(reqState.reason || request?.reason || "")}</textarea>
+          </div>
+          <div class="row-actions">
+            <button class="btn primary" data-submit-permission-request ${reqState.submitting ? "disabled" : ""}>
+              ${request ? "重新申请并发送新验证码" : "申请权限"}
+            </button>
+            ${request ? `
+              <input id="permissionRequestCode" inputmode="numeric" autocomplete="one-time-code" placeholder="输入管理员提供的验证码" value="${html(reqState.code || "")}" />
+              <button class="btn blue" data-confirm-permission-request ${reqState.confirming ? "disabled" : ""}>确认开通</button>
+            ` : ""}
+          </div>
+          ${requestLine}
+          ${messageLine}
+          ${errorLine}
+        </div>
+      `;
+    }
+
+    function bindPermissionRequestEvents() {
+      document.querySelectorAll("[data-permission-request-scope]").forEach((checkbox) => {
+        checkbox.addEventListener("change", () => {
+          const scopes = [];
+          document.querySelectorAll("[data-permission-request-scope]").forEach((item) => {
+            if (item.checked) scopes.push(normalizeScopeValue(item.dataset.permissionRequestScope, ""));
+          });
+          state.permissionRequest.requestedScopes = scopes.filter(Boolean);
+          state.permissionRequest.error = "";
+        });
+      });
+      $("permissionRequestReason")?.addEventListener("input", (event) => {
+        state.permissionRequest.reason = event.target.value || "";
+      });
+      $("permissionRequestCode")?.addEventListener("input", (event) => {
+        state.permissionRequest.code = event.target.value || "";
+      });
+      document.querySelector("[data-submit-permission-request]")?.addEventListener("click", submitPermissionRequest);
+      document.querySelector("[data-confirm-permission-request]")?.addEventListener("click", confirmPermissionRequest);
+    }
+
+    async function submitPermissionRequest() {
+      const scopes = state.permissionRequest.requestedScopes.slice();
+      state.permissionRequest.submitting = true;
+      state.permissionRequest.message = "正在发送申请给管理员";
+      state.permissionRequest.error = "";
+      renderGate();
+      try {
+        const data = await api("/api/auth/permission-requests", {
+          method: "POST",
+          body: JSON.stringify({
+            scopes,
+            reason: state.permissionRequest.reason || "",
+          }),
+        });
+        updateAuthFromPayload(data);
+        state.permissionRequest.request = data.request || null;
+        state.permissionRequest.code = "";
+        state.permissionRequest.message = "申请已发送，请向管理员获取验证码。";
+      } catch (err) {
+        state.permissionRequest.error = err.message || "权限申请提交失败";
+        state.permissionRequest.message = "";
+      } finally {
+        state.permissionRequest.submitting = false;
+        renderGate();
+      }
+    }
+
+    async function confirmPermissionRequest() {
+      const request = state.permissionRequest.request;
+      if (!request?.request_id) {
+        state.permissionRequest.error = "请先提交权限申请。";
+        renderGate();
+        return;
+      }
+      state.permissionRequest.confirming = true;
+      state.permissionRequest.message = "正在确认验证码";
+      state.permissionRequest.error = "";
+      renderGate();
+      let enteredWorkbench = false;
+      try {
+        const data = await api("/api/auth/permission-requests/confirm", {
+          method: "POST",
+          body: JSON.stringify({
+            request_id: request.request_id,
+            code: state.permissionRequest.code || "",
+          }),
+        });
+        updateAuthFromPayload(data);
+        state.permissionRequest = {
+          request: null,
+          requestedScopes: [],
+          reason: "",
+          code: "",
+          message: "",
+          error: "",
+          loading: false,
+          submitting: false,
+          confirming: false,
+        };
+        if (hasPortalAccess()) {
+          state.scopeOptions = state.auth.scopeOptions;
+          const nextScope = state.auth.defaultScope || normalizeScopeValue(state.scopeOptions[0]?.value, "");
+          if (nextScope) {
+            await selectScope(nextScope, { replace: true });
+            enteredWorkbench = true;
+            return;
+          }
+        }
+      } catch (err) {
+        state.permissionRequest.error = err.message || "验证码确认失败";
+        state.permissionRequest.message = "";
+      } finally {
+        state.permissionRequest.confirming = false;
+        if (!enteredWorkbench) renderGate();
+      }
     }
 
     function renderFeatureGate() {
@@ -2232,6 +2608,8 @@
       $("featureGrid").classList.remove("hidden");
       $("scopeGrid").classList.add("hidden");
       $("handoverSettings").classList.add("hidden");
+      $("permissionSettings").classList.add("hidden");
+      const canManagePermissions = (state.auth.user || {}).role === "admin";
       $("featureGrid").innerHTML = `
         <button class="feature-btn" data-feature="handover">
           <strong>各楼交接班相关</strong>
@@ -2241,6 +2619,12 @@
           <strong>维保变更检修相关</strong>
           <span>进入楼栋工作台，处理当天、待发起和未结束的维保、变更、检修通告。</span>
         </button>
+        ${canManagePermissions ? `
+          <button class="feature-btn" data-feature="permissions">
+            <strong>门户权限管理</strong>
+            <span>按 open_id 添加管理员或用户，并配置可查看楼栋范围。</span>
+          </button>
+        ` : ""}
       `;
       $("scopeGrid").innerHTML = "";
       $("gateActions").innerHTML = "";
@@ -2257,6 +2641,7 @@
       $("featureGrid").classList.add("hidden");
       $("scopeGrid").classList.remove("hidden");
       $("handoverSettings").classList.add("hidden");
+      $("permissionSettings").classList.add("hidden");
       $("scopeGrid").innerHTML = state.scopeOptions.map((item) => {
         const itemScope = normalizeScopeValue(item.value, "ALL");
         return `
@@ -2280,6 +2665,7 @@
       $("authPanel").classList.add("hidden");
       $("featureGrid").classList.add("hidden");
       $("scopeGrid").classList.remove("hidden");
+      $("permissionSettings").classList.add("hidden");
       const options = state.handover.scopeOptions.length
         ? state.handover.scopeOptions
         : state.scopeOptions.filter((item) => !["CAMPUS", "ALL"].includes(normalizeScopeValue(item.value, "")));
@@ -2412,6 +2798,189 @@
       });
     }
 
+    function renderPermissionsGate() {
+      $("gateTitle").textContent = "门户权限管理";
+      $("gateDesc").textContent = "按 open_id 配置管理员和用户可查看的楼栋范围。";
+      $("authPanel").classList.add("hidden");
+      $("featureGrid").classList.add("hidden");
+      $("scopeGrid").classList.add("hidden");
+      $("handoverSettings").classList.add("hidden");
+      const panel = $("permissionSettings");
+      panel.classList.remove("hidden");
+      $("gateActions").innerHTML = `<button class="btn ghost" data-back-home>返回功能选择</button>`;
+      document.querySelector("[data-back-home]")?.addEventListener("click", () => showGate("home"));
+      if ((state.auth.user || {}).role !== "admin") {
+        panel.innerHTML = `<div class="empty">只有管理员可以管理门户权限。</div>`;
+        return;
+      }
+      if (!state.permissions.loaded && !state.permissions.loading) {
+        loadPermissions().catch(() => {});
+      }
+      if (state.permissions.loading && !state.permissions.loaded) {
+        panel.innerHTML = `<div class="job-line busy">正在加载权限配置</div>`;
+        return;
+      }
+      const scopeOptions = (state.permissions.scopeOptions.length ? state.permissions.scopeOptions : state.scopeOptions)
+        .filter((item) => normalizeScopeValue(item.value, "") !== "ALL");
+      panel.innerHTML = `
+        <div class="record-title">
+          <span>用户权限</span>
+          <span class="tag blue">${html(state.permissions.updatedAt || "未保存")}</span>
+        </div>
+        <div class="job-line">管理员自动拥有全部权限。普通用户只允许进入已勾选楼栋、园区或全部范围。保存后会向变更的 open_id 发送飞书个人消息。</div>
+        <div class="permission-list">
+          ${state.permissions.users.map((user, index) => permissionCardHtml(user, index, scopeOptions)).join("") || `<div class="empty">暂无用户，请添加 open_id。</div>`}
+        </div>
+        <div class="row-actions" style="margin-top:12px">
+          <button class="btn blue" data-add-permission-user>添加用户</button>
+          <button class="btn primary" data-save-permissions ${state.permissions.saving ? "disabled" : ""}>保存权限配置</button>
+        </div>
+        <div id="permissionLine" class="job-line ${state.permissions.message ? "success" : ""}">${html(state.permissions.message || "请确认 open_id 填写正确。")}</div>
+      `;
+      bindPermissionEvents(scopeOptions);
+    }
+
+    function permissionCardHtml(user, index, scopeOptions) {
+      const role = user.role === "admin" ? "admin" : "building";
+      const locked = Boolean(user.locked);
+      const scopes = new Set(Array.isArray(user.scopes) ? user.scopes.map((x) => normalizeScopeValue(x, "")) : []);
+      const disabledScopes = role === "admin" || user.enabled === false;
+      return `
+        <div class="permission-card" data-permission-index="${index}">
+          <div class="permission-grid">
+            <div>
+              <label>open_id</label>
+              <input data-permission-field="open_id" value="${html(user.open_id || "")}" placeholder="ou_xxx" ${locked ? "readonly" : ""} />
+            </div>
+            <div>
+              <label>姓名/备注</label>
+              <input data-permission-field="name" value="${html(user.name || "")}" placeholder="例如：A楼值班" />
+            </div>
+            <div>
+              <label>身份</label>
+              <select data-permission-field="role" ${locked ? "disabled" : ""}>
+                <option value="building" ${role === "building" ? "selected" : ""}>用户</option>
+                <option value="admin" ${role === "admin" ? "selected" : ""}>管理员</option>
+              </select>
+            </div>
+          </div>
+          <div class="scope-checks">
+            <label class="inline-check">
+              <input type="checkbox" data-permission-field="enabled" ${user.enabled === false ? "" : "checked"} ${locked ? "disabled" : ""} />
+              启用
+            </label>
+            ${scopeOptions.map((item) => {
+              const scope = normalizeScopeValue(item.value, "");
+              return `
+                <label>
+                  <input type="checkbox" data-permission-scope="${html(scope)}" ${scopes.has(scope) ? "checked" : ""} ${disabledScopes ? "disabled" : ""} />
+                  ${html(item.label)}
+                </label>
+              `;
+            }).join("")}
+          </div>
+          <div class="row-actions" style="margin-top:10px">
+            ${locked ? `<span class="tag green">固定管理员</span>` : `<button class="btn danger" data-remove-permission-user="${index}">删除</button>`}
+          </div>
+        </div>
+      `;
+    }
+
+    function bindPermissionEvents(scopeOptions) {
+      document.querySelectorAll("[data-permission-index]").forEach((card) => {
+        const index = Number(card.dataset.permissionIndex || -1);
+        const user = state.permissions.users[index];
+        if (!user) return;
+        card.querySelectorAll("[data-permission-field]").forEach((field) => {
+          field.addEventListener("change", () => {
+            const key = field.dataset.permissionField;
+            if (key === "enabled") user.enabled = field.checked;
+            else user[key] = field.value || "";
+            if (key === "role" && user.role === "admin") {
+              user.scopes = ["ALL", "CAMPUS", "110", "A", "B", "C", "D", "E", "H"];
+            }
+            state.permissions.message = "";
+            renderPermissionsGate();
+          });
+        });
+        card.querySelectorAll("[data-permission-scope]").forEach((checkbox) => {
+          checkbox.addEventListener("change", () => {
+            const scope = normalizeScopeValue(checkbox.dataset.permissionScope, "");
+            const scopes = new Set(Array.isArray(user.scopes) ? user.scopes.map((x) => normalizeScopeValue(x, "")) : []);
+            if (checkbox.checked) scopes.add(scope);
+            else scopes.delete(scope);
+            user.scopes = [...scopes].filter(Boolean);
+            state.permissions.message = "";
+          });
+        });
+      });
+      document.querySelector("[data-add-permission-user]")?.addEventListener("click", () => {
+        state.permissions.users.push({
+          open_id: "",
+          name: "",
+          role: "building",
+          scopes: [],
+          enabled: true,
+          locked: false,
+        });
+        state.permissions.message = "";
+        renderPermissionsGate();
+      });
+      document.querySelectorAll("[data-remove-permission-user]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const index = Number(btn.dataset.removePermissionUser || -1);
+          if (index >= 0) state.permissions.users.splice(index, 1);
+          state.permissions.message = "";
+          renderPermissionsGate();
+        });
+      });
+      document.querySelector("[data-save-permissions]")?.addEventListener("click", savePermissions);
+    }
+
+    async function loadPermissions() {
+      state.permissions.loading = true;
+      renderPermissionsGate();
+      try {
+        const data = await api("/api/auth/permissions");
+        updateAuthFromPayload(data);
+        state.permissions.users = Array.isArray(data.users) ? data.users : [];
+        state.permissions.scopeOptions = Array.isArray(data.scope_options) ? data.scope_options : [];
+        state.permissions.updatedAt = data.updated_at || "";
+        state.permissions.loaded = true;
+        state.permissions.message = "";
+      } catch (err) {
+        state.permissions.message = err.message || "权限配置加载失败";
+        state.permissions.loaded = true;
+      } finally {
+        state.permissions.loading = false;
+        renderPermissionsGate();
+      }
+    }
+
+    async function savePermissions() {
+      state.permissions.saving = true;
+      state.permissions.message = "正在保存权限配置";
+      renderPermissionsGate();
+      try {
+        const data = await api("/api/auth/permissions", {
+          method: "POST",
+          body: JSON.stringify({ users: state.permissions.users }),
+        });
+        updateAuthFromPayload(data);
+        state.permissions.users = Array.isArray(data.users) ? data.users : [];
+        state.permissions.scopeOptions = Array.isArray(data.scope_options) ? data.scope_options : state.permissions.scopeOptions;
+        state.permissions.updatedAt = data.updated_at || "";
+        const notice = data.notification || {};
+        state.permissions.message = `已保存。通知 ${notice.recipients_count || 0} 人：${notice.message || "-"}`;
+        state.permissions.loaded = true;
+      } catch (err) {
+        state.permissions.message = err.message || "保存失败";
+      } finally {
+        state.permissions.saving = false;
+        renderPermissionsGate();
+      }
+    }
+
     async function authenticateHandoverSettings() {
       const password = $("handoverSettingsPassword")?.value || "";
       const line = $("handoverAuthLine");
@@ -2496,7 +3065,7 @@
 
     function showGate(mode, { replace = false } = {}) {
       stopAutoRefresh();
-      state.gateMode = ["maintenance", "handover"].includes(mode) ? mode : "home";
+      state.gateMode = ["maintenance", "handover", "permissions"].includes(mode) ? mode : "home";
       state.scope = "";
       const url = stripTransientUrlParams(new URL(window.location.href));
       url.searchParams.delete("scope");
@@ -2574,7 +3143,7 @@
       updateAuthFromPayload(data);
       state.scopeOptions = data.scope_options || state.scopeOptions;
       state.scopeOverview = data.scopes || {};
-      state.preloadedWorkbenches = data.prepared_workbenches || {};
+      state.preloadedWorkbenches = {};
       state.lastLoadedAt = data.last_loaded_at || state.lastLoadedAt;
       updateAutoRefreshInterval(data);
       state.warnings = data.warnings || [];
@@ -2620,6 +3189,12 @@
     }
 
     function clearWorkbenchViewForScope(scope) {
+      flushDraftState();
+      state.deferredWorkbenchPayload = null;
+      if (state.deferredWorkbenchTimerId) {
+        clearTimeout(state.deferredWorkbenchTimerId);
+        state.deferredWorkbenchTimerId = 0;
+      }
       state.records = [];
       state.zhihangRecords = [];
       state.ongoing = [];
@@ -2661,8 +3236,6 @@
       cleanupDraftState();
       render();
       restoreJobState();
-      const payloadScope = normalizeScopeValue(data.scope || state.scope || "", "");
-      if (payloadScope) state.preloadedWorkbenches[payloadScope] = data;
     }
 
     async function saveHandoverLinks() {
@@ -2714,13 +3287,6 @@
       $("app").classList.remove("hidden");
       const selectedScope = state.scope;
       clearWorkbenchViewForScope(selectedScope);
-      const prepared = state.preloadedWorkbenches[selectedScope];
-      if (prepared) {
-        applyBootstrapPayload(prepared, { fromPreload: true });
-        startAutoRefresh();
-        refreshWorkbench({ automatic: true }).catch(() => {});
-        return;
-      }
       try {
         await loadBootstrap();
       } catch (err) {
@@ -2730,14 +3296,16 @@
 
     async function loadBootstrap() {
       const requestScope = normalizeScopeValue(state.scope || "ALL", "ALL");
+      const requestSeq = nextViewRequestSeq();
       setLoadingState(true, `正在加载${scopeLabel(requestScope)}数据`);
       try {
         const data = await api(`/api/bootstrap?scope=${encodeURIComponent(requestScope)}`);
+        if (!isLatestViewRequest(requestSeq)) return;
         if (normalizeScopeValue(state.scope || "ALL", "ALL") !== requestScope) return;
         applyBootstrapPayload(data);
         startAutoRefresh();
       } finally {
-        setLoadingState(false);
+        if (isLatestViewRequest(requestSeq)) setLoadingState(false);
       }
     }
 
@@ -2753,8 +3321,71 @@
       }
     }
 
+    function applyWorkbenchPayload(data, { automatic = false, deferred = false } = {}) {
+      updateAuthFromPayload(data);
+      state.records = data.records || [];
+      state.zhihangRecords = data.zhihang_change_records || [];
+      state.ongoing = data.ongoing || [];
+      state.dailySummary = data.daily_summary || { date: "", items: [], stats: {} };
+      state.lastLoadedAt = data.last_loaded_at || state.lastLoadedAt;
+      updateAutoRefreshInterval(data);
+      state.warnings = data.warnings || [];
+      if (data.last_loaded_at) {
+        setSyncStatus(
+          `数据更新时间 ${data.last_loaded_at}${deferred ? "（编辑后已刷新）" : ""}`,
+          state.warnings
+        );
+      } else if (!automatic) {
+        setSyncStatus("已刷新", state.warnings);
+      }
+      cleanupDraftState();
+      render();
+      restoreJobState();
+    }
+
+    function scheduleDeferredWorkbenchApply() {
+      if (state.deferredWorkbenchTimerId) {
+        clearTimeout(state.deferredWorkbenchTimerId);
+      }
+      state.deferredWorkbenchTimerId = window.setTimeout(() => {
+        state.deferredWorkbenchTimerId = 0;
+        flushDeferredWorkbenchPayload();
+      }, DEFERRED_REFRESH_RETRY_MS);
+    }
+
+    function deferWorkbenchPayload(data, requestScope) {
+      state.deferredWorkbenchPayload = {
+        data,
+        requestScope,
+        queuedAt: Date.now(),
+      };
+      setSyncStatus("后台数据已更新，编辑完成后自动刷新页面", state.warnings);
+      scheduleDeferredWorkbenchApply();
+    }
+
+    function flushDeferredWorkbenchPayload({ force = false } = {}) {
+      const pending = state.deferredWorkbenchPayload;
+      if (!pending) return false;
+      if (!force && isEditingWorkbenchField()) {
+        scheduleDeferredWorkbenchApply();
+        return false;
+      }
+      const currentScope = normalizeScopeValue(state.scope || "ALL", "ALL");
+      state.deferredWorkbenchPayload = null;
+      if (state.deferredWorkbenchTimerId) {
+        clearTimeout(state.deferredWorkbenchTimerId);
+        state.deferredWorkbenchTimerId = 0;
+      }
+      if (normalizeScopeValue(pending.requestScope || "ALL", "ALL") !== currentScope) {
+        return false;
+      }
+      applyWorkbenchPayload(pending.data, { automatic: true, deferred: true });
+      return true;
+    }
+
     async function refreshWorkbench({ automatic = false } = {}) {
       const requestScope = normalizeScopeValue(state.scope || "ALL", "ALL");
+      const requestSeq = nextViewRequestSeq();
       const params = new URLSearchParams({
         scope: requestScope,
         month: state.filters.month || "",
@@ -2763,39 +3394,42 @@
       setLoadingState(true, "刷新本页中", { automatic });
       try {
         const data = await api(`/api/workbench?${params}`);
+        if (!isLatestViewRequest(requestSeq)) return;
         if (normalizeScopeValue(state.scope || "ALL", "ALL") !== requestScope) return;
-        updateAuthFromPayload(data);
-        state.records = data.records || [];
-        state.zhihangRecords = data.zhihang_change_records || [];
-        state.ongoing = data.ongoing || [];
-        state.dailySummary = data.daily_summary || { date: "", items: [], stats: {} };
-        state.lastLoadedAt = data.last_loaded_at || state.lastLoadedAt;
-        updateAutoRefreshInterval(data);
-        state.warnings = data.warnings || [];
-        if (data.last_loaded_at) {
-          setSyncStatus(`数据更新时间 ${data.last_loaded_at}`, state.warnings);
-        } else if (!automatic) {
-          setSyncStatus("已刷新", state.warnings);
+        if (automatic && isEditingWorkbenchField()) {
+          deferWorkbenchPayload(data, requestScope);
+          return;
         }
-        cleanupDraftState();
-        render();
-        restoreJobState();
+        applyWorkbenchPayload(data, { automatic });
         if (!automatic) startAutoRefresh();
       } catch (err) {
+        if (!isLatestViewRequest(requestSeq)) return;
         if (!automatic) {
           setSyncStatus(`刷新失败: ${err.message || "未知错误"}`, state.warnings);
         }
         throw err;
       } finally {
-        if (!automatic) setLoadingState(false);
+        if (!automatic && isLatestViewRequest(requestSeq)) setLoadingState(false);
       }
+    }
+
+    function scheduleWorkbenchRefresh(delayMs = 1600) {
+      if (state.refreshDebounceTimerId) {
+        clearTimeout(state.refreshDebounceTimerId);
+      }
+      state.refreshDebounceTimerId = window.setTimeout(() => {
+        state.refreshDebounceTimerId = 0;
+        refreshWorkbench({ automatic: true }).catch(() => {});
+      }, Math.max(300, Number(delayMs || 1600)));
     }
 
     async function syncSource() {
       const requestScope = normalizeScopeValue(state.scope || "ALL", "ALL");
+      const requestSeq = nextViewRequestSeq();
       setLoadingState(true, "同步源表中");
       try {
         const data = await api(`/api/refresh?scope=${encodeURIComponent(requestScope)}`);
+        if (!isLatestViewRequest(requestSeq)) return;
         if (normalizeScopeValue(state.scope || "ALL", "ALL") !== requestScope) return;
         updateAuthFromPayload(data);
         state.scopeOptions = data.scope_options || state.scopeOptions;
@@ -2805,7 +3439,6 @@
         state.dailySummary = data.daily_summary || { date: "", items: [], stats: {} };
         state.defaults = data.defaults || state.defaults;
         state.lastLoadedAt = data.last_loaded_at || "";
-        state.preloadedWorkbenches[requestScope] = data;
         updateAutoRefreshInterval(data);
         state.warnings = data.warnings || [];
         setSyncStatus(data.last_loaded_at ? `数据更新时间 ${data.last_loaded_at}` : "已同步", state.warnings);
@@ -2815,10 +3448,11 @@
         loadScopeOverview();
         startAutoRefresh();
       } catch (err) {
+        if (!isLatestViewRequest(requestSeq)) return;
         setSyncStatus(`同步源表失败: ${err.message || "未知错误"}`, state.warnings);
         throw err;
       } finally {
-        setLoadingState(false);
+        if (isLatestViewRequest(requestSeq)) setLoadingState(false);
       }
     }
 
@@ -2832,6 +3466,7 @@
       const ongoingCounts = ongoingTypeCounts();
       $("recordCount").textContent = `待发起 ${WORK_TYPES.map((item) => `${item.label} ${recordCounts[item.value] || 0}`).join(" / ")}`;
       $("ongoingCount").textContent = `进行中 ${WORK_TYPES.map((item) => `${item.label} ${ongoingCounts[item.value] || 0}`).join(" / ")}`;
+      updateBulkSendButton();
       normalizeWorkspaceLayout();
     }
 
@@ -3474,7 +4109,7 @@
             state.actionOps.delete(`${id}:start`);
             forgetJobsForLine(id);
             setActionButtonsDisabled(id, false);
-            saveDraftState();
+            saveDraftState({ defer: true });
             const line = document.querySelector(`[data-job-line="${CSS.escape(id)}"]`);
             if (line) {
               line.className = "job-line";
@@ -3561,7 +4196,7 @@
             <div class="card-head">
               <div>
                 <h3 class="card-title">${html(item.title || "未命名通告")}</h3>
-                <div class="record-meta">${html([workTypeLabel(item.work_type), item.origin_label, item.building, item.specialty, item.level, timeLabel, item.upload_state, item.zhihang_title ? "智航 " + item.zhihang_title : "", item.source_record_id ? "源ID " + item.source_record_id : "", item.active_item_id ? "本地ID " + item.active_item_id : ""].filter(Boolean).join(" | "))}</div>
+                <div class="record-meta">${html([workTypeLabel(item.work_type), item.origin_label, item.building, item.specialty, (item.work_type || "maintenance") === "maintenance" && maintenanceCycleForItem(item) ? "周期 " + maintenanceCycleForItem(item) : "", item.level, timeLabel, item.upload_state, item.zhihang_title ? "智航 " + item.zhihang_title : "", item.source_record_id ? "源ID " + item.source_record_id : "", item.active_item_id ? "本地ID " + item.active_item_id : ""].filter(Boolean).join(" | "))}</div>
               </div>
               <div class="card-actions">
                 <span class="tag ${item.can_update ? "green" : "amber"}">${html(tagText)}</span>
@@ -3627,7 +4262,7 @@
         source_record_id: item?.source_record_id || "",
         source_app_token: item?.source_app_token || "",
         source_table_id: item?.source_table_id || "",
-        maintenance_cycle: item?.maintenance_cycle || "",
+        maintenance_cycle: maintenanceCycleForItem(item),
         specialty: isRepair
           ? read("specialty", item?.specialty || "")
           : (state.filters.specialty === "全部" ? (item?.specialty || "") : state.filters.specialty),
@@ -3665,9 +4300,15 @@
       const item = state.ongoing.find((x) => x.active_item_id === activeItemId);
       if (!item) return;
       const card = document.querySelector(`[data-ongoing="${CSS.escape(activeItemId)}"]`);
+      const hasRemoteRecord = Boolean(item.record_id || item.target_record_id);
+      const confirmText = [
+        `确认删除“${item.title || "未命名通告"}”？`,
+        hasRemoteRecord ? "此操作会删除对应多维记录并删除 Qt 条目。" : "此操作只删除 Qt 条目和页面显示。",
+        item.record_id || item.target_record_id ? `多维记录：${item.record_id || item.target_record_id}` : "",
+      ].filter(Boolean).join("\n");
+      if (!window.confirm(confirmText)) return;
       try {
         setActionButtonsDisabled(activeItemId, true);
-        const hasRemoteRecord = Boolean(item.record_id || item.target_record_id);
         setJobLine(activeItemId, hasRemoteRecord ? "正在删除多维记录和 Qt 条目" : "正在删除 Qt 条目", "busy");
         const payload = {
           scope: state.scope,
@@ -3870,7 +4511,7 @@
             }
             state.polling.delete(jobId);
             forgetJobState(localKey);
-            await refreshWorkbench();
+            scheduleWorkbenchRefresh();
             return;
           }
           if (phase === "failed") {
@@ -3923,7 +4564,12 @@
             text: label,
             status: "busy",
           });
-          setTimeout(tick, 1200);
+          const nextDelay = phase === "queued"
+            ? 3500
+            : phase === "sending_message"
+              ? 2200
+              : 2600;
+          setTimeout(tick, nextDelay);
         } catch (err) {
           const lost = /任务不存在|404/.test(err.message || "");
           const text = lost ? "任务状态已丢失，请核对多维后重试" : (err.message || "任务查询失败");
@@ -3939,7 +4585,7 @@
           state.polling.delete(jobId);
         }
       };
-      setTimeout(tick, 700);
+      setTimeout(tick, 1200);
     }
 
     function restoreJobState() {
@@ -3978,9 +4624,35 @@
     }
 
     async function sendAllStart() {
+      if (state.bulkSending) return;
       const ids = Array.from(state.selected);
-      for (const id of ids) {
-        await sendStart(id);
+      if (!ids.length) return;
+      state.bulkSending = true;
+      state.bulkTotal = ids.length;
+      state.bulkDone = 0;
+      updateBulkSendButton();
+      try {
+        for (const id of ids) {
+          if (!state.selected.has(id)) {
+            state.bulkDone += 1;
+            updateBulkSendButton();
+            continue;
+          }
+          try {
+            await sendStart(id);
+          } catch (err) {
+            setJobLine(id, err.message || "加入队列失败", "failed");
+            setActionButtonsDisabled(id, false);
+          }
+          state.bulkDone += 1;
+          updateBulkSendButton();
+          await new Promise((resolve) => setTimeout(resolve, 120));
+        }
+      } finally {
+        state.bulkSending = false;
+        state.bulkTotal = 0;
+        state.bulkDone = 0;
+        updateBulkSendButton();
       }
     }
 
@@ -4179,6 +4851,13 @@
         closeNoticePasteModal();
       }
     });
+    document.addEventListener("focusout", () => {
+      flushDraftState();
+      if (state.deferredWorkbenchPayload) {
+        window.setTimeout(() => flushDeferredWorkbenchPayload(), 220);
+      }
+    });
+    window.addEventListener("beforeunload", flushDraftState);
     $("addManualDraftBtn").addEventListener("click", addManualDraft);
     $("sendAllStartBtn").addEventListener("click", sendAllStart);
     $("monthSelect").addEventListener("change", (e) => {
@@ -4252,7 +4931,12 @@
       }
     });
     document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") {
+        flushDraftState();
+        return;
+      }
       if (document.visibilityState === "visible" && state.scope && !$("app").classList.contains("hidden")) {
+        if (flushDeferredWorkbenchPayload()) return;
         runAutoRefresh();
       }
     });

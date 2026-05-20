@@ -662,6 +662,9 @@ class MainWindowWorkflowMixin:
         payload.level = entry.get("level") or payload.level
         payload.event_source = entry.get("source") or payload.event_source
         payload.occurrence_date = entry.get("time_str") or payload.occurrence_date
+        payload.maintenance_cycle = (
+            entry.get("maintenance_cycle") or payload.maintenance_cycle
+        )
 
     def _cleanup_payload_for_data(self, data_dict: dict):
         if not isinstance(data_dict, dict):
@@ -1076,7 +1079,12 @@ class MainWindowWorkflowMixin:
                     if task is None:
                         return
                     try:
-                        task()
+                        semaphore = getattr(self, "_upload_worker_semaphore", None)
+                        if semaphore is None:
+                            task()
+                        else:
+                            with semaphore:
+                                task()
                     except Exception as exc:
                         log_error(f"上传任务异常: {exc}")
                         self._post_request_finished(
@@ -1345,6 +1353,9 @@ class MainWindowWorkflowMixin:
             payload.specialty = specialty
             payload.event_source = event_source
             payload.robot_group_choice = robot_group_choice
+            payload.maintenance_cycle = (
+                data_dict.get("maintenance_cycle") or payload.maintenance_cycle
+            )
             payload.occurrence_date = (
                 data_dict.get("time_str") or payload.occurrence_date
             )
@@ -1459,6 +1470,10 @@ class MainWindowWorkflowMixin:
                 )
                 payload.transfer_to_overhaul = transfer_to_overhaul
                 payload.text = data_snapshot["text"]
+                payload.maintenance_cycle = (
+                    data_snapshot.get("maintenance_cycle")
+                    or payload.maintenance_cycle
+                )
                 payload.level = _level or payload.level
                 payload.buildings = _buildings
                 payload.specialty = specialty
@@ -1543,6 +1558,10 @@ class MainWindowWorkflowMixin:
                     )
                     payload.transfer_to_overhaul = transfer_to_overhaul
                     payload.text = data_snapshot["text"]
+                    payload.maintenance_cycle = (
+                        data_snapshot.get("maintenance_cycle")
+                        or payload.maintenance_cycle
+                    )
                     payload.level = _level or payload.level
                     payload.buildings = _buildings
                     payload.specialty = specialty
@@ -1615,6 +1634,10 @@ class MainWindowWorkflowMixin:
                     )
                     payload.transfer_to_overhaul = transfer_to_overhaul
                     payload.text = data_snapshot["text"]
+                    payload.maintenance_cycle = (
+                        data_snapshot.get("maintenance_cycle")
+                        or payload.maintenance_cycle
+                    )
                     payload.level = _level or payload.level
                     payload.buildings = _buildings
                     payload.specialty = specialty
@@ -1653,6 +1676,10 @@ class MainWindowWorkflowMixin:
                     )
                     payload.transfer_to_overhaul = transfer_to_overhaul
                     payload.text = data_snapshot["text"]
+                    payload.maintenance_cycle = (
+                        data_snapshot.get("maintenance_cycle")
+                        or payload.maintenance_cycle
+                    )
                     payload.level = _level or payload.level
                     payload.buildings = _buildings
                     payload.specialty = specialty
@@ -1745,6 +1772,10 @@ class MainWindowWorkflowMixin:
                     )
                     payload.transfer_to_overhaul = transfer_to_overhaul
                     payload.text = data_snapshot["text"]
+                    payload.maintenance_cycle = (
+                        data_snapshot.get("maintenance_cycle")
+                        or payload.maintenance_cycle
+                    )
                     payload.level = _level or payload.level
                     payload.buildings = _buildings
                     payload.specialty = specialty

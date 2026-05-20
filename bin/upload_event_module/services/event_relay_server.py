@@ -6,6 +6,7 @@ import time
 import json
 from contextlib import asynccontextmanager
 from typing import Optional, Set
+from urllib.parse import urlparse
 
 from ..hot_reload.state_store import get_user_data_dir
 from ..config import config
@@ -125,6 +126,17 @@ def get_event_relay_log_path():
     return get_user_data_dir() / "event_relay_events.jsonl"
 
 
+def _is_allowed_dingtalk_url(url: str) -> bool:
+    try:
+        parsed = urlparse(str(url or "").strip())
+    except Exception:
+        return False
+    host = str(parsed.hostname or "").lower()
+    if parsed.scheme != "https" or not host:
+        return False
+    return host == "dingtalk.com" or host.endswith(".dingtalk.com")
+
+
 class EventRelayServer:
     def __init__(
         self,
@@ -238,6 +250,8 @@ class EventRelayServer:
         async def proxy_dingtalk(payload: DingTalkProxyPayload):
             if not self.enable_proxy_dingtalk:
                 raise HTTPException(status_code=403, detail="proxy_dingtalk disabled")
+            if not _is_allowed_dingtalk_url(payload.url):
+                raise HTTPException(status_code=400, detail="invalid dingtalk url")
             import requests
 
             try:

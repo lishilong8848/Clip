@@ -285,6 +285,7 @@ class ClipboardTool(
         self._upload_queues = {}
         self._upload_workers = {}
         self._upload_lock = threading.Lock()
+        self._upload_worker_semaphore = threading.Semaphore(1)
         self._upload_key_alias = {}
         self._feishu_request_lock = threading.Lock()
         self._lan_ongoing_snapshot_lock = threading.RLock()

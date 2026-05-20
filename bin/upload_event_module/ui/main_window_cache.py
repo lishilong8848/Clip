@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import json
 import os
+import hashlib
 import time
 
 from PyQt6.QtCore import Qt, QTimer
@@ -41,9 +42,11 @@ class ActiveCacheMixin:
         return False
 
     def _init_active_cache_timer(self):
+        self._active_cache_last_signature = ""
+        self._active_cache_last_save_at = 0.0
         self.active_cache_timer = QTimer(self)
         self.active_cache_timer.timeout.connect(self.save_active_cache)
-        self.active_cache_timer.start(5000)
+        self.active_cache_timer.start(30000)
 
     def _collect_active_list_cache(self, list_widget):
         items = []
@@ -92,16 +95,33 @@ class ActiveCacheMixin:
                 payload["clipboard_queue"] = []
         return payload
 
+    @staticmethod
+    def _active_cache_signature(payload: dict) -> str:
+        comparable = dict(payload or {})
+        comparable.pop("saved_at", None)
+        raw = json.dumps(
+            comparable,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
     def save_active_cache(self):
         if self._is_restoring_cache:
             return
         payload = self._collect_active_cache()
+        signature = self._active_cache_signature(payload)
+        if signature == getattr(self, "_active_cache_last_signature", ""):
+            return
         has_clipboard_queue = bool(payload.get("clipboard_queue"))
         if not payload["event"] and not payload["other"] and not has_clipboard_queue:
             store = getattr(self, "cache_store", None)
             if store:
                 try:
-                    store.replace_payload(payload)
+                    if store.replace_payload(payload):
+                        self._active_cache_last_signature = signature
+                        self._active_cache_last_save_at = time.time()
                 except Exception:
                     pass
             if hasattr(self, "_schedule_lan_ongoing_snapshot_refresh"):
@@ -110,7 +130,9 @@ class ActiveCacheMixin:
         try:
             store = getattr(self, "cache_store", None)
             if store:
-                store.replace_payload(payload)
+                if store.replace_payload(payload):
+                    self._active_cache_last_signature = signature
+                    self._active_cache_last_save_at = time.time()
             if hasattr(self, "_schedule_lan_ongoing_snapshot_refresh"):
                 self._schedule_lan_ongoing_snapshot_refresh()
         except Exception:

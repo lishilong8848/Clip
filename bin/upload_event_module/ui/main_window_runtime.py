@@ -22,7 +22,7 @@ from ..time_parser import parse_time_range
 
 _QT_MESSAGE_HANDLER_INSTALLED = False
 DEFAULT_DISPLAY_VERSION = "V1.0.20260210"
-LAN_ONGOING_SNAPSHOT_REFRESH_MS = 500
+LAN_ONGOING_SNAPSHOT_REFRESH_MS = 5000
 
 class MainWindowRuntimeMixin:
     def _build_display_version(self) -> str:
