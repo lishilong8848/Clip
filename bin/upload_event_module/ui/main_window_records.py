@@ -1948,6 +1948,7 @@ class MainWindowRecordsMixin:
             fields=[
                 "buildings",
                 "specialty",
+                "maintenance_cycle",
                 "level",
                 "level_locked",
                 "today_in_progress_state",
@@ -1976,6 +1977,12 @@ class MainWindowRecordsMixin:
                 data_dict.pop("specialty", None)
         else:
             data_dict.pop("specialty", None)
+        if "maintenance_cycle" in cache_fields:
+            maintenance_cycle = str(cache_fields.get("maintenance_cycle") or "").strip()
+            if maintenance_cycle:
+                data_dict["maintenance_cycle"] = maintenance_cycle
+            else:
+                data_dict.pop("maintenance_cycle", None)
         level_locked = bool(cache_fields.get("level_locked")) or bool(
             data_dict.get("level_locked")
         )

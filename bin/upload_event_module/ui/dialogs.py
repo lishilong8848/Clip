@@ -218,6 +218,19 @@ from ..config import (
 
 
 
+MAINTENANCE_CYCLE_PLACEHOLDER = "请选择维保周期..."
+MAINTENANCE_CYCLE_OPTIONS = (
+    "每月",
+    "每季",
+    "每年",
+    "半年",
+    "每两年",
+    "每三年",
+    "每五年",
+    "冬季保温每日",
+)
+
+
 class AddDialog(QDialog):
     query_finished = pyqtSignal(bool, str, int)
 
@@ -2256,6 +2269,8 @@ class ScreenshotConfirmDialog(QDialog):
 
         self.enable_specialty_select = False
 
+        self.enable_maintenance_cycle_select = False
+
         self.enable_change_level_select = False
 
         self.enable_building_multi_select = True
@@ -2269,6 +2284,8 @@ class ScreenshotConfirmDialog(QDialog):
         self.enable_recover_select = False
 
         self.selected_specialty = ""
+
+        self.selected_maintenance_cycle = ""
 
         self.selected_change_level = ""
 
@@ -2960,6 +2977,54 @@ class ScreenshotConfirmDialog(QDialog):
 
         change_level_layout.addStretch()
 
+        # 维保周期单选（维保通告专用）
+
+        self.maintenance_cycle_options = list(MAINTENANCE_CYCLE_OPTIONS)
+
+        self.maintenance_cycle_container = QWidget()
+
+        maintenance_cycle_layout = QHBoxLayout(self.maintenance_cycle_container)
+
+        maintenance_cycle_layout.setContentsMargins(0, 0, 0, 0)
+
+        maintenance_cycle_layout.setSpacing(6)
+
+        maintenance_cycle_label = QLabel("维保周期:")
+
+        maintenance_cycle_label.setStyleSheet("color: #F59E0B; font-size: 12px;")
+
+        self.maintenance_cycle_combo = QComboBox()
+
+        self.maintenance_cycle_combo.setMaximumWidth(160)
+
+        self.maintenance_cycle_combo.setStyleSheet(
+            self.change_level_combo.styleSheet()
+        )
+
+        self.maintenance_cycle_combo.addItem(MAINTENANCE_CYCLE_PLACEHOLDER)
+
+        for option in self.maintenance_cycle_options:
+
+            self.maintenance_cycle_combo.addItem(option)
+
+        self.maintenance_cycle_combo.activated.connect(
+            self._on_maintenance_cycle_selected
+        )
+
+        self.maintenance_cycle_selected_label = QLabel("未选择")
+
+        self.maintenance_cycle_selected_label.setStyleSheet(
+            "color: #EF4444; font-size: 11px;"
+        )
+
+        maintenance_cycle_layout.addWidget(maintenance_cycle_label)
+
+        maintenance_cycle_layout.addWidget(self.maintenance_cycle_combo)
+
+        maintenance_cycle_layout.addWidget(self.maintenance_cycle_selected_label)
+
+        maintenance_cycle_layout.addStretch()
+
 
 
         # 专业单选（设备调整专用）
@@ -3074,6 +3139,8 @@ class ScreenshotConfirmDialog(QDialog):
 
         inner_layout.addWidget(self.change_level_container)
 
+        inner_layout.addWidget(self.maintenance_cycle_container)
+
         inner_layout.addWidget(self.specialty_container)
 
         inner_layout.addLayout(btn_layout)
@@ -3136,6 +3203,7 @@ class ScreenshotConfirmDialog(QDialog):
                 fields=[
                     "buildings",
                     "specialty",
+                    "maintenance_cycle",
                     "level",
                     "level_locked",
                     "event_source",
@@ -3212,6 +3280,8 @@ class ScreenshotConfirmDialog(QDialog):
 
         )
 
+        self.enable_maintenance_cycle_select = self.notice_type == "维保通告"
+
         self.enable_change_level_select = self.notice_type in ("设备变更", "变更通告")
 
         self.enable_event_level_select = self.notice_type == "事件通告"
@@ -3235,6 +3305,7 @@ class ScreenshotConfirmDialog(QDialog):
         self.screenshot_image = None
         self.extra_images = []
         self.selected_specialty = ""
+        self.selected_maintenance_cycle = ""
         self.selected_change_level = ""
         self.selected_event_level = ""
         self.preview_label.setPixmap(QPixmap())
@@ -3260,6 +3331,10 @@ class ScreenshotConfirmDialog(QDialog):
         self._update_extra_images_label()
 
         self.specialty_container.setVisible(self.enable_specialty_select)
+
+        self.maintenance_cycle_container.setVisible(
+            self.enable_maintenance_cycle_select
+        )
 
         self.change_level_container.setVisible(self.enable_change_level_select)
 
@@ -3482,6 +3557,74 @@ class ScreenshotConfirmDialog(QDialog):
                 self._update_data_dict_field("specialty", "", remove_when_empty=True)
 
 
+        if self.enable_maintenance_cycle_select:
+
+            cached_cycle = str(cache_state.get("maintenance_cycle") or "").strip()
+
+            saved_cycle = str((self.data_dict or {}).get("maintenance_cycle") or "").strip()
+
+            detected_cycle = self._detect_maintenance_cycle(
+                (self.data_dict or {}).get("text", "")
+            )
+
+            selected_cycle = ""
+
+            for candidate in (cached_cycle, saved_cycle, detected_cycle):
+
+                if candidate in self.maintenance_cycle_options:
+
+                    selected_cycle = candidate
+
+                    break
+
+            if selected_cycle:
+
+                self.selected_maintenance_cycle = selected_cycle
+
+                idx = self.maintenance_cycle_combo.findText(selected_cycle)
+
+                self.maintenance_cycle_combo.setCurrentIndex(idx if idx != -1 else 0)
+
+                self.maintenance_cycle_selected_label.setText(selected_cycle)
+
+                self.maintenance_cycle_selected_label.setStyleSheet(
+                    "color: #10B981; font-size: 11px;"
+                )
+
+                self._update_data_dict_field(
+                    "maintenance_cycle",
+                    selected_cycle,
+                    remove_when_empty=True,
+                )
+
+            else:
+
+                self.selected_maintenance_cycle = ""
+
+                self.maintenance_cycle_combo.setCurrentIndex(0)
+
+                self.maintenance_cycle_selected_label.setText("未选择")
+
+                self.maintenance_cycle_selected_label.setStyleSheet(
+                    "color: #EF4444; font-size: 11px;"
+                )
+
+                self._update_data_dict_field(
+                    "maintenance_cycle", "", remove_when_empty=True
+                )
+
+        else:
+
+            self.selected_maintenance_cycle = ""
+
+            self.maintenance_cycle_combo.setCurrentIndex(0)
+
+            self.maintenance_cycle_selected_label.setText("未选择")
+
+            self.maintenance_cycle_selected_label.setStyleSheet(
+                "color: #EF4444; font-size: 11px;"
+            )
+
 
         self.selected_buildings.clear()
 
@@ -3699,6 +3842,16 @@ class ScreenshotConfirmDialog(QDialog):
             return LEVEL_I2
         if ALI_LEVEL_HIGH in raw:
             return LEVEL_I1
+        return ""
+
+    def _detect_maintenance_cycle(self, text: str) -> str:
+        raw = (
+            self._extract_section(text or "", "维保周期")
+            or self._extract_section(text or "", "维护周期")
+        )
+        for option in MAINTENANCE_CYCLE_OPTIONS:
+            if option in raw:
+                return option
         return ""
 
 
@@ -5740,7 +5893,17 @@ class ScreenshotConfirmDialog(QDialog):
 
         )
 
-        enable_btns = time_valid and buildings_valid and level_valid and source_valid
+        cycle_valid = (not self.enable_maintenance_cycle_select) or bool(
+            self.selected_maintenance_cycle
+        )
+
+        enable_btns = (
+            time_valid
+            and buildings_valid
+            and level_valid
+            and source_valid
+            and cycle_valid
+        )
 
         self.btn_confirm.setEnabled(enable_btns)
 
@@ -7721,6 +7884,41 @@ class ScreenshotConfirmDialog(QDialog):
         self._notify_state_changed()
 
 
+    def _on_maintenance_cycle_selected(self, index):
+        """维保周期选择事件处理（单选）"""
+        if index <= 0:
+            self.selected_maintenance_cycle = ""
+            self.maintenance_cycle_selected_label.setText("未选择")
+            self.maintenance_cycle_selected_label.setStyleSheet(
+                "color: #EF4444; font-size: 11px;"
+            )
+            self._update_data_dict_field(
+                "maintenance_cycle", "", remove_when_empty=True
+            )
+            self._patch_cache_fields({"maintenance_cycle": None})
+            self._refresh_submit_state()
+            self._notify_state_changed()
+            return
+
+        self.selected_maintenance_cycle = self.maintenance_cycle_combo.itemText(index)
+        self.maintenance_cycle_selected_label.setText(
+            self.selected_maintenance_cycle
+        )
+        self.maintenance_cycle_selected_label.setStyleSheet(
+            "color: #10B981; font-size: 11px;"
+        )
+        self._update_data_dict_field(
+            "maintenance_cycle",
+            self.selected_maintenance_cycle,
+            remove_when_empty=True,
+        )
+        self._patch_cache_fields(
+            {"maintenance_cycle": self.selected_maintenance_cycle or None}
+        )
+        self._refresh_submit_state()
+        self._notify_state_changed()
+
+
 
     def _on_change_level_selected(self, index):
         """变更等级选择事件处理（单选）"""
@@ -7955,6 +8153,17 @@ class ScreenshotConfirmDialog(QDialog):
             )
 
             patch["specialty"] = self.selected_specialty or None
+
+
+        if self.enable_maintenance_cycle_select:
+
+            self._update_data_dict_field(
+                "maintenance_cycle",
+                self.selected_maintenance_cycle,
+                remove_when_empty=True,
+            )
+
+            patch["maintenance_cycle"] = self.selected_maintenance_cycle or None
 
 
 
