@@ -843,17 +843,47 @@ class MainWindowRuntimeMixin:
         return {"ok": True}
 
     def _on_lan_maintenance_action_received(self, payload: dict):
-        job_id = str((payload or {}).get("job_id") or "").strip()
+        if not hasattr(self, "_lan_action_batch"):
+            self._lan_action_batch = []
+            self._lan_action_batch_scheduled = False
+        self._lan_action_batch.append(dict(payload or {}))
+        if not getattr(self, "_lan_action_batch_scheduled", False):
+            self._lan_action_batch_scheduled = True
+            QTimer.singleShot(350, self._flush_lan_maintenance_action_batch)
+
+    def _flush_lan_maintenance_action_batch(self):
+        batch = list(getattr(self, "_lan_action_batch", []) or [])
+        self._lan_action_batch = []
+        self._lan_action_batch_scheduled = False
+        if not batch:
+            return
+        cache_dirty = False
+        if hasattr(self, "_begin_defer_active_cache_save"):
+            self._begin_defer_active_cache_save()
         try:
-            self._execute_lan_maintenance_action(payload or {})
-        except Exception as exc:
-            log_error(f"局域网维保动作执行失败: job_id={job_id}, error={exc}")
-            self._mark_lan_portal_job_result(
-                job_id,
-                success=False,
-                message=str(exc),
-                record_id=str((payload or {}).get("record_id") or ""),
-            )
+            for payload in batch:
+                job_id = str((payload or {}).get("job_id") or "").strip()
+                try:
+                    self._execute_lan_maintenance_action(payload or {})
+                    cache_dirty = True
+                except Exception as exc:
+                    log_error(f"局域网维保动作执行失败: job_id={job_id}, error={exc}")
+                    self._mark_lan_portal_job_result(
+                        job_id,
+                        success=False,
+                        message=str(exc),
+                        record_id=str((payload or {}).get("record_id") or ""),
+                    )
+            if cache_dirty:
+                self._active_cache_save_deferred = True
+        finally:
+            if hasattr(self, "_end_defer_active_cache_save"):
+                self._end_defer_active_cache_save()
+        if cache_dirty and not hasattr(self, "_end_defer_active_cache_save"):
+            try:
+                self.save_active_cache()
+            except Exception:
+                pass
 
     def _register_lan_portal_upload_job(
         self, job_id: str, record_id: str = "", active_item_id: str = ""

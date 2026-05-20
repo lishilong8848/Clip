@@ -92,6 +92,25 @@ def create_bitable_record_by_payload(*args, **kwargs):
         )
 
 
+def batch_create_bitable_records_by_payload(*args, **kwargs):
+    with _feishu_lock:
+        batch_fn = getattr(
+            service_registry.feishu_module,
+            "batch_create_bitable_records_by_payload",
+            None,
+        )
+        if callable(batch_fn):
+            return batch_fn(*args, **kwargs)
+        notice_type = args[0] if args else kwargs.get("notice_type")
+        payloads = args[1] if len(args) > 1 else kwargs.get("payloads")
+        return [
+            service_registry.feishu_module.create_bitable_record_by_payload(
+                notice_type, payload
+            )
+            for payload in (payloads or [])
+        ]
+
+
 def query_record_by_id(*args, **kwargs):
     with _feishu_lock:
         return service_registry.feishu_module.query_record_by_id(*args, **kwargs)
@@ -107,6 +126,25 @@ def update_bitable_record_by_payload(*args, **kwargs):
         return service_registry.feishu_module.update_bitable_record_by_payload(
             *args, **kwargs
         )
+
+
+def batch_update_bitable_records_by_payload(*args, **kwargs):
+    with _feishu_lock:
+        batch_fn = getattr(
+            service_registry.feishu_module,
+            "batch_update_bitable_records_by_payload",
+            None,
+        )
+        if callable(batch_fn):
+            return batch_fn(*args, **kwargs)
+        notice_type = args[0] if args else kwargs.get("notice_type")
+        updates = args[1] if len(args) > 1 else kwargs.get("updates")
+        return [
+            service_registry.feishu_module.update_bitable_record_by_payload(
+                record_id, notice_type, payload
+            )
+            for record_id, payload in (updates or [])
+        ]
 
 
 def update_bitable_record_fields(*args, **kwargs):

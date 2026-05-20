@@ -12,6 +12,10 @@ from lark_oapi.api.auth.v3 import (
 )
 from lark_oapi.api.bitable.v1 import (
     AppTableRecord,
+    BatchCreateAppTableRecordRequest,
+    BatchCreateAppTableRecordRequestBody,
+    BatchUpdateAppTableRecordRequest,
+    BatchUpdateAppTableRecordRequestBody,
     CreateAppTableRecordRequest,
     DeleteAppTableRecordRequest,
     GetAppTableRecordRequest,
@@ -556,6 +560,67 @@ def create_bitable_record_by_payload(notice_type: str, payload: NoticePayload):
     return True, record_id
 
 
+def batch_create_bitable_records_by_payload(notice_type: str, payloads: list[NoticePayload]):
+    """
+    Batch-create multiple independent bitable records in the same target table.
+    Falls back to per-item errors at the caller when the batch request fails.
+    :return: list[(success, record_id_or_error)]
+    """
+    check_token_status()
+
+    payloads = [payload for payload in (payloads or []) if isinstance(payload, NoticePayload)]
+    if not payloads:
+        return []
+    if not config.user_token:
+        return [(False, "未配置飞书用户令牌") for _ in payloads]
+
+    handler, table_id, err = _resolve_handler(notice_type)
+    if err:
+        return [(False, err) for _ in payloads]
+
+    fields_list = [handler.build_create_fields(payload) for payload in payloads]
+    if _info_logging_enabled():
+        log_info(f"Batch creating records({notice_type}) count={len(fields_list)}")
+
+    client = _build_client()
+    records = [AppTableRecord.builder().fields(fields).build() for fields in fields_list]
+    request = (
+        BatchCreateAppTableRecordRequest.builder()
+        .app_token(config.app_token)
+        .table_id(table_id)
+        .request_body(
+            BatchCreateAppTableRecordRequestBody.builder().records(records).build()
+        )
+        .build()
+    )
+
+    def do_create(token: str):
+        option = lark.RequestOption.builder().user_access_token(token).build()
+        return client.bitable.v1.app_table_record.batch_create(request, option)
+
+    response = _with_token_retry(do_create)
+
+    if not response.success():
+        error_msg = f"批量创建记录失败: {response.code} - {response.msg}"
+        log_error(f"飞书批量创建记录: {error_msg}")
+        return [(False, error_msg) for _ in payloads]
+
+    response_records = list(getattr(getattr(response, "data", None), "records", None) or [])
+    results = []
+    for index, payload in enumerate(payloads):
+        record = response_records[index] if index < len(response_records) else None
+        record_id = str(getattr(record, "record_id", "") or "").strip()
+        if not record_id:
+            results.append((False, "批量创建记录未返回 record_id"))
+            continue
+        fields = fields_list[index]
+        log_info(f"飞书批量创建记录: 成功, record_id={record_id}")
+        _log_record_action("上传", notice_type, record_id, fields, payload.text)
+        _send_robot_message(handler, payload)
+        results.append((True, record_id))
+    return results
+
+
 def query_record_by_id(record_id, notice_type):
     """
     根据 Record ID 查询记录
@@ -759,6 +824,67 @@ def update_bitable_record_by_payload(record_id: str, notice_type: str, payload: 
     _log_record_action(action, notice_type, record_id, fields, payload.text)
     _send_robot_message(handler, payload)
     return True, record_id
+
+
+def batch_update_bitable_records_by_payload(notice_type: str, updates: list[tuple[str, NoticePayload]]):
+    """
+    Batch-update multiple independent bitable records in the same target table.
+    :return: list[(success, record_id_or_error)]
+    """
+    check_token_status()
+
+    normalized = [
+        (str(record_id or "").strip(), payload)
+        for record_id, payload in (updates or [])
+        if str(record_id or "").strip() and isinstance(payload, NoticePayload)
+    ]
+    if not normalized:
+        return []
+    if not config.user_token:
+        return [(False, "未配置飞书用户令牌") for _ in normalized]
+
+    handler, table_id, err = _resolve_handler(notice_type)
+    if err:
+        return [(False, err) for _ in normalized]
+
+    fields_list = [handler.build_update_fields(payload) for _record_id, payload in normalized]
+    records = [
+        AppTableRecord.builder().record_id(record_id).fields(fields).build()
+        for (record_id, _payload), fields in zip(normalized, fields_list)
+    ]
+    if _info_logging_enabled():
+        log_info(f"Batch updating records({notice_type}) count={len(records)}")
+
+    client = _build_client()
+    request = (
+        BatchUpdateAppTableRecordRequest.builder()
+        .app_token(config.app_token)
+        .table_id(table_id)
+        .request_body(
+            BatchUpdateAppTableRecordRequestBody.builder().records(records).build()
+        )
+        .build()
+    )
+
+    def do_update(token: str):
+        option = lark.RequestOption.builder().user_access_token(token).build()
+        return client.bitable.v1.app_table_record.batch_update(request, option)
+
+    response = _with_token_retry(do_update)
+
+    if not response.success():
+        error_msg = f"批量更新记录失败: {response.code} - {response.msg}"
+        log_error(f"飞书批量更新记录: {error_msg}")
+        return [(False, error_msg) for _ in normalized]
+
+    results = []
+    for (record_id, payload), fields in zip(normalized, fields_list):
+        log_info(f"飞书批量更新记录: 成功, record_id={record_id}")
+        action = "结束" if _extract_status_from_fields(fields) == "结束" else "更新"
+        _log_record_action(action, notice_type, record_id, fields, payload.text)
+        _send_robot_message(handler, payload)
+        results.append((True, record_id))
+    return results
 
 
 def update_bitable_record_fields(record_id: str, notice_type: str, fields: dict):

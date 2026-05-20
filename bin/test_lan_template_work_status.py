@@ -727,7 +727,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 }
             )
             self.assertTrue(should_start)
-            self.assertEqual(service.get_job(job_id)["phase"], "queued")
+            self.assertEqual(service.get_job(job_id)["phase"], "accepted")
 
             restarted = self._new_temp_service(root)
             restored = restarted.get_job(job_id)

@@ -707,6 +707,32 @@ class MaintenancePortalService:
             if isinstance(item, dict)
         ]
 
+    def _source_snapshot_exists(self, scope: str = "ALL") -> bool:
+        try:
+            return bool(self._state_store.get_source_scope_snapshot(scope).get("exists"))
+        except Exception:
+            return False
+
+    def _payload_version(
+        self,
+        *,
+        scope: str,
+        records: list[dict[str, Any]],
+        ongoing_items: list[dict[str, Any]],
+        daily_summary: dict[str, Any] | None = None,
+    ) -> str:
+        stats = (daily_summary or {}).get("stats") if isinstance(daily_summary, dict) else {}
+        return ":".join(
+            [
+                str(self.state_cache_version()),
+                str(scope or ""),
+                str(self._last_loaded_at or ""),
+                str(len(records or [])),
+                str(len(ongoing_items or [])),
+                str((stats or {}).get("ended") or 0),
+            ]
+        )
+
     def clear_target_record_cache(self) -> None:
         with self._refresh_lock:
             self._target_record_cache.clear()
@@ -811,6 +837,31 @@ class MaintenancePortalService:
                     warnings.append(f"检修源表同步失败: {exc}")
             if attempted_optional_load:
                 self._load_warnings = warnings
+
+    def ensure_snapshot_loaded(self) -> None:
+        if (
+            self._maintenance_loaded_once
+            and self._change_loaded_once
+            and self._repair_loaded_once
+            and self._zhihang_change_loaded_once
+        ):
+            return
+        acquired = False
+        try:
+            acquired = self._refresh_lock.acquire(blocking=False)
+            if not acquired:
+                self._hydrate_source_records_from_sqlite()
+                return
+            if not (
+                self._maintenance_loaded_once
+                and self._change_loaded_once
+                and self._repair_loaded_once
+                and self._zhihang_change_loaded_once
+            ):
+                self._hydrate_source_records_from_sqlite()
+        finally:
+            if acquired:
+                self._refresh_lock.release()
 
     def _normalize_field_value(
         self,
@@ -2605,7 +2656,7 @@ class MaintenancePortalService:
         scopes: list[str] | tuple[str, ...] | set[str] | None = None,
         include_prepared: bool = False,
     ) -> dict[str, Any]:
-        self.ensure_loaded()
+        self.ensure_snapshot_loaded()
         default_month = RECENT_MONTH_FILTER_LABEL
         overview: dict[str, dict[str, Any]] = {}
         prepared_workbenches: dict[str, dict[str, Any]] = {}
@@ -2669,6 +2720,12 @@ class MaintenancePortalService:
             "scope_options": SCOPE_OPTIONS,
             "scopes": overview,
             "last_loaded_at": self._last_loaded_at,
+            "payload_version": self._payload_version(
+                scope="overview",
+                records=[],
+                ongoing_items=ongoing_items or [],
+            ),
+            "source_snapshot_ready": self._source_snapshot_exists("ALL"),
             "source_cache_ttl_seconds": self._source_cache_ttl_seconds(),
             "warnings": list(self._load_warnings),
         }
@@ -3960,7 +4017,7 @@ class MaintenancePortalService:
     def assert_generated_drafts_allowed(
         self, drafts: list[dict[str, Any]], *, scope: str = "ALL"
     ) -> None:
-        self.ensure_loaded()
+        self.ensure_snapshot_loaded()
         scope = self._normalize_scope(scope)
         for draft in drafts or []:
             record_id = str((draft or {}).get("record_id") or "").strip()
@@ -3976,7 +4033,7 @@ class MaintenancePortalService:
     def assert_generated_items_allowed(
         self, items: list[dict[str, Any]], *, scope: str = "ALL"
     ) -> None:
-        self.ensure_loaded()
+        self.ensure_snapshot_loaded()
         scope = self._normalize_scope(scope)
         for item in items or []:
             record_id = str((item or {}).get("record_id") or "").strip()
@@ -3995,7 +4052,7 @@ class MaintenancePortalService:
         scope: str = "ALL",
         ongoing_items: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        self.ensure_loaded()
+        self.ensure_snapshot_loaded()
         default_month = RECENT_MONTH_FILTER_LABEL
         scope = self._normalize_scope(scope)
         merged_ongoing = self._merge_ongoing_items(scope, ongoing_items or [])
@@ -4024,6 +4081,13 @@ class MaintenancePortalService:
                 WORK_TYPE_CHANGE if scope == "CAMPUS" else WORK_TYPE_MAINTENANCE
             ),
             "last_loaded_at": self._last_loaded_at,
+            "payload_version": self._payload_version(
+                scope=scope,
+                records=filtered_records,
+                ongoing_items=merged_ongoing,
+                daily_summary=daily_summary,
+            ),
+            "source_snapshot_ready": self._source_snapshot_exists(scope),
             "source_cache_ttl_seconds": self._source_cache_ttl_seconds(),
             "warnings": list(self._load_warnings),
             "maintenance_status": DEFAULT_MAINTENANCE_STATUS,
@@ -4073,7 +4137,7 @@ class MaintenancePortalService:
         scope: str = "ALL",
         ongoing_items: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        self.ensure_loaded()
+        self.ensure_snapshot_loaded()
         scope = self._normalize_scope(scope)
         merged_ongoing = self._merge_ongoing_items(scope, ongoing_items or [])
         filtered_records = self._workbench_records(
@@ -4107,6 +4171,13 @@ class MaintenancePortalService:
                 WORK_TYPE_CHANGE if scope == "CAMPUS" else WORK_TYPE_MAINTENANCE
             ),
             "last_loaded_at": self._last_loaded_at,
+            "payload_version": self._payload_version(
+                scope=scope,
+                records=filtered_records,
+                ongoing_items=merged_ongoing,
+                daily_summary=daily_summary,
+            ),
+            "source_snapshot_ready": self._source_snapshot_exists(scope),
             "source_cache_ttl_seconds": self._source_cache_ttl_seconds(),
             "warnings": list(self._load_warnings),
             "records": [
@@ -4145,7 +4216,7 @@ class MaintenancePortalService:
         raise PortalError(f"未找到记录: {record_id}")
 
     def generate_templates(self, drafts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        self.ensure_loaded()
+        self.ensure_snapshot_loaded()
         generated: list[dict[str, Any]] = []
         for draft in drafts:
             record_id = str(draft.get("record_id") or "").strip()
@@ -4229,16 +4300,29 @@ class MaintenancePortalService:
 
     def _base_job(self, request_payload: dict[str, Any]) -> dict[str, Any]:
         now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+        now_ts = time.time()
         return {
             "job_id": uuid.uuid4().hex,
-            "phase": "queued",
+            "phase": "accepted",
             "created_at": now,
             "updated_at": now,
+            "accepted_at": now_ts,
+            "message_started_at": 0.0,
+            "message_finished_at": 0.0,
+            "upload_queued_at": 0.0,
+            "upload_started_at": 0.0,
+            "upload_finished_at": 0.0,
             "request": copy.deepcopy(request_payload),
             "operation_id": str(request_payload.get("operation_id") or "").strip(),
             "target_key": self._action_target_key(request_payload),
             "message_sent": False,
             "message_signature": "",
+            "message_queue_position": 0,
+            "message_queue_size": 0,
+            "queue_position": 0,
+            "queue_size": 0,
+            "upload_queue_position": 0,
+            "upload_queue_size": 0,
             "record_id": "",
             "active_item_id": str(request_payload.get("active_item_id") or ""),
             "error": "",
@@ -4282,7 +4366,7 @@ class MaintenancePortalService:
                 continue
             job["job_id"] = job_id
             phase = str(job.get("phase") or "").strip()
-            if phase in {"queued", "sending_message", "uploading"}:
+            if phase in {"accepted", "queued", "sending_message", "message_sent", "upload_queued", "uploading"}:
                 job["phase"] = "failed"
                 job["error"] = "程序已重启，任务未完成，请核对多维后重试。"
                 job["updated_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -4333,12 +4417,18 @@ class MaintenancePortalService:
                     if str(existing.get("operation_id") or "") != operation_id:
                         continue
                     phase = str(existing.get("phase") or "")
-                    if phase in {"queued", "sending_message", "uploading", "success"}:
+                    if phase in {"accepted", "queued", "sending_message", "message_sent", "upload_queued", "uploading", "success"}:
                         return str(existing.get("job_id") or ""), False
                     if phase == "failed":
                         existing["request"] = copy.deepcopy(request_payload)
-                        existing["phase"] = "queued"
+                        existing["phase"] = "accepted"
                         existing["error"] = ""
+                        existing["accepted_at"] = time.time()
+                        existing["message_started_at"] = 0.0
+                        existing["message_finished_at"] = 0.0
+                        existing["upload_queued_at"] = 0.0
+                        existing["upload_started_at"] = 0.0
+                        existing["upload_finished_at"] = 0.0
                         existing["updated_at"] = dt.datetime.now().strftime(
                             "%Y-%m-%d %H:%M"
                         )
@@ -4350,7 +4440,7 @@ class MaintenancePortalService:
                     if str(existing.get("target_key") or "") != target_key:
                         continue
                     phase = str(existing.get("phase") or "")
-                    if phase in {"queued", "sending_message", "uploading"}:
+                    if phase in {"accepted", "queued", "sending_message", "message_sent", "upload_queued", "uploading"}:
                         raise PortalError("该通告已有进行中的发送/上传任务，请等待完成后再操作。")
             self._jobs[job["job_id"]] = job
             self._persist_action_job_locked(job)
@@ -4401,11 +4491,23 @@ class MaintenancePortalService:
             "phase": "success",
             "created_at": str(job.get("created_at") or ""),
             "updated_at": str(job.get("updated_at") or ""),
+            "accepted_at": float(job.get("accepted_at") or 0),
+            "message_started_at": float(job.get("message_started_at") or 0),
+            "message_finished_at": float(job.get("message_finished_at") or 0),
+            "upload_queued_at": float(job.get("upload_queued_at") or 0),
+            "upload_started_at": float(job.get("upload_started_at") or 0),
+            "upload_finished_at": float(job.get("upload_finished_at") or 0),
             "request": self._compact_job_request(job.get("request") or {}),
             "operation_id": str(job.get("operation_id") or ""),
             "target_key": str(job.get("target_key") or ""),
             "message_sent": bool(job.get("message_sent")),
             "message_signature": str(job.get("message_signature") or ""),
+            "message_queue_position": 0,
+            "message_queue_size": 0,
+            "queue_position": 0,
+            "queue_size": 0,
+            "upload_queue_position": 0,
+            "upload_queue_size": 0,
             "record_id": str(job.get("record_id") or ""),
             "active_item_id": str(job.get("active_item_id") or ""),
             "error": "",
@@ -4438,6 +4540,25 @@ class MaintenancePortalService:
             job = self._jobs.get(job_id)
             if not job:
                 return
+            phase = str(patch.get("phase") or "").strip()
+            prior_phase = str(job.get("phase") or "").strip()
+            if phase and phase != prior_phase:
+                now_ts = time.time()
+                if phase == "accepted" and not job.get("accepted_at"):
+                    patch["accepted_at"] = now_ts
+                elif phase == "sending_message":
+                    patch["message_started_at"] = now_ts
+                elif phase in {"message_sent", "upload_queued"}:
+                    if not job.get("message_finished_at") and job.get("message_started_at"):
+                        patch["message_finished_at"] = now_ts
+                    if not job.get("upload_queued_at"):
+                        patch["upload_queued_at"] = now_ts
+                elif phase == "uploading":
+                    if not job.get("upload_queued_at"):
+                        patch["upload_queued_at"] = now_ts
+                    patch["upload_started_at"] = now_ts
+                elif phase in {"success", "failed"}:
+                    patch["upload_finished_at"] = now_ts
             changed = any(job.get(key) != value for key, value in patch.items())
             if not changed:
                 return
@@ -4474,7 +4595,6 @@ class MaintenancePortalService:
         )
         self.mark_job(
             job_id,
-            phase="queued",
             prepared=prepared,
             record_id=str(prepared.get("record_id") or ""),
             active_item_id=str(prepared.get("active_item_id") or ""),
@@ -4502,7 +4622,7 @@ class MaintenancePortalService:
         status = status_map.get(action)
         if not status:
             raise PortalError("动作必须是 start/update/end。")
-        self.ensure_loaded()
+        self.ensure_snapshot_loaded()
         scope = self._normalize_scope(request_payload.get("scope"))
         specialty = str(request_payload.get("specialty") or "").strip()
         manual = self._truthy_flag(request_payload.get("manual"))
@@ -4718,7 +4838,7 @@ class MaintenancePortalService:
         status = status_map.get(action)
         if not status:
             raise PortalError("动作必须是 start/update/end。")
-        self.ensure_loaded()
+        self.ensure_snapshot_loaded()
         scope = self._normalize_scope(request_payload.get("scope"))
         manual = self._truthy_flag(request_payload.get("manual"))
 
@@ -4978,7 +5098,7 @@ class MaintenancePortalService:
         status = status_map.get(action)
         if not status:
             raise PortalError("动作必须是 start/update/end。")
-        self.ensure_loaded()
+        self.ensure_snapshot_loaded()
         scope = self._normalize_scope(request_payload.get("scope"))
 
         def request_text(name: str, default: str = "") -> str:
@@ -5356,7 +5476,7 @@ class MaintenancePortalService:
         *,
         notice_callback: Callable[[dict[str, Any]], Any] | None = None,
     ) -> list[dict[str, Any]]:
-        self.ensure_loaded()
+        self.ensure_snapshot_loaded()
         if notice_callback is None:
             raise PortalError("主窗口未连接，无法发送后回填主界面。")
         if not isinstance(items, list) or not items:

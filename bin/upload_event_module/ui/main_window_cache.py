@@ -110,6 +110,9 @@ class ActiveCacheMixin:
     def save_active_cache(self):
         if self._is_restoring_cache:
             return
+        if int(getattr(self, "_defer_active_cache_save_count", 0) or 0) > 0:
+            self._active_cache_save_deferred = True
+            return
         payload = self._collect_active_cache()
         signature = self._active_cache_signature(payload)
         if signature == getattr(self, "_active_cache_last_signature", ""):
@@ -137,6 +140,21 @@ class ActiveCacheMixin:
                 self._schedule_lan_ongoing_snapshot_refresh()
         except Exception:
             pass
+
+    def _begin_defer_active_cache_save(self):
+        self._defer_active_cache_save_count = (
+            int(getattr(self, "_defer_active_cache_save_count", 0) or 0) + 1
+        )
+
+    def _end_defer_active_cache_save(self):
+        count = int(getattr(self, "_defer_active_cache_save_count", 0) or 0)
+        self._defer_active_cache_save_count = max(0, count - 1)
+        if self._defer_active_cache_save_count:
+            return
+        if not bool(getattr(self, "_active_cache_save_deferred", False)):
+            return
+        self._active_cache_save_deferred = False
+        self.save_active_cache()
 
     def _restore_active_item(self, payload):
         if not payload:

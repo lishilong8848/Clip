@@ -64,11 +64,24 @@ class PortalHandler(BaseHTTPRequestHandler):
     action_worker_thread: threading.Thread | None = None
     action_worker_stop = False
     action_upload_timeout_s = 30 * 60
+    upload_wait_thread: threading.Thread | None = None
+    upload_wait_jobs: dict[str, float] = {}
+    upload_wait_lock = threading.RLock()
+    upload_wait_event = threading.Event()
+    upload_wait_stop = False
+    message_queue: list[str] = []
+    message_queue_lock = threading.RLock()
+    message_queue_event = threading.Event()
+    message_worker_threads: list[threading.Thread] = []
+    message_worker_stop = False
+    message_worker_count = 5
     payload_cache_lock = threading.RLock()
     payload_cache: dict[tuple, tuple[float, dict]] = {}
-    payload_cache_ttl_s = 45
-    payload_cache_max_entries = 32
-    payload_cache_max_payload_bytes = 256 * 1024
+    payload_cache_inflight: dict[tuple, threading.Event] = {}
+    payload_cache_generation = 0
+    payload_cache_ttl_s = 3
+    payload_cache_max_entries = 64
+    payload_cache_max_payload_bytes = 1024 * 1024
     orphan_reconcile_lock = threading.RLock()
     orphan_reconcile_last: dict[str, float] = {}
     orphan_reconcile_pending: set[str] = set()
@@ -340,6 +353,7 @@ class PortalHandler(BaseHTTPRequestHandler):
     @classmethod
     def clear_payload_cache(cls) -> None:
         with cls.payload_cache_lock:
+            cls.payload_cache_generation += 1
             cls.payload_cache.clear()
 
     @classmethod
@@ -400,6 +414,7 @@ class PortalHandler(BaseHTTPRequestHandler):
         except Exception:
             pass
         key = (
+            PortalHandler.payload_cache_generation,
             service_version,
             str(getattr(self.service, "_last_loaded_at", "") or ""),
             *key_parts,
@@ -410,8 +425,34 @@ class PortalHandler(BaseHTTPRequestHandler):
             cached = PortalHandler.payload_cache.get(key)
             if cached and cached[0] > now:
                 return copy.deepcopy(cached[1])
-        payload = builder()
+            inflight = PortalHandler.payload_cache_inflight.get(key)
+            if inflight is None:
+                inflight = threading.Event()
+                PortalHandler.payload_cache_inflight[key] = inflight
+                owner = True
+            else:
+                owner = False
+        if not owner:
+            inflight.wait(timeout=5)
+            with PortalHandler.payload_cache_lock:
+                cached = PortalHandler.payload_cache.get(key)
+                if cached and cached[0] > time.monotonic():
+                    return copy.deepcopy(cached[1])
+        try:
+            payload = builder()
+        except Exception:
+            if owner:
+                with PortalHandler.payload_cache_lock:
+                    event = PortalHandler.payload_cache_inflight.pop(key, None)
+                    if event is not None:
+                        event.set()
+            raise
         if not isinstance(payload, dict):
+            if owner:
+                with PortalHandler.payload_cache_lock:
+                    event = PortalHandler.payload_cache_inflight.pop(key, None)
+                    if event is not None:
+                        event.set()
             return payload
         try:
             payload_size = len(
@@ -428,6 +469,11 @@ class PortalHandler(BaseHTTPRequestHandler):
             payload_size
             and payload_size > int(PortalHandler.payload_cache_max_payload_bytes)
         ):
+            if owner:
+                with PortalHandler.payload_cache_lock:
+                    event = PortalHandler.payload_cache_inflight.pop(key, None)
+                    if event is not None:
+                        event.set()
             return payload
         with PortalHandler.payload_cache_lock:
             PortalHandler.payload_cache[key] = (
@@ -435,6 +481,10 @@ class PortalHandler(BaseHTTPRequestHandler):
                 copy.deepcopy(payload),
             )
             PortalHandler._prune_payload_cache_locked(now)
+            if owner:
+                event = PortalHandler.payload_cache_inflight.pop(key, None)
+                if event is not None:
+                    event.set()
         return payload
 
     def _reconcile_orphan_started_items(
@@ -546,8 +596,17 @@ class PortalHandler(BaseHTTPRequestHandler):
                 scope = self._authorized_scope_or_error(session, scope)
                 ongoing = self._get_ongoing(scope)
                 self._reconcile_orphan_started_items(scope, ongoing)
-                data = self.service.get_bootstrap(
-                    scope=scope, ongoing_items=ongoing
+                open_id = str((session.get("user") or {}).get("open_id") or "")
+                data = self._cached_service_payload(
+                    (
+                        "bootstrap",
+                        open_id,
+                        scope,
+                        self._ongoing_items_marker(ongoing),
+                    ),
+                    lambda: self.service.get_bootstrap(
+                        scope=scope, ongoing_items=ongoing
+                    ),
                 )
                 return self._send_json(
                     200,
@@ -572,10 +631,19 @@ class PortalHandler(BaseHTTPRequestHandler):
                     for option in allowed_options
                     if str(option.get("value") or "").strip()
                 ]
-                data = self.service.get_scope_overview(
-                    ongoing_items=ongoing,
-                    scopes=allowed_scopes,
-                    include_prepared=False,
+                open_id = str((session.get("user") or {}).get("open_id") or "")
+                data = self._cached_service_payload(
+                    (
+                        "scope-overview",
+                        open_id,
+                        tuple(sorted(allowed_scopes)),
+                        self._ongoing_items_marker(ongoing),
+                    ),
+                    lambda: self.service.get_scope_overview(
+                        ongoing_items=ongoing,
+                        scopes=allowed_scopes,
+                        include_prepared=False,
+                    ),
                 )
                 data = PortalHandler.auth_manager.filter_scope_overview(data, session)
                 return self._send_json(
@@ -650,11 +718,22 @@ class PortalHandler(BaseHTTPRequestHandler):
                 self._reconcile_orphan_started_items(scope, ongoing)
                 month = (qs.get("month") or [""])[0]
                 specialty = (qs.get("specialty") or [""])[0]
-                payload = self.service.query_records(
-                    month=month,
-                    specialty=specialty,
-                    scope=scope,
-                    ongoing_items=ongoing,
+                open_id = str((session.get("user") or {}).get("open_id") or "")
+                payload = self._cached_service_payload(
+                    (
+                        "records",
+                        open_id,
+                        scope,
+                        month,
+                        specialty,
+                        self._ongoing_items_marker(ongoing),
+                    ),
+                    lambda: self.service.query_records(
+                        month=month,
+                        specialty=specialty,
+                        scope=scope,
+                        ongoing_items=ongoing,
+                    ),
                 )
                 return self._send_json(
                     200,
@@ -677,11 +756,22 @@ class PortalHandler(BaseHTTPRequestHandler):
                 self._reconcile_orphan_started_items(scope, ongoing)
                 month = (qs.get("month") or [""])[0]
                 specialty = (qs.get("specialty") or [""])[0]
-                payload = self.service.query_records(
-                    month=month,
-                    specialty=specialty,
-                    scope=scope,
-                    ongoing_items=ongoing,
+                open_id = str((session.get("user") or {}).get("open_id") or "")
+                payload = self._cached_service_payload(
+                    (
+                        "workbench",
+                        open_id,
+                        scope,
+                        month,
+                        specialty,
+                        self._ongoing_items_marker(ongoing),
+                    ),
+                    lambda: self.service.query_records(
+                        month=month,
+                        specialty=specialty,
+                        scope=scope,
+                        ongoing_items=ongoing,
+                    ),
                 )
                 return self._send_json(
                     200,
@@ -701,9 +791,8 @@ class PortalHandler(BaseHTTPRequestHandler):
                     session, (qs.get("scope") or ["ALL"])[0]
                 )
                 PortalHandler.clear_payload_cache()
-                refreshed = self.service.refresh_if_interval_elapsed(
-                    min_interval_seconds=60
-                )
+                PortalHandler.wake_source_refresh_worker()
+                refreshed = True
                 ongoing = self._get_ongoing(scope)
                 self._reconcile_orphan_started_items(scope, ongoing, force=True)
                 data = self.service.get_bootstrap(
@@ -772,8 +861,19 @@ class PortalHandler(BaseHTTPRequestHandler):
                 job_id, should_start = self.service.create_action_job(payload)
                 if should_start:
                     PortalHandler.clear_payload_cache()
-                    PortalHandler.enqueue_action_job(job_id)
-                return self._send_json(202, {"ok": True, "data": {"job_id": job_id}})
+                    PortalHandler.enqueue_initial_message_or_upload_job(job_id)
+                job = self.service.get_job(job_id) or {}
+                return self._send_json(
+                    202,
+                    {
+                        "ok": True,
+                        "data": {
+                            "job_id": job_id,
+                            "accepted_at": job.get("accepted_at") or 0,
+                            "initial_phase": job.get("phase") or "accepted",
+                        },
+                    },
+                )
             except (PortalError, ValueError, json.JSONDecodeError) as exc:
                 return self._send_json(403, {"ok": False, "error": str(exc)})
         if parsed.path == "/api/ongoing-items/delete":
@@ -1126,6 +1226,141 @@ class PortalHandler(BaseHTTPRequestHandler):
             next_wait = max(60.0, float(ttl or SOURCE_CACHE_TTL_SECONDS))
 
     @classmethod
+    def ensure_message_workers(cls) -> None:
+        with cls.message_queue_lock:
+            cls.message_worker_threads = [
+                worker
+                for worker in cls.message_worker_threads
+                if worker and worker.is_alive()
+            ]
+            if len(cls.message_worker_threads) >= cls.message_worker_count:
+                return
+            cls.message_worker_stop = False
+            missing = cls.message_worker_count - len(cls.message_worker_threads)
+            for _ in range(max(0, missing)):
+                worker = threading.Thread(
+                    target=cls._message_worker_loop,
+                    name="LANPersonalMessageQueue",
+                    daemon=True,
+                )
+                cls.message_worker_threads.append(worker)
+                worker.start()
+
+    @classmethod
+    def stop_message_workers(cls) -> None:
+        with cls.message_queue_lock:
+            cls.message_worker_stop = True
+            cls.message_queue.clear()
+            cls.message_queue_event.set()
+            workers = list(cls.message_worker_threads)
+        for worker in workers:
+            if worker and worker.is_alive():
+                try:
+                    worker.join(timeout=2)
+                except Exception:
+                    pass
+        with cls.message_queue_lock:
+            cls.message_worker_threads = []
+
+    @classmethod
+    def enqueue_initial_message_or_upload_job(cls, job_id: str) -> None:
+        job = cls.service.get_job(job_id) or {}
+        request = job.get("request") if isinstance(job.get("request"), dict) else {}
+        work_type = str((request or {}).get("work_type") or "maintenance").strip()
+        if work_type in {"change", "repair"}:
+            cls.enqueue_action_job(job_id)
+            return
+        cls.enqueue_message_job(job_id)
+
+    @classmethod
+    def enqueue_message_job(cls, job_id: str) -> None:
+        job_id = str(job_id or "").strip()
+        if not job_id:
+            return
+        with cls.message_queue_lock:
+            if job_id not in cls.message_queue:
+                cls.message_queue.append(job_id)
+            cls._update_message_queue_positions_locked()
+        cls.ensure_message_workers()
+        cls.message_queue_event.set()
+
+    @classmethod
+    def _update_message_queue_positions_locked(cls) -> None:
+        total = len(cls.message_queue)
+        for index, queued_job_id in enumerate(cls.message_queue, start=1):
+            cls.service.mark_job(
+                queued_job_id,
+                phase="accepted",
+                message_queue_position=index,
+                message_queue_size=total,
+                _persist=False,
+            )
+
+    @classmethod
+    def _message_worker_loop(cls) -> None:
+        while True:
+            cls.message_queue_event.wait(timeout=1)
+            if cls.message_worker_stop:
+                return
+            job_id = ""
+            with cls.message_queue_lock:
+                if cls.message_queue:
+                    job_id = cls.message_queue.pop(0)
+                    cls._update_message_queue_positions_locked()
+                else:
+                    cls.message_queue_event.clear()
+                    continue
+            if not job_id:
+                continue
+            cls._process_initial_message_job(job_id)
+
+    @classmethod
+    def _process_initial_message_job(cls, job_id: str) -> None:
+        try:
+            prepared = cls.service.prepare_action_job(job_id)
+            if prepared.get("skip_personal_message"):
+                cls.enqueue_action_job(job_id)
+                return
+            message_signature = str(prepared.get("message_signature") or "")
+            if prepared.get("message_sent"):
+                cls.service.mark_job(
+                    job_id,
+                    phase="upload_queued",
+                    message_sent=True,
+                    message_signature=message_signature,
+                    message_queue_position=0,
+                    queue_position=0,
+                )
+                cls.enqueue_action_job(job_id)
+                return
+            cls.service.mark_job(
+                job_id,
+                phase="sending_message",
+                message_queue_position=0,
+                queue_position=0,
+            )
+            ok, message = cls.service.send_action_personal_message(prepared)
+            if not ok:
+                cls.service.mark_job(
+                    job_id,
+                    phase="failed",
+                    error=message,
+                    message_sent=False,
+                )
+                return
+            cls.service.mark_job(
+                job_id,
+                phase="upload_queued",
+                message_sent=True,
+                message_signature=message_signature,
+                message_queue_position=0,
+                queue_position=0,
+            )
+            cls.enqueue_action_job(job_id)
+        except Exception as exc:
+            cls.service.mark_job(job_id, phase="failed", error=str(exc))
+
+    @classmethod
     def ensure_action_worker(cls) -> None:
         with cls.action_queue_lock:
             if cls.action_worker_thread and cls.action_worker_thread.is_alive():
@@ -1171,9 +1406,11 @@ class PortalHandler(BaseHTTPRequestHandler):
         for index, queued_job_id in enumerate(cls.action_queue, start=1):
             cls.service.mark_job(
                 queued_job_id,
-                phase="queued",
+                phase="upload_queued",
                 queue_position=index,
                 queue_size=total,
+                upload_queue_position=index,
+                upload_queue_size=total,
                 _persist=False,
             )
 
@@ -1193,33 +1430,97 @@ class PortalHandler(BaseHTTPRequestHandler):
                     continue
             if not job_id:
                 continue
-            cls.service.mark_job(job_id, queue_position=0)
+            cls.service.mark_job(job_id, queue_position=0, upload_queue_position=0)
             cls._process_maintenance_action_job(job_id)
-            cls._wait_action_upload_finished(job_id)
+            cls.track_upload_wait_job(job_id)
 
     @classmethod
-    def _wait_action_upload_finished(cls, job_id: str) -> None:
-        deadline = time.monotonic() + cls.action_upload_timeout_s
-        while time.monotonic() < deadline:
-            job = cls.service.get_job(job_id) or {}
-            phase = str(job.get("phase") or "")
-            if phase in {"success", "failed"}:
+    def ensure_upload_wait_worker(cls) -> None:
+        with cls.upload_wait_lock:
+            if cls.upload_wait_thread and cls.upload_wait_thread.is_alive():
                 return
-            if phase != "uploading":
+            cls.upload_wait_stop = False
+            cls.upload_wait_event.clear()
+            cls.upload_wait_thread = threading.Thread(
+                target=cls._upload_wait_worker_loop,
+                name="LANUploadResultMonitor",
+                daemon=True,
+            )
+            cls.upload_wait_thread.start()
+
+    @classmethod
+    def stop_upload_wait_worker(cls) -> None:
+        with cls.upload_wait_lock:
+            cls.upload_wait_stop = True
+            cls.upload_wait_jobs.clear()
+            cls.upload_wait_event.set()
+            worker = cls.upload_wait_thread
+        if worker and worker.is_alive():
+            try:
+                worker.join(timeout=2)
+            except Exception:
+                pass
+        with cls.upload_wait_lock:
+            cls.upload_wait_thread = None
+            cls.upload_wait_event.clear()
+
+    @classmethod
+    def track_upload_wait_job(cls, job_id: str) -> None:
+        job_id = str(job_id or "").strip()
+        if not job_id:
+            return
+        job = cls.service.get_job(job_id) or {}
+        if str(job.get("phase") or "") != "uploading":
+            return
+        cls.ensure_upload_wait_worker()
+        with cls.upload_wait_lock:
+            cls.upload_wait_jobs[job_id] = time.monotonic() + cls.action_upload_timeout_s
+            cls.upload_wait_event.set()
+
+    @classmethod
+    def _upload_wait_worker_loop(cls) -> None:
+        while True:
+            cls.upload_wait_event.wait(timeout=1.2)
+            if cls.upload_wait_stop or cls.action_worker_stop:
                 return
-            if cls.action_worker_stop:
-                return
-            time.sleep(1.2)
-        cls.service.mark_job(
-            job_id,
-            phase="failed",
-            error="上传多维超时，请在主界面确认实际结果后重试。",
-        )
+            now = time.monotonic()
+            to_remove: list[str] = []
+            timed_out: list[str] = []
+            with cls.upload_wait_lock:
+                items = list(cls.upload_wait_jobs.items())
+            for job_id, deadline in items:
+                job = cls.service.get_job(job_id) or {}
+                phase = str(job.get("phase") or "")
+                if phase in {"success", "failed"} or phase != "uploading":
+                    to_remove.append(job_id)
+                    continue
+                if now >= deadline:
+                    to_remove.append(job_id)
+                    timed_out.append(job_id)
+            if to_remove:
+                with cls.upload_wait_lock:
+                    for job_id in to_remove:
+                        cls.upload_wait_jobs.pop(job_id, None)
+            for job_id in timed_out:
+                cls.service.mark_job(
+                    job_id,
+                    phase="failed",
+                    error="上传多维超时，请在主界面确认实际结果后重试。",
+                )
+            with cls.upload_wait_lock:
+                if not cls.upload_wait_jobs:
+                    cls.upload_wait_event.clear()
 
     @classmethod
     def _process_maintenance_action_job(cls, job_id: str) -> None:
         try:
             prepared = cls.service.prepare_action_job(job_id)
+            if (
+                not prepared.get("skip_personal_message")
+                and not prepared.get("message_sent")
+            ):
+                cls.enqueue_message_job(job_id)
+                return
             if prepared.get("skip_personal_message"):
                 cls.service.mark_job(
                     job_id,
@@ -1231,26 +1532,10 @@ class PortalHandler(BaseHTTPRequestHandler):
             else:
                 cls.service.mark_job(
                     job_id,
-                    phase="sending_message",
+                    phase="uploading",
                     queue_position=0,
                 )
-            if not prepared.get("skip_personal_message") and not prepared.get("message_sent"):
-                ok, message = cls.service.send_action_personal_message(prepared)
-                if not ok:
-                    cls.service.mark_job(
-                        job_id,
-                        phase="failed",
-                        error=message,
-                        message_sent=False,
-                    )
-                    return
-                cls.service.mark_job(
-                    job_id,
-                    phase="uploading",
-                    message_sent=True,
-                    message_signature=str(prepared.get("message_signature") or ""),
-                )
-            elif not prepared.get("skip_personal_message"):
+            if not prepared.get("skip_personal_message"):
                 cls.service.mark_job(
                     job_id,
                     phase="uploading",
@@ -1313,6 +1598,10 @@ class PortalServerController:
             app_token=self.app_token,
             table_id=self.table_id,
         )
+        try:
+            PortalHandler.service.ensure_snapshot_loaded()
+        except Exception:
+            pass
         PortalHandler.auth_manager = PortalAuthManager()
         PortalHandler.state_store = LanPortalStateStore()
         PortalHandler.notice_callback = self.notice_callback
@@ -1323,6 +1612,14 @@ class PortalServerController:
             PortalHandler.action_queue.clear()
             PortalHandler.action_worker_stop = False
             PortalHandler.action_queue_event.clear()
+        with PortalHandler.upload_wait_lock:
+            PortalHandler.upload_wait_jobs.clear()
+            PortalHandler.upload_wait_stop = False
+            PortalHandler.upload_wait_event.clear()
+        with PortalHandler.message_queue_lock:
+            PortalHandler.message_queue.clear()
+            PortalHandler.message_worker_stop = False
+            PortalHandler.message_queue_event.clear()
         self.server = ThreadingHTTPServer((self.host, bound_port), PortalHandler)
         self.thread = threading.Thread(
             target=self.server.serve_forever,
@@ -1330,6 +1627,7 @@ class PortalServerController:
             daemon=True,
         )
         self.thread.start()
+        PortalHandler.ensure_message_workers()
         PortalHandler.ensure_action_worker()
         PortalHandler.ensure_source_refresh_worker()
         self.bound_port = bound_port
@@ -1397,7 +1695,9 @@ class PortalServerController:
         self.server = None
         self.thread = None
         self.bound_port = None
+        PortalHandler.stop_message_workers()
         PortalHandler.stop_action_worker()
+        PortalHandler.stop_upload_wait_worker()
         PortalHandler.stop_source_refresh_worker()
         PortalHandler.notice_callback = None
         PortalHandler.ongoing_callback = None

@@ -13,7 +13,9 @@ from ..services.service_registry import (
     upload_media_to_feishu,
     query_record_by_id,
     create_bitable_record_by_payload,
+    batch_create_bitable_records_by_payload,
     update_bitable_record_by_payload,
+    batch_update_bitable_records_by_payload,
 )
 from ..services.handlers import NoticePayload, get_notice_handler
 from ..core.parser import extract_event_info
@@ -1210,6 +1212,187 @@ class MainWindowWorkflowMixin:
             self._maybe_update_detail_dialog(new_data, record_id)
             self.save_active_cache()
 
+    def _ensure_portal_batch_upload_state(self):
+        if not hasattr(self, "_portal_batch_upload_lock"):
+            self._portal_batch_upload_lock = threading.RLock()
+            self._portal_batch_create_buffer = []
+            self._portal_batch_update_buffer = []
+            self._portal_batch_create_timer = None
+            self._portal_batch_update_timer = None
+
+    def _enqueue_portal_batch_create_upload(self, request: dict) -> None:
+        self._ensure_portal_batch_upload_state()
+        should_flush = False
+        with self._portal_batch_upload_lock:
+            self._portal_batch_create_buffer.append(request)
+            if len(self._portal_batch_create_buffer) >= 20:
+                should_flush = True
+                timer = self._portal_batch_create_timer
+                self._portal_batch_create_timer = None
+                if timer:
+                    try:
+                        timer.cancel()
+                    except Exception:
+                        pass
+            elif self._portal_batch_create_timer is None:
+                timer = threading.Timer(1.0, self._flush_portal_batch_create_uploads)
+                timer.daemon = True
+                self._portal_batch_create_timer = timer
+                timer.start()
+        if should_flush:
+            threading.Thread(
+                target=self._flush_portal_batch_create_uploads,
+                name="LANPortalBatchCreateUpload",
+                daemon=True,
+            ).start()
+
+    def _flush_portal_batch_create_uploads(self) -> None:
+        self._ensure_portal_batch_upload_state()
+        with self._portal_batch_upload_lock:
+            batch = list(self._portal_batch_create_buffer)
+            self._portal_batch_create_buffer = []
+            self._portal_batch_create_timer = None
+        if not batch:
+            return
+        grouped = {}
+        for request in batch:
+            notice_type = str((request or {}).get("notice_type") or "").strip()
+            grouped.setdefault(notice_type, []).append(request)
+        for notice_type, requests in grouped.items():
+            payloads = [copy.deepcopy(item.get("payload")) for item in requests]
+            try:
+                results = batch_create_bitable_records_by_payload(notice_type, payloads)
+            except Exception as exc:
+                log_warning(f"批量上传失败，改为单条上传: notice_type={notice_type}, error={exc}")
+                results = [(False, str(exc)) for _ in requests]
+            if len(results or []) != len(requests) or any(not ok for ok, _ in results):
+                fallback_results = []
+                for request, result in zip(requests, results or []):
+                    ok, value = result
+                    if ok:
+                        fallback_results.append(result)
+                        continue
+                    try:
+                        fallback_results.append(
+                            create_bitable_record_by_payload(
+                                notice_type,
+                                copy.deepcopy(request.get("payload")),
+                            )
+                        )
+                    except Exception as exc:
+                        fallback_results.append((False, str(exc)))
+                if len(fallback_results) < len(requests):
+                    for request in requests[len(fallback_results):]:
+                        try:
+                            fallback_results.append(
+                                create_bitable_record_by_payload(
+                                    notice_type,
+                                    copy.deepcopy(request.get("payload")),
+                                )
+                            )
+                        except Exception as exc:
+                            fallback_results.append((False, str(exc)))
+                results = fallback_results
+            for request, result in zip(requests, results or []):
+                ok, value = result
+                self._post_request_finished(
+                    "上传",
+                    bool(ok),
+                    value,
+                    str(request.get("record_id") or ""),
+                )
+
+    def _enqueue_portal_batch_update_upload(self, request: dict) -> None:
+        self._ensure_portal_batch_upload_state()
+        should_flush = False
+        with self._portal_batch_upload_lock:
+            self._portal_batch_update_buffer.append(request)
+            if len(self._portal_batch_update_buffer) >= 20:
+                should_flush = True
+                timer = self._portal_batch_update_timer
+                self._portal_batch_update_timer = None
+                if timer:
+                    try:
+                        timer.cancel()
+                    except Exception:
+                        pass
+            elif self._portal_batch_update_timer is None:
+                timer = threading.Timer(1.0, self._flush_portal_batch_update_uploads)
+                timer.daemon = True
+                self._portal_batch_update_timer = timer
+                timer.start()
+        if should_flush:
+            threading.Thread(
+                target=self._flush_portal_batch_update_uploads,
+                name="LANPortalBatchUpdateUpload",
+                daemon=True,
+            ).start()
+
+    def _flush_portal_batch_update_uploads(self) -> None:
+        self._ensure_portal_batch_upload_state()
+        with self._portal_batch_upload_lock:
+            batch = list(self._portal_batch_update_buffer)
+            self._portal_batch_update_buffer = []
+            self._portal_batch_update_timer = None
+        if not batch:
+            return
+        grouped = {}
+        for request in batch:
+            key = (
+                str((request or {}).get("notice_type") or "").strip(),
+                str((request or {}).get("action_type") or "").strip(),
+            )
+            grouped.setdefault(key, []).append(request)
+        for (notice_type, action_type), requests in grouped.items():
+            updates = [
+                (str(item.get("record_id") or ""), copy.deepcopy(item.get("payload")))
+                for item in requests
+            ]
+            try:
+                results = batch_update_bitable_records_by_payload(notice_type, updates)
+            except Exception as exc:
+                log_warning(f"批量更新失败，改为单条更新: notice_type={notice_type}, error={exc}")
+                results = [(False, str(exc)) for _ in requests]
+            if len(results or []) != len(requests) or any(not ok for ok, _ in results):
+                fallback_results = []
+                for request, result in zip(requests, results or []):
+                    ok, value = result
+                    if ok:
+                        fallback_results.append(result)
+                        continue
+                    try:
+                        fallback_results.append(
+                            update_bitable_record_by_payload(
+                                str(request.get("record_id") or ""),
+                                notice_type,
+                                copy.deepcopy(request.get("payload")),
+                            )
+                        )
+                    except Exception as exc:
+                        fallback_results.append((False, str(exc)))
+                if len(fallback_results) < len(requests):
+                    for request in requests[len(fallback_results):]:
+                        try:
+                            fallback_results.append(
+                                update_bitable_record_by_payload(
+                                    str(request.get("record_id") or ""),
+                                    notice_type,
+                                    copy.deepcopy(request.get("payload")),
+                                )
+                            )
+                        except Exception as exc:
+                            fallback_results.append((False, str(exc)))
+                results = fallback_results
+            finished_name = "结束" if action_type == "end" else "更新"
+            for request, result in zip(requests, results or []):
+                ok, value = result
+                self._post_request_finished(
+                    finished_name,
+                    bool(ok),
+                    value,
+                    str(request.get("record_id") or ""),
+                )
+
     def do_feishu_upload(
         self,
         data_dict,
@@ -1375,6 +1558,115 @@ class MainWindowWorkflowMixin:
             f"response_time={response_time or '-'} "
             f"notice_time={data_snapshot.get('time_str') or '-'}"
         )
+
+        if (
+            action_type == "upload"
+            and bool(data_snapshot.get("lan_created_from_portal"))
+            and not screenshot_bytes
+            and not extra_images
+        ):
+            payload = (
+                copy.deepcopy(payload_base)
+                if payload_base
+                else NoticePayload(
+                    text=data_snapshot.get("text", ""),
+                    robot_group_choice=robot_group_choice,
+                )
+            )
+            payload.transfer_to_overhaul = data_snapshot.get("transfer_to_overhaul")
+            payload.text = data_snapshot.get("text", "")
+            payload.maintenance_cycle = (
+                data_snapshot.get("maintenance_cycle") or payload.maintenance_cycle
+            )
+            payload.level = (
+                change_level
+                if notice_type in ("设备变更", "变更通告")
+                else event_level
+                if notice_type == "事件通告"
+                else data_snapshot.get("level") or payload.level
+            )
+            payload.buildings = _buildings
+            payload.specialty = specialty
+            payload.event_source = event_source
+            payload.robot_group_choice = robot_group_choice
+            payload.file_tokens = None
+            payload.extra_file_tokens = None
+            payload.response_time = response_time
+            payload.occurrence_date = data_snapshot.get("time_str", "")
+            payload.existing_file_tokens = None
+            payload.existing_extra_file_tokens = None
+            payload.existing_response_time = None
+            payload.recover = recover_selected
+            self._enqueue_portal_batch_create_upload(
+                {
+                    "record_id": record_id,
+                    "notice_type": notice_type,
+                    "payload": payload,
+                }
+            )
+            self._mark_upload_queued(record_id)
+            if self.current_screenshot_record_id == record_id:
+                self.current_screenshot_record_id = None
+                self.current_screenshot_action_type = None
+            self._try_process_deferred_events()
+            return
+
+        if (
+            action_type in ("update", "end")
+            and bool(data_snapshot.get("lan_created_from_portal"))
+            and not self._is_placeholder_record(data_snapshot)
+            and not screenshot_bytes
+            and not extra_images
+            and not (
+                action_type == "update"
+                and notice_type in ("设备变更", "变更通告", "事件通告")
+            )
+        ):
+            payload = (
+                copy.deepcopy(payload_base)
+                if payload_base
+                else NoticePayload(
+                    text=data_snapshot.get("text", ""),
+                    robot_group_choice=robot_group_choice,
+                )
+            )
+            payload.transfer_to_overhaul = data_snapshot.get("transfer_to_overhaul")
+            payload.text = data_snapshot.get("text", "")
+            payload.maintenance_cycle = (
+                data_snapshot.get("maintenance_cycle") or payload.maintenance_cycle
+            )
+            payload.level = (
+                change_level
+                if notice_type in ("设备变更", "变更通告")
+                else event_level
+                if notice_type == "事件通告"
+                else data_snapshot.get("level") or payload.level
+            )
+            payload.buildings = _buildings
+            payload.specialty = specialty
+            payload.event_source = event_source
+            payload.robot_group_choice = robot_group_choice
+            payload.file_tokens = None
+            payload.extra_file_tokens = None
+            payload.existing_file_tokens = None
+            payload.existing_extra_file_tokens = None
+            payload.response_time = response_time
+            payload.existing_response_time = ""
+            payload.recover = recover_selected
+            self._enqueue_portal_batch_update_upload(
+                {
+                    "record_id": record_id,
+                    "notice_type": notice_type,
+                    "action_type": action_type,
+                    "payload": payload,
+                }
+            )
+            self._mark_upload_queued(record_id)
+            if self.current_screenshot_record_id == record_id:
+                self.current_screenshot_record_id = None
+                self.current_screenshot_action_type = None
+            self._try_process_deferred_events()
+            return
 
         def task():
             # 从外部作用域获取参数

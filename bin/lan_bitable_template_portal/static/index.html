@@ -1307,6 +1307,7 @@
       scopeOverview: {},
       preloadedWorkbenches: {},
       lastLoadedAt: "",
+      payloadVersion: "",
       warnings: [],
       filters: { month: "", specialty: "", search: "" },
       workType: "maintenance",
@@ -1338,6 +1339,7 @@
         active: false,
         automatic: false,
       },
+      renderSeq: { records: 0, ongoing: 0 },
       expandedRecordId: "",
       expandedSummaryKey: "",
     };
@@ -3323,6 +3325,16 @@
 
     function applyWorkbenchPayload(data, { automatic = false, deferred = false } = {}) {
       updateAuthFromPayload(data);
+      const nextPayloadVersion = data.payload_version || "";
+      if (automatic && nextPayloadVersion && nextPayloadVersion === state.payloadVersion) {
+        state.lastLoadedAt = data.last_loaded_at || state.lastLoadedAt;
+        state.warnings = data.warnings || [];
+        updateAutoRefreshInterval(data);
+        if (data.last_loaded_at) setSyncStatus(`数据更新时间 ${data.last_loaded_at}`, state.warnings);
+        restoreJobState();
+        return;
+      }
+      state.payloadVersion = nextPayloadVersion || state.payloadVersion;
       state.records = data.records || [];
       state.zhihangRecords = data.zhihang_change_records || [];
       state.ongoing = data.ongoing || [];
@@ -3335,6 +3347,8 @@
           `数据更新时间 ${data.last_loaded_at}${deferred ? "（编辑后已刷新）" : ""}`,
           state.warnings
         );
+      } else if (data.source_snapshot_ready === false) {
+        setSyncStatus("后台正在准备数据，稍后会自动显示", state.warnings);
       } else if (!automatic) {
         setSyncStatus("已刷新", state.warnings);
       }
@@ -3858,12 +3872,30 @@
       `;
     }
 
+    function renderHtmlInChunks(kind, container, items, itemToHtml, afterRender) {
+      if (!container) return;
+      const seq = (state.renderSeq[kind] || 0) + 1;
+      state.renderSeq[kind] = seq;
+      container.innerHTML = "";
+      const chunkSize = 32;
+      let index = 0;
+      const step = () => {
+        if (state.renderSeq[kind] !== seq) return;
+        const htmlChunk = items.slice(index, index + chunkSize).map(itemToHtml).join("");
+        if (htmlChunk) container.insertAdjacentHTML("beforeend", htmlChunk);
+        index += chunkSize;
+        if (index < items.length) {
+          window.requestAnimationFrame(step);
+          return;
+        }
+        if (typeof afterRender === "function") afterRender();
+      };
+      window.requestAnimationFrame(step);
+    }
+
     function renderRecords() {
       const records = visibleRecords();
       if (state.workType === "change") {
-        const left = records.length
-          ? records.map(recordCardHtml).join("")
-          : emptyRecordHtml();
         $("recordList").innerHTML = `
           <div class="change-pair-grid">
             <div class="change-pair-column">
@@ -3871,15 +3903,23 @@
                 <span>阿里侧变更</span>
                 <span>${html(records.length)}条</span>
               </div>
-              ${left}
+              <div id="aliChangeRecordList"></div>
             </div>
             ${renderZhihangColumn()}
           </div>
         `;
-        bindRecordEvents();
-        bindZhihangEvents();
-        document.querySelectorAll("[data-empty-switch-type]").forEach((btn) => {
-          btn.addEventListener("click", () => setWorkType(btn.dataset.emptySwitchType));
+        const aliList = $("aliChangeRecordList");
+        if (!records.length) {
+          aliList.innerHTML = emptyRecordHtml();
+          document.querySelectorAll("[data-empty-switch-type]").forEach((btn) => {
+            btn.addEventListener("click", () => setWorkType(btn.dataset.emptySwitchType));
+          });
+          bindZhihangEvents();
+          return;
+        }
+        renderHtmlInChunks("records", aliList, records, recordCardHtml, () => {
+          bindRecordEvents();
+          bindZhihangEvents();
         });
         return;
       }
@@ -3890,8 +3930,7 @@
         });
         return;
       }
-      $("recordList").innerHTML = records.map(recordCardHtml).join("");
-      bindRecordEvents();
+      renderHtmlInChunks("records", $("recordList"), records, recordCardHtml, bindRecordEvents);
     }
 
     function draftFieldsHtml(record, id, draft) {
@@ -4183,7 +4222,7 @@
         $("ongoingList").innerHTML = `<div class="empty">当前楼栋没有已开始未结束通告</div>`;
         return;
       }
-      $("ongoingList").innerHTML = state.ongoing.map((item) => {
+      renderHtmlInChunks("ongoing", $("ongoingList"), state.ongoing, (item) => {
         const id = item.active_item_id;
         const range = splitTimeRange(item.time, item.start_time, item.end_time);
         const readonly = Boolean(item.source_only);
@@ -4221,8 +4260,7 @@
             <div class="job-line ${readonly ? "hidden" : ""}" data-job-line="${html(id)}">待操作</div>
           </article>
         `;
-      }).join("");
-      bindOngoingEvents();
+      }, bindOngoingEvents);
     }
 
     function toDatetimeLocal(text) {
@@ -4451,20 +4489,24 @@
       const localKey = jobLocalKey(payload, lineKey);
       try {
         setActionButtonsDisabled(lineKey, true);
-        setJobLine(lineKey, "提交中，准备加入上传队列", "busy");
+        setJobLine(lineKey, "提交中，准备进入后台任务", "busy");
         const data = await api("/api/workbench-actions", {
           method: "POST",
           body: JSON.stringify(payload),
         });
         const jobId = data.job_id;
+        const initialPhase = data.initial_phase || "accepted";
         if (payload.operation_id) state.jobToOpKey.set(jobId, payload.operation_id);
+        const acceptedText = payload.work_type === "maintenance"
+          ? `已受理，正在发送个人消息 ${jobId.slice(0, 8)}`
+          : `已受理，等待上传 ${jobId.slice(0, 8)}`;
         rememberJobState(localKey, {
           job_id: jobId,
           line_key: lineKey,
           payload,
           operation_id: payload.operation_id || "",
-          phase: "queued",
-          text: `已加入上传队列 ${jobId.slice(0, 8)}`,
+          phase: initialPhase,
+          text: acceptedText,
           status: "busy",
         });
         const draft = state.drafts.get(lineKey);
@@ -4472,7 +4514,7 @@
           draft.job_id = jobId;
           saveDraftState();
         }
-        setJobLine(lineKey, `已加入上传队列 ${jobId.slice(0, 8)}`, "busy");
+        setJobLine(lineKey, acceptedText, "busy");
         pollJob(jobId, lineKey, localKey);
       } catch (err) {
         setJobLine(lineKey, err.message || "提交失败", "failed");
@@ -4543,12 +4585,23 @@
             state.polling.delete(jobId);
             return;
           }
-          const queuedLabel = job.queue_position
-            ? `排队中，第 ${job.queue_position} 位`
-            : "排队中";
+          const uploadPosition = job.upload_queue_position || job.queue_position || 0;
+          const uploadQueuedLabel = uploadPosition
+            ? `上传排队中，第 ${uploadPosition} 位`
+            : "等待上传";
+          const messageQueuedLabel = job.message_queue_position
+            ? `消息排队中，第 ${job.message_queue_position} 位`
+            : "已受理，正在发送个人消息";
+          const messageStartedAt = Number(job.message_started_at || 0) * 1000;
+          const messageSlow = messageStartedAt && Date.now() - messageStartedAt > 3000;
           const label = {
-            queued: queuedLabel,
-            sending_message: "队列已轮到，正在发送个人飞书消息",
+            accepted: messageQueuedLabel,
+            queued: uploadQueuedLabel,
+            message_sent: "个人消息已发送，等待上传",
+            upload_queued: uploadQueuedLabel,
+            sending_message: messageSlow
+              ? "飞书发送中，已在后台处理"
+              : "正在发送个人飞书消息",
             uploading: job.prepared?.work_type === "change"
               ? "正在上传变更多维"
               : job.prepared?.work_type === "repair"
@@ -4564,10 +4617,12 @@
             text: label,
             status: "busy",
           });
-          const nextDelay = phase === "queued"
+          const nextDelay = phase === "accepted"
+            ? 1000
+            : phase === "queued" || phase === "upload_queued" || phase === "message_sent"
             ? 3500
             : phase === "sending_message"
-              ? 2200
+              ? 1200
               : 2600;
           setTimeout(tick, nextDelay);
         } catch (err) {
@@ -4600,7 +4655,7 @@
           continue;
         }
         if (visibleLine) setJobLine(lineKey, saved.text || "任务处理中", saved.status || "busy");
-        if (["queued", "sending_message", "uploading"].includes(saved.phase || "") && jobId) {
+        if (["accepted", "queued", "sending_message", "message_sent", "upload_queued", "uploading"].includes(saved.phase || "") && jobId) {
           if (visibleLine) setActionButtonsDisabled(lineKey, true);
           pollJob(jobId, lineKey, localKey);
         } else if (["failed", "lost"].includes(saved.phase || "")) {
