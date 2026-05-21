@@ -1107,6 +1107,7 @@
         <span id="ongoingCount" class="pill">进行中 0</span>
         <span id="autoRefreshPill" class="pill hidden">自动刷新已关闭</span>
         <button id="refreshBtn" class="btn ghost">刷新本页</button>
+        <button id="repairRefreshBtn" class="btn ghost" title="只重新读取检修源表，用于刚创建检修后立即发通告">刷新检修</button>
         <button id="syncSourceBtn" class="btn ghost hidden" title="管理员手动触发后台同步源表">同步源表</button>
         <button id="switchScopeBtn" class="btn ghost">切换楼栋</button>
         <button id="homeBtn" class="btn ghost">功能选择</button>
@@ -1698,7 +1699,7 @@
       $("app").classList.toggle("loading", state.loading.active && !state.loading.automatic);
       $("syncTime").classList.toggle("busy", state.loading.active);
       if (text) $("syncTime").textContent = text;
-      ["refreshBtn", "refreshOngoingBtn", "syncSourceBtn"].forEach((id) => {
+      ["refreshBtn", "refreshOngoingBtn", "repairRefreshBtn", "syncSourceBtn"].forEach((id) => {
         const btn = $(id);
         if (btn) btn.disabled = state.loading.active;
       });
@@ -3482,6 +3483,47 @@
       }
     }
 
+    async function refreshRepairSource() {
+      const requestScope = normalizeScopeValue(state.scope || "ALL", "ALL");
+      const requestSeq = nextViewRequestSeq();
+      setLoadingState(true, "刷新检修源表中");
+      try {
+        const data = await api(`/api/repair-refresh?scope=${encodeURIComponent(requestScope)}`);
+        if (!isLatestViewRequest(requestSeq)) return;
+        if (normalizeScopeValue(state.scope || "ALL", "ALL") !== requestScope) return;
+        updateAuthFromPayload(data);
+        state.scopeOptions = data.scope_options || state.scopeOptions;
+        state.records = data.records || [];
+        state.zhihangRecords = data.zhihang_change_records || [];
+        state.ongoing = data.ongoing || [];
+        state.dailySummary = data.daily_summary || { date: "", items: [], stats: {} };
+        state.defaults = data.defaults || state.defaults;
+        state.lastLoadedAt = data.last_loaded_at || "";
+        updateAutoRefreshInterval(data);
+        state.warnings = data.warnings || [];
+        const countText = Number.isFinite(Number(data.repair_count))
+          ? `，检修源记录 ${Number(data.repair_count)} 条`
+          : "";
+        setSyncStatus(
+          data.repair_refreshed_at
+            ? `检修数据已刷新 ${data.repair_refreshed_at}${countText}`
+            : `检修数据已刷新${countText}`,
+          state.warnings
+        );
+        cleanupDraftState();
+        render();
+        restoreJobState();
+        loadScopeOverview();
+        startAutoRefresh();
+      } catch (err) {
+        if (!isLatestViewRequest(requestSeq)) return;
+        setSyncStatus(`刷新检修失败: ${err.message || "未知错误"}`, state.warnings);
+        throw err;
+      } finally {
+        if (isLatestViewRequest(requestSeq)) setLoadingState(false);
+      }
+    }
+
     function scheduleSearchRender() {
       if (state.searchRenderTimerId) clearTimeout(state.searchRenderTimerId);
       state.searchRenderTimerId = window.setTimeout(() => {
@@ -4944,6 +4986,7 @@
 
     $("refreshBtn").addEventListener("click", () => refreshWorkbench().catch(() => {}));
     $("refreshOngoingBtn").addEventListener("click", () => refreshWorkbench().catch(() => {}));
+    $("repairRefreshBtn").addEventListener("click", () => refreshRepairSource().catch(() => {}));
     $("syncSourceBtn").addEventListener("click", () => syncSource().catch(() => {}));
     $("switchScopeBtn").addEventListener("click", () => showGate("maintenance"));
     $("homeBtn").addEventListener("click", () => showGate("home"));

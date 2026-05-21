@@ -783,6 +783,41 @@ class MaintenancePortalService:
             self._save_source_scope_snapshots()
             self._touch_state_cache_version()
 
+    def refresh_repair_source(self) -> dict[str, Any]:
+        """Refresh only the repair source table and rewrite SQLite snapshots."""
+        with self._refresh_lock:
+            if not (
+                self._maintenance_loaded_once
+                and self._change_loaded_once
+                and self._repair_loaded_once
+                and self._zhihang_change_loaded_once
+            ):
+                self._hydrate_source_records_from_sqlite()
+            warnings = [
+                str(item)
+                for item in (self._load_warnings or [])
+                if not str(item or "").startswith("检修源表同步失败")
+            ]
+            try:
+                self._load_repair_fields()
+                self._load_repair_records()
+            except Exception as exc:
+                warning = f"检修源表同步失败: {exc}"
+                if warning not in warnings:
+                    warnings.append(warning)
+                self._load_warnings = warnings
+                raise PortalError(warning) from exc
+            now = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self._last_loaded_at = now
+            self._last_loaded_ts = time.time()
+            self._load_warnings = warnings
+            self._save_source_scope_snapshots()
+            self._touch_state_cache_version()
+            return {
+                "repair_refreshed_at": now,
+                "repair_count": len(self._repair_records),
+            }
+
     def refresh_if_interval_elapsed(self, *, min_interval_seconds: int = 60) -> bool:
         min_interval = max(0, int(min_interval_seconds or 0))
         with self._refresh_lock:

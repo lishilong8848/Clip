@@ -90,6 +90,13 @@ class PortalHandler(BaseHTTPRequestHandler):
     source_refresh_stop = False
     source_refresh_event = threading.Event()
     source_refresh_lock = threading.RLock()
+    repair_refresh_lock = threading.RLock()
+    repair_refresh_inflight = False
+    repair_refresh_event = threading.Event()
+    repair_refresh_last_result: dict = {}
+    repair_refresh_last_error = ""
+    repair_refresh_last_finished = 0.0
+    repair_refresh_reuse_window_s = 10.0
 
     @staticmethod
     def _is_client_disconnect(exc: BaseException) -> bool:
@@ -487,6 +494,65 @@ class PortalHandler(BaseHTTPRequestHandler):
                     event.set()
         return payload
 
+    @classmethod
+    def _refresh_repair_source_singleflight(cls) -> dict:
+        now = time.monotonic()
+        with cls.repair_refresh_lock:
+            if (
+                cls.repair_refresh_last_result
+                and now - float(cls.repair_refresh_last_finished or 0)
+                <= float(cls.repair_refresh_reuse_window_s)
+            ):
+                result = copy.deepcopy(cls.repair_refresh_last_result)
+                result["repair_refresh_reused"] = True
+                return result
+            if cls.repair_refresh_inflight:
+                event = cls.repair_refresh_event
+                owner = False
+            else:
+                event = threading.Event()
+                cls.repair_refresh_event = event
+                cls.repair_refresh_inflight = True
+                cls.repair_refresh_last_error = ""
+                owner = True
+
+        if not owner:
+            if not event.wait(timeout=120):
+                raise PortalError("检修源表刷新仍在进行，请稍后查看。")
+            with cls.repair_refresh_lock:
+                if cls.repair_refresh_last_error:
+                    raise PortalError(cls.repair_refresh_last_error)
+                if not cls.repair_refresh_last_result:
+                    raise PortalError("检修源表刷新未返回结果，请稍后重试。")
+                result = copy.deepcopy(cls.repair_refresh_last_result)
+                result["repair_refresh_reused"] = True
+                return result
+
+        try:
+            result = cls.service.refresh_repair_source()
+            if not isinstance(result, dict):
+                result = {}
+            result = copy.deepcopy(result)
+            result["repair_refresh_reused"] = False
+            cls.clear_payload_cache()
+            with cls.repair_refresh_lock:
+                cls.repair_refresh_last_result = copy.deepcopy(result)
+                cls.repair_refresh_last_error = ""
+                cls.repair_refresh_last_finished = time.monotonic()
+            return result
+        except Exception as exc:
+            error = str(exc)
+            with cls.repair_refresh_lock:
+                cls.repair_refresh_last_error = error
+                cls.repair_refresh_last_finished = time.monotonic()
+            if isinstance(exc, PortalError):
+                raise
+            raise PortalError(error) from exc
+        finally:
+            with cls.repair_refresh_lock:
+                cls.repair_refresh_inflight = False
+                event.set()
+
     def _reconcile_orphan_started_items(
         self, scope: str, ongoing: list[dict] | None, *, force: bool = False
     ) -> None:
@@ -801,6 +867,31 @@ class PortalHandler(BaseHTTPRequestHandler):
                     scope=scope, ongoing_items=ongoing
                 )
                 data["source_refresh_triggered"] = refreshed
+                return self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "data": self._with_auth_context(
+                            self._with_runtime_warnings(data), session
+                        ),
+                    },
+                )
+            except PortalError as exc:
+                return self._send_json(403, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/repair-refresh":
+            qs = parse_qs(parsed.query)
+            try:
+                scope = self._authorized_scope_or_error(
+                    session, (qs.get("scope") or ["ALL"])[0]
+                )
+                refresh_result = PortalHandler._refresh_repair_source_singleflight()
+                ongoing = self._get_ongoing(scope)
+                self._reconcile_orphan_started_items(scope, ongoing)
+                data = self.service.get_bootstrap(
+                    scope=scope, ongoing_items=ongoing
+                )
+                data.update(refresh_result)
+                data["repair_source_refreshed"] = True
                 return self._send_json(
                     200,
                     {
@@ -1610,6 +1701,12 @@ class PortalServerController:
         PortalHandler.ongoing_callback = self.ongoing_callback
         PortalHandler.ongoing_delete_callback = self.ongoing_delete_callback
         PortalHandler.maintenance_action_callback = self.maintenance_action_callback
+        with PortalHandler.repair_refresh_lock:
+            PortalHandler.repair_refresh_inflight = False
+            PortalHandler.repair_refresh_event = threading.Event()
+            PortalHandler.repair_refresh_last_result = {}
+            PortalHandler.repair_refresh_last_error = ""
+            PortalHandler.repair_refresh_last_finished = 0.0
         with PortalHandler.action_queue_lock:
             PortalHandler.action_queue.clear()
             PortalHandler.action_worker_stop = False
