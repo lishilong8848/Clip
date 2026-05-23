@@ -35,6 +35,8 @@ from lan_bitable_template_portal.portal_auth import AUTH_COOKIE_NAME
 from lan_bitable_template_portal.portal_service import (
     CHANGE_SOURCE_APP_TOKEN,
     CHANGE_SOURCE_TABLE_ID,
+    DEFAULT_APP_TOKEN,
+    DEFAULT_TABLE_ID,
     NOTICE_TYPE_CHANGE,
     NOTICE_TYPE_MAINTENANCE,
     NOTICE_TYPE_REPAIR,
@@ -192,6 +194,24 @@ def _field_names(metas: list) -> set[str]:
     return names
 
 
+def _missing_fields(
+    names: set[str],
+    fields: list[str] | None,
+    aliases: dict[str, list[str]] | None = None,
+) -> list[str]:
+    aliases = aliases or {}
+    missing: list[str] = []
+    for field_name in fields or []:
+        candidates = [str(field_name or "").strip()]
+        candidates.extend(str(item or "").strip() for item in aliases.get(field_name, []))
+        candidates = [item for item in candidates if item]
+        if not candidates:
+            continue
+        if not any(candidate in names for candidate in candidates):
+            missing.append(candidates[0])
+    return missing
+
+
 def _check_field_set(
     service: MaintenancePortalService,
     *,
@@ -200,6 +220,8 @@ def _check_field_set(
     table_id: str,
     required: list[str],
     optional: list[str] | None = None,
+    required_aliases: dict[str, list[str]] | None = None,
+    optional_aliases: dict[str, list[str]] | None = None,
 ) -> dict:
     app_token = str(app_token or "").strip()
     table_id = str(table_id or "").strip()
@@ -224,8 +246,8 @@ def _check_field_set(
     try:
         metas, _ = service._load_table_fields(app_token=app_token, table_id=table_id)
         names = _field_names(metas)
-        missing_required = [name for name in required or [] if name not in names]
-        missing_optional = [name for name in optional or [] if name not in names]
+        missing_required = _missing_fields(names, required, required_aliases)
+        missing_optional = _missing_fields(names, optional, optional_aliases)
         status = "fail" if missing_required else "warning" if missing_optional else "ok"
         message = (
             "缺少必需字段。"
@@ -277,8 +299,8 @@ def _build_backend_preflight_report(service: MaintenancePortalService) -> dict:
             _check_field_set(
                 service,
                 label="维保源表字段",
-                app_token=getattr(service, "app_token", ""),
-                table_id=getattr(service, "table_id", ""),
+                app_token=getattr(service, "app_token", "") or DEFAULT_APP_TOKEN,
+                table_id=getattr(service, "table_id", "") or DEFAULT_TABLE_ID,
                 required=[
                     "楼栋",
                     "维护总项",
@@ -311,8 +333,9 @@ def _build_backend_preflight_report(service: MaintenancePortalService) -> dict:
                 label="检修源表字段",
                 app_token=REPAIR_SOURCE_APP_TOKEN,
                 table_id=REPAIR_SOURCE_TABLE_ID,
-                required=["维修名称", "所属数据中心/楼栋-使用"],
+                required=["检修通告名称", "所属数据中心/楼栋-使用"],
                 optional=[
+                    "维修名称",
                     "所属专业",
                     "专业（推送消息用）",
                     "故障发生时间",
@@ -331,6 +354,16 @@ def _build_backend_preflight_report(service: MaintenancePortalService) -> dict:
                 table_id=ZHIHANG_CHANGE_TABLE_ID,
                 required=["进展"],
                 optional=["标题"],
+                required_aliases={"进展": ["进度"]},
+                optional_aliases={
+                    "标题": [
+                        "名称",
+                        "变更名称",
+                        "变更标题",
+                        "变更简述",
+                        "工作内容",
+                    ]
+                },
             ),
             _check_field_set(
                 service,
@@ -391,13 +424,13 @@ class FastAPIPortalController:
         *,
         host: str = DEFAULT_HOST,
         port: int = DEFAULT_PORT,
-        app_token: str = "",
-        table_id: str = "",
+        app_token: str = DEFAULT_APP_TOKEN,
+        table_id: str = DEFAULT_TABLE_ID,
     ) -> None:
         self.host = str(host or DEFAULT_HOST).strip() or DEFAULT_HOST
         self.preferred_port = int(port or DEFAULT_PORT)
-        self.app_token = str(app_token or "").strip()
-        self.table_id = str(table_id or "").strip()
+        self.app_token = str(app_token or DEFAULT_APP_TOKEN).strip()
+        self.table_id = str(table_id or DEFAULT_TABLE_ID).strip()
         self.bound_port: int | None = None
         self._legacy_controller: PortalServerController | None = None
         self._legacy_url = ""

@@ -768,6 +768,8 @@ class MainWindowRecordsMixin:
         record_id: str,
         state: str,
         error: str = "",
+        *,
+        persist_cache: bool = True,
     ):
         record_id = str(record_id or "").strip()
         normalized_state = self._normalize_record_binding_state(state)
@@ -778,7 +780,7 @@ class MainWindowRecordsMixin:
             patch["record_binding_error"] = str(error or "Record ID 冲突").strip()
         else:
             patch["record_binding_error"] = None
-        if getattr(self, "cache_store", None):
+        if persist_cache and getattr(self, "cache_store", None):
             try:
                 self.cache_store.patch_record_fields(record_id=record_id, patch=patch)
             except Exception:
@@ -787,18 +789,30 @@ class MainWindowRecordsMixin:
         if item and self._is_valid_list_item(item):
             data = item.data(Qt.ItemDataRole.UserRole) or {}
             updated = dict(data)
+            old_state = self._normalize_record_binding_state(
+                updated.get("record_binding_state")
+            )
+            old_error = str(updated.get("record_binding_error") or "").strip()
             updated["record_binding_state"] = normalized_state
             if normalized_state == "conflicted":
                 updated["record_binding_error"] = patch["record_binding_error"]
             else:
                 updated.pop("record_binding_error", None)
-            self._commit_active_record(
-                updated,
-                refresh_detail=True,
-                rebuild_widget=True,
-                list_widget=list_widget,
-                item=item,
-            )
+            new_error = str(updated.get("record_binding_error") or "").strip()
+            if old_state == normalized_state and old_error == new_error:
+                return
+            try:
+                item.setData(Qt.ItemDataRole.UserRole, updated)
+            except Exception:
+                pass
+            widget = self._safe_item_widget(list_widget, item)
+            if widget is not None and hasattr(widget, "data"):
+                try:
+                    widget.data = updated
+                except Exception:
+                    pass
+            if normalized_state == "conflicted":
+                self._maybe_update_detail_dialog(updated, record_id)
 
     @staticmethod
     def _is_missing_remote_record_error(error_text: str) -> bool:
@@ -833,6 +847,8 @@ class MainWindowRecordsMixin:
             conflict = False
             conflict_error = ""
             missing_remote_record = False
+            state_to_apply = ""
+            error_to_apply = ""
             if success:
                 fields = result.get("fields", {}) if isinstance(result, dict) else {}
                 local_fp = self._extract_local_record_binding_fingerprint(local_data)
@@ -857,6 +873,8 @@ class MainWindowRecordsMixin:
                         + "、".join(labels)
                         + " 与多维记录不一致"
                     )
+                state_to_apply = "conflicted" if conflict else "bound"
+                error_to_apply = conflict_error if conflict else ""
             else:
                 conflict_error = str(result or "")
                 missing_remote_record = self._is_missing_remote_record_error(
@@ -864,6 +882,24 @@ class MainWindowRecordsMixin:
                 )
                 if missing_remote_record:
                     conflict_error = "Record ID 已失效：多维记录不存在，可能已被删除"
+                    state_to_apply = "conflicted"
+                    error_to_apply = conflict_error
+
+            if state_to_apply and getattr(self, "cache_store", None):
+                patch = {"record_binding_state": state_to_apply}
+                if state_to_apply == "conflicted":
+                    patch["record_binding_error"] = (
+                        error_to_apply or "Record ID 冲突"
+                    )
+                else:
+                    patch["record_binding_error"] = None
+                try:
+                    self.cache_store.patch_record_fields(
+                        record_id=record_id,
+                        patch=patch,
+                    )
+                except Exception:
+                    pass
 
             def apply_result():
                 self._record_binding_validation_pending_ids.discard(record_id)
@@ -876,19 +912,18 @@ class MainWindowRecordsMixin:
                         self._record_binding_validated_ids.add(record_id)
                         self._set_record_binding_state(
                             record_id,
-                            "conflicted",
-                            error=conflict_error,
+                            state_to_apply,
+                            error=error_to_apply,
+                            persist_cache=False,
                         )
                     return
                 self._record_binding_validated_ids.add(record_id)
-                if conflict:
-                    self._set_record_binding_state(
-                        record_id,
-                        "conflicted",
-                        error=conflict_error,
-                    )
-                else:
-                    self._set_record_binding_state(record_id, "bound", error="")
+                self._set_record_binding_state(
+                    record_id,
+                    state_to_apply,
+                    error=error_to_apply,
+                    persist_cache=False,
+                )
 
             self._enqueue_ui_mutation("record_binding_validation", apply_result)
 

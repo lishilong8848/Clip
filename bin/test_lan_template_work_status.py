@@ -325,6 +325,7 @@ def _build_repair_record(
     record_id: str,
     *,
     title: str = "测试检修",
+    repair_name: str | None = None,
     event_description: str = "",
     event_level: str = "",
     source: str = "",
@@ -354,7 +355,8 @@ def _build_repair_record(
         "source_app_token": "AnEBwJlvGiJfDdkOB32cUPuknzg",
         "source_table_id": "tblschT48zXwigUG",
         "display_fields": {
-            "维修名称": title,
+            "检修通告名称": title,
+            "维修名称": title if repair_name is None else repair_name,
             "事件描述": event_description,
             "对应事件等级": event_level,
             "对应来源": source,
@@ -419,6 +421,12 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
         self.addCleanup(store_patcher.stop)
         return service_cls()
+
+    def test_portal_service_empty_source_config_falls_back_to_defaults(self):
+        service = MaintenancePortalService(app_token="", table_id="")
+
+        self.assertEqual(service.app_token, "HU38bc1vnamMK9sCeOgclUvXnFc")
+        self.assertEqual(service.table_id, "tblzk7WrXxNWQy6V")
 
     def test_lan_portal_state_store_replaces_ongoing_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1718,14 +1726,15 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(prepared["fault_time"], "2026-05-08 08:20")
             self.assertEqual(prepared["building_code"], "D")
 
-    def test_repair_defaults_use_repair_name_formula_level_and_source(self):
+    def test_repair_defaults_use_notice_title_formula_level_and_source(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
             service._repair_records = [
                 _build_repair_record(
                     "r1",
                     building="D楼",
-                    title="维修名称公式字段作为检修标题",
+                    title="检修通告名称公式字段作为检修标题",
+                    repair_name="维修名称不应作为检修标题",
                     event_description="事件描述不作为检修标题",
                     event_level="I2",
                     source="监控发现",
@@ -1751,12 +1760,13 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
             self.assertTrue(should_start)
             prepared = service.prepare_action_job(start_job_id)
-            self.assertEqual(prepared["title"], "维修名称公式字段作为检修标题")
+            self.assertEqual(prepared["title"], "检修通告名称公式字段作为检修标题")
             self.assertEqual(prepared["level"], "中")
             self.assertEqual(prepared["discovery"], "监控发现")
             self.assertEqual(service._repair_level_from_event_level("I3"), "低")
             self.assertEqual(service._repair_level_from_event_level("I1"), "")
-            self.assertIn("【标题】维修名称公式字段作为检修标题", prepared["text"])
+            self.assertIn("【标题】检修通告名称公式字段作为检修标题", prepared["text"])
+            self.assertNotIn("维修名称不应作为检修标题", prepared["text"])
             self.assertNotIn("事件描述不作为检修标题", prepared["text"])
             self.assertIn("【紧急程度】中", prepared["text"])
             self.assertIn("【故障发现方式】监控发现", prepared["text"])
@@ -3582,6 +3592,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "变更楼栋",
                     "专业",
                     "变更等级（阿里）",
+                    "检修通告名称",
                     "维修名称",
                     "所属数据中心/楼栋-使用",
                     "进展",

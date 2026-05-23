@@ -186,8 +186,8 @@ class MaintenancePortalService:
         app_token: str = DEFAULT_APP_TOKEN,
         table_id: str = DEFAULT_TABLE_ID,
     ) -> None:
-        self.app_token = app_token
-        self.table_id = table_id
+        self.app_token = str(app_token or DEFAULT_APP_TOKEN).strip()
+        self.table_id = str(table_id or DEFAULT_TABLE_ID).strip()
         self._session = requests.Session()
         self._http_lock = threading.RLock()
         self._field_meta_list: list[FieldMeta] = []
@@ -280,6 +280,8 @@ class MaintenancePortalService:
     ) -> dict[str, Any]:
         app_token = str(app_token or self.app_token).strip()
         table_id = str(table_id or self.table_id).strip()
+        if not app_token or not table_id:
+            raise PortalError("飞书多维请求缺少 app_token/table_id，已阻止空源表请求。")
         url = (
             f"https://open.feishu.cn/open-apis/bitable/v1/apps/"
             f"{app_token}/tables/{table_id}/{path}"
@@ -1395,11 +1397,16 @@ class MaintenancePortalService:
         text = str(value or "").strip()
         return "" if text in PLACEHOLDER_TEXT_VALUES else text
 
+    def _repair_notice_title(self, fields: dict[str, Any]) -> str:
+        return self._clean_source_text(
+            fields.get("检修通告名称") or fields.get("维修名称")
+        )
+
     def _repair_title(self, record: dict[str, Any]) -> str:
         fields = record.get("display_fields") or {}
-        repair_name = str(fields.get("维修名称") or "").strip()
-        if repair_name:
-            return repair_name
+        title = self._repair_notice_title(fields)
+        if title:
+            return title
         return str(record.get("record_id") or "").strip()
 
     @staticmethod
@@ -1437,8 +1444,8 @@ class MaintenancePortalService:
 
     def _is_valid_repair_record(self, record: dict[str, Any]) -> bool:
         fields = record.get("display_fields") or {}
-        repair_name = self._clean_source_text(fields.get("维修名称"))
-        if not repair_name or repair_name in PLACEHOLDER_TEXT_VALUES:
+        title = self._repair_notice_title(fields)
+        if not title:
             return False
         return bool(self._repair_record_building_codes(record))
 
@@ -3430,6 +3437,13 @@ class MaintenancePortalService:
             "notice_type": str(record.get("notice_type") or NOTICE_TYPE_MAINTENANCE),
             "source_app_token": str(record.get("source_app_token") or self.app_token),
             "source_table_id": str(record.get("source_table_id") or self.table_id),
+            "title": (
+                self._change_title(record)
+                if work_type == WORK_TYPE_CHANGE
+                else self._repair_title(record)
+                if work_type == WORK_TYPE_REPAIR
+                else ""
+            ),
             "display_fields": record["display_fields"],
             "memory": self._get_record_memory(record),
             "work_summary": summary_by_record.get(record["record_id"]) or {},
@@ -5536,7 +5550,7 @@ class MaintenancePortalService:
                 record = self._find_record_by_id(record_id, WORK_TYPE_REPAIR)
                 fields = record.get("display_fields") or {}
                 if not self._is_valid_repair_record(record):
-                    raise PortalError("该检修记录缺少有效维修名称或楼栋，不能发起。")
+                    raise PortalError("该检修记录缺少有效检修通告名称/维修名称或楼栋，不能发起。")
                 source_progress = self._repair_source_status(record)
                 if source_progress != DEFAULT_MAINTENANCE_STATUS:
                     raise PortalError(

@@ -1188,7 +1188,7 @@
             </div>
             <div>
               <label for="searchInput">事项搜索</label>
-              <input id="searchInput" type="search" placeholder="输入名称、编号、变更简述或维修名称" />
+              <input id="searchInput" type="search" placeholder="输入名称、编号、变更简述或检修通告名称" />
             </div>
           </div>
           <div id="recordList" class="record-list"></div>
@@ -1967,7 +1967,15 @@
 
     function repairTitleForRecord(record) {
       const f = fieldsOf(record);
-      return firstRepairField(record, ["事件描述"]) || f["维修名称"] || record.record_id;
+      return record?.title || firstRepairField(record, ["检修通告名称", "维修名称"]) || record.record_id;
+    }
+
+    function ongoingTitleForItem(item) {
+      if ((item?.work_type || "maintenance") === "repair") {
+        const source = findSourceRecord(item?.source_record_id || "", "repair");
+        if (source) return titleForRecord(source);
+      }
+      return item?.title || item?.content || "未命名通告";
     }
 
     function titleForRecord(record) {
@@ -2122,7 +2130,11 @@
       if (draft.progress === state.defaults.progress) draft.progress = "";
       const f = fieldsOf(record);
       const sourceTitle = titleForRecord(record);
-      if (!draft.content || (f["维修名称"] && draft.content === f["维修名称"])) {
+      if (
+        !draft.content
+        || (f["维修名称"] && draft.content === f["维修名称"])
+        || (f["事件描述"] && draft.content === f["事件描述"])
+      ) {
         draft.content = sourceTitle;
       }
       const sourceLevel = levelForRecord(record);
@@ -2274,7 +2286,7 @@
       const sections = parsed.sections;
       const status = noticeStatusFromText(parsed);
       const draft = manualDraftDefaults(type);
-      const title = noticeSection(sections, ["名称", "标题", "变更简述", "维修名称"]);
+      const title = noticeSection(sections, ["名称", "标题", "变更简述", "检修通告名称", "维修名称"]);
       const location = noticeSection(sections, ["位置", "地点"]);
       const specialty = noticeSection(sections, ["专业", "专业类别", "所属专业"]);
       const building = noticeSection(sections, ["楼栋", "变更楼栋", "所属数据中心/楼栋-使用"])
@@ -4143,6 +4155,7 @@
           f["变更简述"] || "",
           f["变更编码&描述"] || "",
           f["专业"] || "",
+          f["检修通告名称"] || "",
           f["维修名称"] || "",
           f["维修单号"] || "",
           f["设备名称"] || "",
@@ -4208,7 +4221,7 @@
       } else if (state.workType === "change") {
         message = "当前楼栋没有未开始变更。";
       } else if (state.workType === "repair") {
-        message = "当前范围没有待发起检修事项；检修来源于“检修中与未开始”视图，且会排除无维修名称或无法识别楼栋的记录。";
+        message = "当前范围没有待发起检修事项；检修来源于“检修中与未开始”视图，且会排除无检修通告名称或无法识别楼栋的记录。";
       } else {
         message = "当前范围没有待发起维保事项，请检查计划维护月份或专业类别筛选。";
       }
@@ -4689,10 +4702,11 @@
 
     function ongoingFieldsHtml(item, id, range) {
       if ((item.work_type || "maintenance") === "repair") {
+        const title = ongoingTitleForItem(item);
         return `
           ${inputField(id, "expected_time", "期望完成时间", toDatetimeLocal(item.expected_time || item.start_time || range.end), "datetime-local")}
           ${inputField(id, "fault_time", "故障发生时间", toDatetimeLocal(item.fault_time || item.end_time || range.start), "datetime-local")}
-          ${textField(id, "content", "标题", item.content || item.title || "")}
+          ${textField(id, "content", "标题", title)}
           ${textField(id, "level", "紧急程度", item.level || "")}
           ${textField(id, "specialty", "专业", item.specialty || "")}
           ${textField(id, "repair_device", "维修设备", item.repair_device || "")}
@@ -4811,11 +4825,12 @@
         const tagText = readonly ? "只读" : (item.can_update ? "可操作" : "等待");
         const isRepair = (item.work_type || "maintenance") === "repair";
         const timeLabel = item.time || [range.start, range.end].filter(Boolean).join(" ~ ");
+        const title = ongoingTitleForItem(item);
         return `
           <article class="ongoing-card" data-ongoing="${html(id)}">
             <div class="card-head">
               <div>
-                <h3 class="card-title">${html(item.title || "未命名通告")}</h3>
+                <h3 class="card-title">${html(title)}</h3>
                 <div class="record-meta">${html([workTypeLabel(item.work_type), item.origin_label, item.building, item.specialty, (item.work_type || "maintenance") === "maintenance" && maintenanceCycleForItem(item) ? "周期 " + maintenanceCycleForItem(item) : "", item.level, timeLabel, item.upload_state, item.zhihang_title ? "智航 " + item.zhihang_title : "", item.source_record_id ? "源ID " + item.source_record_id : "", item.active_item_id ? "本地ID " + item.active_item_id : ""].filter(Boolean).join(" | "))}</div>
               </div>
               <div class="card-actions">
@@ -4871,6 +4886,7 @@
       const isRepair = (item?.work_type || "maintenance") === "repair";
       const expectedTime = read("expected_time", item?.expected_time || item?.start_time || range.end || "");
       const faultTime = read("fault_time", item?.fault_time || item?.end_time || range.start || "");
+      const repairTitle = isRepair ? ongoingTitleForItem(item) : "";
       return {
         action,
         scope: state.scope,
@@ -4886,7 +4902,7 @@
           ? read("specialty", item?.specialty || "")
           : (state.filters.specialty === "全部" ? (item?.specialty || "") : state.filters.specialty),
         active_item_id: activeItemId,
-        title: isRepair ? (read("content", item?.title || "") || item?.title || "") : (item?.title || ""),
+        title: isRepair ? (read("content", repairTitle) || repairTitle) : (item?.title || ""),
         building: item?.building || "",
         building_codes: item?.building_codes || [],
         level: isRepair ? read("level", item?.level || "") : (item?.level || ""),
@@ -4894,7 +4910,7 @@
         start_time: isRepair ? expectedTime : read("start_time", range.start),
         end_time: isRepair ? faultTime : read("end_time", range.end),
         location: read("location", item?.location || ""),
-        content: read("content", item?.content || ""),
+        content: read("content", isRepair ? repairTitle : (item?.content || "")),
         reason: read("reason", item?.reason || ""),
         impact: isRepair ? read("impact", item?.impact || "") : read("impact", item?.impact || state.defaults.impact),
         progress: read("progress", item?.progress || ""),
@@ -4921,7 +4937,7 @@
       const card = document.querySelector(`[data-ongoing="${CSS.escape(activeItemId)}"]`);
       const hasRemoteRecord = Boolean(item.record_id || item.target_record_id);
       const confirmText = [
-        `确认删除“${item.title || "未命名通告"}”？`,
+        `确认删除“${ongoingTitleForItem(item)}”？`,
         hasRemoteRecord ? "此操作会删除对应多维记录并删除 Qt 条目。" : "此操作只删除 Qt 条目和页面显示。",
         item.record_id || item.target_record_id ? `多维记录：${item.record_id || item.target_record_id}` : "",
       ].filter(Boolean).join("\n");
