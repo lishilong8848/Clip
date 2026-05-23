@@ -571,6 +571,35 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(payload["records"][0]["display_fields"]["维护周期"], "每月")
             self.assertEqual(payload["last_loaded_at"], "2026-05-20 19:00:00")
 
+    def test_obsolete_empty_source_warning_is_not_shown_from_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            record = _build_record(
+                "rec-a",
+                "A楼",
+                "过滤网维护",
+                f"{dt.datetime.now().month}月",
+                maintenance_cycle="每月",
+            )
+            stale_warning = (
+                "源表后台同步失败: 飞书接口 HTTP失败: 404 Client Error: "
+                "Not Found for url: https://open.feishu.cn/open-apis/bitable/v1/apps//tables//fields?page_size=500"
+            )
+            service._state_store.replace_source_scope_snapshot(
+                "A",
+                records=[record],
+                zhihang_records=[],
+                meta={
+                    "last_loaded_at": "2026-05-20 19:00:00",
+                    "warnings": [stale_warning, "检修源表同步失败: token 失效"],
+                },
+            )
+
+            payload = service.query_records(scope="A", ongoing_items=[])
+
+            self.assertNotIn(stale_warning, payload["warnings"])
+            self.assertEqual(payload["warnings"], ["检修源表同步失败: token 失效"])
+
     def test_repair_link_task_is_scheduled_after_repair_start_success(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))

@@ -641,6 +641,29 @@ class MaintenancePortalService:
             return True
         return (time.time() - self._last_loaded_ts) >= ttl
 
+    @staticmethod
+    def _is_obsolete_empty_source_warning(value: Any) -> bool:
+        text = str(value or "")
+        normalized = text.replace("\\/", "/")
+        return "/apps//tables//" in normalized or "apps//tables//" in normalized
+
+    def _clean_load_warnings(self, warnings: list[Any] | None = None) -> list[str]:
+        source = self._load_warnings if warnings is None else warnings
+        cleaned: list[str] = []
+        for item in source or []:
+            text = str(item or "").strip()
+            if not text or self._is_obsolete_empty_source_warning(text):
+                continue
+            if text not in cleaned:
+                cleaned.append(text)
+        return cleaned
+
+    def _current_load_warnings(self) -> list[str]:
+        cleaned = self._clean_load_warnings()
+        if cleaned != list(self._load_warnings or []):
+            self._load_warnings = cleaned
+        return cleaned
+
     def _hydrate_source_records_from_sqlite(self) -> bool:
         try:
             snapshot = self._state_store.get_source_scope_snapshot("ALL")
@@ -682,7 +705,7 @@ class MaintenancePortalService:
             pass
         warnings = meta.get("warnings") if isinstance(meta, dict) else []
         if isinstance(warnings, list):
-            self._load_warnings = [str(item) for item in warnings if str(item or "").strip()]
+            self._load_warnings = self._clean_load_warnings(warnings)
         return True
 
     def _snapshot_meta(self) -> dict[str, Any]:
@@ -690,7 +713,7 @@ class MaintenancePortalService:
             "last_loaded_at": self._last_loaded_at,
             "last_loaded_ts": self._last_loaded_ts,
             "source_cache_ttl_seconds": self._source_cache_ttl_seconds(),
-            "warnings": list(self._load_warnings),
+            "warnings": self._current_load_warnings(),
         }
 
     def _save_source_scope_snapshots(self) -> None:
@@ -725,6 +748,9 @@ class MaintenancePortalService:
         meta = snapshot.get("meta") if isinstance(snapshot.get("meta"), dict) else {}
         if meta.get("last_loaded_at"):
             self._last_loaded_at = str(meta.get("last_loaded_at") or "")
+        warnings = meta.get("warnings") if isinstance(meta, dict) else []
+        if isinstance(warnings, list):
+            self._load_warnings = self._clean_load_warnings(warnings)
         records = [
             dict(item)
             for item in (snapshot.get("records") or [])
@@ -742,6 +768,10 @@ class MaintenancePortalService:
             return None
         if not snapshot.get("exists"):
             return None
+        meta = snapshot.get("meta") if isinstance(snapshot.get("meta"), dict) else {}
+        warnings = meta.get("warnings") if isinstance(meta, dict) else []
+        if isinstance(warnings, list):
+            self._load_warnings = self._clean_load_warnings(warnings)
         return [
             dict(item)
             for item in (snapshot.get("zhihang_records") or [])
@@ -2807,7 +2837,7 @@ class MaintenancePortalService:
             ),
             "source_snapshot_ready": self._source_snapshot_exists("ALL"),
             "source_cache_ttl_seconds": self._source_cache_ttl_seconds(),
-            "warnings": list(self._load_warnings),
+            "warnings": self._current_load_warnings(),
         }
         if include_prepared:
             payload["prepared_workbenches"] = prepared_workbenches
@@ -3079,7 +3109,7 @@ class MaintenancePortalService:
             "work_type": work_type,
             "days": days,
             "last_loaded_at": self._last_loaded_at,
-            "warnings": list(self._load_warnings),
+            "warnings": self._current_load_warnings(),
         }
 
     def _summary_by_record_id(self, summary_items: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -4182,7 +4212,7 @@ class MaintenancePortalService:
             ),
             "source_snapshot_ready": self._source_snapshot_exists(scope),
             "source_cache_ttl_seconds": self._source_cache_ttl_seconds(),
-            "warnings": list(self._load_warnings),
+            "warnings": self._current_load_warnings(),
             "maintenance_status": DEFAULT_MAINTENANCE_STATUS,
             "field_order": [meta.field_name for meta in self._field_meta_list],
             "fields": [
@@ -4272,7 +4302,7 @@ class MaintenancePortalService:
             ),
             "source_snapshot_ready": self._source_snapshot_exists(scope),
             "source_cache_ttl_seconds": self._source_cache_ttl_seconds(),
-            "warnings": list(self._load_warnings),
+            "warnings": self._current_load_warnings(),
             "records": [
                 self._serialize_record(record, summary_by_record)
                 for record in filtered_records
