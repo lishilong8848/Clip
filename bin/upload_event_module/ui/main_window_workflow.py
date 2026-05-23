@@ -842,8 +842,8 @@ class MainWindowWorkflowMixin:
                 list_widget.scrollToItem(item)
                 self._notify_new_event(widget)
 
-        if not self.isVisible():
-            self.toggle_window()
+        # 后台剪贴板/门户事件只更新列表数据，不主动把最小化或托盘中的主界面拉到前台。
+        # 用户需要查看时可通过托盘或主窗口按钮打开，避免后台批量任务造成小窗口闪烁。
 
     def _auto_replace_content(
         self,
@@ -2652,9 +2652,6 @@ class MainWindowWorkflowMixin:
 
         def _apply_updates():
             try:
-                # 恢复主界面显示（截图开始时被隐藏）
-                self.show()
-
                 if name == "结束" and not success and record_id:
                     self._rollback_end(record_id)
                     self.show_message(f"「{name}」失败\n{msg}")

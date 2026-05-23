@@ -41,6 +41,7 @@ from .styles import get_stylesheet
 from .widgets import HistoryItemWidget
 from .dialogs import AddDialog
 from .display_state import normalize_active_item_data
+from .common import show_toast_message
 
 HISTORY_RETENTION_DAYS = 7
 HISTORY_RETENTION_MS = HISTORY_RETENTION_DAYS * 24 * 60 * 60 * 1000
@@ -1048,6 +1049,14 @@ class MainWindowUiMixin:
             pass
         super().hideEvent(event)
 
+    def _is_backgrounded_window(self) -> bool:
+        try:
+            if not self.isVisible() or self.isMinimized():
+                return True
+            return bool(self.windowState() & Qt.WindowState.WindowMinimized)
+        except Exception:
+            return True
+
     def quit_app(self):
         log_info("================ 应用程序退出 ================")
         self._closing = True
@@ -1110,23 +1119,34 @@ class MainWindowUiMixin:
             e.accept()
 
     def show_message(self, text):
-        msg = QMessageBox(self)
-        msg.setWindowFlags(Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
-        msg.setStandardButtons(QMessageBox.StandardButton.Ok)
-        msg.button(QMessageBox.StandardButton.Ok).setText("确定")
-        msg.setText(text)
-        msg.setStyleSheet(get_stylesheet(self.current_theme))
+        text = str(text or "").strip()
+        if not text:
+            return
+        now = time.monotonic()
+        last = getattr(self, "_last_nonblocking_message", None) or {}
+        if last.get("text") == text and now - float(last.get("ts") or 0.0) < 2.0:
+            return
+        self._last_nonblocking_message = {"text": text, "ts": now}
+        if self._is_backgrounded_window():
+            return
+
+        msg = show_toast_message(
+            self,
+            text,
+            duration_ms=2400,
+            theme=getattr(self, "current_theme", "dark"),
+        )
         msg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self._active_messages.append(msg)
 
-        def _cleanup():
+        def _cleanup(*_args):
             try:
                 self._active_messages.remove(msg)
             except ValueError:
                 pass
 
         msg.finished.connect(_cleanup)
-        msg.show()  # 使用非阻塞的 show() 替代 exec()
+        msg.destroyed.connect(_cleanup)
 
     def _prompt_i2_robot_group_choice(self, notice_type: str):
         msg = QMessageBox(self)

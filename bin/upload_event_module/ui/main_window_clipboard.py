@@ -663,6 +663,16 @@ class MainWindowClipboardMixin:
                 return
 
             python_exe = sys.executable
+            if os.name == "nt":
+                try:
+                    pythonw_exe = os.path.join(
+                        os.path.dirname(python_exe),
+                        "pythonw.exe",
+                    )
+                    if os.path.exists(pythonw_exe):
+                        python_exe = pythonw_exe
+                except Exception:
+                    pass
             self._clipboard_process.start(python_exe, ["-u", script_path])
             self._clipboard_effective_running = False
             self._refresh_clipboard_toggle_ui()
