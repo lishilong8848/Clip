@@ -278,8 +278,8 @@ class MaintenancePortalService:
         app_token: str | None = None,
         table_id: str | None = None,
     ) -> dict[str, Any]:
-        app_token = str(app_token or self.app_token).strip()
-        table_id = str(table_id or self.table_id).strip()
+        app_token = str(app_token or self.app_token or DEFAULT_APP_TOKEN).strip()
+        table_id = str(table_id or self.table_id or DEFAULT_TABLE_ID).strip()
         if not app_token or not table_id:
             raise PortalError("飞书多维请求缺少 app_token/table_id，已阻止空源表请求。")
         url = (
@@ -458,8 +458,8 @@ class MaintenancePortalService:
                     meta_by_name=self._field_meta_by_name,
                     work_type=WORK_TYPE_MAINTENANCE,
                     notice_type=NOTICE_TYPE_MAINTENANCE,
-                    source_app_token=self.app_token,
-                    source_table_id=self.table_id,
+                    source_app_token=self.app_token or DEFAULT_APP_TOKEN,
+                    source_table_id=self.table_id or DEFAULT_TABLE_ID,
                 )
                 if self._source_record_matches_month_window(normalized):
                     records.append(normalized)

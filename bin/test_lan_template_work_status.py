@@ -428,6 +428,36 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(service.app_token, "HU38bc1vnamMK9sCeOgclUvXnFc")
         self.assertEqual(service.table_id, "tblzk7WrXxNWQy6V")
 
+    def test_portal_service_request_uses_defaults_if_source_attrs_are_cleared(self):
+        service = MaintenancePortalService()
+        service.app_token = ""
+        service.table_id = ""
+        captured = {}
+
+        class _Response:
+            ok = True
+            text = ""
+
+            @staticmethod
+            def json():
+                return {"code": 0, "data": {"items": []}}
+
+        class _Session:
+            @staticmethod
+            def get(url, **kwargs):
+                captured["url"] = url
+                return _Response()
+
+        service._session = _Session()
+        service._auth_headers = lambda: {"Authorization": "Bearer test"}
+
+        service._request_json("fields", params={"page_size": 500})
+
+        self.assertIn("/apps/HU38bc1vnamMK9sCeOgclUvXnFc/", captured["url"])
+        self.assertIn("/tables/tblzk7WrXxNWQy6V/", captured["url"])
+        self.assertNotIn("/apps//", captured["url"])
+        self.assertNotIn("/tables//", captured["url"])
+
     def test_lan_portal_state_store_replaces_ongoing_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
