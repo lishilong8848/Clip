@@ -3,10 +3,9 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
-import requests
-
 from ..config import config
 from ..logger import log_error, log_info
+from .http_client import FeishuHTTPError, request_json
 
 
 _CHAT_CACHE: Dict[str, Any] = {"timestamp": 0.0, "items": []}
@@ -24,13 +23,17 @@ def _get_tenant_access_token() -> Tuple[str, str]:
     headers = {"Content-Type": "application/json; charset=utf-8"}
 
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=8.0)
-        response.raise_for_status()
-        result = response.json()
+        result = request_json(
+            "POST",
+            url,
+            json_payload=payload,
+            headers=headers,
+            retries=2,
+        )
         if result.get("code", 0) != 0:
             return "", result.get("msg", "unknown error")
         return result.get("tenant_access_token", ""), ""
-    except Exception as exc:
+    except FeishuHTTPError as exc:
         return "", str(exc)
 
 
@@ -52,16 +55,20 @@ def _get_bot_chats(
         if page_token:
             params["page_token"] = page_token
         try:
-            response = requests.get(url, headers=headers, params=params, timeout=8.0)
-            response.raise_for_status()
-            result = response.json()
+            result = request_json(
+                "GET",
+                url,
+                headers=headers,
+                params=params,
+                retries=2,
+            )
             if result.get("code", 0) != 0:
                 return [], result.get("msg", "unknown error")
             data = result.get("data", {})
             chats.extend(data.get("items", []))
             has_more = data.get("has_more", False)
             page_token = data.get("page_token", "")
-        except Exception as exc:
+        except FeishuHTTPError as exc:
             return [], str(exc)
 
     return chats, ""
@@ -150,15 +157,18 @@ def _send_message_to_receive_id(
     params = {"receive_id_type": receive_id_type}
 
     try:
-        response = requests.post(
-            url, headers=headers, params=params, json=payload, timeout=8.0
+        result = request_json(
+            "POST",
+            url,
+            headers=headers,
+            params=params,
+            json_payload=payload,
+            retries=2,
         )
-        response.raise_for_status()
-        result = response.json()
         if result.get("code", 0) != 0:
             return False, result.get("msg", "unknown error")
         return True, "ok"
-    except Exception as exc:
+    except FeishuHTTPError as exc:
         return False, str(exc)
 
 

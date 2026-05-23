@@ -66,6 +66,19 @@ def refresh_feishu_token():
         return service_registry.feishu_module.refresh_feishu_token()
 
 
+def check_token_status():
+    with _feishu_lock:
+        return service_registry.feishu_module.check_token_status()
+
+
+def ensure_feishu_token(*args, **kwargs):
+    with _feishu_lock:
+        ensure_fn = getattr(service_registry.feishu_module, "ensure_feishu_token", None)
+        if callable(ensure_fn):
+            return ensure_fn(*args, **kwargs)
+        return service_registry.feishu_module.check_token_status()
+
+
 def resolve_bitable_app_token(app_id: str, app_secret: str, app_token: str):
     with _feishu_lock:
         return service_registry.feishu_module.resolve_bitable_app_token(

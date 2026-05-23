@@ -164,6 +164,23 @@ class ActiveCacheStore:
                     result[key] = data.get(key)
             return result
 
+    def get_locked_level_map(self) -> dict[str, dict[str, Any]]:
+        """Return level-lock fields for all cached active records in one read."""
+        with self._lock:
+            payload = self._load_payload_unlocked()
+            result: dict[str, dict[str, Any]] = {}
+            for _, _, data in self._iter_record_entries_unlocked(payload):
+                if not isinstance(data, dict):
+                    continue
+                record_id = self._normalize_key(data.get("record_id"))
+                if not record_id or not bool(data.get("level_locked")):
+                    continue
+                result[record_id] = {
+                    "level": data.get("level"),
+                    "level_locked": True,
+                }
+            return result
+
     def patch_record_fields(
         self,
         record_id: str = "",

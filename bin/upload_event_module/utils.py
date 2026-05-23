@@ -17,6 +17,9 @@ def get_base_dir() -> str:
 
 
 def get_user_data_dir(app_name: str = "ClipFlow") -> str:
+    override = os.getenv("CLIPFLOW_DATA_DIR")
+    if override:
+        return os.path.abspath(override)
     # Data directory is fixed to the bin-level isolated folder.
     data_root = os.path.join(BASE_DIR, "data")
     if app_name and app_name != "ClipFlow":

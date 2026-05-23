@@ -13,10 +13,12 @@ DEFAULT_MODULE_TO_PACKAGE = {
     "watchdog": "watchdog",
     "requests": "requests",
     "urllib3": "urllib3",
+    "httpx": "httpx",
     "PIL": "Pillow",
     "anyio": "anyio",
     "pydantic": "pydantic",
     "starlette": "starlette",
+    "apscheduler": "APScheduler",
     "fastapi": "fastapi",
     "uvicorn": "uvicorn",
     "lark_oapi": "lark-oapi",
@@ -50,6 +52,13 @@ def _safe_int(value: Any, default: int) -> int:
 
 
 def _run_cmd(args: list[str], timeout_seconds: int = 30) -> tuple[bool, str]:
+    startupinfo = None
+    creationflags = 0
+    if sys.platform == "win32":
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = 0  # SW_HIDE
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
         proc = subprocess.run(
             args,
@@ -59,6 +68,8 @@ def _run_cmd(args: list[str], timeout_seconds: int = 30) -> tuple[bool, str]:
             errors="ignore",
             timeout=max(5, timeout_seconds),
             check=False,
+            startupinfo=startupinfo,
+            creationflags=creationflags,
         )
     except Exception as exc:
         return False, str(exc)

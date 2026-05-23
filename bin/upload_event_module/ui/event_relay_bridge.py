@@ -162,6 +162,9 @@ class EventRelayBridge(QObject):
         if sys.platform != "win32":
             return ""
         try:
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0  # SW_HIDE
             result = subprocess.run(
                 ["ipconfig"],
                 capture_output=True,
@@ -169,6 +172,8 @@ class EventRelayBridge(QObject):
                 encoding="utf-8",
                 errors="ignore",
                 check=False,
+                startupinfo=startupinfo,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except Exception:
             return ""

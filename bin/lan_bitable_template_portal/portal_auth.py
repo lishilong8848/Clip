@@ -13,9 +13,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-import requests
-
 from upload_event_module.config import config
+from upload_event_module.services.http_client import FeishuHTTPError, request_json
 from upload_event_module.utils import get_data_file_path
 
 from .portal_service import (
@@ -823,15 +822,14 @@ class PortalAuthManager:
             "app_secret": str(config.app_secret or "").strip(),
         }
         try:
-            response = requests.post(
+            result = request_json(
+                "POST",
                 FEISHU_APP_ACCESS_TOKEN_URL,
-                json=payload,
                 headers={"Content-Type": "application/json; charset=utf-8"},
-                timeout=8.0,
+                json_payload=payload,
+                retries=2,
             )
-            response.raise_for_status()
-            result = response.json()
-        except Exception as exc:
+        except FeishuHTTPError as exc:
             raise PortalError(f"获取飞书 app_access_token 失败: {exc}") from exc
         if result.get("code", 0) != 0:
             raise PortalError(f"获取飞书 app_access_token 失败: {result.get('msg') or 'unknown'}")
@@ -846,18 +844,17 @@ class PortalAuthManager:
     def _exchange_login_code(self, code: str) -> dict[str, Any]:
         app_access_token = self._get_app_access_token()
         try:
-            response = requests.post(
+            result = request_json(
+                "POST",
                 FEISHU_USER_ACCESS_TOKEN_URL,
                 headers={
                     "Authorization": f"Bearer {app_access_token}",
                     "Content-Type": "application/json; charset=utf-8",
                 },
-                json={"grant_type": "authorization_code", "code": code},
-                timeout=8.0,
+                json_payload={"grant_type": "authorization_code", "code": code},
+                retries=2,
             )
-            response.raise_for_status()
-            result = response.json()
-        except Exception as exc:
+        except FeishuHTTPError as exc:
             raise PortalError(f"获取飞书用户身份失败: {exc}") from exc
         if result.get("code", 0) != 0:
             raise PortalError(f"获取飞书用户身份失败: {result.get('msg') or 'unknown'}")
@@ -871,13 +868,12 @@ class PortalAuthManager:
         if not user_access_token:
             return {}
         try:
-            response = requests.get(
+            result = request_json(
+                "GET",
                 FEISHU_USER_INFO_URL,
                 headers={"Authorization": f"Bearer {user_access_token}"},
-                timeout=8.0,
+                retries=2,
             )
-            response.raise_for_status()
-            result = response.json()
         except Exception:
             return {}
         if result.get("code", 0) != 0:

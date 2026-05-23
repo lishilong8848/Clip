@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import time
 from typing import Callable
 
@@ -48,6 +49,9 @@ FEISHU_ERROR_SUGGESTIONS = {
     99991664: "Token 已过期，正在自动刷新",
     99991665: "Token 已过期，正在自动刷新",
 }
+
+TOKEN_REFRESH_MARGIN_SECONDS = 60
+_token_refresh_lock = threading.RLock()
 
 
 def _info_logging_enabled() -> bool:
@@ -224,46 +228,69 @@ def _log_record_action(
 
 def refresh_feishu_token():
     """刷新飞书 Token (Tenant Access Token)"""
-    log_info("正在尝试刷新飞书 Token...")
-    try:
-        app_id = config.app_id
-        app_secret = config.app_secret
+    with _token_refresh_lock:
+        log_info("正在尝试刷新飞书 Token...")
+        try:
+            app_id = config.app_id
+            app_secret = config.app_secret
 
-        if not app_id or not app_secret:
-            log_error("Token 刷新失败: 未配置 App ID 或 App Secret")
-            return None
+            if not app_id or not app_secret:
+                log_error("Token 刷新失败: 未配置 App ID 或 App Secret")
+                return None
 
-        client = lark.Client.builder().build()
+            client = lark.Client.builder().build()
 
-        req = (
-            InternalTenantAccessTokenRequest.builder()
-            .request_body(
-                InternalTenantAccessTokenRequestBody.builder()
-                .app_id(app_id)
-                .app_secret(app_secret)
+            req = (
+                InternalTenantAccessTokenRequest.builder()
+                .request_body(
+                    InternalTenantAccessTokenRequestBody.builder()
+                    .app_id(app_id)
+                    .app_secret(app_secret)
+                    .build()
+                )
                 .build()
             )
-            .build()
-        )
 
-        resp = client.auth.v3.tenant_access_token.internal(req)
+            resp = client.auth.v3.tenant_access_token.internal(req)
 
-        if resp.success():
-            data = json.loads(resp.raw.content)
-            new_token = data["tenant_access_token"]
-            expire_in = data.get("expire", 7200)  # 默认 2 小时
+            if resp.success():
+                data = json.loads(resp.raw.content)
+                new_token = data["tenant_access_token"]
+                expire_in = data.get("expire", 7200)  # 默认 2 小时
 
-            expire_time = int(time.time()) + expire_in - 300
-            config.save(user_token=new_token, token_expire_time=expire_time)
+                expire_time = int(time.time()) + expire_in - 300
+                config.save(user_token=new_token, token_expire_time=expire_time)
 
-            log_info(f"Token 刷新成功: {new_token[:10]}... (过期时间: {expire_time})")
-            return new_token
-        else:
-            log_error(f"Token 刷新失败: {resp.code} - {resp.msg}")
+                log_info(f"Token 刷新成功: {new_token[:10]}... (过期时间: {expire_time})")
+                return new_token
+            else:
+                log_error(f"Token 刷新失败: {resp.code} - {resp.msg}")
+                return None
+        except Exception as e:
+            log_error(f"Token 刷新异常: {e}")
             return None
-    except Exception as e:
-        log_error(f"Token 刷新异常: {e}")
-        return None
+
+
+def _token_refresh_needed(*, margin_seconds: int = TOKEN_REFRESH_MARGIN_SECONDS) -> bool:
+    if not str(config.user_token or "").strip():
+        return True
+    try:
+        expire_time = int(float(config.token_expire_time or 0))
+    except Exception:
+        expire_time = 0
+    if expire_time <= 0:
+        return True
+    return int(time.time()) + max(0, int(margin_seconds or 0)) >= expire_time
+
+
+def ensure_feishu_token(*, margin_seconds: int = TOKEN_REFRESH_MARGIN_SECONDS) -> str | None:
+    """Return a usable tenant token, refreshing once if it is missing or near expiry."""
+    if not _token_refresh_needed(margin_seconds=margin_seconds):
+        return str(config.user_token or "").strip()
+    with _token_refresh_lock:
+        if not _token_refresh_needed(margin_seconds=margin_seconds):
+            return str(config.user_token or "").strip()
+        return refresh_feishu_token()
 
 
 def _get_tenant_access_token_with_credentials(
@@ -338,12 +365,13 @@ def resolve_bitable_app_token(
 def check_token_status():
     """检查 Token 状态，如果过期或即将过期则刷新"""
     try:
-        current_time = int(time.time())
-        if current_time >= config.token_expire_time:
+        if _token_refresh_needed():
             log_info("Token 已过期或即将过期，正在刷新...")
-            refresh_feishu_token()
+            return ensure_feishu_token()
+        return str(config.user_token or "").strip()
     except Exception as e:
         log_info(f"Token 检查/刷新异常: {e}")
+        return None
 
 
 def upload_media_to_feishu(image_bytes, file_name="screenshot.jpg", file_size=None):

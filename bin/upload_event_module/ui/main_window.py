@@ -10,7 +10,7 @@ from ..config import config
 from ..logger import log_info
 from ..hot_reload.state_store import get_user_data_dir
 from ..hot_reload.connection_registry import ConnectionRegistry
-from ..services.service_registry import refresh_feishu_token
+from ..services.service_registry import check_token_status
 from .dialogs import ClipboardPreviewDialog, DetailDialog, ScreenshotConfirmDialog
 from .settings_dialog import SettingsDialog
 from .main_window_patch import PatchUpdateMixin
@@ -68,9 +68,11 @@ class ClipboardTool(
         self._install_qt_message_handler()
 
         # 检查并刷新飞书 Token (初始化时，如有必要)
-        if not config.user_token:
-            # 可以在这里或者 load 时刷新，原代码是直接调用
-            threading.Thread(target=refresh_feishu_token, daemon=True).start()
+        threading.Thread(
+            target=check_token_status,
+            name="ClipFlowTokenStartupCheck",
+            daemon=True,
+        ).start()
 
         # 剪贴板监听（独立进程 + 文件IPC）
         self._clipboard_process = None
@@ -133,7 +135,7 @@ class ClipboardTool(
             port=62345,
         )
         self._ui_signal_queue = queue.Queue()
-        self._ui_signal_max_per_tick = 20
+        self._ui_signal_max_per_tick = 3
         self._ui_signal_timer = QTimer(self)
         self.connection_registry.connect(
             "ui_signal_timer",
@@ -143,7 +145,11 @@ class ClipboardTool(
         )
         self._ui_signal_timer.start(100)
         self._ui_mutation_queue = queue.Queue()
-        self._ui_mutation_max_per_tick = 10
+        self._ui_mutation_max_per_tick = 2
+        self._ui_slow_threshold_ms = 120.0
+        self._ui_slow_log_interval_s = 10.0
+        self._ui_slow_last_log_ts = 0.0
+        self._ui_slow_count = 0
         self._ui_mutation_timer = QTimer(self)
         self.connection_registry.connect(
             "ui_mutation_timer",

@@ -220,6 +220,7 @@ from ..config import (
 
 MAINTENANCE_CYCLE_PLACEHOLDER = "请选择维保周期..."
 MAINTENANCE_CYCLE_OPTIONS = (
+    "/",
     "每月",
     "每季",
     "每年",

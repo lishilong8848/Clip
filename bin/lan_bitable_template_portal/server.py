@@ -8,6 +8,7 @@ import html
 import json
 import logging
 import mimetypes
+import os
 import socket
 import threading
 import time
@@ -24,6 +25,7 @@ from .portal_service import (
     PortalError,
     SCOPE_OPTIONS,
     SOURCE_CACHE_TTL_SECONDS,
+    external_real_write_guard,
 )
 from .state_store import LanPortalStateStore
 from upload_event_module.services.robot_webhook import send_text_to_open_ids
@@ -47,6 +49,23 @@ def find_available_port(host: str, preferred_port: int) -> int:
             except OSError:
                 port += 1
     raise RuntimeError(f"未找到可用端口，起始端口={preferred_port}")
+
+
+def _send_text_to_open_ids_guarded(text: str, recipients: list[str]) -> tuple[bool, str, list[dict]]:
+    clean_recipients = [
+        str(open_id or "").strip()
+        for open_id in (recipients or [])
+        if str(open_id or "").strip()
+    ]
+    guard = external_real_write_guard()
+    if guard.get("mock_external"):
+        return True, "mock external send skipped", [
+            {"open_id": open_id, "ok": True, "message": "mock external send skipped"}
+            for open_id in clean_recipients
+        ]
+    if not guard.get("real_write_allowed"):
+        return False, str(guard.get("reason") or "真实外部写入未确认。"), []
+    return send_text_to_open_ids(text, clean_recipients)
 
 
 class PortalHandler(BaseHTTPRequestHandler):
@@ -90,6 +109,10 @@ class PortalHandler(BaseHTTPRequestHandler):
     source_refresh_stop = False
     source_refresh_event = threading.Event()
     source_refresh_lock = threading.RLock()
+    source_refresh_run_lock = threading.Lock()
+    source_refresh_inflight = False
+    source_refresh_last_result: dict = {}
+    source_refresh_last_finished = 0.0
     repair_refresh_lock = threading.RLock()
     repair_refresh_inflight = False
     repair_refresh_event = threading.Event()
@@ -97,6 +120,67 @@ class PortalHandler(BaseHTTPRequestHandler):
     repair_refresh_last_error = ""
     repair_refresh_last_finished = 0.0
     repair_refresh_reuse_window_s = 10.0
+
+    @staticmethod
+    def _bounded_int(value, default: int, minimum: int, maximum: int) -> int:
+        try:
+            number = int(value)
+        except Exception:
+            number = int(default)
+        return max(int(minimum), min(int(maximum), number))
+
+    @staticmethod
+    def _bounded_float(value, default: float, minimum: float, maximum: float) -> float:
+        try:
+            number = float(value)
+        except Exception:
+            number = float(default)
+        return max(float(minimum), min(float(maximum), number))
+
+    @classmethod
+    def runtime_limits(cls) -> dict:
+        return {
+            "message_worker_count": int(cls.message_worker_count or 0),
+            "qt_items_per_tick": 1,
+            "qt_tick_interval_ms": 250,
+            "upload_seconds_per_record": float(getattr(cls, "upload_seconds_per_record", 2.0)),
+            "upload_batch_wait_seconds": float(getattr(cls, "upload_batch_wait_seconds", 5.0)),
+            "upload_batch_max_records": int(getattr(cls, "upload_batch_max_records", 5)),
+            "source_refresh_minutes": 30,
+            "frontend_snapshot_refresh_minutes": 10,
+        }
+
+    @classmethod
+    def apply_runtime_settings(cls) -> dict:
+        try:
+            settings = cls.state_store.get_settings() or {}
+        except Exception:
+            settings = {}
+        cls.message_worker_count = cls._bounded_int(
+            settings.get("lan_message_worker_count"),
+            5,
+            1,
+            5,
+        )
+        cls.upload_seconds_per_record = cls._bounded_float(
+            settings.get("lan_upload_seconds_per_record"),
+            2.0,
+            0.5,
+            10.0,
+        )
+        cls.upload_batch_wait_seconds = cls._bounded_float(
+            settings.get("lan_upload_batch_wait_seconds"),
+            5.0,
+            1.0,
+            30.0,
+        )
+        cls.upload_batch_max_records = cls._bounded_int(
+            settings.get("lan_upload_batch_max_records"),
+            5,
+            1,
+            10,
+        )
+        return cls.runtime_limits()
 
     @staticmethod
     def _is_client_disconnect(exc: BaseException) -> bool:
@@ -553,6 +637,80 @@ class PortalHandler(BaseHTTPRequestHandler):
                 cls.repair_refresh_inflight = False
                 event.set()
 
+    @classmethod
+    def request_repair_source_refresh(cls) -> dict:
+        """Start repair source refresh in the background and return immediately."""
+        if os.environ.get("CLIPFLOW_BACKEND_MOCK_EXTERNAL") == "1":
+            return {
+                "repair_refresh_started": False,
+                "repair_refresh_inflight": False,
+                "repair_refresh_reused": False,
+                "mock_external": True,
+            }
+        now = time.monotonic()
+        with cls.repair_refresh_lock:
+            if (
+                cls.repair_refresh_last_result
+                and now - float(cls.repair_refresh_last_finished or 0)
+                <= float(cls.repair_refresh_reuse_window_s)
+            ):
+                result = copy.deepcopy(cls.repair_refresh_last_result)
+                result["repair_refresh_started"] = False
+                result["repair_refresh_inflight"] = False
+                result["repair_refresh_reused"] = True
+                return result
+            if cls.repair_refresh_inflight:
+                return {
+                    "repair_refresh_started": False,
+                    "repair_refresh_inflight": True,
+                    "repair_refresh_reused": True,
+                }
+            event = threading.Event()
+            cls.repair_refresh_event = event
+            cls.repair_refresh_inflight = True
+            cls.repair_refresh_last_error = ""
+
+        def _worker() -> None:
+            try:
+                result = cls.service.refresh_repair_source()
+                if not isinstance(result, dict):
+                    result = {}
+                result = copy.deepcopy(result)
+                result["repair_refresh_reused"] = False
+                cls.clear_payload_cache()
+                with cls.repair_refresh_lock:
+                    cls.repair_refresh_last_result = copy.deepcopy(result)
+                    cls.repair_refresh_last_error = ""
+                    cls.repair_refresh_last_finished = time.monotonic()
+            except Exception as exc:
+                error = str(exc)
+                with cls.repair_refresh_lock:
+                    cls.repair_refresh_last_error = error
+                    cls.repair_refresh_last_finished = time.monotonic()
+                logging.warning("检修源表后台刷新失败: %s", error)
+            finally:
+                with cls.repair_refresh_lock:
+                    cls.repair_refresh_inflight = False
+                    event.set()
+
+        try:
+            threading.Thread(
+                target=_worker,
+                name="LANRepairRefresh",
+                daemon=True,
+            ).start()
+        except Exception as exc:
+            with cls.repair_refresh_lock:
+                cls.repair_refresh_inflight = False
+                cls.repair_refresh_last_error = str(exc)
+                event.set()
+            raise PortalError(f"检修源表刷新启动失败: {exc}") from exc
+        return {
+            "repair_refresh_started": True,
+            "repair_refresh_inflight": True,
+            "repair_refresh_reused": False,
+        }
+
     def _reconcile_orphan_started_items(
         self, scope: str, ongoing: list[dict] | None, *, force: bool = False
     ) -> None:
@@ -858,15 +1016,15 @@ class PortalHandler(BaseHTTPRequestHandler):
                 scope = self._authorized_scope_or_error(
                     session, (qs.get("scope") or ["ALL"])[0]
                 )
-                PortalHandler.clear_payload_cache()
-                PortalHandler.wake_source_refresh_worker()
-                refreshed = True
+                refresh_result = PortalHandler.request_source_refresh(force=True)
+                refreshed = bool(refresh_result.get("refreshed", False))
                 ongoing = self._get_ongoing(scope)
                 self._reconcile_orphan_started_items(scope, ongoing, force=True)
                 data = self.service.get_bootstrap(
                     scope=scope, ongoing_items=ongoing
                 )
                 data["source_refresh_triggered"] = refreshed
+                data.update(refresh_result)
                 return self._send_json(
                     200,
                     {
@@ -884,7 +1042,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                 scope = self._authorized_scope_or_error(
                     session, (qs.get("scope") or ["ALL"])[0]
                 )
-                refresh_result = PortalHandler._refresh_repair_source_singleflight()
+                refresh_result = PortalHandler.request_repair_source_refresh()
                 ongoing = self._get_ongoing(scope)
                 self._reconcile_orphan_started_items(scope, ongoing)
                 data = self.service.get_bootstrap(
@@ -934,11 +1092,6 @@ class PortalHandler(BaseHTTPRequestHandler):
         if session is None:
             return
         if parsed.path in {"/api/maintenance-actions", "/api/workbench-actions"}:
-            if PortalHandler.maintenance_action_callback is None:
-                return self._send_json(
-                    503,
-                    {"ok": False, "error": "主窗口未连接，无法上传多维。"},
-                )
             try:
                 payload = self._read_json_body()
                 scope = self._authorized_scope_or_error(
@@ -985,9 +1138,24 @@ class PortalHandler(BaseHTTPRequestHandler):
                 self.service.validate_ongoing_delete_item(payload, scope=scope)
                 callback = PortalHandler.ongoing_delete_callback
                 if callback is None:
+                    event_id = PortalHandler.state_store.enqueue_outbox_event(
+                        "qt_action",
+                        {
+                            "kind": "ongoing_delete",
+                            "payload": payload,
+                        },
+                    )
+                    data = self.service.hide_ongoing_item(
+                        payload,
+                        scope=scope,
+                        deleted_by=payload["_auth_open_id"],
+                    )
+                    PortalHandler.clear_payload_cache()
+                    data["qt_delete_queued"] = True
+                    data["qt_event_id"] = event_id
                     return self._send_json(
-                        503,
-                        {"ok": False, "error": "主窗口未连接，无法删除进行中通告。"},
+                        202,
+                        {"ok": True, "data": self._with_runtime_warnings(data)},
                     )
                 try:
                     accepted = callback(payload)
@@ -1096,7 +1264,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                     f"有效期至：{data.get('expires_at') or ''}\n"
                     "请管理员确认申请人身份和申请范围后，再将验证码告知申请人。"
                 )
-                ok, message, _ = send_text_to_open_ids(text, recipients)
+                ok, message, _ = _send_text_to_open_ids_guarded(text, recipients)
                 if not ok:
                     PortalHandler.auth_manager.mark_permission_request_notify_failed(
                         str(data.get("request_id") or "")
@@ -1163,7 +1331,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                         "请重新进入门户或刷新页面查看最新楼栋权限。"
                     )
                     threading.Thread(
-                        target=send_text_to_open_ids,
+                        target=_send_text_to_open_ids_guarded,
                         args=(text, changed_open_ids),
                         name="LANPortalPermissionNotify",
                         daemon=True,
@@ -1291,6 +1459,119 @@ class PortalHandler(BaseHTTPRequestHandler):
         cls.source_refresh_event.set()
 
     @classmethod
+    def refresh_sources_once(
+        cls, *, force: bool = False, min_interval_seconds: int = 60
+    ) -> dict:
+        if os.environ.get("CLIPFLOW_BACKEND_MOCK_EXTERNAL") == "1":
+            return {"refreshed": False, "warnings": [], "mock_external": True}
+        if not cls.source_refresh_run_lock.acquire(blocking=False):
+            return {
+                "refreshed": False,
+                "warnings": [],
+                "source_refresh_inflight": True,
+                "source_refresh_reused": True,
+            }
+        return cls._run_source_refresh_with_reserved_lock(
+            force=force,
+            min_interval_seconds=min_interval_seconds,
+        )
+
+    @classmethod
+    def _run_source_refresh_with_reserved_lock(
+        cls, *, force: bool, min_interval_seconds: int = 60
+    ) -> dict:
+        try:
+            with cls.source_refresh_lock:
+                cls.source_refresh_inflight = True
+            refreshed = False
+            warnings: list[str] = []
+            try:
+                if force:
+                    cls.service.refresh()
+                    refreshed = True
+                else:
+                    refreshed = bool(
+                        cls.service.refresh_if_interval_elapsed(
+                            min_interval_seconds=min_interval_seconds
+                        )
+                    )
+                if refreshed:
+                    cls.clear_payload_cache()
+            except Exception as exc:
+                warning = f"源表后台同步失败: {exc}"
+                warnings.append(warning)
+                if warning not in cls.service._load_warnings:
+                    cls.service._load_warnings.append(warning)
+                logging.warning(warning)
+            try:
+                cls.service.process_due_repair_link_tasks(limit=3)
+            except Exception as exc:
+                warning = f"检修源表关联补写失败: {exc}"
+                warnings.append(warning)
+                if warning not in cls.service._load_warnings:
+                    cls.service._load_warnings.append(warning)
+                logging.warning(warning)
+            result = {
+                "refreshed": refreshed,
+                "warnings": warnings,
+                "source_refresh_inflight": False,
+                "source_refresh_reused": False,
+            }
+            with cls.source_refresh_lock:
+                cls.source_refresh_last_result = copy.deepcopy(result)
+                cls.source_refresh_last_finished = time.monotonic()
+            return result
+        finally:
+            with cls.source_refresh_lock:
+                cls.source_refresh_inflight = False
+            cls.source_refresh_run_lock.release()
+
+    @classmethod
+    def request_source_refresh(cls, *, force: bool = True) -> dict:
+        """Start source refresh in the background and return immediately."""
+        if os.environ.get("CLIPFLOW_BACKEND_MOCK_EXTERNAL") == "1":
+            return {"refreshed": False, "source_refresh_started": False, "mock_external": True}
+        if not cls.source_refresh_run_lock.acquire(blocking=False):
+            return {
+                "refreshed": False,
+                "source_refresh_started": False,
+                "source_refresh_inflight": True,
+                "source_refresh_reused": True,
+            }
+        with cls.source_refresh_lock:
+            cls.source_refresh_inflight = True
+
+        def _worker() -> None:
+            try:
+                cls._run_source_refresh_with_reserved_lock(force=force)
+            except Exception as exc:
+                warning = f"源表后台刷新启动后失败: {exc}"
+                if warning not in cls.service._load_warnings:
+                    cls.service._load_warnings.append(warning)
+                logging.warning(warning)
+
+        try:
+            threading.Thread(
+                target=_worker,
+                name="LANSourceRefresh",
+                daemon=True,
+            ).start()
+        except Exception as exc:
+            with cls.source_refresh_lock:
+                cls.source_refresh_inflight = False
+            try:
+                cls.source_refresh_run_lock.release()
+            except Exception:
+                pass
+            raise PortalError(f"源表刷新启动失败: {exc}") from exc
+        return {
+            "refreshed": False,
+            "source_refresh_started": True,
+            "source_refresh_inflight": True,
+            "source_refresh_reused": False,
+        }
+
+    @classmethod
     def _source_refresh_loop(cls) -> None:
         next_wait = 0.0
         while True:
@@ -1299,19 +1580,7 @@ class PortalHandler(BaseHTTPRequestHandler):
             with cls.source_refresh_lock:
                 if cls.source_refresh_stop:
                     return
-            try:
-                cls.service.refresh()
-                cls.clear_payload_cache()
-            except Exception as exc:
-                warning = f"源表后台同步失败: {exc}"
-                if warning not in cls.service._load_warnings:
-                    cls.service._load_warnings.append(warning)
-            try:
-                cls.service.process_due_repair_link_tasks(limit=3)
-            except Exception as exc:
-                warning = f"检修源表关联补写失败: {exc}"
-                if warning not in cls.service._load_warnings:
-                    cls.service._load_warnings.append(warning)
+            cls.refresh_sources_once(force=True)
             try:
                 ttl = int(cls.service._source_cache_ttl_seconds())
             except Exception:
@@ -1418,7 +1687,7 @@ class PortalHandler(BaseHTTPRequestHandler):
             if prepared.get("message_sent"):
                 cls.service.mark_job(
                     job_id,
-                    phase="upload_queued",
+                    phase="message_sent",
                     message_sent=True,
                     message_signature=message_signature,
                     message_queue_position=0,
@@ -1443,7 +1712,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                 return
             cls.service.mark_job(
                 job_id,
-                phase="upload_queued",
+                phase="message_sent",
                 message_sent=True,
                 message_signature=message_signature,
                 message_queue_position=0,
@@ -1499,11 +1768,14 @@ class PortalHandler(BaseHTTPRequestHandler):
         for index, queued_job_id in enumerate(cls.action_queue, start=1):
             cls.service.mark_job(
                 queued_job_id,
-                phase="upload_queued",
+                phase="qt_queued",
+                qt_phase="queued",
+                qt_queue_position=index,
+                qt_queue_size=total,
                 queue_position=index,
                 queue_size=total,
-                upload_queue_position=index,
-                upload_queue_size=total,
+                upload_queue_position=0,
+                upload_queue_size=0,
                 _persist=False,
             )
 
@@ -1523,9 +1795,13 @@ class PortalHandler(BaseHTTPRequestHandler):
                     continue
             if not job_id:
                 continue
-            cls.service.mark_job(job_id, queue_position=0, upload_queue_position=0)
+            cls.service.mark_job(
+                job_id,
+                queue_position=0,
+                qt_queue_position=0,
+                upload_queue_position=0,
+            )
             cls._process_maintenance_action_job(job_id)
-            cls.track_upload_wait_job(job_id)
 
     @classmethod
     def ensure_upload_wait_worker(cls) -> None:
@@ -1617,7 +1893,8 @@ class PortalHandler(BaseHTTPRequestHandler):
             if prepared.get("skip_personal_message"):
                 cls.service.mark_job(
                     job_id,
-                    phase="uploading",
+                    phase="qt_queued",
+                    qt_phase="queued",
                     queue_position=0,
                     message_sent=True,
                     message_signature=str(prepared.get("message_signature") or ""),
@@ -1625,21 +1902,52 @@ class PortalHandler(BaseHTTPRequestHandler):
             else:
                 cls.service.mark_job(
                     job_id,
-                    phase="uploading",
+                    phase="qt_queued",
+                    qt_phase="queued",
                     queue_position=0,
                 )
             if not prepared.get("skip_personal_message"):
                 cls.service.mark_job(
                     job_id,
-                    phase="uploading",
+                    phase="qt_queued",
+                    qt_phase="queued",
                     message_sent=True,
                     message_signature=str(prepared.get("message_signature") or ""),
                 )
+            guard = external_real_write_guard()
+            if not guard.get("real_write_allowed"):
+                cls.service.mark_job(
+                    job_id,
+                    phase="failed",
+                    error=str(guard.get("reason") or "真实外部写入未确认。"),
+                    message_sent=bool(prepared.get("message_sent")),
+                )
+                return
             callback = cls.maintenance_action_callback
             if callback is None:
-                cls.service.mark_job(
-                    job_id, phase="failed", error="主窗口未连接，无法上传多维。"
-                )
+                try:
+                    event_id = cls.state_store.enqueue_outbox_event(
+                        "qt_action",
+                        {
+                            "kind": "maintenance_action",
+                            "job_id": job_id,
+                            "payload": prepared,
+                        },
+                    )
+                    cls.service.mark_job(
+                        job_id,
+                        phase="qt_queued",
+                        qt_phase="outbox",
+                        qt_queue_position=0,
+                        qt_queue_size=0,
+                        qt_event_id=event_id,
+                    )
+                except Exception as exc:
+                    cls.service.mark_job(
+                        job_id,
+                        phase="failed",
+                        error=f"主窗口事件投递失败: {exc}",
+                    )
                 return
             accepted = callback(prepared)
             if isinstance(accepted, dict):
@@ -1670,11 +1978,13 @@ class PortalServerController:
         port: int = DEFAULT_PORT,
         app_token: str = DEFAULT_APP_TOKEN,
         table_id: str = DEFAULT_TABLE_ID,
+        start_source_refresh_worker: bool = True,
     ) -> None:
         self.host = str(host or DEFAULT_HOST).strip() or DEFAULT_HOST
         self.preferred_port = int(port or DEFAULT_PORT)
         self.app_token = str(app_token or DEFAULT_APP_TOKEN).strip()
         self.table_id = str(table_id or DEFAULT_TABLE_ID).strip()
+        self.start_source_refresh_worker = bool(start_source_refresh_worker)
         self.server: ThreadingHTTPServer | None = None
         self.thread: threading.Thread | None = None
         self.bound_port: int | None = None
@@ -1697,10 +2007,15 @@ class PortalServerController:
             pass
         PortalHandler.auth_manager = PortalAuthManager()
         PortalHandler.state_store = LanPortalStateStore()
+        PortalHandler.apply_runtime_settings()
         PortalHandler.notice_callback = self.notice_callback
         PortalHandler.ongoing_callback = self.ongoing_callback
         PortalHandler.ongoing_delete_callback = self.ongoing_delete_callback
         PortalHandler.maintenance_action_callback = self.maintenance_action_callback
+        with PortalHandler.source_refresh_lock:
+            PortalHandler.source_refresh_inflight = False
+            PortalHandler.source_refresh_last_result = {}
+            PortalHandler.source_refresh_last_finished = 0.0
         with PortalHandler.repair_refresh_lock:
             PortalHandler.repair_refresh_inflight = False
             PortalHandler.repair_refresh_event = threading.Event()
@@ -1728,7 +2043,10 @@ class PortalServerController:
         self.thread.start()
         PortalHandler.ensure_message_workers()
         PortalHandler.ensure_action_worker()
-        PortalHandler.ensure_source_refresh_worker()
+        for job_id in PortalHandler.service.recoverable_action_job_ids():
+            PortalHandler.enqueue_initial_message_or_upload_job(job_id)
+        if self.start_source_refresh_worker:
+            PortalHandler.ensure_source_refresh_worker()
         self.bound_port = bound_port
         return self.get_url()
 
@@ -1772,6 +2090,17 @@ class PortalServerController:
             active_item_id=active_item_id,
         )
 
+    def mark_job_progress(self, job_id: str, **patch) -> None:
+        if not job_id:
+            return
+        PortalHandler.service.mark_job(job_id, **patch)
+        phase = str((patch or {}).get("phase") or "").strip()
+        if phase == "uploading":
+            PortalHandler.track_upload_wait_job(job_id)
+        elif phase in {"success", "failed"}:
+            with PortalHandler.upload_wait_lock:
+                PortalHandler.upload_wait_jobs.pop(job_id, None)
+
     def get_job(self, job_id: str) -> dict | None:
         return PortalHandler.service.get_job(job_id)
 
@@ -1797,7 +2126,8 @@ class PortalServerController:
         PortalHandler.stop_message_workers()
         PortalHandler.stop_action_worker()
         PortalHandler.stop_upload_wait_worker()
-        PortalHandler.stop_source_refresh_worker()
+        if self.start_source_refresh_worker:
+            PortalHandler.stop_source_refresh_worker()
         PortalHandler.notice_callback = None
         PortalHandler.ongoing_callback = None
         PortalHandler.ongoing_delete_callback = None

@@ -20,6 +20,10 @@ from ..services.service_registry import (
 from ..services.handlers import NoticePayload, get_notice_handler
 from ..core.parser import extract_event_info
 
+PORTAL_BATCH_MAX_RECORDS = 5
+PORTAL_BATCH_WAIT_SECONDS = 5.0
+PORTAL_UPLOAD_SECONDS_PER_RECORD = 2.0
+
 class MainWindowWorkflowMixin:
     def _collect_live_payload_runtime_keys(self) -> set[str]:
         keys = set()
@@ -935,7 +939,12 @@ class MainWindowWorkflowMixin:
             list_widget=list_widget,
             item=item_ref,
         )
-        self.save_active_cache()
+        if bool(new_data.get("lan_created_from_portal")) and hasattr(
+            self, "schedule_active_cache_save"
+        ):
+            self.schedule_active_cache_save(800)
+        else:
+            self.save_active_cache()
         if defer_ui:
             self._mark_cache_refresh_needed()
             return
@@ -1110,7 +1119,7 @@ class MainWindowWorkflowMixin:
                 self._start_upload_worker(key, task_queue)
         task_queue.put(task)
 
-    def _mark_upload_queued(self, record_id):
+    def _mark_upload_queued(self, record_id, portal_phase: str = "uploading"):
         if not record_id:
             return
         if record_id in self.pending_action_record_ids:
@@ -1126,6 +1135,18 @@ class MainWindowWorkflowMixin:
             data["_has_unuploaded_changes"] = False
             data["_upload_in_progress"] = True
             item.setData(Qt.ItemDataRole.UserRole, data)
+            if bool(data.get("lan_created_from_portal")) and portal_phase:
+                job_id = self._portal_upload_job_id_for_record(
+                    record_id,
+                    str(data.get("active_item_id") or ""),
+                )
+                if job_id:
+                    self._mark_lan_portal_upload_progress(
+                        {"job_id": job_id},
+                        phase=str(portal_phase or "uploading"),
+                        upload_queue_position=0,
+                        upload_queue_size=0,
+                    )
             self._rebuild_active_item_widget(
                 list_widget,
                 item,
@@ -1135,7 +1156,12 @@ class MainWindowWorkflowMixin:
                 pending_upload_hash=pending_hash,
                 has_unuploaded_changes=False,
             )
-            self.save_active_cache()
+            if bool(data.get("lan_created_from_portal")) and hasattr(
+                self, "schedule_active_cache_save"
+            ):
+                self.schedule_active_cache_save(800)
+            else:
+                self.save_active_cache()
 
     def _has_pending_upload(self, record_id):
         key = self._get_upload_key(record_id)
@@ -1219,13 +1245,104 @@ class MainWindowWorkflowMixin:
             self._portal_batch_update_buffer = []
             self._portal_batch_create_timer = None
             self._portal_batch_update_timer = None
+            self._portal_upload_release_lock = threading.RLock()
+            self._portal_upload_next_release_at = 0.0
+            self._portal_batch_max_records = PORTAL_BATCH_MAX_RECORDS
+            self._portal_batch_wait_seconds = PORTAL_BATCH_WAIT_SECONDS
+            self._portal_upload_seconds_per_record = PORTAL_UPLOAD_SECONDS_PER_RECORD
+            try:
+                from lan_bitable_template_portal.state_store import LanPortalStateStore
+
+                settings = LanPortalStateStore().get_settings() or {}
+                self._portal_batch_max_records = max(
+                    1,
+                    min(10, int(settings.get("lan_upload_batch_max_records") or PORTAL_BATCH_MAX_RECORDS)),
+                )
+                self._portal_batch_wait_seconds = max(
+                    1.0,
+                    min(30.0, float(settings.get("lan_upload_batch_wait_seconds") or PORTAL_BATCH_WAIT_SECONDS)),
+                )
+                self._portal_upload_seconds_per_record = max(
+                    0.5,
+                    min(10.0, float(settings.get("lan_upload_seconds_per_record") or PORTAL_UPLOAD_SECONDS_PER_RECORD)),
+                )
+            except Exception:
+                pass
+
+    def _portal_upload_job_id_for_record(
+        self, record_id: str = "", active_item_id: str = ""
+    ) -> str:
+        if hasattr(self, "_peek_lan_portal_upload_job"):
+            try:
+                return str(
+                    self._peek_lan_portal_upload_job(record_id, active_item_id) or ""
+                )
+            except Exception:
+                return ""
+        return ""
+
+    def _mark_lan_portal_upload_progress(self, request: dict, **patch) -> None:
+        job_id = str((request or {}).get("job_id") or "").strip()
+        if not job_id:
+            return
+        if hasattr(self, "_mark_lan_portal_job_progress"):
+            self._mark_lan_portal_job_progress(job_id, **patch)
+
+    def _reserve_portal_upload_release(self, item_count: int) -> float:
+        self._ensure_portal_batch_upload_state()
+        units = max(1, int(item_count or 1))
+        now = time.time()
+        with self._portal_upload_release_lock:
+            release_at = max(now, float(self._portal_upload_next_release_at or 0.0))
+            self._portal_upload_next_release_at = (
+                release_at + float(self._portal_upload_seconds_per_record or PORTAL_UPLOAD_SECONDS_PER_RECORD) * units
+            )
+        return release_at
+
+    @staticmethod
+    def _sleep_until_timestamp(release_at: float) -> None:
+        delay = max(0.0, float(release_at or 0.0) - time.time())
+        if delay:
+            time.sleep(delay)
+
+    def _mark_portal_upload_batch_waiting(
+        self, requests: list[dict], release_at: float
+    ) -> None:
+        total = len(requests)
+        for index, request in enumerate(requests, start=1):
+            self._mark_lan_portal_upload_progress(
+                request,
+                phase="upload_waiting",
+                upload_release_at=release_at,
+                upload_queue_position=index,
+                upload_queue_size=total,
+            )
+
+    def _mark_portal_upload_batch_started(self, requests: list[dict]) -> None:
+        for request in requests:
+            self._mark_lan_portal_upload_progress(
+                request,
+                phase="uploading",
+                upload_queue_position=0,
+                upload_queue_size=0,
+            )
 
     def _enqueue_portal_batch_create_upload(self, request: dict) -> None:
         self._ensure_portal_batch_upload_state()
         should_flush = False
         with self._portal_batch_upload_lock:
             self._portal_batch_create_buffer.append(request)
-            if len(self._portal_batch_create_buffer) >= 20:
+            total = len(self._portal_batch_create_buffer)
+            for index, queued in enumerate(self._portal_batch_create_buffer, start=1):
+                self._mark_lan_portal_upload_progress(
+                    queued,
+                    phase="upload_waiting",
+                    upload_queue_position=index,
+                    upload_queue_size=total,
+                    _persist=False,
+                )
+            batch_max = int(self._portal_batch_max_records or PORTAL_BATCH_MAX_RECORDS)
+            if len(self._portal_batch_create_buffer) >= batch_max:
                 should_flush = True
                 timer = self._portal_batch_create_timer
                 self._portal_batch_create_timer = None
@@ -1235,7 +1352,10 @@ class MainWindowWorkflowMixin:
                     except Exception:
                         pass
             elif self._portal_batch_create_timer is None:
-                timer = threading.Timer(1.0, self._flush_portal_batch_create_uploads)
+                timer = threading.Timer(
+                    float(self._portal_batch_wait_seconds or PORTAL_BATCH_WAIT_SECONDS),
+                    self._flush_portal_batch_create_uploads,
+                )
                 timer.daemon = True
                 self._portal_batch_create_timer = timer
                 timer.start()
@@ -1249,9 +1369,23 @@ class MainWindowWorkflowMixin:
     def _flush_portal_batch_create_uploads(self) -> None:
         self._ensure_portal_batch_upload_state()
         with self._portal_batch_upload_lock:
-            batch = list(self._portal_batch_create_buffer)
-            self._portal_batch_create_buffer = []
+            batch_max = int(self._portal_batch_max_records or PORTAL_BATCH_MAX_RECORDS)
+            batch = list(self._portal_batch_create_buffer[:batch_max])
+            self._portal_batch_create_buffer = list(
+                self._portal_batch_create_buffer[batch_max:]
+            )
             self._portal_batch_create_timer = None
+            has_more = bool(self._portal_batch_create_buffer)
+            if has_more:
+                total = len(self._portal_batch_create_buffer)
+                for index, queued in enumerate(self._portal_batch_create_buffer, start=1):
+                    self._mark_lan_portal_upload_progress(
+                        queued,
+                        phase="upload_waiting",
+                        upload_queue_position=index,
+                        upload_queue_size=total,
+                        _persist=False,
+                    )
         if not batch:
             return
         grouped = {}
@@ -1260,6 +1394,10 @@ class MainWindowWorkflowMixin:
             grouped.setdefault(notice_type, []).append(request)
         for notice_type, requests in grouped.items():
             payloads = [copy.deepcopy(item.get("payload")) for item in requests]
+            release_at = self._reserve_portal_upload_release(len(requests))
+            self._mark_portal_upload_batch_waiting(requests, release_at)
+            self._sleep_until_timestamp(release_at)
+            self._mark_portal_upload_batch_started(requests)
             try:
                 results = batch_create_bitable_records_by_payload(notice_type, payloads)
             except Exception as exc:
@@ -1301,13 +1439,29 @@ class MainWindowWorkflowMixin:
                     value,
                     str(request.get("record_id") or ""),
                 )
+        if has_more:
+            threading.Thread(
+                target=self._flush_portal_batch_create_uploads,
+                name="LANPortalBatchCreateUpload",
+                daemon=True,
+            ).start()
 
     def _enqueue_portal_batch_update_upload(self, request: dict) -> None:
         self._ensure_portal_batch_upload_state()
         should_flush = False
         with self._portal_batch_upload_lock:
             self._portal_batch_update_buffer.append(request)
-            if len(self._portal_batch_update_buffer) >= 20:
+            total = len(self._portal_batch_update_buffer)
+            for index, queued in enumerate(self._portal_batch_update_buffer, start=1):
+                self._mark_lan_portal_upload_progress(
+                    queued,
+                    phase="upload_waiting",
+                    upload_queue_position=index,
+                    upload_queue_size=total,
+                    _persist=False,
+                )
+            batch_max = int(self._portal_batch_max_records or PORTAL_BATCH_MAX_RECORDS)
+            if len(self._portal_batch_update_buffer) >= batch_max:
                 should_flush = True
                 timer = self._portal_batch_update_timer
                 self._portal_batch_update_timer = None
@@ -1317,7 +1471,10 @@ class MainWindowWorkflowMixin:
                     except Exception:
                         pass
             elif self._portal_batch_update_timer is None:
-                timer = threading.Timer(1.0, self._flush_portal_batch_update_uploads)
+                timer = threading.Timer(
+                    float(self._portal_batch_wait_seconds or PORTAL_BATCH_WAIT_SECONDS),
+                    self._flush_portal_batch_update_uploads,
+                )
                 timer.daemon = True
                 self._portal_batch_update_timer = timer
                 timer.start()
@@ -1331,9 +1488,23 @@ class MainWindowWorkflowMixin:
     def _flush_portal_batch_update_uploads(self) -> None:
         self._ensure_portal_batch_upload_state()
         with self._portal_batch_upload_lock:
-            batch = list(self._portal_batch_update_buffer)
-            self._portal_batch_update_buffer = []
+            batch_max = int(self._portal_batch_max_records or PORTAL_BATCH_MAX_RECORDS)
+            batch = list(self._portal_batch_update_buffer[:batch_max])
+            self._portal_batch_update_buffer = list(
+                self._portal_batch_update_buffer[batch_max:]
+            )
             self._portal_batch_update_timer = None
+            has_more = bool(self._portal_batch_update_buffer)
+            if has_more:
+                total = len(self._portal_batch_update_buffer)
+                for index, queued in enumerate(self._portal_batch_update_buffer, start=1):
+                    self._mark_lan_portal_upload_progress(
+                        queued,
+                        phase="upload_waiting",
+                        upload_queue_position=index,
+                        upload_queue_size=total,
+                        _persist=False,
+                    )
         if not batch:
             return
         grouped = {}
@@ -1348,6 +1519,10 @@ class MainWindowWorkflowMixin:
                 (str(item.get("record_id") or ""), copy.deepcopy(item.get("payload")))
                 for item in requests
             ]
+            release_at = self._reserve_portal_upload_release(len(requests))
+            self._mark_portal_upload_batch_waiting(requests, release_at)
+            self._sleep_until_timestamp(release_at)
+            self._mark_portal_upload_batch_started(requests)
             try:
                 results = batch_update_bitable_records_by_payload(notice_type, updates)
             except Exception as exc:
@@ -1392,6 +1567,12 @@ class MainWindowWorkflowMixin:
                     value,
                     str(request.get("record_id") or ""),
                 )
+        if has_more:
+            threading.Thread(
+                target=self._flush_portal_batch_update_uploads,
+                name="LANPortalBatchUpdateUpload",
+                daemon=True,
+            ).start()
 
     def do_feishu_upload(
         self,
@@ -1526,7 +1707,12 @@ class MainWindowWorkflowMixin:
                         buildings=_buildings,
                         level=data_dict.get("level"),
                     )
-        self.save_active_cache()
+        if bool(data_dict.get("lan_created_from_portal")) and hasattr(
+            self, "schedule_active_cache_save"
+        ):
+            self.schedule_active_cache_save(800)
+        else:
+            self.save_active_cache()
 
         payload = self._ensure_payload_for_data(data_dict)
         if payload:
@@ -1597,14 +1783,20 @@ class MainWindowWorkflowMixin:
             payload.existing_extra_file_tokens = None
             payload.existing_response_time = None
             payload.recover = recover_selected
+            portal_job_id = self._portal_upload_job_id_for_record(
+                record_id,
+                str(data_snapshot.get("active_item_id") or ""),
+            )
             self._enqueue_portal_batch_create_upload(
                 {
                     "record_id": record_id,
+                    "active_item_id": str(data_snapshot.get("active_item_id") or ""),
+                    "job_id": portal_job_id,
                     "notice_type": notice_type,
                     "payload": payload,
                 }
             )
-            self._mark_upload_queued(record_id)
+            self._mark_upload_queued(record_id, portal_phase="")
             if self.current_screenshot_record_id == record_id:
                 self.current_screenshot_record_id = None
                 self.current_screenshot_action_type = None
@@ -1653,15 +1845,21 @@ class MainWindowWorkflowMixin:
             payload.response_time = response_time
             payload.existing_response_time = ""
             payload.recover = recover_selected
+            portal_job_id = self._portal_upload_job_id_for_record(
+                record_id,
+                str(data_snapshot.get("active_item_id") or ""),
+            )
             self._enqueue_portal_batch_update_upload(
                 {
                     "record_id": record_id,
+                    "active_item_id": str(data_snapshot.get("active_item_id") or ""),
+                    "job_id": portal_job_id,
                     "notice_type": notice_type,
                     "action_type": action_type,
                     "payload": payload,
                 }
             )
-            self._mark_upload_queued(record_id)
+            self._mark_upload_queued(record_id, portal_phase="")
             if self.current_screenshot_record_id == record_id:
                 self.current_screenshot_record_id = None
                 self.current_screenshot_action_type = None

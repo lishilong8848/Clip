@@ -44,11 +44,25 @@ class ActiveCacheMixin:
     def _init_active_cache_timer(self):
         self._active_cache_last_signature = ""
         self._active_cache_last_save_at = 0.0
+        self._active_cache_save_deferred = False
         self.active_cache_timer = QTimer(self)
         self.active_cache_timer.timeout.connect(self.save_active_cache)
         self.active_cache_timer.start(30000)
+        self._active_cache_delayed_save_timer = QTimer(self)
+        self._active_cache_delayed_save_timer.setSingleShot(True)
+        self._active_cache_delayed_save_timer.timeout.connect(self.save_active_cache)
 
-    def _collect_active_list_cache(self, list_widget):
+    def _locked_level_map_for_active_cache(self):
+        store = getattr(self, "cache_store", None)
+        if not store or not hasattr(store, "get_locked_level_map"):
+            return {}
+        try:
+            return store.get_locked_level_map() or {}
+        except Exception:
+            return {}
+
+    def _collect_active_list_cache(self, list_widget, locked_level_map=None):
+        locked_level_map = locked_level_map or {}
         items = []
         for i in range(list_widget.count()):
             item = list_widget.item(i)
@@ -57,15 +71,8 @@ class ActiveCacheMixin:
                 continue
             source_data = dict(data)
             record_id = str(source_data.get("record_id") or "").strip()
-            store = getattr(self, "cache_store", None)
-            if store and record_id:
-                try:
-                    cache_fields = store.get_record_fields(
-                        record_id=record_id,
-                        fields=["level", "level_locked"],
-                    )
-                except Exception:
-                    cache_fields = {}
+            if record_id:
+                cache_fields = locked_level_map.get(record_id) or {}
                 if bool(cache_fields.get("level_locked")):
                     source_data["level_locked"] = True
                     cached_level = str(cache_fields.get("level") or "").strip()
@@ -82,11 +89,16 @@ class ActiveCacheMixin:
         return items
 
     def _collect_active_cache(self):
+        locked_level_map = self._locked_level_map_for_active_cache()
         payload = {
             "version": 2,
             "saved_at": int(time.time()),
-            "event": self._collect_active_list_cache(self.list_active_event),
-            "other": self._collect_active_list_cache(self.list_active_other),
+            "event": self._collect_active_list_cache(
+                self.list_active_event, locked_level_map
+            ),
+            "other": self._collect_active_list_cache(
+                self.list_active_other, locked_level_map
+            ),
         }
         if hasattr(self, "_get_clipboard_cache_payload"):
             try:
@@ -141,6 +153,18 @@ class ActiveCacheMixin:
         except Exception:
             pass
 
+    def schedule_active_cache_save(self, delay_ms: int = 800):
+        if self._is_restoring_cache:
+            return
+        if int(getattr(self, "_defer_active_cache_save_count", 0) or 0) > 0:
+            self._active_cache_save_deferred = True
+            return
+        timer = getattr(self, "_active_cache_delayed_save_timer", None)
+        if timer is None:
+            QTimer.singleShot(max(0, int(delay_ms or 0)), self.save_active_cache)
+            return
+        timer.start(max(0, int(delay_ms or 0)))
+
     def _begin_defer_active_cache_save(self):
         self._defer_active_cache_save_count = (
             int(getattr(self, "_defer_active_cache_save_count", 0) or 0) + 1
@@ -154,7 +178,7 @@ class ActiveCacheMixin:
         if not bool(getattr(self, "_active_cache_save_deferred", False)):
             return
         self._active_cache_save_deferred = False
-        self.save_active_cache()
+        self.schedule_active_cache_save(800)
 
     def _restore_active_item(self, payload):
         if not payload:

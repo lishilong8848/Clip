@@ -26,7 +26,16 @@ from upload_event_module.config import (
     HOT_RELOAD_SAFE_MODE_WINDOW_S,
     config,
 )
-from lan_bitable_template_portal.server import PortalServerController
+
+if os.environ.get("CLIPFLOW_LEGACY_PORTAL") == "1":
+    from lan_bitable_template_portal.server import PortalServerController
+else:
+    try:
+        from clipflow_backend.process_controller import (
+            BackendProcessPortalController as PortalServerController,
+        )
+    except Exception:
+        from lan_bitable_template_portal.server import PortalServerController
 
 _CRASH_TRACE_FP = None
 

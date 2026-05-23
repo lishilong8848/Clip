@@ -30,7 +30,7 @@ class LanPortalStateStore:
     are migration inputs only and are never deleted or overwritten here.
     """
 
-    SCHEMA_VERSION = 6
+    SCHEMA_VERSION = 8
     SOURCE_SCOPE_TABLES = {
         "110": "source_records_110",
         "A": "source_records_a",
@@ -193,6 +193,47 @@ class LanPortalStateStore:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS backend_runtime (
+                key TEXT PRIMARY KEY,
+                value_json TEXT NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS event_outbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel TEXT NOT NULL,
+                status TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        self._ensure_column_locked(
+            conn,
+            "event_outbox",
+            "attempts",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        self._ensure_column_locked(
+            conn,
+            "event_outbox",
+            "last_error",
+            "TEXT NOT NULL DEFAULT ''",
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_event_outbox_channel_status
+            ON event_outbox(channel, status, id)
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS repair_link_tasks (
                 task_key TEXT PRIMARY KEY,
                 status TEXT NOT NULL,
@@ -293,6 +334,20 @@ class LanPortalStateStore:
         )
         conn.commit()
         self._initialized = True
+
+    @staticmethod
+    def _ensure_column_locked(
+        conn: sqlite3.Connection, table: str, column: str, ddl: str
+    ) -> None:
+        try:
+            columns = {
+                str(row[1] or "")
+                for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            if column not in columns:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+        except sqlite3.OperationalError:
+            pass
 
     @staticmethod
     def _text(value: Any) -> str:
@@ -1591,6 +1646,363 @@ class LanPortalStateStore:
                 )
                 conn.commit()
                 return int(cursor.lastrowid or 0)
+
+    def put_backend_runtime(self, key: str, payload: dict[str, Any] | None) -> None:
+        key = self._text(key)
+        if not key:
+            return
+        normalized = dict(payload or {})
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO backend_runtime(key, value_json, updated_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    (key, self._json(normalized), time.time()),
+                )
+                conn.commit()
+
+    def get_backend_runtime(self, key: str) -> dict[str, Any] | None:
+        key = self._text(key)
+        if not key or not self.db_path.exists():
+            return None
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    "SELECT value_json, updated_at FROM backend_runtime WHERE key = ?",
+                    (key,),
+                ).fetchone()
+        if not row:
+            return None
+        payload = self._loads(str(row["value_json"] or ""), {})
+        if not isinstance(payload, dict):
+            payload = {}
+        payload.setdefault("updated_at", float(row["updated_at"] or 0))
+        return payload
+
+    def get_database_stats(self) -> dict[str, Any]:
+        db_path = self.db_path
+
+        def file_size(path: Path) -> int:
+            try:
+                return int(path.stat().st_size)
+            except OSError:
+                return 0
+
+        stats: dict[str, Any] = {
+            "path": str(db_path),
+            "exists": db_path.exists(),
+            "db_bytes": file_size(db_path),
+            "wal_bytes": file_size(Path(f"{db_path}-wal")),
+            "shm_bytes": file_size(Path(f"{db_path}-shm")),
+            "total_bytes": 0,
+            "page_count": 0,
+            "page_size": 0,
+            "freelist_count": 0,
+            "journal_mode": "",
+            "busy_timeout_ms": 0,
+            "table_counts": {},
+            "checked_at": time.time(),
+        }
+        stats["total_bytes"] = (
+            int(stats["db_bytes"]) + int(stats["wal_bytes"]) + int(stats["shm_bytes"])
+        )
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                try:
+                    stats["page_count"] = int(
+                        (conn.execute("PRAGMA page_count").fetchone() or [0])[0] or 0
+                    )
+                    stats["page_size"] = int(
+                        (conn.execute("PRAGMA page_size").fetchone() or [0])[0] or 0
+                    )
+                    stats["freelist_count"] = int(
+                        (conn.execute("PRAGMA freelist_count").fetchone() or [0])[0] or 0
+                    )
+                    stats["journal_mode"] = str(
+                        (conn.execute("PRAGMA journal_mode").fetchone() or [""])[0] or ""
+                    )
+                    stats["busy_timeout_ms"] = int(
+                        (conn.execute("PRAGMA busy_timeout").fetchone() or [0])[0] or 0
+                    )
+                except sqlite3.Error:
+                    pass
+                counts: dict[str, int] = {}
+                for table in (
+                    "notice_actions",
+                    "event_outbox",
+                    "backend_runtime",
+                    "daily_summary",
+                    "work_status",
+                    "source_records_all",
+                ):
+                    try:
+                        row = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+                        counts[table] = int((row or [0])[0] or 0)
+                    except sqlite3.Error:
+                        continue
+                stats["table_counts"] = counts
+        return stats
+
+    def checkpoint_database(self, *, truncate: bool = True) -> dict[str, Any]:
+        before = self.get_database_stats()
+        mode = "TRUNCATE" if truncate else "PASSIVE"
+        checkpoint = {"busy": 0, "log": 0, "checkpointed": 0, "mode": mode}
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(f"PRAGMA wal_checkpoint({mode})").fetchone()
+                if row:
+                    checkpoint["busy"] = int(row[0] or 0)
+                    checkpoint["log"] = int(row[1] or 0)
+                    checkpoint["checkpointed"] = int(row[2] or 0)
+        after = self.get_database_stats()
+        return {
+            "before": before,
+            "after": after,
+            "checkpoint": checkpoint,
+            "reclaimed_bytes": max(
+                0,
+                int(before.get("total_bytes") or 0) - int(after.get("total_bytes") or 0),
+            ),
+        }
+
+    def enqueue_outbox_event(
+        self, channel: str, payload: dict[str, Any] | None
+    ) -> int:
+        channel = self._text(channel) or "default"
+        normalized = dict(payload or {})
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                cursor = conn.execute(
+                    """
+                    INSERT INTO event_outbox(
+                        channel, status, payload_json, attempts, last_error, created_at, updated_at
+                    )
+                    VALUES (?, 'pending', ?, 0, '', ?, ?)
+                    """,
+                    (channel, self._json(normalized), now, now),
+                )
+                conn.commit()
+                return int(cursor.lastrowid or 0)
+
+    def list_outbox_events(
+        self,
+        channel: str,
+        *,
+        status: str = "pending",
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        channel = self._text(channel)
+        status = self._text(status) or "pending"
+        if not channel or not self.db_path.exists():
+            return []
+        limit = max(1, min(int(limit or 100), 500))
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                rows = conn.execute(
+                    """
+                    SELECT id, channel, status, payload_json, attempts, last_error, created_at, updated_at
+                    FROM event_outbox
+                    WHERE channel = ? AND status = ?
+                    ORDER BY id ASC
+                    LIMIT ?
+                    """,
+                    (channel, status, limit),
+                ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            payload = self._loads(str(row["payload_json"] or ""), {})
+            result.append(
+                {
+                    "id": int(row["id"] or 0),
+                    "channel": str(row["channel"] or ""),
+                    "status": str(row["status"] or ""),
+                    "payload": payload if isinstance(payload, dict) else {},
+                    "attempts": int(row["attempts"] or 0),
+                    "last_error": str(row["last_error"] or ""),
+                    "created_at": float(row["created_at"] or 0),
+                    "updated_at": float(row["updated_at"] or 0),
+                }
+            )
+        return result
+
+    def count_outbox_events(
+        self, channel: str, *, stale_lease_seconds: int = 120
+    ) -> dict[str, int]:
+        channel = self._text(channel)
+        if not channel or not self.db_path.exists():
+            return {}
+        stale_lease_seconds = max(5, int(stale_lease_seconds or 60))
+        now = time.time()
+        stale_before = now - stale_lease_seconds
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute(
+                    """
+                    UPDATE event_outbox
+                    SET status = 'pending', updated_at = ?
+                    WHERE channel = ? AND status = 'leased' AND updated_at < ?
+                    """,
+                    (now, channel, stale_before),
+                )
+                rows = conn.execute(
+                    """
+                    SELECT status, COUNT(*) AS count
+                    FROM event_outbox
+                    WHERE channel = ?
+                    GROUP BY status
+                    """,
+                    (channel,),
+                ).fetchall()
+                conn.commit()
+        return {
+            str(row["status"] or ""): int(row["count"] or 0)
+            for row in rows
+            if str(row["status"] or "")
+        }
+
+    def lease_outbox_events(
+        self,
+        channel: str,
+        *,
+        limit: int = 1,
+        lease_seconds: int = 30,
+    ) -> list[dict[str, Any]]:
+        channel = self._text(channel)
+        if not channel or not self.db_path.exists():
+            return []
+        limit = max(1, min(int(limit or 1), 20))
+        lease_seconds = max(5, int(lease_seconds or 30))
+        now = time.time()
+        stale_before = now - lease_seconds
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute(
+                    """
+                    UPDATE event_outbox
+                    SET status = 'pending', updated_at = ?
+                    WHERE channel = ? AND status = 'leased' AND updated_at < ?
+                    """,
+                    (now, channel, stale_before),
+                )
+                rows = conn.execute(
+                    """
+                    SELECT id, channel, status, payload_json, attempts, last_error, created_at, updated_at
+                    FROM event_outbox
+                    WHERE channel = ? AND status = 'pending'
+                    ORDER BY id ASC
+                    LIMIT ?
+                    """,
+                    (channel, limit),
+                ).fetchall()
+                ids = [int(row["id"] or 0) for row in rows if int(row["id"] or 0) > 0]
+                if ids:
+                    placeholders = ",".join("?" for _ in ids)
+                    conn.execute(
+                        f"""
+                        UPDATE event_outbox
+                        SET status = 'leased', updated_at = ?
+                        WHERE id IN ({placeholders})
+                        """,
+                        (now, *ids),
+                    )
+                conn.commit()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            payload = self._loads(str(row["payload_json"] or ""), {})
+            result.append(
+                {
+                    "id": int(row["id"] or 0),
+                    "channel": str(row["channel"] or ""),
+                    "status": "leased",
+                    "payload": payload if isinstance(payload, dict) else {},
+                    "attempts": int(row["attempts"] or 0),
+                    "last_error": str(row["last_error"] or ""),
+                    "created_at": float(row["created_at"] or 0),
+                    "updated_at": now,
+                }
+            )
+        return result
+
+    def mark_outbox_event(
+        self,
+        event_id: int,
+        status: str,
+        *,
+        error: str = "",
+        max_attempts: int = 3,
+    ) -> dict[str, Any] | None:
+        try:
+            event_id = int(event_id or 0)
+        except Exception:
+            event_id = 0
+        status = self._text(status) or "done"
+        if event_id <= 0:
+            return None
+        error = self._text(error)
+        max_attempts = max(1, int(max_attempts or 3))
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                current = conn.execute(
+                    """
+                    SELECT id, channel, status, payload_json, attempts, last_error, created_at, updated_at
+                    FROM event_outbox
+                    WHERE id = ?
+                    """,
+                    (event_id,),
+                ).fetchone()
+                if not current:
+                    return None
+                attempts = int(current["attempts"] or 0)
+                final_status = status
+                if status == "pending":
+                    attempts += 1
+                    if attempts >= max_attempts:
+                        final_status = "failed"
+                elif status == "done":
+                    error = ""
+                conn.execute(
+                    """
+                    UPDATE event_outbox
+                    SET status = ?, attempts = ?, last_error = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (final_status, attempts, error, now, event_id),
+                )
+                conn.commit()
+                row = conn.execute(
+                    """
+                    SELECT id, channel, status, payload_json, attempts, last_error, created_at, updated_at
+                    FROM event_outbox
+                    WHERE id = ?
+                    """,
+                    (event_id,),
+                ).fetchone()
+        if not row:
+            return None
+        payload = self._loads(str(row["payload_json"] or ""), {})
+        return {
+            "id": int(row["id"] or 0),
+            "channel": str(row["channel"] or ""),
+            "status": str(row["status"] or ""),
+            "payload": payload if isinstance(payload, dict) else {},
+            "attempts": int(row["attempts"] or 0),
+            "last_error": str(row["last_error"] or ""),
+            "created_at": float(row["created_at"] or 0),
+            "updated_at": float(row["updated_at"] or 0),
+        }
 
     def import_jsonl_events_once(
         self, source: str, path: str | Path, *, marker: str = ""

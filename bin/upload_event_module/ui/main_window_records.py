@@ -10,7 +10,7 @@ from PyQt6.QtCore import Qt, QSize, QTimer
 from PyQt6 import sip
 
 from ..config import get_field_config
-from ..logger import LOG_FILE, log_info, log_warning
+from ..logger import LOG_FILE, log_error, log_info, log_warning
 from ..utils import WHITESPACE_TRANSLATOR
 from ..services.service_registry import query_record_by_id, update_bitable_record_fields
 from ..core.parser import extract_event_info
@@ -393,7 +393,24 @@ class MainWindowRecordsMixin:
             detail = " ".join(f"{k}={v}" for k, v in kwargs.items()) if kwargs else ""
             msg = f"{label} {detail}".strip()
             self._last_ui_op = msg
-            log_info(f"UI_OP: {msg}")
+        except Exception:
+            pass
+
+    def _record_slow_ui_operation(self, label: str, elapsed_ms: float):
+        try:
+            self._ui_slow_count = int(getattr(self, "_ui_slow_count", 0) or 0) + 1
+            now = time.time()
+            last_log = float(getattr(self, "_ui_slow_last_log_ts", 0.0) or 0.0)
+            interval = float(getattr(self, "_ui_slow_log_interval_s", 10.0) or 10.0)
+            if now - last_log < interval:
+                return
+            self._ui_slow_last_log_ts = now
+            log_error(
+                "Qt主线程操作耗时过长: "
+                f"op={label or '-'}, elapsed_ms={elapsed_ms:.1f}, "
+                f"slow_count={int(getattr(self, '_ui_slow_count', 0) or 0)}, "
+                f"last_ui_op={getattr(self, '_last_ui_op', '') or '-'}"
+            )
         except Exception:
             pass
 

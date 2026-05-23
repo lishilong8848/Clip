@@ -1,11 +1,16 @@
 import os
+import socket
+import sqlite3
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import json
 import datetime as dt
 import base64
+import ast
+import re
 from pathlib import Path
 from unittest.mock import patch
 
@@ -18,9 +23,13 @@ from lan_bitable_template_portal.portal_service import PortalError  # noqa: E402
 from lan_bitable_template_portal.portal_service import RECENT_MONTH_FILTER_LABEL  # noqa: E402
 from lan_bitable_template_portal.portal_service import WORK_TYPE_CHANGE  # noqa: E402
 from lan_bitable_template_portal.portal_service import WORK_TYPE_REPAIR  # noqa: E402
+from lan_bitable_template_portal.portal_auth import AUTH_COOKIE_NAME  # noqa: E402
 from lan_bitable_template_portal.portal_auth import PortalAuthManager  # noqa: E402
 from lan_bitable_template_portal.server import PortalHandler  # noqa: E402
 from lan_bitable_template_portal.state_store import LanPortalStateStore  # noqa: E402
+from clipflow_backend.main import FastAPIPortalController  # noqa: E402
+from clipflow_backend.process_controller import BackendProcessPortalController  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
 import upload_event_module.config as config_module  # noqa: E402
 from upload_event_module.config import ConfigManager  # noqa: E402
 from upload_event_module.config import MAINTENANCE_NOTICE_FIELDS  # noqa: E402
@@ -28,10 +37,17 @@ from upload_event_module.services.handlers.base import NoticePayload  # noqa: E4
 from upload_event_module.services.handlers.maintenance_notice import (  # noqa: E402
     MaintenanceNoticeHandler,
 )
+import upload_event_module.services.feishu_service as feishu_service_module  # noqa: E402
 from upload_event_module.ui.active_cache_store import ActiveCacheStore  # noqa: E402
 from upload_event_module.ui.main_window_ui import MainWindowUiMixin  # noqa: E402
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+
+def _free_tcp_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
 
 
 class _TestMaintenancePortalService(MaintenancePortalService):
@@ -72,6 +88,161 @@ class _ChangeSourceFailureService(MaintenancePortalService):
 
     def _load_change_fields(self):
         raise RuntimeError("mock change source down")
+
+
+class _NativeFastAPIRouteService:
+    _last_loaded_at = ""
+    _load_warnings: list[str] = []
+
+    def state_cache_version(self):
+        return 1
+
+    def _scope_matches_item(self, scope, item):
+        return True
+
+    def reconcile_orphan_started_items(self, *, scope, ongoing_items):
+        return {"removed": 0}
+
+    def get_bootstrap(self, *, scope, ongoing_items):
+        return {
+            "scope": scope,
+            "scope_options": [{"value": "ALL", "label": "全部"}],
+            "ongoing": ongoing_items,
+            "route": "bootstrap",
+        }
+
+    def refresh(self):
+        self.refreshed = True
+
+    def refresh_if_interval_elapsed(self, *, min_interval_seconds):
+        self.refreshed_if_interval = min_interval_seconds
+        return True
+
+    def process_due_repair_link_tasks(self, *, limit):
+        self.repair_link_limit = limit
+        return {"processed": 0}
+
+    def refresh_repair_source(self):
+        return {"repair_refresh_reused": False, "repair_refresh_mock": True}
+
+    def get_scope_overview(self, *, ongoing_items, scopes, include_prepared):
+        return {
+            "scope_options": [{"value": "ALL", "label": "全部"}],
+            "scopes": scopes,
+            "ongoing": ongoing_items,
+            "route": "scope-overview",
+        }
+
+    def query_records(self, *, month, specialty, scope, ongoing_items):
+        return {
+            "scope": scope,
+            "month": month,
+            "specialty": specialty,
+            "ongoing": ongoing_items,
+            "route": "workbench",
+            "scope_options": [{"value": "ALL", "label": "全部"}],
+        }
+
+    def get_history_summary(self, *, scope, month, work_type):
+        return {
+            "scope": scope,
+            "month": month,
+            "work_type": work_type,
+            "items": [],
+            "route": "history-summary",
+        }
+
+    def get_handover_links(self):
+        return {
+            "links": {"ALL": "http://example.test"},
+            "scope_options": [{"value": "ALL", "label": "全部"}],
+            "route": "handover-links",
+        }
+
+    def save_handover_links(self, links, *, password):
+        self.saved_handover_links = dict(links or {})
+        self.saved_handover_password = password
+        return {
+            "links": self.saved_handover_links,
+            "scope_options": [{"value": "ALL", "label": "全部"}],
+            "route": "handover-links-save",
+        }
+
+    def verify_handover_settings_password(self, password):
+        return str(password or "") == "ok"
+
+    def request_handover_password_reset(self):
+        return {"reset_id": "reset1", "expires_at": "2026-05-22 15:00:00"}
+
+    def reset_handover_password_with_code(self, *, reset_id, code, new_password):
+        return {
+            "reset_id": reset_id,
+            "code_ok": code == "123456",
+            "new_password_len": len(new_password),
+        }
+
+    def create_action_job(self, payload):
+        self.last_action_payload = dict(payload)
+        return "job-native", False
+
+    def get_job(self, job_id):
+        if job_id == "job-native":
+            return {
+                "job_id": job_id,
+                "accepted_at": 123,
+                "phase": "accepted",
+                "request": getattr(self, "last_action_payload", {}),
+            }
+        return None
+
+    def mark_job(self, job_id, **patch):
+        self.last_marked_job_id = job_id
+        self.last_marked_job_patch = dict(patch)
+
+    def validate_ongoing_delete_item(self, payload, *, scope):
+        self.last_delete_payload = dict(payload)
+        return None
+
+    def hide_ongoing_item(self, payload, *, scope, deleted_by):
+        return {
+            "deleted": True,
+            "scope": scope,
+            "deleted_by": deleted_by,
+            "active_item_id": payload.get("active_item_id") or "",
+        }
+
+    def discard_deleted_ongoing_state(self, payload, *, scope):
+        return {"discarded": True}
+
+    def assert_generated_drafts_allowed(self, drafts, *, scope):
+        self.generated_draft_scope = scope
+        self.generated_drafts = list(drafts or [])
+
+    def generate_templates(self, drafts):
+        return [
+            {
+                "record_id": str((draft or {}).get("record_id") or ""),
+                "text": "generated",
+            }
+            for draft in drafts or []
+        ]
+
+    def assert_generated_items_allowed(self, items, *, scope):
+        self.generated_item_scope = scope
+        self.generated_items = list(items or [])
+
+    def send_generated_templates(self, items, *, notice_callback=None):
+        results = []
+        for item in items or []:
+            if notice_callback is not None:
+                notice_callback({"title": item.get("title") or "", "text": item.get("text") or ""})
+            results.append(
+                {
+                    "record_id": str((item or {}).get("record_id") or ""),
+                    "ok": True,
+                }
+            )
+        return results
 
     def _load_zhihang_change_fields(self):
         self._zhihang_change_field_meta_list = []
@@ -276,6 +447,32 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             snapshot = store.get_ongoing_snapshot()
             self.assertTrue(snapshot["exists"])
             self.assertEqual(snapshot["items"], [])
+
+    def test_lan_portal_state_store_reports_database_stats(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            store.put_backend_runtime("probe", {"ok": True})
+
+            stats = store.get_database_stats()
+
+            self.assertTrue(stats["exists"])
+            self.assertGreater(stats["db_bytes"], 0)
+            self.assertGreaterEqual(stats["total_bytes"], stats["db_bytes"])
+            self.assertEqual(stats["journal_mode"].lower(), "wal")
+            self.assertIn("backend_runtime", stats["table_counts"])
+            self.assertGreaterEqual(stats["table_counts"]["backend_runtime"], 1)
+
+    def test_lan_portal_state_store_checkpoints_database(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            store.put_backend_runtime("probe", {"ok": True})
+
+            result = store.checkpoint_database()
+
+            self.assertIn("before", result)
+            self.assertIn("after", result)
+            self.assertEqual(result["checkpoint"]["mode"], "TRUNCATE")
+            self.assertGreaterEqual(result["reclaimed_bytes"], 0)
 
     def test_lan_portal_state_store_replaces_source_scope_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -713,7 +910,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(stored_status["items"][0]["status"], "已结束")
             self.assertEqual(status_path.read_text(encoding="utf-8"), original)
 
-    def test_action_jobs_persist_in_sqlite_and_restart_marks_active_failed(self):
+    def test_action_jobs_persist_in_sqlite_and_restart_recovers_pre_send_job(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             service = self._new_temp_service(root)
@@ -731,8 +928,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
             restarted = self._new_temp_service(root)
             restored = restarted.get_job(job_id)
-            self.assertEqual(restored["phase"], "failed")
-            self.assertIn("程序已重启", restored["error"])
+            self.assertEqual(restored["phase"], "accepted")
+            self.assertTrue(restored["restart_recovered"])
+            self.assertEqual(restarted.recoverable_action_job_ids(), [job_id])
 
     def test_qt_active_cache_migrates_to_sqlite_without_overwriting_json(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1520,15 +1718,15 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(prepared["fault_time"], "2026-05-08 08:20")
             self.assertEqual(prepared["building_code"], "D")
 
-    def test_repair_defaults_use_event_description_level_and_source(self):
+    def test_repair_defaults_use_repair_name_formula_level_and_source(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
             service._repair_records = [
                 _build_repair_record(
                     "r1",
                     building="D楼",
-                    title="维修名称不作为标题",
-                    event_description="事件描述作为检修标题",
+                    title="维修名称公式字段作为检修标题",
+                    event_description="事件描述不作为检修标题",
                     event_level="I2",
                     source="监控发现",
                 )
@@ -1553,12 +1751,13 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
             self.assertTrue(should_start)
             prepared = service.prepare_action_job(start_job_id)
-            self.assertEqual(prepared["title"], "事件描述作为检修标题")
+            self.assertEqual(prepared["title"], "维修名称公式字段作为检修标题")
             self.assertEqual(prepared["level"], "中")
             self.assertEqual(prepared["discovery"], "监控发现")
             self.assertEqual(service._repair_level_from_event_level("I3"), "低")
             self.assertEqual(service._repair_level_from_event_level("I1"), "")
-            self.assertIn("【标题】事件描述作为检修标题", prepared["text"])
+            self.assertIn("【标题】维修名称公式字段作为检修标题", prepared["text"])
+            self.assertNotIn("事件描述不作为检修标题", prepared["text"])
             self.assertIn("【紧急程度】中", prepared["text"])
             self.assertIn("【故障发现方式】监控发现", prepared["text"])
 
@@ -2822,6 +3021,1320 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             fields[MAINTENANCE_NOTICE_FIELDS["maintenance_cycle"]],
             "月度",
         )
+
+    def test_maintenance_cycle_options_match_qt_and_portal(self):
+        dialogs_source = (BIN_DIR / "upload_event_module" / "ui" / "dialogs.py").read_text(
+            encoding="utf-8"
+        )
+        tree = ast.parse(dialogs_source)
+        qt_options = []
+        for node in tree.body:
+            if isinstance(node, ast.Assign):
+                names = [target.id for target in node.targets if isinstance(target, ast.Name)]
+                if "MAINTENANCE_CYCLE_OPTIONS" in names:
+                    qt_options = list(ast.literal_eval(node.value))
+                    break
+        self.assertIn("/", qt_options)
+
+        html_source = (
+            BIN_DIR / "lan_bitable_template_portal" / "static" / "index.html"
+        ).read_text(encoding="utf-8")
+        match = re.search(
+            r"const\s+MAINTENANCE_CYCLE_OPTIONS\s*=\s*\[(?P<body>.*?)\];",
+            html_source,
+            re.S,
+        )
+        self.assertIsNotNone(match)
+        portal_options = re.findall(r'"([^"]*)"', match.group("body"))
+        self.assertEqual(portal_options, qt_options)
+
+    def test_outbox_events_are_leased_and_acknowledged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            event_id = store.enqueue_outbox_event(
+                "qt_action",
+                {"kind": "maintenance_action", "job_id": "job1"},
+            )
+            leased = store.lease_outbox_events("qt_action", limit=1, lease_seconds=30)
+            self.assertEqual(len(leased), 1)
+            self.assertEqual(leased[0]["id"], event_id)
+            self.assertEqual(leased[0]["status"], "leased")
+            self.assertEqual(store.list_outbox_events("qt_action"), [])
+
+            store.mark_outbox_event(event_id, "done")
+            done = store.list_outbox_events("qt_action", status="done")
+            self.assertEqual(len(done), 1)
+            self.assertEqual(done[0]["id"], event_id)
+
+            failed_id = store.enqueue_outbox_event(
+                "qt_action",
+                {"kind": "maintenance_action", "job_id": "job2"},
+            )
+            first = store.mark_outbox_event(
+                failed_id,
+                "pending",
+                error="callback down",
+                max_attempts=2,
+            )
+            self.assertEqual(first["status"], "pending")
+            self.assertEqual(first["attempts"], 1)
+            self.assertEqual(first["last_error"], "callback down")
+            second = store.mark_outbox_event(
+                failed_id,
+                "pending",
+                error="callback still down",
+                max_attempts=2,
+            )
+            self.assertEqual(second["status"], "failed")
+            self.assertEqual(second["attempts"], 2)
+            failed = store.list_outbox_events("qt_action", status="failed")
+            self.assertEqual(len(failed), 1)
+            self.assertEqual(failed[0]["id"], failed_id)
+            self.assertEqual(failed[0]["last_error"], "callback still down")
+            counts = store.count_outbox_events("qt_action")
+            self.assertEqual(counts.get("done"), 1)
+            self.assertEqual(counts.get("failed"), 1)
+
+            stale_id = store.enqueue_outbox_event(
+                "qt_action",
+                {"kind": "notice", "job_id": "job3"},
+            )
+            stale_lease = store.lease_outbox_events("qt_action", limit=1)
+            self.assertEqual(stale_lease[0]["id"], stale_id)
+            conn = sqlite3.connect(Path(tmp) / "state.sqlite3")
+            try:
+                conn.execute(
+                    "UPDATE event_outbox SET updated_at = 0 WHERE id = ?",
+                    (stale_id,),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            counts = store.count_outbox_events("qt_action", stale_lease_seconds=5)
+            self.assertEqual(counts.get("pending"), 1)
+            self.assertIsNone(counts.get("leased"))
+
+    def test_source_refresh_singleflight_returns_inflight_status(self):
+        acquired = PortalHandler.source_refresh_run_lock.acquire(blocking=False)
+        self.assertTrue(acquired)
+        try:
+            with patch.dict(os.environ, {"CLIPFLOW_BACKEND_MOCK_EXTERNAL": ""}, clear=False):
+                result = PortalHandler.refresh_sources_once(force=True)
+            self.assertFalse(result["refreshed"])
+            self.assertTrue(result["source_refresh_inflight"])
+            self.assertTrue(result["source_refresh_reused"])
+        finally:
+            PortalHandler.source_refresh_run_lock.release()
+
+    def test_action_jobs_recover_only_before_external_side_effects(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            accepted = {
+                "job_id": "job-accepted",
+                "phase": "accepted",
+                "message_started_at": 0.0,
+                "request": {"action": "start", "record_id": "m1"},
+            }
+            uploading = {
+                "job_id": "job-uploading",
+                "phase": "uploading",
+                "message_started_at": time.time(),
+                "request": {"action": "start", "record_id": "m2"},
+            }
+            store.put_document("notice_action_job", "job-accepted", accepted)
+            store.put_document("notice_action_job", "job-uploading", uploading)
+            service = _TestMaintenancePortalService()
+            service._state_store = store
+            service._jobs = service._load_action_jobs_from_state()
+
+            self.assertEqual(service.get_job("job-accepted")["phase"], "accepted")
+            self.assertTrue(service.get_job("job-accepted")["restart_recovered"])
+            self.assertEqual(service.recoverable_action_job_ids(), ["job-accepted"])
+            failed = service.get_job("job-uploading")
+            self.assertEqual(failed["phase"], "failed")
+            self.assertEqual(failed["error_category"], "process_restart")
+            self.assertFalse(failed["error_retryable"])
+
+    def test_cleanup_action_jobs_only_removes_expired_terminal_jobs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            now = time.time()
+
+            def create_job(operation_id: str) -> str:
+                job_id, should_start = service.create_action_job(
+                    {
+                        "action": "start",
+                        "scope": "A",
+                        "record_id": operation_id,
+                        "operation_id": operation_id,
+                    }
+                )
+                self.assertTrue(should_start)
+                return job_id
+
+            old_success = create_job("old-success")
+            old_failed = create_job("old-failed")
+            old_running = create_job("old-running")
+            recent_success = create_job("recent-success")
+
+            with service._jobs_lock:
+                for job_id, phase, finished_at in [
+                    (old_success, "success", now - 500),
+                    (old_failed, "failed", now - 500),
+                    (old_running, "uploading", now - 500),
+                    (recent_success, "success", now),
+                ]:
+                    job = service._jobs[job_id]
+                    job["phase"] = phase
+                    job["upload_finished_at"] = finished_at
+                    service._persist_action_job_locked(job)
+
+            result = service.cleanup_action_jobs(
+                success_retention_seconds=120,
+                failed_retention_seconds=120,
+            )
+
+            self.assertEqual(result["removed_success"], 1)
+            self.assertEqual(result["removed_failed"], 1)
+            self.assertIsNone(service.get_job(old_success))
+            self.assertIsNone(service.get_job(old_failed))
+            self.assertEqual(service.get_job(old_running)["phase"], "uploading")
+            self.assertEqual(service.get_job(recent_success)["phase"], "success")
+
+    def test_failed_action_jobs_are_compacted_after_persist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            job_id, should_start = service.create_action_job(
+                {
+                    "action": "start",
+                    "scope": "A",
+                    "record_id": "rec-failed",
+                    "work_type": "maintenance",
+                    "location": "x" * 2000,
+                    "operation_id": "failed-compact",
+                }
+            )
+            self.assertTrue(should_start)
+            service.mark_job(
+                job_id,
+                phase="failed",
+                message_sent=True,
+                message_signature="sig-1",
+                prepared={"text": "y" * 5000, "work_type": "maintenance"},
+                error="网络连接失败",
+            )
+
+            stored = service.get_job(job_id)
+            self.assertEqual(stored["phase"], "failed")
+            self.assertEqual(stored["error_category"], "network_error")
+            self.assertTrue(stored["error_retryable"])
+            self.assertTrue(stored["message_sent"])
+            self.assertEqual(stored["message_signature"], "sig-1")
+            self.assertEqual(stored["prepared"], {})
+            self.assertNotIn("location", stored["request"])
+            self.assertIn("location", stored["retry_request"])
+
+    def test_job_error_classification(self):
+        self.assertEqual(
+            MaintenancePortalService.classify_job_error("请求 timeout")["error_category"],
+            "network_timeout",
+        )
+        self.assertTrue(
+            MaintenancePortalService.classify_job_error("接口限流 429")["error_retryable"]
+        )
+        self.assertFalse(
+            MaintenancePortalService.classify_job_error("字段 维保周期 缺失")["error_retryable"]
+        )
+
+    def test_runtime_settings_are_bounded(self):
+        original_store = PortalHandler.state_store
+        original_count = PortalHandler.message_worker_count
+        original_upload_seconds = getattr(PortalHandler, "upload_seconds_per_record", 2.0)
+        original_batch_wait = getattr(PortalHandler, "upload_batch_wait_seconds", 5.0)
+        original_batch_max = getattr(PortalHandler, "upload_batch_max_records", 5)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            store.put_settings(
+                {
+                    "lan_message_worker_count": 99,
+                    "lan_upload_seconds_per_record": -1,
+                    "lan_upload_batch_wait_seconds": 100,
+                    "lan_upload_batch_max_records": 99,
+                }
+            )
+            PortalHandler.state_store = store
+            try:
+                limits = PortalHandler.apply_runtime_settings()
+            finally:
+                PortalHandler.state_store = original_store
+                PortalHandler.message_worker_count = original_count
+                PortalHandler.upload_seconds_per_record = original_upload_seconds
+                PortalHandler.upload_batch_wait_seconds = original_batch_wait
+                PortalHandler.upload_batch_max_records = original_batch_max
+            self.assertEqual(limits["message_worker_count"], 5)
+            self.assertEqual(limits["upload_seconds_per_record"], 0.5)
+            self.assertEqual(limits["upload_batch_wait_seconds"], 30.0)
+            self.assertEqual(limits["upload_batch_max_records"], 10)
+
+    def test_repair_source_refresh_request_is_background_singleflight(self):
+        class _SlowRepairRefreshService:
+            _load_warnings: list[str] = []
+
+            def __init__(self):
+                self.calls = 0
+                self.entered = threading.Event()
+                self.release = threading.Event()
+
+            def refresh_repair_source(self):
+                self.calls += 1
+                self.entered.set()
+                self.release.wait(timeout=5)
+                return {"repair_count": 3, "repair_refreshed_at": "17:01"}
+
+        original_service = PortalHandler.service
+        service = _SlowRepairRefreshService()
+        with PortalHandler.repair_refresh_lock:
+            PortalHandler.repair_refresh_inflight = False
+            PortalHandler.repair_refresh_event = threading.Event()
+            PortalHandler.repair_refresh_last_result = {}
+            PortalHandler.repair_refresh_last_error = ""
+            PortalHandler.repair_refresh_last_finished = 0.0
+        PortalHandler.service = service
+        try:
+            first = PortalHandler.request_repair_source_refresh()
+            self.assertTrue(first["repair_refresh_started"])
+            self.assertTrue(service.entered.wait(timeout=2))
+            second = PortalHandler.request_repair_source_refresh()
+            self.assertFalse(second["repair_refresh_started"])
+            self.assertTrue(second["repair_refresh_inflight"])
+            service.release.set()
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                with PortalHandler.repair_refresh_lock:
+                    if not PortalHandler.repair_refresh_inflight:
+                        break
+                time.sleep(0.02)
+            with PortalHandler.repair_refresh_lock:
+                self.assertFalse(PortalHandler.repair_refresh_inflight)
+                self.assertEqual(PortalHandler.repair_refresh_last_result["repair_count"], 3)
+            self.assertEqual(service.calls, 1)
+        finally:
+            service.release.set()
+            PortalHandler.service = original_service
+            with PortalHandler.repair_refresh_lock:
+                PortalHandler.repair_refresh_inflight = False
+                PortalHandler.repair_refresh_event = threading.Event()
+                PortalHandler.repair_refresh_last_result = {}
+                PortalHandler.repair_refresh_last_error = ""
+                PortalHandler.repair_refresh_last_finished = 0.0
+
+    def test_source_refresh_request_is_background_singleflight(self):
+        class _SlowSourceRefreshService:
+            _load_warnings: list[str] = []
+
+            def __init__(self):
+                self.calls = 0
+                self.link_calls = 0
+                self.entered = threading.Event()
+                self.release = threading.Event()
+
+            def refresh(self):
+                self.calls += 1
+                self.entered.set()
+                self.release.wait(timeout=5)
+
+            def refresh_if_interval_elapsed(self, *, min_interval_seconds):
+                self.refresh()
+                return True
+
+            def process_due_repair_link_tasks(self, *, limit):
+                self.link_calls += 1
+                return {"processed": 0}
+
+        original_service = PortalHandler.service
+        service = _SlowSourceRefreshService()
+        with PortalHandler.source_refresh_lock:
+            PortalHandler.source_refresh_inflight = False
+            PortalHandler.source_refresh_last_result = {}
+            PortalHandler.source_refresh_last_finished = 0.0
+        PortalHandler.service = service
+        try:
+            first = PortalHandler.request_source_refresh(force=True)
+            self.assertTrue(first["source_refresh_started"])
+            self.assertTrue(service.entered.wait(timeout=2))
+            second = PortalHandler.request_source_refresh(force=True)
+            self.assertFalse(second["source_refresh_started"])
+            self.assertTrue(second["source_refresh_inflight"])
+            service.release.set()
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                with PortalHandler.source_refresh_lock:
+                    inflight = PortalHandler.source_refresh_inflight
+                if not inflight and not PortalHandler.source_refresh_run_lock.locked():
+                    break
+                time.sleep(0.02)
+            with PortalHandler.source_refresh_lock:
+                self.assertFalse(PortalHandler.source_refresh_inflight)
+                self.assertTrue(PortalHandler.source_refresh_last_result["refreshed"])
+            self.assertFalse(PortalHandler.source_refresh_run_lock.locked())
+            self.assertEqual(service.calls, 1)
+            self.assertEqual(service.link_calls, 1)
+        finally:
+            service.release.set()
+            PortalHandler.service = original_service
+            with PortalHandler.source_refresh_lock:
+                PortalHandler.source_refresh_inflight = False
+                PortalHandler.source_refresh_last_result = {}
+                PortalHandler.source_refresh_last_finished = 0.0
+
+    def test_fastapi_qt_local_endpoints_work_without_auth(self):
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        client = TestClient(controller._build_app())
+        root = client.get("/")
+        self.assertEqual(root.status_code, 200)
+        self.assertIn("text/html", root.headers.get("content-type", ""))
+        asset = client.get("/assets/vnet-logo.png")
+        self.assertEqual(asset.status_code, 200)
+        self.assertEqual(asset.headers.get("cache-control"), "public, max-age=86400")
+        self.assertEqual(
+            client.get("/assets/%2e%2e/%2e%2e/server.py").status_code,
+            404,
+        )
+        logout_get = client.get("/api/auth/logout", follow_redirects=False)
+        self.assertEqual(logout_get.status_code, 302)
+        logout_post = client.post("/api/auth/logout")
+        self.assertEqual(logout_post.status_code, 200)
+        self.assertTrue(logout_post.json().get("ok"))
+        self.assertEqual(client.get("/api/health").status_code, 200)
+        self.assertEqual(client.get("/api/qt/events").status_code, 200)
+        heartbeat = client.post(
+            "/api/qt/bridge-heartbeat",
+            json={"notice_callback": True, "maintenance_action_callback": True},
+        )
+        self.assertEqual(heartbeat.status_code, 200)
+        self.assertEqual(client.get("/api/backend/stats").status_code, 401)
+        session_id = "local-admin-stats-session"
+        original_sessions = dict(PortalHandler.auth_manager._sessions)
+        with PortalHandler.auth_manager._lock:
+            PortalHandler.auth_manager._sessions[session_id] = {
+                "session_id": session_id,
+                "user": {"name": "admin", "open_id": ""},
+                "role": "admin",
+                "allowed_scopes": ["ALL"],
+                "expires_at": time.time() + 3600,
+            }
+        try:
+            stats = client.get(
+                "/api/backend/stats",
+                headers={"Cookie": f"{AUTH_COOKIE_NAME}={session_id}"},
+            )
+            with PortalHandler.auth_manager._lock:
+                PortalHandler.auth_manager._sessions["local-user-stats-session"] = {
+                    "session_id": "local-user-stats-session",
+                    "user": {"name": "building", "open_id": ""},
+                    "role": "building",
+                    "allowed_scopes": ["A"],
+                    "expires_at": time.time() + 3600,
+                }
+            non_admin_stats = client.get(
+                "/api/backend/stats",
+                headers={"Cookie": f"{AUTH_COOKIE_NAME}=local-user-stats-session"},
+            )
+            non_admin_stream = client.get(
+                "/api/jobs/stream",
+                headers={"Cookie": f"{AUTH_COOKIE_NAME}=local-user-stats-session"},
+            )
+        finally:
+            with PortalHandler.auth_manager._lock:
+                PortalHandler.auth_manager._sessions = original_sessions
+        self.assertEqual(stats.status_code, 200)
+        self.assertEqual(non_admin_stats.status_code, 403)
+        self.assertEqual(non_admin_stream.status_code, 200)
+        self.assertIn("只有管理员可以查看任务队列状态", non_admin_stream.text)
+        self.assertTrue(stats.json()["data"]["qt_bridge"]["connected"])
+        self.assertTrue(stats.json()["data"]["qt_bridge"]["notice_callback"])
+        self.assertIn("sqlite", stats.json()["data"])
+        self.assertIn("total_bytes", stats.json()["data"]["sqlite"])
+        response = client.post("/api/qt/ongoing-snapshot", json={"items": []})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(client.get("/api/qt/jobs/missing").status_code, 404)
+        self.assertEqual(client.get("/api/jobs/missing").status_code, 401)
+
+    def test_fastapi_recent_jobs_returns_compact_admin_summary(self):
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        original_service = PortalHandler.service
+        original_state_store = PortalHandler.state_store
+        original_auth_state_store = PortalHandler.auth_manager._state_store
+        original_sessions = dict(PortalHandler.auth_manager._sessions)
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            PortalHandler.service = service
+            PortalHandler.state_store = service._state_store
+            PortalHandler.auth_manager._state_store = service._state_store
+            PortalHandler.auth_manager.upsert_permission_user(
+                open_id="ou_admin",
+                name="admin",
+                role="admin",
+                scopes=["ALL"],
+                enabled=True,
+                updated_by="test",
+            )
+            job_id, should_start = service.create_action_job(
+                {
+                    "action": "start",
+                    "scope": "A",
+                    "record_id": "recent-1",
+                    "work_type": "maintenance",
+                    "location": "x" * 5000,
+                    "operation_id": "recent-compact",
+                }
+            )
+            self.assertTrue(should_start)
+            service.mark_job(
+                job_id,
+                phase="failed",
+                prepared={"text": "y" * 5000, "work_type": "maintenance"},
+                error="网络连接失败",
+            )
+            session_id = "recent-jobs-session"
+            with PortalHandler.auth_manager._lock:
+                PortalHandler.auth_manager._sessions[session_id] = {
+                    "session_id": session_id,
+                    "user": {"name": "admin", "open_id": "ou_admin"},
+                    "role": "building",
+                    "allowed_scopes": [],
+                    "expires_at": time.time() + 3600,
+                }
+            client = TestClient(controller._build_app())
+            try:
+                response = client.get(
+                    "/api/jobs/recent?phase=failed&limit=1",
+                    headers={"Cookie": f"{AUTH_COOKIE_NAME}={session_id}"},
+                )
+                self.assertEqual(response.status_code, 200)
+                item = response.json()["data"]["items"][0]
+                self.assertEqual(item["job_id"], job_id)
+                self.assertEqual(item["phase"], "failed")
+                self.assertEqual(item["error_category"], "network_error")
+                self.assertTrue(item["can_retry"])
+                self.assertNotIn("prepared", item)
+                self.assertNotIn("request", item)
+                retryable = client.get(
+                    "/api/jobs/recent?phase=failed&retryable=true&limit=5",
+                    headers={"Cookie": f"{AUTH_COOKIE_NAME}={session_id}"},
+                )
+                self.assertEqual(retryable.status_code, 200)
+                self.assertEqual(
+                    retryable.json()["data"]["items"][0]["job_id"],
+                    job_id,
+                )
+                with patch.object(
+                    PortalHandler,
+                    "enqueue_initial_message_or_upload_job",
+                    return_value=None,
+                ) as enqueue_job:
+                    retried = client.post(
+                        f"/api/jobs/{job_id}/retry",
+                        headers={"Cookie": f"{AUTH_COOKIE_NAME}={session_id}"},
+                    )
+                self.assertEqual(retried.status_code, 200)
+                self.assertEqual(retried.json()["data"]["phase"], "accepted")
+                enqueue_job.assert_called_once_with(job_id)
+                self.assertEqual(service.get_job(job_id)["phase"], "accepted")
+                self.assertIn("location", service.get_job(job_id)["request"])
+                service.mark_job(job_id, phase="failed", error="网络连接失败")
+                cleared = client.post(
+                    f"/api/jobs/{job_id}/clear",
+                    headers={"Cookie": f"{AUTH_COOKIE_NAME}={session_id}"},
+                )
+                self.assertEqual(cleared.status_code, 200)
+                self.assertIsNone(service.get_job(job_id))
+            finally:
+                PortalHandler.service = original_service
+                PortalHandler.state_store = original_state_store
+                PortalHandler.auth_manager._state_store = original_auth_state_store
+                with PortalHandler.auth_manager._lock:
+                    PortalHandler.auth_manager._sessions = original_sessions
+
+    def test_fastapi_backend_admin_tools_are_native_and_safe(self):
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        original_service = PortalHandler.service
+        original_state_store = PortalHandler.state_store
+        original_auth_state_store = PortalHandler.auth_manager._state_store
+        original_sessions = dict(PortalHandler.auth_manager._sessions)
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+
+            class _Meta:
+                def __init__(self, field_name):
+                    self.field_name = field_name
+
+            def fake_load_table_fields(*, app_token, table_id):
+                names = [
+                    "楼栋",
+                    "维护总项",
+                    "维护实施状态",
+                    "计划维护月份",
+                    "专业类别",
+                    "维护周期",
+                    "变更简述",
+                    "变更进度",
+                    "变更楼栋",
+                    "专业",
+                    "变更等级（阿里）",
+                    "维修名称",
+                    "所属数据中心/楼栋-使用",
+                    "进展",
+                    "维保状态",
+                    "名称",
+                    "内容",
+                    "影响",
+                    "进度",
+                    "原因",
+                    "位置",
+                    "计划开始时间",
+                    "计划结束时间",
+                    "实际开始时间",
+                    "实际结束时间",
+                    "过程通告图片",
+                    "过程现场图片",
+                    "变更状态",
+                    "变更开始钉钉截图",
+                    "变更开始时间",
+                    "过程更新钉钉截图",
+                    "过程更新时间",
+                    "变更结束钉钉截图",
+                    "变更结束时间",
+                    "智航-变更等级",
+                    "阿里-变更等级",
+                    "楼栋",
+                    "今日是否进行",
+                    "检修状态",
+                    "名称（标题）",
+                    "紧急程度",
+                    "维修设备",
+                    "维修故障",
+                    "故障类型",
+                    "维修方式",
+                    "影响范围",
+                    "故障发现方式（来源）",
+                    "故障现象",
+                    "故障原因",
+                    "解决方案",
+                    "进度（完成情况）",
+                    "发生故障时间",
+                    "期望完成时间",
+                    "过程通告截图",
+                    "过程现场图片",
+                ]
+                metas = [_Meta(name) for name in names]
+                return metas, {meta.field_name: meta for meta in metas}
+
+            service._load_table_fields = fake_load_table_fields
+            PortalHandler.service = service
+            PortalHandler.state_store = service._state_store
+            PortalHandler.auth_manager._state_store = service._state_store
+            PortalHandler.auth_manager.upsert_permission_user(
+                open_id="ou_admin",
+                name="admin",
+                role="admin",
+                scopes=["ALL"],
+                enabled=True,
+                updated_by="test",
+            )
+            session_id = "backend-tools-session"
+            with PortalHandler.auth_manager._lock:
+                PortalHandler.auth_manager._sessions[session_id] = {
+                    "session_id": session_id,
+                    "user": {"name": "admin", "open_id": "ou_admin"},
+                    "role": "building",
+                    "allowed_scopes": [],
+                    "expires_at": time.time() + 3600,
+                }
+            client = TestClient(controller._build_app())
+            headers = {"Cookie": f"{AUTH_COOKIE_NAME}={session_id}"}
+            try:
+                preflight = client.post("/api/backend/preflight", headers=headers)
+                self.assertEqual(preflight.status_code, 200)
+                self.assertTrue(preflight.json()["data"]["checks"])
+                self.assertIn("status", preflight.json()["data"])
+                stats = client.get("/api/backend/stats", headers=headers)
+                self.assertEqual(stats.status_code, 200)
+                self.assertIn("preflight", stats.json()["data"])
+
+                checkpoint = client.post(
+                    "/api/backend/sqlite/checkpoint",
+                    headers=headers,
+                    json={},
+                )
+                self.assertEqual(checkpoint.status_code, 200)
+                self.assertIn("reclaimed_bytes", checkpoint.json()["data"])
+
+                cleanup = client.post(
+                    "/api/backend/jobs/cleanup",
+                    headers=headers,
+                    json={},
+                )
+                self.assertEqual(cleanup.status_code, 200)
+                self.assertIn("removed_total", cleanup.json()["data"])
+
+                pressure = client.post(
+                    "/api/backend/mock-pressure",
+                    headers=headers,
+                    json={"count": 1, "concurrency": 1, "scenario": "accepted"},
+                )
+                self.assertEqual(pressure.status_code, 200)
+                self.assertEqual(pressure.json()["data"]["accepted"], 1)
+            finally:
+                PortalHandler.service = original_service
+                PortalHandler.state_store = original_state_store
+                PortalHandler.auth_manager._state_store = original_auth_state_store
+                with PortalHandler.auth_manager._lock:
+                    PortalHandler.auth_manager._sessions = original_sessions
+
+    def test_compacted_failed_job_remains_visible_to_owner_only(self):
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        original_service = PortalHandler.service
+        original_state_store = PortalHandler.state_store
+        original_auth_state_store = PortalHandler.auth_manager._state_store
+        original_sessions = dict(PortalHandler.auth_manager._sessions)
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            PortalHandler.service = service
+            PortalHandler.state_store = service._state_store
+            PortalHandler.auth_manager._state_store = service._state_store
+            job_id, should_start = service.create_action_job(
+                {
+                    "action": "start",
+                    "scope": "A",
+                    "record_id": "owner-record",
+                    "work_type": "maintenance",
+                    "operation_id": "owner-visible-failed",
+                    "_auth_open_id": "ou_owner",
+                    "location": "x" * 5000,
+                }
+            )
+            self.assertTrue(should_start)
+            service.mark_job(
+                job_id,
+                phase="failed",
+                prepared={"text": "y" * 5000},
+                error="网络连接失败",
+            )
+            with PortalHandler.auth_manager._lock:
+                PortalHandler.auth_manager._sessions["owner-session"] = {
+                    "session_id": "owner-session",
+                    "user": {"name": "owner", "open_id": "ou_owner"},
+                    "role": "building",
+                    "allowed_scopes": ["A"],
+                    "expires_at": time.time() + 3600,
+                }
+                PortalHandler.auth_manager._sessions["other-session"] = {
+                    "session_id": "other-session",
+                    "user": {"name": "other", "open_id": "ou_other"},
+                    "role": "building",
+                    "allowed_scopes": ["A"],
+                    "expires_at": time.time() + 3600,
+                }
+            client = TestClient(controller._build_app())
+            try:
+                owner = client.get(
+                    f"/api/jobs/{job_id}",
+                    headers={"Cookie": f"{AUTH_COOKIE_NAME}=owner-session"},
+                )
+                other = client.get(
+                    f"/api/jobs/{job_id}",
+                    headers={"Cookie": f"{AUTH_COOKIE_NAME}=other-session"},
+                )
+                self.assertEqual(owner.status_code, 200)
+                self.assertEqual(owner.json()["data"]["phase"], "failed")
+                self.assertEqual(
+                    owner.json()["data"]["request"].get("_auth_open_id"),
+                    "ou_owner",
+                )
+                self.assertEqual(owner.json()["data"].get("prepared"), {})
+                self.assertEqual(other.status_code, 403)
+            finally:
+                PortalHandler.service = original_service
+                PortalHandler.state_store = original_state_store
+                PortalHandler.auth_manager._state_store = original_auth_state_store
+                with PortalHandler.auth_manager._lock:
+                    PortalHandler.auth_manager._sessions = original_sessions
+
+    def test_external_write_guard_mock_and_confirm_modes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            prepared = {
+                "job_id": "guard-job",
+                "text": "测试消息",
+                "recipients": ["ou_guard"],
+                "message_signature": "sig",
+            }
+            with patch.dict(os.environ, {"CLIPFLOW_BACKEND_MOCK_EXTERNAL": "1"}, clear=False):
+                ok, message = service.send_action_personal_message(prepared)
+            self.assertTrue(ok)
+            self.assertIn("mock", message)
+
+            with patch.dict(os.environ, {"CLIPFLOW_REQUIRE_REAL_EXTERNAL_CONFIRM": "1"}, clear=False):
+                os.environ.pop("CLIPFLOW_BACKEND_MOCK_EXTERNAL", None)
+                os.environ.pop("CLIPFLOW_REAL_EXTERNAL_CONFIRMED", None)
+                ok, message = service.send_action_personal_message(prepared)
+            self.assertFalse(ok)
+            self.assertIn("CLIPFLOW_REAL_EXTERNAL_CONFIRMED", message)
+
+    def test_bitable_http_400_token_error_refreshes_and_retries(self):
+        class FakeResponse:
+            def __init__(self, status_code, payload):
+                self.status_code = status_code
+                self._payload = payload
+                self.ok = 200 <= status_code < 400
+                self.text = json.dumps(payload, ensure_ascii=False)
+
+            def json(self):
+                return self._payload
+
+            def raise_for_status(self):
+                if not self.ok:
+                    raise RuntimeError(f"{self.status_code} Client Error")
+
+        class FakeSession:
+            def __init__(self):
+                self.calls = 0
+
+            def get(self, *args, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    return FakeResponse(
+                        400,
+                        {
+                            "code": 99991663,
+                            "msg": "Invalid access token for authorization.",
+                        },
+                    )
+                return FakeResponse(200, {"code": 0, "data": {"items": []}})
+
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            fake_session = FakeSession()
+            service._session = fake_session
+            old_token = config_module.config.user_token
+            config_module.config.user_token = "expired-token"
+            try:
+                with patch(
+                    "lan_bitable_template_portal.portal_service.refresh_feishu_token"
+                ) as refresh_token:
+                    payload = service._request_json(
+                        "fields", params={"page_size": 500}
+                    )
+                self.assertEqual(payload["code"], 0)
+                self.assertEqual(fake_session.calls, 2)
+                refresh_token.assert_called_once()
+            finally:
+                config_module.config.user_token = old_token
+
+    def test_token_status_refreshes_once_when_expiring(self):
+        old_token = config_module.config.user_token
+        old_expire = config_module.config.token_expire_time
+        config_module.config.user_token = "old-token"
+        config_module.config.token_expire_time = int(time.time()) + 10
+        try:
+            with patch.object(
+                feishu_service_module,
+                "refresh_feishu_token",
+                return_value="new-token",
+            ) as refresh_token:
+                token = feishu_service_module.check_token_status()
+            self.assertEqual(token, "new-token")
+            refresh_token.assert_called_once()
+
+            config_module.config.user_token = "fresh-token"
+            config_module.config.token_expire_time = int(time.time()) + 3600
+            with patch.object(
+                feishu_service_module,
+                "refresh_feishu_token",
+                return_value="should-not-call",
+            ) as refresh_token:
+                token = feishu_service_module.check_token_status()
+            self.assertEqual(token, "fresh-token")
+            refresh_token.assert_not_called()
+        finally:
+            config_module.config.user_token = old_token
+            config_module.config.token_expire_time = old_expire
+
+    def test_package_runtime_data_scan_blocks_sqlite_outputs(self):
+        import package_portable
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            safe_file = root / "bin" / "refactored_main.py"
+            safe_file.parent.mkdir(parents=True, exist_ok=True)
+            safe_file.write_text("print('ok')\n", encoding="utf-8")
+            package_portable._assert_no_runtime_data_in_output(root, "测试产物")
+
+            db_file = root / "bin" / "data" / "lan_portal_state.sqlite3"
+            db_file.parent.mkdir(parents=True, exist_ok=True)
+            db_file.write_text("runtime", encoding="utf-8")
+            self.assertIn(db_file, package_portable._scan_runtime_data_files(root))
+            with self.assertRaises(RuntimeError):
+                package_portable._assert_no_runtime_data_in_output(root, "测试产物")
+
+    def test_mock_lan_portal_pressure_covers_job_queries_and_stats(self):
+        from tools.mock_lan_portal_pressure import run_pressure
+
+        result = run_pressure(6, 3)
+        self.assertEqual(result["accepted"], 6)
+        self.assertEqual(result["failed"], 0)
+        self.assertEqual(result["job_query_ok"], 6)
+        self.assertEqual(result["job_phase_counts"], {"accepted": 6})
+        self.assertEqual(result["stats_status"], 200)
+        self.assertEqual(result["stats"]["message_worker_count"], 5)
+        self.assertEqual(result["stats"]["job_count"], 6)
+        self.assertEqual(result["stats"]["job_phase_counts"], {"accepted": 6})
+        self.assertIn("qt_outbox_pending", result["stats"])
+
+        mixed = run_pressure(6, 3, scenario="mixed")
+        self.assertEqual(mixed["accepted"], 6)
+        self.assertEqual(mixed["job_query_ok"], 6)
+        self.assertEqual(mixed["job_phase_counts"], {"accepted": 2, "failed": 4})
+        self.assertEqual(mixed["stats"]["job_phase_counts"], {"accepted": 2, "failed": 4})
+
+    def test_fastapi_qt_event_ack_fails_job_after_retries(self):
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        original_service = PortalHandler.service
+        original_controller_state_store = controller._state_store
+        original_portal_state_store = PortalHandler.state_store
+        temp_dir = tempfile.TemporaryDirectory()
+        store = LanPortalStateStore(Path(temp_dir.name) / "state.sqlite3")
+        controller._state_store = store
+        PortalHandler.state_store = store
+        PortalHandler.service = _NativeFastAPIRouteService()
+        client = TestClient(controller._build_app())
+        try:
+            event_id = store.enqueue_outbox_event(
+                "qt_action",
+                {"kind": "maintenance_action", "job_id": "job-native", "payload": {}},
+            )
+            for attempt in range(1, 4):
+                response = client.post(
+                    f"/api/qt/events/{event_id}/ack",
+                    json={"ok": False, "error": "Qt callback down"},
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()["data"]["attempts"], attempt)
+            self.assertEqual(response.json()["data"]["status"], "failed")
+            self.assertEqual(
+                PortalHandler.service.last_marked_job_patch["phase"],
+                "failed",
+            )
+            self.assertIn(
+                "Qt callback down",
+                PortalHandler.service.last_marked_job_patch["error"],
+            )
+        finally:
+            PortalHandler.service = original_service
+            controller._state_store = original_controller_state_store
+            PortalHandler.state_store = original_portal_state_store
+            temp_dir.cleanup()
+
+    def test_fastapi_auth_redirect_routes_are_native(self):
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        client = TestClient(controller._build_app())
+        with patch.object(controller, "_proxy_request", side_effect=AssertionError("proxy used")):
+            with patch.object(
+                PortalHandler.auth_manager,
+                "start_login",
+                return_value="https://login.example.test/oauth",
+            ) as start_login:
+                login = client.get("/api/auth/login?next=/x", follow_redirects=False)
+            self.assertEqual(login.status_code, 302)
+            self.assertEqual(login.headers["location"], "https://login.example.test/oauth")
+            self.assertEqual(start_login.call_args.kwargs["next_path"], "/x")
+
+            with patch.object(
+                PortalHandler.auth_manager,
+                "complete_login",
+                return_value=("session123", "/after"),
+            ) as complete_login:
+                callback = client.get(
+                    "/api/auth/feishu/callback?code=c&state=s",
+                    follow_redirects=False,
+                )
+            self.assertEqual(callback.status_code, 302)
+            self.assertEqual(callback.headers["location"], "/after")
+            self.assertIn(AUTH_COOKIE_NAME, callback.headers.get("set-cookie", ""))
+            self.assertEqual(complete_login.call_args.kwargs["code"], "c")
+
+            with patch.object(
+                PortalHandler.auth_manager,
+                "complete_login",
+                return_value=("session456", "/root-after"),
+            ):
+                root_callback = client.get(
+                    "/?code=c&state=s&keep=1",
+                    follow_redirects=False,
+                )
+            self.assertEqual(root_callback.status_code, 302)
+            self.assertEqual(root_callback.headers["location"], "/root-after")
+
+    def test_fastapi_native_read_routes_do_not_use_legacy_proxy(self):
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        original_service = PortalHandler.service
+        original_state_store = PortalHandler.state_store
+        original_sessions = dict(PortalHandler.auth_manager._sessions)
+        PortalHandler.service = _NativeFastAPIRouteService()
+        temp_dir = tempfile.TemporaryDirectory()
+        PortalHandler.state_store = LanPortalStateStore(
+            Path(temp_dir.name) / "state.sqlite3"
+        )
+        session_id = "native-route-session"
+        with PortalHandler.auth_manager._lock:
+            PortalHandler.auth_manager._sessions[session_id] = {
+                "session_id": session_id,
+                "user": {"name": "测试用户", "open_id": ""},
+                "role": "admin",
+                "allowed_scopes": ["ALL"],
+                "expires_at": time.time() + 3600,
+            }
+        client = TestClient(controller._build_app())
+        try:
+            with patch.object(controller, "_proxy_request", side_effect=AssertionError("proxy used")):
+                headers = {"Cookie": f"{AUTH_COOKIE_NAME}={session_id}"}
+                bootstrap = client.get("/api/bootstrap?scope=ALL", headers=headers)
+                overview = client.get("/api/scope-overview", headers=headers)
+                workbench = client.get(
+                    "/api/workbench?scope=ALL&month=本月&specialty=电气",
+                    headers=headers,
+                )
+                records = client.get("/api/records?scope=ALL", headers=headers)
+                auth_status = client.get("/api/auth/status?next=/", headers=headers)
+                backend_stats = client.get("/api/backend/stats", headers=headers)
+                history = client.get(
+                    "/api/history-summary?scope=ALL&month=2026-05&work_type=all",
+                    headers=headers,
+                )
+                handover = client.get("/api/handover-links", headers=headers)
+                current_request = client.get(
+                    "/api/auth/permission-requests/current",
+                    headers=headers,
+                )
+                refresh = client.get("/api/refresh?scope=ALL", headers=headers)
+                repair_refresh = client.get(
+                    "/api/repair-refresh?scope=ALL",
+                    headers=headers,
+                )
+                action = client.post(
+                    "/api/workbench-actions",
+                    headers=headers,
+                    json={"scope": "ALL", "work_type": "change", "action": "start"},
+                )
+                delete = client.post(
+                    "/api/ongoing-items/delete",
+                    headers=headers,
+                    json={"scope": "ALL", "active_item_id": "active1"},
+                )
+                save_links = client.post(
+                    "/api/handover-links",
+                    headers=headers,
+                    json={"password": "ok", "links": {"ALL": "http://example.test/new"}},
+                )
+                links_auth = client.post(
+                    "/api/handover-links-auth",
+                    headers=headers,
+                    json={"password": "ok"},
+                )
+                reset_request = client.post(
+                    "/api/handover-password-reset/request",
+                    headers=headers,
+                    json={},
+                )
+                reset_confirm = client.post(
+                    "/api/handover-password-reset/confirm",
+                    headers=headers,
+                    json={
+                        "reset_id": "reset1",
+                        "code": "123456",
+                        "new_password": "new-pass",
+                    },
+                )
+                generated = client.post(
+                    "/api/generate",
+                    headers=headers,
+                    json={"scope": "ALL", "drafts": [{"record_id": "m1"}]},
+                )
+                send_generated_without_callback = client.post(
+                    "/api/send-generated",
+                    headers=headers,
+                    json={"scope": "ALL", "items": [{"record_id": "m1"}]},
+                )
+            for response in [
+                bootstrap,
+                overview,
+                workbench,
+                records,
+                auth_status,
+                backend_stats,
+                history,
+                handover,
+                current_request,
+                refresh,
+                repair_refresh,
+            ]:
+                self.assertEqual(response.status_code, 200)
+                self.assertTrue(response.json().get("ok"))
+            self.assertIn("qt_outbox_pending", backend_stats.json()["data"])
+            self.assertEqual(action.status_code, 202)
+            self.assertTrue(action.json().get("ok"))
+            self.assertEqual(action.json()["data"]["job_id"], "job-native")
+            self.assertEqual(
+                PortalHandler.service.last_action_payload["_auth_user_name"],
+                "测试用户",
+            )
+            self.assertEqual(delete.status_code, 202)
+            self.assertTrue(delete.json().get("ok"))
+            self.assertTrue(delete.json()["data"]["qt_delete_queued"])
+            leased_response = client.get("/api/qt/events?limit=1")
+            self.assertEqual(leased_response.status_code, 200)
+            leased = leased_response.json()["data"]["items"]
+            self.assertEqual(len(leased), 1)
+            self.assertEqual(leased[0]["payload"]["kind"], "ongoing_delete")
+            ack_delete = client.post(
+                f"/api/qt/events/{leased[0]['id']}/ack",
+                json={"ok": True},
+            )
+            self.assertEqual(ack_delete.status_code, 200)
+            for response in [save_links, links_auth, reset_request, reset_confirm]:
+                self.assertEqual(response.status_code, 200)
+                self.assertTrue(response.json().get("ok"))
+            self.assertEqual(save_links.json()["data"]["route"], "handover-links-save")
+            self.assertTrue(links_auth.json()["data"]["authorized"])
+            self.assertEqual(reset_request.json()["data"]["reset_id"], "reset1")
+            self.assertTrue(reset_confirm.json()["data"]["code_ok"])
+            self.assertEqual(generated.status_code, 200)
+            self.assertTrue(generated.json().get("ok"))
+            self.assertEqual(generated.json()["data"]["items"][0]["text"], "generated")
+            self.assertEqual(send_generated_without_callback.status_code, 200)
+            self.assertTrue(send_generated_without_callback.json().get("ok"))
+            notice_response = client.get("/api/qt/events?limit=1")
+            self.assertEqual(notice_response.status_code, 200)
+            notice_items = notice_response.json()["data"]["items"]
+            self.assertEqual(len(notice_items), 1)
+            self.assertEqual(notice_items[0]["payload"]["kind"], "notice")
+            for response in [
+                bootstrap,
+                overview,
+                workbench,
+                records,
+                history,
+                handover,
+                current_request,
+            ]:
+                self.assertIn("auth", response.json().get("data") or {})
+            self.assertEqual(bootstrap.json()["data"]["route"], "bootstrap")
+            self.assertEqual(overview.json()["data"]["route"], "scope-overview")
+            self.assertEqual(workbench.json()["data"]["route"], "workbench")
+            self.assertEqual(records.json()["data"]["route"], "workbench")
+            self.assertEqual(history.json()["data"]["route"], "history-summary")
+            self.assertEqual(handover.json()["data"]["route"], "handover-links")
+            self.assertTrue(
+                refresh.json()["data"].get("source_refresh_started")
+                or refresh.json()["data"].get("source_refresh_inflight")
+                or refresh.json()["data"].get("source_refresh_reused")
+            )
+            self.assertTrue(repair_refresh.json()["data"]["repair_source_refreshed"])
+
+            notices = []
+            PortalHandler.notice_callback = lambda payload: notices.append(payload)
+            try:
+                with patch.object(controller, "_proxy_request", side_effect=AssertionError("proxy used")):
+                    sent = client.post(
+                        "/api/send-generated",
+                        headers=headers,
+                        json={
+                            "scope": "ALL",
+                            "items": [{"record_id": "m1", "title": "t", "text": "x"}],
+                        },
+                    )
+            finally:
+                PortalHandler.notice_callback = None
+            self.assertEqual(sent.status_code, 200)
+            self.assertTrue(sent.json().get("ok"))
+            self.assertEqual(sent.json()["data"]["items"][0]["record_id"], "m1")
+            self.assertEqual(len(notices), 1)
+        finally:
+            PortalHandler.service = original_service
+            PortalHandler.state_store = original_state_store
+            temp_dir.cleanup()
+            with PortalHandler.auth_manager._lock:
+                PortalHandler.auth_manager._sessions = original_sessions
+
+    def test_fastapi_permission_request_routes_are_native(self):
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        original_state_store = PortalHandler.auth_manager._state_store
+        original_sessions = dict(PortalHandler.auth_manager._sessions)
+        code_holder: dict[str, str] = {}
+        with tempfile.TemporaryDirectory() as tmp:
+            PortalHandler.auth_manager._state_store = LanPortalStateStore(
+                Path(tmp) / "state.sqlite3"
+            )
+            session_id = "permission-route-session"
+            with PortalHandler.auth_manager._lock:
+                PortalHandler.auth_manager._sessions[session_id] = {
+                    "session_id": session_id,
+                    "user": {"name": "申请人", "open_id": "ou_requester"},
+                    "role": "building",
+                    "allowed_scopes": [],
+                    "expires_at": time.time() + 3600,
+                }
+            client = TestClient(controller._build_app())
+
+            def fake_send(text, recipients):
+                match = re.search(r"验证码：(?P<code>\d{6})", text)
+                if match:
+                    code_holder["code"] = match.group("code")
+                return True, "ok", [{"open_id": item, "ok": True} for item in recipients]
+
+            try:
+                with patch.object(controller, "_proxy_request", side_effect=AssertionError("proxy used")):
+                    with patch("clipflow_backend.main.send_text_to_open_ids", side_effect=fake_send):
+                        headers = {"Cookie": f"{AUTH_COOKIE_NAME}={session_id}"}
+                        created = client.post(
+                            "/api/auth/permission-requests",
+                            headers=headers,
+                            json={"scopes": ["A"], "reason": "测试申请"},
+                        )
+                        self.assertEqual(created.status_code, 200)
+                        request_id = created.json()["data"]["request"]["request_id"]
+                        self.assertRegex(code_holder.get("code", ""), r"^\d{6}$")
+                        current = client.get(
+                            "/api/auth/permission-requests/current",
+                            headers=headers,
+                        )
+                        self.assertEqual(current.status_code, 200)
+                        self.assertEqual(
+                            current.json()["data"]["request"]["request_id"],
+                            request_id,
+                        )
+                        confirmed = client.post(
+                            "/api/auth/permission-requests/confirm",
+                            headers=headers,
+                            json={
+                                "request_id": request_id,
+                                "code": code_holder["code"],
+                            },
+                        )
+                self.assertEqual(confirmed.status_code, 200)
+                self.assertTrue(confirmed.json()["data"]["approved"])
+                self.assertIn("A", confirmed.json()["data"]["auth"]["allowed_scopes"])
+            finally:
+                PortalHandler.auth_manager._state_store = original_state_store
+                with PortalHandler.auth_manager._lock:
+                    PortalHandler.auth_manager._sessions = original_sessions
+
+    def test_backend_process_controller_prefers_portable_python(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            python_path = root / ".venv" / "Scripts" / "python.exe"
+            python_path.parent.mkdir(parents=True, exist_ok=True)
+            python_path.write_text("", encoding="utf-8")
+            with patch.dict(os.environ, {"CLIPFLOW_BACKEND_PYTHON": ""}, clear=False):
+                self.assertEqual(
+                    BackendProcessPortalController._python_executable(root),
+                    python_path,
+                )
+
+    def test_backend_process_controller_dispatches_notice_outbox_event(self):
+        controller = BackendProcessPortalController(host="127.0.0.1", port=18766)
+        received: list[dict] = []
+        ack_payloads: list[dict] = []
+
+        def fake_request(method, path, *, payload=None, timeout=5.0):
+            ack_payloads.append(
+                {
+                    "method": method,
+                    "path": path,
+                    "payload": dict(payload or {}),
+                }
+            )
+            return {"ok": True}
+
+        controller.notice_callback = lambda payload: received.append(payload) or True
+        with patch.object(controller, "_request_json", side_effect=fake_request):
+            controller._dispatch_event(
+                {
+                    "id": 9,
+                    "payload": {
+                        "kind": "notice",
+                        "payload": {"title": "测试通告", "text": "内容"},
+                    },
+                }
+            )
+        self.assertEqual(received, [{"title": "测试通告", "text": "内容"}])
+        self.assertEqual(ack_payloads[0]["path"], "/api/qt/events/9/ack")
+        self.assertTrue(ack_payloads[0]["payload"]["ok"])
+
+    def test_backend_process_controller_retries_qt_event_ack(self):
+        controller = BackendProcessPortalController(host="127.0.0.1", port=18766)
+        attempts = {"count": 0}
+
+        def flaky_ack(method, path, *, payload=None, timeout=5.0):
+            attempts["count"] += 1
+            if attempts["count"] < 3:
+                raise OSError("temporary ack failure")
+            return {"ok": True}
+
+        with patch.object(controller, "_request_json", side_effect=flaky_ack):
+            with patch("clipflow_backend.process_controller.time.sleep") as sleep:
+                controller._ack_event(7, ok=True)
+        self.assertEqual(attempts["count"], 3)
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_backend_process_controller_posts_bridge_heartbeat(self):
+        controller = BackendProcessPortalController(host="127.0.0.1", port=18766)
+        payloads: list[dict] = []
+
+        def fake_request(method, path, *, payload=None, timeout=5.0):
+            payloads.append({"method": method, "path": path, "payload": dict(payload or {})})
+            return {"ok": True}
+
+        controller.notice_callback = lambda payload: True
+        controller.maintenance_action_callback = lambda payload: {"ok": True}
+        with patch.object(controller, "_request_json", side_effect=fake_request):
+            controller._post_bridge_heartbeat(force=True)
+        self.assertEqual(payloads[0]["path"], "/api/qt/bridge-heartbeat")
+        self.assertTrue(payloads[0]["payload"]["notice_callback"])
+        self.assertTrue(payloads[0]["payload"]["maintenance_action_callback"])
+
+    def test_backend_process_controller_starts_and_stops_in_mock_external_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            port = _free_tcp_port()
+            controller = BackendProcessPortalController(host="127.0.0.1", port=port)
+            with patch.dict(
+                os.environ,
+                {
+                    "CLIPFLOW_BACKEND_MOCK_EXTERNAL": "1",
+                    "CLIPFLOW_DATA_DIR": tmp,
+                    "CLIPFLOW_BACKEND_PYTHON": sys.executable,
+                },
+                clear=False,
+            ):
+                url = controller.start()
+                process = controller._process
+                try:
+                    self.assertIn(str(port), url)
+                    health = controller._request_json("GET", "/api/health", timeout=3.0)
+                    self.assertTrue(health.get("ok"))
+                    self.assertEqual(
+                        (health.get("data") or {}).get("backend"),
+                        "fastapi",
+                    )
+                    self.assertFalse((health.get("data") or {}).get("legacy_adapter"))
+                    self.assertTrue((health.get("data") or {}).get("mock_external"))
+                    events = controller._request_json("GET", "/api/qt/events", timeout=3.0)
+                    self.assertTrue(events.get("ok"))
+                finally:
+                    controller.stop()
+                if process is not None:
+                    self.assertIsNotNone(process.poll())
 
     def test_manual_maintenance_requires_and_carries_cycle(self):
         service = _TestMaintenancePortalService()

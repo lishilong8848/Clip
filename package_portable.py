@@ -158,9 +158,13 @@ RUNTIME_MODULE_TO_PACKAGE = {
 
     "urllib3": "urllib3",
 
+    "httpx": "httpx",
+
     "PIL": "Pillow",
 
     "anyio": "anyio",
+
+    "apscheduler": "APScheduler",
 
     "fastapi": "fastapi",
 
@@ -202,9 +206,13 @@ RUNTIME_PACKAGE_INSTALL_ORDER = [
 
     "urllib3",
 
+    "httpx",
+
     "PIL",
 
     "anyio",
+
+    "apscheduler",
 
     "pydantic",
 
@@ -243,6 +251,8 @@ SMOKE_IMPORT_MODULES = [
     "upload_event_module.ui.main_window_runtime",
     "lan_bitable_template_portal.portal_service",
     "lan_bitable_template_portal.server",
+    "clipflow_backend.main",
+    "clipflow_backend.process_controller",
     "lark_oapi",
 ]
 
@@ -1174,6 +1184,134 @@ def _is_runtime_data_path(path: Path, root: Path | None = None) -> bool:
     return path.name.lower().endswith(tuple(RUNTIME_DATA_SUFFIXES))
 
 
+def _scan_runtime_data_files(root: Path) -> list[Path]:
+
+    root = Path(root)
+
+    if not root.exists():
+
+        return []
+
+    found: list[Path] = []
+
+    for path in root.rglob("*"):
+
+        if path.is_dir():
+
+            continue
+
+        if _is_runtime_data_path(path, root):
+
+            found.append(path)
+
+    return found
+
+
+def _assert_no_runtime_data_in_output(root: Path, label: str) -> None:
+
+    found = _scan_runtime_data_files(root)
+
+    if found:
+
+        preview = ", ".join(str(path.relative_to(root)) for path in found[:10])
+
+        more = "" if len(found) <= 10 else f" 等 {len(found)} 个文件"
+
+        raise RuntimeError(
+
+            f"{label}包含运行数据文件，已中止打包，避免覆盖用户现场数据: {preview}{more}"
+
+        )
+
+    log(f"{label}运行数据排除检查通过。")
+
+
+def _assert_project_iterator_excludes_runtime_data() -> None:
+
+    leaked = [
+        path
+        for path in _iter_project_files(PROJECT_ROOT, exclude_venv=True)
+        if _is_runtime_data_path(path, PROJECT_ROOT)
+    ]
+
+    if leaked:
+
+        preview = ", ".join(str(path.relative_to(PROJECT_ROOT)) for path in leaked[:10])
+
+        raise RuntimeError(f"源码复制列表包含运行数据，已中止: {preview}")
+
+    log("源码复制列表运行数据排除检查通过。")
+
+
+def _run_packaging_preflight_tests() -> None:
+
+    log("开始执行打包前自动测试。")
+
+    _assert_project_iterator_excludes_runtime_data()
+
+    py_targets = [
+        PROJECT_ROOT / "bin" / "clipflow_backend" / "main.py",
+        PROJECT_ROOT / "bin" / "clipflow_backend" / "process_controller.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "portal_service.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "server.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "state_store.py",
+        PROJECT_ROOT / "bin" / "upload_event_module" / "ui" / "main_window_runtime.py",
+        PROJECT_ROOT / "package_portable.py",
+    ]
+
+    py_targets = [path for path in py_targets if path.exists()]
+
+    if py_targets:
+
+        subprocess.run(
+            [sys.executable, "-m", "py_compile", *[os.fspath(path) for path in py_targets]],
+            cwd=PROJECT_ROOT,
+            check=True,
+        )
+
+        log(f"Python 语法检查通过: {len(py_targets)} 个文件。")
+
+    node_exe = shutil.which("node")
+
+    index_path = PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "static" / "index.html"
+
+    if node_exe and index_path.exists():
+
+        html_text = index_path.read_text(encoding="utf-8")
+
+        match = re.search(r"(?s)<script>\s*(.*?)\s*</script>", html_text)
+
+        if match:
+
+            tmp_js = BUILD_DIR / ".index.inline.preflight.js"
+
+            try:
+
+                BUILD_DIR.mkdir(parents=True, exist_ok=True)
+
+                tmp_js.write_text(match.group(1), encoding="utf-8")
+
+                subprocess.run([node_exe, "--check", os.fspath(tmp_js)], check=True)
+
+                log("前端内联脚本 node --check 通过。")
+
+            finally:
+
+                if tmp_js.exists():
+
+                    tmp_js.unlink()
+
+        else:
+
+            log("未找到前端内联脚本，跳过 node --check。")
+
+    else:
+
+        log("未找到 node 或前端文件，跳过 node --check。")
+
+    log("打包前自动测试完成。")
+
+
 def _is_under_bin_build_or_dist(path: Path) -> bool:
 
     parts = path.parts
@@ -1846,6 +1984,8 @@ def copy_project(dist_dir: Path) -> None:
 
             shutil.copy2(item, target)
 
+    _assert_no_runtime_data_in_output(dist_dir, "完整构建产物")
+
 
 
 
@@ -2391,8 +2531,23 @@ def main() -> None:
         help=f"Latest patch manifest path in repo. Default: {DEFAULT_GITEE_MANIFEST_PATH}",
 
     )
+    parser.add_argument(
+
+        "--preflight-test",
+
+        action="store_true",
+
+        help="Run packaging preflight checks and exit without building.",
+
+    )
 
     args = parser.parse_args()
+
+    if args.preflight_test:
+
+        _run_packaging_preflight_tests()
+
+        return
 
 
 
@@ -2771,6 +2926,8 @@ def main() -> None:
 
 
     patch_dir = BUILD_DIR / (dist_name + "_patch_only")
+
+    _assert_no_runtime_data_in_output(patch_dir, "补丁产物")
 
     patch_zip = _zip_patch_dir(patch_dir)
 

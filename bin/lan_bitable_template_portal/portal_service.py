@@ -6,6 +6,7 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 import re
 import secrets
 import threading
@@ -19,7 +20,10 @@ from typing import Any, Callable
 import requests
 
 from upload_event_module.config import config, get_field_config
-from upload_event_module.services.feishu_service import refresh_feishu_token
+from upload_event_module.services.feishu_service import (
+    ensure_feishu_token,
+    refresh_feishu_token,
+)
 from upload_event_module.services.robot_webhook import send_text_to_open_ids
 from upload_event_module.utils import get_data_file_path
 
@@ -98,6 +102,34 @@ STATE_NS_WORK_STATUS = "notice_work_status"
 STATE_NS_HIDDEN_ONGOING = "notice_hidden_ongoing"
 STATE_NS_ACTION_JOB = "notice_action_job"
 ACTION_JOB_MAX_RETAINED = 120
+ACTION_JOB_SUCCESS_RETENTION_SECONDS = 3 * 24 * 60 * 60
+ACTION_JOB_FAILED_RETENTION_SECONDS = 14 * 24 * 60 * 60
+
+
+def external_mock_enabled() -> bool:
+    return os.environ.get("CLIPFLOW_BACKEND_MOCK_EXTERNAL") == "1"
+
+
+def external_real_write_guard() -> dict[str, Any]:
+    require_confirm = os.environ.get("CLIPFLOW_REQUIRE_REAL_EXTERNAL_CONFIRM") == "1"
+    confirmed = os.environ.get("CLIPFLOW_REAL_EXTERNAL_CONFIRMED") == "1"
+    mock = external_mock_enabled()
+    allowed = (not mock) and (not require_confirm or confirmed)
+    reason = ""
+    if mock:
+        reason = "当前为外部接口 mock 模式，已拦截真实飞书/多维写入。"
+    elif require_confirm and not confirmed:
+        reason = (
+            "真实飞书/多维写入保护已启用，需设置 "
+            "CLIPFLOW_REAL_EXTERNAL_CONFIRMED=1 后才允许执行。"
+        )
+    return {
+        "mock_external": mock,
+        "require_confirm": require_confirm,
+        "confirmed": confirmed,
+        "real_write_allowed": allowed,
+        "reason": reason,
+    }
 LI_SHILONG_OPEN_ID = "ou_902e364a6c2c6c20893c02abe505a7b2"
 MA_JINYU_OPEN_ID = "ou_a6644e62a43b916c6bc26148cf74f208"
 HANDOVER_PASSWORD_RESET_TTL_SECONDS = 10 * 60
@@ -210,9 +242,7 @@ class MaintenancePortalService:
             self._state_version += 1
 
     def _auth_headers(self) -> dict[str, str]:
-        if not config.user_token:
-            refresh_feishu_token()
-        token = str(config.user_token or "").strip()
+        token = str(ensure_feishu_token() or config.user_token or "").strip()
         if not token:
             raise PortalError("未配置有效的飞书 user_token。")
         return {"Authorization": f"Bearer {token}"}
@@ -220,15 +250,24 @@ class MaintenancePortalService:
     @staticmethod
     def _response_json_or_error(response, context: str) -> dict[str, Any]:
         try:
-            response.raise_for_status()
-        except Exception as exc:
-            raise PortalError(f"{context} HTTP失败: {exc}") from exc
-        try:
             payload = response.json()
-        except ValueError as exc:
-            raise PortalError(f"{context} 返回不是有效 JSON。") from exc
+        except ValueError as json_exc:
+            try:
+                response.raise_for_status()
+            except Exception as http_exc:
+                body = str(getattr(response, "text", "") or "").strip()
+                if len(body) > 300:
+                    body = body[:300] + "..."
+                detail = f"，响应={body}" if body else ""
+                raise PortalError(f"{context} HTTP失败: {http_exc}{detail}") from http_exc
+            raise PortalError(f"{context} 返回不是有效 JSON。") from json_exc
         if not isinstance(payload, dict):
             raise PortalError(f"{context} 返回格式错误。")
+        if not getattr(response, "ok", False) and int(payload.get("code") or 0) == 0:
+            try:
+                response.raise_for_status()
+            except Exception as exc:
+                raise PortalError(f"{context} HTTP失败: {exc}") from exc
         return payload
 
     def _request_json(
@@ -1358,11 +1397,10 @@ class MaintenancePortalService:
 
     def _repair_title(self, record: dict[str, Any]) -> str:
         fields = record.get("display_fields") or {}
-        return (
-            self._clean_source_text(fields.get("事件描述"))
-            or self._clean_source_text(fields.get("维修名称"))
-            or self._clean_source_text(record.get("record_id"))
-        )
+        repair_name = str(fields.get("维修名称") or "").strip()
+        if repair_name:
+            return repair_name
+        return str(record.get("record_id") or "").strip()
 
     @staticmethod
     def _repair_level_from_event_level(value: Any) -> str:
@@ -2898,7 +2936,13 @@ class MaintenancePortalService:
             f"有效期至：{expires_at.strftime('%Y-%m-%d %H:%M:%S')}\n"
             "如果不是本人操作，请忽略。"
         )
-        ok, message, _ = send_text_to_open_ids(text, recipients)
+        guard = external_real_write_guard()
+        if guard["mock_external"]:
+            ok, message = True, "mock external send skipped"
+        elif not guard["real_write_allowed"]:
+            ok, message = False, str(guard["reason"] or "真实外部写入未确认。")
+        else:
+            ok, message, _ = send_text_to_open_ids(text, recipients)
         if not ok:
             with self._handover_reset_lock:
                 reset = self._handover_password_reset or {}
@@ -4347,6 +4391,7 @@ class MaintenancePortalService:
             "upload_queued_at": 0.0,
             "upload_started_at": 0.0,
             "upload_finished_at": 0.0,
+            "upload_release_at": 0.0,
             "request": copy.deepcopy(request_payload),
             "operation_id": str(request_payload.get("operation_id") or "").strip(),
             "target_key": self._action_target_key(request_payload),
@@ -4354,6 +4399,9 @@ class MaintenancePortalService:
             "message_signature": "",
             "message_queue_position": 0,
             "message_queue_size": 0,
+            "qt_phase": "",
+            "qt_queue_position": 0,
+            "qt_queue_size": 0,
             "queue_position": 0,
             "queue_size": 0,
             "upload_queue_position": 0,
@@ -4361,9 +4409,37 @@ class MaintenancePortalService:
             "record_id": "",
             "active_item_id": str(request_payload.get("active_item_id") or ""),
             "error": "",
+            "error_category": "",
+            "error_retryable": False,
             "upload_message": "",
             "prepared": {},
         }
+
+    @staticmethod
+    def classify_job_error(message: str) -> dict[str, Any]:
+        text = str(message or "").strip()
+        lower = text.lower()
+        if not text:
+            return {"error_category": "", "error_retryable": False}
+        if any(key in lower for key in ("timeout", "timed out", "超时", "read timed")):
+            return {"error_category": "network_timeout", "error_retryable": True}
+        if any(key in lower for key in ("429", "rate limit", "too many requests", "限流", "频率")):
+            return {"error_category": "remote_rate_limited", "error_retryable": True}
+        if any(key in lower for key in ("connection", "network", "连接", "网络", "10053", "10054")):
+            return {"error_category": "network_error", "error_retryable": True}
+        if any(key in lower for key in ("重启", "restart")):
+            return {"error_category": "process_restart", "error_retryable": False}
+        if any(key in lower for key in ("token", "tenant_access_token", "access_token", "授权", "登录态")):
+            return {"error_category": "token_or_auth", "error_retryable": False}
+        if any(key in lower for key in ("permission", "forbidden", "无权限", "权限不足", "403")):
+            return {"error_category": "permission_denied", "error_retryable": False}
+        if any(key in lower for key in ("field", "字段", "维保周期", "参数", "invalid")):
+            return {"error_category": "field_or_payload", "error_retryable": False}
+        if any(key in lower for key in ("record not found", "记录不存在", "远端缺失", "1254002")):
+            return {"error_category": "remote_record_missing", "error_retryable": False}
+        if any(key in lower for key in ("qt", "主窗口", "主界面", "回调")):
+            return {"error_category": "qt_bridge", "error_retryable": True}
+        return {"error_category": "unknown", "error_retryable": True}
 
     @staticmethod
     def _action_target_key(request_payload: dict[str, Any]) -> str:
@@ -4401,9 +4477,31 @@ class MaintenancePortalService:
                 continue
             job["job_id"] = job_id
             phase = str(job.get("phase") or "").strip()
-            if phase in {"accepted", "queued", "sending_message", "message_sent", "upload_queued", "uploading"}:
+            if phase in {"accepted", "queued"} and not float(job.get("message_started_at") or 0):
+                job["phase"] = "accepted"
+                job["error"] = ""
+                job["error_category"] = ""
+                job["error_retryable"] = False
+                job["restart_recovered"] = True
+                job["updated_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+                self._state_store.put_document(STATE_NS_ACTION_JOB, job_id, job)
+            elif phase in {
+                "accepted",
+                "queued",
+                "sending_message",
+                "message_sent",
+                "upload_queued",
+                "qt_queued",
+                "qt_displaying",
+                "upload_waiting",
+                "uploading",
+            }:
                 job["phase"] = "failed"
                 job["error"] = "程序已重启，任务未完成，请核对多维后重试。"
+                classified = self.classify_job_error(job["error"])
+                job["error_category"] = classified["error_category"]
+                job["error_retryable"] = classified["error_retryable"]
+                job["restart_recovered"] = False
                 job["updated_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
                 self._state_store.put_document(STATE_NS_ACTION_JOB, job_id, job)
             jobs[job_id] = job
@@ -4416,6 +4514,17 @@ class MaintenancePortalService:
                 jobs.pop(job_id, None)
                 self._state_store.delete_document(STATE_NS_ACTION_JOB, job_id)
         return jobs
+
+    def recoverable_action_job_ids(self) -> list[str]:
+        with self._jobs_lock:
+            return [
+                str(job.get("job_id") or "")
+                for job in self._jobs.values()
+                if isinstance(job, dict)
+                and str(job.get("phase") or "") == "accepted"
+                and bool(job.get("restart_recovered"))
+                and str(job.get("job_id") or "")
+            ]
 
     def _persist_action_job_locked(self, job: dict[str, Any]) -> None:
         job_id = str((job or {}).get("job_id") or "").strip()
@@ -4452,18 +4561,35 @@ class MaintenancePortalService:
                     if str(existing.get("operation_id") or "") != operation_id:
                         continue
                     phase = str(existing.get("phase") or "")
-                    if phase in {"accepted", "queued", "sending_message", "message_sent", "upload_queued", "uploading", "success"}:
+                    if phase in {
+                        "accepted",
+                        "queued",
+                        "sending_message",
+                        "message_sent",
+                        "upload_queued",
+                        "qt_queued",
+                        "qt_displaying",
+                        "upload_waiting",
+                        "uploading",
+                        "success",
+                    }:
                         return str(existing.get("job_id") or ""), False
                     if phase == "failed":
                         existing["request"] = copy.deepcopy(request_payload)
                         existing["phase"] = "accepted"
                         existing["error"] = ""
+                        existing["error_category"] = ""
+                        existing["error_retryable"] = False
                         existing["accepted_at"] = time.time()
                         existing["message_started_at"] = 0.0
                         existing["message_finished_at"] = 0.0
                         existing["upload_queued_at"] = 0.0
                         existing["upload_started_at"] = 0.0
                         existing["upload_finished_at"] = 0.0
+                        existing["upload_release_at"] = 0.0
+                        existing["qt_phase"] = ""
+                        existing["qt_queue_position"] = 0
+                        existing["qt_queue_size"] = 0
                         existing["updated_at"] = dt.datetime.now().strftime(
                             "%Y-%m-%d %H:%M"
                         )
@@ -4475,7 +4601,17 @@ class MaintenancePortalService:
                     if str(existing.get("target_key") or "") != target_key:
                         continue
                     phase = str(existing.get("phase") or "")
-                    if phase in {"accepted", "queued", "sending_message", "message_sent", "upload_queued", "uploading"}:
+                    if phase in {
+                        "accepted",
+                        "queued",
+                        "sending_message",
+                        "message_sent",
+                        "upload_queued",
+                        "qt_queued",
+                        "qt_displaying",
+                        "upload_waiting",
+                        "uploading",
+                    }:
                         raise PortalError("该通告已有进行中的发送/上传任务，请等待完成后再操作。")
             self._jobs[job["job_id"]] = job
             self._persist_action_job_locked(job)
@@ -4492,6 +4628,147 @@ class MaintenancePortalService:
             job_id = str(job.get("job_id") or "")
             self._jobs.pop(job_id, None)
             self._state_store.delete_document(STATE_NS_ACTION_JOB, job_id)
+
+    def delete_action_job(self, job_id: str) -> bool:
+        job_id = str(job_id or "").strip()
+        if not job_id:
+            return False
+        with self._jobs_lock:
+            existed = job_id in self._jobs
+            self._jobs.pop(job_id, None)
+            self._state_store.delete_document(STATE_NS_ACTION_JOB, job_id)
+        return existed
+
+    def retry_action_job(self, job_id: str) -> dict[str, Any]:
+        job_id = str(job_id or "").strip()
+        if not job_id:
+            raise PortalError("任务ID不能为空。")
+        now_text = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+        now_ts = time.time()
+        with self._jobs_lock:
+            job = self._jobs.get(job_id)
+            if not isinstance(job, dict):
+                stored = self._state_store.get_document(STATE_NS_ACTION_JOB, job_id)
+                if isinstance(stored, dict):
+                    stored["job_id"] = str(stored.get("job_id") or job_id)
+                    self._jobs[job_id] = stored
+                    job = stored
+            if not isinstance(job, dict):
+                raise PortalError("任务不存在或已清理。")
+            if str(job.get("phase") or "") != "failed":
+                raise PortalError("只能重试失败任务。")
+            if not bool(job.get("error_retryable")):
+                raise PortalError("该失败类型不可自动重试，请人工核对后重新发起。")
+            request_payload = (
+                job.get("retry_request")
+                if isinstance(job.get("retry_request"), dict)
+                else job.get("request")
+                if isinstance(job.get("request"), dict)
+                else {}
+            )
+            if not request_payload.get("action") or not request_payload.get("work_type"):
+                raise PortalError("任务缺少可重试请求内容，请重新发起通告。")
+            job["request"] = copy.deepcopy(request_payload)
+            job["phase"] = "accepted"
+            job["accepted_at"] = now_ts
+            job["message_started_at"] = 0.0
+            job["message_finished_at"] = 0.0
+            job["upload_queued_at"] = 0.0
+            job["upload_started_at"] = 0.0
+            job["upload_finished_at"] = 0.0
+            job["upload_release_at"] = 0.0
+            job["message_queue_position"] = 0
+            job["message_queue_size"] = 0
+            job["qt_phase"] = ""
+            job["qt_queue_position"] = 0
+            job["qt_queue_size"] = 0
+            job["queue_position"] = 0
+            job["queue_size"] = 0
+            job["upload_queue_position"] = 0
+            job["upload_queue_size"] = 0
+            job["error"] = ""
+            job["error_category"] = ""
+            job["error_retryable"] = False
+            job["upload_message"] = ""
+            job["retry_count"] = int(job.get("retry_count") or 0) + 1
+            job["updated_at"] = now_text
+            self._persist_action_job_locked(job)
+            return copy.deepcopy(job)
+
+    @staticmethod
+    def _job_epoch(job: dict[str, Any]) -> float:
+        if not isinstance(job, dict):
+            return 0.0
+        for key in (
+            "upload_finished_at",
+            "upload_started_at",
+            "upload_queued_at",
+            "message_finished_at",
+            "accepted_at",
+        ):
+            try:
+                value = float(job.get(key) or 0)
+            except Exception:
+                value = 0.0
+            if value > 0:
+                return value
+        for key in ("updated_at", "created_at"):
+            text = str(job.get(key) or "").strip()
+            if not text:
+                continue
+            try:
+                return dt.datetime.strptime(text, "%Y-%m-%d %H:%M").timestamp()
+            except Exception:
+                continue
+        return 0.0
+
+    def cleanup_action_jobs(
+        self,
+        *,
+        success_retention_seconds: int = ACTION_JOB_SUCCESS_RETENTION_SECONDS,
+        failed_retention_seconds: int = ACTION_JOB_FAILED_RETENTION_SECONDS,
+        max_delete: int = 200,
+    ) -> dict[str, int]:
+        now = time.time()
+        success_retention_seconds = max(60, int(success_retention_seconds or 0))
+        failed_retention_seconds = max(60, int(failed_retention_seconds or 0))
+        max_delete = max(1, min(int(max_delete or 200), 1000))
+        removed_success = 0
+        removed_failed = 0
+        candidates: list[tuple[float, str, str]] = []
+        documents = self._state_store.list_documents(STATE_NS_ACTION_JOB)
+        for document in documents:
+            job = document.get("payload") if isinstance(document, dict) else {}
+            if not isinstance(job, dict):
+                continue
+            job_id = str(job.get("job_id") or document.get("key") or "").strip()
+            phase = str(job.get("phase") or "").strip()
+            if not job_id or phase not in {"success", "failed"}:
+                continue
+            epoch = self._job_epoch(job)
+            if not epoch:
+                continue
+            retention = (
+                success_retention_seconds
+                if phase == "success"
+                else failed_retention_seconds
+            )
+            if now - epoch >= retention:
+                candidates.append((epoch, job_id, phase))
+        candidates.sort(key=lambda item: item[0])
+        with self._jobs_lock:
+            for _, job_id, phase in candidates[:max_delete]:
+                self._jobs.pop(job_id, None)
+                self._state_store.delete_document(STATE_NS_ACTION_JOB, job_id)
+                if phase == "success":
+                    removed_success += 1
+                else:
+                    removed_failed += 1
+        return {
+            "removed_success": removed_success,
+            "removed_failed": removed_failed,
+            "removed_total": removed_success + removed_failed,
+        }
 
     @staticmethod
     def _compact_job_request(request: dict[str, Any]) -> dict[str, Any]:
@@ -4532,6 +4809,7 @@ class MaintenancePortalService:
             "upload_queued_at": float(job.get("upload_queued_at") or 0),
             "upload_started_at": float(job.get("upload_started_at") or 0),
             "upload_finished_at": float(job.get("upload_finished_at") or 0),
+            "upload_release_at": float(job.get("upload_release_at") or 0),
             "request": self._compact_job_request(job.get("request") or {}),
             "operation_id": str(job.get("operation_id") or ""),
             "target_key": str(job.get("target_key") or ""),
@@ -4539,6 +4817,9 @@ class MaintenancePortalService:
             "message_signature": str(job.get("message_signature") or ""),
             "message_queue_position": 0,
             "message_queue_size": 0,
+            "qt_phase": str(job.get("qt_phase") or ""),
+            "qt_queue_position": 0,
+            "qt_queue_size": 0,
             "queue_position": 0,
             "queue_size": 0,
             "upload_queue_position": 0,
@@ -4546,9 +4827,56 @@ class MaintenancePortalService:
             "record_id": str(job.get("record_id") or ""),
             "active_item_id": str(job.get("active_item_id") or ""),
             "error": "",
+            "error_category": "",
+            "error_retryable": False,
             "upload_message": str(job.get("upload_message") or ""),
             "prepared": {},
         }
+        self._jobs[job_id] = compacted
+        self._persist_action_job_locked(compacted)
+
+    def _compact_failed_job_locked(self, job_id: str) -> None:
+        job = self._jobs.get(job_id)
+        if not isinstance(job, dict) or str(job.get("phase") or "") != "failed":
+            return
+        retryable = bool(job.get("error_retryable"))
+        compacted = {
+            "job_id": str(job.get("job_id") or job_id),
+            "phase": "failed",
+            "created_at": str(job.get("created_at") or ""),
+            "updated_at": str(job.get("updated_at") or ""),
+            "accepted_at": float(job.get("accepted_at") or 0),
+            "message_started_at": float(job.get("message_started_at") or 0),
+            "message_finished_at": float(job.get("message_finished_at") or 0),
+            "upload_queued_at": float(job.get("upload_queued_at") or 0),
+            "upload_started_at": float(job.get("upload_started_at") or 0),
+            "upload_finished_at": float(job.get("upload_finished_at") or 0),
+            "upload_release_at": float(job.get("upload_release_at") or 0),
+            "request": self._compact_job_request(job.get("request") or {}),
+            "operation_id": str(job.get("operation_id") or ""),
+            "target_key": str(job.get("target_key") or ""),
+            "message_sent": bool(job.get("message_sent")),
+            "message_signature": str(job.get("message_signature") or ""),
+            "message_queue_position": 0,
+            "message_queue_size": 0,
+            "qt_phase": str(job.get("qt_phase") or ""),
+            "qt_queue_position": 0,
+            "qt_queue_size": 0,
+            "queue_position": 0,
+            "queue_size": 0,
+            "upload_queue_position": 0,
+            "upload_queue_size": 0,
+            "record_id": str(job.get("record_id") or ""),
+            "active_item_id": str(job.get("active_item_id") or ""),
+            "error": str(job.get("error") or ""),
+            "error_category": str(job.get("error_category") or ""),
+            "error_retryable": retryable,
+            "upload_message": str(job.get("upload_message") or ""),
+            "retry_count": int(job.get("retry_count") or 0),
+            "prepared": {},
+        }
+        if retryable:
+            compacted["retry_request"] = copy.deepcopy(job.get("request") or {})
         self._jobs[job_id] = compacted
         self._persist_action_job_locked(compacted)
 
@@ -4577,15 +4905,28 @@ class MaintenancePortalService:
                 return
             phase = str(patch.get("phase") or "").strip()
             prior_phase = str(job.get("phase") or "").strip()
+            if phase == "accepted":
+                patch.setdefault("error_category", "")
+                patch.setdefault("error_retryable", False)
+            if phase == "failed" or ("error" in patch and str(patch.get("error") or "").strip()):
+                classified = self.classify_job_error(str(patch.get("error") or job.get("error") or ""))
+                patch.setdefault("error_category", classified["error_category"])
+                patch.setdefault("error_retryable", classified["error_retryable"])
             if phase and phase != prior_phase:
                 now_ts = time.time()
                 if phase == "accepted" and not job.get("accepted_at"):
                     patch["accepted_at"] = now_ts
                 elif phase == "sending_message":
                     patch["message_started_at"] = now_ts
-                elif phase in {"message_sent", "upload_queued"}:
+                elif phase in {"message_sent", "qt_queued"}:
                     if not job.get("message_finished_at") and job.get("message_started_at"):
                         patch["message_finished_at"] = now_ts
+                elif phase == "upload_queued":
+                    if not job.get("message_finished_at") and job.get("message_started_at"):
+                        patch["message_finished_at"] = now_ts
+                    if not job.get("upload_queued_at"):
+                        patch["upload_queued_at"] = now_ts
+                elif phase == "upload_waiting":
                     if not job.get("upload_queued_at"):
                         patch["upload_queued_at"] = now_ts
                 elif phase == "uploading":
@@ -4601,6 +4942,8 @@ class MaintenancePortalService:
             job["updated_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
             if persist:
                 self._persist_action_job_locked(job)
+                if str(job.get("phase") or "") == "failed":
+                    self._compact_failed_job_locked(job_id)
 
     @staticmethod
     def _action_message_signature(prepared: dict[str, Any]) -> str:
@@ -5466,7 +5809,18 @@ class MaintenancePortalService:
         if not pending_recipients:
             self.mark_job(job_id, recipient_results=prior_results)
             return True, "ok"
-        ok, message, new_results = send_text_to_open_ids(text, pending_recipients)
+        guard = external_real_write_guard()
+        if guard["mock_external"]:
+            new_results = [
+                {"open_id": open_id, "ok": True, "message": "mock external send skipped"}
+                for open_id in pending_recipients
+            ]
+            ok = True
+            message = "mock external send skipped"
+        elif not guard["real_write_allowed"]:
+            return False, str(guard["reason"] or "真实外部写入未确认。")
+        else:
+            ok, message, new_results = send_text_to_open_ids(text, pending_recipients)
         by_open_id = {
             str(item.get("open_id") or "").strip(): dict(item)
             for item in prior_results
@@ -5551,9 +5905,25 @@ class MaintenancePortalService:
                     results.append(base_result)
                     continue
 
-                ok, message, recipient_results = send_text_to_open_ids(
-                    base_result["text"], recipients
-                )
+                guard = external_real_write_guard()
+                if guard["mock_external"]:
+                    ok, message, recipient_results = True, "mock external send skipped", [
+                        {
+                            "open_id": str(open_id or "").strip(),
+                            "ok": True,
+                            "message": "mock external send skipped",
+                        }
+                        for open_id in recipients
+                        if str(open_id or "").strip()
+                    ]
+                elif not guard["real_write_allowed"]:
+                    ok, message, recipient_results = False, str(
+                        guard["reason"] or "真实外部写入未确认。"
+                    ), []
+                else:
+                    ok, message, recipient_results = send_text_to_open_ids(
+                        base_result["text"], recipients
+                    )
                 base_result["recipient_results"] = recipient_results
                 if not ok:
                     base_result["error"] = message

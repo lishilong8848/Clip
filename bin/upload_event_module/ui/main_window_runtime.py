@@ -846,44 +846,77 @@ class MainWindowRuntimeMixin:
         if not hasattr(self, "_lan_action_batch"):
             self._lan_action_batch = []
             self._lan_action_batch_scheduled = False
+            self._lan_action_batch_processing = False
         self._lan_action_batch.append(dict(payload or {}))
+        self._update_lan_action_batch_positions()
         if not getattr(self, "_lan_action_batch_scheduled", False):
             self._lan_action_batch_scheduled = True
-            QTimer.singleShot(350, self._flush_lan_maintenance_action_batch)
+            QTimer.singleShot(0, self._flush_lan_maintenance_action_batch)
+
+    def _update_lan_action_batch_positions(self) -> None:
+        batch = list(getattr(self, "_lan_action_batch", []) or [])
+        total = len(batch)
+        for index, payload in enumerate(batch, start=1):
+            job_id = str((payload or {}).get("job_id") or "").strip()
+            self._mark_lan_portal_job_progress(
+                job_id,
+                phase="qt_queued",
+                qt_phase="queued",
+                qt_queue_position=index,
+                qt_queue_size=total,
+                _persist=False,
+            )
 
     def _flush_lan_maintenance_action_batch(self):
-        batch = list(getattr(self, "_lan_action_batch", []) or [])
-        self._lan_action_batch = []
-        self._lan_action_batch_scheduled = False
-        if not batch:
+        if getattr(self, "_lan_action_batch_processing", False):
             return
+        batch = getattr(self, "_lan_action_batch", []) or []
+        if not batch:
+            self._lan_action_batch_scheduled = False
+            return
+        payload = batch.pop(0)
+        self._lan_action_batch = batch
+        self._lan_action_batch_processing = True
+        self._update_lan_action_batch_positions()
         cache_dirty = False
+        job_id = str((payload or {}).get("job_id") or "").strip()
+        self._mark_lan_portal_job_progress(
+            job_id,
+            phase="qt_displaying",
+            qt_phase="displaying",
+            qt_queue_position=0,
+            qt_queue_size=len(batch),
+        )
         if hasattr(self, "_begin_defer_active_cache_save"):
             self._begin_defer_active_cache_save()
         try:
-            for payload in batch:
-                job_id = str((payload or {}).get("job_id") or "").strip()
-                try:
-                    self._execute_lan_maintenance_action(payload or {})
-                    cache_dirty = True
-                except Exception as exc:
-                    log_error(f"局域网维保动作执行失败: job_id={job_id}, error={exc}")
-                    self._mark_lan_portal_job_result(
-                        job_id,
-                        success=False,
-                        message=str(exc),
-                        record_id=str((payload or {}).get("record_id") or ""),
-                    )
+            try:
+                self._execute_lan_maintenance_action(payload or {})
+                cache_dirty = True
+            except Exception as exc:
+                log_error(f"局域网维保动作执行失败: job_id={job_id}, error={exc}")
+                self._mark_lan_portal_job_result(
+                    job_id,
+                    success=False,
+                    message=str(exc),
+                    record_id=str((payload or {}).get("record_id") or ""),
+                )
             if cache_dirty:
                 self._active_cache_save_deferred = True
         finally:
             if hasattr(self, "_end_defer_active_cache_save"):
                 self._end_defer_active_cache_save()
+            self._lan_action_batch_processing = False
         if cache_dirty and not hasattr(self, "_end_defer_active_cache_save"):
             try:
                 self.save_active_cache()
             except Exception:
                 pass
+        if getattr(self, "_lan_action_batch", None):
+            self._lan_action_batch_scheduled = True
+            QTimer.singleShot(250, self._flush_lan_maintenance_action_batch)
+        else:
+            self._lan_action_batch_scheduled = False
 
     def _register_lan_portal_upload_job(
         self, job_id: str, record_id: str = "", active_item_id: str = ""
@@ -897,6 +930,30 @@ class MainWindowRuntimeMixin:
             self._lan_portal_jobs_by_record_id[record_id] = job_id
         if active_item_id:
             self._lan_portal_jobs_by_active_item_id[active_item_id] = job_id
+
+    def _peek_lan_portal_upload_job(
+        self, record_id: str = "", active_item_id: str = ""
+    ) -> str:
+        record_id = str(record_id or "").strip()
+        active_item_id = str(active_item_id or "").strip()
+        if record_id:
+            job_id = self._lan_portal_jobs_by_record_id.get(record_id, "")
+            if job_id:
+                return job_id
+        if active_item_id:
+            return self._lan_portal_jobs_by_active_item_id.get(active_item_id, "")
+        return ""
+
+    def _mark_lan_portal_job_progress(self, job_id: str, **patch) -> None:
+        job_id = str(job_id or "").strip()
+        if not job_id:
+            return
+        controller = getattr(self, "lan_template_portal_controller", None)
+        if controller and hasattr(controller, "mark_job_progress"):
+            try:
+                controller.mark_job_progress(job_id, **patch)
+            except Exception as exc:
+                log_warning(f"局域网维保任务进度回写失败: job_id={job_id}, error={exc}")
 
     def _pop_lan_portal_upload_job(self, record_id: str = "", active_item_id: str = "") -> str:
         record_id = str(record_id or "").strip()
@@ -1236,12 +1293,15 @@ class MainWindowRuntimeMixin:
         data["_upload_in_progress"] = False
         committed = self._commit_active_record(
             data,
-            refresh_detail=True,
+            refresh_detail=False,
             rebuild_widget=True,
             list_widget=list_widget,
             item=item,
         ) or data
-        self.save_active_cache()
+        if hasattr(self, "schedule_active_cache_save"):
+            self.schedule_active_cache_save(800)
+        else:
+            self.save_active_cache()
         self._register_lan_portal_upload_job(job_id, record_id, active_item_id)
         self.do_feishu_upload(
             committed,
@@ -1470,7 +1530,11 @@ class MainWindowRuntimeMixin:
                     break
                 try:
                     self._set_last_ui_op(f"ui_mutation:{tag}")
+                    started = time.perf_counter()
                     fn()
+                    elapsed_ms = (time.perf_counter() - started) * 1000.0
+                    if elapsed_ms >= float(getattr(self, "_ui_slow_threshold_ms", 120.0)):
+                        self._record_slow_ui_operation(f"ui_mutation:{tag}", elapsed_ms)
                 except Exception as exc:
                     log_error(f"UI变更执行失败({tag}): {exc}")
                 finally:
@@ -1501,7 +1565,11 @@ class MainWindowRuntimeMixin:
             except Exception:
                 continue
             try:
+                started = time.perf_counter()
                 self.request_finished.emit(name, success, msg, record_id)
+                elapsed_ms = (time.perf_counter() - started) * 1000.0
+                if elapsed_ms >= float(getattr(self, "_ui_slow_threshold_ms", 120.0)):
+                    self._record_slow_ui_operation(f"ui_signal:{name}", elapsed_ms)
             except Exception:
                 pass
 

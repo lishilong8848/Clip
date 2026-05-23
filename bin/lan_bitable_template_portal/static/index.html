@@ -245,6 +245,33 @@
       align-items: end;
     }
 
+    .backend-stats-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(120px, 1fr));
+      gap: 10px;
+      margin-top: 10px;
+    }
+
+    .backend-stat {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #fff;
+      padding: 10px;
+      min-height: 72px;
+    }
+
+    .backend-stat strong {
+      display: block;
+      font-size: 22px;
+      line-height: 1.1;
+      margin-bottom: 6px;
+    }
+
+    .backend-stat span {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
     .scope-checks {
       display: flex;
       flex-wrap: wrap;
@@ -1070,6 +1097,7 @@
       .feature-grid { grid-template-columns: 1fr; }
       .link-settings { grid-template-columns: 1fr; }
       .permission-grid { grid-template-columns: 1fr; }
+      .backend-stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
   </style>
 </head>
@@ -1086,6 +1114,7 @@
       <div id="scopeGrid" class="scope-grid hidden"></div>
       <div id="handoverSettings" class="settings-panel hidden"></div>
       <div id="permissionSettings" class="settings-panel hidden"></div>
+      <div id="backendSettings" class="settings-panel hidden"></div>
       <div id="gateActions" class="gate-actions"></div>
     </div>
   </section>
@@ -1294,6 +1323,12 @@
         loading: false,
         saving: false,
       },
+      backendStats: {
+        data: null,
+        message: "",
+        loading: false,
+        loaded: false,
+      },
       permissionRequest: {
         request: null,
         requestedScopes: [],
@@ -1319,6 +1354,11 @@
       actionOps: new Map(),
       jobToOpKey: new Map(),
       polling: new Set(),
+      jobStreams: new Map(),
+      jobStreamLastEventIds: new Map(),
+      qtActiveStream: null,
+      qtActiveLastEventId: "",
+      qtActiveSnapshotId: "",
       refreshDebounceTimerId: 0,
       searchRenderTimerId: 0,
       draftSaveTimerId: 0,
@@ -1354,6 +1394,7 @@
     const WORK_TYPE_VALUES = WORK_TYPES.map((item) => item.value);
     const MANUAL_DRAFT_PREFIX = "manual:";
     const MAINTENANCE_CYCLE_OPTIONS = [
+      "/",
       "每月",
       "每季",
       "每年",
@@ -1542,11 +1583,25 @@
     }
 
     async function api(path, options = {}) {
-      const res = await fetch(path, {
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
-        ...options,
-      });
+      const { timeoutMs = 45000, ...fetchOptions } = options || {};
+      const controller = new AbortController();
+      const timerId = window.setTimeout(() => controller.abort(), Math.max(3000, Number(timeoutMs || 0)));
+      let res;
+      try {
+        res = await fetch(path, {
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          ...fetchOptions,
+          signal: controller.signal,
+        });
+      } catch (err) {
+        if (err && err.name === "AbortError") {
+          throw new Error("请求超时，请稍后重试。");
+        }
+        throw err;
+      } finally {
+        window.clearTimeout(timerId);
+      }
       const payload = await res.json().catch(() => ({}));
       if (res.status === 401) {
         state.auth.loggedIn = false;
@@ -1722,6 +1777,14 @@
       return ["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName);
     }
 
+    function isWorkbenchInteractionBusy() {
+      const workspace = $("workspace");
+      if (workspace?.classList.contains("resizing")) return true;
+      const pasteModal = $("noticePasteModal");
+      if (pasteModal && !pasteModal.classList.contains("hidden")) return true;
+      return isEditingWorkbenchField();
+    }
+
     function formatRefreshInterval(ms) {
       const minutes = Math.max(1, Math.round(Number(ms || 0) / 60000));
       return `${minutes}分钟`;
@@ -1758,6 +1821,7 @@
         clearTimeout(state.autoRefresh.timerId);
         state.autoRefresh.timerId = 0;
       }
+      closeQtActiveItemsStream();
       updateAutoRefreshPill();
     }
 
@@ -1766,7 +1830,37 @@
       if (!state.auth.loggedIn || !state.scope || $("app").classList.contains("hidden")) return;
       state.autoRefresh.nextDelayMs = nextAutoRefreshDelay();
       state.autoRefresh.timerId = window.setTimeout(runAutoRefresh, state.autoRefresh.nextDelayMs);
+      startQtActiveItemsStream();
       updateAutoRefreshPill();
+    }
+
+    function closeQtActiveItemsStream() {
+      if (!state.qtActiveStream) return;
+      try { state.qtActiveStream.close(); } catch (_) {}
+      state.qtActiveStream = null;
+    }
+
+    function startQtActiveItemsStream() {
+      if (!window.EventSource || state.qtActiveStream) return;
+      if (!state.auth.loggedIn || !state.scope || $("app").classList.contains("hidden")) return;
+      const lastEventId = state.qtActiveLastEventId
+        ? `?last_event_id=${encodeURIComponent(state.qtActiveLastEventId)}`
+        : "";
+      const stream = new EventSource(`/api/qt-active-items/stream${lastEventId}`);
+      state.qtActiveStream = stream;
+      stream.addEventListener("qt_active_items", (event) => {
+        try {
+          if (event.lastEventId) state.qtActiveLastEventId = event.lastEventId;
+          const payload = JSON.parse(event.data || "{}");
+          const snapshotId = String(payload.snapshot_id || "");
+          if (!snapshotId || snapshotId === state.qtActiveSnapshotId) return;
+          state.qtActiveSnapshotId = snapshotId;
+          scheduleWorkbenchRefresh(500);
+        } catch (_) {}
+      });
+      stream.onerror = () => {
+        closeQtActiveItemsStream();
+      };
     }
 
     async function runAutoRefresh() {
@@ -1776,7 +1870,7 @@
         updateAutoRefreshPill();
         return;
       }
-      if (document.visibilityState === "hidden" || state.autoRefresh.inFlight || state.loading.active) {
+      if (document.visibilityState === "hidden" || state.autoRefresh.inFlight || state.loading.active || isWorkbenchInteractionBusy()) {
         startAutoRefresh();
         return;
       }
@@ -2393,6 +2487,7 @@
       if (state.gateMode === "maintenance") return renderMaintenanceGate();
       if (state.gateMode === "handover") return renderHandoverGate();
       if (state.gateMode === "permissions") return renderPermissionsGate();
+      if (state.gateMode === "backend") return renderBackendGate();
       return renderFeatureGate();
     }
 
@@ -2403,6 +2498,7 @@
       $("scopeGrid").classList.add("hidden");
       $("handoverSettings").classList.add("hidden");
       $("permissionSettings").classList.add("hidden");
+      $("backendSettings").classList.add("hidden");
       $("gateActions").innerHTML = "";
       const panel = $("authPanel");
       panel.classList.remove("hidden");
@@ -2620,6 +2716,7 @@
       $("scopeGrid").classList.add("hidden");
       $("handoverSettings").classList.add("hidden");
       $("permissionSettings").classList.add("hidden");
+      $("backendSettings").classList.add("hidden");
       const canManagePermissions = (state.auth.user || {}).role === "admin";
       $("featureGrid").innerHTML = `
         <button class="feature-btn" data-feature="handover">
@@ -2634,6 +2731,10 @@
           <button class="feature-btn" data-feature="permissions">
             <strong>门户权限管理</strong>
             <span>按 open_id 添加管理员或用户，并配置可查看楼栋范围。</span>
+          </button>
+          <button class="feature-btn" data-feature="backend">
+            <strong>后端运行状态</strong>
+            <span>查看消息、Qt 事件、多维上传等待和源表刷新状态。</span>
           </button>
         ` : ""}
       `;
@@ -2653,6 +2754,7 @@
       $("scopeGrid").classList.remove("hidden");
       $("handoverSettings").classList.add("hidden");
       $("permissionSettings").classList.add("hidden");
+      $("backendSettings").classList.add("hidden");
       $("scopeGrid").innerHTML = state.scopeOptions.map((item) => {
         const itemScope = normalizeScopeValue(item.value, "ALL");
         return `
@@ -2677,6 +2779,7 @@
       $("featureGrid").classList.add("hidden");
       $("scopeGrid").classList.remove("hidden");
       $("permissionSettings").classList.add("hidden");
+      $("backendSettings").classList.add("hidden");
       const options = state.handover.scopeOptions.length
         ? state.handover.scopeOptions
         : state.scopeOptions.filter((item) => !["CAMPUS", "ALL"].includes(normalizeScopeValue(item.value, "")));
@@ -2816,6 +2919,7 @@
       $("featureGrid").classList.add("hidden");
       $("scopeGrid").classList.add("hidden");
       $("handoverSettings").classList.add("hidden");
+      $("backendSettings").classList.add("hidden");
       const panel = $("permissionSettings");
       panel.classList.remove("hidden");
       $("gateActions").innerHTML = `<button class="btn ghost" data-back-home>返回功能选择</button>`;
@@ -2849,6 +2953,227 @@
         <div id="permissionLine" class="job-line ${state.permissions.message ? "success" : ""}">${html(state.permissions.message || "请确认 open_id 填写正确。")}</div>
       `;
       bindPermissionEvents(scopeOptions);
+    }
+
+    function backendStatHtml(label, value, hint = "") {
+      return `
+        <div class="backend-stat">
+          <strong>${html(String(value ?? "-"))}</strong>
+          <span>${html(label)}${hint ? ` · ${html(hint)}` : ""}</span>
+        </div>
+      `;
+    }
+
+    function formatBackendTime(value) {
+      const number = Number(value || 0);
+      if (!number) return "-";
+      const date = new Date(number * 1000);
+      if (Number.isNaN(date.getTime())) return "-";
+      return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+    }
+
+    function formatBytes(value) {
+      const number = Number(value || 0);
+      if (!Number.isFinite(number) || number <= 0) return "0 B";
+      const units = ["B", "KB", "MB", "GB"];
+      let size = number;
+      let index = 0;
+      while (size >= 1024 && index < units.length - 1) {
+        size /= 1024;
+        index += 1;
+      }
+      return `${size >= 10 || index === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[index]}`;
+    }
+
+    function jobErrorCategoryLabel(category) {
+      const labels = {
+        network_timeout: "网络超时",
+        remote_rate_limited: "飞书接口限流",
+        network_error: "网络连接异常",
+        process_restart: "程序重启中断",
+        token_or_auth: "飞书授权或 token 异常",
+        permission_denied: "飞书或多维权限不足",
+        field_or_payload: "字段或内容不匹配",
+        remote_record_missing: "远端记录不存在",
+        qt_bridge: "主界面连接异常",
+        unknown: "未知错误",
+      };
+      return labels[String(category || "").trim()] || "未分类错误";
+    }
+
+    function jobErrorAdvice(category, retryable) {
+      const advice = {
+        network_timeout: "可稍后重试；如果连续超时，请检查运行电脑网络。",
+        remote_rate_limited: "等待飞书限流恢复后重试。",
+        network_error: "检查运行电脑网络和飞书接口连通性。",
+        process_restart: "程序重启中断，请核对多维后重新发起。",
+        token_or_auth: "请在 Qt 设置中检查飞书应用配置并重新获取 token。",
+        permission_denied: "请确认应用对目标多维表有读写权限。",
+        field_or_payload: "请运行真实联调预检，确认字段名与目标表一致。",
+        remote_record_missing: "对应多维记录可能被删除或同步延迟，请核对后重新发起。",
+        qt_bridge: "请确认 Qt 主界面仍在运行且没有卡住。",
+        unknown: "请查看后端最近告警和任务错误详情。",
+      };
+      if (retryable) return `${advice[category] || advice.unknown} 该任务可重试。`;
+      return advice[category] || advice.unknown;
+    }
+
+    function renderBackendGate() {
+      $("gateTitle").textContent = "后端运行状态";
+      $("gateDesc").textContent = "查看门户队列、Qt 事件和源表刷新状态，用于现场排查卡顿或任务积压。";
+      $("authPanel").classList.add("hidden");
+      $("featureGrid").classList.add("hidden");
+      $("scopeGrid").classList.add("hidden");
+      $("handoverSettings").classList.add("hidden");
+      $("permissionSettings").classList.add("hidden");
+      const panel = $("backendSettings");
+      panel.classList.remove("hidden");
+      $("gateActions").innerHTML = `
+        <button class="btn ghost" data-back-home>返回功能选择</button>
+        <button class="btn primary" data-refresh-backend-stats ${state.backendStats.loading ? "disabled" : ""}>刷新状态</button>
+        <button class="btn blue" data-run-backend-preflight ${state.backendStats.loading ? "disabled" : ""}>真实联调预检</button>
+        <button class="btn ghost" data-run-mock-pressure ${state.backendStats.loading ? "disabled" : ""}>mock 压测</button>
+        <button class="btn ghost" data-run-sqlite-checkpoint ${state.backendStats.loading ? "disabled" : ""}>整理 SQLite</button>
+        <button class="btn ghost" data-run-job-cleanup ${state.backendStats.loading ? "disabled" : ""}>清理过期任务</button>
+      `;
+      document.querySelector("[data-back-home]")?.addEventListener("click", () => showGate("home"));
+      document.querySelector("[data-refresh-backend-stats]")?.addEventListener("click", () => loadBackendStats());
+      document.querySelector("[data-run-backend-preflight]")?.addEventListener("click", () => runBackendPreflight());
+      document.querySelector("[data-run-mock-pressure]")?.addEventListener("click", () => runMockPressure());
+      document.querySelector("[data-run-sqlite-checkpoint]")?.addEventListener("click", () => runSqliteCheckpoint());
+      document.querySelector("[data-run-job-cleanup]")?.addEventListener("click", () => runBackendJobCleanup());
+      if ((state.auth.user || {}).role !== "admin") {
+        panel.innerHTML = `<div class="empty">只有管理员可以查看后端运行状态。</div>`;
+        return;
+      }
+      if (!state.backendStats.loaded && !state.backendStats.loading) {
+        loadBackendStats().catch(() => {});
+      }
+      if (state.backendStats.loading && !state.backendStats.loaded) {
+        panel.innerHTML = `<div class="job-line busy">正在读取后端状态</div>`;
+        return;
+      }
+      const data = state.backendStats.data || {};
+      const warnings = Array.isArray(data.warnings) ? data.warnings : [];
+      const failedJobs = Array.isArray(data.recent_failed_jobs) ? data.recent_failed_jobs : [];
+      const phaseCounts = data.job_phase_counts || {};
+      const qtBridge = data.qt_bridge || {};
+      const slowHistory = Array.isArray(qtBridge.slow_event_history) ? qtBridge.slow_event_history : [];
+      const jobCleanup = data.job_cleanup || {};
+      const preflight = data.preflight || {};
+      const tokenStatus = data.token_status || {};
+      const preflightChecks = Array.isArray(preflight.checks) ? preflight.checks : [];
+      const sqliteStats = data.sqlite || {};
+      const externalGuard = data.external_guard || {};
+      const tableCounts = sqliteStats.table_counts || {};
+      const phaseLines = Object.entries(phaseCounts)
+        .filter(([, value]) => Number(value || 0) > 0)
+        .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+      const limits = data.runtime_limits || {};
+      panel.innerHTML = `
+        <div class="record-title">
+          <span>队列状态</span>
+          <span class="tag blue">更新时间 ${html(formatBackendTime(data.time))}</span>
+        </div>
+        <div class="backend-stats-grid">
+          ${backendStatHtml("个人消息队列", data.message_queue_size, `${data.message_workers_alive || 0}/${data.message_worker_count || 0} worker`)}
+          ${backendStatHtml("Qt 内部队列", data.qt_queue_size, data.qt_worker_alive ? "worker 正常" : "worker 未运行")}
+          ${backendStatHtml("Qt outbox 待确认", data.qt_outbox_pending, `${data.qt_outbox_leased || 0} leased / ${data.qt_outbox_failed || 0} failed`)}
+          ${backendStatHtml("Qt 桥", qtBridge.connected ? "在线" : "未连接", qtBridge.age_seconds ? `${qtBridge.age_seconds}s 前` : "无心跳")}
+          ${backendStatHtml("Qt 慢事件", qtBridge.slow_event_count || 0, `${qtBridge.last_event_duration_ms || 0}ms / ${qtBridge.last_event_kind || "-"}`)}
+          ${backendStatHtml("旧门户回退", data.legacy_adapter_enabled || data.legacy_fallback_env ? "已启用" : "未启用", data.legacy_fallback_env ? "CLIPFLOW_LEGACY_PORTAL" : "默认 FastAPI")}
+          ${backendStatHtml("上传等待", data.upload_wait_size, data.upload_wait_alive ? "监控中" : "未运行")}
+          ${backendStatHtml(
+            "外部写入",
+            externalGuard.real_write_allowed ? "允许" : "拦截",
+            externalGuard.mock_external ? "mock 模式" : (externalGuard.require_confirm ? "需确认" : "生产模式")
+          )}
+          ${backendStatHtml("源表刷新", data.source_refresh_inflight ? "进行中" : "空闲", data.mock_external ? "测试模式" : "30分钟调度")}
+          ${backendStatHtml("检修刷新", data.repair_refresh_inflight ? "进行中" : "空闲")}
+          ${backendStatHtml("工作台短缓存", data.payload_cache_entries || 0)}
+          ${backendStatHtml("任务总数", data.job_count || 0)}
+          ${backendStatHtml("失败可重试", data.failed_retryable_count || 0, `${data.failed_non_retryable_count || 0} 需处理`)}
+          ${backendStatHtml(
+            "任务清理",
+            Number(jobCleanup.removed_total || 0),
+            jobCleanup.cleaned_at ? `${formatBackendTime(jobCleanup.cleaned_at)} 执行` : "未执行"
+          )}
+          ${backendStatHtml(
+            "真实联调预检",
+            preflight.status || "未执行",
+            preflight.checked_at ? `${formatBackendTime(preflight.checked_at)} · ${preflight.failed || 0} 失败 / ${preflight.warnings || 0} 告警` : "只读检查"
+          )}
+          ${backendStatHtml("SQLite 总量", formatBytes(sqliteStats.total_bytes), `WAL ${formatBytes(sqliteStats.wal_bytes)}`)}
+          ${backendStatHtml("SQLite 空闲页", sqliteStats.freelist_count || 0, `${html(sqliteStats.journal_mode || "-")} / ${html(sqliteStats.busy_timeout_ms || 0)}ms`)}
+          ${backendStatHtml("最近源表加载", data.last_loaded_at || "-")}
+          ${backendStatHtml(
+            "飞书 Token",
+            tokenStatus.has_token ? "已就绪" : "缺失",
+            tokenStatus.checked_at ? `${formatBackendTime(tokenStatus.checked_at)} 检查` : "等待自动检查"
+          )}
+        </div>
+        ${state.backendStats.message ? `<div class="job-line failed">${html(state.backendStats.message)}</div>` : ""}
+        ${externalGuard.reason ? `<div class="job-line failed">${html(externalGuard.reason)}</div>` : ""}
+        ${(data.legacy_adapter_enabled || data.legacy_fallback_env) ? `<div class="job-line failed">当前启用了旧门户回退路径；稳定后建议关闭 CLIPFLOW_LEGACY_PORTAL / CLIPFLOW_FASTAPI_LEGACY_ADAPTER。</div>` : ""}
+        ${phaseLines.length ? `
+          <div class="work-detail" style="margin-top:10px">
+            <strong>任务阶段分布</strong>
+            ${phaseLines.map(([phase, value]) => `<div>${html(phase)}：${html(value)}</div>`).join("")}
+          </div>
+        ` : `<div class="job-line muted">暂无任务阶段数据。</div>`}
+        ${warnings.length ? `
+          <div class="work-detail" style="margin-top:10px">
+            <strong>最近告警</strong>
+            ${warnings.map((item) => `<div>${html(item)}</div>`).join("")}
+          </div>
+        ` : `<div class="job-line success">暂无后端告警。</div>`}
+        ${slowHistory.length ? `
+          <div class="work-detail" style="margin-top:10px">
+            <strong>Qt 慢事件详情</strong>
+            ${slowHistory.slice().reverse().map((item) => `
+              <div>${html(formatBackendTime(item.at))} · ${html(item.kind || "-")} · ${html(item.elapsed_ms || 0)}ms${item.error ? ` · ${html(item.error)}` : ""}</div>
+            `).join("")}
+          </div>
+        ` : ""}
+        ${preflightChecks.length ? `
+          <div class="work-detail" style="margin-top:10px">
+            <strong>真实联调预检结果</strong>
+            ${preflightChecks.map((item) => `
+              <div>${html(item.label || "-")}：${html(item.status || "-")} · ${html(item.message || "-")}${(item.missing_required || []).length ? ` · 缺少 ${html((item.missing_required || []).join("、"))}` : ""}</div>
+            `).join("")}
+          </div>
+        ` : `<div class="job-line muted">真实联调预检未执行；该检查只读取字段，不发送飞书、不写多维。</div>`}
+        ${failedJobs.length ? `
+          <div class="work-detail" style="margin-top:10px">
+            <strong>最近失败任务</strong>
+            ${failedJobs.map((job) => `
+              <div class="row-actions" style="align-items:center; justify-content:space-between; gap:8px">
+                <span>${html((job.job_id || "").slice(0, 8))} · ${html(job.work_type || "-")} · ${html(job.action || "-")} · ${html(jobErrorCategoryLabel(job.error_category))}${job.error_retryable ? " · 可重试" : ""}：${html(job.error || "-")}；${html(jobErrorAdvice(job.error_category, job.error_retryable))}</span>
+                <span class="row-actions" style="gap:6px">
+                  ${job.can_retry ? `<button class="btn blue" data-retry-failed-job="${html(job.job_id || "")}">重试</button>` : ""}
+                  ${job.can_clear ? `<button class="btn ghost" data-clear-failed-job="${html(job.job_id || "")}">清理</button>` : ""}
+                </span>
+              </div>
+            `).join("")}
+          </div>
+        ` : `<div class="job-line success">暂无失败任务。</div>`}
+        <div class="work-detail" style="margin-top:10px">
+          <strong>SQLite 表记录数</strong>
+          <div>任务 ${html(tableCounts.notice_actions || 0)}；Qt事件 ${html(tableCounts.event_outbox || 0)}；源快照 ${html(tableCounts.source_records_all || 0)}；闭环 ${html(tableCounts.daily_summary || 0)}。</div>
+        </div>
+        <div class="work-detail" style="margin-top:10px">
+          <strong>当前限流参数</strong>
+          <div>个人消息并发：${html(limits.message_worker_count || "-")}；Qt 显示：${html(limits.qt_items_per_tick || 1)} 条 / ${html(limits.qt_tick_interval_ms || 250)}ms。</div>
+          <div>多维上传：${html(limits.upload_seconds_per_record || "-")} 秒 / 条；批量最多 ${html(limits.upload_batch_max_records || "-")} 条，等待 ${html(limits.upload_batch_wait_seconds || "-")} 秒。</div>
+          <div>源表刷新：${html(limits.source_refresh_minutes || 30)} 分钟；前端快照刷新：${html(limits.frontend_snapshot_refresh_minutes || 10)} 分钟。</div>
+        </div>
+      `;
+      panel.querySelectorAll("[data-clear-failed-job]").forEach((btn) => {
+        btn.addEventListener("click", () => clearFailedJob(btn.dataset.clearFailedJob || ""));
+      });
+      panel.querySelectorAll("[data-retry-failed-job]").forEach((btn) => {
+        btn.addEventListener("click", () => retryFailedJob(btn.dataset.retryFailedJob || ""));
+      });
     }
 
     function permissionCardHtml(user, index, scopeOptions) {
@@ -2992,6 +3317,150 @@
       }
     }
 
+    async function loadBackendStats() {
+      if (state.backendStats.loading) return;
+      state.backendStats.loading = true;
+      state.backendStats.message = "";
+      renderBackendGate();
+      try {
+        const data = await api("/api/backend/stats");
+        updateAuthFromPayload(data);
+        state.backendStats.data = data || {};
+        state.backendStats.loaded = true;
+      } catch (err) {
+        state.backendStats.message = err.message || "后端状态读取失败";
+        state.backendStats.loaded = true;
+      } finally {
+        state.backendStats.loading = false;
+        renderBackendGate();
+      }
+    }
+
+    async function clearFailedJob(jobId) {
+      const id = String(jobId || "").trim();
+      if (!id || state.backendStats.loading) return;
+      state.backendStats.loading = true;
+      state.backendStats.message = "";
+      renderBackendGate();
+      try {
+        await api(`/api/jobs/${encodeURIComponent(id)}/clear`, { method: "POST" });
+        state.backendStats.message = `已清理失败任务 ${id.slice(0, 8)}`;
+        const data = await api("/api/backend/stats");
+        updateAuthFromPayload(data);
+        state.backendStats.data = data || {};
+        state.backendStats.loaded = true;
+      } catch (err) {
+        state.backendStats.message = err.message || "清理失败任务失败";
+      } finally {
+        state.backendStats.loading = false;
+        renderBackendGate();
+      }
+    }
+
+    async function retryFailedJob(jobId) {
+      const id = String(jobId || "").trim();
+      if (!id || state.backendStats.loading) return;
+      state.backendStats.loading = true;
+      state.backendStats.message = "";
+      renderBackendGate();
+      try {
+        const result = await api(`/api/jobs/${encodeURIComponent(id)}/retry`, { method: "POST" });
+        state.backendStats.message = `已重新排队任务 ${id.slice(0, 8)}，第 ${result.retry_count || 1} 次重试`;
+        const data = await api("/api/backend/stats");
+        updateAuthFromPayload(data);
+        state.backendStats.data = data || {};
+        state.backendStats.loaded = true;
+      } catch (err) {
+        state.backendStats.message = err.message || "重试失败任务失败";
+      } finally {
+        state.backendStats.loading = false;
+        renderBackendGate();
+      }
+    }
+
+    async function runBackendPreflight() {
+      if (state.backendStats.loading) return;
+      state.backendStats.loading = true;
+      state.backendStats.message = "正在执行只读预检，不会发送飞书或写入多维";
+      renderBackendGate();
+      try {
+        const result = await api("/api/backend/preflight", { method: "POST", body: JSON.stringify({}) });
+        state.backendStats.message = `预检完成：${result.status || "-"}，失败 ${result.failed || 0}，告警 ${result.warnings || 0}`;
+        const data = await api("/api/backend/stats");
+        updateAuthFromPayload(data);
+        state.backendStats.data = data || {};
+        state.backendStats.loaded = true;
+      } catch (err) {
+        state.backendStats.message = err.message || "真实联调预检失败";
+      } finally {
+        state.backendStats.loading = false;
+        renderBackendGate();
+      }
+    }
+
+    async function runSqliteCheckpoint() {
+      if (state.backendStats.loading) return;
+      state.backendStats.loading = true;
+      state.backendStats.message = "正在整理 SQLite WAL";
+      renderBackendGate();
+      try {
+        const result = await api("/api/backend/sqlite/checkpoint", { method: "POST", body: JSON.stringify({}) });
+        state.backendStats.message = `SQLite 整理完成，释放 ${formatBytes(result.reclaimed_bytes || 0)}`;
+        const data = await api("/api/backend/stats");
+        updateAuthFromPayload(data);
+        state.backendStats.data = data || {};
+        state.backendStats.loaded = true;
+      } catch (err) {
+        state.backendStats.message = err.message || "SQLite 整理失败";
+      } finally {
+        state.backendStats.loading = false;
+        renderBackendGate();
+      }
+    }
+
+    async function runBackendJobCleanup() {
+      if (state.backendStats.loading) return;
+      state.backendStats.loading = true;
+      state.backendStats.message = "正在清理过期成功/失败任务";
+      renderBackendGate();
+      try {
+        const result = await api("/api/backend/jobs/cleanup", { method: "POST", body: JSON.stringify({}) });
+        state.backendStats.message = `任务清理完成，移除 ${result.removed_total || 0} 条`;
+        const data = await api("/api/backend/stats");
+        updateAuthFromPayload(data);
+        state.backendStats.data = data || {};
+        state.backendStats.loaded = true;
+      } catch (err) {
+        state.backendStats.message = err.message || "任务清理失败";
+      } finally {
+        state.backendStats.loading = false;
+        renderBackendGate();
+      }
+    }
+
+    async function runMockPressure() {
+      if (state.backendStats.loading) return;
+      state.backendStats.loading = true;
+      state.backendStats.message = "正在运行 mock 压测，不会发送飞书或写入多维";
+      renderBackendGate();
+      try {
+        const result = await api("/api/backend/mock-pressure", {
+          method: "POST",
+          body: JSON.stringify({ count: 10, concurrency: 6, scenario: "mixed" }),
+        });
+        state.backendStats.message = `mock 压测完成：受理 ${result.accepted || 0}/${result.count || 0}，提交 ${result.submit_seconds || 0}s，查询 ${result.job_query_seconds || 0}s`;
+        const data = await api("/api/backend/stats");
+        updateAuthFromPayload(data);
+        state.backendStats.data = data || {};
+        state.backendStats.loaded = true;
+      } catch (err) {
+        state.backendStats.message = err.message || "mock 压测失败";
+      } finally {
+        state.backendStats.loading = false;
+        renderBackendGate();
+      }
+    }
+
     async function authenticateHandoverSettings() {
       const password = $("handoverSettingsPassword")?.value || "";
       const line = $("handoverAuthLine");
@@ -3076,7 +3545,7 @@
 
     function showGate(mode, { replace = false } = {}) {
       stopAutoRefresh();
-      state.gateMode = ["maintenance", "handover", "permissions"].includes(mode) ? mode : "home";
+      state.gateMode = ["maintenance", "handover", "permissions", "backend"].includes(mode) ? mode : "home";
       state.scope = "";
       const url = stripTransientUrlParams(new URL(window.location.href));
       url.searchParams.delete("scope");
@@ -3089,6 +3558,7 @@
       renderGate();
       if (state.gateMode === "maintenance") loadScopeOverview();
       if (state.gateMode === "handover") loadHandoverLinks();
+      if (state.gateMode === "backend") loadBackendStats();
     }
 
     async function logout() {
@@ -3389,7 +3859,7 @@
     function flushDeferredWorkbenchPayload({ force = false } = {}) {
       const pending = state.deferredWorkbenchPayload;
       if (!pending) return false;
-      if (!force && isEditingWorkbenchField()) {
+      if (!force && isWorkbenchInteractionBusy()) {
         scheduleDeferredWorkbenchApply();
         return false;
       }
@@ -3419,7 +3889,7 @@
         const data = await api(`/api/workbench?${params}`);
         if (!isLatestViewRequest(requestSeq)) return;
         if (normalizeScopeValue(state.scope || "ALL", "ALL") !== requestScope) return;
-        if (automatic && isEditingWorkbenchField()) {
+        if (automatic && isWorkbenchInteractionBusy()) {
           deferWorkbenchPayload(data, requestScope);
           return;
         }
@@ -3468,7 +3938,17 @@
         state.lastLoadedAt = data.last_loaded_at || "";
         updateAutoRefreshInterval(data);
         state.warnings = data.warnings || [];
-        setSyncStatus(data.last_loaded_at ? `数据更新时间 ${data.last_loaded_at}` : "已同步", state.warnings);
+        if (data.source_refresh_started || data.source_refresh_inflight) {
+          setSyncStatus(
+            data.source_refresh_reused
+              ? "源表正在后台同步，多个页面会共用这一次同步"
+              : "源表同步已提交，后台完成后会自动显示最新数据",
+            state.warnings
+          );
+          scheduleWorkbenchRefresh(8000);
+        } else {
+          setSyncStatus(data.last_loaded_at ? `数据更新时间 ${data.last_loaded_at}` : "已同步", state.warnings);
+        }
         cleanupDraftState();
         render();
         restoreJobState();
@@ -3504,12 +3984,22 @@
         const countText = Number.isFinite(Number(data.repair_count))
           ? `，检修源记录 ${Number(data.repair_count)} 条`
           : "";
-        setSyncStatus(
-          data.repair_refreshed_at
-            ? `检修数据已刷新 ${data.repair_refreshed_at}${countText}`
-            : `检修数据已刷新${countText}`,
-          state.warnings
-        );
+        if (data.repair_refresh_started || data.repair_refresh_inflight) {
+          setSyncStatus(
+            data.repair_refresh_reused
+              ? "检修源表正在后台刷新，多个页面会共用这一次刷新"
+              : "检修源表刷新已提交，后台完成后会自动显示最新数据",
+            state.warnings
+          );
+          scheduleWorkbenchRefresh(6000);
+        } else {
+          setSyncStatus(
+            data.repair_refreshed_at
+              ? `检修数据已刷新 ${data.repair_refreshed_at}${countText}`
+              : `检修数据已刷新${countText}`,
+            state.warnings
+          );
+        }
         cleanupDraftState();
         render();
         restoreJobState();
@@ -4590,7 +5080,7 @@
         if (payload.operation_id) state.jobToOpKey.set(jobId, payload.operation_id);
         const acceptedText = payload.work_type === "maintenance"
           ? `已受理，正在发送个人消息 ${jobId.slice(0, 8)}`
-          : `已受理，等待上传 ${jobId.slice(0, 8)}`;
+          : `已受理，等待主界面显示 ${jobId.slice(0, 8)}`;
         rememberJobState(localKey, {
           job_id: jobId,
           line_key: lineKey,
@@ -4620,102 +5110,170 @@
       }
     }
 
-    function pollJob(jobId, lineKey, localKey = "") {
+    function applyJobUpdate(job, jobId, lineKey, localKey = "") {
+      const phase = job.phase || "";
+      if (phase === "success") {
+        setJobLine(lineKey, `已完成，多维记录 ${job.record_id || ""}`, "success");
+        setActionButtonsDisabled(lineKey, true);
+        if (state.drafts.has(lineKey)) {
+          state.selected.delete(lineKey);
+          state.drafts.delete(lineKey);
+          saveDraftState();
+        }
+        const operationId = state.jobToOpKey.get(jobId);
+        if (operationId) {
+          for (const [key, value] of Array.from(state.actionOps.entries())) {
+            if (value === operationId) state.actionOps.delete(key);
+          }
+          state.jobToOpKey.delete(jobId);
+        }
+        state.polling.delete(jobId);
+        closeJobStream(jobId);
+        state.jobStreamLastEventIds.delete(jobId);
+        forgetJobState(localKey);
+        scheduleWorkbenchRefresh();
+        return { done: true };
+      }
+      if (phase === "failed") {
+        const jobType = job.prepared?.work_type || job.request?.work_type || "maintenance";
+        const errorCategory = job.error_category
+          ? ` [${jobErrorCategoryLabel(job.error_category)}${job.error_retryable ? "，可重试" : "，需处理"}]`
+          : "";
+        const advice = job.error_category ? `；${jobErrorAdvice(job.error_category, job.error_retryable)}` : "";
+        const prefix = jobType === "change"
+          ? "变更上传失败"
+          : jobType === "repair"
+            ? "检修上传失败"
+            : (job.message_sent ? "消息已发送，上传失败" : "操作失败");
+        const text = `${prefix}${errorCategory}: ${job.error || job.upload_message || ""}${advice}`;
+        setJobLine(lineKey, text, "failed");
+        setActionButtonsDisabled(lineKey, false);
+        rememberJobState(localKey, {
+          job_id: jobId,
+          line_key: lineKey,
+          phase: "failed",
+          text,
+          status: "failed",
+          message_sent: Boolean(job.message_sent),
+        });
+        if (!job.message_sent) {
+          const operationId = state.jobToOpKey.get(jobId);
+          if (operationId) {
+            for (const [key, value] of Array.from(state.actionOps.entries())) {
+              if (value === operationId) state.actionOps.delete(key);
+            }
+          }
+        }
+        state.polling.delete(jobId);
+        closeJobStream(jobId);
+        state.jobStreamLastEventIds.delete(jobId);
+        return { done: true };
+      }
+      const uploadPosition = job.upload_queue_position || 0;
+      const qtPosition = job.qt_queue_position || job.queue_position || 0;
+      const uploadQueuedLabel = uploadPosition
+        ? `等待多维上传，第 ${uploadPosition} 位`
+        : "等待多维上传";
+      const uploadReleaseAt = Number(job.upload_release_at || 0) * 1000;
+      const uploadWaitingLabel = uploadReleaseAt && uploadReleaseAt > Date.now()
+        ? `等待多维上传，预计 ${new Date(uploadReleaseAt).toLocaleTimeString("zh-CN", { hour12: false })} 放行`
+        : uploadQueuedLabel;
+      const qtQueuedLabel = qtPosition
+        ? `等待主界面显示，第 ${qtPosition} 位`
+        : "等待主界面显示";
+      const messageQueuedLabel = job.message_queue_position
+        ? `消息排队中，第 ${job.message_queue_position} 位`
+        : "已受理，正在发送个人消息";
+      const messageStartedAt = Number(job.message_started_at || 0) * 1000;
+      const messageSlow = messageStartedAt && Date.now() - messageStartedAt > 3000;
+      const label = {
+        accepted: messageQueuedLabel,
+        queued: qtQueuedLabel,
+        message_sent: "个人消息已发送，等待主界面显示",
+        upload_queued: uploadQueuedLabel,
+        qt_queued: qtQueuedLabel,
+        qt_displaying: "正在加入主界面",
+        upload_waiting: uploadWaitingLabel,
+        sending_message: messageSlow
+          ? "飞书发送中，已在后台处理"
+          : "正在发送个人飞书消息",
+        uploading: job.prepared?.work_type === "change"
+          ? "正在上传变更多维"
+          : job.prepared?.work_type === "repair"
+            ? "正在上传检修多维"
+            : "个人消息已发送，正在上传多维",
+      }[phase] || "处理中";
+      setJobLine(lineKey, label, "busy");
+      setActionButtonsDisabled(lineKey, true);
+      rememberJobState(localKey, {
+        job_id: jobId,
+        line_key: lineKey,
+        phase,
+        text: label,
+        status: "busy",
+      });
+      const nextDelay = phase === "accepted"
+        ? 1000
+        : phase === "queued" || phase === "upload_queued" || phase === "message_sent" || phase === "qt_queued" || phase === "upload_waiting"
+        ? 3500
+        : phase === "sending_message" || phase === "qt_displaying"
+          ? 1200
+          : 2600;
+      return { done: false, nextDelay };
+    }
+
+    function closeJobStream(jobId) {
+      const stream = state.jobStreams.get(jobId);
+      if (!stream) return;
+      try { stream.close(); } catch (_) {}
+      state.jobStreams.delete(jobId);
+    }
+
+    function startJobStream(jobId, lineKey, localKey = "") {
+      if (!window.EventSource || state.jobStreams.has(jobId)) return false;
+      let opened = false;
+      let fallbackTimer = 0;
+      const params = new URLSearchParams({ job_id: jobId });
+      const lastEventId = state.jobStreamLastEventIds.get(jobId);
+      if (lastEventId) params.set("last_event_id", lastEventId);
+      const stream = new EventSource(`/api/jobs/stream?${params.toString()}`);
+      state.jobStreams.set(jobId, stream);
+      stream.onopen = () => {
+        opened = true;
+        if (fallbackTimer) clearTimeout(fallbackTimer);
+      };
+      stream.onmessage = (event) => {
+        try {
+          if (event.lastEventId) state.jobStreamLastEventIds.set(jobId, event.lastEventId);
+          const payload = JSON.parse(event.data || "{}");
+          const job = payload.job || payload;
+          if (!job || !job.job_id) return;
+          applyJobUpdate(job, jobId, lineKey, localKey);
+        } catch (_) {}
+      };
+      stream.addEventListener("job", stream.onmessage);
+      stream.onerror = () => {
+        closeJobStream(jobId);
+        if (state.polling.has(jobId)) return;
+        pollJob(jobId, lineKey, localKey, { forcePolling: true });
+      };
+      fallbackTimer = setTimeout(() => {
+        if (opened || !state.jobStreams.has(jobId)) return;
+        closeJobStream(jobId);
+        if (!state.polling.has(jobId)) pollJob(jobId, lineKey, localKey, { forcePolling: true });
+      }, 2500);
+      return true;
+    }
+
+    function pollJob(jobId, lineKey, localKey = "", options = {}) {
+      if (!options.forcePolling && startJobStream(jobId, lineKey, localKey)) return;
       if (state.polling.has(jobId)) return;
       state.polling.add(jobId);
       const tick = async () => {
         try {
           const job = await api(`/api/jobs/${encodeURIComponent(jobId)}`);
-          const phase = job.phase || "";
-          if (phase === "success") {
-            setJobLine(lineKey, `已完成，多维记录 ${job.record_id || ""}`, "success");
-            setActionButtonsDisabled(lineKey, true);
-            if (state.drafts.has(lineKey)) {
-              state.selected.delete(lineKey);
-              state.drafts.delete(lineKey);
-              saveDraftState();
-            }
-            const operationId = state.jobToOpKey.get(jobId);
-            if (operationId) {
-              for (const [key, value] of Array.from(state.actionOps.entries())) {
-                if (value === operationId) state.actionOps.delete(key);
-              }
-              state.jobToOpKey.delete(jobId);
-            }
-            state.polling.delete(jobId);
-            forgetJobState(localKey);
-            scheduleWorkbenchRefresh();
-            return;
-          }
-          if (phase === "failed") {
-            const jobType = job.prepared?.work_type || job.request?.work_type || "maintenance";
-            const prefix = jobType === "change"
-              ? "变更上传失败"
-              : jobType === "repair"
-                ? "检修上传失败"
-                : (job.message_sent ? "消息已发送，上传失败" : "操作失败");
-            const text = `${prefix}: ${job.error || job.upload_message || ""}`;
-            setJobLine(lineKey, text, "failed");
-            setActionButtonsDisabled(lineKey, false);
-            rememberJobState(localKey, {
-              job_id: jobId,
-              line_key: lineKey,
-              phase: "failed",
-              text,
-              status: "failed",
-              message_sent: Boolean(job.message_sent),
-            });
-            if (!job.message_sent) {
-              const operationId = state.jobToOpKey.get(jobId);
-              if (operationId) {
-                for (const [key, value] of Array.from(state.actionOps.entries())) {
-                  if (value === operationId) state.actionOps.delete(key);
-                }
-              }
-            }
-            state.polling.delete(jobId);
-            return;
-          }
-          const uploadPosition = job.upload_queue_position || job.queue_position || 0;
-          const uploadQueuedLabel = uploadPosition
-            ? `上传排队中，第 ${uploadPosition} 位`
-            : "等待上传";
-          const messageQueuedLabel = job.message_queue_position
-            ? `消息排队中，第 ${job.message_queue_position} 位`
-            : "已受理，正在发送个人消息";
-          const messageStartedAt = Number(job.message_started_at || 0) * 1000;
-          const messageSlow = messageStartedAt && Date.now() - messageStartedAt > 3000;
-          const label = {
-            accepted: messageQueuedLabel,
-            queued: uploadQueuedLabel,
-            message_sent: "个人消息已发送，等待上传",
-            upload_queued: uploadQueuedLabel,
-            sending_message: messageSlow
-              ? "飞书发送中，已在后台处理"
-              : "正在发送个人飞书消息",
-            uploading: job.prepared?.work_type === "change"
-              ? "正在上传变更多维"
-              : job.prepared?.work_type === "repair"
-                ? "正在上传检修多维"
-                : "个人消息已发送，正在上传多维",
-          }[phase] || "处理中";
-          setJobLine(lineKey, label, "busy");
-          setActionButtonsDisabled(lineKey, true);
-          rememberJobState(localKey, {
-            job_id: jobId,
-            line_key: lineKey,
-            phase,
-            text: label,
-            status: "busy",
-          });
-          const nextDelay = phase === "accepted"
-            ? 1000
-            : phase === "queued" || phase === "upload_queued" || phase === "message_sent"
-            ? 3500
-            : phase === "sending_message"
-              ? 1200
-              : 2600;
-          setTimeout(tick, nextDelay);
+          const result = applyJobUpdate(job, jobId, lineKey, localKey);
+          if (!result.done) setTimeout(tick, Math.max(2000, Number(result.nextDelay || 2600)));
         } catch (err) {
           const lost = /任务不存在|404/.test(err.message || "");
           const text = lost ? "任务状态已丢失，请核对多维后重试" : (err.message || "任务查询失败");
@@ -4729,11 +5287,12 @@
             status: "failed",
           });
           state.polling.delete(jobId);
+          closeJobStream(jobId);
+          state.jobStreamLastEventIds.delete(jobId);
         }
       };
-      setTimeout(tick, 1200);
+      setTimeout(tick, 2000);
     }
-
     function restoreJobState() {
       for (const [localKey, saved] of Array.from(state.jobStates.entries())) {
         const lineKey = saved.line_key || "";
@@ -4746,7 +5305,7 @@
           continue;
         }
         if (visibleLine) setJobLine(lineKey, saved.text || "任务处理中", saved.status || "busy");
-        if (["accepted", "queued", "sending_message", "message_sent", "upload_queued", "uploading"].includes(saved.phase || "") && jobId) {
+        if (["accepted", "queued", "sending_message", "message_sent", "upload_queued", "qt_queued", "qt_displaying", "upload_waiting", "uploading"].includes(saved.phase || "") && jobId) {
           if (visibleLine) setActionButtonsDisabled(lineKey, true);
           pollJob(jobId, lineKey, localKey);
         } else if (["failed", "lost"].includes(saved.phase || "")) {
@@ -5055,6 +5614,7 @@
       renderGate();
       if (state.gateMode === "maintenance") loadScopeOverview();
       if (state.gateMode === "handover") loadHandoverLinks();
+      if (state.gateMode === "backend") loadBackendStats();
     }
 
     window.addEventListener("popstate", () => {
@@ -5079,12 +5639,13 @@
         });
       } else {
         stopAutoRefresh();
-        state.gateMode = ["maintenance", "handover"].includes(mode) ? mode : "home";
+        state.gateMode = ["maintenance", "handover", "permissions", "backend"].includes(mode) ? mode : "home";
         $("app").classList.add("hidden");
         $("gate").classList.remove("hidden");
         renderGate();
         if (state.gateMode === "maintenance") loadScopeOverview();
         if (state.gateMode === "handover") loadHandoverLinks();
+        if (state.gateMode === "backend") loadBackendStats();
       }
     });
     document.addEventListener("visibilitychange", () => {
