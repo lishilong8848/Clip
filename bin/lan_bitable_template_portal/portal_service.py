@@ -4593,10 +4593,18 @@ class MaintenancePortalService:
                 self._state_store.put_document(STATE_NS_ACTION_JOB, job_id, job)
             jobs[job_id] = job
         if len(jobs) > ACTION_JOB_MAX_RETAINED:
-            ordered = sorted(
-                jobs.values(), key=lambda item: str(item.get("created_at") or "")
+            terminal_phases = {"success", "failed"}
+            terminal_jobs = [
+                job
+                for job in jobs.values()
+                if str(job.get("phase") or "") in terminal_phases
+            ]
+            terminal_jobs.sort(key=lambda item: str(item.get("created_at") or ""))
+            remove_count = min(
+                max(0, len(jobs) - ACTION_JOB_MAX_RETAINED),
+                len(terminal_jobs),
             )
-            for job in ordered[: len(jobs) - ACTION_JOB_MAX_RETAINED]:
+            for job in terminal_jobs[:remove_count]:
                 job_id = str(job.get("job_id") or "")
                 jobs.pop(job_id, None)
                 self._state_store.delete_document(STATE_NS_ACTION_JOB, job_id)

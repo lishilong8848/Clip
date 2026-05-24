@@ -2313,6 +2313,7 @@ class ScreenshotConfirmDialog(QDialog):
         self._suppress_ocr_cancel_on_hide = False
 
         self._submit_accepted = True
+        self._cancelled_emitted = False
 
         self._ocr_vote_candidates = []
 
@@ -3260,6 +3261,7 @@ class ScreenshotConfirmDialog(QDialog):
         self.is_mandatory = is_mandatory
 
         self.notice_type = (data_dict or {}).get("notice_type", "")
+        self._cancelled_emitted = False
 
         if isinstance(self.data_dict, dict):
 
@@ -8240,7 +8242,33 @@ class ScreenshotConfirmDialog(QDialog):
 
         self.hide()
 
+        self._emit_cancelled_once()
+
+    def _emit_cancelled_once(self):
+
+        if self._cancelled_emitted:
+
+            return
+
+        self._cancelled_emitted = True
+
         self.cancelled.emit()
+
+    def reject(self):
+
+        self.cancel_upload()
+
+    def closeEvent(self, event):
+
+        self._suppress_ocr_cancel_on_hide = False
+
+        self._ocr_cancelled = True
+
+        self._reset_recover_selection()
+
+        self._emit_cancelled_once()
+
+        super().closeEvent(event)
 
 
 

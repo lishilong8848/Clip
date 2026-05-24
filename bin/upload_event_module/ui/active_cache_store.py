@@ -7,6 +7,7 @@ from typing import Any
 
 from lan_bitable_template_portal.state_store import LanPortalStateStore
 
+from ..logger import log_warning
 from ..building_normalizer import normalize_buildings_value as normalize_buildings_list
 from .display_state import (
     detect_level_from_notice_text,
@@ -227,14 +228,16 @@ class ActiveCacheStore:
         normalized = self._normalize_payload(payload)
         try:
             self._state_store.replace_qt_active_items_from_payload(normalized)
-        except Exception:
-            pass
+        except Exception as exc:
+            log_warning(f"Qt active items 规范表写入失败: {exc}")
+            return False
         try:
             self._state_store.put_document(
                 self._STATE_NAMESPACE, self._STATE_KEY, normalized
             )
             return True
-        except Exception:
+        except Exception as exc:
+            log_warning(f"Qt active cache 兼容文档写入失败: {exc}")
             return False
 
     def save_payload(self, payload: dict) -> bool:

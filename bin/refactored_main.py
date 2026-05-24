@@ -1,6 +1,7 @@
 import sys
 import os
 import faulthandler
+import threading
 from pathlib import Path
 
 from upload_event_module.hot_reload.state_store import get_user_data_dir
@@ -22,7 +23,7 @@ if sys.platform == "win32":
 os.environ.setdefault("CLIPFLOW_REQUIRE_REAL_EXTERNAL_CONFIRM", "1")
 os.environ.setdefault("CLIPFLOW_REAL_EXTERNAL_CONFIRMED", "1")
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QObject, pyqtSignal
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from upload_event_module.hot_reload.restart_guard import RestartGuard
@@ -45,6 +46,10 @@ else:
 _CRASH_TRACE_FP = None
 
 
+class _PortalStartupBridge(QObject):
+    finished = pyqtSignal(object, str)
+
+
 def _init_crash_trace():
     global _CRASH_TRACE_FP
     try:
@@ -62,8 +67,11 @@ def _init_crash_trace():
         _CRASH_TRACE_FP.write("\n=== Crash Trace Session Start ===\n")
         _CRASH_TRACE_FP.flush()
         faulthandler.enable(file=_CRASH_TRACE_FP, all_threads=True)
-        # Periodic traceback dump to catch deadlocks/stalls
-        faulthandler.dump_traceback_later(30, repeat=True, file=_CRASH_TRACE_FP)
+        # Periodic traceback dumps are useful for diagnosing freezes, but they
+        # write every thread stack to disk and can make low-power machines feel
+        # stuck during normal operation. Keep them opt-in for production builds.
+        if os.environ.get("CLIPFLOW_ENABLE_PERIODIC_TRACEBACK") == "1":
+            faulthandler.dump_traceback_later(300, repeat=True, file=_CRASH_TRACE_FP)
     except Exception:
         _CRASH_TRACE_FP = None
         try:
@@ -72,7 +80,8 @@ def _init_crash_trace():
             _CRASH_TRACE_FP.write("\n=== Crash Trace Session Start (fallback) ===\n")
             _CRASH_TRACE_FP.flush()
             faulthandler.enable(file=_CRASH_TRACE_FP, all_threads=True)
-            faulthandler.dump_traceback_later(30, repeat=True, file=_CRASH_TRACE_FP)
+            if os.environ.get("CLIPFLOW_ENABLE_PERIODIC_TRACEBACK") == "1":
+                faulthandler.dump_traceback_later(300, repeat=True, file=_CRASH_TRACE_FP)
             print(f"[ClipFlow] crash_trace fallback: {fallback}")
         except Exception as exc:
             _CRASH_TRACE_FP = None
@@ -207,38 +216,73 @@ def main():
 
     from upload_event_module.ui.main_window import ClipboardTool
 
-    portal_controller = None
-    try:
-        portal_controller = PortalServerController(
-            host=getattr(config, "lan_template_portal_host", "0.0.0.0"),
-            port=int(getattr(config, "lan_template_portal_port", 18766) or 18766),
-        )
-        portal_url = portal_controller.start()
-        print(f"[ClipFlow] 局域网模板门户已随主程序启动: {portal_url}")
-        app.aboutToQuit.connect(portal_controller.stop)
-    except Exception as exc:
-        portal_controller = None
-        print(f"[ClipFlow] 局域网模板门户启动失败: {exc}")
-
     window = ClipboardTool()
-    if portal_controller is not None:
+
+    portal_bridge = _PortalStartupBridge()
+    portal_holder = {"controller": None}
+
+    def _stop_portal_if_started():
+        controller = portal_holder.get("controller")
+        if controller is None:
+            return
         try:
-            window.lan_template_portal_controller = portal_controller
-            window.lan_template_portal_url = portal_controller.get_url()
-            portal_controller.set_notice_callback(window.enqueue_lan_template_notice)
-            portal_controller.set_ongoing_callback(
+            controller.stop()
+        except Exception:
+            pass
+
+    app.aboutToQuit.connect(_stop_portal_if_started)
+
+    def _attach_portal_controller(controller, error: str = ""):
+        if controller is None:
+            print(f"[ClipFlow] 局域网模板门户启动失败: {error}")
+            try:
+                window.lan_template_portal_url = (
+                    window._build_lan_template_portal_url_from_config()
+                )
+                window.refresh_lan_template_portal_link()
+            except Exception:
+                pass
+            return
+        try:
+            window.lan_template_portal_controller = controller
+            window.lan_template_portal_url = controller.get_url()
+            controller.set_notice_callback(window.enqueue_lan_template_notice)
+            controller.set_ongoing_callback(
                 window.get_lan_maintenance_ongoing_notices
             )
-            if hasattr(portal_controller, "set_ongoing_delete_callback"):
-                portal_controller.set_ongoing_delete_callback(
+            if hasattr(controller, "set_ongoing_delete_callback"):
+                controller.set_ongoing_delete_callback(
                     window.delete_lan_ongoing_notice
                 )
-            portal_controller.set_maintenance_action_callback(
+            controller.set_maintenance_action_callback(
                 window.enqueue_lan_maintenance_action
             )
             window.refresh_lan_template_portal_link()
-        except Exception:
-            pass
+            print(f"[ClipFlow] 局域网模板门户已随主程序启动: {controller.get_url()}")
+        except Exception as exc:
+            print(f"[ClipFlow] 局域网模板门户回调绑定失败: {exc}")
+
+    portal_bridge.finished.connect(_attach_portal_controller)
+    window._portal_startup_bridge = portal_bridge
+
+    def _start_portal_worker():
+        try:
+            controller = PortalServerController(
+                host=getattr(config, "lan_template_portal_host", "0.0.0.0"),
+                port=int(getattr(config, "lan_template_portal_port", 18766) or 18766),
+            )
+            portal_holder["controller"] = controller
+            controller.start()
+            portal_bridge.finished.emit(controller, "")
+        except Exception as exc:
+            portal_bridge.finished.emit(None, str(exc))
+
+    portal_thread = threading.Thread(
+        target=_start_portal_worker,
+        name="ClipFlowPortalStartup",
+        daemon=True,
+    )
+    window._portal_startup_thread = portal_thread
 
     # 设置初始位置 (添加空值检查防止访问违规)
     primary_screen = app.primaryScreen()
@@ -246,6 +290,7 @@ def main():
         screen = primary_screen.geometry()
         window.move(screen.width() - 600, screen.height() - 790)
     window.show()
+    portal_thread.start()
 
     sys.exit(app.exec())
 

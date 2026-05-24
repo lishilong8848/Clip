@@ -584,9 +584,12 @@ class MainWindowRuntimeMixin:
         self.lan_maintenance_ongoing_query_received.emit(
             {"scope": scope, "event": event, "result": result}
         )
-        event.wait(timeout=5)
-        items = result.get("items")
-        return items if isinstance(items, list) else []
+        if event.wait(timeout=0.8):
+            items = result.get("items")
+            return items if isinstance(items, list) else []
+        result["_timed_out"] = True
+        self._request_lan_ongoing_snapshot_refresh()
+        return []
 
     def _on_lan_maintenance_ongoing_query_received(self, payload: dict):
         result = (payload or {}).get("result")
@@ -632,13 +635,17 @@ class MainWindowRuntimeMixin:
         self.lan_ongoing_delete_received.emit(
             {"payload": dict(payload), "event": event, "result": result}
         )
-        event.wait(timeout=5)
-        return result
+        if not event.wait(timeout=5):
+            result["_timed_out"] = True
+            return {"ok": False, "error": str(result.get("error") or "主界面删除请求超时。")}
+        return {key: value for key, value in result.items() if key != "_timed_out"}
 
     def _on_lan_ongoing_delete_received(self, payload: dict):
         result = (payload or {}).get("result")
         event = (payload or {}).get("event")
         try:
+            if isinstance(result, dict) and result.get("_timed_out"):
+                return
             action_payload = (payload or {}).get("payload") or {}
             outcome = self._execute_lan_ongoing_delete(action_payload)
             if isinstance(result, dict):

@@ -480,6 +480,7 @@ class ClipboardItemWidget(QWidget):
             self.data.get("today_in_progress_state")
         )
         self._delete_interaction_enabled = True
+        self._delete_confirm_pending = False
         # 跟踪内容是否未上传（新建/更新后但未点上传按钮）
         self.has_unuploaded_changes = True
         # 上传/更新处理中标记
@@ -564,11 +565,12 @@ class ClipboardItemWidget(QWidget):
 
 
 
-        self.delete_btn = QPushButton("🗑️")
+        self.delete_btn = QPushButton("移")
 
         self.delete_btn.setFixedSize(50, 50)
 
         self.delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.delete_btn.setToolTip("移入历史，不删除多维记录")
 
         self.delete_btn.setStyleSheet("""
 
@@ -578,7 +580,7 @@ class ClipboardItemWidget(QWidget):
 
                 color: white;
 
-                font-size: 20px;
+                font-size: 16px;
 
                 border: none;
 
@@ -704,7 +706,7 @@ class ClipboardItemWidget(QWidget):
 
         self.action_btn.setCursor(Qt.CursorShape.PointingHandCursor)
 
-        self.action_btn.setFixedSize(70, 28)
+        self.action_btn.setFixedSize(84, 32)
 
         self.action_btn.clicked.connect(self.on_btn_click)
 
@@ -716,7 +718,7 @@ class ClipboardItemWidget(QWidget):
 
         self.today_progress_btn = QPushButton("是否在进行")
         self.today_progress_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.today_progress_btn.setFixedSize(92, 28)
+        self.today_progress_btn.setFixedSize(96, 32)
         self.today_progress_btn.clicked.connect(self.on_today_progress_click)
 
         # 倒计时组件（仅事件通告使用）
@@ -933,6 +935,8 @@ class ClipboardItemWidget(QWidget):
 
             return
 
+        self._reset_delete_confirm_visual()
+
 
 
         self._state = ItemState.COLLAPSING
@@ -988,14 +992,21 @@ class ClipboardItemWidget(QWidget):
 
 
     def _on_delete_clicked(self):
-        """处理删除点击：先播放淡出动画再发送信号"""
+        """处理删除点击：第一次确认，第二次才真正删除。"""
         if not self._delete_interaction_enabled:
             return
         if self._state == ItemState.DELETING:
             return
+        if not self._delete_confirm_pending:
+            self._delete_confirm_pending = True
+            self.delete_btn.setText("确认移")
+            self.delete_btn.setToolTip("再次点击确认移入历史")
+            self._auto_collapse_timer.start(3000)
+            return
 
 
         self._state = ItemState.DELETING
+        self._delete_confirm_pending = False
 
         self._auto_collapse_timer.stop()
 
@@ -1055,8 +1066,22 @@ class ClipboardItemWidget(QWidget):
             self.delete_zone.hide()
         except Exception:
             pass
+        self._reset_delete_confirm_visual()
         self._auto_collapse_timer.stop()
         SwipeManager.clear(self)
+
+    def _reset_delete_confirm_visual(self):
+        self._delete_confirm_pending = False
+        btn = getattr(self, "delete_btn", None)
+        if not btn:
+            return
+        try:
+            if sip.isdeleted(btn):
+                return
+        except Exception:
+            return
+        btn.setText("移")
+        btn.setToolTip("移入历史，不删除多维记录")
 
     def _reset_swipe_visual(self):
         if self._slide_anim:

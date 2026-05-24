@@ -127,7 +127,7 @@ class PortalHandler(BaseHTTPRequestHandler):
     payload_cache: dict[tuple, tuple[float, dict]] = {}
     payload_cache_inflight: dict[tuple, threading.Event] = {}
     payload_cache_generation = 0
-    payload_cache_ttl_s = 3
+    payload_cache_ttl_s = 5
     payload_cache_max_entries = 64
     payload_cache_max_payload_bytes = 1024 * 1024
     orphan_reconcile_lock = threading.RLock()
@@ -1247,24 +1247,9 @@ class PortalHandler(BaseHTTPRequestHandler):
                 self.service.validate_ongoing_delete_item(payload, scope=scope)
                 callback = PortalHandler.ongoing_delete_callback
                 if callback is None:
-                    event_id = PortalHandler.state_store.enqueue_outbox_event(
-                        "qt_action",
-                        {
-                            "kind": "ongoing_delete",
-                            "payload": payload,
-                        },
-                    )
-                    data = self.service.hide_ongoing_item(
-                        payload,
-                        scope=scope,
-                        deleted_by=payload["_auth_open_id"],
-                    )
-                    PortalHandler.clear_payload_cache()
-                    data["qt_delete_queued"] = True
-                    data["qt_event_id"] = event_id
                     return self._send_json(
-                        202,
-                        {"ok": True, "data": self._with_runtime_warnings(data)},
+                        503,
+                        {"ok": False, "error": "主窗口删除通道未连接，请确认 Qt 主程序仍在运行。"},
                     )
                 try:
                     accepted = callback(payload)
@@ -2172,24 +2157,6 @@ class PortalHandler(BaseHTTPRequestHandler):
                     message_sent=True,
                     message_signature=str(prepared.get("message_signature") or ""),
                 )
-            guard = external_real_write_guard()
-            if not guard.get("real_write_allowed"):
-                cls.service.mark_job(
-                    job_id,
-                    phase="failed",
-                    error=str(guard.get("reason") or "真实外部写入未确认。"),
-                    message_sent=bool(prepared.get("message_sent")),
-                )
-                try:
-                    cls.state_store.mark_runtime_queue_item(
-                        "qt_action",
-                        job_id,
-                        "failed",
-                        error=str(guard.get("reason") or "真实外部写入未确认。"),
-                    )
-                except Exception:
-                    pass
-                return
             callback = cls.maintenance_action_callback
             if callback is None:
                 try:

@@ -1,15 +1,25 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-from PyQt6.QtCore import QEvent, QRect, QSize, Qt
+import time
+import weakref
+
+from PyQt6.QtCore import QEvent, QRect, QSize, Qt, QTimer
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen
 from PyQt6.QtWidgets import QStyle, QStyledItemDelegate, QStyleOptionViewItem
+from PyQt6 import sip
 
 from .active_notice_model import ActiveNoticeModel
 
 
 class ActiveNoticeDelegate(QStyledItemDelegate):
     """Delegate renderer for future QListView active notice cards."""
+
+    DELETE_CONFIRM_SECONDS = 3.0
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._delete_confirm_until: dict[str, float] = {}
 
     @staticmethod
     def _button_rects(option: QStyleOptionViewItem, index) -> dict[str, QRect]:
@@ -18,15 +28,28 @@ class ActiveNoticeDelegate(QStyledItemDelegate):
         y = rect.top() + 48
         right = rect.right() - 14
         buttons: dict[str, QRect] = {}
-        buttons["delete"] = QRect(right - 28, y, 28, 22)
-        right -= 36
+        buttons["delete"] = QRect(right - 48, y, 48, 26)
+        right -= 56
         label = ActiveNoticeModel.action_label_for_record(record)
         if label:
-            buttons["action"] = QRect(right - 62, y, 62, 22)
-            right -= 70
+            buttons["action"] = QRect(right - 76, y, 76, 26)
+            right -= 84
         if ActiveNoticeModel.supports_today_progress(record):
-            buttons["today"] = QRect(right - 82, y, 82, 22)
+            buttons["today"] = QRect(right - 88, y, 88, 26)
         return buttons
+
+    def _delete_key_for_record(self, record: dict) -> str:
+        return ActiveNoticeModel.identity_for_record(record)
+
+    def _delete_confirm_active(self, record: dict) -> bool:
+        key = self._delete_key_for_record(record)
+        if not key:
+            return False
+        expire_at = self._delete_confirm_until.get(key, 0)
+        if expire_at > time.monotonic():
+            return True
+        self._delete_confirm_until.pop(key, None)
+        return False
 
     def sizeHint(self, option, index):  # noqa: N802
         return QSize(max(360, option.rect.width()), 88)
@@ -135,19 +158,24 @@ class ActiveNoticeDelegate(QStyledItemDelegate):
             painter.setBrush(fill)
             painter.drawRoundedRect(buttons["action"], 11, 11)
             painter.setPen(text_color)
-            painter.setFont(QFont("Microsoft YaHei", 8, QFont.Weight.Bold))
+            painter.setFont(QFont("Microsoft YaHei", 9, QFont.Weight.Bold))
             painter.drawText(
                 buttons["action"],
                 Qt.AlignmentFlag.AlignCenter,
                 ActiveNoticeModel.action_label_for_record(record),
             )
 
-        painter.setPen(QPen(QColor("#7F1D1D"), 1))
-        painter.setBrush(QColor("#3F1212"))
+        confirm_delete = self._delete_confirm_active(record)
+        painter.setPen(QPen(QColor("#B91C1C" if confirm_delete else "#7F1D1D"), 1))
+        painter.setBrush(QColor("#991B1B" if confirm_delete else "#3F1212"))
         painter.drawRoundedRect(buttons["delete"], 11, 11)
         painter.setPen(QColor("#FCA5A5"))
-        painter.setFont(QFont("Microsoft YaHei", 9, QFont.Weight.Bold))
-        painter.drawText(buttons["delete"], Qt.AlignmentFlag.AlignCenter, "删")
+        painter.setFont(QFont("Microsoft YaHei", 8, QFont.Weight.Bold))
+        painter.drawText(
+            buttons["delete"],
+            Qt.AlignmentFlag.AlignCenter,
+            "确认移" if confirm_delete else "移",
+        )
 
     def editorEvent(self, event, model, option, index):  # noqa: N802
         if (
@@ -160,8 +188,38 @@ class ActiveNoticeDelegate(QStyledItemDelegate):
         pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
         buttons = self._button_rects(option, index)
         if buttons.get("delete") and buttons["delete"].contains(pos):
-            if hasattr(model, "deleteRequested"):
-                model.deleteRequested.emit(dict(record))
+            key = self._delete_key_for_record(record)
+            if not key:
+                return True
+            if self._delete_confirm_active(record):
+                self._delete_confirm_until.pop(key, None)
+                if hasattr(model, "deleteRequested"):
+                    model.deleteRequested.emit(dict(record))
+            else:
+                self._delete_confirm_until[key] = (
+                    time.monotonic() + self.DELETE_CONFIRM_SECONDS
+                )
+                widget = getattr(option, "widget", None)
+                if widget is not None:
+                    widget.viewport().update(option.rect)
+                    view_ref = weakref.ref(widget)
+                    update_rect = QRect(option.rect)
+
+                    def _refresh_after_confirm_timeout():
+                        view = view_ref()
+                        if view is None:
+                            return
+                        try:
+                            if sip.isdeleted(view):
+                                return
+                            view.viewport().update(update_rect)
+                        except Exception:
+                            return
+
+                    QTimer.singleShot(
+                        int(self.DELETE_CONFIRM_SECONDS * 1000) + 80,
+                        _refresh_after_confirm_timeout,
+                    )
             return True
         if buttons.get("today") and buttons["today"].contains(pos):
             if hasattr(model, "todayProgressRequested"):

@@ -4570,6 +4570,14 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     headers=headers,
                     json={"scope": "ALL", "work_type": "change", "action": "start"},
                 )
+                PortalHandler.state_store.put_backend_runtime(
+                    "qt_bridge",
+                    {
+                        "heartbeat_at": time.time(),
+                        "ongoing_delete_callback": True,
+                        "event_thread_alive": True,
+                    },
+                )
                 delete = client.post(
                     "/api/ongoing-items/delete",
                     headers=headers,

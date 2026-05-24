@@ -780,6 +780,13 @@
       line-height: 1;
     }
 
+    .icon-btn.confirming {
+      width: 56px;
+      min-width: 56px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
     .row-actions {
       display: flex;
       flex-wrap: wrap;
@@ -1359,6 +1366,7 @@
       qtActiveStream: null,
       qtActiveLastEventId: "",
       qtActiveSnapshotId: "",
+      qtActiveScopeSignature: "",
       refreshDebounceTimerId: 0,
       searchRenderTimerId: 0,
       draftSaveTimerId: 0,
@@ -1377,6 +1385,14 @@
         inFlight: false,
         lastAutoAt: "",
       },
+      manualRefresh: {
+        cooldownUntil: 0,
+        timerId: 0,
+      },
+      requestBackoff: {
+        failures: 0,
+        nextAllowedAt: 0,
+      },
       loading: {
         active: false,
         automatic: false,
@@ -1384,6 +1400,7 @@
       renderSeq: { records: 0, ongoing: 0, zhihang: 0 },
       expandedRecordId: "",
       expandedSummaryKey: "",
+      deleteConfirm: new Map(),
     };
 
     const WORK_TYPES = [
@@ -1412,8 +1429,11 @@
     const AUTO_REFRESH_MIN_MS = 10 * 60 * 1000;
     const AUTO_REFRESH_MAX_MS = 10 * 60 * 1000;
     const AUTO_REFRESH_JITTER_MS = 90 * 1000;
+    const MANUAL_REFRESH_COOLDOWN_MS = 1500;
+    const REQUEST_BACKOFF_MS = [3000, 8000, 20000];
     const DRAFT_SAVE_DEBOUNCE_MS = 450;
     const DEFERRED_REFRESH_RETRY_MS = 900;
+    const DELETE_CONFIRM_MS = 3000;
     const WORKSPACE_LAYOUT_KEY = "lan-workbench-layout:v1";
     const WORKSPACE_MIN_WIDTHS = { records: 300, drafts: 360, ongoing: 320 };
     let normalizeWorkspaceLayout = () => {};
@@ -1754,10 +1774,51 @@
       $("app").classList.toggle("loading", state.loading.active && !state.loading.automatic);
       $("syncTime").classList.toggle("busy", state.loading.active);
       if (text) $("syncTime").textContent = text;
+      updateRefreshButtonState();
+    }
+
+    function updateRefreshButtonState() {
+      const cooling = Date.now() < Number(state.manualRefresh.cooldownUntil || 0);
       ["refreshBtn", "refreshOngoingBtn", "repairRefreshBtn", "syncSourceBtn"].forEach((id) => {
         const btn = $(id);
-        if (btn) btn.disabled = state.loading.active;
+        if (btn) btn.disabled = Boolean(state.loading.active || cooling);
       });
+    }
+
+    function startManualRefreshCooldown() {
+      state.manualRefresh.cooldownUntil = Date.now() + MANUAL_REFRESH_COOLDOWN_MS;
+      updateRefreshButtonState();
+      if (state.manualRefresh.timerId) clearTimeout(state.manualRefresh.timerId);
+      state.manualRefresh.timerId = window.setTimeout(() => {
+        state.manualRefresh.timerId = 0;
+        updateRefreshButtonState();
+      }, MANUAL_REFRESH_COOLDOWN_MS + 50);
+    }
+
+    function recordRefreshResult(ok) {
+      if (ok) {
+        state.requestBackoff.failures = 0;
+        state.requestBackoff.nextAllowedAt = 0;
+        return;
+      }
+      state.requestBackoff.failures = Math.min(
+        REQUEST_BACKOFF_MS.length,
+        Number(state.requestBackoff.failures || 0) + 1
+      );
+      const delay = REQUEST_BACKOFF_MS[Math.max(0, state.requestBackoff.failures - 1)] || REQUEST_BACKOFF_MS[REQUEST_BACKOFF_MS.length - 1];
+      state.requestBackoff.nextAllowedAt = Date.now() + delay;
+    }
+
+    function currentRefreshBackoffDelay() {
+      return Math.max(0, Number(state.requestBackoff.nextAllowedAt || 0) - Date.now());
+    }
+
+    function runManualRefresh(task) {
+      if (Date.now() < Number(state.manualRefresh.cooldownUntil || 0)) return;
+      startManualRefreshCooldown();
+      Promise.resolve()
+        .then(task)
+        .catch(() => {});
     }
 
     function nextViewRequestSeq() {
@@ -1843,18 +1904,20 @@
     function startQtActiveItemsStream() {
       if (!window.EventSource || state.qtActiveStream) return;
       if (!state.auth.loggedIn || !state.scope || $("app").classList.contains("hidden")) return;
-      const lastEventId = state.qtActiveLastEventId
-        ? `?last_event_id=${encodeURIComponent(state.qtActiveLastEventId)}`
-        : "";
-      const stream = new EventSource(`/api/qt-active-items/stream${lastEventId}`);
+      const query = new URLSearchParams();
+      query.set("scope", state.scope || "ALL");
+      if (state.qtActiveLastEventId) query.set("last_event_id", state.qtActiveLastEventId);
+      const stream = new EventSource(`/api/qt-active-items/stream?${query.toString()}`);
       state.qtActiveStream = stream;
       stream.addEventListener("qt_active_items", (event) => {
         try {
           if (event.lastEventId) state.qtActiveLastEventId = event.lastEventId;
           const payload = JSON.parse(event.data || "{}");
           const snapshotId = String(payload.snapshot_id || "");
-          if (!snapshotId || snapshotId === state.qtActiveSnapshotId) return;
+          const scopeSignature = String(payload.scope_signature || snapshotId || "");
+          if (!scopeSignature || scopeSignature === state.qtActiveScopeSignature) return;
           state.qtActiveSnapshotId = snapshotId;
+          state.qtActiveScopeSignature = scopeSignature;
           scheduleWorkbenchRefresh(500);
         } catch (_) {}
       });
@@ -3906,9 +3969,11 @@
           return;
         }
         applyWorkbenchPayload(data, { automatic });
+        recordRefreshResult(true);
         if (!automatic) startAutoRefresh();
       } catch (err) {
         if (!isLatestViewRequest(requestSeq)) return;
+        recordRefreshResult(false);
         if (!automatic) {
           setSyncStatus(`刷新失败: ${err.message || "未知错误"}`, state.warnings);
         }
@@ -3922,10 +3987,11 @@
       if (state.refreshDebounceTimerId) {
         clearTimeout(state.refreshDebounceTimerId);
       }
+      const backoffDelay = currentRefreshBackoffDelay();
       state.refreshDebounceTimerId = window.setTimeout(() => {
         state.refreshDebounceTimerId = 0;
         refreshWorkbench({ automatic: true }).catch(() => {});
-      }, Math.max(300, Number(delayMs || 1600)));
+      }, Math.max(300, Number(delayMs || 1600), backoffDelay));
     }
 
     async function syncSource() {
@@ -3966,8 +4032,10 @@
         restoreJobState();
         loadScopeOverview();
         startAutoRefresh();
+        recordRefreshResult(true);
       } catch (err) {
         if (!isLatestViewRequest(requestSeq)) return;
+        recordRefreshResult(false);
         setSyncStatus(`同步源表失败: ${err.message || "未知错误"}`, state.warnings);
         throw err;
       } finally {
@@ -4017,8 +4085,10 @@
         restoreJobState();
         loadScopeOverview();
         startAutoRefresh();
+        recordRefreshResult(true);
       } catch (err) {
         if (!isLatestViewRequest(requestSeq)) return;
+        recordRefreshResult(false);
         setSyncStatus(`刷新检修失败: ${err.message || "未知错误"}`, state.warnings);
         throw err;
       } finally {
@@ -4835,7 +4905,7 @@
               </div>
               <div class="card-actions">
                 <span class="tag ${item.can_update ? "green" : "amber"}">${html(tagText)}</span>
-                <button class="btn danger icon-btn" data-delete-ongoing="${html(id)}" title="删除此进行中卡片">×</button>
+                <button class="btn danger icon-btn" data-delete-ongoing="${html(id)}" title="删除多维记录和 Qt 条目">×</button>
               </div>
             </div>
             <div class="form-grid ${readonly ? "hidden" : ""}">
@@ -4931,11 +5001,54 @@
       };
     }
 
+    function resetDeleteConfirm(activeItemId) {
+      const entry = state.deleteConfirm.get(activeItemId);
+      if (entry?.timerId) window.clearTimeout(entry.timerId);
+      state.deleteConfirm.delete(activeItemId);
+      const btn = document.querySelector(`[data-delete-ongoing="${CSS.escape(activeItemId)}"]`);
+      if (btn) {
+        btn.classList.remove("confirming");
+        btn.textContent = "×";
+        btn.title = "删除多维记录和 Qt 条目";
+      }
+    }
+
     async function deleteOngoing(activeItemId) {
       const item = state.ongoing.find((x) => x.active_item_id === activeItemId);
       if (!item) return;
       const card = document.querySelector(`[data-ongoing="${CSS.escape(activeItemId)}"]`);
+      const btn = document.querySelector(`[data-delete-ongoing="${CSS.escape(activeItemId)}"]`);
       const hasRemoteRecord = Boolean(item.record_id || item.target_record_id);
+      const confirmState = state.deleteConfirm.get(activeItemId);
+      if (!confirmState || Number(confirmState.expiresAt || 0) < Date.now()) {
+        resetDeleteConfirm(activeItemId);
+        const timerId = window.setTimeout(() => {
+          resetDeleteConfirm(activeItemId);
+          const line = document.querySelector(`[data-job-line="${CSS.escape(activeItemId)}"]`);
+          if (line && line.textContent.includes("再次点击确认删除")) {
+            line.className = "job-line";
+            line.textContent = "待操作";
+          }
+        }, DELETE_CONFIRM_MS);
+        state.deleteConfirm.set(activeItemId, {
+          expiresAt: Date.now() + DELETE_CONFIRM_MS,
+          timerId,
+        });
+        if (btn) {
+          btn.classList.add("confirming");
+          btn.textContent = "确认";
+          btn.title = "再次点击确认删除";
+        }
+        setJobLine(
+          activeItemId,
+          hasRemoteRecord
+            ? "再次点击确认删除：将删除对应多维记录和 Qt 条目"
+            : "再次点击确认删除：将删除 Qt 条目和页面显示",
+          "busy",
+        );
+        return;
+      }
+      resetDeleteConfirm(activeItemId);
       const confirmText = [
         `确认删除“${ongoingTitleForItem(item)}”？`,
         hasRemoteRecord ? "此操作会删除对应多维记录并删除 Qt 条目。" : "此操作只删除 Qt 条目和页面显示。",
@@ -4966,15 +5079,20 @@
           building_codes: item.building_codes || [],
           specialty: item.specialty || "",
         };
-        await api("/api/ongoing-items/delete", {
+        const data = await api("/api/ongoing-items/delete", {
           method: "POST",
           body: JSON.stringify(payload),
         });
+        const deleteQueued = Boolean(data?.qt_delete_queued);
         if (card) card.classList.add("removing");
         await new Promise((resolve) => setTimeout(resolve, 180));
         state.ongoing = state.ongoing.filter((x) => x.active_item_id !== activeItemId);
         render();
-        await refreshWorkbench({ automatic: true });
+        if (deleteQueued) {
+          window.setTimeout(() => refreshWorkbench({ automatic: true }), 2500);
+        } else {
+          await refreshWorkbench({ automatic: true });
+        }
       } catch (err) {
         if (card) card.classList.remove("removing");
         setJobLine(activeItemId, err.message || "删除失败", "failed");
@@ -5559,10 +5677,10 @@
       });
     }
 
-    $("refreshBtn").addEventListener("click", () => refreshWorkbench().catch(() => {}));
-    $("refreshOngoingBtn").addEventListener("click", () => refreshWorkbench().catch(() => {}));
-    $("repairRefreshBtn").addEventListener("click", () => refreshRepairSource().catch(() => {}));
-    $("syncSourceBtn").addEventListener("click", () => syncSource().catch(() => {}));
+    $("refreshBtn").addEventListener("click", () => runManualRefresh(() => refreshWorkbench()));
+    $("refreshOngoingBtn").addEventListener("click", () => runManualRefresh(() => refreshWorkbench()));
+    $("repairRefreshBtn").addEventListener("click", () => runManualRefresh(() => refreshRepairSource()));
+    $("syncSourceBtn").addEventListener("click", () => runManualRefresh(() => syncSource()));
     $("switchScopeBtn").addEventListener("click", () => showGate("maintenance"));
     $("homeBtn").addEventListener("click", () => showGate("home"));
     $("logoutBtn").addEventListener("click", logout);

@@ -14,6 +14,7 @@ import sys
 import threading
 import time
 from contextlib import suppress
+from collections import deque
 from pathlib import Path
 from typing import AsyncIterator
 from urllib.parse import urlencode
@@ -458,21 +459,83 @@ class FastAPIPortalController:
         self.ongoing_callback = None
         self.ongoing_delete_callback = None
         self.maintenance_action_callback = None
+        self._read_cache_lock = threading.RLock()
+        self._read_cache: dict[tuple, tuple[float, float, object]] = {}
+        self._read_cache_max_entries = 128
+        self._static_cache_lock = threading.RLock()
+        self._static_cache: dict[str, dict] = {}
+        self._rate_limit_lock = threading.RLock()
+        self._rate_limit_buckets: dict[tuple, dict] = {}
+        self._perf_lock = threading.RLock()
+        self._perf: dict[str, dict] = {}
+        self._sse_lock = threading.RLock()
+        self._sse_connections: dict[tuple, int] = {}
+        self._sse_connection_seq = 0
 
     def _build_app(self) -> FastAPI:
         app = FastAPI(title="ClipFlow LAN Backend")
+
+        @app.middleware("http")
+        async def pressure_guard(request: Request, call_next):
+            group = self._endpoint_group(request)
+            started = time.perf_counter()
+            rate_limited = False
+            if not self._rate_limit_exempt(request, group):
+                allowed, retry_after = self._consume_rate_limit(request, group)
+                if not allowed:
+                    rate_limited = True
+                    stale = self._stale_response_for_rate_limit(request)
+                    if stale is not None:
+                        self._record_endpoint_perf(
+                            request,
+                            group=group,
+                            elapsed_ms=(time.perf_counter() - started) * 1000.0,
+                            status_code=200,
+                            rate_limited=True,
+                            cache_hit=True,
+                        )
+                        return stale
+                    self._record_endpoint_perf(
+                        request,
+                        group=group,
+                        elapsed_ms=(time.perf_counter() - started) * 1000.0,
+                        status_code=429,
+                        rate_limited=True,
+                    )
+                    return JSONResponse(
+                        {
+                            "ok": False,
+                            "error": "请求过于频繁，请稍后再试。",
+                            "retry_after_seconds": retry_after,
+                        },
+                        status_code=429,
+                        headers={"Retry-After": str(max(1, int(retry_after)))},
+                    )
+            try:
+                response = await call_next(request)
+                return response
+            finally:
+                self._record_endpoint_perf(
+                    request,
+                    group=group,
+                    elapsed_ms=(time.perf_counter() - started) * 1000.0,
+                    status_code=int(getattr(locals().get("response", None), "status_code", 500) or 500),
+                    cache_hit=bool(getattr(request.state, "cache_hit", False)),
+                    cache_miss=bool(getattr(request.state, "cache_miss", False)),
+                    rate_limited=rate_limited,
+                )
 
         @app.get("/")
         async def root(request: Request):
             oauth_response = self._root_oauth_callback_response(request)
             if oauth_response is not None:
                 return oauth_response
-            return self._static_file_response(portal_index_file(), html=True)
+            return self._static_file_response(request, portal_index_file(), html=True)
 
         @app.get("/assets/{asset_path:path}")
-        async def assets(asset_path: str):
+        async def assets(asset_path: str, request: Request):
             relative = Path(*str(asset_path or "").split("/"))
-            return self._static_file_response(portal_asset_file(relative))
+            return self._static_file_response(request, portal_asset_file(relative))
 
         @app.get("/api/auth/login")
         async def auth_login(request: Request):
@@ -503,6 +566,7 @@ class FastAPIPortalController:
                 )
             except PortalError as exc:
                 return self._html_message(400, "飞书登录失败", str(exc))
+            self._clear_read_cache(("auth_status",))
             return Response(
                 status_code=302,
                 headers={
@@ -516,6 +580,7 @@ class FastAPIPortalController:
             PortalHandler.auth_manager.clear_session(
                 str(request.cookies.get(AUTH_COOKIE_NAME) or "")
             )
+            self._clear_read_cache(("auth_status",))
             return Response(
                 status_code=302,
                 headers={
@@ -529,19 +594,25 @@ class FastAPIPortalController:
             PortalHandler.auth_manager.clear_session(
                 str(request.cookies.get(AUTH_COOKIE_NAME) or "")
             )
+            self._clear_read_cache(("auth_status",))
             return JSONResponse(
                 {"ok": True, "data": {}},
                 headers={"Set-Cookie": PortalHandler.auth_manager.clear_cookie_header()},
             )
 
         @app.get("/api/health")
-        async def health() -> dict:
+        async def health(request: Request) -> dict:
+            cached = self._read_cache_get(("health",), ttl=1.5, stale_ttl=5.0)
+            if cached is not None:
+                request.state.cache_hit = True
+                return cached
+            request.state.cache_miss = True
             legacy_alive = bool(
                 self._legacy_controller
                 and self._legacy_controller.thread
                 and self._legacy_controller.thread.is_alive()
             )
-            return {
+            payload = {
                 "ok": True,
                 "data": {
                     "service": "clipflow_backend",
@@ -555,6 +626,8 @@ class FastAPIPortalController:
                     "runtime": PortalHandler.state_store.get_backend_runtime("backend") or {},
                 },
             }
+            self._read_cache_put(("health",), payload, ttl=1.5, stale_ttl=5.0)
+            return payload
 
         @app.get("/api/backend/stats")
         async def stats(request: Request):
@@ -658,6 +731,11 @@ class FastAPIPortalController:
                     "preflight": preflight if isinstance(preflight, dict) else {},
                     "token_status": token_status if isinstance(token_status, dict) else {},
                     "sqlite": sqlite_stats if isinstance(sqlite_stats, dict) else {},
+                    "read_cache": self._read_cache_stats(),
+                    "singleflight": {
+                        "payload_cache_inflight": len(PortalHandler.payload_cache_inflight),
+                    },
+                    "sse_connections": self._sse_stats(),
                     "recent_failed_jobs": recent_failed_jobs,
                     "time": time.time(),
                 },
@@ -701,6 +779,12 @@ class FastAPIPortalController:
                     "sqlite": PortalHandler.state_store.get_database_stats(),
                     "qt_active_items": PortalHandler.state_store.qt_active_items_stats(),
                     "qt_bridge": qt_bridge_payload,
+                    "endpoint_metrics": self._perf_snapshot(),
+                    "read_cache": self._read_cache_stats(),
+                    "sse_connections": self._sse_stats(),
+                    "singleflight": {
+                        "payload_cache_inflight": len(PortalHandler.payload_cache_inflight),
+                    },
                     "slow_thresholds": {
                         "qt_ui_mutation_ms": 120,
                         "qt_event_ms": 500,
@@ -824,7 +908,14 @@ class FastAPIPortalController:
             next_path = str(
                 request.query_params.get("next") or self._request_target(request)
             )
-            return {
+            session_id = str(request.cookies.get(AUTH_COOKIE_NAME) or "")
+            cache_key = ("auth_status", session_id, next_path)
+            cached = self._read_cache_get(cache_key, ttl=2.0, stale_ttl=10.0)
+            if cached is not None:
+                request.state.cache_hit = True
+                return cached
+            request.state.cache_miss = True
+            payload = {
                 "ok": True,
                 "data": PortalHandler.auth_manager.public_status(
                     session,
@@ -832,6 +923,8 @@ class FastAPIPortalController:
                     redirect_uri=f"{self._request_base_url(request)}/api/auth/feishu/callback",
                 ),
             }
+            self._read_cache_put(cache_key, payload, ttl=2.0, stale_ttl=10.0)
+            return payload
 
         @app.get("/api/jobs/recent")
         async def recent_jobs(
@@ -931,6 +1024,7 @@ class FastAPIPortalController:
             try:
                 job = PortalHandler.service.retry_action_job(normalized_job_id)
                 PortalHandler.clear_payload_cache()
+                self._clear_read_cache()
                 PortalHandler.enqueue_initial_message_or_upload_job(normalized_job_id)
                 return {
                     "ok": True,
@@ -1097,6 +1191,7 @@ class FastAPIPortalController:
                     session, request.query_params.get("scope") or "ALL"
                 )
                 refresh_result = PortalHandler.request_source_refresh(force=True)
+                self._clear_read_cache()
                 refreshed = bool(refresh_result.get("refreshed", False))
                 ongoing = self._get_ongoing(scope)
                 self._reconcile_orphan_started_items(scope, ongoing, force=True)
@@ -1119,6 +1214,7 @@ class FastAPIPortalController:
                     session, request.query_params.get("scope") or "ALL"
                 )
                 refresh_result = PortalHandler.request_repair_source_refresh()
+                self._clear_read_cache()
                 ongoing = self._get_ongoing(scope)
                 self._reconcile_orphan_started_items(scope, ongoing)
                 data = PortalHandler.service.get_bootstrap(
@@ -1174,6 +1270,7 @@ class FastAPIPortalController:
                 job_id, should_start = PortalHandler.service.create_action_job(payload)
                 if should_start:
                     PortalHandler.clear_payload_cache()
+                    self._clear_read_cache()
                     PortalHandler.enqueue_initial_message_or_upload_job(job_id)
                 job = PortalHandler.service.get_job(job_id) or {}
                 return JSONResponse(
@@ -1208,7 +1305,10 @@ class FastAPIPortalController:
                 )
                 PortalHandler.service.validate_ongoing_delete_item(payload, scope=scope)
                 callback = PortalHandler.ongoing_delete_callback
-                if callback is None:
+                bridge_delete_ready = self._qt_bridge_callback_ready(
+                    "ongoing_delete_callback"
+                )
+                if bridge_delete_ready:
                     event_id = PortalHandler.state_store.enqueue_outbox_event(
                         "qt_action",
                         {
@@ -1216,17 +1316,24 @@ class FastAPIPortalController:
                             "payload": payload,
                         },
                     )
-                    data = PortalHandler.service.hide_ongoing_item(
-                        payload,
-                        scope=scope,
-                        deleted_by=payload["_auth_open_id"],
-                    )
                     PortalHandler.clear_payload_cache()
-                    data["qt_delete_queued"] = True
-                    data["qt_event_id"] = event_id
+                    self._clear_read_cache()
+                    data = {
+                        "qt_delete_queued": True,
+                        "qt_event_id": event_id,
+                        "message": "删除请求已进入主窗口队列。",
+                    }
                     return JSONResponse(
                         {"ok": True, "data": PortalHandler._with_runtime_warnings(data)},
                         status_code=202,
+                    )
+                if callback is None:
+                    return JSONResponse(
+                        {
+                            "ok": False,
+                            "error": "主窗口删除通道未连接，请确认 Qt 主程序仍在运行。",
+                        },
+                        status_code=503,
                     )
                 try:
                     accepted = callback(payload)
@@ -1254,6 +1361,7 @@ class FastAPIPortalController:
                     )
                 )
                 PortalHandler.clear_payload_cache()
+                self._clear_read_cache()
                 data["qt_deleted"] = True
                 data["remote_deleted"] = bool(
                     accepted.get("remote_deleted")
@@ -1275,6 +1383,7 @@ class FastAPIPortalController:
                     payload.get("links") or {},
                     password=str(payload.get("password") or ""),
                 )
+                self._clear_read_cache()
                 data = PortalHandler.auth_manager.filter_handover_links(data, session)
                 return self._json_ok(request, session, data)
             except Exception as exc:
@@ -1369,6 +1478,7 @@ class FastAPIPortalController:
                     open_id=str(data.get("open_id") or ""),
                     keep_request_id=str(data.get("request_id") or ""),
                 )
+                self._clear_read_cache(("auth_status",))
                 data["notification"] = {
                     "ok": True,
                     "recipients_count": len(recipients),
@@ -1392,6 +1502,7 @@ class FastAPIPortalController:
                     code=str(payload.get("code") or ""),
                     updated_by=str(user.get("open_id") or "permission_request"),
                 )
+                self._clear_read_cache(("auth_status",))
                 refreshed_session = self._current_session(request) or session
                 return self._json_ok(
                     request,
@@ -1413,6 +1524,7 @@ class FastAPIPortalController:
                     payload.get("users") or [],
                     updated_by=str(actor.get("open_id") or ""),
                 )
+                self._clear_read_cache(("auth_status",))
                 if changed_open_ids:
                     actor_name = str(actor.get("name") or actor.get("en_name") or "管理员")
                     text = (
@@ -1534,6 +1646,7 @@ class FastAPIPortalController:
             event_status = str((event or {}).get("status") or ("done" if ok else "pending"))
             event_payload = (event or {}).get("payload") if isinstance(event, dict) else {}
             event_payload = event_payload if isinstance(event_payload, dict) else {}
+            event_kind = str(event_payload.get("kind") or "").strip()
             job_id = str(event_payload.get("job_id") or "").strip()
             if job_id:
                 if event_status == "failed":
@@ -1550,6 +1663,29 @@ class FastAPIPortalController:
                         qt_phase="outbox_retry",
                         qt_event_attempts=int((event or {}).get("attempts") or 0),
                         qt_event_error=error,
+                    )
+            if event_kind == "ongoing_delete" and ok and event_status == "done":
+                delete_payload = event_payload.get("payload")
+                delete_payload = delete_payload if isinstance(delete_payload, dict) else {}
+                try:
+                    scope = str(delete_payload.get("scope") or "ALL")
+                    data = PortalHandler.service.hide_ongoing_item(
+                        delete_payload,
+                        scope=scope,
+                        deleted_by=str(delete_payload.get("_auth_open_id") or ""),
+                    )
+                    data.update(
+                        PortalHandler.service.discard_deleted_ongoing_state(
+                            delete_payload, scope=scope
+                        )
+                    )
+                    PortalHandler.clear_payload_cache()
+                except Exception as exc:
+                    PortalHandler.state_store.mark_outbox_event(
+                        event_id,
+                        "pending",
+                        error=f"Qt 已处理删除，但本地状态清理失败: {exc}",
+                        max_attempts=3,
                     )
             return {
                 "ok": True,
@@ -1619,6 +1755,7 @@ class FastAPIPortalController:
                     deleted += 1
             if upserted or deleted:
                 PortalHandler.clear_payload_cache()
+                self._clear_read_cache()
             return {
                 "ok": True,
                 "data": {
@@ -1739,6 +1876,62 @@ class FastAPIPortalController:
             PortalHandler.message_queue_event.clear()
 
     @staticmethod
+    def _qt_bridge_callback_ready(callback_key: str) -> bool:
+        callback_key = str(callback_key or "").strip()
+        if not callback_key:
+            return False
+        try:
+            payload = PortalHandler.state_store.get_backend_runtime("qt_bridge") or {}
+            payload = payload if isinstance(payload, dict) else {}
+            heartbeat_at = float(payload.get("heartbeat_at") or 0.0)
+            if not heartbeat_at or time.time() - heartbeat_at > 20.0:
+                return False
+            return bool(payload.get(callback_key)) and bool(
+                payload.get("event_thread_alive", True)
+            )
+        except Exception:
+            return False
+
+    @staticmethod
+    def _scoped_ongoing_signature(scope: str, items: list[dict]) -> tuple[str, int]:
+        normalized_scope = PortalHandler.service._normalize_scope(scope)
+        compact: list[dict[str, str]] = []
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                if not PortalHandler.service._scope_matches_item(normalized_scope, item):
+                    continue
+            except Exception:
+                continue
+            compact.append(
+                {
+                    "active_item_id": str(item.get("active_item_id") or ""),
+                    "record_id": str(item.get("record_id") or ""),
+                    "source_record_id": str(item.get("source_record_id") or ""),
+                    "work_type": str(item.get("work_type") or ""),
+                    "notice_type": str(item.get("notice_type") or ""),
+                    "title": str(item.get("title") or ""),
+                    "upload_state": str(item.get("upload_state") or ""),
+                    "updated_at": str(
+                        item.get("updated_at")
+                        or item.get("last_updated_at")
+                        or item.get("time")
+                        or ""
+                    ),
+                }
+            )
+        compact.sort(
+            key=lambda row: (
+                row.get("active_item_id") or "",
+                row.get("record_id") or "",
+                row.get("source_record_id") or "",
+            )
+        )
+        raw = json.dumps(compact, ensure_ascii=False, sort_keys=True)
+        return hashlib.sha1(raw.encode("utf-8")).hexdigest(), len(compact)
+
+    @staticmethod
     def _is_local_client(request: Request) -> bool:
         host = str(request.client.host if request.client else "").strip()
         return host in {"127.0.0.1", "::1", "localhost", "testclient"}
@@ -1767,7 +1960,261 @@ class FastAPIPortalController:
             str(request.cookies.get(AUTH_COOKIE_NAME) or "")
         )
 
-    def _static_file_response(self, path: Path, *, html: bool = False) -> Response:
+    @staticmethod
+    def _request_session_id(request: Request) -> str:
+        return str(request.cookies.get(AUTH_COOKIE_NAME) or "").strip()
+
+    def _endpoint_group(self, request: Request) -> str:
+        path = str(request.url.path or "/")
+        method = str(request.method or "GET").upper()
+        if path.endswith("/stream"):
+            return "stream"
+        if method not in {"GET", "HEAD"}:
+            return "mutation"
+        if path == "/" or path.startswith("/assets/"):
+            return "static"
+        if path in {"/api/health", "/api/auth/status"}:
+            return "light_read"
+        if path in {
+            "/api/workbench",
+            "/api/records",
+            "/api/bootstrap",
+            "/api/scope-overview",
+            "/api/history-summary",
+            "/api/handover-links",
+        }:
+            return "heavy_read"
+        if path.startswith("/api/backend/") or path.startswith("/api/jobs/recent"):
+            return "admin_read"
+        if path.startswith("/api/"):
+            return "read"
+        return "static"
+
+    @staticmethod
+    def _rate_limit_exempt(request: Request, group: str) -> bool:
+        path = str(request.url.path or "")
+        if group == "stream":
+            return True
+        if path.startswith("/api/qt/"):
+            return True
+        return False
+
+    @staticmethod
+    def _rate_limit_params(group: str) -> tuple[float, float]:
+        if group == "mutation":
+            return 0.8, 12.0
+        if group == "heavy_read":
+            return 3.0, 18.0
+        if group == "light_read":
+            return 120.0, 240.0
+        if group == "admin_read":
+            return 2.0, 12.0
+        if group == "static":
+            return 200.0, 300.0
+        return 60.0, 120.0
+
+    def _consume_rate_limit(self, request: Request, group: str) -> tuple[bool, float]:
+        host = str(request.client.host if request.client else "unknown").strip() or "unknown"
+        session_id = self._request_session_id(request)
+        key = (host, session_id, group)
+        rate_per_second, burst = self._rate_limit_params(group)
+        now = time.monotonic()
+        with self._rate_limit_lock:
+            bucket = self._rate_limit_buckets.get(key)
+            if not bucket:
+                bucket = {"tokens": burst, "updated": now}
+                self._rate_limit_buckets[key] = bucket
+            elapsed = max(0.0, now - float(bucket.get("updated") or now))
+            tokens = min(burst, float(bucket.get("tokens") or 0.0) + elapsed * rate_per_second)
+            bucket["updated"] = now
+            if tokens >= 1.0:
+                bucket["tokens"] = tokens - 1.0
+                if len(self._rate_limit_buckets) > 2000:
+                    stale_keys = [
+                        item_key
+                        for item_key, item in self._rate_limit_buckets.items()
+                        if now - float(item.get("updated") or 0.0) > 120.0
+                    ]
+                    for item_key in stale_keys[:500]:
+                        self._rate_limit_buckets.pop(item_key, None)
+                return True, 0.0
+            bucket["tokens"] = tokens
+            retry_after = (1.0 - tokens) / max(0.1, rate_per_second)
+            return False, retry_after
+
+    def _read_cache_get(self, key: tuple, *, ttl: float, stale_ttl: float = 0.0):
+        now = time.monotonic()
+        with self._read_cache_lock:
+            cached = self._read_cache.get(tuple(key))
+            if not cached:
+                return None
+            expires_at, stale_until, payload = cached
+            if expires_at > now:
+                return payload
+            if stale_ttl and stale_until > now:
+                return payload
+            return None
+
+    def _read_cache_get_stale(self, key: tuple):
+        now = time.monotonic()
+        with self._read_cache_lock:
+            cached = self._read_cache.get(tuple(key))
+            if cached and cached[1] > now:
+                return cached[2]
+        return None
+
+    def _read_cache_put(self, key: tuple, payload, *, ttl: float = 2.0, stale_ttl: float = 10.0) -> None:
+        now = time.monotonic()
+        with self._read_cache_lock:
+            self._read_cache[tuple(key)] = (now + float(ttl), now + float(stale_ttl), payload)
+            if len(self._read_cache) <= self._read_cache_max_entries:
+                return
+            ordered = sorted(self._read_cache.items(), key=lambda item: item[1][1])
+            for old_key, _value in ordered[: max(1, len(ordered) - self._read_cache_max_entries)]:
+                self._read_cache.pop(old_key, None)
+
+    def _clear_read_cache(self, prefix: tuple | None = None) -> None:
+        with self._read_cache_lock:
+            if not prefix:
+                self._read_cache.clear()
+                return
+            prefix = tuple(prefix)
+            for key in list(self._read_cache.keys()):
+                if tuple(key[: len(prefix)]) == prefix:
+                    self._read_cache.pop(key, None)
+
+    def _read_cache_stats(self) -> dict:
+        now = time.monotonic()
+        with self._read_cache_lock:
+            fresh = 0
+            stale = 0
+            for expires_at, stale_until, _payload in self._read_cache.values():
+                if expires_at > now:
+                    fresh += 1
+                elif stale_until > now:
+                    stale += 1
+            return {
+                "entries": len(self._read_cache),
+                "fresh": fresh,
+                "stale": stale,
+                "max_entries": self._read_cache_max_entries,
+            }
+
+    def _stale_response_for_rate_limit(self, request: Request) -> JSONResponse | None:
+        path = str(request.url.path or "")
+        if str(request.method or "GET").upper() not in {"GET", "HEAD"}:
+            return None
+        if path == "/api/health":
+            payload = self._read_cache_get_stale(("health",))
+        elif path == "/api/auth/status":
+            next_path = str(request.query_params.get("next") or self._request_target(request))
+            payload = self._read_cache_get_stale(
+                ("auth_status", self._request_session_id(request), next_path)
+            )
+        else:
+            payload = None
+        if payload is None:
+            return None
+        return JSONResponse(
+            payload,
+            headers={
+                "X-ClipFlow-Stale-Cache": "1",
+                "Cache-Control": "no-store",
+            },
+        )
+
+    def _record_endpoint_perf(
+        self,
+        request: Request,
+        *,
+        group: str,
+        elapsed_ms: float,
+        status_code: int,
+        cache_hit: bool = False,
+        cache_miss: bool = False,
+        rate_limited: bool = False,
+    ) -> None:
+        path = str(request.url.path or "/")
+        method = str(request.method or "GET").upper()
+        key = f"{method} {path}"
+        with self._perf_lock:
+            item = self._perf.get(key)
+            if not item:
+                item = {
+                    "method": method,
+                    "path": path,
+                    "group": group,
+                    "count": 0,
+                    "total_ms": 0.0,
+                    "samples": deque(maxlen=200),
+                    "status_counts": {},
+                    "cache_hit": 0,
+                    "cache_miss": 0,
+                    "rate_limited": 0,
+                }
+                self._perf[key] = item
+            item["count"] += 1
+            item["total_ms"] += float(elapsed_ms)
+            item["samples"].append(float(elapsed_ms))
+            status_counts = item["status_counts"]
+            status_key = str(int(status_code or 0))
+            status_counts[status_key] = int(status_counts.get(status_key) or 0) + 1
+            if cache_hit:
+                item["cache_hit"] += 1
+            if cache_miss:
+                item["cache_miss"] += 1
+            if rate_limited:
+                item["rate_limited"] += 1
+
+    def _perf_snapshot(self) -> dict:
+        with self._perf_lock:
+            result: dict[str, dict] = {}
+            for key, item in self._perf.items():
+                samples = sorted(float(value) for value in item.get("samples") or [])
+                p95 = 0.0
+                if samples:
+                    p95 = samples[min(len(samples) - 1, int(len(samples) * 0.95))]
+                count = int(item.get("count") or 0)
+                result[key] = {
+                    "group": item.get("group") or "",
+                    "count": count,
+                    "avg_ms": round(float(item.get("total_ms") or 0.0) / max(1, count), 2),
+                    "p95_ms": round(p95, 2),
+                    "cache_hit": int(item.get("cache_hit") or 0),
+                    "cache_miss": int(item.get("cache_miss") or 0),
+                    "rate_limited": int(item.get("rate_limited") or 0),
+                    "status_counts": dict(item.get("status_counts") or {}),
+                }
+            return result
+
+    def _register_sse(self, request: Request, stream_name: str, scope: str = "") -> tuple[tuple, int]:
+        host = str(request.client.host if request.client else "unknown").strip() or "unknown"
+        session_id = self._request_session_id(request)
+        key = (stream_name, host, session_id, str(scope or ""))
+        with self._sse_lock:
+            self._sse_connection_seq += 1
+            connection_id = self._sse_connection_seq
+            self._sse_connections[key] = connection_id
+            return key, connection_id
+
+    def _sse_active(self, key: tuple, connection_id: int) -> bool:
+        with self._sse_lock:
+            return self._sse_connections.get(key) == connection_id
+
+    def _unregister_sse(self, key: tuple, connection_id: int) -> None:
+        with self._sse_lock:
+            if self._sse_connections.get(key) == connection_id:
+                self._sse_connections.pop(key, None)
+
+    def _sse_stats(self) -> dict:
+        with self._sse_lock:
+            by_stream: dict[str, int] = {}
+            for key in self._sse_connections:
+                stream = str(key[0] if key else "unknown")
+                by_stream[stream] = by_stream.get(stream, 0) + 1
+            return {"connections": len(self._sse_connections), "by_stream": by_stream}
+
+    def _static_file_response(self, request: Request, path: Path, *, html: bool = False) -> Response:
         resolved = Path(path).resolve()
         allowed = False
         for static_root in portal_static_roots():
@@ -1781,13 +2228,39 @@ class FastAPIPortalController:
             return JSONResponse({"ok": False, "error": "Not Found"}, status_code=404)
         if not resolved.is_file():
             return JSONResponse({"ok": False, "error": "Not Found"}, status_code=404)
-        content_type = "text/html; charset=utf-8" if html else (
-            mimetypes.guess_type(str(resolved))[0] or "application/octet-stream"
-        )
-        headers = {"Content-Type": content_type}
-        if not html:
-            headers["Cache-Control"] = "public, max-age=86400"
-        return Response(content=resolved.read_bytes(), status_code=200, headers=headers)
+        stat = resolved.stat()
+        cache_key = str(resolved)
+        with self._static_cache_lock:
+            cached = self._static_cache.get(cache_key)
+            if (
+                cached
+                and cached.get("mtime_ns") == stat.st_mtime_ns
+                and cached.get("size") == stat.st_size
+            ):
+                entry = cached
+            else:
+                content = resolved.read_bytes()
+                etag = hashlib.sha1(
+                    f"{resolved}:{stat.st_mtime_ns}:{stat.st_size}".encode("utf-8")
+                ).hexdigest()
+                entry = {
+                    "mtime_ns": stat.st_mtime_ns,
+                    "size": stat.st_size,
+                    "content": content,
+                    "etag": f'"{etag}"',
+                    "content_type": "text/html; charset=utf-8"
+                    if html
+                    else (mimetypes.guess_type(str(resolved))[0] or "application/octet-stream"),
+                }
+                self._static_cache[cache_key] = entry
+        headers = {
+            "Content-Type": str(entry.get("content_type") or "application/octet-stream"),
+            "ETag": str(entry.get("etag") or ""),
+            "Cache-Control": "no-store" if html else "public, max-age=86400",
+        }
+        if str(request.headers.get("if-none-match") or "").strip() == headers["ETag"]:
+            return Response(status_code=304, headers=headers)
+        return Response(content=entry.get("content") or b"", status_code=200, headers=headers)
 
     @staticmethod
     def _html_message(status: int, title: str, message: str) -> Response:
@@ -1829,6 +2302,7 @@ class FastAPIPortalController:
             )
         except PortalError as exc:
             return self._html_message(400, "飞书登录失败", str(exc))
+        self._clear_read_cache(("auth_status",))
         return Response(
             status_code=302,
             headers={
@@ -2207,38 +2681,42 @@ class FastAPIPortalController:
             minimum=0.5,
             maximum=10.0,
         )
-        while not await request.is_disconnected():
-            payload: dict
-            if job_id:
-                job = PortalHandler.service.get_job(job_id) or {}
-                if not job:
-                    payload = {
-                        "job_id": job_id,
-                        "job": {
+        sse_key, sse_id = self._register_sse(request, "jobs", job_id)
+        try:
+            while self._sse_active(sse_key, sse_id) and not await request.is_disconnected():
+                payload: dict
+                if job_id:
+                    job = PortalHandler.service.get_job(job_id) or {}
+                    if not job:
+                        payload = {
                             "job_id": job_id,
-                            "phase": "failed",
-                            "error": "任务状态已丢失，请核对多维后重试。",
-                        },
-                    }
-                elif not self._job_visible_to_session(job, session):
-                    payload = {
-                        "job_id": job_id,
-                        "job": {"job_id": job_id, "phase": "failed", "error": "无权查看该任务。"},
-                    }
-                    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-                    yield f"event: job\ndata: {raw}\n\n".encode("utf-8")
-                    return
+                            "job": {
+                                "job_id": job_id,
+                                "phase": "failed",
+                                "error": "任务状态已丢失，请核对多维后重试。",
+                            },
+                        }
+                    elif not self._job_visible_to_session(job, session):
+                        payload = {
+                            "job_id": job_id,
+                            "job": {"job_id": job_id, "phase": "failed", "error": "无权查看该任务。"},
+                        }
+                        raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+                        yield f"event: job\ndata: {raw}\n\n".encode("utf-8")
+                        return
+                    else:
+                        job["job_id"] = str(job.get("job_id") or job_id)
+                        payload = {"job_id": job_id, "job": job}
                 else:
-                    job["job_id"] = str(job.get("job_id") or job_id)
-                    payload = {"job_id": job_id, "job": job}
-            else:
-                payload = {"stats": _queue_stats(), "time": time.time()}
-            raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-            if raw != last_payload:
-                event_id = hashlib.sha1(raw.encode("utf-8")).hexdigest()
-                yield f"id: {event_id}\nevent: job\ndata: {raw}\n\n".encode("utf-8")
-                last_payload = raw
-            await asyncio.sleep(interval_s)
+                    payload = {"stats": _queue_stats(), "time": time.time()}
+                raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+                if raw != last_payload:
+                    event_id = hashlib.sha1(raw.encode("utf-8")).hexdigest()
+                    yield f"id: {event_id}\nevent: job\ndata: {raw}\n\n".encode("utf-8")
+                    last_payload = raw
+                await asyncio.sleep(interval_s)
+        finally:
+            self._unregister_sse(sse_key, sse_id)
 
     async def _heartbeat_stream(
         self, request: Request, *, event_name: str
@@ -2254,32 +2732,36 @@ class FastAPIPortalController:
 
     async def _qt_event_stream(self, request: Request) -> AsyncIterator[bytes]:
         last_heartbeat = 0.0
-        while not await request.is_disconnected():
-            items = await asyncio.to_thread(
-                PortalHandler.state_store.lease_outbox_events,
-                "qt_action",
-                limit=1,
-                lease_seconds=30,
-            )
-            if items:
-                for item in items:
-                    raw = json.dumps(item, ensure_ascii=False, sort_keys=True)
-                    event_id = int(item.get("id") or 0)
-                    yield (
-                        f"id: {event_id}\nevent: qt_event\ndata: {raw}\n\n"
-                    ).encode("utf-8")
-                await asyncio.sleep(0.05)
-                continue
-            now = time.monotonic()
-            if now - last_heartbeat >= 3.0:
-                last_heartbeat = now
-                payload = json.dumps(
-                    {"time": time.time(), "stats": _queue_stats()},
-                    ensure_ascii=False,
-                    sort_keys=True,
+        sse_key, sse_id = self._register_sse(request, "qt_events")
+        try:
+            while self._sse_active(sse_key, sse_id) and not await request.is_disconnected():
+                items = await asyncio.to_thread(
+                    PortalHandler.state_store.lease_outbox_events,
+                    "qt_action",
+                    limit=1,
+                    lease_seconds=30,
                 )
-                yield f"event: heartbeat\ndata: {payload}\n\n".encode("utf-8")
-            await asyncio.sleep(0.5)
+                if items:
+                    for item in items:
+                        raw = json.dumps(item, ensure_ascii=False, sort_keys=True)
+                        event_id = int(item.get("id") or 0)
+                        yield (
+                            f"id: {event_id}\nevent: qt_event\ndata: {raw}\n\n"
+                        ).encode("utf-8")
+                    await asyncio.sleep(0.05)
+                    continue
+                now = time.monotonic()
+                if now - last_heartbeat >= 3.0:
+                    last_heartbeat = now
+                    payload = json.dumps(
+                        {"time": time.time(), "stats": _queue_stats()},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    )
+                    yield f"event: heartbeat\ndata: {payload}\n\n".encode("utf-8")
+                await asyncio.sleep(0.5)
+        finally:
+            self._unregister_sse(sse_key, sse_id)
 
     async def _qt_active_items_stream(self, request: Request) -> AsyncIterator[bytes]:
         session = self._current_session(request)
@@ -2290,28 +2772,49 @@ class FastAPIPortalController:
             )
             yield f"event: error\ndata: {payload}\n\n".encode("utf-8")
             return
-        last_payload = ""
-        while not await request.is_disconnected():
-            snapshot = PortalHandler.state_store.get_ongoing_snapshot()
-            qt_active_items = PortalHandler.state_store.qt_active_items_stats()
-            payload = json.dumps(
-                {
-                    "snapshot_id": snapshot.get("snapshot_id", ""),
-                    "count": snapshot.get("count", 0),
-                    "updated_at": snapshot.get("updated_at", 0),
-                    "qt_active_items": qt_active_items,
-                    "time": time.time(),
-                },
-                ensure_ascii=False,
-                sort_keys=True,
+        try:
+            scope = self._authorized_scope_or_error(
+                session, request.query_params.get("scope") or "ALL"
             )
-            if payload != last_payload:
-                event_id = hashlib.sha1(payload.encode("utf-8")).hexdigest()
-                yield (
-                    f"id: {event_id}\nevent: qt_active_items\ndata: {payload}\n\n"
-                ).encode("utf-8")
-                last_payload = payload
-            await asyncio.sleep(3.0)
+        except Exception as exc:
+            payload = json.dumps(
+                {"ok": False, "error": str(exc), "auth_required": False},
+                ensure_ascii=False,
+            )
+            yield f"event: error\ndata: {payload}\n\n".encode("utf-8")
+            return
+        last_payload = ""
+        sse_key, sse_id = self._register_sse(request, "qt_active_items", scope)
+        try:
+            while self._sse_active(sse_key, sse_id) and not await request.is_disconnected():
+                snapshot = PortalHandler.state_store.get_ongoing_snapshot()
+                scoped_signature, scoped_count = self._scoped_ongoing_signature(
+                    scope, list(snapshot.get("items") or [])
+                )
+                qt_active_items = dict(PortalHandler.state_store.qt_active_items_stats())
+                qt_active_items.pop("checked_at", None)
+                payload = json.dumps(
+                    {
+                        "scope": scope,
+                        "snapshot_id": snapshot.get("snapshot_id", ""),
+                        "count": snapshot.get("count", 0),
+                        "scope_count": scoped_count,
+                        "scope_signature": scoped_signature,
+                        "updated_at": snapshot.get("updated_at", 0),
+                        "qt_active_items": qt_active_items,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                if payload != last_payload:
+                    event_id = hashlib.sha1(payload.encode("utf-8")).hexdigest()
+                    yield (
+                        f"id: {event_id}\nevent: qt_active_items\ndata: {payload}\n\n"
+                    ).encode("utf-8")
+                    last_payload = payload
+                await asyncio.sleep(3.0)
+        finally:
+            self._unregister_sse(sse_key, sse_id)
 
     async def _proxy_request(self, path: str, request: Request) -> Response:
         if not self._legacy_url:

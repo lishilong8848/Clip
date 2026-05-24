@@ -334,6 +334,13 @@ class MainWindowUiMixin:
         view.setSpacing(2)
         view.setUniformItemSizes(False)
         view.setObjectName("ActiveNoticeView")
+        view.setStyleSheet(
+            "QListView#ActiveNoticeView { background: transparent; border: none; outline: 0; }"
+        )
+        try:
+            view.viewport().setAutoFillBackground(False)
+        except Exception:
+            pass
         if model is not None:
             model.recordActivated.connect(
                 lambda data, lw=backing_list: self._open_active_model_record(lw, data)
@@ -441,6 +448,18 @@ class MainWindowUiMixin:
         if not widget:
             return
         if getattr(self, "_disable_effects", False):
+            return
+        if isinstance(widget, QAbstractItemView):
+            # QGraphicsOpacityEffect can leave native item-view viewports white or
+            # transparent after rapid stacked-widget switches. Keep list repainting
+            # plain and immediate; the tab button state still provides feedback.
+            if isinstance(widget.graphicsEffect(), QGraphicsOpacityEffect):
+                widget.setGraphicsEffect(None)
+            try:
+                widget.viewport().update()
+            except Exception:
+                pass
+            widget.update()
             return
         effect = widget.graphicsEffect()
         if not isinstance(effect, QGraphicsOpacityEffect):
@@ -866,6 +885,7 @@ class MainWindowUiMixin:
         block_reason = self._dialog_block_reason("screenshot")
         if block_reason:
             self.show_message(block_reason)
+            self.restore_button_state(record_id=data.get("record_id") if data else None)
             return
         if not config.user_token:
             self.show_message("未配置飞书用户令牌。")
@@ -955,14 +975,15 @@ class MainWindowUiMixin:
         self.show()
 
     def on_screenshot_cancelled(self):
+        record_id = self.current_screenshot_record_id
         self._set_delete_interaction_enabled(True)
         self._resume_clipboard_timer()
-        if self.current_screenshot_record_id:
+        if record_id:
             self.restore_button_state(
-                success=False, record_id=self.current_screenshot_record_id
+                success=False, record_id=record_id
             )
-        if self.current_screenshot_record_id:
-            self.pending_new_by_record_id.pop(self.current_screenshot_record_id, None)
+            self.pending_new_by_record_id.pop(record_id, None)
+        self.current_screenshot_record_id = None
         self.current_screenshot_action_type = None
         # 截图取消时恢复显示主界面
         self.show()
