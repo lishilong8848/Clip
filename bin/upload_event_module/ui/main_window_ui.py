@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QPushButton,
     QLabel,
+    QListView,
     QListWidget,
     QListWidgetItem,
     QStackedWidget,
@@ -17,6 +18,7 @@ from PyQt6.QtWidgets import (
     QApplication,
     QFrame,
     QMenu,
+    QAbstractItemView,
     QGraphicsOpacityEffect,
     QGraphicsDropShadowEffect,
     QCheckBox,
@@ -40,6 +42,7 @@ from lan_bitable_template_portal.state_store import LanPortalStateStore
 from .styles import get_stylesheet
 from .widgets import HistoryItemWidget
 from .dialogs import AddDialog
+from .active_notice_delegate import ActiveNoticeDelegate
 from .display_state import normalize_active_item_data
 from .common import show_toast_message
 
@@ -176,8 +179,18 @@ class MainWindowUiMixin:
         self._init_list_widget(self.list_active_event)
         self.list_active_other = QListWidget()
         self._init_list_widget(self.list_active_other)
-        self.active_stack.addWidget(self.list_active_event)
-        self.active_stack.addWidget(self.list_active_other)
+        if self._active_model_view_visible():
+            self.view_active_event = QListView()
+            self._init_active_model_view(self.view_active_event, self.list_active_event)
+            self.view_active_other = QListView()
+            self._init_active_model_view(self.view_active_other, self.list_active_other)
+            self.active_stack.addWidget(self.view_active_event)
+            self.active_stack.addWidget(self.view_active_other)
+        else:
+            self.view_active_event = None
+            self.view_active_other = None
+            self.active_stack.addWidget(self.list_active_event)
+            self.active_stack.addWidget(self.list_active_other)
         active_layout.addWidget(self.active_stack)
 
         self.history_container = QWidget()
@@ -263,6 +276,128 @@ class MainWindowUiMixin:
         self.set_notice_tab("event")
         self._refresh_patch_button()
 
+    def _active_model_view_visible(self) -> bool:
+        if os.environ.get("CLIPFLOW_LEGACY_QT_WIDGET_LIST") == "1":
+            return False
+        if os.environ.get("CLIPFLOW_DISABLE_QT_MODEL_VIEW") == "1":
+            return False
+        enabled = getattr(self, "_active_notice_model_enabled", None)
+        return bool(enabled() if callable(enabled) else True)
+
+    def _active_stack_widget_for_tab(self, is_event: bool):
+        if self._active_model_view_visible() and getattr(self, "view_active_event", None):
+            return self.view_active_event if is_event else self.view_active_other
+        return self.list_active_event if is_event else self.list_active_other
+
+    def _current_visible_content_widget(self):
+        if self._is_active_view():
+            return self._active_stack_widget_for_tab(self.notice_tab == "event")
+        return self._current_list_widget()
+
+    def _active_view_for_backing_list(self, list_widget):
+        if not self._active_model_view_visible():
+            return None
+        if list_widget is getattr(self, "list_active_event", None):
+            return getattr(self, "view_active_event", None)
+        if list_widget is getattr(self, "list_active_other", None):
+            return getattr(self, "view_active_other", None)
+        return None
+
+    def _scroll_active_model_view_to_item(self, list_widget, item):
+        view = self._active_view_for_backing_list(list_widget)
+        if not view or not item or not self._is_valid_list_item(item):
+            return
+        model = view.model()
+        if model is None:
+            return
+        try:
+            row = list_widget.row(item)
+            if row < 0:
+                return
+            index = model.index(row, 0)
+            if not index.isValid():
+                return
+            view.setCurrentIndex(index)
+            view.scrollTo(index)
+        except Exception:
+            return
+
+    def _init_active_model_view(self, view: QListView, backing_list: QListWidget):
+        model = self._active_notice_model_for_list(backing_list)
+        view.setModel(model)
+        view.setItemDelegate(ActiveNoticeDelegate(view))
+        view.setMouseTracking(True)
+        view.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        view.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        view.setSpacing(2)
+        view.setUniformItemSizes(False)
+        view.setObjectName("ActiveNoticeView")
+        if model is not None:
+            model.recordActivated.connect(
+                lambda data, lw=backing_list: self._open_active_model_record(lw, data)
+            )
+            model.actionRequested.connect(
+                lambda data, action, lw=backing_list: self._handle_active_model_action(
+                    lw, data, action
+                )
+            )
+            model.todayProgressRequested.connect(
+                lambda data, state, lw=backing_list: self._handle_active_model_today(
+                    lw, data, state
+                )
+            )
+            model.deleteRequested.connect(
+                lambda data, lw=backing_list: self._handle_active_model_delete(lw, data)
+            )
+
+    def _active_model_current_data(self, backing_list: QListWidget, data_dict: dict):
+        item = self._active_model_backing_item(backing_list, data_dict)
+        if item and self._is_valid_list_item(item):
+            try:
+                current = item.data(Qt.ItemDataRole.UserRole)
+            except Exception:
+                current = None
+            if isinstance(current, dict):
+                return item, current
+        return item, data_dict if isinstance(data_dict, dict) else {}
+
+    def _active_model_backing_item(self, backing_list: QListWidget, data_dict: dict):
+        if not isinstance(data_dict, dict):
+            return None
+        active_item_id = str(data_dict.get("active_item_id") or "").strip()
+        record_id = str(data_dict.get("record_id") or "").strip()
+        candidates = []
+        if active_item_id:
+            candidates.append(self._find_active_item_by_active_item_id(active_item_id))
+        if record_id:
+            candidates.append(self._find_active_item_by_record_id(record_id))
+        for list_widget, item in candidates:
+            if list_widget is backing_list and item and self._is_valid_list_item(item):
+                return item
+        return None
+
+    def _open_active_model_record(self, backing_list: QListWidget, data_dict: dict):
+        item, _current = self._active_model_current_data(backing_list, data_dict)
+        if item and self._is_valid_list_item(item):
+            self.on_item_clicked(item)
+
+    def _handle_active_model_action(self, backing_list: QListWidget, data_dict: dict, action: str):
+        _item, current = self._active_model_current_data(backing_list, data_dict)
+        if isinstance(current, dict) and action:
+            self.handle_action(dict(current), action)
+
+    def _handle_active_model_today(self, backing_list: QListWidget, data_dict: dict, state: str):
+        _item, current = self._active_model_current_data(backing_list, data_dict)
+        if isinstance(current, dict) and state:
+            self._handle_today_in_progress_toggle(dict(current), state)
+
+    def _handle_active_model_delete(self, backing_list: QListWidget, data_dict: dict):
+        _item, current = self._active_model_current_data(backing_list, data_dict)
+        if isinstance(current, dict):
+            self._delete_active_item(dict(current))
+
     def _current_list_widget(self):
         if self._is_active_view():
             return (
@@ -292,13 +427,15 @@ class MainWindowUiMixin:
         self._refresh_tab_button(self.event_tab_btn)
         self._refresh_tab_button(self.other_tab_btn)
 
-        self.active_stack.setCurrentWidget(
-            self.list_active_event if is_event else self.list_active_other
-        )
+        self.active_stack.setCurrentWidget(self._active_stack_widget_for_tab(is_event))
         self.history_stack.setCurrentWidget(
             self.list_history_event if is_event else self.list_history_other
         )
-        self._fade_in_widget(self._current_list_widget())
+        current_list = self._current_list_widget()
+        self._fade_in_widget(self._current_visible_content_widget())
+        if hasattr(self, "_schedule_active_list_virtualization_refresh"):
+            self._schedule_active_list_virtualization_refresh(current_list, 0)
+            self._schedule_active_list_virtualization_refresh(current_list, 250)
 
     def _fade_in_widget(self, widget):
         if not widget:
@@ -336,11 +473,17 @@ class MainWindowUiMixin:
         list_widget.insertItem(0, item)
         if widget:
             list_widget.setItemWidget(item, widget)
+        if hasattr(self, "_sync_active_notice_model_for_list"):
+            self._sync_active_notice_model_for_list(list_widget)
         try:
             list_widget.setCurrentItem(item)
             list_widget.scrollToItem(item)
+            self._scroll_active_model_view_to_item(list_widget, item)
         except Exception:
             return
+        if hasattr(self, "_schedule_active_list_virtualization_refresh"):
+            self._schedule_active_list_virtualization_refresh(list_widget, 0)
+            self._schedule_active_list_virtualization_refresh(list_widget, 250)
 
     def _set_view_mode(self, active):
         if active:
@@ -356,7 +499,11 @@ class MainWindowUiMixin:
             self.nav_btn.setText("返回")
             self.clear_btn.show()
             self.add_btn.hide()
-        self._fade_in_widget(self._current_list_widget())
+        current_list = self._current_list_widget()
+        self._fade_in_widget(self._current_visible_content_widget())
+        if hasattr(self, "_schedule_active_list_virtualization_refresh"):
+            self._schedule_active_list_virtualization_refresh(current_list, 0)
+            self._schedule_active_list_virtualization_refresh(current_list, 250)
 
     def _focus_event_tab(self, switch_to_active=True):
         self.set_notice_tab("event")
@@ -391,6 +538,9 @@ class MainWindowUiMixin:
             try:
                 if list_widget.row(item) != -1:
                     list_widget.scrollToItem(item)
+                    self._scroll_active_model_view_to_item(list_widget, item)
+                    if hasattr(self, "_schedule_active_list_virtualization_refresh"):
+                        self._schedule_active_list_virtualization_refresh(list_widget, 0)
             except Exception:
                 return
 
@@ -945,7 +1095,11 @@ class MainWindowUiMixin:
     def _set_delete_interaction_enabled(self, enabled: bool):
         enabled = bool(enabled)
         self._delete_interaction_enabled = enabled
-        for list_widget, item in self._iter_active_items():
+        try:
+            entries = self._active_notice_store().entries()
+        except Exception:
+            entries = []
+        for list_widget, item, _data in entries:
             widget = self._safe_item_widget(list_widget, item)
             if not widget or not hasattr(widget, "set_delete_interaction_enabled"):
                 continue

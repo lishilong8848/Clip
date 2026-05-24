@@ -57,6 +57,7 @@ DEFAULT_GROUP_NAME_EVENT_I3 = ""  # I3事件群名称
 DEFAULT_GROUP_NAME_EVENT_PROMPT = ""  # 事件提示群名称
 DEFAULT_LAN_TEMPLATE_PORTAL_HOST = "0.0.0.0"  # 局域网模板页面监听IP
 DEFAULT_LAN_TEMPLATE_PORTAL_PORT = 18766  # 局域网模板页面默认端口
+DEFAULT_LAN_LOW_PERFORMANCE_MODE = False  # 局域网通告降压模式
 
 CONFIG_FILE = get_data_file_path("config.json")
 
@@ -110,6 +111,7 @@ class ConfigManager:
         self.group_name_event_prompt = DEFAULT_GROUP_NAME_EVENT_PROMPT
         self.lan_template_portal_host = DEFAULT_LAN_TEMPLATE_PORTAL_HOST
         self.lan_template_portal_port = DEFAULT_LAN_TEMPLATE_PORTAL_PORT
+        self.lan_low_performance_mode = DEFAULT_LAN_LOW_PERFORMANCE_MODE
         migrate_legacy_data_file("config.json")
         self.load()
 
@@ -337,6 +339,12 @@ class ConfigManager:
                         self.lan_template_portal_port = DEFAULT_LAN_TEMPLATE_PORTAL_PORT
                     if self.lan_template_portal_port <= 0:
                         self.lan_template_portal_port = DEFAULT_LAN_TEMPLATE_PORTAL_PORT
+                    self.lan_low_performance_mode = bool(
+                        config_data.get(
+                            "lan_low_performance_mode",
+                            DEFAULT_LAN_LOW_PERFORMANCE_MODE,
+                        )
+                    )
                     log_info("系统: SQLite配置加载成功")
         except Exception as e:
             log_error(f"系统: 配置加载失败: {e}")
@@ -362,6 +370,7 @@ class ConfigManager:
         group_name_event_prompt=None,
         lan_template_portal_host=None,
         lan_template_portal_port=None,
+        lan_low_performance_mode=None,
         disable_hot_reload=None,
         disable_alerts=None,
         disable_speech=None,
@@ -467,6 +476,11 @@ class ConfigManager:
                 new_lan_template_portal_port = self.lan_template_portal_port
             if new_lan_template_portal_port <= 0:
                 new_lan_template_portal_port = DEFAULT_LAN_TEMPLATE_PORTAL_PORT
+            new_lan_low_performance_mode = (
+                bool(lan_low_performance_mode)
+                if lan_low_performance_mode is not None
+                else self.lan_low_performance_mode
+            )
             new_disable_hot_reload = (
                 disable_hot_reload
                 if disable_hot_reload is not None
@@ -601,6 +615,7 @@ class ConfigManager:
                 "group_name_event_prompt": new_group_name_event_prompt,
                 "lan_template_portal_host": new_lan_template_portal_host,
                 "lan_template_portal_port": new_lan_template_portal_port,
+                "lan_low_performance_mode": new_lan_low_performance_mode,
                 "disable_hot_reload": new_disable_hot_reload,
                 "disable_alerts": new_disable_alerts,
                 "disable_speech": new_disable_speech,
@@ -651,6 +666,7 @@ class ConfigManager:
             self.group_name_event_prompt = new_group_name_event_prompt
             self.lan_template_portal_host = new_lan_template_portal_host
             self.lan_template_portal_port = new_lan_template_portal_port
+            self.lan_low_performance_mode = new_lan_low_performance_mode
             self.disable_hot_reload = new_disable_hot_reload
             self.disable_alerts = new_disable_alerts
             self.disable_speech = new_disable_speech

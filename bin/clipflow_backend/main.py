@@ -28,8 +28,10 @@ from lan_bitable_template_portal.server import (
     MAX_JSON_BODY_BYTES,
     PortalHandler,
     PortalServerController,
-    STATIC_DIR,
     find_available_port,
+    portal_asset_file,
+    portal_index_file,
+    portal_static_roots,
 )
 from lan_bitable_template_portal.portal_auth import AUTH_COOKIE_NAME
 from lan_bitable_template_portal.portal_service import (
@@ -111,6 +113,14 @@ def _mock_external_enabled() -> bool:
     return os.environ.get("CLIPFLOW_BACKEND_MOCK_EXTERNAL") == "1"
 
 
+def _env_float(name: str, default: float, *, minimum: float, maximum: float) -> float:
+    try:
+        value = float(str(os.environ.get(name, "") or "").strip() or default)
+    except Exception:
+        value = float(default)
+    return max(float(minimum), min(float(maximum), value))
+
+
 def _external_guard_status() -> dict:
     return external_real_write_guard()
 
@@ -182,6 +192,10 @@ def _queue_stats() -> dict:
         "repair_refresh_inflight": repair_refresh_inflight,
         "payload_cache_entries": len(PortalHandler.payload_cache),
         "runtime_limits": PortalHandler.runtime_limits(),
+        "runtime_pressure": PortalHandler.runtime_pressure(),
+        "sqlite_write_worker": PortalHandler.state_store.get_write_worker_stats(),
+        "runtime_queue_counts": PortalHandler.state_store.runtime_queue_counts(),
+        "runtime_queue_details": PortalHandler.state_store.runtime_queue_details(),
     }
 
 
@@ -453,12 +467,12 @@ class FastAPIPortalController:
             oauth_response = self._root_oauth_callback_response(request)
             if oauth_response is not None:
                 return oauth_response
-            return self._static_file_response(STATIC_DIR / "index.html", html=True)
+            return self._static_file_response(portal_index_file(), html=True)
 
         @app.get("/assets/{asset_path:path}")
         async def assets(asset_path: str):
             relative = Path(*str(asset_path or "").split("/"))
-            return self._static_file_response(STATIC_DIR / "assets" / relative)
+            return self._static_file_response(portal_asset_file(relative))
 
         @app.get("/api/auth/login")
         async def auth_login(request: Request):
@@ -649,6 +663,54 @@ class FastAPIPortalController:
                 },
             }
 
+        @app.get("/api/backend/queues")
+        async def backend_queues(request: Request):
+            admin_response, _session = self._require_admin_response(request)
+            if admin_response is not None:
+                return admin_response
+            service = PortalHandler.service
+            job_phase_counts: dict[str, int] = {}
+            with suppress(Exception):
+                with service._jobs_lock:
+                    for job in service._jobs.values():
+                        if not isinstance(job, dict):
+                            continue
+                        phase = str(job.get("phase") or "unknown").strip() or "unknown"
+                        job_phase_counts[phase] = job_phase_counts.get(phase, 0) + 1
+            return {
+                "ok": True,
+                "data": {
+                    **_queue_stats(),
+                    "job_phase_counts": job_phase_counts,
+                    "qt_active_items": PortalHandler.state_store.qt_active_items_stats(),
+                    "time": time.time(),
+                },
+            }
+
+        @app.get("/api/backend/perf")
+        async def backend_perf(request: Request):
+            admin_response, _session = self._require_admin_response(request)
+            if admin_response is not None:
+                return admin_response
+            qt_bridge = PortalHandler.state_store.get_backend_runtime("qt_bridge") or {}
+            qt_bridge_payload = dict(qt_bridge) if isinstance(qt_bridge, dict) else {}
+            return {
+                "ok": True,
+                "data": {
+                    "queues": _queue_stats(),
+                    "sqlite": PortalHandler.state_store.get_database_stats(),
+                    "qt_active_items": PortalHandler.state_store.qt_active_items_stats(),
+                    "qt_bridge": qt_bridge_payload,
+                    "slow_thresholds": {
+                        "qt_ui_mutation_ms": 120,
+                        "qt_event_ms": 500,
+                        "sqlite_write_ms": 100,
+                        "remote_http_ms": 3000,
+                    },
+                    "time": time.time(),
+                },
+            }
+
         @app.post("/api/backend/preflight")
         async def backend_preflight(request: Request):
             admin_response, _session = self._require_admin_response(request)
@@ -725,13 +787,13 @@ class FastAPIPortalController:
                     cwd=os.fspath(Path(__file__).resolve().parents[1]),
                     capture_output=True,
                     text=True,
-                    timeout=30,
+                    timeout=60,
                     check=False,
                     **run_kwargs,
                 )
             except subprocess.TimeoutExpired:
                 return JSONResponse(
-                    {"ok": False, "error": "mock 压测超过 30 秒，已中止。"},
+                    {"ok": False, "error": "mock 压测超过 60 秒，已中止。"},
                     status_code=504,
                 )
             if completed.returncode != 0:
@@ -746,6 +808,14 @@ class FastAPIPortalController:
                 data = json.loads(completed.stdout or "{}")
             except Exception:
                 data = {"raw_output": completed.stdout}
+            if isinstance(data, dict) and isinstance(data.get("runs"), list):
+                runs = [item for item in data.get("runs") or [] if isinstance(item, dict)]
+                if runs:
+                    summary = dict(data)
+                    flattened = dict(runs[0])
+                    flattened["summary"] = summary
+                    flattened["ok"] = bool(summary.get("ok", flattened.get("ok", True)))
+                    data = flattened
             return {"ok": True, "data": data}
 
         @app.get("/api/auth/status")
@@ -1436,6 +1506,17 @@ class FastAPIPortalController:
             )
             return {"ok": True, "data": {"items": items}}
 
+        @app.get("/api/qt/events/stream")
+        async def qt_events_stream(request: Request):
+            deny = self._local_only_response(request)
+            if deny is not None:
+                return deny
+            return StreamingResponse(
+                self._qt_event_stream(request),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-store"},
+            )
+
         @app.post("/api/qt/events/{event_id}/ack")
         async def qt_event_ack(event_id: int, request: Request):
             deny = self._local_only_response(request)
@@ -1491,6 +1572,61 @@ class FastAPIPortalController:
             )
             PortalHandler.clear_payload_cache()
             return {"ok": True, "data": result}
+
+        @app.post("/api/qt/active-items/delta")
+        async def qt_active_items_delta(request: Request):
+            deny = self._local_only_response(request)
+            if deny is not None:
+                return deny
+            payload = await request.json()
+            payload = payload if isinstance(payload, dict) else {}
+            upserts = payload.get("upserts") or payload.get("items") or []
+            deletes = payload.get("deletes") or payload.get("deleted") or []
+            if not isinstance(upserts, list):
+                upserts = []
+            if not isinstance(deletes, list):
+                deletes = []
+            upserted = 0
+            deleted = 0
+            for entry in upserts:
+                if not isinstance(entry, dict):
+                    continue
+                data = entry.get("data") if isinstance(entry.get("data"), dict) else entry
+                section = str(entry.get("section") or "").strip()
+                origin = str(entry.get("origin") or "qt").strip() or "qt"
+                try:
+                    sort_order = int(entry.get("sort_order") or 0)
+                except Exception:
+                    sort_order = 0
+                if PortalHandler.state_store.upsert_qt_active_item(
+                    data,
+                    section=section,
+                    sort_order=sort_order,
+                    origin=origin,
+                ):
+                    upserted += 1
+            for entry in deletes:
+                if isinstance(entry, dict):
+                    active_item_id = str(entry.get("active_item_id") or "").strip()
+                    record_id = str(entry.get("record_id") or "").strip()
+                else:
+                    active_item_id = str(entry or "").strip()
+                    record_id = ""
+                if PortalHandler.state_store.delete_qt_active_item(
+                    active_item_id=active_item_id,
+                    record_id=record_id,
+                ):
+                    deleted += 1
+            if upserted or deleted:
+                PortalHandler.clear_payload_cache()
+            return {
+                "ok": True,
+                "data": {
+                    "upserted": upserted,
+                    "deleted": deleted,
+                    "qt_active_items": PortalHandler.state_store.qt_active_items_stats(),
+                },
+            }
 
         @app.post("/api/qt/bridge-heartbeat")
         async def qt_bridge_heartbeat(request: Request):
@@ -1571,6 +1707,10 @@ class FastAPIPortalController:
         PortalHandler.state_store = LanPortalStateStore()
         PortalHandler.apply_runtime_settings()
         self._state_store = PortalHandler.state_store
+        try:
+            PortalHandler.state_store.reset_runtime_queue_incomplete()
+        except Exception as exc:
+            log_warning(f"运行队列状态重置失败: {exc}")
         PortalHandler.notice_callback = self.notice_callback
         PortalHandler.ongoing_callback = self.ongoing_callback
         PortalHandler.ongoing_delete_callback = self.ongoing_delete_callback
@@ -1629,10 +1769,15 @@ class FastAPIPortalController:
 
     def _static_file_response(self, path: Path, *, html: bool = False) -> Response:
         resolved = Path(path).resolve()
-        static_root = STATIC_DIR.resolve()
-        try:
-            resolved.relative_to(static_root)
-        except ValueError:
+        allowed = False
+        for static_root in portal_static_roots():
+            try:
+                resolved.relative_to(static_root)
+                allowed = True
+                break
+            except ValueError:
+                continue
+        if not allowed:
             return JSONResponse({"ok": False, "error": "Not Found"}, status_code=404)
         if not resolved.is_file():
             return JSONResponse({"ok": False, "error": "Not Found"}, status_code=404)
@@ -1859,7 +2004,7 @@ class FastAPIPortalController:
 
     def _write_runtime_heartbeat(self) -> None:
         try:
-            PortalHandler.state_store.put_backend_runtime(
+            if not PortalHandler.state_store.put_backend_runtime_async(
                 "backend",
                 {
                     "backend": "fastapi",
@@ -1868,7 +2013,17 @@ class FastAPIPortalController:
                     "stats": _queue_stats(),
                     "heartbeat_at": time.time(),
                 },
-            )
+            ):
+                PortalHandler.state_store.put_backend_runtime(
+                    "backend",
+                    {
+                        "backend": "fastapi",
+                        "url": self.get_url(),
+                        "internal_url": self._legacy_url,
+                        "stats": _queue_stats(),
+                        "heartbeat_at": time.time(),
+                    },
+                )
         except Exception as exc:
             log_warning(f"后端心跳写入失败: {exc}")
 
@@ -1889,20 +2044,46 @@ class FastAPIPortalController:
         result = PortalHandler.refresh_sources_once(
             force=False,
             min_interval_seconds=30 * 60,
+            defer_if_busy=True,
         )
+        if result.get("source_refresh_deferred"):
+            if not PortalHandler.state_store.put_backend_runtime_async(
+                "source_refresh_deferred",
+                {
+                    "deferred_at": time.time(),
+                    "reason": result.get("source_refresh_defer_reason") or "",
+                    "runtime_pressure": result.get("runtime_pressure") or {},
+                },
+            ):
+                PortalHandler.state_store.put_backend_runtime(
+                    "source_refresh_deferred",
+                    {
+                        "deferred_at": time.time(),
+                        "reason": result.get("source_refresh_defer_reason") or "",
+                        "runtime_pressure": result.get("runtime_pressure") or {},
+                    },
+                )
+            return
         for warning in result.get("warnings") or []:
             log_warning(str(warning))
 
     def _run_scheduled_job_cleanup(self) -> None:
         try:
             cleanup = PortalHandler.service.cleanup_action_jobs()
-            PortalHandler.state_store.put_backend_runtime(
-                "job_cleanup",
-                {
-                    **cleanup,
-                    "cleaned_at": time.time(),
-                },
+            queue_removed = PortalHandler.state_store.cleanup_runtime_queue_items(
+                retention_seconds=3 * 24 * 3600,
+                max_delete=500,
             )
+            payload = {
+                **cleanup,
+                "runtime_queue_removed": queue_removed,
+                "cleaned_at": time.time(),
+            }
+            if not PortalHandler.state_store.put_backend_runtime_async(
+                "job_cleanup",
+                payload,
+            ):
+                PortalHandler.state_store.put_backend_runtime("job_cleanup", payload)
         except Exception as exc:
             log_warning(f"后台任务状态清理失败: {exc}")
 
@@ -1910,14 +2091,16 @@ class FastAPIPortalController:
         if _mock_external_enabled():
             return
         token = check_token_status()
-        PortalHandler.state_store.put_backend_runtime(
+        payload = {
+            "checked_at": time.time(),
+            "has_token": bool(token),
+            "token_expire_time": int(getattr(config, "token_expire_time", 0) or 0),
+        }
+        if not PortalHandler.state_store.put_backend_runtime_async(
             "token_status",
-            {
-                "checked_at": time.time(),
-                "has_token": bool(token),
-                "token_expire_time": int(getattr(config, "token_expire_time", 0) or 0),
-            },
-        )
+            payload,
+        ):
+            PortalHandler.state_store.put_backend_runtime("token_status", payload)
 
     def _start_scheduler(self) -> None:
         if self._scheduler is not None:
@@ -2018,6 +2201,12 @@ class FastAPIPortalController:
             yield f"event: error\ndata: {payload}\n\n".encode("utf-8")
             return
         last_payload = ""
+        interval_s = _env_float(
+            "CLIPFLOW_JOB_SSE_INTERVAL_SECONDS",
+            0.75 if job_id else 2.0,
+            minimum=0.5,
+            maximum=10.0,
+        )
         while not await request.is_disconnected():
             payload: dict
             if job_id:
@@ -2049,7 +2238,7 @@ class FastAPIPortalController:
                 event_id = hashlib.sha1(raw.encode("utf-8")).hexdigest()
                 yield f"id: {event_id}\nevent: job\ndata: {raw}\n\n".encode("utf-8")
                 last_payload = raw
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(interval_s)
 
     async def _heartbeat_stream(
         self, request: Request, *, event_name: str
@@ -2063,6 +2252,35 @@ class FastAPIPortalController:
             yield f"event: {event_name}\ndata: {payload}\n\n".encode("utf-8")
             await asyncio.sleep(5.0)
 
+    async def _qt_event_stream(self, request: Request) -> AsyncIterator[bytes]:
+        last_heartbeat = 0.0
+        while not await request.is_disconnected():
+            items = await asyncio.to_thread(
+                PortalHandler.state_store.lease_outbox_events,
+                "qt_action",
+                limit=1,
+                lease_seconds=30,
+            )
+            if items:
+                for item in items:
+                    raw = json.dumps(item, ensure_ascii=False, sort_keys=True)
+                    event_id = int(item.get("id") or 0)
+                    yield (
+                        f"id: {event_id}\nevent: qt_event\ndata: {raw}\n\n"
+                    ).encode("utf-8")
+                await asyncio.sleep(0.05)
+                continue
+            now = time.monotonic()
+            if now - last_heartbeat >= 3.0:
+                last_heartbeat = now
+                payload = json.dumps(
+                    {"time": time.time(), "stats": _queue_stats()},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                yield f"event: heartbeat\ndata: {payload}\n\n".encode("utf-8")
+            await asyncio.sleep(0.5)
+
     async def _qt_active_items_stream(self, request: Request) -> AsyncIterator[bytes]:
         session = self._current_session(request)
         if session is None:
@@ -2075,11 +2293,13 @@ class FastAPIPortalController:
         last_payload = ""
         while not await request.is_disconnected():
             snapshot = PortalHandler.state_store.get_ongoing_snapshot()
+            qt_active_items = PortalHandler.state_store.qt_active_items_stats()
             payload = json.dumps(
                 {
                     "snapshot_id": snapshot.get("snapshot_id", ""),
                     "count": snapshot.get("count", 0),
                     "updated_at": snapshot.get("updated_at", 0),
+                    "qt_active_items": qt_active_items,
                     "time": time.time(),
                 },
                 ensure_ascii=False,
@@ -2227,6 +2447,10 @@ class FastAPIPortalController:
             PortalHandler.ongoing_callback = None
             PortalHandler.ongoing_delete_callback = None
             PortalHandler.maintenance_action_callback = None
+        try:
+            PortalHandler.state_store.shutdown_write_worker(timeout=2.0)
+        except Exception as exc:
+            log_warning(f"SQLite写入队列停止失败: {exc}")
         self.bound_port = None
         self._legacy_url = ""
         self._shutdown_event.set()
@@ -2296,7 +2520,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mock-external",
         action="store_true",
-        help="禁用真实飞书/多维后台刷新，仅用于本地自动化测试。",
+        help="禁用真实飞书/多维写入和后台刷新，仅用于本地自动化测试。",
+    )
+    parser.add_argument(
+        "--allow-real-external",
+        action="store_true",
+        help="允许直接命令行启动的后端执行真实飞书/多维写入。",
     )
     return parser
 
@@ -2305,6 +2534,9 @@ def main() -> None:
     args = build_arg_parser().parse_args()
     if args.mock_external:
         os.environ["CLIPFLOW_BACKEND_MOCK_EXTERNAL"] = "1"
+    if args.allow_real_external:
+        os.environ["CLIPFLOW_REQUIRE_REAL_EXTERNAL_CONFIRM"] = "1"
+        os.environ["CLIPFLOW_REAL_EXTERNAL_CONFIRMED"] = "1"
     controller = FastAPIPortalController(host=args.host, port=args.port)
     url = controller.start()
     print(f"ClipFlow FastAPI 后端已启动: {url}")

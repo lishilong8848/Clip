@@ -18,6 +18,14 @@ from lan_bitable_template_portal.server import DEFAULT_HOST, DEFAULT_PORT
 from upload_event_module.logger import log_error, log_info, log_warning
 
 
+def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    try:
+        value = int(str(os.environ.get(name, "") or "").strip() or default)
+    except Exception:
+        value = int(default)
+    return max(int(minimum), min(int(maximum), value))
+
+
 def _display_host(host: str) -> str:
     text = str(host or DEFAULT_HOST).strip() or DEFAULT_HOST
     return "127.0.0.1" if text in {"0.0.0.0", "::"} else text
@@ -60,6 +68,35 @@ class BackendProcessPortalController:
         self._last_event_kind = ""
         self._last_event_error = ""
         self._slow_event_history: list[dict[str, Any]] = []
+        self._event_stream_connected = False
+        self._event_stream_connect_count = 0
+        self._event_stream_disconnect_count = 0
+        self._event_stream_last_connected_at = 0.0
+        self._event_stream_last_event_at = 0.0
+        self._event_stream_last_error = ""
+        self._event_poll_fallback_count = 0
+        self._active_delta_lock = threading.Lock()
+        self._active_delta_upserts: list[dict[str, Any]] = []
+        self._active_delta_deletes: list[dict[str, Any]] = []
+        self._active_delta_thread: threading.Thread | None = None
+        self._event_fetch_limit = _env_int(
+            "CLIPFLOW_QT_EVENT_FETCH_LIMIT",
+            5,
+            minimum=1,
+            maximum=5,
+        )
+        self._snapshot_interval_s = _env_int(
+            "CLIPFLOW_QT_SNAPSHOT_INTERVAL_SECONDS",
+            30,
+            minimum=8,
+            maximum=60,
+        )
+        self._startup_timeout_s = _env_int(
+            "CLIPFLOW_BACKEND_STARTUP_TIMEOUT_SECONDS",
+            75,
+            minimum=15,
+            maximum=180,
+        )
 
     def get_url(self) -> str:
         return f"http://{_display_host(self.host)}:{self.bound_port}"
@@ -114,6 +151,10 @@ class BackendProcessPortalController:
         env["PYTHONPATH"] = os.pathsep.join(
             [os.fspath(bin_dir), existing] if existing else [os.fspath(bin_dir)]
         )
+        # The desktop app is the trusted operator entrypoint. Directly running the
+        # backend from a shell still requires an explicit confirmation env var.
+        env.setdefault("CLIPFLOW_REQUIRE_REAL_EXTERNAL_CONFIRM", "1")
+        env.setdefault("CLIPFLOW_REAL_EXTERNAL_CONFIRMED", "1")
         args = [
             os.fspath(python_exe),
             "-m",
@@ -169,7 +210,7 @@ class BackendProcessPortalController:
         )
         self._owns_process = True
         self._stop_event.clear()
-        if not self._wait_for_health():
+        if not self._wait_for_health(timeout_s=float(self._startup_timeout_s)):
             code = self._process.poll() if self._process else None
             self.stop()
             raise RuntimeError(f"局域网后端进程启动失败，退出码={code}")
@@ -225,6 +266,7 @@ class BackendProcessPortalController:
 
     def _event_loop(self) -> None:
         delay = 0.25
+        next_sse_attempt = 0.0
         while not self._stop_event.wait(delay):
             if (
                 self.maintenance_action_callback is None
@@ -233,8 +275,19 @@ class BackendProcessPortalController:
             ):
                 delay = 1.0
                 continue
+            now = time.monotonic()
+            if now >= next_sse_attempt:
+                if self._event_stream_once():
+                    delay = 0.25
+                    continue
+                next_sse_attempt = time.monotonic() + 5.0
             try:
-                result = self._request_json("GET", "/api/qt/events?limit=1", timeout=3.0)
+                self._event_poll_fallback_count += 1
+                result = self._request_json(
+                    "GET",
+                    f"/api/qt/events?limit={self._event_fetch_limit}",
+                    timeout=3.0,
+                )
                 items = ((result.get("data") or {}).get("items") or []) if result.get("ok") else []
             except Exception:
                 delay = 2.0
@@ -242,6 +295,62 @@ class BackendProcessPortalController:
             for item in items:
                 self._dispatch_event(item)
             delay = 0.25 if items else 1.0
+
+    def _event_stream_once(self) -> bool:
+        url = f"{self._local_url()}/api/qt/events/stream"
+        request = urllib.request.Request(
+            url,
+            headers={"Accept": "text/event-stream"},
+            method="GET",
+        )
+        lines: list[str] = []
+        try:
+            with urllib.request.urlopen(request, timeout=6.0) as response:
+                self._event_stream_connected = True
+                self._event_stream_connect_count += 1
+                self._event_stream_last_connected_at = time.time()
+                self._event_stream_last_error = ""
+                while not self._stop_event.is_set():
+                    raw_line = response.readline()
+                    if not raw_line:
+                        return False
+                    line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+                    if line:
+                        lines.append(line)
+                        continue
+                    self._handle_sse_event(lines)
+                    lines = []
+            return True
+        except Exception as exc:
+            self._event_stream_last_error = str(exc)
+            return False
+        finally:
+            if self._event_stream_connected:
+                self._event_stream_disconnect_count += 1
+            self._event_stream_connected = False
+
+    def _handle_sse_event(self, lines: list[str]) -> None:
+        if not lines:
+            return
+        event_name = "message"
+        data_lines: list[str] = []
+        for line in lines:
+            if line.startswith(":"):
+                continue
+            if line.startswith("event:"):
+                event_name = line.split(":", 1)[1].strip() or "message"
+                continue
+            if line.startswith("data:"):
+                data_lines.append(line.split(":", 1)[1].lstrip())
+        if event_name != "qt_event" or not data_lines:
+            return
+        try:
+            item = json.loads("\n".join(data_lines))
+        except Exception:
+            return
+        if isinstance(item, dict):
+            self._event_stream_last_event_at = time.time()
+            self._dispatch_event(item)
 
     def _dispatch_event(self, item: dict[str, Any]) -> None:
         event_id = int((item or {}).get("id") or 0)
@@ -354,14 +463,57 @@ class BackendProcessPortalController:
                     "last_event_kind": self._last_event_kind,
                     "last_event_error": self._last_event_error,
                     "slow_event_history": list(self._slow_event_history),
+                    "event_stream": {
+                        "connected": bool(self._event_stream_connected),
+                        "connect_count": int(self._event_stream_connect_count),
+                        "disconnect_count": int(self._event_stream_disconnect_count),
+                        "last_connected_at": float(
+                            self._event_stream_last_connected_at or 0
+                        ),
+                        "last_event_at": float(self._event_stream_last_event_at or 0),
+                        "last_error": self._event_stream_last_error,
+                        "poll_fallback_count": int(self._event_poll_fallback_count),
+                    },
                 },
                 timeout=2.0,
             )
         except Exception:
             return
 
+    @staticmethod
+    def _snapshot_digest(items: list[dict[str, Any]]) -> str:
+        digest = hashlib.sha1()
+        digest.update(str(len(items or [])).encode("utf-8"))
+        digest.update(b"\0")
+        fields = (
+            "active_item_id",
+            "record_id",
+            "notice_type",
+            "status",
+            "text",
+            "building",
+            "building_codes",
+            "start_time",
+            "end_time",
+            "time",
+            "source_record_id",
+            "source_only",
+            "maintenance_cycle",
+            "lan_created_from_portal",
+        )
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            for field in fields:
+                value = item.get(field)
+                if isinstance(value, (list, tuple, set)):
+                    value = ",".join(str(part) for part in value)
+                digest.update(str(value or "").encode("utf-8", errors="ignore"))
+                digest.update(b"\0")
+        return digest.hexdigest()
+
     def _snapshot_loop(self) -> None:
-        while not self._stop_event.wait(3.0):
+        while not self._stop_event.wait(float(self._snapshot_interval_s or 8)):
             self._post_bridge_heartbeat()
             callback = self.ongoing_callback
             if callback is None:
@@ -370,8 +522,7 @@ class BackendProcessPortalController:
                 items = callback("ALL")
                 if not isinstance(items, list):
                     items = []
-                raw = json.dumps(items, ensure_ascii=False, sort_keys=True, default=str)
-                digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()
+                digest = self._snapshot_digest(items)
                 if digest == self._last_snapshot_hash:
                     continue
                 self._last_snapshot_hash = digest
@@ -442,3 +593,48 @@ class BackendProcessPortalController:
         except Exception:
             return None
         return None
+
+    def post_active_items_delta(
+        self,
+        *,
+        upserts: list[dict[str, Any]] | None = None,
+        deletes: list[dict[str, Any]] | None = None,
+    ) -> None:
+        clean_upserts = [item for item in (upserts or []) if isinstance(item, dict)]
+        clean_deletes = [item for item in (deletes or []) if isinstance(item, dict)]
+        if not clean_upserts and not clean_deletes:
+            return
+        with self._active_delta_lock:
+            self._active_delta_upserts.extend(clean_upserts)
+            self._active_delta_deletes.extend(clean_deletes)
+            if self._active_delta_thread and self._active_delta_thread.is_alive():
+                return
+            self._active_delta_thread = threading.Thread(
+                target=self._active_delta_loop,
+                name="ClipFlowBackendActiveDeltaBridge",
+                daemon=True,
+            )
+            self._active_delta_thread.start()
+
+    def _active_delta_loop(self) -> None:
+        while not self._stop_event.is_set():
+            time.sleep(0.1)
+            with self._active_delta_lock:
+                upserts = self._active_delta_upserts
+                deletes = self._active_delta_deletes
+                self._active_delta_upserts = []
+                self._active_delta_deletes = []
+            if upserts or deletes:
+                try:
+                    self._request_json(
+                        "POST",
+                        "/api/qt/active-items/delta",
+                        payload={"upserts": upserts, "deletes": deletes},
+                        timeout=3.0,
+                    )
+                except Exception as exc:
+                    log_warning(f"Qt active item 增量上报失败: {exc}")
+            with self._active_delta_lock:
+                if not self._active_delta_upserts and not self._active_delta_deletes:
+                    self._active_delta_thread = None
+                    return

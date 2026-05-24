@@ -51,6 +51,7 @@ from ..config import (
     DEFAULT_GROUP_NAME_EVENT_PROMPT,
     DEFAULT_LAN_TEMPLATE_PORTAL_HOST,
     DEFAULT_LAN_TEMPLATE_PORTAL_PORT,
+    DEFAULT_LAN_LOW_PERFORMANCE_MODE,
     DEFAULT_DISABLE_HOT_RELOAD,
     DEFAULT_DISABLE_ALERTS,
     DEFAULT_DISABLE_SPEECH,
@@ -377,6 +378,13 @@ class SettingsDialog(QDialog):
         lan_hint.setObjectName("LanPortalHint")
         lan_hint.setWordWrap(True)
         lan_portal_layout.addWidget(lan_hint)
+        self.lan_low_performance_checkbox = QCheckBox(
+            "低性能模式（多楼同时发通告时降低后台刷新、Qt显示和上传频率）"
+        )
+        self.lan_low_performance_checkbox.setToolTip(
+            "勾选后会让通告卡片和多维上传更慢地排队处理，优先保证运行程序电脑不卡。"
+        )
+        lan_portal_layout.addWidget(self.lan_low_performance_checkbox)
         form_layout.addWidget(lan_portal_card)
 
 
@@ -539,6 +547,9 @@ class SettingsDialog(QDialog):
                 DEFAULT_LAN_TEMPLATE_PORTAL_HOST,
             )
         )
+        self.lan_low_performance_checkbox.setChecked(
+            bool(getattr(config, "lan_low_performance_mode", False))
+        )
 
     @staticmethod
     def _is_valid_lan_template_portal_host(value: str) -> bool:
@@ -596,6 +607,7 @@ class SettingsDialog(QDialog):
             self.lan_template_portal_host_input.text().strip()
             or DEFAULT_LAN_TEMPLATE_PORTAL_HOST
         )
+        lan_low_performance_mode = self.lan_low_performance_checkbox.isChecked()
         if not self._is_valid_lan_template_portal_host(lan_template_portal_host):
             show_toast_message(
                 self,
@@ -658,6 +670,7 @@ group_name_change_i3=group_name_change_i3,
             group_name_event_prompt=group_name_event_prompt,
             lan_template_portal_host=lan_template_portal_host,
             lan_template_portal_port=DEFAULT_LAN_TEMPLATE_PORTAL_PORT,
+            lan_low_performance_mode=lan_low_performance_mode,
             disable_hot_reload=disable_hot_reload,
             disable_alerts=disable_alerts,
             disable_speech=disable_speech,
@@ -775,6 +788,7 @@ group_name_change_i3=group_name_change_i3,
 
         self.group_name_event_prompt_input.setText(DEFAULT_GROUP_NAME_EVENT_PROMPT)
         self.lan_template_portal_host_input.setText(DEFAULT_LAN_TEMPLATE_PORTAL_HOST)
+        self.lan_low_performance_checkbox.setChecked(DEFAULT_LAN_LOW_PERFORMANCE_MODE)
 
 
 

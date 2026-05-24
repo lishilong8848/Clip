@@ -278,8 +278,18 @@ class ClipboardTool(
         self.pending_action_record_ids = set()
         self._today_in_progress_pending_record_ids = set()
         self._today_in_progress_synced_record_ids = set()
+        self._today_in_progress_sync_queue = queue.Queue()
+        self._today_in_progress_sync_worker = None
+        self._today_in_progress_sync_interval_s = 0.35
         self._record_binding_validation_pending_ids = set()
         self._record_binding_validated_ids = set()
+        self._record_binding_validation_queue = queue.Queue()
+        self._record_binding_validation_worker = None
+        self._record_binding_validation_interval_s = 0.35
+        self._startup_record_binding_validation_queue = []
+        self._startup_record_binding_validation_pending = False
+        self._startup_today_in_progress_sync_queue = []
+        self._startup_today_in_progress_sync_pending = False
         self.current_screenshot_record_id = None
         self.current_screenshot_action_type = None
         self._pending_cache_refresh = False
@@ -300,6 +310,11 @@ class ClipboardTool(
         self._lan_ongoing_snapshot_refresh_pending = False
         self._lan_portal_state_store = None
         self._is_restoring_cache = False
+        self._active_cache_restore_in_progress = False
+        self._active_cache_restore_finalize_done = False
+        self._active_cache_restore_queue = []
+        self._active_cache_restore_cache_changed = False
+        self._active_notice_store_obj = None
         self.clipboard_paused = False
         self._deferred_events = []
         self._manual_add_hot_reload_paused = False
@@ -315,9 +330,7 @@ class ClipboardTool(
         self.setup_tray()
         self._cache_id_repair_result = self._validate_cache_record_ids_on_startup()
         self._restore_active_cache()
-        self._repair_missing_item_widgets()
-        self._reconcile_active_route_duplicates()
-        self._validate_record_bindings_on_startup()
+        self._finalize_active_cache_restore_startup()
         if self._cache_id_repair_result.get("changed"):
             self.save_active_cache()
         self._init_active_cache_timer()

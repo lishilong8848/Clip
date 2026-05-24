@@ -24,6 +24,7 @@ from upload_event_module.services.feishu_service import (
     ensure_feishu_token,
     refresh_feishu_token,
 )
+from upload_event_module.services.http_client import FeishuHTTPError, FeishuHttpClient
 from upload_event_module.services.robot_webhook import send_text_to_open_ids
 from upload_event_module.utils import get_data_file_path
 
@@ -102,7 +103,7 @@ STATE_NS_WORK_STATUS = "notice_work_status"
 STATE_NS_HIDDEN_ONGOING = "notice_hidden_ongoing"
 STATE_NS_ACTION_JOB = "notice_action_job"
 ACTION_JOB_MAX_RETAINED = 120
-ACTION_JOB_SUCCESS_RETENTION_SECONDS = 3 * 24 * 60 * 60
+ACTION_JOB_SUCCESS_RETENTION_SECONDS = 30 * 60
 ACTION_JOB_FAILED_RETENTION_SECONDS = 14 * 24 * 60 * 60
 
 
@@ -111,7 +112,7 @@ def external_mock_enabled() -> bool:
 
 
 def external_real_write_guard() -> dict[str, Any]:
-    require_confirm = os.environ.get("CLIPFLOW_REQUIRE_REAL_EXTERNAL_CONFIRM") == "1"
+    require_confirm = os.environ.get("CLIPFLOW_REQUIRE_REAL_EXTERNAL_CONFIRM", "1") != "0"
     confirmed = os.environ.get("CLIPFLOW_REAL_EXTERNAL_CONFIRMED") == "1"
     mock = external_mock_enabled()
     allowed = (not mock) and (not require_confirm or confirmed)
@@ -189,6 +190,7 @@ class MaintenancePortalService:
         self.app_token = str(app_token or DEFAULT_APP_TOKEN).strip()
         self.table_id = str(table_id or DEFAULT_TABLE_ID).strip()
         self._session = requests.Session()
+        self._http_client = FeishuHttpClient()
         self._http_lock = threading.RLock()
         self._field_meta_list: list[FieldMeta] = []
         self._field_meta_by_name: dict[str, FieldMeta] = {}
@@ -247,6 +249,49 @@ class MaintenancePortalService:
             raise PortalError("未配置有效的飞书 user_token。")
         return {"Authorization": f"Bearer {token}"}
 
+    def _use_unified_http_client(self) -> bool:
+        if os.environ.get("CLIPFLOW_DISABLE_UNIFIED_FEISHU_HTTP") == "1":
+            return False
+        return isinstance(self._session, requests.sessions.Session)
+
+    def _request_payload(
+        self,
+        method: str,
+        url: str,
+        *,
+        context: str,
+        headers: dict[str, str],
+        params: dict[str, Any] | None = None,
+        json_payload: Any = None,
+    ) -> dict[str, Any]:
+        if self._use_unified_http_client():
+            try:
+                return self._http_client.request_json(
+                    method,
+                    url,
+                    headers=headers,
+                    params=params or {},
+                    json_payload=json_payload,
+                )
+            except FeishuHTTPError as exc:
+                raise PortalError(f"{context} HTTP失败: {exc}") from exc
+        with self._http_lock:
+            if method.upper() == "PATCH":
+                response = self._session.patch(
+                    url,
+                    headers=headers,
+                    json=json_payload,
+                    timeout=(5, 30),
+                )
+            else:
+                response = self._session.get(
+                    url,
+                    headers=headers,
+                    params=params or {},
+                    timeout=(5, 30),
+                )
+        return self._response_json_or_error(response, context)
+
     @staticmethod
     def _response_json_or_error(response, context: str) -> dict[str, Any]:
         try:
@@ -288,14 +333,13 @@ class MaintenancePortalService:
         )
 
         def do_get() -> dict[str, Any]:
-            with self._http_lock:
-                response = self._session.get(
-                    url,
-                    headers=self._auth_headers(),
-                    params=params or {},
-                    timeout=(5, 30),
-                )
-            return self._response_json_or_error(response, "飞书接口")
+            return self._request_payload(
+                "GET",
+                url,
+                context="飞书接口",
+                headers=self._auth_headers(),
+                params=params or {},
+            )
 
         payload = do_get()
         if payload.get("code") == 99991663:
@@ -329,14 +373,13 @@ class MaintenancePortalService:
         )
 
         def do_patch() -> dict[str, Any]:
-            with self._http_lock:
-                response = self._session.patch(
-                    url,
-                    headers={**self._auth_headers(), "Content-Type": "application/json"},
-                    json={"fields": fields},
-                    timeout=(5, 30),
-                )
-            return self._response_json_or_error(response, "飞书记录更新")
+            return self._request_payload(
+                "PATCH",
+                url,
+                context="飞书记录更新",
+                headers={**self._auth_headers(), "Content-Type": "application/json"},
+                json_payload={"fields": fields},
+            )
 
         payload = do_patch()
         if payload.get("code") == 99991663:
@@ -4665,10 +4708,15 @@ class MaintenancePortalService:
     def _trim_jobs_locked(self) -> None:
         if len(self._jobs) <= ACTION_JOB_MAX_RETAINED:
             return
-        ordered = sorted(
-            self._jobs.values(), key=lambda item: str(item.get("created_at") or "")
-        )
-        for job in ordered[: len(self._jobs) - ACTION_JOB_MAX_RETAINED]:
+        terminal_phases = {"success", "failed"}
+        terminal_jobs = [
+            job
+            for job in self._jobs.values()
+            if str(job.get("phase") or "") in terminal_phases
+        ]
+        terminal_jobs.sort(key=lambda item: self._job_epoch(item) or 0)
+        remove_count = max(0, len(self._jobs) - ACTION_JOB_MAX_RETAINED)
+        for job in terminal_jobs[:remove_count]:
             job_id = str(job.get("job_id") or "")
             self._jobs.pop(job_id, None)
             self._state_store.delete_document(STATE_NS_ACTION_JOB, job_id)

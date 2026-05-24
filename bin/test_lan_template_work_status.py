@@ -14,6 +14,8 @@ import re
 from pathlib import Path
 from unittest.mock import patch
 
+import httpx
+
 BIN_DIR = Path(__file__).resolve().parent
 if str(BIN_DIR) not in sys.path:
     sys.path.insert(0, str(BIN_DIR))
@@ -25,6 +27,7 @@ from lan_bitable_template_portal.portal_service import WORK_TYPE_CHANGE  # noqa:
 from lan_bitable_template_portal.portal_service import WORK_TYPE_REPAIR  # noqa: E402
 from lan_bitable_template_portal.portal_auth import AUTH_COOKIE_NAME  # noqa: E402
 from lan_bitable_template_portal.portal_auth import PortalAuthManager  # noqa: E402
+import lan_bitable_template_portal.server as portal_server_module  # noqa: E402
 from lan_bitable_template_portal.server import PortalHandler  # noqa: E402
 from lan_bitable_template_portal.state_store import LanPortalStateStore  # noqa: E402
 from clipflow_backend.main import FastAPIPortalController  # noqa: E402
@@ -33,12 +36,14 @@ from fastapi.testclient import TestClient  # noqa: E402
 import upload_event_module.config as config_module  # noqa: E402
 from upload_event_module.config import ConfigManager  # noqa: E402
 from upload_event_module.config import MAINTENANCE_NOTICE_FIELDS  # noqa: E402
+from upload_event_module.services.http_client import FeishuHttpClient  # noqa: E402
 from upload_event_module.services.handlers.base import NoticePayload  # noqa: E402
 from upload_event_module.services.handlers.maintenance_notice import (  # noqa: E402
     MaintenanceNoticeHandler,
 )
 import upload_event_module.services.feishu_service as feishu_service_module  # noqa: E402
 from upload_event_module.ui.active_cache_store import ActiveCacheStore  # noqa: E402
+from upload_event_module.ui.main_window_workflow import MainWindowWorkflowMixin  # noqa: E402
 from upload_event_module.ui.main_window_ui import MainWindowUiMixin  # noqa: E402
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -88,6 +93,17 @@ class _ChangeSourceFailureService(MaintenancePortalService):
 
     def _load_change_fields(self):
         raise RuntimeError("mock change source down")
+
+
+class _WorkflowRuntimeQueueHarness(MainWindowWorkflowMixin):
+    def __init__(self, store):
+        self._lan_portal_state_store = store
+
+
+class _HistoryMigrationHarness(MainWindowUiMixin):
+    def __init__(self, store):
+        self._lan_portal_state_store = store
+        self.last_history_mtime = 0
 
 
 class _NativeFastAPIRouteService:
@@ -458,6 +474,43 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertNotIn("/apps//", captured["url"])
         self.assertNotIn("/tables//", captured["url"])
 
+    def test_feishu_http_client_returns_business_json_on_http_error(self):
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(
+                400,
+                json={"code": 99991663, "msg": "token expired"},
+                request=request,
+            )
+        )
+        client = FeishuHttpClient(transport=transport, retries=0)
+        try:
+            payload = client.request_json("GET", "https://open.feishu.cn/mock")
+        finally:
+            client.close()
+
+        self.assertEqual(payload["code"], 99991663)
+
+    def test_portal_service_request_uses_unified_http_client_by_default(self):
+        service = MaintenancePortalService()
+        captured = {}
+
+        class _HttpClient:
+            def request_json(self, method, url, **kwargs):
+                captured["method"] = method
+                captured["url"] = url
+                captured["kwargs"] = kwargs
+                return {"code": 0, "data": {"items": []}}
+
+        service._http_client = _HttpClient()
+        service._auth_headers = lambda: {"Authorization": "Bearer test"}
+
+        payload = service._request_json("fields", params={"page_size": 500})
+
+        self.assertEqual(payload["code"], 0)
+        self.assertEqual(captured["method"], "GET")
+        self.assertIn("/fields", captured["url"])
+        self.assertEqual(captured["kwargs"]["params"]["page_size"], 500)
+
     def test_lan_portal_state_store_replaces_ongoing_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
@@ -500,6 +553,223 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertIn("backend_runtime", stats["table_counts"])
             self.assertGreaterEqual(stats["table_counts"]["backend_runtime"], 1)
 
+    def test_lan_portal_state_store_background_write_worker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+
+            self.assertTrue(store.put_backend_runtime_async("async_probe", {"ok": True}))
+            self.assertTrue(store.append_event_async("async_event", {"value": 1}))
+            store.shutdown_write_worker(timeout=2.0)
+
+            runtime = store.get_backend_runtime("async_probe")
+            events = store.list_events_after("async_event", 0, limit=10)
+            stats = store.get_write_worker_stats()
+
+            self.assertEqual(runtime["ok"], True)
+            self.assertEqual(events[-1]["payload"]["value"], 1)
+            self.assertGreaterEqual(stats["written"], 2)
+            self.assertFalse(stats["alive"])
+
+    def test_lan_portal_state_store_background_write_worker_coalesces_runtime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            with patch.dict(
+                os.environ,
+                {"CLIPFLOW_SQLITE_WRITE_BATCH_WINDOW_MS": "50"},
+                clear=False,
+            ):
+                self.assertTrue(store.put_backend_runtime_async("heartbeat", {"seq": 1}))
+                self.assertTrue(store.put_backend_runtime_async("heartbeat", {"seq": 2}))
+                store.shutdown_write_worker(timeout=2.0)
+
+            runtime = store.get_backend_runtime("heartbeat")
+            stats = store.get_write_worker_stats()
+
+            self.assertEqual(runtime["seq"], 2)
+            self.assertGreaterEqual(stats.get("coalesced", 0), 1)
+
+    def test_lan_portal_state_store_runtime_queue_counts_and_cleanup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+
+            self.assertTrue(store.upsert_runtime_queue_item("message", "job-1"))
+            self.assertTrue(
+                store.upsert_runtime_queue_item(
+                    "message",
+                    "job-2",
+                    status="processing",
+                )
+            )
+            self.assertTrue(store.mark_runtime_queue_item("message", "job-1", "done"))
+            counts = store.runtime_queue_counts()
+
+            self.assertEqual(counts["message"]["done"], 1)
+            self.assertEqual(counts["message"]["processing"], 1)
+            reset = store.reset_runtime_queue_incomplete()
+            reset_counts = store.runtime_queue_counts()
+
+            self.assertEqual(reset, 1)
+            self.assertEqual(reset_counts["message"]["interrupted"], 1)
+            removed = store.cleanup_runtime_queue_items(
+                retention_seconds=60,
+                max_delete=100,
+            )
+            self.assertEqual(removed, 0)
+
+    def test_lan_portal_state_store_runtime_queue_lease_and_requeue(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+
+            now = time.time()
+            self.assertTrue(store.upsert_runtime_queue_item("message", "job-1"))
+            self.assertTrue(
+                store.upsert_runtime_queue_item(
+                    "message",
+                    "job-future",
+                    available_at=now + 60,
+                )
+            )
+            leased = store.lease_runtime_queue_items("message", limit=5, lease_seconds=10)
+
+            self.assertEqual([item["job_id"] for item in leased], ["job-1"])
+            self.assertEqual(leased[0]["status"], "processing")
+            self.assertEqual(leased[0]["attempts"], 1)
+            counts = store.runtime_queue_counts()
+            self.assertEqual(counts["message"]["processing"], 1)
+            self.assertEqual(counts["message"]["queued"], 1)
+            details = store.runtime_queue_details()
+            self.assertEqual(details["message"]["queued_future"], 1)
+            self.assertEqual(details["message"]["processing_active"], 1)
+
+            self.assertTrue(store.requeue_runtime_queue_item("message", "job-1"))
+            requeued_counts = store.runtime_queue_counts()
+            self.assertEqual(requeued_counts["message"]["queued"], 2)
+            leased_again = store.lease_runtime_queue_items("message", limit=1, lease_seconds=10)
+            self.assertEqual(leased_again[0]["job_id"], "job-1")
+            self.assertEqual(leased_again[0]["attempts"], 2)
+
+    def test_qt_upload_runtime_queue_marks_progress(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            harness = _WorkflowRuntimeQueueHarness(store)
+
+            harness._mark_qt_upload_runtime_queue(
+                "record-1",
+                "queued",
+                payload={"record_id": "record-1"},
+            )
+            harness._mark_qt_upload_runtime_queue("record-1", "processing")
+            harness._mark_qt_upload_runtime_queue("record-1", "done")
+
+            counts = store.runtime_queue_counts()
+            self.assertEqual(counts["qt_upload"]["done"], 1)
+
+    def test_backend_controller_batches_active_item_delta(self):
+        controller = BackendProcessPortalController(host="127.0.0.1", port=9)
+        calls = []
+
+        def fake_request(method, path, *, payload=None, timeout=5.0):
+            calls.append(
+                {
+                    "method": method,
+                    "path": path,
+                    "payload": payload or {},
+                    "timeout": timeout,
+                }
+            )
+            return {"ok": True}
+
+        controller._request_json = fake_request
+        controller.post_active_items_delta(
+            upserts=[{"data": {"active_item_id": "active-1"}}]
+        )
+        controller.post_active_items_delta(deletes=[{"active_item_id": "active-2"}])
+
+        deadline = time.time() + 2.0
+        while time.time() < deadline and not calls:
+            time.sleep(0.02)
+        controller._stop_event.set()
+        thread = controller._active_delta_thread
+        if thread and thread.is_alive():
+            thread.join(timeout=1.0)
+
+        self.assertTrue(calls)
+        payloads = [call["payload"] for call in calls]
+        self.assertEqual(calls[0]["method"], "POST")
+        self.assertEqual(calls[0]["path"], "/api/qt/active-items/delta")
+        self.assertEqual(
+            sum(len(payload.get("upserts") or []) for payload in payloads),
+            1,
+        )
+        self.assertEqual(
+            sum(len(payload.get("deletes") or []) for payload in payloads),
+            1,
+        )
+
+    def test_portal_handler_dequeue_falls_back_to_sqlite_queue(self):
+        class _FakeService:
+            def get_job(self, job_id):
+                return {"phase": "accepted"} if job_id == "job-sqlite" else {}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            old_store = PortalHandler.state_store
+            old_service = PortalHandler.service
+            old_queue = list(PortalHandler.message_queue)
+            old_event = PortalHandler.message_queue_event
+            try:
+                PortalHandler.state_store = store
+                PortalHandler.service = _FakeService()
+                PortalHandler.message_queue = []
+                PortalHandler.message_queue_event = threading.Event()
+                store.upsert_runtime_queue_item("message", "job-sqlite")
+
+                job_id = PortalHandler._dequeue_runtime_job("message")
+
+                self.assertEqual(job_id, "job-sqlite")
+                counts = store.runtime_queue_counts()
+                self.assertEqual(counts["message"]["processing"], 1)
+            finally:
+                PortalHandler.state_store = old_store
+                PortalHandler.service = old_service
+                PortalHandler.message_queue = old_queue
+                PortalHandler.message_queue_event = old_event
+
+    def test_portal_handler_dequeue_skips_terminal_sqlite_jobs(self):
+        class _FakeService:
+            def get_job(self, job_id):
+                if job_id == "job-done":
+                    return {"phase": "success"}
+                if job_id == "job-valid":
+                    return {"phase": "accepted"}
+                return {}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            old_store = PortalHandler.state_store
+            old_service = PortalHandler.service
+            old_queue = list(PortalHandler.message_queue)
+            old_event = PortalHandler.message_queue_event
+            try:
+                PortalHandler.state_store = store
+                PortalHandler.service = _FakeService()
+                PortalHandler.message_queue = []
+                PortalHandler.message_queue_event = threading.Event()
+                store.upsert_runtime_queue_item("message", "job-done")
+                store.upsert_runtime_queue_item("message", "job-valid")
+
+                job_id = PortalHandler._dequeue_runtime_job("message")
+
+                self.assertEqual(job_id, "job-valid")
+                counts = store.runtime_queue_counts()
+                self.assertEqual(counts["message"]["done"], 1)
+                self.assertEqual(counts["message"]["processing"], 1)
+            finally:
+                PortalHandler.state_store = old_store
+                PortalHandler.service = old_service
+                PortalHandler.message_queue = old_queue
+                PortalHandler.message_queue_event = old_event
+
     def test_lan_portal_state_store_checkpoints_database(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
@@ -511,6 +781,164 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertIn("after", result)
             self.assertEqual(result["checkpoint"]["mode"], "TRUNCATE")
             self.assertGreaterEqual(result["reclaimed_bytes"], 0)
+
+    def test_active_cache_store_imports_legacy_file_to_qt_items(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_path = Path(tmp) / "active_cache.json"
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "event": [],
+                        "other": [
+                            {
+                                "data": {
+                                    "active_item_id": "legacy-active-1",
+                                    "record_id": "legacy-record-1",
+                                    "notice_type": "维保通告",
+                                    "text": "【维保通告】状态：开始\n\n【标题】旧通告",
+                                }
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            state_store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            cache_store = ActiveCacheStore(str(cache_path), state_store)
+
+            result = cache_store.migrate_legacy_cache_file_to_sqlite()
+            payload = cache_store.load_payload()
+            qt_items = state_store.list_qt_active_items()
+
+            self.assertEqual(result["status"], "imported")
+            self.assertEqual(result["imported"], 1)
+            self.assertEqual(payload["other"][0]["data"]["record_id"], "legacy-record-1")
+            self.assertEqual(qt_items[0]["active_item_id"], "legacy-active-1")
+
+    def test_active_cache_store_does_not_overwrite_existing_qt_items_with_legacy_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_path = Path(tmp) / "active_cache.json"
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "event": [],
+                        "other": [
+                            {
+                                "data": {
+                                    "active_item_id": "stale-active",
+                                    "record_id": "stale-record",
+                                    "notice_type": "维保通告",
+                                    "text": "旧文件中的过期通告",
+                                }
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            state_store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            state_store.upsert_qt_active_item(
+                {
+                    "active_item_id": "current-active",
+                    "record_id": "current-record",
+                    "notice_type": "维保通告",
+                    "text": "当前 SQLite 通告",
+                },
+                section="other",
+                origin="qt",
+            )
+            cache_store = ActiveCacheStore(str(cache_path), state_store)
+
+            result = cache_store.migrate_legacy_cache_file_to_sqlite()
+            payload = cache_store.load_payload()
+            qt_items = state_store.list_qt_active_items()
+
+            self.assertEqual(result["status"], "skipped")
+            self.assertEqual(result["reason"], "sqlite_already_initialized")
+            self.assertEqual(payload["other"][0]["data"]["record_id"], "current-record")
+            self.assertEqual([item["active_item_id"] for item in qt_items], ["current-active"])
+
+    def test_history_payload_imports_legacy_file_to_sqlite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            history_path = Path(tmp) / "history.json"
+            history_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "record_id": "history-record-1",
+                            "text": "【维保通告】状态：结束\n\n【标题】旧闭环",
+                            "history_saved_at": int(time.time() * 1000),
+                        }
+                    ],
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            state_store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            harness = _HistoryMigrationHarness(state_store)
+
+            with patch("upload_event_module.ui.main_window_ui.HISTORY_FILE", str(history_path)):
+                items = harness._load_history_payload()
+            stored = state_store.get_document("qt_notice_history", "history")
+
+            self.assertEqual(items[0]["record_id"], "history-record-1")
+            self.assertEqual(stored["items"][0]["record_id"], "history-record-1")
+
+    def test_history_payload_does_not_overwrite_existing_sqlite_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            history_path = Path(tmp) / "history.json"
+            history_path.write_text(
+                json.dumps(
+                    [{"record_id": "stale-history", "text": "旧文件"}],
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            state_store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            state_store.put_document(
+                "qt_notice_history",
+                "history",
+                {"version": 1, "items": [{"record_id": "current-history", "text": "当前"}]},
+            )
+            harness = _HistoryMigrationHarness(state_store)
+
+            with patch("upload_event_module.ui.main_window_ui.HISTORY_FILE", str(history_path)):
+                items = harness._load_history_payload()
+
+            self.assertEqual(items[0]["record_id"], "current-history")
+
+    def test_portal_frontend_dist_prefers_dist_but_falls_back_to_static_assets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dist = root / "frontend" / "dist"
+            static = root / "static"
+            (dist / "assets").mkdir(parents=True)
+            (static / "assets").mkdir(parents=True)
+            (dist / "index.html").write_text("vue", encoding="utf-8")
+            (dist / "assets" / "app.js").write_text("dist", encoding="utf-8")
+            (static / "assets" / "logo.png").write_text("static", encoding="utf-8")
+
+            with patch.object(portal_server_module, "FRONTEND_DIST_DIR", dist), patch.object(
+                portal_server_module, "STATIC_DIR", static
+            ), patch.dict(os.environ, {"CLIPFLOW_FRONTEND_LEGACY": ""}, clear=False):
+                self.assertEqual(portal_server_module.portal_index_file(), dist / "index.html")
+                self.assertEqual(
+                    portal_server_module.portal_asset_file(Path("app.js")),
+                    dist / "assets" / "app.js",
+                )
+                self.assertEqual(
+                    portal_server_module.portal_asset_file(Path("logo.png")),
+                    static / "assets" / "logo.png",
+                )
+
+            with patch.object(portal_server_module, "FRONTEND_DIST_DIR", dist), patch.object(
+                portal_server_module, "STATIC_DIR", static
+            ), patch.dict(os.environ, {"CLIPFLOW_FRONTEND_LEGACY": "1"}, clear=False):
+                self.assertEqual(portal_server_module.portal_index_file(), static / "index.html")
 
     def test_lan_portal_state_store_replaces_source_scope_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2586,6 +3014,13 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             ), patch(
                 "lan_bitable_template_portal.portal_service.send_text_to_open_ids",
                 side_effect=fake_send,
+            ), patch.dict(
+                os.environ,
+                {
+                    "CLIPFLOW_REQUIRE_REAL_EXTERNAL_CONFIRM": "1",
+                    "CLIPFLOW_REAL_EXTERNAL_CONFIRMED": "1",
+                },
+                clear=False,
             ):
                 reset = service.request_handover_password_reset()
                 self.assertTrue(reset["reset_id"])
@@ -3321,6 +3756,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         original_upload_seconds = getattr(PortalHandler, "upload_seconds_per_record", 2.0)
         original_batch_wait = getattr(PortalHandler, "upload_batch_wait_seconds", 5.0)
         original_batch_max = getattr(PortalHandler, "upload_batch_max_records", 5)
+        original_qt_interval = getattr(PortalHandler, "qt_action_interval_ms", 250)
+        original_source_defer = getattr(PortalHandler, "source_refresh_defer_when_busy", True)
         with tempfile.TemporaryDirectory() as tmp:
             store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
             store.put_settings(
@@ -3329,6 +3766,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "lan_upload_seconds_per_record": -1,
                     "lan_upload_batch_wait_seconds": 100,
                     "lan_upload_batch_max_records": 99,
+                    "lan_qt_action_interval_ms": 1,
                 }
             )
             PortalHandler.state_store = store
@@ -3340,10 +3778,37 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 PortalHandler.upload_seconds_per_record = original_upload_seconds
                 PortalHandler.upload_batch_wait_seconds = original_batch_wait
                 PortalHandler.upload_batch_max_records = original_batch_max
+                PortalHandler.qt_action_interval_ms = original_qt_interval
+                PortalHandler.source_refresh_defer_when_busy = original_source_defer
             self.assertEqual(limits["message_worker_count"], 5)
             self.assertEqual(limits["upload_seconds_per_record"], 0.5)
             self.assertEqual(limits["upload_batch_wait_seconds"], 30.0)
             self.assertEqual(limits["upload_batch_max_records"], 10)
+            self.assertEqual(limits["qt_tick_interval_ms"], 100)
+
+    def test_source_refresh_defers_when_runtime_busy(self):
+        original_store = PortalHandler.state_store
+        original_service = PortalHandler.service
+        original_defer = getattr(PortalHandler, "source_refresh_defer_when_busy", True)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            service = _NativeFastAPIRouteService()
+            PortalHandler.state_store = store
+            PortalHandler.service = service
+            PortalHandler.source_refresh_defer_when_busy = True
+            try:
+                store.upsert_runtime_queue_item("qt_action", "job-busy")
+                with patch.dict(os.environ, {"CLIPFLOW_BACKEND_MOCK_EXTERNAL": ""}, clear=False):
+                    result = PortalHandler.refresh_sources_once(
+                        force=True,
+                        defer_if_busy=True,
+                    )
+            finally:
+                PortalHandler.state_store = original_store
+                PortalHandler.service = original_service
+                PortalHandler.source_refresh_defer_when_busy = original_defer
+        self.assertFalse(result["refreshed"])
+        self.assertTrue(result["source_refresh_deferred"])
 
     def test_repair_source_refresh_request_is_background_singleflight(self):
         class _SlowRepairRefreshService:
@@ -3845,6 +4310,14 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertTrue(ok)
             self.assertIn("mock", message)
 
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("CLIPFLOW_BACKEND_MOCK_EXTERNAL", None)
+                os.environ.pop("CLIPFLOW_REQUIRE_REAL_EXTERNAL_CONFIRM", None)
+                os.environ.pop("CLIPFLOW_REAL_EXTERNAL_CONFIRMED", None)
+                ok, message = service.send_action_personal_message(prepared)
+            self.assertFalse(ok)
+            self.assertIn("CLIPFLOW_REAL_EXTERNAL_CONFIRMED", message)
+
             with patch.dict(os.environ, {"CLIPFLOW_REQUIRE_REAL_EXTERNAL_CONFIRM": "1"}, clear=False):
                 os.environ.pop("CLIPFLOW_BACKEND_MOCK_EXTERNAL", None)
                 os.environ.pop("CLIPFLOW_REAL_EXTERNAL_CONFIRMED", None)
@@ -4265,7 +4738,17 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
             try:
                 with patch.object(controller, "_proxy_request", side_effect=AssertionError("proxy used")):
-                    with patch("clipflow_backend.main.send_text_to_open_ids", side_effect=fake_send):
+                    with patch(
+                        "clipflow_backend.main.send_text_to_open_ids",
+                        side_effect=fake_send,
+                    ), patch.dict(
+                        os.environ,
+                        {
+                            "CLIPFLOW_REQUIRE_REAL_EXTERNAL_CONFIRM": "1",
+                            "CLIPFLOW_REAL_EXTERNAL_CONFIRMED": "1",
+                        },
+                        clear=False,
+                    ):
                         headers = {"Cookie": f"{AUTH_COOKIE_NAME}={session_id}"}
                         created = client.post(
                             "/api/auth/permission-requests",

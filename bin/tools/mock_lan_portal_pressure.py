@@ -225,6 +225,20 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Mock LAN portal submit pressure test.")
     parser.add_argument("--count", type=int, default=30)
     parser.add_argument("--concurrency", type=int, default=10)
+    parser.add_argument("--repeat", type=int, default=1, help="连续压测轮数。")
+    parser.add_argument("--pause", type=float, default=0.2, help="每轮之间暂停秒数。")
+    parser.add_argument(
+        "--max-submit-average-ms",
+        type=float,
+        default=0.0,
+        help="提交平均耗时阈值，超过则脚本返回失败；0 表示不检查。",
+    )
+    parser.add_argument(
+        "--max-total-seconds",
+        type=float,
+        default=0.0,
+        help="单轮总耗时阈值，超过则脚本返回失败；0 表示不检查。",
+    )
     parser.add_argument(
         "--no-job-query",
         action="store_true",
@@ -237,13 +251,54 @@ def main() -> None:
         help="模拟外部链路结果，不触发真实飞书或多维。",
     )
     args = parser.parse_args()
-    result = run_pressure(
-        max(1, args.count),
-        max(1, args.concurrency),
-        query_jobs=not bool(args.no_job_query),
-        scenario=args.scenario,
-    )
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    repeat = max(1, int(args.repeat or 1))
+    runs = []
+    ok = True
+    for index in range(repeat):
+        result = run_pressure(
+            max(1, args.count),
+            max(1, args.concurrency),
+            query_jobs=not bool(args.no_job_query),
+            scenario=args.scenario,
+        )
+        result["run"] = index + 1
+        threshold_failures = []
+        if (
+            float(args.max_submit_average_ms or 0) > 0
+            and float(result.get("submit_average_ms") or 0) > float(args.max_submit_average_ms)
+        ):
+            threshold_failures.append("submit_average_ms")
+        if (
+            float(args.max_total_seconds or 0) > 0
+            and float(result.get("elapsed_seconds") or 0) > float(args.max_total_seconds)
+        ):
+            threshold_failures.append("elapsed_seconds")
+        if int(result.get("accepted") or 0) != int(result.get("count") or 0):
+            threshold_failures.append("accepted_count")
+        result["threshold_failures"] = threshold_failures
+        ok = ok and not threshold_failures
+        runs.append(result)
+        if index + 1 < repeat:
+            time.sleep(max(0.0, float(args.pause or 0)))
+    summary = {
+        "ok": ok,
+        "repeat": repeat,
+        "count": max(1, args.count),
+        "concurrency": max(1, args.concurrency),
+        "scenario": args.scenario,
+        "runs": runs,
+        "max_submit_average_ms": max(
+            (float(item.get("submit_average_ms") or 0) for item in runs),
+            default=0.0,
+        ),
+        "max_elapsed_seconds": max(
+            (float(item.get("elapsed_seconds") or 0) for item in runs),
+            default=0.0,
+        ),
+    }
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    if not ok:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

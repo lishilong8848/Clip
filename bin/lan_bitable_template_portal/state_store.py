@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import queue
 import sqlite3
 import threading
 import time
@@ -30,7 +31,7 @@ class LanPortalStateStore:
     are migration inputs only and are never deleted or overwritten here.
     """
 
-    SCHEMA_VERSION = 8
+    SCHEMA_VERSION = 10
     SOURCE_SCOPE_TABLES = {
         "110": "source_records_110",
         "A": "source_records_a",
@@ -58,6 +59,20 @@ class LanPortalStateStore:
         self._lock = threading.RLock()
         self._initialized = False
         self._wal_initialized = False
+        self._write_queue: queue.Queue[dict[str, Any] | None] | None = None
+        self._write_thread: threading.Thread | None = None
+        self._write_worker_lock = threading.Lock()
+        self._write_worker_started = False
+        self._write_worker_stop = threading.Event()
+        self._write_worker_stats: dict[str, Any] = {
+            "enabled": False,
+            "queued": 0,
+            "written": 0,
+            "failed": 0,
+            "last_error": "",
+            "last_flush_at": 0.0,
+            "queue_size": 0,
+        }
 
     def _connect(self) -> sqlite3.Connection:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -69,6 +84,194 @@ class LanPortalStateStore:
             self._wal_initialized = True
         conn.execute("PRAGMA synchronous = NORMAL")
         return conn
+
+    @staticmethod
+    def _write_worker_enabled() -> bool:
+        return os.environ.get("CLIPFLOW_DISABLE_SQLITE_WRITE_WORKER") != "1"
+
+    @staticmethod
+    def _write_batch_window_seconds() -> float:
+        raw = str(os.environ.get("CLIPFLOW_SQLITE_WRITE_BATCH_WINDOW_MS", "") or "").strip()
+        try:
+            value_ms = int(raw or "100")
+        except Exception:
+            value_ms = 100
+        value_ms = max(0, min(value_ms, 1000))
+        return value_ms / 1000.0
+
+    def _ensure_write_worker(self) -> bool:
+        if not self._write_worker_enabled():
+            return False
+        with self._write_worker_lock:
+            if self._write_worker_started and self._write_thread and self._write_thread.is_alive():
+                return True
+            self._write_worker_stop.clear()
+            self._write_queue = queue.Queue()
+            self._write_thread = threading.Thread(
+                target=self._run_write_worker,
+                name="ClipFlowSQLiteWriteWorker",
+                daemon=True,
+            )
+            self._write_worker_started = True
+            self._write_worker_stats["enabled"] = True
+            self._write_thread.start()
+            return True
+
+    def _submit_background_write(self, operation: str, payload: dict[str, Any]) -> bool:
+        if not self._ensure_write_worker():
+            return False
+        write_queue = self._write_queue
+        if write_queue is None:
+            return False
+        try:
+            write_queue.put_nowait(
+                {
+                    "operation": str(operation or "").strip(),
+                    "payload": dict(payload or {}),
+                    "queued_at": time.time(),
+                }
+            )
+            self._write_worker_stats["queued"] = int(
+                self._write_worker_stats.get("queued") or 0
+            ) + 1
+            self._write_worker_stats["queue_size"] = write_queue.qsize()
+            return True
+        except Exception as exc:
+            self._write_worker_stats["failed"] = int(
+                self._write_worker_stats.get("failed") or 0
+            ) + 1
+            self._write_worker_stats["last_error"] = str(exc)
+            return False
+
+    def _run_write_worker(self) -> None:
+        batch: list[dict[str, Any]] = []
+        while not self._write_worker_stop.is_set():
+            write_queue = self._write_queue
+            if write_queue is None:
+                break
+            try:
+                item = write_queue.get(timeout=0.2)
+            except queue.Empty:
+                item = None
+            if item is None:
+                if batch:
+                    self._flush_background_writes(batch)
+                    batch = []
+                continue
+            batch.append(item)
+            deadline = time.monotonic() + self._write_batch_window_seconds()
+            try:
+                while len(batch) < 100:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    next_item = write_queue.get(timeout=remaining)
+                    if next_item is not None:
+                        batch.append(next_item)
+                    else:
+                        break
+            except queue.Empty:
+                pass
+            self._flush_background_writes(batch)
+            batch = []
+        if batch:
+            self._flush_background_writes(batch)
+        self._write_worker_stats["queue_size"] = 0
+
+    def _flush_background_writes(self, batch: list[dict[str, Any]]) -> None:
+        if not batch:
+            return
+        now = time.time()
+        effective_batch: list[dict[str, Any]] = []
+        latest_backend_runtime: dict[str, dict[str, Any]] = {}
+        for item in batch:
+            operation = str(item.get("operation") or "").strip()
+            payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+            if operation == "backend_runtime":
+                key = self._text(payload.get("key"))
+                if key:
+                    latest_backend_runtime[key] = item
+                    continue
+            effective_batch.append(item)
+        effective_batch.extend(latest_backend_runtime.values())
+        try:
+            with self._lock:
+                with closing(self._connect()) as conn:
+                    self._ensure_schema_locked(conn)
+                    conn.execute("BEGIN IMMEDIATE")
+                    for item in effective_batch:
+                        operation = str(item.get("operation") or "").strip()
+                        payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+                        if operation == "backend_runtime":
+                            key = self._text(payload.get("key"))
+                            if not key:
+                                continue
+                            value = payload.get("value")
+                            normalized = dict(value) if isinstance(value, dict) else {}
+                            conn.execute(
+                                """
+                                INSERT OR REPLACE INTO backend_runtime(key, value_json, updated_at)
+                                VALUES (?, ?, ?)
+                                """,
+                                (key, self._json(normalized), now),
+                            )
+                        elif operation == "append_event":
+                            source = self._text(payload.get("source")) or "unknown"
+                            value = payload.get("value")
+                            normalized = dict(value) if isinstance(value, dict) else {}
+                            conn.execute(
+                                """
+                                INSERT INTO append_events(source, payload_json, created_at)
+                                VALUES (?, ?, ?)
+                                """,
+                                (source, self._json(normalized), now),
+                            )
+                    conn.commit()
+            self._write_worker_stats["written"] = int(
+                self._write_worker_stats.get("written") or 0
+            ) + len(batch)
+            self._write_worker_stats["coalesced"] = int(
+                self._write_worker_stats.get("coalesced") or 0
+            ) + max(0, len(batch) - len(effective_batch))
+            self._write_worker_stats["last_error"] = ""
+            self._write_worker_stats["last_flush_at"] = now
+            if self._write_queue is not None:
+                self._write_worker_stats["queue_size"] = self._write_queue.qsize()
+        except Exception as exc:
+            self._write_worker_stats["failed"] = int(
+                self._write_worker_stats.get("failed") or 0
+            ) + len(batch)
+            self._write_worker_stats["last_error"] = str(exc)
+            if self._write_queue is not None:
+                self._write_worker_stats["queue_size"] = self._write_queue.qsize()
+
+    def shutdown_write_worker(self, *, timeout: float = 2.0) -> None:
+        if not self._write_worker_started:
+            return
+        self._write_worker_stop.set()
+        write_queue = self._write_queue
+        if write_queue is not None:
+            try:
+                write_queue.put_nowait(None)
+            except Exception:
+                pass
+        thread = self._write_thread
+        if thread and thread.is_alive():
+            thread.join(timeout=max(0.1, float(timeout or 0)))
+        self._write_worker_stats["enabled"] = False
+
+    def get_write_worker_stats(self) -> dict[str, Any]:
+        stats = dict(self._write_worker_stats)
+        queue_size = 0
+        try:
+            if self._write_queue is not None:
+                queue_size = self._write_queue.qsize()
+        except Exception:
+            queue_size = 0
+        stats["queue_size"] = queue_size
+        stats["alive"] = bool(self._write_thread and self._write_thread.is_alive())
+        stats["enabled"] = bool(stats.get("enabled")) and self._write_worker_enabled()
+        return stats
 
     def _ensure_schema_locked(self, conn: sqlite3.Connection) -> None:
         if self._initialized:
@@ -230,6 +433,62 @@ class LanPortalStateStore:
             """
             CREATE INDEX IF NOT EXISTS idx_event_outbox_channel_status
             ON event_outbox(channel, status, id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS runtime_task_queue (
+                queue_name TEXT NOT NULL,
+                job_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                available_at REAL NOT NULL DEFAULT 0,
+                lease_until REAL NOT NULL DEFAULT 0,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT NOT NULL DEFAULT '',
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY(queue_name, job_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_runtime_task_queue_status
+            ON runtime_task_queue(queue_name, status, available_at, updated_at)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS qt_active_items (
+                active_item_id TEXT PRIMARY KEY,
+                record_id TEXT,
+                notice_type TEXT,
+                section TEXT NOT NULL,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                origin TEXT,
+                payload_json TEXT NOT NULL,
+                updated_at REAL NOT NULL,
+                deleted_at REAL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_qt_active_items_record_id
+            ON qt_active_items(record_id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_qt_active_items_notice_section
+            ON qt_active_items(notice_type, section)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_qt_active_items_deleted_at
+            ON qt_active_items(deleted_at)
             """
         )
         conn.execute(
@@ -1275,6 +1534,259 @@ class LanPortalStateStore:
             for row in rows
         ]
 
+    def _qt_active_item_key(self, payload: dict[str, Any], fallback: str = "") -> str:
+        return (
+            self._text(payload.get("active_item_id"))
+            or self._text(payload.get("item_id"))
+            or self._text(payload.get("record_id"))
+            or self._text(fallback)
+        )
+
+    def _normalize_qt_active_section(self, section: str) -> str:
+        section = self._text(section)
+        return section if section in {"event", "other"} else "other"
+
+    def _qt_active_item_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        payload = self._loads(str(row["payload_json"] or ""), {})
+        payload = payload if isinstance(payload, dict) else {}
+        return {
+            "active_item_id": str(row["active_item_id"] or ""),
+            "record_id": str(row["record_id"] or ""),
+            "notice_type": str(row["notice_type"] or ""),
+            "section": str(row["section"] or "other"),
+            "sort_order": int(row["sort_order"] or 0),
+            "origin": str(row["origin"] or ""),
+            "payload": payload,
+            "updated_at": float(row["updated_at"] or 0),
+            "deleted_at": float(row["deleted_at"] or 0) if row["deleted_at"] is not None else None,
+        }
+
+    def list_qt_active_items(self, *, include_deleted: bool = False) -> list[dict[str, Any]]:
+        if not self.db_path.exists():
+            return []
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                where = "" if include_deleted else "WHERE deleted_at IS NULL"
+                rows = conn.execute(
+                    f"""
+                    SELECT active_item_id, record_id, notice_type, section, sort_order,
+                           origin, payload_json, updated_at, deleted_at
+                    FROM qt_active_items
+                    {where}
+                    ORDER BY section ASC, sort_order ASC, updated_at DESC
+                    """
+                ).fetchall()
+        return [self._qt_active_item_from_row(row) for row in rows]
+
+    def upsert_qt_active_item(
+        self,
+        payload: dict[str, Any] | None,
+        *,
+        section: str = "",
+        sort_order: int = 0,
+        origin: str = "",
+    ) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        normalized = dict(payload or {})
+        active_item_id = self._qt_active_item_key(normalized)
+        if not active_item_id:
+            return False
+        normalized.setdefault("active_item_id", active_item_id)
+        record_id = self._text(normalized.get("record_id"))
+        notice_type = self._text(normalized.get("notice_type"))
+        section = self._normalize_qt_active_section(
+            section or ("event" if notice_type == "事件通告" else "other")
+        )
+        origin = self._text(origin) or self._text(normalized.get("origin"))
+        if not origin and bool(normalized.get("lan_created_from_portal")):
+            origin = "portal"
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute(
+                    """
+                    INSERT INTO qt_active_items(
+                        active_item_id, record_id, notice_type, section, sort_order,
+                        origin, payload_json, updated_at, deleted_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                    ON CONFLICT(active_item_id) DO UPDATE SET
+                        record_id = excluded.record_id,
+                        notice_type = excluded.notice_type,
+                        section = excluded.section,
+                        sort_order = excluded.sort_order,
+                        origin = excluded.origin,
+                        payload_json = excluded.payload_json,
+                        updated_at = excluded.updated_at,
+                        deleted_at = NULL
+                    """,
+                    (
+                        active_item_id,
+                        record_id,
+                        notice_type,
+                        section,
+                        int(sort_order or 0),
+                        origin,
+                        self._json(normalized),
+                        now,
+                    ),
+                )
+                conn.commit()
+        return True
+
+    def delete_qt_active_item(
+        self, *, active_item_id: str = "", record_id: str = ""
+    ) -> bool:
+        active_item_id = self._text(active_item_id)
+        record_id = self._text(record_id)
+        if not active_item_id and not record_id:
+            return False
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                if active_item_id:
+                    cursor = conn.execute(
+                        """
+                        UPDATE qt_active_items
+                        SET deleted_at = ?, updated_at = ?
+                        WHERE active_item_id = ? AND deleted_at IS NULL
+                        """,
+                        (now, now, active_item_id),
+                    )
+                else:
+                    cursor = conn.execute(
+                        """
+                        UPDATE qt_active_items
+                        SET deleted_at = ?, updated_at = ?
+                        WHERE record_id = ? AND deleted_at IS NULL
+                        """,
+                        (now, now, record_id),
+                    )
+                conn.commit()
+                return bool(cursor.rowcount)
+
+    def replace_qt_active_items_from_payload(
+        self, payload: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        payload = payload if isinstance(payload, dict) else {}
+        sections = ("event", "other")
+        rows: list[tuple[str, str, str, str, int, str, str, float]] = []
+        seen: set[str] = set()
+        now = time.time()
+        for section in sections:
+            section_items = payload.get(section, [])
+            if not isinstance(section_items, list):
+                continue
+            for sort_order, entry in enumerate(section_items):
+                if not isinstance(entry, dict):
+                    continue
+                data = entry.get("data")
+                if not isinstance(data, dict):
+                    continue
+                normalized = dict(data)
+                active_item_id = self._qt_active_item_key(normalized)
+                if not active_item_id:
+                    continue
+                normalized.setdefault("active_item_id", active_item_id)
+                seen.add(active_item_id)
+                notice_type = self._text(normalized.get("notice_type"))
+                origin = self._text(normalized.get("origin"))
+                if not origin and bool(normalized.get("lan_created_from_portal")):
+                    origin = "portal"
+                rows.append(
+                    (
+                        active_item_id,
+                        self._text(normalized.get("record_id")),
+                        notice_type,
+                        self._normalize_qt_active_section(section),
+                        int(sort_order),
+                        origin,
+                        self._json(normalized),
+                        now,
+                    )
+                )
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                for row in rows:
+                    conn.execute(
+                        """
+                        INSERT INTO qt_active_items(
+                            active_item_id, record_id, notice_type, section, sort_order,
+                            origin, payload_json, updated_at, deleted_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                        ON CONFLICT(active_item_id) DO UPDATE SET
+                            record_id = excluded.record_id,
+                            notice_type = excluded.notice_type,
+                            section = excluded.section,
+                            sort_order = excluded.sort_order,
+                            origin = excluded.origin,
+                            payload_json = excluded.payload_json,
+                            updated_at = excluded.updated_at,
+                            deleted_at = NULL
+                        """,
+                        row,
+                    )
+                if seen:
+                    placeholders = ",".join("?" for _ in seen)
+                    conn.execute(
+                        f"""
+                        UPDATE qt_active_items
+                        SET deleted_at = ?, updated_at = ?
+                        WHERE deleted_at IS NULL
+                          AND active_item_id NOT IN ({placeholders})
+                        """,
+                        (now, now, *sorted(seen)),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        UPDATE qt_active_items
+                        SET deleted_at = ?, updated_at = ?
+                        WHERE deleted_at IS NULL
+                        """,
+                        (now, now),
+                    )
+                conn.commit()
+        return {"upserted": len(rows), "active": len(seen), "updated_at": now}
+
+    def qt_active_items_stats(self) -> dict[str, Any]:
+        if not self.db_path.exists():
+            return {"active": 0, "deleted": 0, "by_notice_type": {}, "checked_at": time.time()}
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                rows = conn.execute(
+                    """
+                    SELECT
+                        SUM(CASE WHEN deleted_at IS NULL THEN 1 ELSE 0 END) AS active_count,
+                        SUM(CASE WHEN deleted_at IS NULL THEN 0 ELSE 1 END) AS deleted_count
+                    FROM qt_active_items
+                    """
+                ).fetchone()
+                type_rows = conn.execute(
+                    """
+                    SELECT notice_type, COUNT(*) AS count
+                    FROM qt_active_items
+                    WHERE deleted_at IS NULL
+                    GROUP BY notice_type
+                    """
+                ).fetchall()
+        return {
+            "active": int(rows["active_count"] or 0) if rows else 0,
+            "deleted": int(rows["deleted_count"] or 0) if rows else 0,
+            "by_notice_type": {
+                str(row["notice_type"] or ""): int(row["count"] or 0)
+                for row in type_rows
+            },
+            "checked_at": time.time(),
+        }
+
     def get_settings(self) -> dict[str, Any] | None:
         if not self.db_path.exists():
             return None
@@ -1647,6 +2159,15 @@ class LanPortalStateStore:
                 conn.commit()
                 return int(cursor.lastrowid or 0)
 
+    def append_event_async(self, source: str, payload: dict[str, Any] | None) -> bool:
+        return self._submit_background_write(
+            "append_event",
+            {
+                "source": self._text(source) or "unknown",
+                "value": dict(payload or {}),
+            },
+        )
+
     def put_backend_runtime(self, key: str, payload: dict[str, Any] | None) -> None:
         key = self._text(key)
         if not key:
@@ -1663,6 +2184,20 @@ class LanPortalStateStore:
                     (key, self._json(normalized), time.time()),
                 )
                 conn.commit()
+
+    def put_backend_runtime_async(
+        self, key: str, payload: dict[str, Any] | None
+    ) -> bool:
+        key = self._text(key)
+        if not key:
+            return False
+        return self._submit_background_write(
+            "backend_runtime",
+            {
+                "key": key,
+                "value": dict(payload or {}),
+            },
+        )
 
     def get_backend_runtime(self, key: str) -> dict[str, Any] | None:
         key = self._text(key)
@@ -1735,7 +2270,9 @@ class LanPortalStateStore:
                 for table in (
                     "notice_actions",
                     "event_outbox",
+                    "runtime_task_queue",
                     "backend_runtime",
+                    "qt_active_items",
                     "daily_summary",
                     "work_status",
                     "source_records_all",
@@ -2003,6 +2540,300 @@ class LanPortalStateStore:
             "created_at": float(row["created_at"] or 0),
             "updated_at": float(row["updated_at"] or 0),
         }
+
+    def upsert_runtime_queue_item(
+        self,
+        queue_name: str,
+        job_id: str,
+        *,
+        status: str = "queued",
+        payload: dict[str, Any] | None = None,
+        available_at: float | None = None,
+        error: str = "",
+    ) -> bool:
+        queue_name = self._text(queue_name)
+        job_id = self._text(job_id)
+        status = self._text(status) or "queued"
+        if not queue_name or not job_id:
+            return False
+        now = time.time()
+        available = float(available_at if available_at is not None else now)
+        normalized = dict(payload or {})
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute(
+                    """
+                    INSERT INTO runtime_task_queue(
+                        queue_name, job_id, status, available_at, lease_until,
+                        attempts, last_error, payload_json, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, ?)
+                    ON CONFLICT(queue_name, job_id) DO UPDATE SET
+                        status = excluded.status,
+                        available_at = excluded.available_at,
+                        lease_until = 0,
+                        last_error = excluded.last_error,
+                        payload_json = excluded.payload_json,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        queue_name,
+                        job_id,
+                        status,
+                        available,
+                        self._text(error),
+                        self._json(normalized),
+                        now,
+                        now,
+                    ),
+                )
+                conn.commit()
+        return True
+
+    def mark_runtime_queue_item(
+        self,
+        queue_name: str,
+        job_id: str,
+        status: str,
+        *,
+        error: str = "",
+    ) -> bool:
+        queue_name = self._text(queue_name)
+        job_id = self._text(job_id)
+        status = self._text(status) or "done"
+        if not queue_name or not job_id:
+            return False
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                cursor = conn.execute(
+                    """
+                    UPDATE runtime_task_queue
+                    SET status = ?,
+                        last_error = ?,
+                        lease_until = CASE WHEN ? = 'processing' THEN lease_until ELSE 0 END,
+                        updated_at = ?
+                    WHERE queue_name = ? AND job_id = ?
+                    """,
+                    (status, self._text(error), status, now, queue_name, job_id),
+                )
+                conn.commit()
+                return bool(cursor.rowcount)
+
+    def lease_runtime_queue_items(
+        self,
+        queue_name: str,
+        *,
+        limit: int = 1,
+        lease_seconds: float = 30.0,
+    ) -> list[dict[str, Any]]:
+        queue_name = self._text(queue_name)
+        if not queue_name:
+            return []
+        limit = max(1, min(int(limit or 1), 50))
+        now = time.time()
+        lease_until = now + max(1.0, float(lease_seconds or 30.0))
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                rows = conn.execute(
+                    """
+                    SELECT queue_name, job_id, status, available_at, lease_until,
+                           attempts, last_error, payload_json, created_at, updated_at
+                    FROM runtime_task_queue
+                    WHERE queue_name = ?
+                      AND (
+                        (status = 'queued' AND available_at <= ?)
+                        OR (status = 'processing' AND lease_until > 0 AND lease_until <= ?)
+                      )
+                    ORDER BY available_at ASC, updated_at ASC
+                    LIMIT ?
+                    """,
+                    (queue_name, now, now, limit),
+                ).fetchall()
+                keys = [str(row["job_id"] or "") for row in rows if str(row["job_id"] or "")]
+                for job_id in keys:
+                    conn.execute(
+                        """
+                        UPDATE runtime_task_queue
+                        SET status = 'processing',
+                            lease_until = ?,
+                            attempts = attempts + 1,
+                            updated_at = ?
+                        WHERE queue_name = ? AND job_id = ?
+                        """,
+                        (lease_until, now, queue_name, job_id),
+                    )
+                conn.commit()
+        leased: list[dict[str, Any]] = []
+        for row in rows:
+            payload = self._loads(str(row["payload_json"] or ""), {})
+            leased.append(
+                {
+                    "queue_name": str(row["queue_name"] or ""),
+                    "job_id": str(row["job_id"] or ""),
+                    "status": "processing",
+                    "available_at": float(row["available_at"] or 0),
+                    "lease_until": lease_until,
+                    "attempts": int(row["attempts"] or 0) + 1,
+                    "last_error": str(row["last_error"] or ""),
+                    "payload": payload if isinstance(payload, dict) else {},
+                    "created_at": float(row["created_at"] or 0),
+                    "updated_at": now,
+                }
+            )
+        return leased
+
+    def requeue_runtime_queue_item(
+        self,
+        queue_name: str,
+        job_id: str,
+        *,
+        available_at: float | None = None,
+        error: str = "",
+    ) -> bool:
+        queue_name = self._text(queue_name)
+        job_id = self._text(job_id)
+        if not queue_name or not job_id:
+            return False
+        now = time.time()
+        available = float(available_at if available_at is not None else now)
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                cursor = conn.execute(
+                    """
+                    UPDATE runtime_task_queue
+                    SET status = 'queued',
+                        available_at = ?,
+                        lease_until = 0,
+                        last_error = ?,
+                        updated_at = ?
+                    WHERE queue_name = ? AND job_id = ?
+                    """,
+                    (available, self._text(error), now, queue_name, job_id),
+                )
+                conn.commit()
+                return bool(cursor.rowcount)
+
+    def runtime_queue_counts(self) -> dict[str, dict[str, int]]:
+        if not self.db_path.exists():
+            return {}
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                rows = conn.execute(
+                    """
+                    SELECT queue_name, status, COUNT(*) AS count
+                    FROM runtime_task_queue
+                    GROUP BY queue_name, status
+                    """
+                ).fetchall()
+        counts: dict[str, dict[str, int]] = {}
+        for row in rows:
+            queue_name = str(row["queue_name"] or "")
+            status = str(row["status"] or "")
+            if not queue_name or not status:
+                continue
+            counts.setdefault(queue_name, {})[status] = int(row["count"] or 0)
+        return counts
+
+    def runtime_queue_details(self) -> dict[str, dict[str, int]]:
+        if not self.db_path.exists():
+            return {}
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                rows = conn.execute(
+                    """
+                    SELECT queue_name,
+                           SUM(CASE WHEN status = 'queued' AND available_at <= ? THEN 1 ELSE 0 END) AS queued_due,
+                           SUM(CASE WHEN status = 'queued' AND available_at > ? THEN 1 ELSE 0 END) AS queued_future,
+                           SUM(CASE WHEN status = 'processing' AND lease_until > ? THEN 1 ELSE 0 END) AS processing_active,
+                           SUM(CASE WHEN status = 'processing' AND lease_until > 0 AND lease_until <= ? THEN 1 ELSE 0 END) AS processing_expired,
+                           SUM(CASE WHEN status IN ('done', 'failed', 'cancelled', 'interrupted') THEN 1 ELSE 0 END) AS terminal
+                    FROM runtime_task_queue
+                    GROUP BY queue_name
+                    """,
+                    (now, now, now, now),
+                ).fetchall()
+        details: dict[str, dict[str, int]] = {}
+        for row in rows:
+            queue_name = str(row["queue_name"] or "")
+            if not queue_name:
+                continue
+            details[queue_name] = {
+                "queued_due": int(row["queued_due"] or 0),
+                "queued_future": int(row["queued_future"] or 0),
+                "processing_active": int(row["processing_active"] or 0),
+                "processing_expired": int(row["processing_expired"] or 0),
+                "terminal": int(row["terminal"] or 0),
+            }
+        return details
+
+    def reset_runtime_queue_incomplete(
+        self,
+        *,
+        status: str = "interrupted",
+        error: str = "程序重启，队列状态已重置。",
+    ) -> int:
+        final_status = self._text(status) or "interrupted"
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                cursor = conn.execute(
+                    """
+                    UPDATE runtime_task_queue
+                    SET status = ?, last_error = ?, lease_until = 0, updated_at = ?
+                    WHERE status NOT IN ('done', 'failed', 'cancelled', 'interrupted')
+                    """,
+                    (final_status, self._text(error), now),
+                )
+                conn.commit()
+                return int(cursor.rowcount or 0)
+
+    def cleanup_runtime_queue_items(
+        self,
+        *,
+        retention_seconds: int = 86400,
+        max_delete: int = 500,
+    ) -> int:
+        retention_seconds = max(60, int(retention_seconds or 0))
+        max_delete = max(1, min(int(max_delete or 500), 2000))
+        cutoff = time.time() - retention_seconds
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                rows = conn.execute(
+                    """
+                    SELECT queue_name, job_id
+                    FROM runtime_task_queue
+                    WHERE status IN ('done', 'failed', 'cancelled') AND updated_at < ?
+                    ORDER BY updated_at ASC
+                    LIMIT ?
+                    """,
+                    (cutoff, max_delete),
+                ).fetchall()
+                keys = [
+                    (str(row["queue_name"] or ""), str(row["job_id"] or ""))
+                    for row in rows
+                ]
+                for queue_name, job_id in keys:
+                    if queue_name and job_id:
+                        conn.execute(
+                            """
+                            DELETE FROM runtime_task_queue
+                            WHERE queue_name = ? AND job_id = ?
+                            """,
+                            (queue_name, job_id),
+                        )
+                conn.commit()
+        return len(keys)
 
     def import_jsonl_events_once(
         self, source: str, path: str | Path, *, marker: str = ""

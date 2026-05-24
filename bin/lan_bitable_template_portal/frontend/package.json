@@ -1,0 +1,20 @@
+{
+  "private": true,
+  "name": "clipflow-lan-portal-frontend",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "typecheck": "vue-tsc --noEmit"
+  },
+  "dependencies": {
+    "@tanstack/vue-virtual": "^3.13.12",
+    "vue": "^3.5.16"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.4",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5",
+    "vue-tsc": "^2.2.10"
+  }
+}

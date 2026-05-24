@@ -23,6 +23,13 @@ except ImportError as e:
 def test_add_record():
     print("================ 测试开始 ================")
 
+    if os.environ.get("CLIPFLOW_ALLOW_TEST_CREATE_RECORD") != "1":
+        print(
+            "已拦截真实多维创建测试。若确需执行，请设置 "
+            "CLIPFLOW_ALLOW_TEST_CREATE_RECORD=1。"
+        )
+        return
+
     # 1. 检查配置
     if not config.user_token:
         print("错误: 未检测到飞书 User Token，请检查配置文件 secrets.yaml")

@@ -2060,7 +2060,7 @@ class ScreenshotRegionSelector(QWidget):
 
     def _start_roi_watching(self):
 
-        """启动ROI变化监听循环（每200ms检测一次）"""
+        """启动ROI变化监听循环。"""
 
         if not self._roi_watch_timer:
 
@@ -2070,9 +2070,9 @@ class ScreenshotRegionSelector(QWidget):
 
 
 
-        # 启动定时器，200ms检测一次ROI变化
+        interval_ms = 500 if os.environ.get("CLIPFLOW_LOW_PERFORMANCE_MODE") == "1" else 350
 
-        self._roi_watch_timer.start(200)
+        self._roi_watch_timer.start(interval_ms)
 
 
 

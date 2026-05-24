@@ -86,6 +86,14 @@ EXCLUDE_FILES = {
 
     "feishu_error_code.md",
 
+    "debug_feishu_fields.py",
+
+    "debug_feishu_fields_json.py",
+
+    "fields_output.json",
+
+    "test_create_record.py",
+
 }
 
 
@@ -115,6 +123,10 @@ EXCLUDE_DIR_NAMES = {
     ".idea",
 
     ".vscode",
+
+    ".vite",
+
+    "node_modules",
 
     "__pycache__",
 

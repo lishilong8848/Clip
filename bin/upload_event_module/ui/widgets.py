@@ -109,6 +109,34 @@ class TimerWidget(QWidget):
     """计时器组件：显示倒计时（仅用于事件通告）"""
 
     alert_triggered = pyqtSignal()  # 语音提醒触发信号
+    _running_instances = weakref.WeakSet()
+    _global_update_timer = None
+
+    @classmethod
+    def _ensure_global_update_timer(cls):
+        if cls._global_update_timer is not None:
+            return cls._global_update_timer
+        timer = QTimer()
+        timer.setInterval(TIMER_WIDGET_REFRESH_MS)
+        timer.timeout.connect(cls._update_running_instances)
+        cls._global_update_timer = timer
+        return timer
+
+    @classmethod
+    def _update_running_instances(cls):
+        running_count = 0
+        for widget in list(cls._running_instances):
+            try:
+                if sip.isdeleted(widget) or not widget.is_running:
+                    continue
+                running_count += 1
+                if widget.isVisible():
+                    widget.update_display()
+            except RuntimeError:
+                continue
+        timer = cls._global_update_timer
+        if running_count <= 0 and timer is not None and timer.isActive():
+            timer.stop()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -289,11 +317,25 @@ class TimerWidget(QWidget):
         self.is_running = True
         self.is_overtime = False
         self.update_display()
-        self.update_timer.start(TIMER_WIDGET_REFRESH_MS)
+        self._running_instances.add(self)
+        timer = self._ensure_global_update_timer()
+        if not timer.isActive():
+            timer.start()
 
     def stop(self):
         self.is_running = False
+        try:
+            self._running_instances.discard(self)
+        except Exception:
+            pass
         self.update_timer.stop()
+        if not any(
+            getattr(widget, "is_running", False)
+            for widget in list(self._running_instances)
+        ):
+            timer = self._global_update_timer
+            if timer is not None and timer.isActive():
+                timer.stop()
 
     def update_display(self):
         if not self.start_time:

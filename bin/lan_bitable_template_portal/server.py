@@ -32,10 +32,39 @@ from upload_event_module.services.robot_webhook import send_text_to_open_ids
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+FRONTEND_DIST_DIR = Path(__file__).resolve().parent / "frontend" / "dist"
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 18766
 CLIENT_DISCONNECT_WINERRORS = {10053, 10054, 10058}
 MAX_JSON_BODY_BYTES = 512 * 1024
+
+
+def portal_frontend_dist_enabled() -> bool:
+    return (
+        os.environ.get("CLIPFLOW_FRONTEND_LEGACY") != "1"
+        and (FRONTEND_DIST_DIR / "index.html").is_file()
+    )
+
+
+def portal_index_file() -> Path:
+    if portal_frontend_dist_enabled():
+        return FRONTEND_DIST_DIR / "index.html"
+    return STATIC_DIR / "index.html"
+
+
+def portal_asset_file(relative: Path) -> Path:
+    if portal_frontend_dist_enabled():
+        candidate = FRONTEND_DIST_DIR / "assets" / relative
+        if candidate.is_file():
+            return candidate
+    return STATIC_DIR / "assets" / relative
+
+
+def portal_static_roots() -> list[Path]:
+    roots = [STATIC_DIR.resolve()]
+    if portal_frontend_dist_enabled():
+        roots.append(FRONTEND_DIST_DIR.resolve())
+    return roots
 
 
 def find_available_port(host: str, preferred_port: int) -> int:
@@ -120,6 +149,8 @@ class PortalHandler(BaseHTTPRequestHandler):
     repair_refresh_last_error = ""
     repair_refresh_last_finished = 0.0
     repair_refresh_reuse_window_s = 10.0
+    qt_action_interval_ms = 250
+    source_refresh_defer_when_busy = True
 
     @staticmethod
     def _bounded_int(value, default: int, minimum: int, maximum: int) -> int:
@@ -142,12 +173,15 @@ class PortalHandler(BaseHTTPRequestHandler):
         return {
             "message_worker_count": int(cls.message_worker_count or 0),
             "qt_items_per_tick": 1,
-            "qt_tick_interval_ms": 250,
+            "qt_tick_interval_ms": int(getattr(cls, "qt_action_interval_ms", 250) or 250),
             "upload_seconds_per_record": float(getattr(cls, "upload_seconds_per_record", 2.0)),
             "upload_batch_wait_seconds": float(getattr(cls, "upload_batch_wait_seconds", 5.0)),
             "upload_batch_max_records": int(getattr(cls, "upload_batch_max_records", 5)),
             "source_refresh_minutes": 30,
             "frontend_snapshot_refresh_minutes": 10,
+            "source_refresh_defer_when_busy": bool(
+                getattr(cls, "source_refresh_defer_when_busy", True)
+            ),
         }
 
     @classmethod
@@ -156,6 +190,10 @@ class PortalHandler(BaseHTTPRequestHandler):
             settings = cls.state_store.get_settings() or {}
         except Exception:
             settings = {}
+        low_performance = (
+            str(settings.get("lan_low_performance_mode") or "").strip() in {"1", "true", "是", "开启"}
+            or os.environ.get("CLIPFLOW_LOW_PERFORMANCE_MODE") == "1"
+        )
         cls.message_worker_count = cls._bounded_int(
             settings.get("lan_message_worker_count"),
             5,
@@ -164,23 +202,88 @@ class PortalHandler(BaseHTTPRequestHandler):
         )
         cls.upload_seconds_per_record = cls._bounded_float(
             settings.get("lan_upload_seconds_per_record"),
-            2.0,
+            5.0 if low_performance else 2.0,
             0.5,
             10.0,
         )
         cls.upload_batch_wait_seconds = cls._bounded_float(
             settings.get("lan_upload_batch_wait_seconds"),
-            5.0,
+            8.0 if low_performance else 5.0,
             1.0,
             30.0,
         )
         cls.upload_batch_max_records = cls._bounded_int(
             settings.get("lan_upload_batch_max_records"),
-            5,
+            3 if low_performance else 5,
             1,
             10,
         )
+        cls.qt_action_interval_ms = cls._bounded_int(
+            settings.get("lan_qt_action_interval_ms"),
+            500 if low_performance else 250,
+            100,
+            3000,
+        )
+        cls.source_refresh_defer_when_busy = (
+            str(settings.get("lan_source_refresh_defer_when_busy") or "").strip()
+            not in {"0", "false", "否", "关闭"}
+        )
         return cls.runtime_limits()
+
+    @classmethod
+    def runtime_pressure(cls) -> dict:
+        with cls.message_queue_lock:
+            message_queue_size = len(cls.message_queue)
+        with cls.action_queue_lock:
+            qt_queue_size = len(cls.action_queue)
+        with cls.upload_wait_lock:
+            upload_wait_size = len(cls.upload_wait_jobs)
+        runtime_counts = {}
+        try:
+            runtime_counts = cls.state_store.runtime_queue_details()
+        except Exception:
+            runtime_counts = {}
+        queued_due = 0
+        processing_active = 0
+        for details in (runtime_counts or {}).values():
+            if not isinstance(details, dict):
+                continue
+            queued_due += int(details.get("queued_due") or 0)
+            processing_active += int(details.get("processing_active") or 0)
+        active_jobs = 0
+        try:
+            with cls.service._jobs_lock:
+                for job in cls.service._jobs.values():
+                    if str((job or {}).get("phase") or "") not in {"success", "failed"}:
+                        active_jobs += 1
+        except Exception:
+            active_jobs = 0
+        busy = any(
+            value > 0
+            for value in (
+                message_queue_size,
+                qt_queue_size,
+                upload_wait_size,
+                queued_due,
+                processing_active,
+                active_jobs,
+            )
+        )
+        return {
+            "busy": bool(busy),
+            "message_queue_size": message_queue_size,
+            "qt_queue_size": qt_queue_size,
+            "upload_wait_size": upload_wait_size,
+            "runtime_queue_due": queued_due,
+            "runtime_queue_processing": processing_active,
+            "active_jobs": active_jobs,
+        }
+
+    @classmethod
+    def should_defer_source_refresh(cls) -> bool:
+        if not bool(getattr(cls, "source_refresh_defer_when_busy", True)):
+            return False
+        return bool(cls.runtime_pressure().get("busy"))
 
     @staticmethod
     def _is_client_disconnect(exc: BaseException) -> bool:
@@ -229,10 +332,15 @@ class PortalHandler(BaseHTTPRequestHandler):
 
     def _send_static_file(self, path: Path) -> None:
         resolved = path.resolve()
-        static_root = STATIC_DIR.resolve()
-        try:
-            resolved.relative_to(static_root)
-        except ValueError:
+        allowed = False
+        for static_root in portal_static_roots():
+            try:
+                resolved.relative_to(static_root)
+                allowed = True
+                break
+            except ValueError:
+                continue
+        if not allowed:
             return self._send_json(404, {"ok": False, "error": "Not Found"})
         if not resolved.is_file():
             return self._send_json(404, {"ok": False, "error": "Not Found"})
@@ -761,10 +869,11 @@ class PortalHandler(BaseHTTPRequestHandler):
         if self._redirect_root_oauth_callback(parsed):
             return
         if parsed.path == "/":
-            return self._send_html(STATIC_DIR / "index.html")
+            return self._send_html(portal_index_file())
         if parsed.path.startswith("/assets/"):
-            relative = Path(*parsed.path.lstrip("/").split("/"))
-            return self._send_static_file(STATIC_DIR / relative)
+            relative_text = parsed.path[len("/assets/") :]
+            relative = Path(*relative_text.split("/")) if relative_text else Path()
+            return self._send_static_file(portal_asset_file(relative))
         if parsed.path == "/api/auth/status":
             session = self._current_session()
             data = PortalHandler.auth_manager.public_status(
@@ -1460,10 +1569,25 @@ class PortalHandler(BaseHTTPRequestHandler):
 
     @classmethod
     def refresh_sources_once(
-        cls, *, force: bool = False, min_interval_seconds: int = 60
+        cls,
+        *,
+        force: bool = False,
+        min_interval_seconds: int = 60,
+        defer_if_busy: bool = False,
     ) -> dict:
         if os.environ.get("CLIPFLOW_BACKEND_MOCK_EXTERNAL") == "1":
             return {"refreshed": False, "warnings": [], "mock_external": True}
+        if defer_if_busy and cls.should_defer_source_refresh():
+            pressure = cls.runtime_pressure()
+            return {
+                "refreshed": False,
+                "warnings": [],
+                "source_refresh_inflight": False,
+                "source_refresh_reused": True,
+                "source_refresh_deferred": True,
+                "source_refresh_defer_reason": "当前存在待发送/待显示/待上传任务，后台源表刷新已避让。",
+                "runtime_pressure": pressure,
+            }
         if not cls.source_refresh_run_lock.acquire(blocking=False):
             return {
                 "refreshed": False,
@@ -1580,7 +1704,7 @@ class PortalHandler(BaseHTTPRequestHandler):
             with cls.source_refresh_lock:
                 if cls.source_refresh_stop:
                     return
-            cls.refresh_sources_once(force=True)
+            cls.refresh_sources_once(force=True, defer_if_busy=True)
             try:
                 ttl = int(cls.service._source_cache_ttl_seconds())
             except Exception:
@@ -1639,6 +1763,10 @@ class PortalHandler(BaseHTTPRequestHandler):
         job_id = str(job_id or "").strip()
         if not job_id:
             return
+        try:
+            cls.state_store.upsert_runtime_queue_item("message", job_id)
+        except Exception:
+            pass
         with cls.message_queue_lock:
             if job_id not in cls.message_queue:
                 cls.message_queue.append(job_id)
@@ -1664,23 +1792,92 @@ class PortalHandler(BaseHTTPRequestHandler):
             cls.message_queue_event.wait(timeout=1)
             if cls.message_worker_stop:
                 return
-            job_id = ""
+            job_id = cls._dequeue_runtime_job("message")
+            if not job_id:
+                continue
+            try:
+                cls.state_store.mark_runtime_queue_item("message", job_id, "processing")
+            except Exception:
+                pass
+            cls._process_initial_message_job(job_id)
+
+    @classmethod
+    def _dequeue_runtime_job(cls, queue_name: str) -> str:
+        queue_name = str(queue_name or "").strip()
+        if queue_name == "message":
             with cls.message_queue_lock:
                 if cls.message_queue:
                     job_id = cls.message_queue.pop(0)
                     cls._update_message_queue_positions_locked()
-                else:
-                    cls.message_queue_event.clear()
-                    continue
-            if not job_id:
-                continue
-            cls._process_initial_message_job(job_id)
+                    return str(job_id or "").strip()
+                cls.message_queue_event.clear()
+        elif queue_name == "qt_action":
+            with cls.action_queue_lock:
+                if cls.action_queue:
+                    job_id = cls.action_queue.pop(0)
+                    cls._update_queue_positions_locked()
+                    return str(job_id or "").strip()
+                cls.action_queue_event.clear()
+        for _attempt in range(5):
+            try:
+                leased = cls.state_store.lease_runtime_queue_items(
+                    queue_name,
+                    limit=1,
+                    lease_seconds=30,
+                )
+            except Exception:
+                leased = []
+            if not leased:
+                return ""
+            job_id = str((leased[0] or {}).get("job_id") or "").strip()
+            if cls._runtime_queue_job_processable(queue_name, job_id):
+                return job_id
+        return ""
+
+    @classmethod
+    def _runtime_queue_job_processable(cls, queue_name: str, job_id: str) -> bool:
+        queue_name = str(queue_name or "").strip()
+        job_id = str(job_id or "").strip()
+        if not job_id:
+            return False
+        try:
+            job = cls.service.get_job(job_id) or {}
+        except Exception:
+            job = {}
+        phase = str((job or {}).get("phase") or "").strip()
+        if not job:
+            try:
+                cls.state_store.mark_runtime_queue_item(
+                    queue_name,
+                    job_id,
+                    "cancelled",
+                    error="任务记录不存在，已跳过队列项。",
+                )
+            except Exception:
+                pass
+            return False
+        if phase in {"success", "failed"}:
+            try:
+                cls.state_store.mark_runtime_queue_item(
+                    queue_name,
+                    job_id,
+                    "done" if phase == "success" else "failed",
+                    error=str((job or {}).get("error") or ""),
+                )
+            except Exception:
+                pass
+            return False
+        return True
 
     @classmethod
     def _process_initial_message_job(cls, job_id: str) -> None:
         try:
             prepared = cls.service.prepare_action_job(job_id)
             if prepared.get("skip_personal_message"):
+                try:
+                    cls.state_store.mark_runtime_queue_item("message", job_id, "done")
+                except Exception:
+                    pass
                 cls.enqueue_action_job(job_id)
                 return
             message_signature = str(prepared.get("message_signature") or "")
@@ -1693,6 +1890,10 @@ class PortalHandler(BaseHTTPRequestHandler):
                     message_queue_position=0,
                     queue_position=0,
                 )
+                try:
+                    cls.state_store.mark_runtime_queue_item("message", job_id, "done")
+                except Exception:
+                    pass
                 cls.enqueue_action_job(job_id)
                 return
             cls.service.mark_job(
@@ -1709,6 +1910,15 @@ class PortalHandler(BaseHTTPRequestHandler):
                     error=message,
                     message_sent=False,
                 )
+                try:
+                    cls.state_store.mark_runtime_queue_item(
+                        "message",
+                        job_id,
+                        "failed",
+                        error=message,
+                    )
+                except Exception:
+                    pass
                 return
             cls.service.mark_job(
                 job_id,
@@ -1718,9 +1928,22 @@ class PortalHandler(BaseHTTPRequestHandler):
                 message_queue_position=0,
                 queue_position=0,
             )
+            try:
+                cls.state_store.mark_runtime_queue_item("message", job_id, "done")
+            except Exception:
+                pass
             cls.enqueue_action_job(job_id)
         except Exception as exc:
             cls.service.mark_job(job_id, phase="failed", error=str(exc))
+            try:
+                cls.state_store.mark_runtime_queue_item(
+                    "message",
+                    job_id,
+                    "failed",
+                    error=str(exc),
+                )
+            except Exception:
+                pass
 
     @classmethod
     def ensure_action_worker(cls) -> None:
@@ -1755,6 +1978,10 @@ class PortalHandler(BaseHTTPRequestHandler):
         job_id = str(job_id or "").strip()
         if not job_id:
             return
+        try:
+            cls.state_store.upsert_runtime_queue_item("qt_action", job_id)
+        except Exception:
+            pass
         with cls.action_queue_lock:
             if job_id not in cls.action_queue:
                 cls.action_queue.append(job_id)
@@ -1785,16 +2012,13 @@ class PortalHandler(BaseHTTPRequestHandler):
             cls.action_queue_event.wait(timeout=1)
             if cls.action_worker_stop:
                 return
-            job_id = ""
-            with cls.action_queue_lock:
-                if cls.action_queue:
-                    job_id = cls.action_queue.pop(0)
-                    cls._update_queue_positions_locked()
-                else:
-                    cls.action_queue_event.clear()
-                    continue
+            job_id = cls._dequeue_runtime_job("qt_action")
             if not job_id:
                 continue
+            try:
+                cls.state_store.mark_runtime_queue_item("qt_action", job_id, "processing")
+            except Exception:
+                pass
             cls.service.mark_job(
                 job_id,
                 queue_position=0,
@@ -1843,8 +2067,17 @@ class PortalHandler(BaseHTTPRequestHandler):
             return
         cls.ensure_upload_wait_worker()
         with cls.upload_wait_lock:
-            cls.upload_wait_jobs[job_id] = time.monotonic() + cls.action_upload_timeout_s
+            deadline = time.monotonic() + cls.action_upload_timeout_s
+            cls.upload_wait_jobs[job_id] = deadline
             cls.upload_wait_event.set()
+        try:
+            cls.state_store.upsert_runtime_queue_item(
+                "upload_wait",
+                job_id,
+                payload={"deadline_monotonic": deadline},
+            )
+        except Exception:
+            pass
 
     @classmethod
     def _upload_wait_worker_loop(cls) -> None:
@@ -1862,6 +2095,14 @@ class PortalHandler(BaseHTTPRequestHandler):
                 phase = str(job.get("phase") or "")
                 if phase in {"success", "failed"} or phase != "uploading":
                     to_remove.append(job_id)
+                    try:
+                        cls.state_store.mark_runtime_queue_item(
+                            "upload_wait",
+                            job_id,
+                            "done" if phase == "success" else "failed" if phase == "failed" else "cancelled",
+                        )
+                    except Exception:
+                        pass
                     continue
                 if now >= deadline:
                     to_remove.append(job_id)
@@ -1876,6 +2117,15 @@ class PortalHandler(BaseHTTPRequestHandler):
                     phase="failed",
                     error="上传多维超时，请在主界面确认实际结果后重试。",
                 )
+                try:
+                    cls.state_store.mark_runtime_queue_item(
+                        "upload_wait",
+                        job_id,
+                        "failed",
+                        error="上传多维超时，请在主界面确认实际结果后重试。",
+                    )
+                except Exception:
+                    pass
             with cls.upload_wait_lock:
                 if not cls.upload_wait_jobs:
                     cls.upload_wait_event.clear()
@@ -1888,6 +2138,14 @@ class PortalHandler(BaseHTTPRequestHandler):
                 not prepared.get("skip_personal_message")
                 and not prepared.get("message_sent")
             ):
+                try:
+                    cls.state_store.mark_runtime_queue_item(
+                        "qt_action",
+                        job_id,
+                        "waiting_message",
+                    )
+                except Exception:
+                    pass
                 cls.enqueue_message_job(job_id)
                 return
             if prepared.get("skip_personal_message"):
@@ -1922,6 +2180,15 @@ class PortalHandler(BaseHTTPRequestHandler):
                     error=str(guard.get("reason") or "真实外部写入未确认。"),
                     message_sent=bool(prepared.get("message_sent")),
                 )
+                try:
+                    cls.state_store.mark_runtime_queue_item(
+                        "qt_action",
+                        job_id,
+                        "failed",
+                        error=str(guard.get("reason") or "真实外部写入未确认。"),
+                    )
+                except Exception:
+                    pass
                 return
             callback = cls.maintenance_action_callback
             if callback is None:
@@ -1942,12 +2209,25 @@ class PortalHandler(BaseHTTPRequestHandler):
                         qt_queue_size=0,
                         qt_event_id=event_id,
                     )
+                    try:
+                        cls.state_store.mark_runtime_queue_item("qt_action", job_id, "done")
+                    except Exception:
+                        pass
                 except Exception as exc:
                     cls.service.mark_job(
                         job_id,
                         phase="failed",
                         error=f"主窗口事件投递失败: {exc}",
                     )
+                    try:
+                        cls.state_store.mark_runtime_queue_item(
+                            "qt_action",
+                            job_id,
+                            "failed",
+                            error=f"主窗口事件投递失败: {exc}",
+                        )
+                    except Exception:
+                        pass
                 return
             accepted = callback(prepared)
             if isinstance(accepted, dict):
@@ -1963,8 +2243,31 @@ class PortalHandler(BaseHTTPRequestHandler):
                     error=error or "主窗口拒绝执行本次上传。",
                     message_sent=True,
                 )
+                try:
+                    cls.state_store.mark_runtime_queue_item(
+                        "qt_action",
+                        job_id,
+                        "failed",
+                        error=error or "主窗口拒绝执行本次上传。",
+                    )
+                except Exception:
+                    pass
+                return
+            try:
+                cls.state_store.mark_runtime_queue_item("qt_action", job_id, "done")
+            except Exception:
+                pass
         except Exception as exc:
             cls.service.mark_job(job_id, phase="failed", error=str(exc))
+            try:
+                cls.state_store.mark_runtime_queue_item(
+                    "qt_action",
+                    job_id,
+                    "failed",
+                    error=str(exc),
+                )
+            except Exception:
+                pass
 
     def log_message(self, format: str, *args) -> None:  # noqa: A003
         return
@@ -2148,12 +2451,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=MaintenancePortalService().table_id,
         help="飞书多维表 table_id",
     )
+    parser.add_argument(
+        "--allow-real-external",
+        action="store_true",
+        help="允许直接命令行启动的旧门户执行真实飞书/多维写入。",
+    )
     return parser
 
 
 def main() -> None:
     parser = build_arg_parser()
     args = parser.parse_args()
+    if args.allow_real_external:
+        os.environ["CLIPFLOW_REQUIRE_REAL_EXTERNAL_CONFIRM"] = "1"
+        os.environ["CLIPFLOW_REAL_EXTERNAL_CONFIRMED"] = "1"
     controller = PortalServerController(
         host=str(args.host or DEFAULT_HOST).strip() or DEFAULT_HOST,
         port=int(args.port or DEFAULT_PORT),

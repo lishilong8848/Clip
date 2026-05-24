@@ -3,6 +3,8 @@
 /build/
 /build_output/
 /node_modules/
+**/node_modules/
+**/.vite/
 
 # Environment and caches
 /.env

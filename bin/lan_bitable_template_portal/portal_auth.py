@@ -14,7 +14,7 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from upload_event_module.config import config
-from upload_event_module.services.http_client import FeishuHTTPError, request_json
+from upload_event_module.services.http_client import FeishuHTTPError, FeishuHttpClient
 from upload_event_module.utils import get_data_file_path
 
 from .portal_service import (
@@ -57,6 +57,7 @@ class PortalAuthManager:
         self._sessions: dict[str, dict[str, Any]] = {}
         self._states: dict[str, dict[str, Any]] = {}
         self._app_token_cache: dict[str, Any] = {"token": "", "expires_at": 0.0}
+        self._http_client = FeishuHttpClient()
         self._permission_path = Path(get_data_file_path("lan_portal_auth.json"))
         self._permission_path.parent.mkdir(parents=True, exist_ok=True)
         self._state_store = LanPortalStateStore(
@@ -810,6 +811,23 @@ class PortalAuthManager:
         with self._lock:
             self._sessions.pop(str(session_id or "").strip(), None)
 
+    def _request_json(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        json_payload: Any = None,
+        retries: int = 2,
+    ) -> dict[str, Any]:
+        return self._http_client.request_json(
+            method,
+            url,
+            headers=headers,
+            json_payload=json_payload,
+            retries=retries,
+        )
+
     def _get_app_access_token(self) -> str:
         now = time.time()
         with self._lock:
@@ -822,7 +840,7 @@ class PortalAuthManager:
             "app_secret": str(config.app_secret or "").strip(),
         }
         try:
-            result = request_json(
+            result = self._request_json(
                 "POST",
                 FEISHU_APP_ACCESS_TOKEN_URL,
                 headers={"Content-Type": "application/json; charset=utf-8"},
@@ -844,7 +862,7 @@ class PortalAuthManager:
     def _exchange_login_code(self, code: str) -> dict[str, Any]:
         app_access_token = self._get_app_access_token()
         try:
-            result = request_json(
+            result = self._request_json(
                 "POST",
                 FEISHU_USER_ACCESS_TOKEN_URL,
                 headers={
@@ -868,7 +886,7 @@ class PortalAuthManager:
         if not user_access_token:
             return {}
         try:
-            result = request_json(
+            result = self._request_json(
                 "GET",
                 FEISHU_USER_INFO_URL,
                 headers={"Authorization": f"Bearer {user_access_token}"},

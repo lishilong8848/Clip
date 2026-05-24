@@ -45,12 +45,45 @@ class ActiveCacheMixin:
         self._active_cache_last_signature = ""
         self._active_cache_last_save_at = 0.0
         self._active_cache_save_deferred = False
+        self._active_cache_dirty = True
+        self._active_cache_periodic_full_scan_seconds = 300.0
         self.active_cache_timer = QTimer(self)
-        self.active_cache_timer.timeout.connect(self.save_active_cache)
+        self.active_cache_timer.timeout.connect(self._periodic_active_cache_save)
         self.active_cache_timer.start(30000)
         self._active_cache_delayed_save_timer = QTimer(self)
         self._active_cache_delayed_save_timer.setSingleShot(True)
         self._active_cache_delayed_save_timer.timeout.connect(self.save_active_cache)
+
+    def _mark_active_cache_dirty(self):
+        self._active_cache_dirty = True
+
+    def _post_qt_active_items_delta(self, *, upserts=None, deletes=None):
+        controller = getattr(self, "lan_template_portal_controller", None)
+        if not controller or not hasattr(controller, "post_active_items_delta"):
+            return
+        try:
+            controller.post_active_items_delta(
+                upserts=list(upserts or []),
+                deletes=list(deletes or []),
+            )
+        except Exception:
+            return
+
+    def _periodic_active_cache_save(self):
+        if self._is_restoring_cache:
+            return
+        now = time.time()
+        last_save_at = float(getattr(self, "_active_cache_last_save_at", 0.0) or 0.0)
+        full_scan_interval = float(
+            getattr(self, "_active_cache_periodic_full_scan_seconds", 300.0) or 300.0
+        )
+        if (
+            not bool(getattr(self, "_active_cache_dirty", True))
+            and last_save_at
+            and now - last_save_at < full_scan_interval
+        ):
+            return
+        self.save_active_cache()
 
     def _locked_level_map_for_active_cache(self):
         store = getattr(self, "cache_store", None)
@@ -60,6 +93,52 @@ class ActiveCacheMixin:
             return store.get_locked_level_map() or {}
         except Exception:
             return {}
+
+    def _upsert_active_cache_record(self, data_dict):
+        if self._is_restoring_cache or not isinstance(data_dict, dict):
+            return False
+        store = getattr(self, "cache_store", None)
+        if not store or not hasattr(store, "upsert_record"):
+            return False
+        try:
+            if store.upsert_record(data_dict):
+                self._active_cache_last_save_at = time.time()
+                self._active_cache_dirty = False
+                if hasattr(self, "_schedule_lan_ongoing_snapshot_refresh"):
+                    self._schedule_lan_ongoing_snapshot_refresh()
+                self._post_qt_active_items_delta(upserts=[{"data": data_dict}])
+                return True
+        except Exception:
+            return False
+        return False
+
+    def _delete_active_cache_record(self, data_dict):
+        if self._is_restoring_cache or not isinstance(data_dict, dict):
+            return False
+        store = getattr(self, "cache_store", None)
+        if not store or not hasattr(store, "delete_record"):
+            return False
+        try:
+            if store.delete_record(
+                record_id=str(data_dict.get("record_id") or ""),
+                active_item_id=str(data_dict.get("active_item_id") or ""),
+            ):
+                self._active_cache_last_save_at = time.time()
+                self._active_cache_dirty = False
+                if hasattr(self, "_schedule_lan_ongoing_snapshot_refresh"):
+                    self._schedule_lan_ongoing_snapshot_refresh()
+                self._post_qt_active_items_delta(
+                    deletes=[
+                        {
+                            "record_id": str(data_dict.get("record_id") or ""),
+                            "active_item_id": str(data_dict.get("active_item_id") or ""),
+                        }
+                    ]
+                )
+                return True
+        except Exception:
+            return False
+        return False
 
     def _collect_active_list_cache(self, list_widget, locked_level_map=None):
         locked_level_map = locked_level_map or {}
@@ -124,10 +203,12 @@ class ActiveCacheMixin:
             return
         if int(getattr(self, "_defer_active_cache_save_count", 0) or 0) > 0:
             self._active_cache_save_deferred = True
+            self._mark_active_cache_dirty()
             return
         payload = self._collect_active_cache()
         signature = self._active_cache_signature(payload)
         if signature == getattr(self, "_active_cache_last_signature", ""):
+            self._active_cache_dirty = False
             return
         has_clipboard_queue = bool(payload.get("clipboard_queue"))
         if not payload["event"] and not payload["other"] and not has_clipboard_queue:
@@ -137,6 +218,7 @@ class ActiveCacheMixin:
                     if store.replace_payload(payload):
                         self._active_cache_last_signature = signature
                         self._active_cache_last_save_at = time.time()
+                        self._active_cache_dirty = False
                 except Exception:
                     pass
             if hasattr(self, "_schedule_lan_ongoing_snapshot_refresh"):
@@ -148,6 +230,7 @@ class ActiveCacheMixin:
                 if store.replace_payload(payload):
                     self._active_cache_last_signature = signature
                     self._active_cache_last_save_at = time.time()
+                    self._active_cache_dirty = False
             if hasattr(self, "_schedule_lan_ongoing_snapshot_refresh"):
                 self._schedule_lan_ongoing_snapshot_refresh()
         except Exception:
@@ -156,6 +239,7 @@ class ActiveCacheMixin:
     def schedule_active_cache_save(self, delay_ms: int = 800):
         if self._is_restoring_cache:
             return
+        self._mark_active_cache_dirty()
         if int(getattr(self, "_defer_active_cache_save_count", 0) or 0) > 0:
             self._active_cache_save_deferred = True
             return
@@ -166,6 +250,7 @@ class ActiveCacheMixin:
         timer.start(max(0, int(delay_ms or 0)))
 
     def _begin_defer_active_cache_save(self):
+        self._mark_active_cache_dirty()
         self._defer_active_cache_save_count = (
             int(getattr(self, "_defer_active_cache_save_count", 0) or 0) + 1
         )
@@ -214,6 +299,44 @@ class ActiveCacheMixin:
                 widget.mark_as_uploaded()
         return False
 
+    @staticmethod
+    def _active_cache_restore_batch_size():
+        try:
+            value = int(os.environ.get("CLIPFLOW_ACTIVE_RESTORE_BATCH_SIZE", "5") or 5)
+        except Exception:
+            value = 5
+        return max(1, min(value, 20))
+
+    @staticmethod
+    def _active_cache_restore_async_threshold():
+        try:
+            value = int(
+                os.environ.get("CLIPFLOW_ACTIVE_RESTORE_ASYNC_THRESHOLD", "25") or 25
+            )
+        except Exception:
+            value = 25
+        return max(1, min(value, 500))
+
+    @staticmethod
+    def _active_cache_restore_batch_interval_ms():
+        try:
+            value = int(
+                os.environ.get("CLIPFLOW_ACTIVE_RESTORE_BATCH_INTERVAL_MS", "80") or 80
+            )
+        except Exception:
+            value = 80
+        return max(10, min(value, 1000))
+
+    def _set_clipboard_cache_from_payload(self, payload):
+        if not hasattr(self, "_set_clipboard_cache_payload"):
+            return
+        try:
+            self._set_clipboard_cache_payload(
+                payload.get("clipboard_queue", []) if isinstance(payload, dict) else []
+            )
+        except Exception:
+            pass
+
     def _restore_active_cache(self):
         store = getattr(self, "cache_store", None)
         if store:
@@ -231,21 +354,68 @@ class ActiveCacheMixin:
         try:
             event_items = payload.get("event", []) if isinstance(payload, dict) else []
             other_items = payload.get("other", []) if isinstance(payload, dict) else []
-            for item_payload in event_items:
+            restore_items = list(event_items or []) + list(other_items or [])
+            self._set_clipboard_cache_from_payload(payload)
+            if len(restore_items) > self._active_cache_restore_async_threshold():
+                self._active_cache_restore_in_progress = True
+                self._active_cache_restore_queue = restore_items
+                self._active_cache_restore_cache_changed = False
+                QTimer.singleShot(0, self._restore_active_cache_batch)
+                return
+            for item_payload in restore_items:
                 cache_changed = self._restore_active_item(item_payload) or cache_changed
-            for item_payload in other_items:
-                cache_changed = self._restore_active_item(item_payload) or cache_changed
-            if hasattr(self, "_set_clipboard_cache_payload"):
-                try:
-                    self._set_clipboard_cache_payload(
-                        payload.get("clipboard_queue", []) if isinstance(payload, dict) else []
-                    )
-                except Exception:
-                    pass
         finally:
-            self._is_restoring_cache = False
+            if not bool(getattr(self, "_active_cache_restore_in_progress", False)):
+                self._is_restoring_cache = False
         if cache_changed:
             try:
                 self.save_active_cache()
             except Exception:
                 pass
+
+    def _restore_active_cache_batch(self):
+        if getattr(self, "_closing", False):
+            self._active_cache_restore_queue = []
+            self._active_cache_restore_in_progress = False
+            self._is_restoring_cache = False
+            return
+        self._is_restoring_cache = True
+        batch_size = self._active_cache_restore_batch_size()
+        queue_items = list(getattr(self, "_active_cache_restore_queue", []) or [])
+        remaining = queue_items[batch_size:]
+        current_batch = queue_items[:batch_size]
+        cache_changed = bool(getattr(self, "_active_cache_restore_cache_changed", False))
+        try:
+            for item_payload in current_batch:
+                cache_changed = self._restore_active_item(item_payload) or cache_changed
+        finally:
+            self._active_cache_restore_queue = remaining
+            self._active_cache_restore_cache_changed = cache_changed
+        if remaining:
+            QTimer.singleShot(
+                self._active_cache_restore_batch_interval_ms(),
+                self._restore_active_cache_batch,
+            )
+            return
+        self._active_cache_restore_in_progress = False
+        self._is_restoring_cache = False
+        if cache_changed:
+            try:
+                self.save_active_cache()
+            except Exception:
+                pass
+        self._finalize_active_cache_restore_startup()
+
+    def _finalize_active_cache_restore_startup(self):
+        if bool(getattr(self, "_active_cache_restore_finalize_done", False)):
+            return
+        if bool(getattr(self, "_active_cache_restore_in_progress", False)):
+            QTimer.singleShot(200, self._finalize_active_cache_restore_startup)
+            return
+        self._active_cache_restore_finalize_done = True
+        self._repair_missing_item_widgets()
+        if hasattr(self, "_sync_all_active_notice_models"):
+            self._sync_all_active_notice_models()
+        self._reconcile_active_route_duplicates()
+        self._schedule_today_in_progress_sync_on_startup()
+        self._validate_record_bindings_on_startup()

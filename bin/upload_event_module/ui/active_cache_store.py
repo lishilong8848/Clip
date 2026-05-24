@@ -26,6 +26,7 @@ class ActiveCacheStore:
         self.cache_file = str(cache_file or "")
         self._state_store = state_store or LanPortalStateStore()
         self._lock = threading.RLock()
+        self._legacy_file_migration_result: dict[str, Any] | None = None
 
     def _default_payload(self) -> dict:
         return {
@@ -42,13 +43,55 @@ class ActiveCacheStore:
 
     def _load_payload_unlocked(self) -> dict:
         try:
+            qt_items = self._state_store.list_qt_active_items()
+        except Exception:
+            qt_items = []
+        qt_items_initialized = bool(qt_items)
+        if not qt_items_initialized:
+            try:
+                qt_items_initialized = bool(
+                    self._state_store.list_qt_active_items(include_deleted=True)
+                )
+            except Exception:
+                qt_items_initialized = False
+        if qt_items_initialized:
+            payload = self._default_payload()
+            try:
+                stored = self._state_store.get_document(
+                    self._STATE_NAMESPACE, self._STATE_KEY
+                )
+            except Exception:
+                stored = None
+            if isinstance(stored, dict) and isinstance(stored.get("clipboard_queue"), list):
+                payload["clipboard_queue"] = list(stored.get("clipboard_queue") or [])
+            for item in qt_items:
+                if not isinstance(item, dict):
+                    continue
+                section = str(item.get("section") or "other").strip()
+                if section not in self._SECTIONS:
+                    section = "other"
+                data = item.get("payload")
+                if not isinstance(data, dict):
+                    continue
+                normalized = dict(data)
+                active_item_id = str(item.get("active_item_id") or "").strip()
+                if active_item_id and not str(normalized.get("active_item_id") or "").strip():
+                    normalized["active_item_id"] = active_item_id
+                payload[section].append({"data": normalized})
+            return self._normalize_payload(payload)
+        try:
             stored = self._state_store.get_document(
                 self._STATE_NAMESPACE, self._STATE_KEY
             )
         except Exception:
             stored = None
         if isinstance(stored, dict):
-            return self._normalize_payload(stored)
+            payload = self._normalize_payload(stored)
+            try:
+                self._state_store.replace_qt_active_items_from_payload(payload)
+            except Exception:
+                pass
+            return payload
         if not self.cache_file or not os.path.exists(self.cache_file):
             return self._default_payload()
         try:
@@ -61,6 +104,7 @@ class ActiveCacheStore:
                 self._state_store.put_document(
                     self._STATE_NAMESPACE, self._STATE_KEY, payload
                 )
+                self._state_store.replace_qt_active_items_from_payload(payload)
             except Exception:
                 pass
             return payload
@@ -77,14 +121,117 @@ class ActiveCacheStore:
             payload["clipboard_queue"] = []
         return payload
 
+    def _count_payload_items(self, payload: dict) -> int:
+        total = 0
+        for section in self._SECTIONS:
+            values = payload.get(section, []) if isinstance(payload, dict) else []
+            total += len(values) if isinstance(values, list) else 0
+        return total
+
+    def _migrate_legacy_cache_file_unlocked(self) -> dict[str, Any]:
+        if self._legacy_file_migration_result is not None:
+            return dict(self._legacy_file_migration_result)
+        result = {
+            "status": "skipped",
+            "imported": 0,
+            "path": self.cache_file,
+            "reason": "",
+        }
+        if not self.cache_file or not os.path.exists(self.cache_file):
+            result["reason"] = "missing_legacy_file"
+            self._legacy_file_migration_result = result
+            return dict(result)
+        try:
+            existing_doc = self._state_store.get_document(
+                self._STATE_NAMESPACE, self._STATE_KEY
+            )
+        except Exception:
+            existing_doc = None
+        try:
+            existing_qt_items = self._state_store.list_qt_active_items(include_deleted=True)
+        except Exception:
+            existing_qt_items = []
+        if isinstance(existing_doc, dict) or existing_qt_items:
+            result["reason"] = "sqlite_already_initialized"
+            self._legacy_file_migration_result = result
+            return dict(result)
+        try:
+            with open(self.cache_file, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except Exception as exc:
+            result["status"] = "failed"
+            result["reason"] = f"read_failed: {exc}"
+            self._legacy_file_migration_result = result
+            return dict(result)
+        if not isinstance(payload, dict):
+            result["status"] = "failed"
+            result["reason"] = "invalid_payload"
+            self._legacy_file_migration_result = result
+            return dict(result)
+        payload = self._normalize_payload(payload)
+        try:
+            self._state_store.put_document(self._STATE_NAMESPACE, self._STATE_KEY, payload)
+            migrated = self._state_store.replace_qt_active_items_from_payload(payload)
+        except Exception as exc:
+            result["status"] = "failed"
+            result["reason"] = f"sqlite_import_failed: {exc}"
+            self._legacy_file_migration_result = result
+            return dict(result)
+        imported = int((migrated or {}).get("upserted") or self._count_payload_items(payload))
+        result["status"] = "imported"
+        result["imported"] = imported
+        result["reason"] = ""
+        self._legacy_file_migration_result = result
+        return dict(result)
+
+    def migrate_legacy_cache_file_to_sqlite(self) -> dict[str, Any]:
+        with self._lock:
+            return self._migrate_legacy_cache_file_unlocked()
+
+    def _payload_from_qt_items_unlocked(self) -> dict:
+        payload = self._default_payload()
+        try:
+            stored = self._state_store.get_document(
+                self._STATE_NAMESPACE, self._STATE_KEY
+            )
+        except Exception:
+            stored = None
+        if isinstance(stored, dict) and isinstance(stored.get("clipboard_queue"), list):
+            payload["clipboard_queue"] = list(stored.get("clipboard_queue") or [])
+        try:
+            qt_items = self._state_store.list_qt_active_items()
+        except Exception:
+            qt_items = []
+        for item in qt_items:
+            if not isinstance(item, dict):
+                continue
+            section = str(item.get("section") or "other").strip()
+            if section not in self._SECTIONS:
+                section = "other"
+            data = item.get("payload")
+            if isinstance(data, dict):
+                payload[section].append({"data": dict(data)})
+        return self._normalize_payload(payload)
+
+    def _sync_legacy_document_from_qt_items_unlocked(self) -> None:
+        payload = self._payload_from_qt_items_unlocked()
+        payload["saved_at"] = int(time.time())
+        self._state_store.put_document(self._STATE_NAMESPACE, self._STATE_KEY, payload)
+
     def load_payload(self) -> dict:
         with self._lock:
+            self._migrate_legacy_cache_file_unlocked()
             return self._load_payload_unlocked()
 
     def _save_payload_unlocked(self, payload: dict) -> bool:
+        normalized = self._normalize_payload(payload)
+        try:
+            self._state_store.replace_qt_active_items_from_payload(normalized)
+        except Exception:
+            pass
         try:
             self._state_store.put_document(
-                self._STATE_NAMESPACE, self._STATE_KEY, self._normalize_payload(payload)
+                self._STATE_NAMESPACE, self._STATE_KEY, normalized
             )
             return True
         except Exception:
@@ -188,6 +335,44 @@ class ActiveCacheStore:
     ) -> bool:
         if not isinstance(patch, dict) or not patch:
             return False
+        rid = self._normalize_key(record_id)
+        if rid:
+            with self._lock:
+                try:
+                    matches = [
+                        item
+                        for item in self._state_store.list_qt_active_items()
+                        if self._normalize_key((item.get("payload") or {}).get("record_id")) == rid
+                    ]
+                except Exception:
+                    matches = []
+                if len(matches) == 1:
+                    item = matches[0]
+                    data = dict(item.get("payload") or {})
+                    changed = False
+                    for key, value in patch.items():
+                        old_value = data.get(key, None)
+                        if value is None:
+                            if key in data:
+                                data.pop(key, None)
+                                changed = True
+                            continue
+                        if old_value != value:
+                            data[key] = value
+                            changed = True
+                    if not changed:
+                        return False
+                    saved = self._state_store.upsert_qt_active_item(
+                        data,
+                        section=str(item.get("section") or ""),
+                        sort_order=int(item.get("sort_order") or 0),
+                        origin=str(item.get("origin") or ""),
+                    )
+                    if saved:
+                        self._sync_legacy_document_from_qt_items_unlocked()
+                    return saved
+                if len(matches) > 1:
+                    return False
         with self._lock:
             payload = self._load_payload_unlocked()
             _, _, data, err = self._find_record_by_id_unlocked(payload, record_id)
@@ -218,29 +403,36 @@ class ActiveCacheStore:
         record_id = self._normalize_key(normalized.get("record_id"))
         if not record_id:
             return False
+        target_section = self._section_for_data(normalized)
         with self._lock:
-            payload = self._load_payload_unlocked()
-            target_section = self._section_for_data(normalized)
-            current_section, entry, _, err = self._find_record_by_id_unlocked(
-                payload, record_id
-            )
-            if err == "conflict":
+            try:
+                saved = self._state_store.upsert_qt_active_item(
+                    normalized,
+                    section=target_section,
+                    origin="portal" if bool(normalized.get("lan_created_from_portal")) else "qt",
+                )
+                if saved:
+                    self._sync_legacy_document_from_qt_items_unlocked()
+                return saved
+            except Exception:
                 return False
-            if err == "not_found":
-                payload[target_section].insert(0, {"data": normalized})
-                payload["saved_at"] = int(time.time())
-                return self._save_payload_unlocked(payload)
-            if not isinstance(entry, dict):
+
+    def delete_record(self, record_id: str = "", active_item_id: str = "") -> bool:
+        record_id = self._normalize_key(record_id)
+        active_item_id = self._normalize_key(active_item_id)
+        if not record_id and not active_item_id:
+            return False
+        with self._lock:
+            try:
+                deleted = self._state_store.delete_qt_active_item(
+                    active_item_id=active_item_id,
+                    record_id=record_id,
+                )
+                if deleted:
+                    self._sync_legacy_document_from_qt_items_unlocked()
+                return deleted
+            except Exception:
                 return False
-            if current_section != target_section and current_section in self._SECTIONS:
-                try:
-                    payload[current_section].remove(entry)
-                except ValueError:
-                    pass
-                payload[target_section].insert(0, entry)
-            entry["data"] = normalized
-            payload["saved_at"] = int(time.time())
-            return self._save_payload_unlocked(payload)
 
     def replace_payload(self, payload: dict | None = None) -> bool:
         payload_to_save = payload if isinstance(payload, dict) else self._default_payload()
@@ -251,6 +443,26 @@ class ActiveCacheStore:
         new_id = self._normalize_key(new_record_id)
         if not old_id or not new_id or old_id == new_id:
             return False
+        with self._lock:
+            try:
+                changed = False
+                for item in self._state_store.list_qt_active_items():
+                    data = dict(item.get("payload") or {})
+                    if self._normalize_key(data.get("record_id")) != old_id:
+                        continue
+                    data["record_id"] = new_id
+                    self._state_store.upsert_qt_active_item(
+                        data,
+                        section=str(item.get("section") or ""),
+                        sort_order=int(item.get("sort_order") or 0),
+                        origin=str(item.get("origin") or ""),
+                    )
+                    changed = True
+                if changed:
+                    self._sync_legacy_document_from_qt_items_unlocked()
+                    return True
+            except Exception:
+                pass
         with self._lock:
             payload = self._load_payload_unlocked()
             changed = False

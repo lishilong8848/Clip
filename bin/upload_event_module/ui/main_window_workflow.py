@@ -5,6 +5,7 @@ import queue
 import time
 import hashlib
 import uuid
+import os
 from PyQt6.QtCore import Qt, QTimer
 
 from ..logger import log_info, log_error, log_warning
@@ -25,6 +26,53 @@ PORTAL_BATCH_WAIT_SECONDS = 5.0
 PORTAL_UPLOAD_SECONDS_PER_RECORD = 2.0
 
 class MainWindowWorkflowMixin:
+    def _lan_portal_runtime_store(self):
+        store = getattr(self, "_lan_portal_state_store", None)
+        if store is not None:
+            return store
+        try:
+            from lan_bitable_template_portal.state_store import LanPortalStateStore
+
+            store = LanPortalStateStore()
+            self._lan_portal_state_store = store
+            return store
+        except Exception:
+            return None
+
+    def _mark_qt_upload_runtime_queue(
+        self,
+        upload_key: str,
+        status: str,
+        *,
+        payload: dict | None = None,
+        error: str = "",
+    ) -> None:
+        upload_key = str(upload_key or "").strip()
+        status = str(status or "").strip() or "queued"
+        if not upload_key:
+            return
+        store = self._lan_portal_runtime_store()
+        if not store:
+            return
+        try:
+            if status == "queued":
+                store.upsert_runtime_queue_item(
+                    "qt_upload",
+                    upload_key,
+                    status="queued",
+                    payload=dict(payload or {}),
+                    error=str(error or ""),
+                )
+            else:
+                store.mark_runtime_queue_item(
+                    "qt_upload",
+                    upload_key,
+                    status,
+                    error=str(error or ""),
+                )
+        except Exception:
+            return
+
     def _collect_live_payload_runtime_keys(self) -> set[str]:
         keys = set()
 
@@ -44,11 +92,12 @@ class MainWindowWorkflowMixin:
                 if unique_key:
                     keys.add(unique_key)
 
-        for _, item in self._iter_active_items():
-            try:
-                add_from_data(item.data(Qt.ItemDataRole.UserRole))
-            except Exception:
-                continue
+        try:
+            active_snapshot = self._active_notice_store().data_snapshot()
+        except Exception:
+            active_snapshot = []
+        for data in active_snapshot:
+            add_from_data(data)
 
         for mapping in (
             self.pending_replace_by_record_id,
@@ -132,11 +181,11 @@ class MainWindowWorkflowMixin:
             except Exception:
                 continue
 
-        for _, item in self._iter_active_items():
-            try:
-                data = item.data(Qt.ItemDataRole.UserRole)
-            except Exception:
-                continue
+        try:
+            active_snapshot = self._active_notice_store().data_snapshot()
+        except Exception:
+            active_snapshot = []
+        for data in active_snapshot:
             if isinstance(data, dict) and data.get("_upload_in_progress"):
                 return True
 
@@ -1029,7 +1078,11 @@ class MainWindowWorkflowMixin:
                 pending_upload_hash=pending_hash,
                 has_unuploaded_changes=False,
             )
-        self.save_active_cache()
+        if not (
+            hasattr(self, "_upsert_active_cache_record")
+            and self._upsert_active_cache_record(data_dict)
+        ):
+            self.save_active_cache()
         self._show_screenshot_dialog(data_dict, action_type)
 
     def _get_upload_key(self, record_id):
@@ -1065,7 +1118,49 @@ class MainWindowWorkflowMixin:
             except queue.Empty:
                 pass
             task_queue.put(None)
+        self._mark_qt_upload_runtime_queue(
+            key,
+            "cancelled",
+            error="上传队列已被清空。",
+        )
         return worker
+
+    def _qt_upload_interval_seconds(self) -> float:
+        cached = getattr(self, "_qt_upload_interval_cached_s", None)
+        cached_at = float(getattr(self, "_qt_upload_interval_cached_at", 0.0) or 0.0)
+        if cached is not None and time.monotonic() - cached_at < 30.0:
+            return float(cached)
+        interval = 1.0 if os.environ.get("CLIPFLOW_LOW_PERFORMANCE_MODE") == "1" else 0.2
+        try:
+            from lan_bitable_template_portal.state_store import LanPortalStateStore
+
+            settings = LanPortalStateStore().get_settings() or {}
+            low_performance = (
+                str(settings.get("lan_low_performance_mode") or "").strip()
+                in {"1", "true", "是", "开启"}
+            )
+            default_interval = 1.0 if low_performance else interval
+            raw = settings.get("lan_qt_upload_seconds_per_record")
+            interval = float(raw if raw not in (None, "") else default_interval)
+        except Exception:
+            pass
+        interval = max(0.0, min(float(interval or 0.0), 10.0))
+        self._qt_upload_interval_cached_s = interval
+        self._qt_upload_interval_cached_at = time.monotonic()
+        return interval
+
+    def _reserve_qt_upload_start(self) -> float:
+        interval = self._qt_upload_interval_seconds()
+        if interval <= 0:
+            return time.time()
+        if not hasattr(self, "_qt_upload_rate_lock"):
+            self._qt_upload_rate_lock = threading.RLock()
+            self._qt_upload_next_release_at = 0.0
+        now = time.time()
+        with self._qt_upload_rate_lock:
+            release_at = max(now, float(getattr(self, "_qt_upload_next_release_at", 0.0) or 0.0))
+            self._qt_upload_next_release_at = release_at + interval
+        return release_at
 
     def _start_upload_worker(self, key, task_queue):
         def worker():
@@ -1089,18 +1184,27 @@ class MainWindowWorkflowMixin:
                 try:
                     if task is None:
                         return
+                    self._mark_qt_upload_runtime_queue(key, "processing")
                     try:
                         semaphore = getattr(self, "_upload_worker_semaphore", None)
+                        self._sleep_until_timestamp(self._reserve_qt_upload_start())
                         if semaphore is None:
                             task()
                         else:
                             with semaphore:
                                 task()
                     except Exception as exc:
+                        self._mark_qt_upload_runtime_queue(
+                            key,
+                            "failed",
+                            error=str(exc),
+                        )
                         log_error(f"上传任务异常: {exc}")
                         self._post_request_finished(
                             "上传", False, f"上传异常: {exc}", None
                         )
+                    else:
+                        self._mark_qt_upload_runtime_queue(key, "done")
                 finally:
                     task_queue.task_done()
 
@@ -1117,6 +1221,15 @@ class MainWindowWorkflowMixin:
                 self._upload_queues[key] = task_queue
             if key not in self._upload_workers:
                 self._start_upload_worker(key, task_queue)
+        self._mark_qt_upload_runtime_queue(
+            key,
+            "queued",
+            payload={
+                "record_id": str(record_id or ""),
+                "upload_key": str(key or ""),
+                "queued_at": time.time(),
+            },
+        )
         task_queue.put(task)
 
     def _mark_upload_queued(self, record_id, portal_phase: str = "uploading"):
@@ -2333,11 +2446,17 @@ class MainWindowWorkflowMixin:
         self.pending_replace_by_record_id.pop(data_dict.get("record_id"), None)
         self._cleanup_payload_for_data(data_dict)
         if list_widget and item:
+            if hasattr(self, "_remove_active_notice_model_record"):
+                self._remove_active_notice_model_record(data_dict)
             row = list_widget.row(item)
             if row != -1:
                 list_widget.takeItem(row)
         self.save_to_history_file(data_dict)
-        self.save_active_cache()
+        if not (
+            hasattr(self, "_delete_active_cache_record")
+            and self._delete_active_cache_record(data_dict)
+        ):
+            self.save_active_cache()
 
     def _finish_apply_replace(self, record_id):
         pending = self.pending_replace_by_record_id.pop(record_id, None)
@@ -2526,14 +2645,15 @@ class MainWindowWorkflowMixin:
 
         changed = False
         updated_items = []
-        for list_widget, item in self._iter_active_items():
+        try:
+            candidates = self._active_notice_store().candidates_by_record_id(old_id)
+        except Exception:
+            candidates = []
+        for list_widget, item, data in candidates:
             try:
                 if not self._is_valid_list_item(item):
                     continue
-                data = item.data(Qt.ItemDataRole.UserRole)
                 if not isinstance(data, dict):
-                    continue
-                if str(data.get("record_id") or "").strip() != old_id:
                     continue
                 data = dict(data)
                 data["record_id"] = new_id
@@ -2541,6 +2661,8 @@ class MainWindowWorkflowMixin:
                 if data.get("payload_key") == old_id:
                     data["payload_key"] = new_id
                 item.setData(Qt.ItemDataRole.UserRole, data)
+                if hasattr(self, "_upsert_active_notice_model_item"):
+                    self._upsert_active_notice_model_item(list_widget, item, data)
                 updated_items.append((list_widget, item, data))
                 changed = True
             except Exception:

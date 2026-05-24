@@ -23,8 +23,33 @@ from ..time_parser import parse_time_range
 _QT_MESSAGE_HANDLER_INSTALLED = False
 DEFAULT_DISPLAY_VERSION = "V1.0.20260210"
 LAN_ONGOING_SNAPSHOT_REFRESH_MS = 5000
+LAN_ONGOING_SNAPSHOT_STALE_SECONDS = 3.0
 
 class MainWindowRuntimeMixin:
+    def _lan_qt_action_interval_ms(self) -> int:
+        cached = getattr(self, "_lan_qt_action_interval_cached_ms", None)
+        cached_at = float(getattr(self, "_lan_qt_action_interval_cached_at", 0.0) or 0.0)
+        if cached is not None and time.monotonic() - cached_at < 30.0:
+            return int(cached)
+        interval = 500 if os.environ.get("CLIPFLOW_LOW_PERFORMANCE_MODE") == "1" else 250
+        try:
+            from lan_bitable_template_portal.state_store import LanPortalStateStore
+
+            settings = LanPortalStateStore().get_settings() or {}
+            low_performance = (
+                str(settings.get("lan_low_performance_mode") or "").strip()
+                in {"1", "true", "是", "开启"}
+            )
+            default_interval = 500 if low_performance else interval
+            raw = settings.get("lan_qt_action_interval_ms")
+            interval = int(raw if raw not in (None, "") else default_interval)
+        except Exception:
+            pass
+        interval = max(100, min(int(interval or 250), 3000))
+        self._lan_qt_action_interval_cached_ms = interval
+        self._lan_qt_action_interval_cached_at = time.monotonic()
+        return interval
+
     def _build_display_version(self) -> str:
         meta_path = os.path.join(BASE_DIR, "build_meta.json")
         try:
@@ -541,7 +566,18 @@ class MainWindowRuntimeMixin:
             pass
         cached_items, cached_at = self._get_lan_ongoing_snapshot()
         if cached_at:
-            self._request_lan_ongoing_snapshot_refresh()
+            try:
+                stale_seconds = float(
+                    os.environ.get(
+                        "CLIPFLOW_LAN_ONGOING_SNAPSHOT_STALE_SECONDS",
+                        str(LAN_ONGOING_SNAPSHOT_STALE_SECONDS),
+                    )
+                    or LAN_ONGOING_SNAPSHOT_STALE_SECONDS
+                )
+            except Exception:
+                stale_seconds = LAN_ONGOING_SNAPSHOT_STALE_SECONDS
+            if time.time() - float(cached_at or 0) >= max(0.5, stale_seconds):
+                self._request_lan_ongoing_snapshot_refresh()
             return self._filter_lan_ongoing_items_for_scope(cached_items, scope)
         event = threading.Event()
         result = {"items": []}
@@ -637,11 +673,27 @@ class MainWindowRuntimeMixin:
         source_record_id = str((payload or {}).get("source_record_id") or "").strip()
         notice_type = str((payload or {}).get("notice_type") or "").strip()
         title_key = re.sub(r"\s+", "", str((payload or {}).get("title") or ""))
-        for list_widget, item in self._iter_active_items():
+        try:
+            store = self._active_notice_store()
+        except Exception:
+            store = None
+        if source_record_id and store is not None:
+            try:
+                source_candidates = store.candidates_by_source_record_id(source_record_id)
+            except Exception:
+                source_candidates = []
+            for list_widget, item, data in source_candidates:
+                if notice_type and str(data.get("notice_type") or "").strip() != notice_type:
+                    continue
+                return list_widget, item
+        try:
+            active_entries = store.entries() if store is not None else []
+        except Exception:
+            active_entries = []
+        for list_widget, item, data in active_entries:
             try:
                 if not self._is_valid_list_item(item):
                     continue
-                data = item.data(Qt.ItemDataRole.UserRole) or {}
             except Exception:
                 continue
             if notice_type and str(data.get("notice_type") or "").strip() != notice_type:
@@ -719,11 +771,11 @@ class MainWindowRuntimeMixin:
 
     def _collect_lan_maintenance_ongoing_notices(self, scope: str = "ALL") -> list[dict]:
         items: list[dict] = []
-        for _, item in self._iter_active_items():
-            try:
-                data = item.data(Qt.ItemDataRole.UserRole) or {}
-            except Exception:
-                continue
+        try:
+            active_entries = self._active_notice_store().entries()
+        except Exception:
+            active_entries = []
+        for _list_widget, _item, data in active_entries:
             if not isinstance(data, dict):
                 continue
             notice_type = str(data.get("notice_type") or "").strip()
@@ -914,7 +966,10 @@ class MainWindowRuntimeMixin:
                 pass
         if getattr(self, "_lan_action_batch", None):
             self._lan_action_batch_scheduled = True
-            QTimer.singleShot(250, self._flush_lan_maintenance_action_batch)
+            QTimer.singleShot(
+                self._lan_qt_action_interval_ms(),
+                self._flush_lan_maintenance_action_batch,
+            )
         else:
             self._lan_action_batch_scheduled = False
 
@@ -1056,11 +1111,29 @@ class MainWindowRuntimeMixin:
         source_record_id = str(source_record_id or "").strip()
         normalized_title = re.sub(r"\s+", "", str(title or ""))
         notice_type = str(notice_type or "维保通告").strip()
-        for _, item in self._iter_active_items():
+        try:
+            store = self._active_notice_store()
+        except Exception:
+            store = None
+        if source_record_id and store is not None:
             try:
-                data = item.data(Qt.ItemDataRole.UserRole) or {}
+                source_candidates = store.candidates_by_source_record_id(source_record_id)
             except Exception:
-                continue
+                source_candidates = []
+            for _list_widget, _item, data in source_candidates:
+                if not isinstance(data, dict):
+                    continue
+                if str(data.get("notice_type") or "").strip() != notice_type:
+                    continue
+                text = str(data.get("text") or "")
+                info = extract_event_info(text) or {}
+                if str(info.get("status") or "").strip() != "结束":
+                    return data
+        try:
+            active_entries = store.entries() if store is not None else []
+        except Exception:
+            active_entries = []
+        for _list_widget, _item, data in active_entries:
             if not isinstance(data, dict):
                 continue
             if str(data.get("notice_type") or "").strip() != notice_type:

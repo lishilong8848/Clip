@@ -5,8 +5,9 @@ import re
 import unicodedata
 import uuid
 import os
+import queue
 from PyQt6.QtWidgets import QListWidgetItem, QInputDialog
-from PyQt6.QtCore import Qt, QSize, QTimer
+from PyQt6.QtCore import Qt, QSize, QTimer, QPoint, QObject
 from PyQt6 import sip
 
 from ..config import get_field_config
@@ -25,6 +26,8 @@ from .display_state import (
     normalize_active_item_data,
     notice_supports_level_lock,
 )
+from .active_notice_store import ActiveNoticeStore
+from .active_notice_model import ActiveNoticeModel
 
 class MainWindowRecordsMixin:
     _EVENT_TIMER_STATE_FIELDS = (
@@ -56,11 +59,11 @@ class MainWindowRecordsMixin:
 
     def _collect_live_runtime_record_ids(self) -> set[str]:
         record_ids = set()
-        for _, item in self._iter_active_items():
-            try:
-                data = item.data(Qt.ItemDataRole.UserRole)
-            except Exception:
-                continue
+        try:
+            active_snapshot = self._active_notice_store().data_snapshot()
+        except Exception:
+            active_snapshot = []
+        for data in active_snapshot:
             if not isinstance(data, dict):
                 continue
             record_id = str(data.get("record_id") or "").strip()
@@ -156,11 +159,15 @@ class MainWindowRecordsMixin:
                 clipboard_state = "idle"
         except Exception:
             clipboard_state = "unknown"
+        try:
+            active_count = len(self._active_notice_store().data_snapshot())
+        except Exception:
+            active_count = 0
         log_info(
             "RuntimeHealth[%s]: active_items=%s validated=%s synced=%s payload_store=%s payload_alias=%s upload_workers=%s clipboard=%s app_log_bytes=%s"
             % (
                 reason,
-                sum(1 for _ in self._iter_active_items()),
+                active_count,
                 len(getattr(self, "_record_binding_validated_ids", set())),
                 len(getattr(self, "_today_in_progress_synced_record_ids", set())),
                 len(getattr(self, "_payload_store", {})),
@@ -229,6 +236,496 @@ class MainWindowRecordsMixin:
             return None
         return self._safe_widget(widget)
 
+    def _is_active_list_widget(self, list_widget) -> bool:
+        return list_widget in (
+            getattr(self, "list_active_event", None),
+            getattr(self, "list_active_other", None),
+        )
+
+    def _active_notice_model_enabled(self) -> bool:
+        return os.environ.get("CLIPFLOW_DISABLE_ACTIVE_NOTICE_MODEL") != "1"
+
+    def _active_item_widgets_required(self) -> bool:
+        visible = getattr(self, "_active_model_view_visible", None)
+        if callable(visible) and visible():
+            return False
+        return True
+
+    def _active_notice_model_for_list(self, list_widget):
+        if not self._active_notice_model_enabled():
+            return None
+        if list_widget is getattr(self, "list_active_event", None):
+            attr = "_active_notice_event_model"
+        elif list_widget is getattr(self, "list_active_other", None):
+            attr = "_active_notice_other_model"
+        else:
+            return None
+        model = getattr(self, attr, None)
+        if not isinstance(model, ActiveNoticeModel):
+            model = ActiveNoticeModel(self if isinstance(self, QObject) else None)
+            setattr(self, attr, model)
+        return model
+
+    def _sync_active_notice_model_for_list(self, list_widget) -> None:
+        model = self._active_notice_model_for_list(list_widget)
+        if model is None or not list_widget:
+            return
+        records = []
+        try:
+            count = list_widget.count()
+        except Exception:
+            count = 0
+        for row in range(count):
+            try:
+                item = list_widget.item(row)
+                if not self._is_valid_list_item(item):
+                    continue
+                data = item.data(Qt.ItemDataRole.UserRole)
+            except Exception:
+                continue
+            if isinstance(data, dict):
+                records.append(dict(data))
+        model.replace_records(records)
+
+    def _sync_all_active_notice_models(self) -> None:
+        self._sync_active_notice_model_for_list(getattr(self, "list_active_event", None))
+        self._sync_active_notice_model_for_list(getattr(self, "list_active_other", None))
+
+    def _upsert_active_notice_model_item(self, list_widget, item, data_dict=None) -> None:
+        model = self._active_notice_model_for_list(list_widget)
+        if model is None or not list_widget or not item:
+            return
+        try:
+            row = list_widget.row(item)
+        except Exception:
+            row = -1
+        if row < 0:
+            return
+        data = data_dict
+        if not isinstance(data, dict):
+            try:
+                data = item.data(Qt.ItemDataRole.UserRole)
+            except Exception:
+                data = None
+        if isinstance(data, dict):
+            model.upsert_record(dict(data), row=row)
+
+    def _remove_active_notice_model_record(self, data_dict) -> None:
+        if not isinstance(data_dict, dict):
+            return
+        for list_widget in (
+            getattr(self, "list_active_event", None),
+            getattr(self, "list_active_other", None),
+        ):
+            model = self._active_notice_model_for_list(list_widget)
+            if model is not None and model.remove_record(data_dict):
+                return
+
+    def _active_list_virtualization_enabled(self) -> bool:
+        visible = getattr(self, "_active_model_view_visible", None)
+        if callable(visible) and visible():
+            return False
+        if os.environ.get("CLIPFLOW_LEGACY_QT_WIDGET_LIST") == "1":
+            return False
+        if os.environ.get("CLIPFLOW_DISABLE_ACTIVE_LIST_VIRTUALIZATION") == "1":
+            return False
+        return True
+
+    @staticmethod
+    def _active_list_virtual_buffer_rows() -> int:
+        try:
+            value = int(os.environ.get("CLIPFLOW_ACTIVE_LIST_VIRTUAL_BUFFER_ROWS", "8") or 8)
+        except Exception:
+            value = 8
+        return max(2, min(value, 50))
+
+    @staticmethod
+    def _active_list_virtual_cleanup_batch_size() -> int:
+        try:
+            value = int(
+                os.environ.get("CLIPFLOW_ACTIVE_LIST_VIRTUAL_CLEANUP_BATCH_SIZE", "80")
+                or 80
+            )
+        except Exception:
+            value = 80
+        return max(20, min(value, 500))
+
+    @staticmethod
+    def _active_list_scroll_refresh_delay_ms() -> int:
+        try:
+            value = int(
+                os.environ.get("CLIPFLOW_ACTIVE_LIST_SCROLL_REFRESH_DELAY_MS", "40")
+                or 40
+            )
+        except Exception:
+            value = 40
+        return max(0, min(value, 250))
+
+    def _active_list_visible_row_bounds(self, list_widget) -> tuple[int, int]:
+        count = list_widget.count() if list_widget else 0
+        if count <= 0:
+            return 0, -1
+        buffer_rows = self._active_list_virtual_buffer_rows()
+        try:
+            viewport = list_widget.viewport()
+            top_index = list_widget.indexAt(QPoint(1, 1))
+            bottom_index = list_widget.indexAt(QPoint(1, max(1, viewport.height() - 2)))
+            top = top_index.row() if top_index.isValid() else 0
+            if bottom_index.isValid():
+                bottom = bottom_index.row()
+            else:
+                approx_rows = max(1, int((viewport.height() or 80) / 80) + 2)
+                bottom = min(count - 1, top + approx_rows)
+        except Exception:
+            top = 0
+            bottom = min(count - 1, 20)
+        return max(0, top - buffer_rows), min(count - 1, bottom + buffer_rows)
+
+    def _active_item_in_virtual_range(self, list_widget, item) -> bool:
+        if not list_widget or not item or not self._is_valid_list_item(item):
+            return False
+        start, end = self._active_list_visible_row_bounds(list_widget)
+        if end < start:
+            return False
+        try:
+            row = list_widget.row(item)
+        except Exception:
+            return False
+        return start <= row <= end
+
+    def _create_active_item_widget(self, data_dict):
+        widget = ClipboardItemWidget(data_dict)
+        widget.action_clicked.connect(self.handle_action)
+        widget.today_progress_clicked.connect(self._handle_today_in_progress_toggle)
+        widget.ended_signal.connect(self.move_to_history)
+        widget.delete_requested.connect(self._delete_active_item)
+        if hasattr(widget, "set_delete_interaction_enabled"):
+            widget.set_delete_interaction_enabled(self._delete_interaction_enabled)
+        return widget
+
+    def _apply_active_widget_state(
+        self,
+        widget,
+        data_dict,
+        *,
+        force_status: str | None = None,
+        upload_in_progress: bool | None = None,
+        pending_upload_hash: str | None = None,
+        has_unuploaded_changes: bool | None = None,
+    ) -> None:
+        if not widget:
+            return
+        if upload_in_progress is None:
+            upload_in_progress = data_dict.get("_upload_in_progress")
+        if pending_upload_hash is None:
+            pending_upload_hash = data_dict.get("_pending_upload_hash")
+        if has_unuploaded_changes is None:
+            has_unuploaded_changes = data_dict.get("_has_unuploaded_changes")
+        if has_unuploaded_changes is not None:
+            data_dict["_has_unuploaded_changes"] = bool(has_unuploaded_changes)
+            if not data_dict["_has_unuploaded_changes"]:
+                data_dict["_pending_upload_hash"] = None
+                pending_upload_hash = None
+        if upload_in_progress is not None:
+            widget.upload_in_progress = bool(upload_in_progress)
+        if pending_upload_hash is not None:
+            widget.pending_upload_hash = pending_upload_hash
+        if has_unuploaded_changes is not None:
+            widget.has_unuploaded_changes = bool(has_unuploaded_changes)
+        status = force_status
+        if not status:
+            info = extract_event_info(data_dict.get("text", ""))
+            if info and info.get("status") == "结束":
+                status = "end"
+            elif not data_dict.get("_is_placeholder_record", True):
+                status = "update"
+        if status == "end":
+            widget.set_button_to_end_mode()
+        elif status == "update":
+            widget.set_button_to_update_mode()
+        elif has_unuploaded_changes is False:
+            widget.set_uploaded_visual(True)
+
+    def _sync_item_data_from_widget(self, list_widget, item) -> None:
+        widget = self._safe_item_widget(list_widget, item)
+        if not widget:
+            return
+        try:
+            if hasattr(widget, "_sync_timer_state_to_data"):
+                widget._sync_timer_state_to_data()
+            data = dict(widget.data or item.data(Qt.ItemDataRole.UserRole) or {})
+            data["_has_unuploaded_changes"] = bool(
+                getattr(widget, "has_unuploaded_changes", data.get("_has_unuploaded_changes", True))
+            )
+            data["_upload_in_progress"] = bool(
+                getattr(widget, "upload_in_progress", data.get("_upload_in_progress", False))
+            )
+            pending_hash = getattr(widget, "pending_upload_hash", None)
+            if pending_hash:
+                data["_pending_upload_hash"] = pending_hash
+            elif "_pending_upload_hash" in data:
+                data.pop("_pending_upload_hash", None)
+            item.setData(Qt.ItemDataRole.UserRole, data)
+        except Exception:
+            return
+
+    def _unmount_active_item_widget(self, list_widget, item) -> None:
+        widget = self._safe_item_widget(list_widget, item)
+        if not widget:
+            return
+        state = getattr(widget, "_state", None)
+        if str(state).endswith("DELETING"):
+            return
+        self._sync_item_data_from_widget(list_widget, item)
+        try:
+            if hasattr(widget, "stop_timer"):
+                widget.stop_timer()
+        except Exception:
+            pass
+        try:
+            list_widget.removeItemWidget(item)
+        except Exception:
+            pass
+        try:
+            widget.deleteLater()
+        except Exception:
+            pass
+
+    def _ensure_active_item_widget(self, list_widget, item):
+        widget = self._safe_item_widget(list_widget, item)
+        if widget:
+            return widget
+        if not list_widget or not item or not self._is_valid_list_item(item):
+            return None
+        data = item.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(data, dict):
+            return None
+        try:
+            widget = self._create_active_item_widget(data)
+            list_widget.setItemWidget(item, widget)
+        except Exception as exc:
+            try:
+                log_warning(
+                    f"活动条目虚拟化挂载失败: record_id={data.get('record_id','')}, error={exc}"
+                )
+            except Exception:
+                pass
+            try:
+                if widget:
+                    widget.deleteLater()
+            except Exception:
+                pass
+            return None
+        self._apply_active_widget_state(
+            widget,
+            data,
+            upload_in_progress=data.get("_upload_in_progress"),
+            pending_upload_hash=data.get("_pending_upload_hash"),
+            has_unuploaded_changes=data.get("_has_unuploaded_changes"),
+        )
+        return widget
+
+    def _schedule_active_list_virtualization_refresh(self, list_widget=None, delay_ms: int = 0):
+        if not self._active_list_virtualization_enabled():
+            return
+        if list_widget is not None and not self._is_active_list_widget(list_widget):
+            return
+        if list_widget is None:
+            self._active_list_virtual_refresh_all = True
+        else:
+            targets = getattr(self, "_active_list_virtual_refresh_targets", None)
+            if not isinstance(targets, list):
+                targets = []
+            if list_widget not in targets:
+                targets.append(list_widget)
+            self._active_list_virtual_refresh_targets = targets
+        if getattr(self, "_active_list_virtual_refresh_pending", False):
+            if int(delay_ms or 0) > 0 and not getattr(
+                self, "_active_list_virtual_delayed_pending", False
+            ):
+                self._active_list_virtual_delayed_pending = True
+
+                def _delayed_run():
+                    self._active_list_virtual_delayed_pending = False
+                    self._schedule_active_list_virtualization_refresh(list_widget, 0)
+
+                QTimer.singleShot(max(1, int(delay_ms or 0)), _delayed_run)
+            return
+        self._active_list_virtual_refresh_pending = True
+
+        def _run():
+            self._active_list_virtual_refresh_pending = False
+            refresh_all = bool(getattr(self, "_active_list_virtual_refresh_all", False))
+            targets = list(getattr(self, "_active_list_virtual_refresh_targets", []) or [])
+            self._active_list_virtual_refresh_all = False
+            self._active_list_virtual_refresh_targets = []
+            if refresh_all or not targets:
+                self._refresh_active_list_virtualization(None)
+                return
+            for target in targets:
+                self._refresh_active_list_virtualization(target)
+
+        QTimer.singleShot(max(0, int(delay_ms or 0)), _run)
+
+    def _refresh_active_list_virtualization(self, list_widget=None):
+        if not self._active_list_virtualization_enabled():
+            return
+        targets = [list_widget] if list_widget is not None else [
+            getattr(self, "list_active_event", None),
+            getattr(self, "list_active_other", None),
+        ]
+        for target in targets:
+            if not target or not self._is_active_list_widget(target):
+                continue
+            start, end = self._active_list_visible_row_bounds(target)
+            if end >= start:
+                for row in range(start, end + 1):
+                    item = target.item(row)
+                    if not self._is_valid_list_item(item):
+                        continue
+                    self._ensure_active_item_widget(target, item)
+            self._schedule_active_list_virtual_cleanup(target, start, end)
+
+    def _schedule_active_list_virtual_cleanup(self, list_widget, visible_start: int, visible_end: int):
+        if not list_widget or not self._is_active_list_widget(list_widget):
+            return
+        states = getattr(self, "_active_list_virtual_cleanup_states", None)
+        if not isinstance(states, dict):
+            states = {}
+            self._active_list_virtual_cleanup_states = states
+        key = id(list_widget)
+        old_state = states.get(key) or {}
+        generation = int(old_state.get("generation") or 0) + 1
+        states[key] = {
+            "list_widget": list_widget,
+            "visible_start": max(0, int(visible_start or 0)),
+            "visible_end": int(visible_end if visible_end is not None else -1),
+            "next_row": 0,
+            "generation": generation,
+        }
+        QTimer.singleShot(
+            0,
+            lambda key=key, generation=generation: self._run_active_list_virtual_cleanup(
+                key, generation
+            ),
+        )
+
+    def _run_active_list_virtual_cleanup(self, key, generation):
+        if not self._active_list_virtualization_enabled():
+            return
+        states = getattr(self, "_active_list_virtual_cleanup_states", None)
+        if not isinstance(states, dict):
+            return
+        state = states.get(key)
+        if not state or int(state.get("generation") or 0) != int(generation or 0):
+            return
+        target = state.get("list_widget")
+        if not target or not self._is_active_list_widget(target):
+            states.pop(key, None)
+            return
+        try:
+            if sip.isdeleted(target):
+                states.pop(key, None)
+                return
+        except Exception:
+            states.pop(key, None)
+            return
+        count = target.count()
+        start = int(state.get("visible_start") or 0)
+        end = int(state.get("visible_end") if state.get("visible_end") is not None else -1)
+        row = max(0, int(state.get("next_row") or 0))
+        batch_size = self._active_list_virtual_cleanup_batch_size()
+        processed = 0
+        while row < count and processed < batch_size:
+            if row < start or row > end:
+                item = target.item(row)
+                if not self._is_valid_list_item(item):
+                    row += 1
+                    processed += 1
+                    continue
+                self._unmount_active_item_widget(target, item)
+            row += 1
+            processed += 1
+        if row < count:
+            state["next_row"] = row
+            QTimer.singleShot(
+                25,
+                lambda key=key, generation=generation: self._run_active_list_virtual_cleanup(
+                    key, generation
+                ),
+            )
+            return
+        states.pop(key, None)
+
+    def _refresh_existing_active_item_widget(
+        self,
+        list_widget,
+        item,
+        data_dict,
+        *,
+        force_status: str | None = None,
+        upload_in_progress: bool | None = None,
+        pending_upload_hash: str | None = None,
+        has_unuploaded_changes: bool | None = None,
+    ):
+        widget = self._safe_item_widget(list_widget, item)
+        if not widget or not hasattr(widget, "refresh_data"):
+            return None
+        try:
+            old_data = item.data(Qt.ItemDataRole.UserRole) or {}
+        except Exception:
+            old_data = {}
+        old_notice_type = str((old_data or {}).get("notice_type") or "").strip()
+        new_notice_type = str((data_dict or {}).get("notice_type") or "").strip()
+        if old_notice_type != new_notice_type:
+            return None
+        if new_notice_type == "事件通告" and not getattr(widget, "timer_widget", None):
+            return None
+        if upload_in_progress is None:
+            upload_in_progress = data_dict.get("_upload_in_progress")
+        if pending_upload_hash is None:
+            pending_upload_hash = data_dict.get("_pending_upload_hash")
+        if has_unuploaded_changes is None:
+            has_unuploaded_changes = data_dict.get("_has_unuploaded_changes")
+        if has_unuploaded_changes is not None:
+            data_dict["_has_unuploaded_changes"] = bool(has_unuploaded_changes)
+            if not data_dict["_has_unuploaded_changes"]:
+                data_dict["_pending_upload_hash"] = None
+                pending_upload_hash = None
+        try:
+            item.setData(Qt.ItemDataRole.UserRole, data_dict)
+            widget.refresh_data(data_dict)
+        except Exception:
+            return None
+        if upload_in_progress is not None:
+            widget.upload_in_progress = bool(upload_in_progress)
+        if pending_upload_hash is not None:
+            widget.pending_upload_hash = pending_upload_hash
+        if has_unuploaded_changes is not None:
+            widget.has_unuploaded_changes = bool(has_unuploaded_changes)
+        status = force_status
+        if not status:
+            info = extract_event_info(data_dict.get("text", ""))
+            if info and info.get("status") == "结束":
+                status = "end"
+            elif not data_dict.get("_is_placeholder_record", True):
+                status = "update"
+        if status == "end":
+            widget.set_button_to_end_mode()
+        elif status == "update":
+            widget.set_button_to_update_mode()
+        else:
+            widget.is_updated_status = False
+            widget.is_end_status = False
+            if has_unuploaded_changes is False:
+                widget.set_uploaded_visual(True)
+            elif hasattr(widget, "_refresh_action_text"):
+                widget._refresh_action_text()
+        if hasattr(widget, "set_delete_interaction_enabled"):
+            widget.set_delete_interaction_enabled(self._delete_interaction_enabled)
+        self._schedule_today_in_progress_sync(data_dict)
+        return widget
+
     def _rebuild_active_item_widget(
         self,
         list_widget,
@@ -244,6 +741,47 @@ class MainWindowRecordsMixin:
             return None
         if not self._is_valid_list_item(item):
             return None
+        if not self._active_item_widgets_required():
+            if has_unuploaded_changes is not None:
+                data_dict["_has_unuploaded_changes"] = bool(has_unuploaded_changes)
+                if not data_dict["_has_unuploaded_changes"]:
+                    data_dict["_pending_upload_hash"] = None
+                    pending_upload_hash = None
+            if upload_in_progress is not None:
+                data_dict["_upload_in_progress"] = bool(upload_in_progress)
+            if pending_upload_hash is not None:
+                data_dict["_pending_upload_hash"] = pending_upload_hash
+            try:
+                item.setSizeHint(QSize(420, 88))
+                item.setData(Qt.ItemDataRole.UserRole, data_dict)
+            except Exception:
+                return None
+            self._upsert_active_notice_model_item(list_widget, item, data_dict)
+            self._schedule_today_in_progress_sync(data_dict)
+            return None
+        if (
+            self._active_list_virtualization_enabled()
+            and self._is_active_list_widget(list_widget)
+            and not self._safe_item_widget(list_widget, item)
+            and not self._active_item_in_virtual_range(list_widget, item)
+        ):
+            try:
+                item.setSizeHint(QSize(420, 80))
+                item.setData(Qt.ItemDataRole.UserRole, data_dict)
+            except Exception:
+                pass
+            return None
+        refreshed = self._refresh_existing_active_item_widget(
+            list_widget,
+            item,
+            data_dict,
+            force_status=force_status,
+            upload_in_progress=upload_in_progress,
+            pending_upload_hash=pending_upload_hash,
+            has_unuploaded_changes=has_unuploaded_changes,
+        )
+        if refreshed is not None:
+            return refreshed
         old_widget = None
         try:
             old_widget = list_widget.itemWidget(item)
@@ -827,6 +1365,8 @@ class MainWindowRecordsMixin:
         )
 
     def _schedule_record_binding_validation(self, data_dict: dict | None):
+        if bool(getattr(self, "_active_cache_restore_in_progress", False)):
+            return
         if not isinstance(data_dict, dict):
             return
         record_id = str(data_dict.get("record_id") or "").strip()
@@ -840,106 +1380,200 @@ class MainWindowRecordsMixin:
         ):
             return
         self._record_binding_validation_pending_ids.add(record_id)
-        local_data = dict(data_dict)
+        try:
+            self._record_binding_validation_queue.put_nowait(dict(data_dict))
+        except Exception:
+            self._record_binding_validation_pending_ids.discard(record_id)
+            return
+        self._ensure_record_binding_validation_worker()
 
-        def worker():
-            success, result = query_record_by_id(record_id, notice_type)
-            conflict = False
-            conflict_error = ""
-            missing_remote_record = False
-            state_to_apply = ""
-            error_to_apply = ""
-            if success:
-                fields = result.get("fields", {}) if isinstance(result, dict) else {}
-                local_fp = self._extract_local_record_binding_fingerprint(local_data)
-                remote_fp = self._extract_remote_record_binding_fingerprint(
-                    notice_type, fields
-                )
-                conflict, mismatch_keys = self._detect_record_binding_conflict(
-                    local_fp, remote_fp
-                )
-                if conflict:
-                    mismatch_label_map = {
-                        "title": "标题",
-                        "building": "楼栋",
-                        "specialty": "专业",
-                        "time_anchor": "计划开始时间",
-                    }
-                    labels = [
-                        mismatch_label_map.get(key, key) for key in mismatch_keys
-                    ]
-                    conflict_error = (
-                        "Record ID 冲突："
-                        + "、".join(labels)
-                        + " 与多维记录不一致"
-                    )
-                state_to_apply = "conflicted" if conflict else "bound"
-                error_to_apply = conflict_error if conflict else ""
-            else:
-                conflict_error = str(result or "")
-                missing_remote_record = self._is_missing_remote_record_error(
-                    conflict_error
-                )
-                if missing_remote_record:
-                    conflict_error = "Record ID 已失效：多维记录不存在，可能已被删除"
-                    state_to_apply = "conflicted"
-                    error_to_apply = conflict_error
+    def _ensure_record_binding_validation_worker(self):
+        worker = getattr(self, "_record_binding_validation_worker", None)
+        if worker and worker.is_alive():
+            return
+        worker = threading.Thread(
+            target=self._record_binding_validation_loop,
+            name="RecordBindingValidationWorker",
+            daemon=True,
+        )
+        self._record_binding_validation_worker = worker
+        worker.start()
 
-            if state_to_apply and getattr(self, "cache_store", None):
-                patch = {"record_binding_state": state_to_apply}
-                if state_to_apply == "conflicted":
-                    patch["record_binding_error"] = (
-                        error_to_apply or "Record ID 冲突"
-                    )
-                else:
-                    patch["record_binding_error"] = None
+    def _record_binding_validation_loop(self):
+        validation_queue = getattr(self, "_record_binding_validation_queue", None)
+        if validation_queue is None:
+            return
+        while not bool(getattr(self, "_closing", False)):
+            try:
+                local_data = validation_queue.get(timeout=1.0)
+            except queue.Empty:
+                return
+            try:
+                self._run_record_binding_validation(local_data)
+            except Exception as exc:
+                record_id = str((local_data or {}).get("record_id") or "").strip()
+                if record_id:
+                    self._record_binding_validation_pending_ids.discard(record_id)
+                log_warning(f"Record ID 校验队列执行失败: record_id={record_id}, error={exc}")
+            finally:
                 try:
-                    self.cache_store.patch_record_fields(
-                        record_id=record_id,
-                        patch=patch,
-                    )
+                    validation_queue.task_done()
                 except Exception:
                     pass
-
-            def apply_result():
-                self._record_binding_validation_pending_ids.discard(record_id)
-                if not success:
-                    if conflict_error:
-                        log_warning(
-                            f"Record ID 校验失败: record_id={record_id}, error={conflict_error}"
-                        )
-                    if missing_remote_record:
-                        self._record_binding_validated_ids.add(record_id)
-                        self._set_record_binding_state(
-                            record_id,
-                            state_to_apply,
-                            error=error_to_apply,
-                            persist_cache=False,
-                        )
-                    return
-                self._record_binding_validated_ids.add(record_id)
-                self._set_record_binding_state(
-                    record_id,
-                    state_to_apply,
-                    error=error_to_apply,
-                    persist_cache=False,
+                interval = float(
+                    getattr(self, "_record_binding_validation_interval_s", 0.35)
+                    or 0.35
                 )
+                if interval > 0:
+                    time.sleep(min(2.0, interval))
 
-            self._enqueue_ui_mutation("record_binding_validation", apply_result)
+    def _run_record_binding_validation(self, local_data: dict | None):
+        local_data = dict(local_data or {})
+        record_id = str(local_data.get("record_id") or "").strip()
+        notice_type = str(local_data.get("notice_type") or "").strip()
+        if not record_id or not notice_type:
+            if record_id:
+                self._record_binding_validation_pending_ids.discard(record_id)
+            return
+        if bool(getattr(self, "_closing", False)):
+            self._record_binding_validation_pending_ids.discard(record_id)
+            return
+        success, result = query_record_by_id(record_id, notice_type)
+        conflict = False
+        conflict_error = ""
+        missing_remote_record = False
+        state_to_apply = ""
+        error_to_apply = ""
+        if success:
+            fields = result.get("fields", {}) if isinstance(result, dict) else {}
+            local_fp = self._extract_local_record_binding_fingerprint(local_data)
+            remote_fp = self._extract_remote_record_binding_fingerprint(
+                notice_type, fields
+            )
+            conflict, mismatch_keys = self._detect_record_binding_conflict(
+                local_fp, remote_fp
+            )
+            if conflict:
+                mismatch_label_map = {
+                    "title": "标题",
+                    "building": "楼栋",
+                    "specialty": "专业",
+                    "time_anchor": "计划开始时间",
+                }
+                labels = [mismatch_label_map.get(key, key) for key in mismatch_keys]
+                conflict_error = (
+                    "Record ID 冲突："
+                    + "、".join(labels)
+                    + " 与多维记录不一致"
+                )
+            state_to_apply = "conflicted" if conflict else "bound"
+            error_to_apply = conflict_error if conflict else ""
+        else:
+            conflict_error = str(result or "")
+            missing_remote_record = self._is_missing_remote_record_error(conflict_error)
+            if missing_remote_record:
+                conflict_error = "Record ID 已失效：多维记录不存在，可能已被删除"
+                state_to_apply = "conflicted"
+                error_to_apply = conflict_error
 
-        threading.Thread(target=worker, daemon=True).start()
+        if state_to_apply and getattr(self, "cache_store", None):
+            patch = {"record_binding_state": state_to_apply}
+            if state_to_apply == "conflicted":
+                patch["record_binding_error"] = error_to_apply or "Record ID 冲突"
+            else:
+                patch["record_binding_error"] = None
+            try:
+                self.cache_store.patch_record_fields(record_id=record_id, patch=patch)
+            except Exception:
+                pass
+
+        def apply_result():
+            self._record_binding_validation_pending_ids.discard(record_id)
+            if not success:
+                if conflict_error:
+                    log_warning(
+                        f"Record ID 校验失败: record_id={record_id}, error={conflict_error}"
+                    )
+                if missing_remote_record:
+                    self._record_binding_validated_ids.add(record_id)
+                    self._set_record_binding_state(
+                        record_id,
+                        state_to_apply,
+                        error=error_to_apply,
+                        persist_cache=False,
+                    )
+                return
+            self._record_binding_validated_ids.add(record_id)
+            self._set_record_binding_state(
+                record_id,
+                state_to_apply,
+                error=error_to_apply,
+                persist_cache=False,
+            )
+
+        self._enqueue_ui_mutation("record_binding_validation", apply_result)
+
+    @staticmethod
+    def _startup_remote_sync_batch_size() -> int:
+        try:
+            value = int(os.environ.get("CLIPFLOW_STARTUP_REMOTE_SYNC_BATCH_SIZE", "4") or 4)
+        except Exception:
+            value = 4
+        return max(1, min(value, 20))
+
+    @staticmethod
+    def _startup_remote_sync_interval_ms() -> int:
+        try:
+            value = int(
+                os.environ.get("CLIPFLOW_STARTUP_REMOTE_SYNC_INTERVAL_MS", "1500")
+                or 1500
+            )
+        except Exception:
+            value = 1500
+        return max(200, min(value, 10000))
+
+    def _active_data_snapshot_for_startup_sync(self) -> list[dict]:
+        return self._active_notice_store().data_snapshot()
 
     def _validate_record_bindings_on_startup(self):
-        for _, item in self._iter_active_items():
-            try:
-                if not self._is_valid_list_item(item):
-                    continue
-                data = item.data(Qt.ItemDataRole.UserRole)
-            except Exception:
-                continue
-            if not isinstance(data, dict):
-                continue
+        pending = [
+            data
+            for data in self._active_data_snapshot_for_startup_sync()
+            if isinstance(data, dict)
+        ]
+        if not pending:
+            return
+        self._startup_record_binding_validation_queue = pending
+        if getattr(self, "_startup_record_binding_validation_pending", False):
+            return
+        self._startup_record_binding_validation_pending = True
+        QTimer.singleShot(0, self._drain_startup_record_binding_validation_batch)
+
+    def _drain_startup_record_binding_validation_batch(self):
+        self._startup_record_binding_validation_pending = False
+        if getattr(self, "_closing", False):
+            self._startup_record_binding_validation_queue = []
+            return
+        if bool(getattr(self, "_active_cache_restore_in_progress", False)):
+            self._startup_record_binding_validation_pending = True
+            QTimer.singleShot(500, self._drain_startup_record_binding_validation_batch)
+            return
+        pending = list(
+            getattr(self, "_startup_record_binding_validation_queue", []) or []
+        )
+        if not pending:
+            return
+        batch_size = self._startup_remote_sync_batch_size()
+        batch = pending[:batch_size]
+        self._startup_record_binding_validation_queue = pending[batch_size:]
+        for data in batch:
             self._schedule_record_binding_validation(data)
+        if self._startup_record_binding_validation_queue:
+            self._startup_record_binding_validation_pending = True
+            QTimer.singleShot(
+                self._startup_remote_sync_interval_ms(),
+                self._drain_startup_record_binding_validation_batch,
+            )
 
     def _request_safe_bind_record_id(self, current_record_id: str):
         record_id = str(current_record_id or "").strip()
@@ -1056,6 +1690,12 @@ class MainWindowRecordsMixin:
         if not list_widget or not item or not self._is_valid_list_item(item):
             return
         try:
+            data = item.data(Qt.ItemDataRole.UserRole)
+        except Exception:
+            data = None
+        if isinstance(data, dict):
+            self._remove_active_notice_model_record(data)
+        try:
             widget = list_widget.itemWidget(item)
         except Exception:
             widget = None
@@ -1081,21 +1721,23 @@ class MainWindowRecordsMixin:
             preview = preview[:40] + "..."
         return f"条目路由冲突：匹配键重复（{preview}），已阻止自动匹配和远端写入。"
 
-    def _reconcile_active_route_duplicates(self):
-        groups = {}
-        for list_widget, item in self._iter_active_items():
-            try:
-                if not self._is_valid_list_item(item):
-                    continue
-                data = self._ensure_active_item_identity(
-                    item.data(Qt.ItemDataRole.UserRole)
-                )
-            except Exception:
-                continue
-            match_key = str(data.get("match_key") or "").strip()
-            if not match_key:
-                continue
-            groups.setdefault(match_key, []).append((list_widget, item, data))
+    @staticmethod
+    def _route_match_key_from_data(data_dict: dict | None) -> str:
+        if not isinstance(data_dict, dict):
+            return ""
+        return str(data_dict.get("match_key") or "").strip()
+
+    def _reconcile_active_route_duplicates(self, match_keys: set[str] | None = None):
+        limited_keys = {
+            str(key or "").strip()
+            for key in (match_keys or set())
+            if str(key or "").strip()
+        }
+        if match_keys is not None and not limited_keys:
+            return False
+        groups = self._active_notice_store().groups_by_match_key(
+            limited_keys if match_keys is not None else None
+        )
 
         changed = False
         for match_key, entries in groups.items():
@@ -1273,6 +1915,8 @@ class MainWindowRecordsMixin:
         self._persist_today_in_progress_state(record_id, normalized_state)
 
     def _schedule_today_in_progress_sync(self, data_dict: dict | None):
+        if bool(getattr(self, "_active_cache_restore_in_progress", False)):
+            return
         if not self._supports_today_in_progress_toggle(data_dict):
             return
         if self._is_record_binding_conflicted(data_dict):
@@ -1286,34 +1930,124 @@ class MainWindowRecordsMixin:
         ):
             return
         self._today_in_progress_pending_record_ids.add(record_id)
+        try:
+            self._today_in_progress_sync_queue.put_nowait(dict(data_dict))
+        except Exception:
+            self._today_in_progress_pending_record_ids.discard(record_id)
+            return
+        self._ensure_today_in_progress_sync_worker()
 
-        def worker():
-            success, result = query_record_by_id(record_id, notice_type)
-            state = "unknown"
-            error_text = ""
-            if success:
-                fields = result.get("fields", {}) if isinstance(result, dict) else {}
-                state = self._extract_today_in_progress_state_from_record_fields(
-                    notice_type,
-                    fields,
+    def _ensure_today_in_progress_sync_worker(self):
+        worker = getattr(self, "_today_in_progress_sync_worker", None)
+        if worker and worker.is_alive():
+            return
+        worker = threading.Thread(
+            target=self._today_in_progress_sync_loop,
+            name="TodayInProgressSyncWorker",
+            daemon=True,
+        )
+        self._today_in_progress_sync_worker = worker
+        worker.start()
+
+    def _today_in_progress_sync_loop(self):
+        sync_queue = getattr(self, "_today_in_progress_sync_queue", None)
+        if sync_queue is None:
+            return
+        while not bool(getattr(self, "_closing", False)):
+            try:
+                data_dict = sync_queue.get(timeout=1.0)
+            except queue.Empty:
+                return
+            try:
+                self._run_today_in_progress_sync(data_dict)
+            except Exception as exc:
+                record_id = str((data_dict or {}).get("record_id") or "").strip()
+                if record_id:
+                    self._today_in_progress_pending_record_ids.discard(record_id)
+                log_warning(
+                    f"今日是否进行状态同步队列执行失败: record_id={record_id}, error={exc}"
                 )
-            else:
-                error_text = str(result or "")
+            finally:
+                try:
+                    sync_queue.task_done()
+                except Exception:
+                    pass
+                interval = float(
+                    getattr(self, "_today_in_progress_sync_interval_s", 0.35) or 0.35
+                )
+                if interval > 0:
+                    time.sleep(min(2.0, interval))
 
-            def apply_result():
+    def _run_today_in_progress_sync(self, data_dict: dict | None):
+        data_dict = dict(data_dict or {})
+        record_id = str(data_dict.get("record_id") or "").strip()
+        notice_type = str(data_dict.get("notice_type") or "").strip()
+        if not record_id or not notice_type or bool(getattr(self, "_closing", False)):
+            if record_id:
                 self._today_in_progress_pending_record_ids.discard(record_id)
-                self._today_in_progress_synced_record_ids.add(record_id)
-                if not success:
-                    if error_text:
-                        log_warning(
-                            f"今日是否进行状态同步失败: record_id={record_id}, error={error_text}"
-                        )
-                    return
-                self._apply_today_in_progress_state_to_record(record_id, state)
+            return
+        success, result = query_record_by_id(record_id, notice_type)
+        state = "unknown"
+        error_text = ""
+        if success:
+            fields = result.get("fields", {}) if isinstance(result, dict) else {}
+            state = self._extract_today_in_progress_state_from_record_fields(
+                notice_type,
+                fields,
+            )
+        else:
+            error_text = str(result or "")
 
-            self._enqueue_ui_mutation("today_in_progress_sync", apply_result)
+        def apply_result():
+            self._today_in_progress_pending_record_ids.discard(record_id)
+            self._today_in_progress_synced_record_ids.add(record_id)
+            if not success:
+                if error_text:
+                    log_warning(
+                        f"今日是否进行状态同步失败: record_id={record_id}, error={error_text}"
+                    )
+                return
+            self._apply_today_in_progress_state_to_record(record_id, state)
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._enqueue_ui_mutation("today_in_progress_sync", apply_result)
+
+    def _schedule_today_in_progress_sync_on_startup(self):
+        pending = [
+            data
+            for data in self._active_data_snapshot_for_startup_sync()
+            if isinstance(data, dict)
+        ]
+        if not pending:
+            return
+        self._startup_today_in_progress_sync_queue = pending
+        if getattr(self, "_startup_today_in_progress_sync_pending", False):
+            return
+        self._startup_today_in_progress_sync_pending = True
+        QTimer.singleShot(0, self._drain_startup_today_in_progress_sync_batch)
+
+    def _drain_startup_today_in_progress_sync_batch(self):
+        self._startup_today_in_progress_sync_pending = False
+        if getattr(self, "_closing", False):
+            self._startup_today_in_progress_sync_queue = []
+            return
+        if bool(getattr(self, "_active_cache_restore_in_progress", False)):
+            self._startup_today_in_progress_sync_pending = True
+            QTimer.singleShot(500, self._drain_startup_today_in_progress_sync_batch)
+            return
+        pending = list(getattr(self, "_startup_today_in_progress_sync_queue", []) or [])
+        if not pending:
+            return
+        batch_size = self._startup_remote_sync_batch_size()
+        batch = pending[:batch_size]
+        self._startup_today_in_progress_sync_queue = pending[batch_size:]
+        for data in batch:
+            self._schedule_today_in_progress_sync(data)
+        if self._startup_today_in_progress_sync_queue:
+            self._startup_today_in_progress_sync_pending = True
+            QTimer.singleShot(
+                self._startup_remote_sync_interval_ms(),
+                self._drain_startup_today_in_progress_sync_batch,
+            )
 
     def _handle_today_in_progress_toggle(self, data_dict: dict, target_state: str):
         if not self._supports_today_in_progress_toggle(data_dict):
@@ -1387,6 +2121,61 @@ class MainWindowRecordsMixin:
             return None
         return self._ensure_active_item_identity(normalize_active_item_data(data))
 
+    def _load_active_cache_record_maps(self) -> tuple[dict[str, dict], dict[str, dict]]:
+        store = getattr(self, "cache_store", None)
+        if not store or not hasattr(store, "load_payload"):
+            return {}, {}
+        try:
+            payload = store.load_payload()
+        except Exception:
+            return {}, {}
+        if not isinstance(payload, dict):
+            return {}, {}
+        by_record_id: dict[str, dict] = {}
+        by_active_item_id: dict[str, dict] = {}
+        for section in ("event", "other"):
+            entries = payload.get(section, [])
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                data = entry.get("data")
+                if not isinstance(data, dict):
+                    continue
+                normalized = self._ensure_active_item_identity(
+                    normalize_active_item_data(data)
+                )
+                record_id = str(normalized.get("record_id") or "").strip()
+                active_item_id = str(normalized.get("active_item_id") or "").strip()
+                if record_id:
+                    by_record_id[record_id] = normalized
+                if active_item_id:
+                    by_active_item_id[active_item_id] = normalized
+        return by_record_id, by_active_item_id
+
+    def _cache_data_for_active_item(
+        self,
+        item,
+        by_record_id: dict[str, dict] | None,
+        by_active_item_id: dict[str, dict] | None,
+    ) -> dict | None:
+        if not item or not self._is_valid_list_item(item):
+            return None
+        try:
+            data = item.data(Qt.ItemDataRole.UserRole)
+        except Exception:
+            data = None
+        if not isinstance(data, dict):
+            return None
+        record_id = str(data.get("record_id") or "").strip()
+        active_item_id = str(data.get("active_item_id") or "").strip()
+        if record_id and by_record_id and record_id in by_record_id:
+            return dict(by_record_id[record_id])
+        if active_item_id and by_active_item_id and active_item_id in by_active_item_id:
+            return dict(by_active_item_id[active_item_id])
+        return self._ensure_active_item_identity(normalize_active_item_data(data))
+
     def _commit_active_record(
         self,
         data_dict: dict,
@@ -1440,6 +2229,7 @@ class MainWindowRecordsMixin:
                 item.setData(Qt.ItemDataRole.UserRole, committed)
             except Exception:
                 pass
+            self._upsert_active_notice_model_item(list_widget, item, committed)
             if rebuild_widget:
                 self._rebuild_active_item_widget(
                     list_widget,
@@ -1453,7 +2243,7 @@ class MainWindowRecordsMixin:
         if refresh_detail:
             self._maybe_update_detail_dialog(committed, record_id)
         self._schedule_record_binding_validation(committed)
-        self._schedule_active_route_reconcile()
+        self._schedule_active_route_reconcile(committed, previous_data=existing_data)
         return committed
 
     def _maybe_update_detail_dialog(self, data_dict: dict, record_id: str = ""):
@@ -1513,9 +2303,24 @@ class MainWindowRecordsMixin:
 
         QTimer.singleShot(0, _run)
 
-    def _schedule_active_route_reconcile(self):
+    def _schedule_active_route_reconcile(self, data_dict=None, previous_data=None):
         if getattr(self, "_closing", False):
             return
+        if bool(getattr(self, "_active_cache_restore_in_progress", False)):
+            return
+        if bool(getattr(self, "_route_reconcile_in_progress", False)):
+            return
+        if data_dict is None and previous_data is None:
+            self._route_reconcile_full_requested = True
+        else:
+            dirty_keys = getattr(self, "_route_reconcile_dirty_match_keys", None)
+            if not isinstance(dirty_keys, set):
+                dirty_keys = set()
+            for candidate in (data_dict, previous_data):
+                match_key = self._route_match_key_from_data(candidate)
+                if match_key:
+                    dirty_keys.add(match_key)
+            self._route_reconcile_dirty_match_keys = dirty_keys
         if getattr(self, "_route_reconcile_single_shot_pending", False):
             return
         self._route_reconcile_single_shot_pending = True
@@ -1524,12 +2329,26 @@ class MainWindowRecordsMixin:
             self._route_reconcile_single_shot_pending = False
             if getattr(self, "_closing", False):
                 return
+            full_requested = bool(
+                getattr(self, "_route_reconcile_full_requested", False)
+            )
+            dirty_keys = set(
+                getattr(self, "_route_reconcile_dirty_match_keys", set()) or set()
+            )
+            self._route_reconcile_full_requested = False
+            self._route_reconcile_dirty_match_keys = set()
             try:
-                self._reconcile_active_route_duplicates()
+                self._route_reconcile_in_progress = True
+                if full_requested or not dirty_keys:
+                    self._reconcile_active_route_duplicates()
+                else:
+                    self._reconcile_active_route_duplicates(dirty_keys)
             except Exception as exc:
                 log_warning(f"活动条目路由校验失败: error={exc}")
+            finally:
+                self._route_reconcile_in_progress = False
 
-        QTimer.singleShot(0, _run)
+        QTimer.singleShot(150, _run)
 
     def _apply_cache_to_item(self, list_widget, item, cache_data: dict):
         if not list_widget or not item or not cache_data:
@@ -1545,8 +2364,12 @@ class MainWindowRecordsMixin:
         )
 
     def _repair_missing_item_widgets(self):
+        if self._active_list_virtualization_enabled():
+            self._schedule_active_list_virtualization_refresh(None, 0)
+            return 0
         repaired = 0
-        for list_widget, item in self._iter_active_items():
+        by_record_id, by_active_item_id = self._load_active_cache_record_maps()
+        for list_widget, item, _data in self._active_notice_store().entries():
             try:
                 if not self._is_valid_list_item(item):
                     continue
@@ -1556,10 +2379,11 @@ class MainWindowRecordsMixin:
                 data = item.data(Qt.ItemDataRole.UserRole)
                 if not isinstance(data, dict):
                     continue
-                record_id = str(data.get("record_id") or "").strip()
-                cache_data = self._load_record_from_cache(
-                    record_id
-                ) or self._ensure_active_item_identity(normalize_active_item_data(data))
+                cache_data = self._cache_data_for_active_item(
+                    item, by_record_id, by_active_item_id
+                )
+                if not isinstance(cache_data, dict):
+                    continue
                 rebuilt = self._rebuild_active_item_widget(
                     list_widget,
                     item,
@@ -1618,18 +2442,20 @@ class MainWindowRecordsMixin:
         if self._closing:
             return
         refresh_error = False
-        for list_widget, item in self._iter_active_items():
+        by_record_id, by_active_item_id = self._load_active_cache_record_maps()
+        for list_widget, item, data in self._active_notice_store().entries():
             try:
                 if not self._is_valid_list_item(item):
                     continue
-                data = item.data(Qt.ItemDataRole.UserRole)
                 if not isinstance(data, dict):
                     continue
-                record_id = str(data.get("record_id") or "").strip()
-                cache_data = self._load_record_from_cache(
-                    record_id
-                ) or self._ensure_active_item_identity(normalize_active_item_data(data))
+                cache_data = self._cache_data_for_active_item(
+                    item, by_record_id, by_active_item_id
+                )
+                if not isinstance(cache_data, dict):
+                    continue
                 item.setData(Qt.ItemDataRole.UserRole, cache_data)
+                self._upsert_active_notice_model_item(list_widget, item, cache_data)
                 self._apply_cache_to_item(list_widget, item, cache_data)
             except Exception as exc:
                 refresh_error = True
@@ -1649,6 +2475,8 @@ class MainWindowRecordsMixin:
         pending_after_repair = bool(getattr(self, "_pending_cache_refresh", False))
         self._refresh_detail_from_cache()
         self._pending_cache_refresh = bool(refresh_error or pending_after_repair)
+        self._sync_all_active_notice_models()
+        self._schedule_active_list_virtualization_refresh(None, 0)
 
     def _init_list_widget(self, list_widget):
         list_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -1656,6 +2484,15 @@ class MainWindowRecordsMixin:
             lambda pos, lw=list_widget: self.show_context_menu(pos, lw)
         )
         list_widget.itemClicked.connect(self.on_item_clicked)
+        if self._is_active_list_widget(list_widget):
+            try:
+                list_widget.verticalScrollBar().valueChanged.connect(
+                    lambda _value, lw=list_widget: self._schedule_active_list_virtualization_refresh(
+                        lw, self._active_list_scroll_refresh_delay_ms()
+                    )
+                )
+            except Exception:
+                pass
 
     def _is_active_view(self):
         return self.stack.currentWidget() == self.active_container
@@ -1702,26 +2539,28 @@ class MainWindowRecordsMixin:
                     continue
                 yield list_widget, item
 
+    def _active_notice_store(self) -> ActiveNoticeStore:
+        store = getattr(self, "_active_notice_store_obj", None)
+        if not isinstance(store, ActiveNoticeStore):
+            store = ActiveNoticeStore(
+                self._iter_active_items,
+                self._is_valid_list_item,
+                compact_text_normalizer=lambda value: str(value or "").translate(
+                    WHITESPACE_TRANSLATOR
+                ),
+                match_title_normalizer=self._normalize_match_text,
+            )
+            self._active_notice_store_obj = store
+        return store
+
+    def _build_active_item_index(self):
+        self._active_notice_store().rebuild()
+
     def _find_active_item_by_record_id(self, record_id):
-        for list_widget, item in self._iter_active_items():
-            if not self._is_valid_list_item(item):
-                continue
-            item_data = item.data(Qt.ItemDataRole.UserRole)
-            if item_data.get("record_id") == record_id:
-                return list_widget, item
-        return None, None
+        return self._active_notice_store().find_by_record_id(record_id)
 
     def _find_active_item_by_active_item_id(self, active_item_id):
-        active_item_id = str(active_item_id or "").strip()
-        if not active_item_id:
-            return None, None
-        for list_widget, item in self._iter_active_items():
-            if not self._is_valid_list_item(item):
-                continue
-            item_data = item.data(Qt.ItemDataRole.UserRole)
-            if str(item_data.get("active_item_id") or "").strip() == active_item_id:
-                return list_widget, item
-        return None, None
+        return self._active_notice_store().find_by_active_item_id(active_item_id)
 
     def _update_active_item_data(self, record_id, data_dict):
         list_widget, item = self._find_active_item_by_record_id(record_id)
@@ -1735,7 +2574,13 @@ class MainWindowRecordsMixin:
                 list_widget=list_widget,
                 item=item,
             )
-            self.save_active_cache()
+            cache_updated = bool(
+                committed
+                and hasattr(self, "_upsert_active_cache_record")
+                and self._upsert_active_cache_record(committed)
+            )
+            if not cache_updated:
+                self.save_active_cache()
             if self._should_defer_ui_refresh():
                 self._mark_cache_refresh_needed()
             elif committed:
@@ -2241,35 +3086,33 @@ class MainWindowRecordsMixin:
         )
         if not content_clean and not match_title and not match_key:
             return None, None
-        key_matches = []
-        title_matches = []
-        for list_widget, item in self._iter_active_items():
-            try:
-                if not self._is_valid_list_item(item):
-                    continue
-                data = self._ensure_active_item_identity(
-                    item.data(Qt.ItemDataRole.UserRole)
-                )
-            except Exception:
-                continue
-            if not data:
-                continue
+
+        def _notice_type_matches(data: dict | None) -> bool:
+            if not isinstance(data, dict):
+                return False
             if (
                 resolved_notice_type
                 and data.get("notice_type")
                 and data.get("notice_type") != resolved_notice_type
             ):
-                continue
-            old_text = (data.get("text") or "").strip()
-            if content_clean and old_text and old_text == content_clean:
-                return list_widget, item
-            item_match_key = str(data.get("match_key") or "").strip()
-            item_match_title = self._normalize_match_text(data.get("match_title"))
-            if match_key and item_match_key and item_match_key == match_key:
-                key_matches.append((list_widget, item))
-                continue
-            if match_title and item_match_title and item_match_title == match_title:
-                title_matches.append((list_widget, item))
+                return False
+            return True
+
+        store = self._active_notice_store()
+        if content_clean:
+            for list_widget, item, data in store.candidates_by_exact_text(content_clean):
+                if _notice_type_matches(data):
+                    return list_widget, item
+        key_matches = []
+        title_matches = []
+        if match_key:
+            for list_widget, item, data in store.candidates_by_match_key(match_key):
+                if _notice_type_matches(data):
+                    key_matches.append((list_widget, item))
+        if match_title:
+            for list_widget, item, data in store.candidates_by_match_title(match_title):
+                if _notice_type_matches(data):
+                    title_matches.append((list_widget, item))
         if key_matches:
             return key_matches[0]
         if self._is_event_notice(resolved_notice_type):
@@ -2282,14 +3125,7 @@ class MainWindowRecordsMixin:
         content_clean = (content or "").translate(WHITESPACE_TRANSLATOR)
         if not content_clean:
             return None, None
-        for list_widget, item in self._iter_active_items():
-            data = item.data(Qt.ItemDataRole.UserRole)
-            if not data:
-                continue
-            old_text = (data.get("text") or "").translate(WHITESPACE_TRANSLATOR)
-            if old_text and old_text == content_clean:
-                return list_widget, item
-        return None, None
+        return self._active_notice_store().find_by_compact_text(content)
 
     def _is_valid_list_item(self, item) -> bool:
         if item is None:
@@ -2324,35 +3160,39 @@ class MainWindowRecordsMixin:
         list_widget = self._get_active_list_for_notice(notice_type)
         item = QListWidgetItem()
         widget = None
-        try:
-            widget = ClipboardItemWidget(data_dict)
-            widget.action_clicked.connect(self.handle_action)
-            widget.today_progress_clicked.connect(self._handle_today_in_progress_toggle)
-            widget.ended_signal.connect(self.move_to_history)
-            widget.delete_requested.connect(self._delete_active_item)
-            if hasattr(widget, "set_delete_interaction_enabled"):
-                widget.set_delete_interaction_enabled(self._delete_interaction_enabled)
-        except Exception as exc:
-            record_id = str(data_dict.get("record_id") or "").strip()
-            log_warning(
-                f"活动条目创建失败，未插入列表: notice_type={notice_type}, "
-                f"record_id={record_id}, error={exc}"
-            )
+        widgets_required = self._active_item_widgets_required()
+        if widgets_required:
             try:
-                if widget:
-                    widget.deleteLater()
-            except Exception:
-                pass
-            self._schedule_pending_cache_refresh()
-            return None, None
+                widget = ClipboardItemWidget(data_dict)
+                widget.action_clicked.connect(self.handle_action)
+                widget.today_progress_clicked.connect(self._handle_today_in_progress_toggle)
+                widget.ended_signal.connect(self.move_to_history)
+                widget.delete_requested.connect(self._delete_active_item)
+                if hasattr(widget, "set_delete_interaction_enabled"):
+                    widget.set_delete_interaction_enabled(self._delete_interaction_enabled)
+            except Exception as exc:
+                record_id = str(data_dict.get("record_id") or "").strip()
+                log_warning(
+                    f"活动条目创建失败，未插入列表: notice_type={notice_type}, "
+                    f"record_id={record_id}, error={exc}"
+                )
+                try:
+                    if widget:
+                        widget.deleteLater()
+                except Exception:
+                    pass
+                self._schedule_pending_cache_refresh()
+                return None, None
         try:
-            item.setSizeHint(QSize(420, 80))
+            item.setSizeHint(QSize(420, 88 if not widgets_required else 80))
             item.setData(Qt.ItemDataRole.UserRole, data_dict)
             if insert_top:
                 list_widget.insertItem(0, item)
             else:
                 list_widget.addItem(item)
-            list_widget.setItemWidget(item, widget)
+            if widget:
+                list_widget.setItemWidget(item, widget)
+            self._upsert_active_notice_model_item(list_widget, item, data_dict)
         except Exception as exc:
             record_id = str(data_dict.get("record_id") or "").strip()
             log_warning(
@@ -2372,19 +3212,25 @@ class MainWindowRecordsMixin:
                 pass
             self._schedule_pending_cache_refresh()
             return None, None
-        # 根据内容状态设置按钮
-        info = extract_event_info(data_dict.get("text", ""))
-        if info and info.get("status") == "结束":
-            widget.set_button_to_end_mode()
-        elif not data_dict.get("_is_placeholder_record", True):
-            widget.set_button_to_update_mode()
-        if data_dict.get("_has_unuploaded_changes") is False:
-            widget.mark_as_uploaded()
+        if widget:
+            # 根据内容状态设置按钮
+            info = extract_event_info(data_dict.get("text", ""))
+            if info and info.get("status") == "结束":
+                widget.set_button_to_end_mode()
+            elif not data_dict.get("_is_placeholder_record", True):
+                widget.set_button_to_update_mode()
+            if data_dict.get("_has_unuploaded_changes") is False:
+                widget.mark_as_uploaded()
         self._schedule_today_in_progress_sync(data_dict)
         self._schedule_record_binding_validation(data_dict)
-        self._schedule_active_route_reconcile()
+        self._schedule_active_route_reconcile(data_dict)
         if not skip_cache:
-            self.save_active_cache()
+            if not (
+                hasattr(self, "_upsert_active_cache_record")
+                and self._upsert_active_cache_record(data_dict)
+            ):
+                self.save_active_cache()
+        self._schedule_active_list_virtualization_refresh(list_widget, 0)
         return item, widget
 
     def sync_record_id_to_widget(self, old_record_id, new_record_id):
@@ -2398,15 +3244,8 @@ class MainWindowRecordsMixin:
             return
 
     def find_widget_by_record_id(self, rid):
-        for list_widget, item in self._iter_active_items():
-            try:
-                if not self._is_valid_list_item(item):
-                    continue
-                if item.data(Qt.ItemDataRole.UserRole).get("record_id") == rid:
-                    return self._safe_item_widget(list_widget, item)
-            except Exception:
-                continue
-        return None
+        list_widget, item = self._find_active_item_by_record_id(rid)
+        return self._safe_item_widget(list_widget, item)
 
     def sync_content_to_widget(self, active_item_id, record_id=None, new_data=None):
         if isinstance(record_id, dict) and new_data is None:

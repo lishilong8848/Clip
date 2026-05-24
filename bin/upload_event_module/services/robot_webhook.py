@@ -5,11 +5,31 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..config import config
 from ..logger import log_error, log_info
-from .http_client import FeishuHTTPError, request_json
+from .http_client import FeishuHTTPError, FeishuHttpClient
 
 
 _CHAT_CACHE: Dict[str, Any] = {"timestamp": 0.0, "items": []}
 _CHAT_CACHE_TTL_SEC = 300
+_HTTP_CLIENT = FeishuHttpClient()
+
+
+def _request_json(
+    method: str,
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    params: dict[str, Any] | None = None,
+    json_payload: Any = None,
+    retries: int = 2,
+) -> dict[str, Any]:
+    return _HTTP_CLIENT.request_json(
+        method,
+        url,
+        headers=headers,
+        params=params,
+        json_payload=json_payload,
+        retries=retries,
+    )
 
 
 def _get_tenant_access_token() -> Tuple[str, str]:
@@ -23,7 +43,7 @@ def _get_tenant_access_token() -> Tuple[str, str]:
     headers = {"Content-Type": "application/json; charset=utf-8"}
 
     try:
-        result = request_json(
+        result = _request_json(
             "POST",
             url,
             json_payload=payload,
@@ -55,7 +75,7 @@ def _get_bot_chats(
         if page_token:
             params["page_token"] = page_token
         try:
-            result = request_json(
+            result = _request_json(
                 "GET",
                 url,
                 headers=headers,
@@ -157,7 +177,7 @@ def _send_message_to_receive_id(
     params = {"receive_id_type": receive_id_type}
 
     try:
-        result = request_json(
+        result = _request_json(
             "POST",
             url,
             headers=headers,
