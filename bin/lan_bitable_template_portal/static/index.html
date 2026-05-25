@@ -1357,6 +1357,7 @@
       defaults: { impact: "对IT业务无影响，不会触发BA和BMS系统相关告警", progress: "准备工作已完成，人员已就位，可否开始操作？" },
       selected: new Set(),
       drafts: new Map(),
+      ongoingEdits: new Map(),
       jobStates: new Map(),
       actionOps: new Map(),
       jobToOpKey: new Map(),
@@ -2528,6 +2529,26 @@
         normalizeRepairDraft(record, draft);
       }
       return draft;
+    }
+
+    function pruneOngoingEdits() {
+      const valid = new Set((state.ongoing || []).map((item) => String(item.active_item_id || "").trim()).filter(Boolean));
+      for (const key of Array.from(state.ongoingEdits.keys())) {
+        if (!valid.has(String(key || "").trim())) state.ongoingEdits.delete(key);
+      }
+    }
+
+    function mergedOngoingItem(item) {
+      const id = String(item?.active_item_id || "").trim();
+      const edits = id ? state.ongoingEdits.get(id) : null;
+      return edits ? { ...item, ...edits, active_item_id: id } : item;
+    }
+
+    function setOngoingEditValue(activeItemId, key, value) {
+      const id = String(activeItemId || "").trim();
+      if (!id || !key) return;
+      const current = state.ongoingEdits.get(id) || {};
+      state.ongoingEdits.set(id, { ...current, [key]: value, active_item_id: id });
     }
 
     function setJobLine(key, text, status = "") {
@@ -3771,6 +3792,7 @@
       state.records = data.records || [];
       state.zhihangRecords = data.zhihang_change_records || [];
       state.ongoing = data.ongoing || [];
+      pruneOngoingEdits();
       state.dailySummary = data.daily_summary || { date: "", items: [], stats: {} };
       state.defaults = data.defaults || state.defaults;
       state.lastLoadedAt = data.last_loaded_at || "";
@@ -4011,6 +4033,7 @@
         state.records = data.records || [];
         state.zhihangRecords = data.zhihang_change_records || [];
         state.ongoing = data.ongoing || [];
+        pruneOngoingEdits();
         state.dailySummary = data.daily_summary || { date: "", items: [], stats: {} };
         state.defaults = data.defaults || state.defaults;
         state.lastLoadedAt = data.last_loaded_at || "";
@@ -4056,6 +4079,7 @@
         state.records = data.records || [];
         state.zhihangRecords = data.zhihang_change_records || [];
         state.ongoing = data.ongoing || [];
+        pruneOngoingEdits();
         state.dailySummary = data.daily_summary || { date: "", items: [], stats: {} };
         state.defaults = data.defaults || state.defaults;
         state.lastLoadedAt = data.last_loaded_at || "";
@@ -4888,40 +4912,43 @@
         return;
       }
       renderHtmlInChunks("ongoing", $("ongoingList"), state.ongoing, (item) => {
-        const id = item.active_item_id;
-        const range = splitTimeRange(item.time, item.start_time, item.end_time);
-        const readonly = Boolean(item.source_only);
-        const readonlyReason = item.block_reason || `该${workTypeLabel(item.work_type)}当前不可通过网页更新或结束。`;
-        const tagText = readonly ? "只读" : (item.can_update ? "可操作" : "等待");
-        const isRepair = (item.work_type || "maintenance") === "repair";
-        const timeLabel = item.time || [range.start, range.end].filter(Boolean).join(" ~ ");
-        const title = ongoingTitleForItem(item);
+        const viewItem = mergedOngoingItem(item);
+        const id = viewItem.active_item_id;
+        const range = splitTimeRange(viewItem.time, viewItem.start_time, viewItem.end_time);
+        const readonly = Boolean(viewItem.source_only);
+        const readonlyReason = readonly
+          ? (viewItem.block_reason || "只读：本地未绑定可更新记录")
+          : (viewItem.block_reason || `该${workTypeLabel(viewItem.work_type)}当前不可通过网页更新或结束。`);
+        const tagText = readonly ? "只读" : (viewItem.can_update ? "可操作" : "等待");
+        const isRepair = (viewItem.work_type || "maintenance") === "repair";
+        const timeLabel = viewItem.time || [range.start, range.end].filter(Boolean).join(" ~ ");
+        const title = ongoingTitleForItem(viewItem);
         return `
           <article class="ongoing-card" data-ongoing="${html(id)}">
             <div class="card-head">
               <div>
                 <h3 class="card-title">${html(title)}</h3>
-                <div class="record-meta">${html([workTypeLabel(item.work_type), item.origin_label, item.building, item.specialty, (item.work_type || "maintenance") === "maintenance" && maintenanceCycleForItem(item) ? "周期 " + maintenanceCycleForItem(item) : "", item.level, timeLabel, item.upload_state, item.zhihang_title ? "智航 " + item.zhihang_title : "", item.source_record_id ? "源ID " + item.source_record_id : "", item.active_item_id ? "本地ID " + item.active_item_id : ""].filter(Boolean).join(" | "))}</div>
+                <div class="record-meta">${html([workTypeLabel(viewItem.work_type), viewItem.origin_label, viewItem.building, viewItem.specialty, (viewItem.work_type || "maintenance") === "maintenance" && maintenanceCycleForItem(viewItem) ? "周期 " + maintenanceCycleForItem(viewItem) : "", viewItem.level, timeLabel, viewItem.upload_state, viewItem.zhihang_title ? "智航 " + viewItem.zhihang_title : ""].filter(Boolean).join(" | "))}</div>
               </div>
               <div class="card-actions">
-                <span class="tag ${item.can_update ? "green" : "amber"}">${html(tagText)}</span>
+                <span class="tag ${viewItem.can_update ? "green" : "amber"}">${html(tagText)}</span>
                 <button class="btn danger icon-btn" data-delete-ongoing="${html(id)}" title="删除多维记录和 Qt 条目">×</button>
               </div>
             </div>
             <div class="form-grid ${readonly ? "hidden" : ""}">
-              <div>${textField(id, "progress", isRepair ? "完成情况" : "进度", item.progress || "")}</div>
-              <div>${textField(id, "location", isRepair ? "地点" : "位置", item.location || "")}</div>
+              <div>${textField(id, "progress", isRepair ? "完成情况" : "进度", viewItem.progress || "")}</div>
+              <div>${textField(id, "location", isRepair ? "地点" : "位置", viewItem.location || "")}</div>
             </div>
             <details class="${readonly ? "hidden" : ""}">
               <summary>编辑完整通告字段</summary>
               <div class="form-grid">
-                ${ongoingFieldsHtml(item, id, range)}
+                ${ongoingFieldsHtml(viewItem, id, range)}
               </div>
             </details>
-            ${readonly ? `<div class="job-line failed">${html(readonlyReason)}</div>` : (item.block_reason ? `<div class="job-line failed">${html(item.block_reason)}</div>` : "")}
+            ${readonly ? `<div class="job-line failed">${html(readonlyReason)}</div>` : (viewItem.block_reason ? `<div class="job-line failed">${html(viewItem.block_reason)}</div>` : "")}
             <div class="row-actions ${readonly ? "hidden" : ""}" style="margin-top:10px">
-              <button class="btn blue" data-send-update="${html(id)}" ${item.can_update ? "" : "disabled"}>发送更新并上传</button>
-              <button class="btn danger" data-send-end="${html(id)}" ${item.can_end ? "" : "disabled"}>发送结束并上传</button>
+              <button class="btn blue" data-send-update="${html(id)}" ${viewItem.can_update ? "" : "disabled"}>发送更新并上传</button>
+              <button class="btn danger" data-send-end="${html(id)}" ${viewItem.can_end ? "" : "disabled"}>发送结束并上传</button>
             </div>
             <div class="job-line ${readonly ? "hidden" : ""}" data-job-line="${html(id)}">待操作</div>
           </article>
@@ -4945,7 +4972,8 @@
     }
 
     function readOngoingPayload(activeItemId, action) {
-      const item = state.ongoing.find((x) => x.active_item_id === activeItemId);
+      const baseItem = state.ongoing.find((x) => x.active_item_id === activeItemId);
+      const item = baseItem ? mergedOngoingItem(baseItem) : null;
       const card = document.querySelector(`[data-ongoing="${CSS.escape(activeItemId)}"]`);
       const field = (key) => card?.querySelector(`[data-draft-field="${CSS.escape(activeItemId + ":" + key)}"]`);
       const read = (key, fallback = "") => {
@@ -5051,8 +5079,7 @@
       resetDeleteConfirm(activeItemId);
       const confirmText = [
         `确认删除“${ongoingTitleForItem(item)}”？`,
-        hasRemoteRecord ? "此操作会删除对应多维记录并删除 Qt 条目。" : "此操作只删除 Qt 条目和页面显示。",
-        item.record_id || item.target_record_id ? `多维记录：${item.record_id || item.target_record_id}` : "",
+        hasRemoteRecord ? "此操作会同步删除多维记录和 Qt 条目。" : "此操作只删除 Qt 条目和页面显示。",
       ].filter(Boolean).join("\n");
       if (!window.confirm(confirmText)) return;
       try {
@@ -5103,7 +5130,10 @@
     function bindOngoingEvents() {
       document.querySelectorAll(".ongoing-card [data-draft-field]").forEach((el) => {
         el.addEventListener("input", () => {
-          const [id] = el.dataset.draftField.split(":");
+          const marker = el.dataset.draftField.lastIndexOf(":");
+          const id = el.dataset.draftField.slice(0, marker);
+          const key = el.dataset.draftField.slice(marker + 1);
+          setOngoingEditValue(id, key, el.value);
           state.actionOps.delete(`${id}:update`);
           state.actionOps.delete(`${id}:end`);
           forgetJobsForLine(id);
@@ -5318,10 +5348,13 @@
       const messageQueuedLabel = job.message_queue_position
         ? `消息排队中，第 ${job.message_queue_position} 位`
         : "已受理，正在发送个人消息";
+      const dependencyWaitingLabel = job.depends_on_job_id
+        ? "等待上一条同通告任务完成"
+        : messageQueuedLabel;
       const messageStartedAt = Number(job.message_started_at || 0) * 1000;
       const messageSlow = messageStartedAt && Date.now() - messageStartedAt > 3000;
       const label = {
-        accepted: messageQueuedLabel,
+        accepted: dependencyWaitingLabel,
         queued: qtQueuedLabel,
         message_sent: "个人消息已发送，等待主界面显示",
         upload_queued: uploadQueuedLabel,

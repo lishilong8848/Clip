@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from contextlib import suppress
 from collections import deque
 from pathlib import Path
@@ -23,6 +24,26 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+from clipflow_backend.api_models import (
+    APIModel,
+    OngoingDeleteRequest,
+    PermissionRequestConfirm,
+    PermissionRequestCreate,
+    QtClipboardAckRequest,
+    QtClipboardEventRequest,
+    QtActiveItemsDeltaRequest,
+    QtCommandRequest,
+    QtDialogResultRequest,
+    QtDialogSessionRequest,
+    QtEventAckRequest,
+    QtJobProgressRequest,
+    QtJobResultRequest,
+    QtLocalHeartbeatRequest,
+    QtNoticeUploadRequest,
+    QtOngoingSnapshotRequest,
+    WorkbenchActionRequest,
+    parse_api_model,
+)
 from lan_bitable_template_portal.server import (
     DEFAULT_HOST,
     DEFAULT_PORT,
@@ -31,6 +52,8 @@ from lan_bitable_template_portal.server import (
     PortalServerController,
     find_available_port,
     portal_asset_file,
+    portal_frontend_dist_enabled,
+    portal_frontend_dist_ready,
     portal_index_file,
     portal_static_roots,
 )
@@ -56,6 +79,7 @@ from lan_bitable_template_portal.portal_service import MaintenancePortalService
 from lan_bitable_template_portal.portal_auth import PortalAuthManager
 from lan_bitable_template_portal.state_store import LanPortalStateStore
 from upload_event_module.config import config, get_field_config
+from upload_event_module.core.parser import extract_event_info
 from upload_event_module.services.feishu_service import check_token_status
 from upload_event_module.logger import log_error, log_info, log_warning
 from upload_event_module.services.robot_webhook import send_text_to_open_ids
@@ -532,6 +556,12 @@ class FastAPIPortalController:
                 return oauth_response
             return self._static_file_response(request, portal_index_file(), html=True)
 
+        @app.get("/legacy-index.html")
+        async def legacy_index(request: Request):
+            from lan_bitable_template_portal.server import STATIC_DIR
+
+            return self._static_file_response(request, STATIC_DIR / "index.html", html=True)
+
         @app.get("/assets/{asset_path:path}")
         async def assets(asset_path: str, request: Request):
             relative = Path(*str(asset_path or "").split("/"))
@@ -622,6 +652,12 @@ class FastAPIPortalController:
                     "external_guard": _external_guard_status(),
                     "url": self.get_url(),
                     "internal_url": self._legacy_url,
+                    "frontend": {
+                        "vue_requested": os.environ.get("CLIPFLOW_FRONTEND_LEGACY") != "1",
+                        "vue_ready": portal_frontend_dist_ready(),
+                        "vue_enabled": portal_frontend_dist_enabled(),
+                        "legacy_forced": os.environ.get("CLIPFLOW_FRONTEND_LEGACY") == "1",
+                    },
                     "time": time.time(),
                     "runtime": PortalHandler.state_store.get_backend_runtime("backend") or {},
                 },
@@ -660,8 +696,17 @@ class FastAPIPortalController:
             preflight = PortalHandler.state_store.get_backend_runtime("preflight") or {}
             token_status = PortalHandler.state_store.get_backend_runtime("token_status") or {}
             sqlite_stats: dict = {}
+            source_snapshot_stats: dict = {}
+            schema_status: dict = {}
+            runtime_health: dict = {}
             with suppress(Exception):
                 sqlite_stats = PortalHandler.state_store.get_database_stats()
+            with suppress(Exception):
+                source_snapshot_stats = PortalHandler.state_store.source_snapshot_stats()
+            with suppress(Exception):
+                schema_status = PortalHandler.state_store.schema_health()
+            with suppress(Exception):
+                runtime_health = PortalHandler.state_store.runtime_health_report()
             with suppress(Exception):
                 last_loaded_at = str(getattr(service, "_last_loaded_at", "") or "")
                 last_loaded_ts = float(getattr(service, "_last_loaded_ts", 0.0) or 0.0)
@@ -713,6 +758,12 @@ class FastAPIPortalController:
                     "external_guard": _external_guard_status(),
                     "legacy_adapter_enabled": _legacy_adapter_enabled(),
                     "legacy_fallback_env": os.environ.get("CLIPFLOW_LEGACY_PORTAL", ""),
+                    "frontend": {
+                        "vue_requested": os.environ.get("CLIPFLOW_FRONTEND_LEGACY") != "1",
+                        "vue_ready": portal_frontend_dist_ready(),
+                        "vue_enabled": portal_frontend_dist_enabled(),
+                        "legacy_forced": os.environ.get("CLIPFLOW_FRONTEND_LEGACY") == "1",
+                    },
                     "last_loaded_at": last_loaded_at,
                     "last_loaded_ts": last_loaded_ts,
                     "warnings": warnings,
@@ -731,6 +782,9 @@ class FastAPIPortalController:
                     "preflight": preflight if isinstance(preflight, dict) else {},
                     "token_status": token_status if isinstance(token_status, dict) else {},
                     "sqlite": sqlite_stats if isinstance(sqlite_stats, dict) else {},
+                    "schema": schema_status if isinstance(schema_status, dict) else {},
+                    "runtime_health": runtime_health if isinstance(runtime_health, dict) else {},
+                    "source_snapshot": source_snapshot_stats if isinstance(source_snapshot_stats, dict) else {},
                     "read_cache": self._read_cache_stats(),
                     "singleflight": {
                         "payload_cache_inflight": len(PortalHandler.payload_cache_inflight),
@@ -760,6 +814,8 @@ class FastAPIPortalController:
                 "data": {
                     **_queue_stats(),
                     "job_phase_counts": job_phase_counts,
+                    "schema": PortalHandler.state_store.schema_health(),
+                    "source_snapshot": PortalHandler.state_store.source_snapshot_stats(),
                     "qt_active_items": PortalHandler.state_store.qt_active_items_stats(),
                     "time": time.time(),
                 },
@@ -843,6 +899,13 @@ class FastAPIPortalController:
             payload = await self._read_json_request(request)
             count = max(1, min(int(payload.get("count") or 10), 50))
             concurrency = max(1, min(int(payload.get("concurrency") or 5), 10))
+            raw_scopes = payload.get("scopes")
+            scopes: list[str] = []
+            if isinstance(raw_scopes, list):
+                scopes = [str(item or "").strip().upper() for item in raw_scopes if str(item or "").strip()]
+            elif isinstance(raw_scopes, str):
+                scopes = [item.strip().upper() for item in raw_scopes.split(",") if item.strip()]
+            per_scope = max(0, min(int(payload.get("per_scope") or 0), 10))
             scenario = str(payload.get("scenario") or "accepted").strip()
             if scenario not in {"accepted", "failed-network", "failed-remote-missing", "mixed"}:
                 scenario = "accepted"
@@ -857,6 +920,8 @@ class FastAPIPortalController:
                 "--scenario",
                 scenario,
             ]
+            if scopes and per_scope > 0:
+                args.extend(["--scopes", ",".join(scopes), "--per-scope", str(per_scope)])
             run_kwargs = {}
             if os.name == "nt":
                 startupinfo = subprocess.STARTUPINFO()
@@ -1071,6 +1136,7 @@ class FastAPIPortalController:
             if session is None:
                 return self._auth_required_response()
             try:
+                self._ensure_source_snapshot_background()
                 scope = self._authorized_scope_or_error(
                     session, request.query_params.get("scope") or "ALL"
                 )
@@ -1098,6 +1164,7 @@ class FastAPIPortalController:
             if session is None:
                 return self._auth_required_response()
             try:
+                self._ensure_source_snapshot_background()
                 ongoing = self._get_ongoing("ALL")
                 self._reconcile_orphan_started_items("ALL", ongoing)
                 allowed_options = PortalHandler.auth_manager.filter_scope_options(
@@ -1134,6 +1201,7 @@ class FastAPIPortalController:
             if session is None:
                 return self._auth_required_response()
             try:
+                self._ensure_source_snapshot_background()
                 scope = self._authorized_scope_or_error(
                     session, request.query_params.get("scope") or "ALL"
                 )
@@ -1239,6 +1307,17 @@ class FastAPIPortalController:
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=500)
 
+        @app.get("/api/auth/permissions")
+        async def auth_permissions(request: Request):
+            admin_response, session = self._require_admin_response(request)
+            if admin_response is not None:
+                return admin_response
+            try:
+                data = PortalHandler.auth_manager.get_permissions_payload()
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=500)
+
         @app.get("/api/auth/permission-requests/current")
         async def current_permission_request(request: Request):
             session = self._current_session(request)
@@ -1257,7 +1336,9 @@ class FastAPIPortalController:
             if session is None:
                 return self._auth_required_response()
             try:
-                payload = await self._read_json_request(request)
+                payload = (
+                    await self._read_model_request(request, WorkbenchActionRequest)
+                ).to_payload()
                 scope = self._authorized_scope_or_error(
                     session, payload.get("scope") or "ALL"
                 )
@@ -1293,7 +1374,9 @@ class FastAPIPortalController:
             if session is None:
                 return self._auth_required_response()
             try:
-                payload = await self._read_json_request(request)
+                payload = (
+                    await self._read_model_request(request, OngoingDeleteRequest)
+                ).to_payload()
                 scope = self._authorized_scope_or_error(
                     session, payload.get("scope") or "ALL"
                 )
@@ -1304,50 +1387,15 @@ class FastAPIPortalController:
                     user.get("name") or user.get("en_name") or ""
                 )
                 PortalHandler.service.validate_ongoing_delete_item(payload, scope=scope)
-                callback = PortalHandler.ongoing_delete_callback
-                bridge_delete_ready = self._qt_bridge_callback_ready(
-                    "ongoing_delete_callback"
+                delete_result = PortalHandler.execute_local_delete_active_item(
+                    {"data_dict": payload}
                 )
-                if bridge_delete_ready:
-                    event_id = PortalHandler.state_store.enqueue_outbox_event(
-                        "qt_action",
-                        {
-                            "kind": "ongoing_delete",
-                            "payload": payload,
-                        },
-                    )
-                    PortalHandler.clear_payload_cache()
-                    self._clear_read_cache()
-                    data = {
-                        "qt_delete_queued": True,
-                        "qt_event_id": event_id,
-                        "message": "删除请求已进入主窗口队列。",
-                    }
-                    return JSONResponse(
-                        {"ok": True, "data": PortalHandler._with_runtime_warnings(data)},
-                        status_code=202,
-                    )
-                if callback is None:
+                if not bool((delete_result or {}).get("ok")):
                     return JSONResponse(
                         {
                             "ok": False,
-                            "error": "主窗口删除通道未连接，请确认 Qt 主程序仍在运行。",
+                            "error": str((delete_result or {}).get("message") or "多维记录删除失败。"),
                         },
-                        status_code=503,
-                    )
-                try:
-                    accepted = callback(payload)
-                except Exception as exc:
-                    return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
-                if isinstance(accepted, dict):
-                    qt_deleted = bool(accepted.get("ok"))
-                    error = str(accepted.get("error") or "").strip()
-                else:
-                    qt_deleted = bool(accepted)
-                    error = ""
-                if not qt_deleted:
-                    return JSONResponse(
-                        {"ok": False, "error": error or "主窗口删除失败。"},
                         status_code=500,
                     )
                 data = PortalHandler.service.hide_ongoing_item(
@@ -1362,12 +1410,26 @@ class FastAPIPortalController:
                 )
                 PortalHandler.clear_payload_cache()
                 self._clear_read_cache()
-                data["qt_deleted"] = True
-                data["remote_deleted"] = bool(
-                    accepted.get("remote_deleted")
-                    if isinstance(accepted, dict)
-                    else False
+                event_id = PortalHandler.state_store.enqueue_outbox_event(
+                    "qt_action",
+                    {
+                        "kind": "active_delete",
+                        "payload": {
+                            "active_item_id": str(payload.get("active_item_id") or ""),
+                            "record_id": str(
+                                payload.get("target_record_id")
+                                or payload.get("record_id")
+                                or ""
+                            ),
+                            "source_record_id": str(payload.get("source_record_id") or ""),
+                            "work_type": str(payload.get("work_type") or ""),
+                            "notice_type": str(payload.get("notice_type") or ""),
+                        },
+                    },
                 )
+                data["qt_deleted"] = bool(delete_result.get("active_item_id") or delete_result.get("record_id"))
+                data["qt_event_id"] = event_id
+                data["remote_deleted"] = bool(delete_result.get("remote_deleted"))
                 return self._json_ok(request, session, data)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)
@@ -1441,7 +1503,9 @@ class FastAPIPortalController:
             if session is None:
                 return self._auth_required_response()
             try:
-                payload = await self._read_json_request(request)
+                payload = (
+                    await self._read_model_request(request, PermissionRequestCreate)
+                ).to_payload()
                 user = session.get("user") if isinstance(session.get("user"), dict) else {}
                 data = PortalHandler.auth_manager.create_permission_request(
                     open_id=str(user.get("open_id") or ""),
@@ -1494,7 +1558,9 @@ class FastAPIPortalController:
             if session is None:
                 return self._auth_required_response()
             try:
-                payload = await self._read_json_request(request)
+                payload = (
+                    await self._read_model_request(request, PermissionRequestConfirm)
+                ).to_payload()
                 user = session.get("user") if isinstance(session.get("user"), dict) else {}
                 permissions = PortalHandler.auth_manager.confirm_permission_request(
                     open_id=str(user.get("open_id") or ""),
@@ -1606,6 +1672,137 @@ class FastAPIPortalController:
                 headers={"Cache-Control": "no-store"},
             )
 
+        @app.get("/api/qt/shell/bootstrap")
+        async def qt_shell_bootstrap(request: Request):
+            deny = self._local_only_response(request)
+            if deny is not None:
+                return deny
+            active_items = PortalHandler.state_store.list_qt_active_items()
+            clipboard_candidates = PortalHandler.state_store.list_clipboard_candidates(
+                status="pending",
+                limit=100,
+            )
+            dialog_sessions = PortalHandler.state_store.list_dialog_sessions(
+                status="pending",
+                limit=50,
+            )
+            return {
+                "ok": True,
+                "data": {
+                    "active_items": active_items,
+                    "history_items": [],
+                    "clipboard_candidates": clipboard_candidates,
+                    "dialog_sessions": dialog_sessions,
+                    "runtime_limits": PortalHandler.runtime_limits(),
+                    "runtime_pressure": PortalHandler.runtime_pressure(),
+                    "qt_active_items": PortalHandler.state_store.qt_active_items_stats(),
+                    "qt_bridge": PortalHandler.state_store.get_backend_runtime("qt_bridge") or {},
+                },
+            }
+
+        @app.post("/api/qt/commands")
+        async def qt_commands(request: Request):
+            deny = self._local_only_response(request)
+            if deny is not None:
+                return deny
+            payload = (
+                await self._read_model_request(request, QtCommandRequest)
+            ).to_payload()
+            command = str(payload.get("command") or "").strip().lower()
+            try:
+                if command in {"notice_upload", "notice_update", "notice_end", "notice_archive"}:
+                    action_map = {
+                        "notice_upload": "upload",
+                        "notice_update": "update",
+                        "notice_end": "end",
+                        "notice_archive": "upload_replace",
+                    }
+                    command_payload = dict(payload.get("payload") or {})
+                    command_payload["action_type"] = action_map[command]
+                    data = PortalHandler.execute_local_notice_upload(command_payload)
+                    return {"ok": True, "data": data}
+                if command == "delete_active_item":
+                    command_payload = dict(payload.get("payload") or {})
+                    data = PortalHandler.execute_local_delete_active_item(command_payload)
+                    return {"ok": True, "data": data}
+                if command == "set_today_in_progress":
+                    command_payload = dict(payload.get("payload") or {})
+                    data = PortalHandler.execute_local_today_progress_update(command_payload)
+                    return {"ok": True, "data": data}
+                return JSONResponse(
+                    {"ok": False, "error": f"不支持的 Qt command: {command or '-'}"},
+                    status_code=400,
+                )
+            except Exception as exc:
+                return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+
+        @app.post("/api/qt/dialog-result")
+        async def qt_dialog_result(request: Request):
+            deny = self._local_only_response(request)
+            if deny is not None:
+                return deny
+            payload = (
+                await self._read_model_request(request, QtDialogResultRequest)
+            ).to_payload()
+            session_id = str(payload.get("session_id") or "").strip()
+            if not session_id:
+                return JSONResponse({"ok": False, "error": "缺少 session_id"}, status_code=400)
+            updated = PortalHandler.state_store.mark_dialog_session(
+                session_id,
+                str(payload.get("status") or "completed"),
+                payload={"result": payload.get("result")},
+            )
+            if not updated:
+                return JSONResponse({"ok": False, "error": "dialog session 不存在"}, status_code=404)
+            return {"ok": True, "data": {"session_id": session_id}}
+
+        @app.post("/api/qt/dialog-sessions")
+        async def qt_dialog_sessions(request: Request):
+            deny = self._local_only_response(request)
+            if deny is not None:
+                return deny
+            payload = (
+                await self._read_model_request(request, QtDialogSessionRequest)
+            ).to_payload()
+            session_id = str(payload.get("session_id") or "").strip() or uuid.uuid4().hex
+            dialog_type = str(payload.get("type") or payload.get("dialog_type") or "dialog").strip()
+            stored_payload = {
+                "session_id": session_id,
+                "type": dialog_type,
+                "action_type": str(payload.get("action_type") or "").strip(),
+                "record_id": str(payload.get("record_id") or "").strip(),
+                "active_item_id": str(payload.get("active_item_id") or "").strip(),
+                "created_by": "qt",
+                "created_at": time.time(),
+                "payload": payload.get("payload") if isinstance(payload.get("payload"), dict) else {},
+            }
+            PortalHandler.state_store.upsert_dialog_session(
+                session_id,
+                session_type=dialog_type,
+                payload=stored_payload,
+                status="pending",
+            )
+            return {"ok": True, "data": {"session_id": session_id, "payload": stored_payload}}
+
+        @app.post("/api/qt/clipboard-candidates/{candidate_id}/ack")
+        async def qt_clipboard_candidate_ack(candidate_id: str, request: Request):
+            deny = self._local_only_response(request)
+            if deny is not None:
+                return deny
+            payload = (
+                await self._read_model_request(request, QtClipboardAckRequest)
+            ).to_payload()
+            ok = bool(payload.get("ok", True))
+            status = "done" if ok else str(payload.get("status") or "failed")
+            updated = PortalHandler.state_store.mark_clipboard_candidate(
+                candidate_id,
+                status,
+                payload={"ack": payload},
+            )
+            if not updated:
+                return JSONResponse({"ok": False, "error": "clipboard candidate 不存在"}, status_code=404)
+            return {"ok": True, "data": {"candidate_id": candidate_id, "status": status}}
+
         @app.get("/api/qt/events")
         async def qt_events(request: Request, limit: int = 1):
             deny = self._local_only_response(request)
@@ -1634,7 +1831,9 @@ class FastAPIPortalController:
             deny = self._local_only_response(request)
             if deny is not None:
                 return deny
-            payload = await request.json()
+            payload = (
+                await self._read_model_request(request, QtEventAckRequest)
+            ).to_payload()
             ok = bool((payload or {}).get("ok", True))
             error = str((payload or {}).get("error") or "")
             event = PortalHandler.state_store.mark_outbox_event(
@@ -1687,6 +1886,37 @@ class FastAPIPortalController:
                         error=f"Qt 已处理删除，但本地状态清理失败: {exc}",
                         max_attempts=3,
                     )
+            if event_kind == "clipboard_candidate":
+                candidate_payload = event_payload.get("payload")
+                candidate_payload = candidate_payload if isinstance(candidate_payload, dict) else {}
+                candidate_id = str(candidate_payload.get("candidate_id") or "").strip()
+                if candidate_id:
+                    try:
+                        PortalHandler.state_store.mark_clipboard_candidate(
+                            candidate_id,
+                            "done" if ok and event_status == "done" else "pending",
+                            payload={
+                                "event_id": event_id,
+                                "ok": ok,
+                                "status": event_status,
+                                "error": error,
+                            },
+                        )
+                    except Exception:
+                        pass
+            if event_kind == "dialog_request":
+                dialog_payload = event_payload.get("payload")
+                dialog_payload = dialog_payload if isinstance(dialog_payload, dict) else {}
+                session_id = str(dialog_payload.get("session_id") or "").strip()
+                if session_id and ok and event_status == "done":
+                    try:
+                        PortalHandler.state_store.mark_dialog_session(
+                            session_id,
+                            "delivered",
+                            payload={"event_id": event_id},
+                        )
+                    except Exception:
+                        pass
             return {
                 "ok": True,
                 "data": {
@@ -1701,7 +1931,9 @@ class FastAPIPortalController:
             deny = self._local_only_response(request)
             if deny is not None:
                 return deny
-            payload = await request.json()
+            payload = (
+                await self._read_model_request(request, QtOngoingSnapshotRequest)
+            ).to_payload()
             items = payload.get("items") if isinstance(payload, dict) else []
             result = PortalHandler.state_store.replace_ongoing_items(
                 items if isinstance(items, list) else []
@@ -1714,8 +1946,9 @@ class FastAPIPortalController:
             deny = self._local_only_response(request)
             if deny is not None:
                 return deny
-            payload = await request.json()
-            payload = payload if isinstance(payload, dict) else {}
+            payload = (
+                await self._read_model_request(request, QtActiveItemsDeltaRequest)
+            ).to_payload()
             upserts = payload.get("upserts") or payload.get("items") or []
             deletes = payload.get("deletes") or payload.get("deleted") or []
             if not isinstance(upserts, list):
@@ -1770,11 +2003,91 @@ class FastAPIPortalController:
             deny = self._local_only_response(request)
             if deny is not None:
                 return deny
-            payload = await request.json()
-            payload = payload if isinstance(payload, dict) else {}
+            payload = (
+                await self._read_model_request(request, QtLocalHeartbeatRequest)
+            ).to_payload()
             payload["heartbeat_at"] = time.time()
             PortalHandler.state_store.put_backend_runtime("qt_bridge", payload)
             return {"ok": True, "data": {"heartbeat_at": payload["heartbeat_at"]}}
+
+        @app.post("/api/qt/local/heartbeat")
+        async def qt_local_heartbeat(request: Request):
+            deny = self._local_only_response(request)
+            if deny is not None:
+                return deny
+            payload = (
+                await self._read_model_request(request, QtLocalHeartbeatRequest)
+            ).to_payload()
+            payload["heartbeat_at"] = time.time()
+            PortalHandler.state_store.put_backend_runtime("qt_local_shell", payload)
+            return {"ok": True, "data": {"heartbeat_at": payload["heartbeat_at"]}}
+
+        @app.post("/api/qt/local/clipboard-event")
+        async def qt_local_clipboard_event(request: Request):
+            deny = self._local_only_response(request)
+            if deny is not None:
+                return deny
+            payload = (
+                await self._read_model_request(request, QtClipboardEventRequest)
+            ).to_payload()
+            content = str(payload.get("content") or "").strip()
+            if not content:
+                return JSONResponse({"ok": False, "error": "缺少 content"}, status_code=400)
+            event_payload = {
+                "content": content,
+                "ts": payload.get("ts") or int(time.time() * 1000),
+                "source": str(payload.get("source") or "clipboard"),
+                "target_record_id": str(payload.get("target_record_id") or "").strip(),
+            }
+            event_id = PortalHandler.state_store.append_event(
+                "clipboard",
+                event_payload,
+            )
+            entry = self._clipboard_entry_from_content(
+                content,
+                ts=int(event_payload["ts"] or time.time() * 1000),
+                source=event_payload["source"],
+            )
+            if not entry:
+                return {
+                    "ok": True,
+                    "data": {
+                        "event_id": event_id,
+                        "ignored": True,
+                        "reason": "不是支持的通告文本。",
+                    },
+                }
+            candidate_id = str(entry.get("entry_id") or "").strip()
+            entry["target_record_id"] = event_payload["target_record_id"]
+            PortalHandler.state_store.upsert_clipboard_candidate(
+                candidate_id,
+                content=content,
+                payload={**event_payload, "entry": entry},
+                status="projecting",
+                source_event_id=event_id,
+            )
+            try:
+                projection = self._project_clipboard_entry_to_active(entry)
+            except Exception as exc:
+                PortalHandler.state_store.mark_clipboard_candidate(
+                    candidate_id,
+                    "pending",
+                    payload={"error": str(exc), "entry": entry},
+                )
+                raise
+            PortalHandler.state_store.mark_clipboard_candidate(
+                candidate_id,
+                "done" if projection.get("ok") else "pending",
+                payload={"projection": projection, "entry": entry},
+            )
+            return {
+                "ok": True,
+                "data": {
+                    "event_id": event_id,
+                    "candidate_id": candidate_id,
+                    "projection": projection,
+                },
+            }
 
         @app.get("/api/qt/jobs/{job_id}")
         async def qt_get_job(job_id: str, request: Request):
@@ -1791,9 +2104,14 @@ class FastAPIPortalController:
             deny = self._local_only_response(request)
             if deny is not None:
                 return deny
-            patch = await request.json()
-            if not isinstance(patch, dict):
-                patch = {}
+            patch = (
+                await self._read_model_request(request, QtJobProgressRequest)
+            ).to_payload()
+            patch = {
+                key: value
+                for key, value in patch.items()
+                if value is not None and value != ""
+            }
             self.mark_job_progress(job_id, **patch)
             return {"ok": True, "data": {"job_id": job_id}}
 
@@ -1802,9 +2120,9 @@ class FastAPIPortalController:
             deny = self._local_only_response(request)
             if deny is not None:
                 return deny
-            payload = await request.json()
-            if not isinstance(payload, dict):
-                payload = {}
+            payload = (
+                await self._read_model_request(request, QtJobResultRequest)
+            ).to_payload()
             self.mark_job_upload_result(
                 job_id,
                 success=bool(payload.get("success")),
@@ -1813,6 +2131,23 @@ class FastAPIPortalController:
                 active_item_id=str(payload.get("active_item_id") or ""),
             )
             return {"ok": True, "data": {"job_id": job_id}}
+
+        @app.post("/api/qt/notice-upload")
+        async def qt_notice_upload(request: Request):
+            deny = self._local_only_response(request)
+            if deny is not None:
+                return deny
+            payload = (
+                await self._read_model_request(request, QtNoticeUploadRequest)
+            ).to_payload()
+            try:
+                data = PortalHandler.execute_local_notice_upload(payload)
+                return {"ok": True, "data": data}
+            except Exception as exc:
+                return JSONResponse(
+                    {"ok": False, "error": str(exc)},
+                    status_code=400,
+                )
 
         @app.post("/api/backend/shutdown")
         async def backend_shutdown(request: Request):
@@ -2002,7 +2337,7 @@ class FastAPIPortalController:
     @staticmethod
     def _rate_limit_params(group: str) -> tuple[float, float]:
         if group == "mutation":
-            return 0.8, 12.0
+            return 20.0, 120.0
         if group == "heavy_read":
             return 3.0, 18.0
         if group == "light_read":
@@ -2382,6 +2717,13 @@ class FastAPIPortalController:
             raise ValueError("请求体必须是 JSON 对象。")
         return payload
 
+    @classmethod
+    async def _read_model_request(
+        cls, request: Request, model_cls: type[APIModel]
+    ) -> APIModel:
+        payload = await cls._read_json_request(request)
+        return parse_api_model(model_cls, payload)
+
     @staticmethod
     def _portal_error_response(exc: Exception, *, default_status: int) -> JSONResponse:
         status = default_status if isinstance(exc, PortalError) else 500
@@ -2512,13 +2854,151 @@ class FastAPIPortalController:
         )
         return {"ok": True, "event_id": event_id}
 
+    @staticmethod
+    def _clipboard_entry_id(entry: dict) -> str:
+        key = (
+            f"{entry.get('unique_key', '')}|{entry.get('status', '')}|"
+            f"{entry.get('notice_type', '')}|{entry.get('title', '')}"
+        )
+        return hashlib.md5(key.encode("utf-8", errors="ignore")).hexdigest()
+
+    @classmethod
+    def _clipboard_entry_from_content(
+        cls, content: str, *, ts: int | None = None, source: str = "clipboard"
+    ) -> dict | None:
+        info = extract_event_info(content) or {}
+        if not info:
+            return None
+        entry = {
+            "content": info.get("content") or content,
+            "status": str(info.get("status") or "").strip(),
+            "title": str(info.get("title") or "").strip(),
+            "notice_type": str(info.get("notice_type") or "").strip(),
+            "level": info.get("level"),
+            "source": str(info.get("source") or source or "").strip(),
+            "time_str": str(info.get("time_str") or "").strip(),
+            "unique_key": str(info.get("unique_key") or "").strip(),
+            "ts": int(ts or time.time() * 1000),
+        }
+        entry["entry_id"] = cls._clipboard_entry_id(entry)
+        return entry
+
+    @classmethod
+    def _find_qt_active_item_for_clipboard_entry(cls, entry: dict) -> dict | None:
+        notice_type = str(entry.get("notice_type") or "").strip()
+        unique_key = str(entry.get("unique_key") or "").strip()
+        title = str(entry.get("title") or "").strip()
+        target_record_id = str(entry.get("target_record_id") or "").strip()
+        if not notice_type or not (unique_key or title):
+            return None
+        for item in PortalHandler.state_store.list_qt_active_items():
+            payload = item.get("payload") if isinstance(item, dict) else {}
+            payload = payload if isinstance(payload, dict) else {}
+            if str(payload.get("notice_type") or item.get("notice_type") or "").strip() != notice_type:
+                continue
+            if target_record_id and str(payload.get("record_id") or item.get("record_id") or "").strip() == target_record_id:
+                return item
+            info = extract_event_info(str(payload.get("text") or "")) or {}
+            item_key = str(info.get("unique_key") or "").strip()
+            item_title = str(info.get("title") or payload.get("title") or "").strip()
+            if unique_key and item_key and item_key == unique_key:
+                return item
+            if title and item_title and item_title == title and notice_type != "事件通告":
+                return item
+        return None
+
+    @classmethod
+    def _project_clipboard_entry_to_active(cls, entry: dict) -> dict:
+        status = str(entry.get("status") or "").strip()
+        content = str(entry.get("content") or "").strip()
+        notice_type = str(entry.get("notice_type") or "").strip()
+        existing = cls._find_qt_active_item_for_clipboard_entry(entry)
+        active_item_id = ""
+        if existing and isinstance(existing.get("payload"), dict):
+            data = dict(existing.get("payload") or {})
+            active_item_id = str(data.get("active_item_id") or existing.get("active_item_id") or "").strip()
+        else:
+            data = {}
+        if status not in {"", "开始", "新增"} and not data:
+            return {"ok": True, "ignored": True, "reason": "未找到可更新的活动条目。"}
+        if not active_item_id:
+            active_item_id = str(entry.get("entry_id") or "").strip() or uuid.uuid4().hex
+        record_id = str(data.get("record_id") or "").strip()
+        if not record_id:
+            record_id = f"local_{active_item_id[:24]}"
+        if "_is_placeholder_record" in data:
+            is_placeholder = bool(data.get("_is_placeholder_record"))
+        else:
+            is_placeholder = not bool(str(data.get("record_id") or "").strip())
+        data.update(
+            {
+                "active_item_id": active_item_id,
+                "record_id": record_id,
+                "_is_placeholder_record": is_placeholder,
+                "text": content,
+                "title": entry.get("title") or data.get("title", ""),
+                "notice_type": notice_type,
+                "level": entry.get("level") or data.get("level"),
+                "source": entry.get("source") or data.get("source", ""),
+                "time_str": entry.get("time_str") or data.get("time_str", ""),
+                "_has_unuploaded_changes": True,
+                "_pending_upload_hash": None,
+                "_upload_in_progress": False,
+                "origin": data.get("origin") or "clipboard",
+            }
+        )
+        section = "event" if notice_type == "事件通告" else "other"
+        projected_item = {
+            "active_item_id": active_item_id,
+            "record_id": record_id,
+            "notice_type": notice_type,
+            "section": section,
+            "sort_order": 0,
+            "origin": "clipboard",
+            "payload": data,
+        }
+        PortalHandler.state_store.upsert_qt_active_item(
+            data,
+            section=section,
+            sort_order=0,
+            origin="clipboard",
+        )
+        event_id = PortalHandler.state_store.enqueue_outbox_event(
+            "qt_action",
+            {
+                "kind": "active_upsert",
+                "payload": {
+                    "item": projected_item,
+                    "source": "clipboard",
+                },
+            },
+        )
+        return {
+            "ok": True,
+            "active_item_id": active_item_id,
+            "record_id": record_id,
+            "qt_event_id": event_id,
+            "item": projected_item,
+        }
+
+    def _ensure_source_snapshot_background(self) -> None:
+        """Kick off one background source refresh when the local SQLite snapshot is empty."""
+        try:
+            result = PortalHandler.ensure_source_snapshot_refresh_started()
+        except Exception as exc:
+            log_warning(f"源表快照缺失，后台刷新触发失败: {exc}")
+            return
+        if result.get("source_refresh_started"):
+            self._clear_read_cache()
+
     def _run_scheduled_source_refresh(self) -> None:
         if _mock_external_enabled():
             return
+        has_snapshot = PortalHandler.source_snapshot_ready("ALL")
         result = PortalHandler.refresh_sources_once(
-            force=False,
+            force=not has_snapshot,
             min_interval_seconds=30 * 60,
-            defer_if_busy=True,
+            defer_if_busy=has_snapshot,
         )
         if result.get("source_refresh_deferred"):
             if not PortalHandler.state_store.put_backend_runtime_async(
@@ -2536,8 +3016,10 @@ class FastAPIPortalController:
                         "reason": result.get("source_refresh_defer_reason") or "",
                         "runtime_pressure": result.get("runtime_pressure") or {},
                     },
-                )
+            )
             return
+        if result.get("refreshed"):
+            self._clear_read_cache()
         for warning in result.get("warnings") or []:
             log_warning(str(warning))
 
@@ -2595,15 +3077,6 @@ class FastAPIPortalController:
             max_instances=1,
         )
         scheduler.add_job(
-            self._run_scheduled_source_refresh,
-            "interval",
-            minutes=30,
-            id="source_refresh",
-            replace_existing=True,
-            max_instances=1,
-            coalesce=True,
-        )
-        scheduler.add_job(
             self._run_scheduled_job_cleanup,
             "interval",
             hours=1,
@@ -2635,14 +3108,6 @@ class FastAPIPortalController:
                 "date",
                 run_date=dt.datetime.now() + dt.timedelta(seconds=5),
                 id="feishu_token_refresh_startup",
-                replace_existing=True,
-                max_instances=1,
-            )
-            scheduler.add_job(
-                self._run_scheduled_source_refresh,
-                "date",
-                run_date=dt.datetime.now() + dt.timedelta(seconds=60),
-                id="source_refresh_startup",
                 replace_existing=True,
                 max_instances=1,
             )
@@ -2891,6 +3356,7 @@ class FastAPIPortalController:
             self._legacy_controller = None
             PortalHandler.ensure_message_workers()
             PortalHandler.ensure_action_worker()
+            PortalHandler.ensure_source_refresh_worker()
             for job_id in PortalHandler.service.recoverable_action_job_ids():
                 PortalHandler.enqueue_initial_message_or_upload_job(job_id)
 
@@ -2927,6 +3393,10 @@ class FastAPIPortalController:
 
     def stop(self) -> None:
         self._stop_scheduler()
+        try:
+            PortalHandler.stop_source_refresh_worker()
+        except Exception:
+            pass
         server = self._server
         if server:
             server.should_exit = True

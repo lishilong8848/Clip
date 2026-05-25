@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import base64
 import copy
 import threading
 import queue
@@ -9,7 +10,6 @@ import os
 from PyQt6.QtCore import Qt, QTimer
 
 from ..logger import log_info, log_error, log_warning
-from ..utils import WHITESPACE_TRANSLATOR
 from ..services.service_registry import (
     upload_media_to_feishu,
     query_record_by_id,
@@ -18,14 +18,154 @@ from ..services.service_registry import (
     update_bitable_record_by_payload,
     batch_update_bitable_records_by_payload,
 )
+from ..services.feishu_service import delete_bitable_record
 from ..services.handlers import NoticePayload, get_notice_handler
 from ..core.parser import extract_event_info
 
-PORTAL_BATCH_MAX_RECORDS = 5
-PORTAL_BATCH_WAIT_SECONDS = 5.0
+PORTAL_BATCH_MAX_RECORDS = 100
+PORTAL_BATCH_WAIT_SECONDS = 30.0
 PORTAL_UPLOAD_SECONDS_PER_RECORD = 2.0
 
 class MainWindowWorkflowMixin:
+    @staticmethod
+    def _encode_backend_upload_bytes(data: bytes | None) -> str:
+        if not data:
+            return ""
+        return base64.b64encode(bytes(data)).decode("utf-8")
+
+    def _delegate_qt_notice_upload_to_backend(
+        self,
+        *,
+        data_snapshot: dict,
+        screenshot_bytes,
+        extra_images: list,
+        action_type: str,
+        response_time: str,
+        recover_selected: bool,
+        robot_group_choice: str,
+    ) -> bool:
+        controller = getattr(self, "lan_template_portal_controller", None)
+        if controller is None or not hasattr(controller, "execute_qt_notice_upload"):
+            self._post_request_finished(
+                "归档" if action_type == "upload_replace" else "结束" if action_type == "end" else "更新" if action_type == "update" else "上传",
+                False,
+                "本机后端未连接，Qt 不再直接执行多维写入。",
+                str((data_snapshot or {}).get("record_id") or ""),
+            )
+            return True
+        request_payload = {
+            "action_type": str(action_type or "").strip(),
+            "data_dict": dict(data_snapshot or {}),
+            "response_time": str(response_time or ""),
+            "recover_selected": bool(recover_selected),
+            "robot_group_choice": str(robot_group_choice or "auto").strip() or "auto",
+        }
+        if screenshot_bytes:
+            request_payload["screenshot_bytes_b64"] = self._encode_backend_upload_bytes(
+                screenshot_bytes
+            )
+        encoded_extra_images = []
+        for index, item in enumerate(list(extra_images or []), start=1):
+            if isinstance(item, (list, tuple)) and len(item) >= 2:
+                image_bytes = item[0]
+                file_name = item[1] or f"extra_{index}.png"
+            else:
+                image_bytes = item
+                file_name = f"extra_{index}.png"
+            if not image_bytes:
+                continue
+            encoded_extra_images.append(
+                {
+                    "file_name": str(file_name or f"extra_{index}.png"),
+                    "bytes_b64": self._encode_backend_upload_bytes(image_bytes),
+                }
+            )
+        if encoded_extra_images:
+            request_payload["extra_images"] = encoded_extra_images
+        try:
+            result = controller.execute_qt_notice_upload(request_payload)
+        except Exception as exc:
+            self._post_request_finished(
+                "归档" if action_type == "upload_replace" else "结束" if action_type == "end" else "更新" if action_type == "update" else "上传",
+                False,
+                f"本机后端执行失败：{exc}",
+                str((data_snapshot or {}).get("record_id") or ""),
+            )
+            return True
+        if not isinstance(result, dict):
+            self._post_request_finished(
+                "归档" if action_type == "upload_replace" else "结束" if action_type == "end" else "更新" if action_type == "update" else "上传",
+                False,
+                "本机后端返回格式异常。",
+                str((data_snapshot or {}).get("record_id") or ""),
+            )
+            return True
+        name = str(result.get("name") or "").strip()
+        success = bool(result.get("ok"))
+        record_id = str((data_snapshot or {}).get("record_id") or "")
+        message = str(result.get("message") or "")
+        real_record_id = str(result.get("real_record_id") or "").strip()
+        if success and name in {"上传", "归档"} and real_record_id:
+            message = real_record_id
+        self._post_request_finished(
+            name or ("归档" if action_type == "upload_replace" else "结束" if action_type == "end" else "更新" if action_type == "update" else "上传"),
+            success,
+            message,
+            record_id,
+        )
+        return True
+
+    def on_screenshot_upload_confirmed(
+        self,
+        data_dict,
+        screenshot_bytes,
+        action_type,
+        response_time="",
+        buildings=None,
+        extra_images=None,
+        specialty=None,
+        change_level=None,
+        event_level=None,
+        event_source=None,
+        recover_selected=False,
+        robot_group_choice="auto",
+    ):
+        session_id = str(getattr(self, "_current_screenshot_dialog_session_id", "") or "")
+        if session_id:
+            controller = getattr(self, "lan_template_portal_controller", None)
+            if controller is not None and hasattr(controller, "submit_qt_dialog_result"):
+                try:
+                    controller.submit_qt_dialog_result(
+                        session_id,
+                        status="completed",
+                        result_payload={
+                            "record_id": str((data_dict or {}).get("record_id") or ""),
+                            "active_item_id": str(
+                                (data_dict or {}).get("active_item_id") or ""
+                            ),
+                            "action_type": str(action_type or ""),
+                            "has_screenshot": bool(screenshot_bytes),
+                            "extra_image_count": len(list(extra_images or [])),
+                        },
+                    )
+                except Exception as exc:
+                    log_warning(f"截图确认结果提交后端失败: {exc}")
+        self._current_screenshot_dialog_session_id = ""
+        return self.do_feishu_upload(
+            data_dict,
+            screenshot_bytes,
+            action_type,
+            response_time=response_time,
+            buildings=buildings,
+            extra_images=extra_images,
+            specialty=specialty,
+            change_level=change_level,
+            event_level=event_level,
+            event_source=event_source,
+            recover_selected=recover_selected,
+            robot_group_choice=robot_group_choice,
+        )
+
     def _lan_portal_runtime_store(self):
         store = getattr(self, "_lan_portal_state_store", None)
         if store is not None:
@@ -288,10 +428,11 @@ class MainWindowWorkflowMixin:
             return
         pending = self._deferred_events.pop(0)
         content = pending.get("content")
-        status = pending.get("status")
-        notice_type = pending.get("notice_type")
         if content:
-            self._process_event(content, status, notice_type)
+            self._submit_notice_text_to_backend_projection(
+                content,
+                source="deferred_event",
+            )
             entry_id = pending.get("entry_id", "")
             if entry_id:
                 self._remove_clipboard_pending_entry(entry_id)
@@ -887,8 +1028,11 @@ class MainWindowWorkflowMixin:
         if self._is_event_notice(notice_type):
             if not defer_ui and item and widget:
                 list_widget = item.listWidget()
-                list_widget.setCurrentItem(item)
-                list_widget.scrollToItem(item)
+                if self._active_model_view_visible():
+                    self._scroll_active_model_view_to_item(list_widget, item)
+                else:
+                    list_widget.setCurrentItem(item)
+                    list_widget.scrollToItem(item)
                 self._notify_new_event(widget)
 
         # 后台剪贴板/门户事件只更新列表数据，不主动把最小化或托盘中的主界面拉到前台。
@@ -1023,8 +1167,51 @@ class MainWindowWorkflowMixin:
         log_info(f"UI操作: 结束事件, Record ID: {data_dict['record_id']}")
         self._show_screenshot_dialog(data_dict, "end")
 
+    def _delete_active_item_remote_and_local(self, data_dict) -> tuple[bool, str]:
+        data_dict = dict(data_dict or {})
+        record_id = str(data_dict.get("record_id") or "").strip()
+        active_item_id = str(data_dict.get("active_item_id") or "").strip()
+        notice_type = str(data_dict.get("notice_type") or "").strip()
+        controller = getattr(self, "lan_template_portal_controller", None)
+        if controller is None or not hasattr(controller, "submit_qt_command"):
+            return False, "本机后端未连接，Qt 不再直接执行多维删除。"
+        try:
+            result = controller.submit_qt_command(
+                "delete_active_item",
+                {"data_dict": dict(data_dict)},
+            )
+        except Exception as exc:
+            return False, f"本机后端删除失败：{exc}"
+        if not bool((result or {}).get("ok")):
+            return False, str((result or {}).get("message") or "多维记录删除失败。")
+        self._clear_upload_queue(record_id)
+        self._today_in_progress_pending_record_ids.discard(record_id)
+        self._today_in_progress_synced_record_ids.discard(record_id)
+        self.pending_new_by_record_id.pop(record_id, None)
+        self.pending_replace_by_record_id.pop(record_id, None)
+        self.pending_update_after_upload.pop(record_id, None)
+        self.pending_action_record_ids.discard(record_id)
+        self.pending_action_types.pop(record_id, None)
+        if hasattr(self, "_pop_lan_portal_upload_job"):
+            try:
+                self._pop_lan_portal_upload_job(record_id=record_id, active_item_id=active_item_id)
+            except Exception:
+                pass
+        list_widget, item = self._find_active_item_by_record_id(record_id)
+        if (not item or not self._is_valid_list_item(item)) and active_item_id:
+            list_widget, item = self._find_active_item_by_active_item_id(active_item_id)
+        if item and self._is_valid_list_item(item):
+            self._remove_active_item_widget_only(list_widget, item)
+        if hasattr(self, "_delete_active_cache_record"):
+            self._delete_active_cache_record(data_dict)
+        if hasattr(self, "schedule_active_cache_save"):
+            self.schedule_active_cache_save(800)
+        else:
+            self.save_active_cache()
+        return True, ""
+
     def _delete_active_item(self, data_dict):
-        """删除活动列表项（滑动删除触发） -> 移动到历史"""
+        """删除活动列表项，并同步删除对应多维记录。"""
         if self._is_screenshot_dialog_active():
             record_id = (data_dict or {}).get("record_id")
             list_widget, item = self._find_active_item_by_record_id(record_id)
@@ -1036,8 +1223,19 @@ class MainWindowWorkflowMixin:
                     pass
             self.show_message("截图上传进行中，暂时不能删除条目。")
             return
-        log_info(f"UI操作: 删除事件(移入历史), Record ID: {data_dict['record_id']}")
-        self._do_move_to_history(None, data_dict)
+        record_id = str((data_dict or {}).get("record_id") or "").strip()
+        list_widget, item = self._find_active_item_by_record_id(record_id)
+        widget = self._safe_item_widget(list_widget, item)
+        success, error = self._delete_active_item_remote_and_local(data_dict)
+        if not success:
+            if widget and hasattr(widget, "cancel_delete_visual"):
+                try:
+                    widget.cancel_delete_visual()
+                except Exception:
+                    pass
+            self.show_message(error or "删除失败。")
+            return
+        log_info(f"UI操作: 删除事件(同步删除多维), Record ID: {record_id}")
 
     def handle_action(self, data_dict, action_type):
         block_reason = self._dialog_block_reason("screenshot")
@@ -1066,7 +1264,7 @@ class MainWindowWorkflowMixin:
         if item and not self._is_valid_list_item(item):
             item = None
             list_widget = None
-        if list_widget and item:
+        if list_widget is not None and item is not None:
             item.setData(Qt.ItemDataRole.UserRole, data_dict)
             # 点击后立即显示“已上传”，避免中间蓝色状态
             self._rebuild_active_item_widget(
@@ -1241,7 +1439,7 @@ class MainWindowWorkflowMixin:
         if item and not self._is_valid_list_item(item):
             item = None
             list_widget = None
-        if list_widget and item:
+        if list_widget is not None and item is not None:
             data = item.data(Qt.ItemDataRole.UserRole) or {}
             pending_hash = self._calc_text_hash(data.get("text", ""))
             data["_pending_upload_hash"] = pending_hash
@@ -1294,7 +1492,7 @@ class MainWindowWorkflowMixin:
         if item and not self._is_valid_list_item(item):
             item = None
             list_widget = None
-        if list_widget and item:
+        if list_widget is not None and item is not None:
             old_data = item.data(Qt.ItemDataRole.UserRole) or {}
             if record_id not in self.pending_upload_rollback_by_record_id:
                 try:
@@ -1369,7 +1567,7 @@ class MainWindowWorkflowMixin:
                 settings = LanPortalStateStore().get_settings() or {}
                 self._portal_batch_max_records = max(
                     1,
-                    min(10, int(settings.get("lan_upload_batch_max_records") or PORTAL_BATCH_MAX_RECORDS)),
+                    min(100, int(settings.get("lan_upload_batch_max_records") or PORTAL_BATCH_MAX_RECORDS)),
                 )
                 self._portal_batch_wait_seconds = max(
                     1.0,
@@ -1507,7 +1705,7 @@ class MainWindowWorkflowMixin:
             grouped.setdefault(notice_type, []).append(request)
         for notice_type, requests in grouped.items():
             payloads = [copy.deepcopy(item.get("payload")) for item in requests]
-            release_at = self._reserve_portal_upload_release(len(requests))
+            release_at = self._reserve_portal_upload_release(1)
             self._mark_portal_upload_batch_waiting(requests, release_at)
             self._sleep_until_timestamp(release_at)
             self._mark_portal_upload_batch_started(requests)
@@ -1632,7 +1830,7 @@ class MainWindowWorkflowMixin:
                 (str(item.get("record_id") or ""), copy.deepcopy(item.get("payload")))
                 for item in requests
             ]
-            release_at = self._reserve_portal_upload_release(len(requests))
+            release_at = self._reserve_portal_upload_release(1)
             self._mark_portal_upload_batch_waiting(requests, release_at)
             self._sleep_until_timestamp(release_at)
             self._mark_portal_upload_batch_started(requests)
@@ -1770,7 +1968,7 @@ class MainWindowWorkflowMixin:
             if item and not self._is_valid_list_item(item):
                 item = None
                 list_widget = None
-            if list_widget and item:
+            if list_widget is not None and item is not None:
                 data = item.data(Qt.ItemDataRole.UserRole) or {}
                 data["_upload_in_progress"] = True
                 item.setData(Qt.ItemDataRole.UserRole, data)
@@ -2014,6 +2212,17 @@ class MainWindowWorkflowMixin:
                         "robot_group_choice": robot_group_choice,
                     },
                 )
+                return
+
+            if self._delegate_qt_notice_upload_to_backend(
+                data_snapshot=data_snapshot if isinstance(data_snapshot, dict) else {},
+                screenshot_bytes=screenshot_bytes,
+                extra_images=extra_images,
+                action_type=action_type,
+                response_time=response_time,
+                recover_selected=recover_selected,
+                robot_group_choice=robot_group_choice,
+            ):
                 return
 
             file_tokens = []
@@ -2445,12 +2654,10 @@ class MainWindowWorkflowMixin:
         self.pending_new_by_record_id.pop(data_dict.get("record_id"), None)
         self.pending_replace_by_record_id.pop(data_dict.get("record_id"), None)
         self._cleanup_payload_for_data(data_dict)
-        if list_widget and item:
+        if list_widget is not None and item is not None:
             if hasattr(self, "_remove_active_notice_model_record"):
                 self._remove_active_notice_model_record(data_dict)
-            row = list_widget.row(item)
-            if row != -1:
-                list_widget.takeItem(row)
+            self._remove_active_item_from_source(list_widget, item)
         self.save_to_history_file(data_dict)
         if not (
             hasattr(self, "_delete_active_cache_record")
@@ -2917,110 +3124,19 @@ class MainWindowWorkflowMixin:
             return
         content = self.add_dialog.result_text
         record_id = getattr(self.add_dialog, "result_record_id", "") or ""
-        status = getattr(self.add_dialog, "result_status", "")
         if not content:
             return
         info = extract_event_info(content)
         if not info:
             return
-        status = status or info.get("status", "")
         cleaned_content = info.get("content") or content
-        if status in {"更新", "结束"} and record_id:
-            force_status = "end" if status == "结束" else "update"
-            self._handle_manual_update(
-                content,
-                record_id,
-                info,
-                force_status=force_status,
-            )
-            return
-
-        if status == "更新":
-            target_list, target_item = self._find_active_item_by_content_or_title(
-                cleaned_content,
-                info.get("title", ""),
-                info.get("notice_type"),
-                info.get("unique_key", ""),
-            )
-            if target_item and not self._is_valid_list_item(target_item):
-                target_item = None
-            if target_item:
-                target_data = target_item.data(Qt.ItemDataRole.UserRole) or {}
-                if self._is_routing_conflicted(target_data):
-                    self.show_message(self._routing_error_text(target_data))
-                    return
-                if self._is_event_notice(info.get("notice_type")):
-                    self._pin_item_to_top(target_list, target_item)
-
-                old_data = target_data
-                old_text = (old_data.get("text") or "").translate(WHITESPACE_TRANSLATOR)
-                new_text = cleaned_content.translate(WHITESPACE_TRANSLATOR)
-                widget = self._safe_item_widget(target_list, target_item)
-                if old_text == new_text:
-                    self.show_message("该事件已存在于列表中！")
-                    self._maybe_flash(widget, target_list, target_item)
-                    self._maybe_speak("该事件已存在")
-                    return
-
-                if old_data:
-                    self._rebuild_active_item_widget(
-                        target_list,
-                        target_item,
-                        old_data,
-                        force_status="update",
-                        upload_in_progress=old_data.get("_upload_in_progress"),
-                        pending_upload_hash=old_data.get("_pending_upload_hash"),
-                        has_unuploaded_changes=old_data.get("_has_unuploaded_changes"),
-                    )
-
-                record_id = old_data.get("record_id") if old_data else None
-                is_processing = (
-                    bool(old_data.get("_upload_in_progress")) if old_data else False
-                )
-                if record_id and self._has_pending_upload(record_id):
-                    is_processing = True
-                if is_processing:
-                    self._queue_pending_content(record_id, cleaned_content, status)
-                    self.show_message("该条目正在上传，完成后将自动替换")
-                    self._maybe_speak("正在上传")
-                    return
-
-                if old_data:
-                    old_data.pop("need_upload_first", None)
-                    target_item.setData(Qt.ItemDataRole.UserRole, old_data)
-
-                self._auto_replace_content(
-                    cleaned_content,
-                    old_data,
-                    target_item,
-                    False,
-                )
-                return
-
-            hint = "未在列表中找到对应条目，请填写记录ID后再更新。"
-            self.show_message(hint)
-            self._maybe_speak("无法更新，未找到对应事件")
-            self._reopen_manual_add_with_hint(content, hint)
-            return
-
-        list_widget, item = self._find_active_item_by_content_or_title(
+        result = self._submit_notice_text_to_backend_projection(
             cleaned_content,
-            info.get("title", ""),
-            info.get("notice_type"),
-            info.get("unique_key", ""),
+            source="manual_add",
+            target_record_id=record_id,
         )
-        if item and not self._is_valid_list_item(item):
-            item = None
-        if item:
-            existing_data = item.data(Qt.ItemDataRole.UserRole) or {}
-            if self._is_routing_conflicted(existing_data):
-                self.show_message(self._routing_error_text(existing_data))
-                return
-            self._auto_replace_content(cleaned_content, existing_data, item)
+        if not result.get("ok"):
+            self.show_message(str(result.get("error") or "通告提交后端失败。"))
             return
-        self._process_event(
-            info["content"],
-            info["status"],
-            info.get("notice_type"),
-        )
+        self.show_message("通告已提交后端处理。")
 

@@ -174,7 +174,7 @@ class ActiveNoticeDelegate(QStyledItemDelegate):
         painter.drawText(
             buttons["delete"],
             Qt.AlignmentFlag.AlignCenter,
-            "确认移" if confirm_delete else "移",
+            "确认删" if confirm_delete else "删",
         )
 
     def editorEvent(self, event, model, option, index):  # noqa: N802

@@ -761,6 +761,7 @@ class MaintenancePortalService:
 
     def _save_source_scope_snapshots(self) -> None:
         meta = self._snapshot_meta()
+        snapshots: dict[str, dict[str, Any]] = {}
         for option in SCOPE_OPTIONS:
             scope = self._normalize_scope(option.get("value"))
             records = self._workbench_records_from_memory(
@@ -771,12 +772,11 @@ class MaintenancePortalService:
                 month=RECENT_MONTH_FILTER_LABEL,
                 scope=scope,
             )
-            self._state_store.replace_source_scope_snapshot(
-                scope,
-                records=records,
-                zhihang_records=zhihang_records,
-                meta=meta,
-            )
+            snapshots[scope] = {
+                "records": records,
+                "zhihang_records": zhihang_records,
+            }
+        self._state_store.replace_all_source_scope_snapshots(snapshots, meta=meta)
 
     def _source_snapshot_records(self, scope: str) -> list[dict[str, Any]] | None:
         try:
@@ -894,8 +894,14 @@ class MaintenancePortalService:
             self._last_loaded_at = now
             self._last_loaded_ts = time.time()
             self._load_warnings = warnings
-            self._save_source_scope_snapshots()
-            self._touch_state_cache_version()
+            if warnings:
+                self._state_store.record_failed_source_snapshot(
+                    meta=self._snapshot_meta(),
+                    error="；".join(warnings),
+                )
+            else:
+                self._save_source_scope_snapshots()
+                self._touch_state_cache_version()
 
     def refresh_repair_source(self) -> dict[str, Any]:
         """Refresh only the repair source table and rewrite SQLite snapshots."""
@@ -4482,6 +4488,8 @@ class MaintenancePortalService:
             "request": copy.deepcopy(request_payload),
             "operation_id": str(request_payload.get("operation_id") or "").strip(),
             "target_key": self._action_target_key(request_payload),
+            "depends_on_job_id": "",
+            "depends_on_phase": "",
             "message_sent": False,
             "message_signature": "",
             "message_queue_position": 0,
@@ -4692,22 +4700,37 @@ class MaintenancePortalService:
                         return str(existing.get("job_id") or ""), True
             target_key = str(job.get("target_key") or "")
             if target_key:
+                blocking_phase_order = {
+                    "accepted": 1,
+                    "queued": 2,
+                    "sending_message": 3,
+                    "message_sent": 4,
+                    "upload_queued": 5,
+                    "qt_queued": 6,
+                    "qt_displaying": 7,
+                    "upload_waiting": 8,
+                    "uploading": 9,
+                }
+                blocking_job_id = ""
+                blocking_phase = ""
+                blocking_rank = -1
+                blocking_epoch = 0.0
                 for existing in self._jobs.values():
                     if str(existing.get("target_key") or "") != target_key:
                         continue
                     phase = str(existing.get("phase") or "")
-                    if phase in {
-                        "accepted",
-                        "queued",
-                        "sending_message",
-                        "message_sent",
-                        "upload_queued",
-                        "qt_queued",
-                        "qt_displaying",
-                        "upload_waiting",
-                        "uploading",
-                    }:
-                        raise PortalError("该通告已有进行中的发送/上传任务，请等待完成后再操作。")
+                    if phase not in blocking_phase_order:
+                        continue
+                    rank = int(blocking_phase_order.get(phase) or 0)
+                    epoch = self._job_epoch(existing) or 0.0
+                    if rank > blocking_rank or (rank == blocking_rank and epoch >= blocking_epoch):
+                        blocking_job_id = str(existing.get("job_id") or "").strip()
+                        blocking_phase = phase
+                        blocking_rank = rank
+                        blocking_epoch = epoch
+                if blocking_job_id:
+                    job["depends_on_job_id"] = blocking_job_id
+                    job["depends_on_phase"] = blocking_phase
             self._jobs[job["job_id"]] = job
             self._persist_action_job_locked(job)
             self._trim_jobs_locked()
@@ -4913,6 +4936,8 @@ class MaintenancePortalService:
             "request": self._compact_job_request(job.get("request") or {}),
             "operation_id": str(job.get("operation_id") or ""),
             "target_key": str(job.get("target_key") or ""),
+            "depends_on_job_id": str(job.get("depends_on_job_id") or ""),
+            "depends_on_phase": "",
             "message_sent": bool(job.get("message_sent")),
             "message_signature": str(job.get("message_signature") or ""),
             "message_queue_position": 0,
@@ -4955,6 +4980,8 @@ class MaintenancePortalService:
             "request": self._compact_job_request(job.get("request") or {}),
             "operation_id": str(job.get("operation_id") or ""),
             "target_key": str(job.get("target_key") or ""),
+            "depends_on_job_id": str(job.get("depends_on_job_id") or ""),
+            "depends_on_phase": str(job.get("depends_on_phase") or ""),
             "message_sent": bool(job.get("message_sent")),
             "message_signature": str(job.get("message_signature") or ""),
             "message_queue_position": 0,

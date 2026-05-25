@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import copy
 import hashlib
 import html
@@ -28,11 +29,21 @@ from .portal_service import (
     external_real_write_guard,
 )
 from .state_store import LanPortalStateStore
+from upload_event_module.services.handlers import NoticePayload
+from upload_event_module.services.service_registry import (
+    create_bitable_record_by_payload,
+    query_record_by_id,
+    upload_media_to_feishu,
+    update_bitable_record_fields,
+    update_bitable_record_by_payload,
+)
+from upload_event_module.services.feishu_service import delete_bitable_record
 from upload_event_module.services.robot_webhook import send_text_to_open_ids
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 FRONTEND_DIST_DIR = Path(__file__).resolve().parent / "frontend" / "dist"
+FRONTEND_READY_MARKER = FRONTEND_DIST_DIR / "clipflow-frontend-ready.json"
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 18766
 CLIENT_DISCONNECT_WINERRORS = {10053, 10054, 10058}
@@ -40,9 +51,29 @@ MAX_JSON_BODY_BYTES = 512 * 1024
 
 
 def portal_frontend_dist_enabled() -> bool:
+    if os.environ.get("CLIPFLOW_FRONTEND_LEGACY") == "1":
+        return False
+    return portal_frontend_dist_ready()
+
+
+def portal_frontend_dist_ready() -> bool:
+    """Return true only when the Vue dist has been marked production-ready.
+
+    The repository may contain a migration/preview Vue build. Serving that build
+    to site users is worse than falling back to the legacy page, so the runtime
+    requires an explicit marker file produced by the release process.
+    """
+    if not (FRONTEND_DIST_DIR / "index.html").is_file():
+        return False
+    try:
+        payload = json.loads(FRONTEND_READY_MARKER.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if not isinstance(payload, dict):
+        return False
     return (
-        os.environ.get("CLIPFLOW_FRONTEND_LEGACY") != "1"
-        and (FRONTEND_DIST_DIR / "index.html").is_file()
+        payload.get("productionReady") is True
+        and str(payload.get("app") or "").strip() == "clipflow-lan-portal"
     )
 
 
@@ -123,6 +154,9 @@ class PortalHandler(BaseHTTPRequestHandler):
     message_worker_threads: list[threading.Thread] = []
     message_worker_stop = False
     message_worker_count = 5
+    message_batch_wait_seconds = 1.2
+    message_batch_max_jobs = 20
+    message_scope_inflight: set[str] = set()
     payload_cache_lock = threading.RLock()
     payload_cache: dict[tuple, tuple[float, dict]] = {}
     payload_cache_inflight: dict[tuple, threading.Event] = {}
@@ -172,10 +206,14 @@ class PortalHandler(BaseHTTPRequestHandler):
     def runtime_limits(cls) -> dict:
         return {
             "message_worker_count": int(cls.message_worker_count or 0),
+            "message_batch_wait_seconds": float(
+                getattr(cls, "message_batch_wait_seconds", 1.2)
+            ),
+            "message_batch_max_jobs": int(getattr(cls, "message_batch_max_jobs", 20)),
             "qt_items_per_tick": 1,
             "qt_tick_interval_ms": int(getattr(cls, "qt_action_interval_ms", 250) or 250),
             "upload_seconds_per_record": float(getattr(cls, "upload_seconds_per_record", 2.0)),
-            "upload_batch_wait_seconds": float(getattr(cls, "upload_batch_wait_seconds", 5.0)),
+            "upload_batch_wait_seconds": float(getattr(cls, "upload_batch_wait_seconds", 30.0)),
             "upload_batch_max_records": int(getattr(cls, "upload_batch_max_records", 5)),
             "source_refresh_minutes": 30,
             "frontend_snapshot_refresh_minutes": 10,
@@ -200,6 +238,18 @@ class PortalHandler(BaseHTTPRequestHandler):
             1,
             5,
         )
+        cls.message_batch_wait_seconds = cls._bounded_float(
+            settings.get("lan_message_batch_wait_seconds"),
+            1.2,
+            0.0,
+            5.0,
+        )
+        cls.message_batch_max_jobs = cls._bounded_int(
+            settings.get("lan_message_batch_max_jobs"),
+            20,
+            1,
+            100,
+        )
         cls.upload_seconds_per_record = cls._bounded_float(
             settings.get("lan_upload_seconds_per_record"),
             5.0 if low_performance else 2.0,
@@ -208,15 +258,15 @@ class PortalHandler(BaseHTTPRequestHandler):
         )
         cls.upload_batch_wait_seconds = cls._bounded_float(
             settings.get("lan_upload_batch_wait_seconds"),
-            8.0 if low_performance else 5.0,
+            30.0,
             1.0,
             30.0,
         )
         cls.upload_batch_max_records = cls._bounded_int(
             settings.get("lan_upload_batch_max_records"),
-            3 if low_performance else 5,
+            100,
             1,
-            10,
+            100,
         )
         cls.qt_action_interval_ms = cls._bounded_int(
             settings.get("lan_qt_action_interval_ms"),
@@ -1605,20 +1655,47 @@ class PortalHandler(BaseHTTPRequestHandler):
                         )
                     )
                 if refreshed:
+                    try:
+                        service_warnings = (
+                            cls.service._current_load_warnings()
+                            if hasattr(cls.service, "_current_load_warnings")
+                            else list(getattr(cls.service, "_load_warnings", []) or [])
+                        )
+                    except Exception:
+                        service_warnings = []
+                    for service_warning in service_warnings or []:
+                        service_warning = str(service_warning or "").strip()
+                        if service_warning and service_warning not in warnings:
+                            warnings.append(service_warning)
+                if refreshed:
                     cls.clear_payload_cache()
             except Exception as exc:
                 warning = f"源表后台同步失败: {exc}"
                 warnings.append(warning)
-                if warning not in cls.service._load_warnings:
-                    cls.service._load_warnings.append(warning)
+                load_warnings = getattr(cls.service, "_load_warnings", None)
+                if isinstance(load_warnings, list) and warning not in load_warnings:
+                    load_warnings.append(warning)
+                try:
+                    meta = (
+                        cls.service._snapshot_meta()
+                        if hasattr(cls.service, "_snapshot_meta")
+                        else {"warnings": [warning]}
+                    )
+                    cls.state_store.record_failed_source_snapshot(
+                        meta=meta,
+                        error=warning,
+                    )
+                except Exception:
+                    pass
                 logging.warning(warning)
             try:
                 cls.service.process_due_repair_link_tasks(limit=3)
             except Exception as exc:
                 warning = f"检修源表关联补写失败: {exc}"
                 warnings.append(warning)
-                if warning not in cls.service._load_warnings:
-                    cls.service._load_warnings.append(warning)
+                load_warnings = getattr(cls.service, "_load_warnings", None)
+                if isinstance(load_warnings, list) and warning not in load_warnings:
+                    load_warnings.append(warning)
                 logging.warning(warning)
             result = {
                 "refreshed": refreshed,
@@ -1634,6 +1711,41 @@ class PortalHandler(BaseHTTPRequestHandler):
             with cls.source_refresh_lock:
                 cls.source_refresh_inflight = False
             cls.source_refresh_run_lock.release()
+
+    @classmethod
+    def source_snapshot_ready(cls, scope: str = "ALL") -> bool:
+        try:
+            return bool(cls.service._source_snapshot_exists(scope or "ALL"))
+        except Exception:
+            return False
+
+    @classmethod
+    def ensure_source_snapshot_refresh_started(cls) -> dict:
+        """Start one background source refresh when no SQLite source snapshot exists."""
+        if cls.source_snapshot_ready("ALL"):
+            return {"source_snapshot_ready": True, "source_refresh_started": False}
+        with cls.source_refresh_lock:
+            if cls.source_refresh_inflight:
+                return {
+                    "source_snapshot_ready": False,
+                    "source_refresh_started": False,
+                    "source_refresh_inflight": True,
+                }
+        try:
+            result = cls.request_source_refresh(force=True)
+        except Exception as exc:
+            warning = f"源表快照缺失，后台刷新启动失败: {exc}"
+            load_warnings = getattr(cls.service, "_load_warnings", None)
+            if isinstance(load_warnings, list) and warning not in load_warnings:
+                load_warnings.append(warning)
+            logging.warning(warning)
+            return {
+                "source_snapshot_ready": False,
+                "source_refresh_started": False,
+                "error": warning,
+            }
+        result["source_snapshot_ready"] = False
+        return result
 
     @classmethod
     def request_source_refresh(cls, *, force: bool = True) -> dict:
@@ -1682,14 +1794,19 @@ class PortalHandler(BaseHTTPRequestHandler):
 
     @classmethod
     def _source_refresh_loop(cls) -> None:
-        next_wait = 0.0
+        try:
+            next_wait = float(os.environ.get("CLIPFLOW_SOURCE_REFRESH_STARTUP_DELAY_SECONDS", "") or 8.0)
+        except Exception:
+            next_wait = 8.0
+        next_wait = max(0.0, min(next_wait, 120.0))
         while True:
             if cls.source_refresh_event.wait(timeout=next_wait):
                 cls.source_refresh_event.clear()
             with cls.source_refresh_lock:
                 if cls.source_refresh_stop:
                     return
-            cls.refresh_sources_once(force=True, defer_if_busy=True)
+            has_snapshot = cls.source_snapshot_ready("ALL")
+            cls.refresh_sources_once(force=True, defer_if_busy=has_snapshot)
             try:
                 ttl = int(cls.service._source_cache_ttl_seconds())
             except Exception:
@@ -1722,6 +1839,7 @@ class PortalHandler(BaseHTTPRequestHandler):
         with cls.message_queue_lock:
             cls.message_worker_stop = True
             cls.message_queue.clear()
+            cls.message_scope_inflight.clear()
             cls.message_queue_event.set()
             workers = list(cls.message_worker_threads)
         for worker in workers:
@@ -1787,14 +1905,172 @@ class PortalHandler(BaseHTTPRequestHandler):
             cls._process_initial_message_job(job_id)
 
     @classmethod
+    def _message_job_scope(cls, job_id: str) -> str:
+        job = cls.service.get_job(job_id) or {}
+        request = job.get("request") if isinstance(job.get("request"), dict) else {}
+        return str((request or {}).get("scope") or "").strip().upper()
+
+    @classmethod
+    def _collect_message_batch_job_ids(cls, primary_job_id: str) -> list[str]:
+        primary_job_id = str(primary_job_id or "").strip()
+        if not primary_job_id:
+            return []
+        primary_job = cls.service.get_job(primary_job_id) or {}
+        request = primary_job.get("request") if isinstance(primary_job.get("request"), dict) else {}
+        if str((request or {}).get("work_type") or "").strip() != "maintenance":
+            return [primary_job_id]
+        scope = str((request or {}).get("scope") or "").strip().upper()
+        if not scope:
+            return [primary_job_id]
+        wait_seconds = float(getattr(cls, "message_batch_wait_seconds", 0.0) or 0.0)
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
+        batch = [primary_job_id]
+        max_jobs = max(1, int(getattr(cls, "message_batch_max_jobs", 20) or 20))
+        with cls.message_queue_lock:
+            if not cls.message_queue:
+                return batch
+            remaining: list[str] = []
+            for queued_job_id in cls.message_queue:
+                queued_job_id = str(queued_job_id or "").strip()
+                if not queued_job_id:
+                    continue
+                if len(batch) < max_jobs and cls._message_job_scope(queued_job_id) == scope:
+                    batch.append(queued_job_id)
+                    try:
+                        cls.state_store.mark_runtime_queue_item(
+                            "message",
+                            queued_job_id,
+                            "processing",
+                        )
+                    except Exception:
+                        pass
+                    continue
+                remaining.append(queued_job_id)
+            cls.message_queue = remaining
+            cls._update_message_queue_positions_locked()
+            if not cls.message_queue:
+                cls.message_queue_event.clear()
+        return batch
+
+    @classmethod
+    def _release_message_scope(cls, job_id: str) -> None:
+        scope = cls._message_job_scope(job_id)
+        if not scope:
+            return
+        with cls.message_queue_lock:
+            cls.message_scope_inflight.discard(scope)
+            if cls.message_queue:
+                cls.message_queue_event.set()
+
+    @classmethod
+    def _process_message_batch(cls, batched_prepared: list[tuple[str, dict]]) -> None:
+        if not batched_prepared:
+            return
+        if len(batched_prepared) == 1:
+            job_id, prepared = batched_prepared[0]
+            ok, message = cls.service.send_action_personal_message(prepared)
+            if not ok:
+                cls.service.mark_job(
+                    job_id,
+                    phase="failed",
+                    error=message,
+                    message_sent=False,
+                )
+                try:
+                    cls.state_store.mark_runtime_queue_item(
+                        "message",
+                        job_id,
+                        "failed",
+                        error=message,
+                    )
+                except Exception:
+                    pass
+                return
+            cls.service.mark_job(
+                job_id,
+                phase="message_sent",
+                message_sent=True,
+                message_signature=str(prepared.get("message_signature") or ""),
+                message_queue_position=0,
+                queue_position=0,
+            )
+            try:
+                cls.state_store.mark_runtime_queue_item("message", job_id, "done")
+            except Exception:
+                pass
+            cls.enqueue_action_job(job_id)
+            return
+        recipients = [
+            str(open_id or "").strip()
+            for open_id in (batched_prepared[0][1].get("recipients") or [])
+            if str(open_id or "").strip()
+        ]
+        combined_text = "\n\n".join(
+            str((prepared or {}).get("text") or "").strip()
+            for _job_id, prepared in batched_prepared
+            if str((prepared or {}).get("text") or "").strip()
+        )
+        ok, message, results = _send_text_to_open_ids_guarded(combined_text, recipients)
+        for job_id, prepared in batched_prepared:
+            if not ok:
+                cls.service.mark_job(
+                    job_id,
+                    phase="failed",
+                    error=message,
+                    message_sent=False,
+                )
+                try:
+                    cls.state_store.mark_runtime_queue_item(
+                        "message",
+                        job_id,
+                        "failed",
+                        error=message,
+                    )
+                except Exception:
+                    pass
+                continue
+            cls.service.mark_job(
+                job_id,
+                phase="message_sent",
+                message_sent=True,
+                message_signature=str(prepared.get("message_signature") or ""),
+                recipient_results=copy.deepcopy(results),
+                message_queue_position=0,
+                queue_position=0,
+            )
+            try:
+                cls.state_store.mark_runtime_queue_item("message", job_id, "done")
+            except Exception:
+                pass
+            cls.enqueue_action_job(job_id)
+
+    @classmethod
     def _dequeue_runtime_job(cls, queue_name: str) -> str:
         queue_name = str(queue_name or "").strip()
         if queue_name == "message":
             with cls.message_queue_lock:
                 if cls.message_queue:
-                    job_id = cls.message_queue.pop(0)
-                    cls._update_message_queue_positions_locked()
-                    return str(job_id or "").strip()
+                    selected_index = -1
+                    selected_scope = ""
+                    for index, queued_job_id in enumerate(cls.message_queue):
+                        queued_job_id = str(queued_job_id or "").strip()
+                        if not queued_job_id:
+                            continue
+                        scope = cls._message_job_scope(queued_job_id)
+                        if scope and scope in cls.message_scope_inflight:
+                            continue
+                        selected_index = index
+                        selected_scope = scope
+                        break
+                    if selected_index >= 0:
+                        job_id = cls.message_queue.pop(selected_index)
+                        if selected_scope:
+                            cls.message_scope_inflight.add(selected_scope)
+                        cls._update_message_queue_positions_locked()
+                        return str(job_id or "").strip()
+                    cls.message_queue_event.clear()
+                    return ""
                 cls.message_queue_event.clear()
         elif queue_name == "qt_action":
             with cls.action_queue_lock:
@@ -1852,72 +2128,78 @@ class PortalHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass
             return False
+        depends_on_job_id = str((job or {}).get("depends_on_job_id") or "").strip()
+        if depends_on_job_id and depends_on_job_id != job_id:
+            try:
+                depends_on_job = cls.service.get_job(depends_on_job_id) or {}
+            except Exception:
+                depends_on_job = {}
+            depends_on_phase = str((depends_on_job or {}).get("phase") or "").strip()
+            if depends_on_job and depends_on_phase not in {"success", "failed"}:
+                cls.service.mark_job(
+                    job_id,
+                    depends_on_phase=depends_on_phase,
+                    _persist=False,
+                )
+                try:
+                    cls.state_store.requeue_runtime_queue_item(
+                        queue_name,
+                        job_id,
+                        available_at=time.time() + 1.5,
+                        error=(
+                            f"waiting_for:{depends_on_job_id}:{depends_on_phase}"
+                        ),
+                    )
+                except Exception:
+                    pass
+                return False
+            if str((job or {}).get("depends_on_phase") or "").strip():
+                cls.service.mark_job(job_id, depends_on_phase="", _persist=False)
         return True
 
     @classmethod
     def _process_initial_message_job(cls, job_id: str) -> None:
         try:
-            prepared = cls.service.prepare_action_job(job_id)
-            if prepared.get("skip_personal_message"):
-                try:
-                    cls.state_store.mark_runtime_queue_item("message", job_id, "done")
-                except Exception:
-                    pass
-                cls.enqueue_action_job(job_id)
-                return
-            message_signature = str(prepared.get("message_signature") or "")
-            if prepared.get("message_sent"):
+            job_ids = cls._collect_message_batch_job_ids(job_id)
+            batched_prepared: list[tuple[str, dict]] = []
+            for current_job_id in job_ids:
+                prepared = cls.service.prepare_action_job(current_job_id)
+                if prepared.get("skip_personal_message"):
+                    try:
+                        cls.state_store.mark_runtime_queue_item(
+                            "message", current_job_id, "done"
+                        )
+                    except Exception:
+                        pass
+                    cls.enqueue_action_job(current_job_id)
+                    continue
+                message_signature = str(prepared.get("message_signature") or "")
+                if prepared.get("message_sent"):
+                    cls.service.mark_job(
+                        current_job_id,
+                        phase="message_sent",
+                        message_sent=True,
+                        message_signature=message_signature,
+                        message_queue_position=0,
+                        queue_position=0,
+                    )
+                    try:
+                        cls.state_store.mark_runtime_queue_item(
+                            "message", current_job_id, "done"
+                        )
+                    except Exception:
+                        pass
+                    cls.enqueue_action_job(current_job_id)
+                    continue
                 cls.service.mark_job(
-                    job_id,
-                    phase="message_sent",
-                    message_sent=True,
-                    message_signature=message_signature,
+                    current_job_id,
+                    phase="sending_message",
                     message_queue_position=0,
                     queue_position=0,
                 )
-                try:
-                    cls.state_store.mark_runtime_queue_item("message", job_id, "done")
-                except Exception:
-                    pass
-                cls.enqueue_action_job(job_id)
-                return
-            cls.service.mark_job(
-                job_id,
-                phase="sending_message",
-                message_queue_position=0,
-                queue_position=0,
-            )
-            ok, message = cls.service.send_action_personal_message(prepared)
-            if not ok:
-                cls.service.mark_job(
-                    job_id,
-                    phase="failed",
-                    error=message,
-                    message_sent=False,
-                )
-                try:
-                    cls.state_store.mark_runtime_queue_item(
-                        "message",
-                        job_id,
-                        "failed",
-                        error=message,
-                    )
-                except Exception:
-                    pass
-                return
-            cls.service.mark_job(
-                job_id,
-                phase="message_sent",
-                message_sent=True,
-                message_signature=message_signature,
-                message_queue_position=0,
-                queue_position=0,
-            )
-            try:
-                cls.state_store.mark_runtime_queue_item("message", job_id, "done")
-            except Exception:
-                pass
-            cls.enqueue_action_job(job_id)
+                batched_prepared.append((current_job_id, prepared))
+            if batched_prepared:
+                cls._process_message_batch(batched_prepared)
         except Exception as exc:
             cls.service.mark_job(job_id, phase="failed", error=str(exc))
             try:
@@ -1929,6 +2211,8 @@ class PortalHandler(BaseHTTPRequestHandler):
                 )
             except Exception:
                 pass
+        finally:
+            cls._release_message_scope(job_id)
 
     @classmethod
     def ensure_action_worker(cls) -> None:
@@ -2115,6 +2399,348 @@ class PortalHandler(BaseHTTPRequestHandler):
                 if not cls.upload_wait_jobs:
                     cls.upload_wait_event.clear()
 
+    @staticmethod
+    def _existing_tokens_for_notice_type(notice_type: str, fields: dict) -> tuple[list[str], list[str], str]:
+        notice_type = str(notice_type or "").strip()
+        fields = fields if isinstance(fields, dict) else {}
+        existing_tokens: list[str] = []
+        existing_extra_tokens: list[str] = []
+        if notice_type == "事件通告":
+            for item in fields.get("进展更新截图", []) or []:
+                if "file_token" in item:
+                    existing_tokens.append(item["file_token"])
+            for item in fields.get("事件恢复截图", []) or []:
+                if "file_token" in item:
+                    existing_extra_tokens.append(item["file_token"])
+        elif notice_type == "维保通告":
+            for item in fields.get("过程通告图片", []) or []:
+                if "file_token" in item:
+                    existing_tokens.append(item["file_token"])
+            for item in fields.get("过程现场图片", []) or []:
+                if "file_token" in item:
+                    existing_extra_tokens.append(item["file_token"])
+        elif notice_type == "设备检修":
+            for item in fields.get("过程通告截图", []) or []:
+                if "file_token" in item:
+                    existing_tokens.append(item["file_token"])
+            for item in fields.get("过程现场图片", []) or []:
+                if "file_token" in item:
+                    existing_extra_tokens.append(item["file_token"])
+        elif notice_type in ("设备变更", "变更通告"):
+            for item in fields.get("过程更新钉钉截图", []) or []:
+                if "file_token" in item:
+                    existing_tokens.append(item["file_token"])
+        elif notice_type in ("上下电通告", "上电通告", "下电通告", "设备轮巡", "设备调整"):
+            for item in fields.get("过程通告截图", []) or []:
+                if "file_token" in item:
+                    existing_tokens.append(item["file_token"])
+        else:
+            for item in fields.get("截图", []) or []:
+                if "file_token" in item:
+                    existing_tokens.append(item["file_token"])
+        if notice_type in ("设备变更", "变更通告"):
+            existing_response_time = fields.get("过程更新时间", "")
+        else:
+            existing_response_time = fields.get("进展更新时间", "")
+        return existing_tokens, existing_extra_tokens, existing_response_time
+
+    @staticmethod
+    def _prepared_to_notice_payload(
+        prepared: dict,
+        *,
+        existing_file_tokens: list[str] | None = None,
+        existing_extra_file_tokens: list[str] | None = None,
+        existing_response_time: str | None = None,
+    ) -> NoticePayload:
+        prepared = prepared if isinstance(prepared, dict) else {}
+        return NoticePayload(
+            text=str(prepared.get("text") or ""),
+            level=str(prepared.get("level") or "").strip() or None,
+            buildings=[
+                str(item or "").strip()
+                for item in (prepared.get("buildings") or [])
+                if str(item or "").strip()
+            ]
+            or None,
+            specialty=str(prepared.get("specialty") or "").strip() or None,
+            event_source=str(prepared.get("event_source") or "").strip() or None,
+            response_time=str(prepared.get("response_time") or "").strip() or None,
+            occurrence_date=str(prepared.get("time_str") or "").strip() or None,
+            existing_file_tokens=list(existing_file_tokens or []) or None,
+            existing_extra_file_tokens=list(existing_extra_file_tokens or []) or None,
+            existing_response_time=existing_response_time or None,
+            transfer_to_overhaul=prepared.get("transfer_to_overhaul"),
+            recover=bool(prepared.get("recover_selected", False)),
+            robot_group_choice="auto",
+            maintenance_cycle=str(prepared.get("maintenance_cycle") or "").strip() or None,
+        )
+
+    @classmethod
+    def _execute_backend_prepared_upload(
+        cls, prepared: dict
+    ) -> tuple[bool, str, str]:
+        prepared = prepared if isinstance(prepared, dict) else {}
+        notice_type = str(prepared.get("notice_type") or "").strip()
+        action = str(prepared.get("action") or "").strip().lower()
+        if not notice_type or action not in {"start", "update", "end"}:
+            return False, "后端上传缺少必要字段。", ""
+        guard = external_real_write_guard()
+        if guard["mock_external"]:
+            job_id = str(prepared.get("job_id") or "").strip() or "mock"
+            record_id = (
+                str(prepared.get("target_record_id") or "").strip()
+                or f"mock_backend_{job_id[:12]}"
+            )
+            return True, record_id, record_id
+        if not guard["real_write_allowed"]:
+            return False, str(guard["reason"] or "真实外部写入未确认。"), ""
+
+        if action == "start":
+            payload = cls._prepared_to_notice_payload(prepared)
+            ok, result = create_bitable_record_by_payload(notice_type, payload)
+            record_id = str(result or "").strip() if ok else ""
+            return bool(ok), str(result or ""), record_id
+
+        record_id = str(
+            prepared.get("target_record_id")
+            or prepared.get("record_id")
+            or ""
+        ).strip()
+        if not record_id:
+            return False, "缺少目标多维 record_id。", ""
+        ok_query, query_result = query_record_by_id(record_id, notice_type)
+        if not ok_query:
+            return False, f"查询失败: {query_result}", record_id
+        fields = query_result.get("fields", {}) if isinstance(query_result, dict) else {}
+        existing_tokens, existing_extra_tokens, existing_response_time = (
+            cls._existing_tokens_for_notice_type(notice_type, fields)
+        )
+        payload = cls._prepared_to_notice_payload(
+            prepared,
+            existing_file_tokens=existing_tokens,
+            existing_extra_file_tokens=existing_extra_tokens,
+            existing_response_time=existing_response_time if action == "update" else "",
+        )
+        ok, result = update_bitable_record_by_payload(record_id, notice_type, payload)
+        return bool(ok), str(result or ""), record_id
+
+    @classmethod
+    def _prepared_to_qt_ui_payload(
+        cls, prepared: dict, *, remote_record_id: str = ""
+    ) -> dict:
+        prepared = dict(prepared or {})
+        source_record_id = str(prepared.get("record_id") or "").strip()
+        target_record_id = (
+            str(remote_record_id or "").strip()
+            or str(prepared.get("target_record_id") or "").strip()
+            or source_record_id
+        )
+        prepared["ui_only"] = True
+        prepared["source_record_id"] = source_record_id
+        prepared["record_id"] = target_record_id
+        prepared["target_record_id"] = target_record_id
+        return prepared
+
+    @staticmethod
+    def _decode_local_notice_bytes(encoded: str) -> bytes:
+        text = str(encoded or "").strip()
+        if not text:
+            return b""
+        return base64.b64decode(text.encode("utf-8"))
+
+    @classmethod
+    def execute_local_notice_upload(cls, request_payload: dict) -> dict:
+        payload = dict(request_payload or {})
+        data = payload.get("data_dict")
+        data = dict(data) if isinstance(data, dict) else {}
+        if not data:
+            raise PortalError("Qt 上传请求缺少 data_dict。")
+        action_type = str(payload.get("action_type") or "").strip().lower()
+        if action_type not in {"upload", "update", "end", "upload_replace"}:
+            raise PortalError("Qt 上传请求 action_type 不支持。")
+        notice_type = str(data.get("notice_type") or "").strip()
+        if not notice_type:
+            raise PortalError("Qt 上传请求缺少 notice_type。")
+        record_id = str(data.get("record_id") or "").strip()
+        if not record_id:
+            raise PortalError("Qt 上传请求缺少 record_id。")
+
+        screenshot_bytes = b""
+        screenshot_b64 = str(payload.get("screenshot_bytes_b64") or "").strip()
+        if screenshot_b64:
+            screenshot_bytes = cls._decode_local_notice_bytes(screenshot_b64)
+        extra_images = payload.get("extra_images") if isinstance(payload.get("extra_images"), list) else []
+        extra_file_tokens: list[str] = []
+        file_tokens: list[str] = []
+
+        if screenshot_bytes:
+            success, result = upload_media_to_feishu(screenshot_bytes)
+            if not success:
+                return {
+                    "ok": False,
+                    "name": "截图上传",
+                    "message": str(result or ""),
+                    "record_id": record_id,
+                    "real_record_id": "",
+                }
+            file_tokens.append(str(result or "").strip())
+        for index, entry in enumerate(extra_images, start=1):
+            entry = entry if isinstance(entry, dict) else {}
+            image_b64 = str(entry.get("bytes_b64") or "").strip()
+            if not image_b64:
+                continue
+            file_name = str(entry.get("file_name") or f"extra_{index}.png").strip()
+            image_bytes = cls._decode_local_notice_bytes(image_b64)
+            success, result = upload_media_to_feishu(image_bytes, file_name=file_name)
+            if not success:
+                return {
+                    "ok": False,
+                    "name": "截图上传",
+                    "message": str(result or ""),
+                    "record_id": record_id,
+                    "real_record_id": "",
+                }
+            extra_file_tokens.append(str(result or "").strip())
+
+        notice_payload = cls._prepared_to_notice_payload(data)
+        notice_payload.file_tokens = file_tokens or None
+        notice_payload.extra_file_tokens = extra_file_tokens or None
+        notice_payload.response_time = str(payload.get("response_time") or "").strip() or None
+        notice_payload.recover = bool(payload.get("recover_selected", False))
+        notice_payload.robot_group_choice = (
+            str(payload.get("robot_group_choice") or "auto").strip() or "auto"
+        )
+        notice_payload.transfer_to_overhaul = data.get("transfer_to_overhaul")
+        notice_payload.occurrence_date = str(data.get("time_str") or "").strip() or None
+
+        if action_type == "upload":
+            success, result = create_bitable_record_by_payload(notice_type, notice_payload)
+            real_record_id = str(result or "").strip() if success else ""
+            return {
+                "ok": bool(success),
+                "name": "上传",
+                "message": str(result or ""),
+                "record_id": record_id,
+                "real_record_id": real_record_id,
+            }
+
+        existing_tokens: list[str] = []
+        existing_extra_tokens: list[str] = []
+        existing_response_time = ""
+        target_record_id = record_id
+        if not bool(data.get("_is_placeholder_record")):
+            ok_query, query_result = query_record_by_id(record_id, notice_type)
+            if not ok_query:
+                action_name = "结束" if action_type == "end" else "更新" if action_type == "update" else "归档"
+                return {
+                    "ok": False,
+                    "name": action_name,
+                    "message": f"查询失败: {query_result}",
+                    "record_id": record_id,
+                    "real_record_id": "",
+                }
+            fields = query_result.get("fields", {}) if isinstance(query_result, dict) else {}
+            (
+                existing_tokens,
+                existing_extra_tokens,
+                existing_response_time,
+            ) = cls._existing_tokens_for_notice_type(notice_type, fields)
+        notice_payload.existing_file_tokens = existing_tokens or None
+        notice_payload.existing_extra_file_tokens = existing_extra_tokens or None
+        notice_payload.existing_response_time = (
+            existing_response_time if action_type in {"update", "upload_replace"} else None
+        )
+
+        if action_type == "upload_replace" and bool(data.get("_is_placeholder_record")):
+            success, result = create_bitable_record_by_payload(notice_type, notice_payload)
+            real_record_id = str(result or "").strip() if success else ""
+            return {
+                "ok": bool(success),
+                "name": "归档",
+                "message": str(result or ""),
+                "record_id": record_id,
+                "real_record_id": real_record_id,
+            }
+
+        action_name = "结束" if action_type == "end" else "更新" if action_type == "update" else "归档"
+        success, result = update_bitable_record_by_payload(
+            target_record_id,
+            notice_type,
+            notice_payload,
+        )
+        return {
+            "ok": bool(success),
+            "name": action_name,
+            "message": str(result or ""),
+            "record_id": record_id,
+            "real_record_id": target_record_id if success else "",
+        }
+
+    @classmethod
+    def execute_local_delete_active_item(cls, payload: dict) -> dict:
+        payload = dict(payload or {})
+        nested = payload.get("data_dict")
+        if isinstance(nested, dict):
+            payload = dict(nested)
+        elif isinstance(payload.get("data"), dict):
+            payload = dict(payload.get("data") or {})
+        record_id = str(payload.get("record_id") or "").strip()
+        if not record_id:
+            record_id = str(
+                payload.get("target_record_id") or payload.get("raw_record_id") or ""
+            ).strip()
+        active_item_id = str(payload.get("active_item_id") or "").strip()
+        notice_type = str(payload.get("notice_type") or "").strip()
+        is_placeholder = bool(payload.get("_is_placeholder_record"))
+        remote_deleted = False
+        if record_id and notice_type and not is_placeholder:
+            ok, result = delete_bitable_record(record_id, notice_type)
+            if not ok:
+                return {
+                    "ok": False,
+                    "message": str(result or "多维记录删除失败。"),
+                    "record_id": record_id,
+                }
+            remote_deleted = True
+        try:
+            cls.state_store.delete_qt_active_item(
+                active_item_id=active_item_id,
+                record_id=record_id,
+            )
+        except Exception:
+            pass
+        return {
+            "ok": True,
+            "message": "",
+            "record_id": record_id,
+            "active_item_id": active_item_id,
+            "remote_deleted": remote_deleted,
+        }
+
+    @classmethod
+    def execute_local_today_progress_update(cls, payload: dict) -> dict:
+        payload = dict(payload or {})
+        record_id = str(payload.get("record_id") or "").strip()
+        notice_type = str(payload.get("notice_type") or "").strip()
+        field_name = str(payload.get("field_name") or "").strip()
+        field_value = payload.get("field_value")
+        if not record_id or not notice_type or not field_name:
+            return {
+                "ok": False,
+                "message": "缺少今日是否进行所需参数。",
+                "record_id": record_id,
+            }
+        ok, result = update_bitable_record_fields(
+            record_id,
+            notice_type,
+            {field_name: field_value},
+        )
+        return {
+            "ok": bool(ok),
+            "message": str(result or ""),
+            "record_id": record_id,
+        }
+
     @classmethod
     def _process_maintenance_action_job(cls, job_id: str) -> None:
         try:
@@ -2152,74 +2778,68 @@ class PortalHandler(BaseHTTPRequestHandler):
             if not prepared.get("skip_personal_message"):
                 cls.service.mark_job(
                     job_id,
-                    phase="qt_queued",
-                    qt_phase="queued",
+                    phase="upload_waiting",
+                    qt_phase="backend_upload",
                     message_sent=True,
                     message_signature=str(prepared.get("message_signature") or ""),
                 )
-            callback = cls.maintenance_action_callback
-            if callback is None:
-                try:
-                    event_id = cls.state_store.enqueue_outbox_event(
-                        "qt_action",
-                        {
-                            "kind": "maintenance_action",
-                            "job_id": job_id,
-                            "payload": prepared,
-                        },
-                    )
-                    cls.service.mark_job(
-                        job_id,
-                        phase="qt_queued",
-                        qt_phase="outbox",
-                        qt_queue_position=0,
-                        qt_queue_size=0,
-                        qt_event_id=event_id,
-                    )
-                    try:
-                        cls.state_store.mark_runtime_queue_item("qt_action", job_id, "done")
-                    except Exception:
-                        pass
-                except Exception as exc:
-                    cls.service.mark_job(
-                        job_id,
-                        phase="failed",
-                        error=f"主窗口事件投递失败: {exc}",
-                    )
-                    try:
-                        cls.state_store.mark_runtime_queue_item(
-                            "qt_action",
-                            job_id,
-                            "failed",
-                            error=f"主窗口事件投递失败: {exc}",
-                        )
-                    except Exception:
-                        pass
-                return
-            accepted = callback(prepared)
-            if isinstance(accepted, dict):
-                ok = bool(accepted.get("ok"))
-                error = str(accepted.get("error") or "").strip()
-            else:
-                ok = bool(accepted)
-                error = ""
+            cls.service.mark_job(
+                job_id,
+                phase="uploading",
+                qt_phase="backend_upload",
+                qt_queue_position=0,
+                qt_queue_size=0,
+                upload_queue_position=0,
+                upload_queue_size=0,
+            )
+            ok, result_message, remote_record_id = cls._execute_backend_prepared_upload(prepared)
             if not ok:
-                cls.service.mark_job(
+                cls.service.mark_action_upload_result(
                     job_id,
-                    phase="failed",
-                    error=error or "主窗口拒绝执行本次上传。",
-                    message_sent=True,
+                    success=False,
+                    message=result_message,
+                    record_id=str(remote_record_id or prepared.get("target_record_id") or prepared.get("record_id") or ""),
+                    active_item_id=str(prepared.get("active_item_id") or ""),
                 )
                 try:
                     cls.state_store.mark_runtime_queue_item(
                         "qt_action",
                         job_id,
                         "failed",
-                        error=error or "主窗口拒绝执行本次上传。",
+                        error=result_message,
                     )
                 except Exception:
                     pass
                 return
+            cls.service.mark_action_upload_result(
+                job_id,
+                success=True,
+                message=result_message,
+                record_id=str(remote_record_id or ""),
+                active_item_id=str(prepared.get("active_item_id") or ""),
+            )
+            event_payload = cls._prepared_to_qt_ui_payload(
+                prepared,
+                remote_record_id=remote_record_id,
+            )
+            try:
+                event_id = cls.state_store.enqueue_outbox_event(
+                    "qt_action",
+                    {
+                        "kind": "maintenance_action",
+                        "job_id": job_id,
+                        "payload": event_payload,
+                    },
+                )
+                cls.service.mark_job(
+                    job_id,
+                    qt_phase="outbox",
+                    qt_queue_position=0,
+                    qt_queue_size=0,
+                    qt_event_id=event_id,
+                )
+            except Exception as exc:
+                log_warning(f"Qt UI 事件投递失败: job_id={job_id}, error={exc}")
             try:
                 cls.state_store.mark_runtime_queue_item("qt_action", job_id, "done")
             except Exception:
@@ -2302,6 +2922,7 @@ class PortalServerController:
             PortalHandler.upload_wait_event.clear()
         with PortalHandler.message_queue_lock:
             PortalHandler.message_queue.clear()
+            PortalHandler.message_scope_inflight.clear()
             PortalHandler.message_worker_stop = False
             PortalHandler.message_queue_event.clear()
         self.server = ThreadingHTTPServer((self.host, bound_port), PortalHandler)

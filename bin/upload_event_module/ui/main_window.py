@@ -239,7 +239,7 @@ class ClipboardTool(
             "screenshot_dialog",
             self.screenshot_dialog,
             "upload_confirmed",
-            self.do_feishu_upload,
+            self.on_screenshot_upload_confirmed,
         )
         self.connection_registry.connect(
             "screenshot_dialog",

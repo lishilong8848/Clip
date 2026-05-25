@@ -570,7 +570,7 @@ class ClipboardItemWidget(QWidget):
         self.delete_btn.setFixedSize(50, 50)
 
         self.delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.delete_btn.setToolTip("移入历史，不删除多维记录")
+        self.delete_btn.setToolTip("删除通告，并删除对应多维记录")
 
         self.delete_btn.setStyleSheet("""
 
@@ -999,8 +999,8 @@ class ClipboardItemWidget(QWidget):
             return
         if not self._delete_confirm_pending:
             self._delete_confirm_pending = True
-            self.delete_btn.setText("确认移")
-            self.delete_btn.setToolTip("再次点击确认移入历史")
+            self.delete_btn.setText("确认删")
+            self.delete_btn.setToolTip("再次点击确认删除通告和多维记录")
             self._auto_collapse_timer.start(3000)
             return
 
@@ -1080,8 +1080,8 @@ class ClipboardItemWidget(QWidget):
                 return
         except Exception:
             return
-        btn.setText("移")
-        btn.setToolTip("移入历史，不删除多维记录")
+        btn.setText("删")
+        btn.setToolTip("删除通告，并删除对应多维记录")
 
     def _reset_swipe_visual(self):
         if self._slide_anim:
@@ -1531,25 +1531,4 @@ class ClipboardItemWidget(QWidget):
             obj.trigger_flash(count + 1)
 
         QTimer.singleShot(200, _next)
-
-
-
-
-class HistoryItemWidget(QWidget):
-    def __init__(self, data_dict, parent=None):
-        super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(15, 8, 15, 8)
-        layout.setSpacing(2)
-        snapshot = build_notice_display_snapshot(data_dict)
-        title = snapshot.get("title") or ""
-        if len(title) > 30:
-            title = title[:30] + "..."
-        self.title_label = QLabel(title)
-        self.title_label.setObjectName("HistoryTitle")
-        self.subtitle_label = QLabel(snapshot.get("subtitle") or "")
-        self.subtitle_label.setObjectName("ItemSubtitle")
-        layout.addWidget(self.title_label)
-        layout.addWidget(self.subtitle_label)
-
 

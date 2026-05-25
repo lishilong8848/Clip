@@ -252,15 +252,15 @@ class EventRelayServer:
                 raise HTTPException(status_code=403, detail="proxy_dingtalk disabled")
             if not _is_allowed_dingtalk_url(payload.url):
                 raise HTTPException(status_code=400, detail="invalid dingtalk url")
-            import requests
+            import httpx
 
             try:
-                resp = requests.post(
-                    payload.url,
-                    json=payload.data,
-                    headers={"Content-Type": "application/json"},
-                    timeout=10,
-                )
+                async with httpx.AsyncClient(timeout=10) as client:
+                    resp = await client.post(
+                        payload.url,
+                        json=payload.data,
+                        headers={"Content-Type": "application/json"},
+                    )
                 try:
                     return resp.json()
                 except Exception:

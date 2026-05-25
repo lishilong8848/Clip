@@ -61,6 +61,7 @@ class BackendProcessPortalController:
         self.ongoing_callback = None
         self.ongoing_delete_callback = None
         self.maintenance_action_callback = None
+        self.shell_event_callback = None
         self._last_snapshot_hash = ""
         self._last_bridge_heartbeat = 0.0
         self._slow_event_count = 0
@@ -133,6 +134,27 @@ class BackendProcessPortalController:
         except Exception:
             return False
 
+    def _shutdown_existing_backend(self) -> bool:
+        try:
+            self._request_json("POST", "/api/backend/shutdown", timeout=2.0)
+        except Exception as exc:
+            log_warning(f"关闭旧后端失败，将尝试继续复用: {exc}")
+            return False
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline:
+            if not self._health_ok():
+                return True
+            time.sleep(0.25)
+        log_warning("旧后端关闭超时，将尝试继续复用。")
+        return False
+
+    def get_qt_shell_bootstrap(self) -> dict[str, Any]:
+        result = self._request_json("GET", "/api/qt/shell/bootstrap", timeout=10.0)
+        if not bool(result.get("ok")):
+            raise RuntimeError(str(result.get("error") or "读取 Qt 壳 bootstrap 失败。"))
+        data = result.get("data")
+        return data if isinstance(data, dict) else {}
+
     def _wait_for_health(self, timeout_s: float = 30.0) -> bool:
         deadline = time.monotonic() + max(1.0, float(timeout_s or 0))
         while time.monotonic() < deadline:
@@ -185,6 +207,20 @@ class BackendProcessPortalController:
         return Path(sys.executable)
 
     def start(self) -> str:
+        if self._health_ok():
+            if os.environ.get("CLIPFLOW_REUSE_EXISTING_BACKEND") != "1":
+                if self._shutdown_existing_backend():
+                    time.sleep(0.2)
+                else:
+                    self._owns_process = False
+                    self._stop_event.clear()
+                    self._ensure_bridge_threads()
+                    return self.get_url()
+            else:
+                self._owns_process = False
+                self._stop_event.clear()
+                self._ensure_bridge_threads()
+                return self.get_url()
         if self._health_ok():
             self._owns_process = False
             self._stop_event.clear()
@@ -272,6 +308,7 @@ class BackendProcessPortalController:
                 self.maintenance_action_callback is None
                 and self.ongoing_delete_callback is None
                 and self.notice_callback is None
+                and self.shell_event_callback is None
             ):
                 delay = 1.0
                 continue
@@ -385,6 +422,22 @@ class BackendProcessPortalController:
                 accepted = callback(callback_payload)
                 ok = bool(accepted.get("ok")) if isinstance(accepted, dict) else bool(accepted)
                 error = str(accepted.get("error") or "") if isinstance(accepted, dict) else ""
+            elif kind in {
+                "clipboard_candidate",
+                "dialog_request",
+                "active_upsert",
+                "active_delete",
+                "history_append",
+                "status_banner",
+                "clipboard_status",
+            }:
+                callback_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+                callback = self.shell_event_callback
+                if callback is None:
+                    raise RuntimeError(f"Qt shell 事件回调未连接: {kind}")
+                accepted = callback(kind, callback_payload)
+                ok = bool(accepted.get("ok")) if isinstance(accepted, dict) else bool(accepted)
+                error = str(accepted.get("error") or "") if isinstance(accepted, dict) else ""
             else:
                 ok = True
         except Exception as exc:
@@ -450,6 +503,7 @@ class BackendProcessPortalController:
                     "ongoing_callback": self.ongoing_callback is not None,
                     "ongoing_delete_callback": self.ongoing_delete_callback is not None,
                     "maintenance_action_callback": self.maintenance_action_callback is not None,
+                    "shell_event_callback": self.shell_event_callback is not None,
                     "event_thread_alive": bool(
                         self._event_thread and self._event_thread.is_alive()
                     ),
@@ -550,6 +604,10 @@ class BackendProcessPortalController:
         self.maintenance_action_callback = callback
         self._ensure_bridge_threads()
 
+    def set_shell_event_callback(self, callback) -> None:
+        self.shell_event_callback = callback
+        self._ensure_bridge_threads()
+
     def mark_job_upload_result(self, job_id: str, **kwargs) -> None:
         job_id = str(job_id or "").strip()
         if not job_id:
@@ -593,6 +651,125 @@ class BackendProcessPortalController:
         except Exception:
             return None
         return None
+
+    def execute_qt_notice_upload(self, payload: dict[str, Any]) -> dict:
+        payload = dict(payload or {})
+        try:
+            result = self._request_json(
+                "POST",
+                "/api/qt/notice-upload",
+                payload=payload,
+                timeout=120.0,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"本机后端执行 Qt 上传失败: {exc}") from exc
+        if not bool(result.get("ok")):
+            raise RuntimeError(str(result.get("error") or "本机后端执行 Qt 上传失败。"))
+        data = result.get("data")
+        return data if isinstance(data, dict) else {}
+
+    def submit_qt_command(self, command: str, payload: dict[str, Any] | None = None) -> dict:
+        request_payload = {
+            "command": str(command or "").strip(),
+            "payload": dict(payload or {}),
+        }
+        result = self._request_json(
+            "POST",
+            "/api/qt/commands",
+            payload=request_payload,
+            timeout=120.0,
+        )
+        if not bool(result.get("ok")):
+            raise RuntimeError(str(result.get("error") or "提交 Qt command 失败。"))
+        data = result.get("data")
+        return data if isinstance(data, dict) else {}
+
+    def submit_qt_dialog_result(self, session_id: str, *, status: str, result_payload: dict[str, Any] | None = None) -> dict:
+        request_payload = {
+            "session_id": str(session_id or "").strip(),
+            "status": str(status or "").strip(),
+            "result": dict(result_payload or {}),
+        }
+        result = self._request_json(
+            "POST",
+            "/api/qt/dialog-result",
+            payload=request_payload,
+            timeout=30.0,
+        )
+        if not bool(result.get("ok")):
+            raise RuntimeError(str(result.get("error") or "提交 dialog 结果失败。"))
+        data = result.get("data")
+        return data if isinstance(data, dict) else {}
+
+    def create_qt_dialog_session(self, payload: dict[str, Any] | None = None) -> dict:
+        result = self._request_json(
+            "POST",
+            "/api/qt/dialog-sessions",
+            payload=dict(payload or {}),
+            timeout=30.0,
+        )
+        if not bool(result.get("ok")):
+            raise RuntimeError(str(result.get("error") or "创建 dialog session 失败。"))
+        data = result.get("data")
+        return data if isinstance(data, dict) else {}
+
+    def post_local_clipboard_event(
+        self,
+        content: str,
+        *,
+        ts: int | None = None,
+        source: str = "clipboard",
+        target_record_id: str = "",
+    ) -> dict:
+        payload = {
+            "content": str(content or "").strip(),
+            "ts": int(ts or time.time() * 1000),
+            "source": str(source or "clipboard"),
+            "target_record_id": str(target_record_id or "").strip(),
+        }
+        result = self._request_json(
+            "POST",
+            "/api/qt/local/clipboard-event",
+            payload=payload,
+            timeout=10.0,
+        )
+        if not bool(result.get("ok")):
+            raise RuntimeError(str(result.get("error") or "提交剪贴板事件失败。"))
+        data = result.get("data")
+        return data if isinstance(data, dict) else {}
+
+    def post_local_heartbeat(self, payload: dict[str, Any] | None = None) -> dict:
+        result = self._request_json(
+            "POST",
+            "/api/qt/local/heartbeat",
+            payload=dict(payload or {}),
+            timeout=5.0,
+        )
+        if not bool(result.get("ok")):
+            raise RuntimeError(str(result.get("error") or "Qt 本机心跳失败。"))
+        data = result.get("data")
+        return data if isinstance(data, dict) else {}
+
+    def acknowledge_clipboard_candidate(
+        self,
+        candidate_id: str,
+        *,
+        ok: bool = True,
+        status: str = "",
+    ) -> dict:
+        candidate_id = str(candidate_id or "").strip()
+        if not candidate_id:
+            raise RuntimeError("缺少 clipboard candidate_id。")
+        result = self._request_json(
+            "POST",
+            f"/api/qt/clipboard-candidates/{urllib.parse.quote(candidate_id)}/ack",
+            payload={"ok": bool(ok), "status": str(status or "")},
+            timeout=10.0,
+        )
+        if not bool(result.get("ok")):
+            raise RuntimeError(str(result.get("error") or "确认 clipboard candidate 失败。"))
+        data = result.get("data")
+        return data if isinstance(data, dict) else {}
 
     def post_active_items_delta(
         self,

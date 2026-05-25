@@ -7,6 +7,7 @@ import ctypes
 import hashlib
 import sqlite3
 import traceback
+import urllib.request
 import win32gui
 import win32con
 import win32clipboard
@@ -18,6 +19,7 @@ class StableClipboardMonitor:
         self.hwnd = None
         self.output_path = output_path or os.environ.get("CLIPFLOW_CLIPBOARD_FILE", "")
         self.db_path = os.environ.get("CLIPFLOW_STATE_DB", "").strip()
+        self.backend_url = os.environ.get("CLIPFLOW_CLIPBOARD_BACKEND_URL", "").strip()
 
         wc = win32gui.WNDCLASS()
         wc.lpfnWndProc = self._wnd_proc
@@ -89,7 +91,24 @@ class StableClipboardMonitor:
 
     def _output_result(self, text):
         payload = {"content": text.strip(), "ts": int(time.time() * 1000)}
+        if self.backend_url and self._post_backend_event(payload):
+            return
         self._write_sqlite_event(payload)
+
+    def _post_backend_event(self, payload):
+        try:
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            request = urllib.request.Request(
+                self.backend_url,
+                data=body,
+                headers={"Content-Type": "application/json; charset=utf-8"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=3.0) as response:
+                response.read()
+            return True
+        except Exception:
+            return False
 
     def _write_sqlite_event(self, payload):
         try:

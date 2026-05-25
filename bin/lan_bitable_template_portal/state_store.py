@@ -20,6 +20,14 @@ except ModuleNotFoundError as exc:
         raise
     from ..upload_event_module.utils import get_data_file_path
 
+try:
+    from .migrations import run_schema_migrations, schema_health
+except ImportError:
+    from lan_bitable_template_portal.migrations import (
+        run_schema_migrations,
+        schema_health,
+    )
+
 
 DEFAULT_STATE_DB_NAME = "lan_portal_state.sqlite3"
 
@@ -31,7 +39,7 @@ class LanPortalStateStore:
     are migration inputs only and are never deleted or overwritten here.
     """
 
-    SCHEMA_VERSION = 10
+    SCHEMA_VERSION = 12
     SOURCE_SCOPE_TABLES = {
         "110": "source_records_110",
         "A": "source_records_a",
@@ -53,6 +61,28 @@ class LanPortalStateStore:
         "qt_notice_history": "qt_notice_history",
         "runtime_state": "runtime_state",
     }
+    REQUIRED_TABLES = [
+        "meta",
+        "settings",
+        "auth_permissions",
+        "permission_requests",
+        "handover_links",
+        "runtime_task_queue",
+        "qt_active_items",
+        "clipboard_candidates",
+        "dialog_sessions",
+        "repair_link_tasks",
+        "source_snapshot_manifest",
+        "source_snapshot_records",
+        "schema_migrations",
+    ]
+    REQUIRED_INDEXES = [
+        "idx_runtime_task_queue_status",
+        "idx_qt_active_items_record_id",
+        "idx_source_snapshot_manifest_status_time",
+        "idx_source_snapshot_records_scope_order",
+        "idx_permission_requests_open_status",
+    ]
 
     def __init__(self, db_path: str | Path | None = None):
         self.db_path = Path(db_path or get_data_file_path(DEFAULT_STATE_DB_NAME))
@@ -475,6 +505,43 @@ class LanPortalStateStore:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS clipboard_candidates (
+                candidate_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                content TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                source_event_id INTEGER,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_clipboard_candidates_status_updated
+            ON clipboard_candidates(status, updated_at)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dialog_sessions (
+                session_id TEXT PRIMARY KEY,
+                session_type TEXT NOT NULL,
+                status TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_dialog_sessions_status_updated
+            ON dialog_sessions(status, updated_at)
+            """
+        )
+        conn.execute(
+            """
             CREATE INDEX IF NOT EXISTS idx_qt_active_items_record_id
             ON qt_active_items(record_id)
             """
@@ -537,6 +604,56 @@ class LanPortalStateStore:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS source_snapshot_manifest (
+                snapshot_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                started_at REAL NOT NULL,
+                finished_at REAL,
+                warnings_json TEXT NOT NULL,
+                counts_json TEXT NOT NULL,
+                meta_json TEXT NOT NULL,
+                error TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_source_snapshot_manifest_status_time
+            ON source_snapshot_manifest(status, updated_at)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS source_snapshot_records (
+                snapshot_id TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                record_key TEXT NOT NULL,
+                record_kind TEXT NOT NULL,
+                work_type TEXT,
+                source_record_id TEXT,
+                payload_json TEXT NOT NULL,
+                sort_order INTEGER NOT NULL,
+                created_at REAL NOT NULL,
+                PRIMARY KEY(snapshot_id, scope, record_key)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_source_snapshot_records_scope_order
+            ON source_snapshot_records(snapshot_id, scope, record_kind, sort_order)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_source_snapshot_records_work_source
+            ON source_snapshot_records(snapshot_id, work_type, source_record_id)
+            """
+        )
         for table in self.SOURCE_SCOPE_TABLES.values():
             conn.execute(
                 f"""
@@ -587,6 +704,8 @@ class LanPortalStateStore:
             ON permission_requests(status, expires_at)
             """
         )
+        run_schema_migrations(conn, target_version=self.SCHEMA_VERSION)
+        self._migrate_legacy_source_snapshot_locked(conn)
         conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
             (str(self.SCHEMA_VERSION),),
@@ -607,6 +726,129 @@ class LanPortalStateStore:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
         except sqlite3.OperationalError:
             pass
+
+    def schema_health(self) -> dict[str, Any]:
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                return schema_health(
+                    conn,
+                    target_version=self.SCHEMA_VERSION,
+                    required_tables=list(self.REQUIRED_TABLES),
+                    required_indexes=list(self.REQUIRED_INDEXES),
+                )
+
+    def _migrate_legacy_source_snapshot_locked(self, conn: sqlite3.Connection) -> None:
+        try:
+            active_row = conn.execute(
+                "SELECT value FROM meta WHERE key = 'active_source_snapshot_id'"
+            ).fetchone()
+            if active_row and str(active_row["value"] or "").strip():
+                return
+            legacy_meta_rows = conn.execute(
+                "SELECT scope, payload_json, updated_at FROM source_scope_snapshots"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return
+        if not legacy_meta_rows:
+            return
+        snapshot_id = uuid.uuid4().hex
+        now = time.time()
+        started_at = min(
+            [float(row["updated_at"] or now) for row in legacy_meta_rows] or [now]
+        )
+        counts: dict[str, dict[str, int]] = {}
+        manifest_meta: dict[str, Any] = {}
+        inserted = 0
+        for meta_row in legacy_meta_rows:
+            scope = self._normalize_source_scope(str(meta_row["scope"] or ""))
+            table = self._source_scope_table(scope)
+            meta_payload = self._loads(str(meta_row["payload_json"] or ""), {})
+            if isinstance(meta_payload, dict) and not manifest_meta:
+                manifest_meta = dict(meta_payload)
+            rows = conn.execute(
+                f"""
+                SELECT record_key, record_kind, work_type, source_record_id,
+                       payload_json, sort_order
+                FROM {table}
+                ORDER BY sort_order ASC, record_key ASC
+                """
+            ).fetchall()
+            records_count = 0
+            zhihang_count = 0
+            for row in rows:
+                record_kind = str(row["record_kind"] or "")
+                if record_kind == "zhihang":
+                    zhihang_count += 1
+                else:
+                    records_count += 1
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO source_snapshot_records(
+                        snapshot_id,
+                        scope,
+                        record_key,
+                        record_kind,
+                        work_type,
+                        source_record_id,
+                        payload_json,
+                        sort_order,
+                        created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        snapshot_id,
+                        scope,
+                        str(row["record_key"] or ""),
+                        record_kind,
+                        str(row["work_type"] or ""),
+                        str(row["source_record_id"] or ""),
+                        str(row["payload_json"] or "{}"),
+                        int(row["sort_order"] or 0),
+                        now,
+                    ),
+                )
+                inserted += 1
+            counts[scope] = {
+                "records": records_count,
+                "zhihang_records": zhihang_count,
+            }
+        if not inserted:
+            return
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO source_snapshot_manifest(
+                snapshot_id,
+                status,
+                started_at,
+                finished_at,
+                warnings_json,
+                counts_json,
+                meta_json,
+                error,
+                created_at,
+                updated_at
+            ) VALUES (?, 'active', ?, ?, ?, ?, ?, '', ?, ?)
+            """,
+            (
+                snapshot_id,
+                started_at,
+                now,
+                self._json(manifest_meta.get("warnings") or []),
+                self._json(counts),
+                self._json(manifest_meta),
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES('active_source_snapshot_id', ?)",
+            (snapshot_id,),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES('active_source_snapshot_at', ?)",
+            (str(now),),
+        )
 
     @staticmethod
     def _text(value: Any) -> str:
@@ -1021,6 +1263,251 @@ class LanPortalStateStore:
             "updated_at": now,
         }
 
+    def _source_snapshot_record_key(self, kind: str, item: dict[str, Any]) -> str:
+        record_key_seed = [
+            self._text(kind),
+            self._text(item.get("work_type")),
+            self._text(item.get("record_id") or item.get("source_record_id")),
+            self._text(item.get("source_app_token")),
+            self._text(item.get("source_table_id")),
+        ]
+        return hashlib.sha1(self._stable_json(record_key_seed).encode("utf-8")).hexdigest()
+
+    def _write_legacy_source_scope_locked(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        scope: str,
+        records: list[dict[str, Any]],
+        zhihang_records: list[dict[str, Any]],
+        meta_payload: dict[str, Any],
+        now: float,
+    ) -> None:
+        table = self._source_scope_table(scope)
+        conn.execute(f"DELETE FROM {table}")
+        order_index = 0
+        for kind, items in (("workbench", records), ("zhihang", zhihang_records)):
+            for item in items:
+                record_id = self._text(item.get("record_id") or item.get("source_record_id"))
+                work_type = self._text(item.get("work_type"))
+                conn.execute(
+                    f"""
+                    INSERT OR REPLACE INTO {table}(
+                        record_key,
+                        record_kind,
+                        work_type,
+                        source_record_id,
+                        payload_json,
+                        sort_order,
+                        updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        self._source_snapshot_record_key(kind, item),
+                        kind,
+                        work_type,
+                        record_id,
+                        self._json(item),
+                        order_index,
+                        now,
+                    ),
+                )
+                order_index += 1
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO source_scope_snapshots(
+                scope, payload_json, updated_at
+            ) VALUES (?, ?, ?)
+            """,
+            (scope, self._json(meta_payload), now),
+        )
+
+    def replace_all_source_scope_snapshots(
+        self,
+        snapshots_by_scope: dict[str, dict[str, Any]],
+        *,
+        meta: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        snapshot_id = uuid.uuid4().hex
+        started_at = time.time()
+        meta_payload = dict(meta or {})
+        normalized: dict[str, dict[str, list[dict[str, Any]]]] = {}
+        counts: dict[str, dict[str, int]] = {}
+        for raw_scope, payload in (snapshots_by_scope or {}).items():
+            scope = self._normalize_source_scope(raw_scope)
+            payload = payload if isinstance(payload, dict) else {}
+            records = [
+                dict(item)
+                for item in (payload.get("records") or [])
+                if isinstance(item, dict)
+            ]
+            zhihang_records = [
+                dict(item)
+                for item in (payload.get("zhihang_records") or [])
+                if isinstance(item, dict)
+            ]
+            normalized[scope] = {
+                "records": records,
+                "zhihang_records": zhihang_records,
+            }
+            counts[scope] = {
+                "records": len(records),
+                "zhihang_records": len(zhihang_records),
+            }
+        if not normalized:
+            raise ValueError("source snapshot payload is empty")
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                now = time.time()
+                conn.execute(
+                    """
+                    INSERT INTO source_snapshot_manifest(
+                        snapshot_id,
+                        status,
+                        started_at,
+                        finished_at,
+                        warnings_json,
+                        counts_json,
+                        meta_json,
+                        error,
+                        created_at,
+                        updated_at
+                    ) VALUES (?, 'building', ?, NULL, ?, ?, ?, '', ?, ?)
+                    """,
+                    (
+                        snapshot_id,
+                        started_at,
+                        self._json(meta_payload.get("warnings") or []),
+                        self._json(counts),
+                        self._json(meta_payload),
+                        now,
+                        now,
+                    ),
+                )
+                for scope in sorted(normalized):
+                    records = normalized[scope]["records"]
+                    zhihang_records = normalized[scope]["zhihang_records"]
+                    scope_meta = dict(meta_payload)
+                    scope_meta.update(
+                        {
+                            "scope": scope,
+                            "snapshot_id": snapshot_id,
+                            "records_count": len(records),
+                            "zhihang_records_count": len(zhihang_records),
+                            "updated_at": now,
+                        }
+                    )
+                    order_index = 0
+                    for kind, items in (("workbench", records), ("zhihang", zhihang_records)):
+                        for item in items:
+                            record_id = self._text(
+                                item.get("record_id") or item.get("source_record_id")
+                            )
+                            conn.execute(
+                                """
+                                INSERT OR REPLACE INTO source_snapshot_records(
+                                    snapshot_id,
+                                    scope,
+                                    record_key,
+                                    record_kind,
+                                    work_type,
+                                    source_record_id,
+                                    payload_json,
+                                    sort_order,
+                                    created_at
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                """,
+                                (
+                                    snapshot_id,
+                                    scope,
+                                    self._source_snapshot_record_key(kind, item),
+                                    kind,
+                                    self._text(item.get("work_type")),
+                                    record_id,
+                                    self._json(item),
+                                    order_index,
+                                    now,
+                                ),
+                            )
+                            order_index += 1
+                    self._write_legacy_source_scope_locked(
+                        conn,
+                        scope=scope,
+                        records=records,
+                        zhihang_records=zhihang_records,
+                        meta_payload=scope_meta,
+                        now=now,
+                    )
+                conn.execute(
+                    "UPDATE source_snapshot_manifest SET status = 'retained', updated_at = ? WHERE status = 'active'",
+                    (now,),
+                )
+                conn.execute(
+                    """
+                    UPDATE source_snapshot_manifest
+                    SET status = 'active', finished_at = ?, updated_at = ?
+                    WHERE snapshot_id = ?
+                    """,
+                    (now, now, snapshot_id),
+                )
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta(key, value) VALUES('active_source_snapshot_id', ?)",
+                    (snapshot_id,),
+                )
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta(key, value) VALUES('active_source_snapshot_at', ?)",
+                    (str(now),),
+                )
+                conn.commit()
+        self.cleanup_source_snapshots()
+        return {
+            "snapshot_id": snapshot_id,
+            "status": "active",
+            "counts": counts,
+            "updated_at": now,
+        }
+
+    def record_failed_source_snapshot(
+        self, *, meta: dict[str, Any] | None = None, error: str = ""
+    ) -> dict[str, Any]:
+        snapshot_id = uuid.uuid4().hex
+        now = time.time()
+        meta_payload = dict(meta or {})
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO source_snapshot_manifest(
+                        snapshot_id,
+                        status,
+                        started_at,
+                        finished_at,
+                        warnings_json,
+                        counts_json,
+                        meta_json,
+                        error,
+                        created_at,
+                        updated_at
+                    ) VALUES (?, 'failed', ?, ?, ?, '{}', ?, ?, ?, ?)
+                    """,
+                    (
+                        snapshot_id,
+                        now,
+                        now,
+                        self._json(meta_payload.get("warnings") or []),
+                        self._json(meta_payload),
+                        self._text(error),
+                        now,
+                        now,
+                    ),
+                )
+                conn.commit()
+        self.cleanup_source_snapshots()
+        return {"snapshot_id": snapshot_id, "status": "failed", "updated_at": now}
+
     def get_source_scope_snapshot(self, scope: str) -> dict[str, Any]:
         scope = self._normalize_source_scope(scope)
         table = self._source_scope_table(scope)
@@ -1036,6 +1523,60 @@ class LanPortalStateStore:
         with self._lock:
             with closing(self._connect()) as conn:
                 self._ensure_schema_locked(conn)
+                active_row = conn.execute(
+                    "SELECT value FROM meta WHERE key = 'active_source_snapshot_id'"
+                ).fetchone()
+                active_snapshot_id = (
+                    str(active_row["value"] or "").strip() if active_row else ""
+                )
+                if active_snapshot_id:
+                    manifest_row = conn.execute(
+                        """
+                        SELECT *
+                        FROM source_snapshot_manifest
+                        WHERE snapshot_id = ? AND status = 'active'
+                        """,
+                        (active_snapshot_id,),
+                    ).fetchone()
+                    if manifest_row:
+                        rows = conn.execute(
+                            """
+                            SELECT record_kind, payload_json
+                            FROM source_snapshot_records
+                            WHERE snapshot_id = ? AND scope = ?
+                            ORDER BY sort_order ASC, record_key ASC
+                            """,
+                            (active_snapshot_id, scope),
+                        ).fetchall()
+                        meta = self._loads(str(manifest_row["meta_json"] or ""), {})
+                        if not isinstance(meta, dict):
+                            meta = {}
+                        meta["snapshot_id"] = active_snapshot_id
+                        try:
+                            updated_at = float(manifest_row["finished_at"] or manifest_row["updated_at"] or 0)
+                        except Exception:
+                            updated_at = 0.0
+                        records: list[dict[str, Any]] = []
+                        zhihang_records: list[dict[str, Any]] = []
+                        for row in rows:
+                            payload = self._loads(str(row["payload_json"] or ""), {})
+                            if not isinstance(payload, dict):
+                                continue
+                            if str(row["record_kind"] or "") == "zhihang":
+                                zhihang_records.append(payload)
+                            else:
+                                records.append(payload)
+                        return {
+                            "exists": True,
+                            "scope": scope,
+                            "records": records,
+                            "zhihang_records": zhihang_records,
+                            "meta": meta,
+                            "updated_at": updated_at,
+                            "snapshot_id": active_snapshot_id,
+                            "count": len(records),
+                            "zhihang_count": len(zhihang_records),
+                        }
                 meta_row = conn.execute(
                     """
                     SELECT payload_json, updated_at
@@ -1080,6 +1621,119 @@ class LanPortalStateStore:
             "updated_at": updated_at,
             "count": len(records),
             "zhihang_count": len(zhihang_records),
+        }
+
+    def source_snapshot_stats(self) -> dict[str, Any]:
+        if not self.db_path.exists():
+            return {}
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                active_row = conn.execute(
+                    "SELECT value FROM meta WHERE key = 'active_source_snapshot_id'"
+                ).fetchone()
+                active_snapshot_id = (
+                    str(active_row["value"] or "").strip() if active_row else ""
+                )
+                active = None
+                if active_snapshot_id:
+                    active = conn.execute(
+                        """
+                        SELECT snapshot_id, status, started_at, finished_at, warnings_json,
+                               counts_json, meta_json, error, updated_at
+                        FROM source_snapshot_manifest
+                        WHERE snapshot_id = ?
+                        """,
+                        (active_snapshot_id,),
+                    ).fetchone()
+                failed = conn.execute(
+                    """
+                    SELECT snapshot_id, status, started_at, finished_at, warnings_json,
+                           counts_json, meta_json, error, updated_at
+                    FROM source_snapshot_manifest
+                    WHERE status = 'failed'
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
+                total = conn.execute(
+                    "SELECT count(*) AS c FROM source_snapshot_manifest"
+                ).fetchone()
+
+        def row_payload(row: sqlite3.Row | None) -> dict[str, Any]:
+            if not row:
+                return {}
+            meta = self._loads(str(row["meta_json"] or ""), {})
+            counts = self._loads(str(row["counts_json"] or ""), {})
+            warnings = self._loads(str(row["warnings_json"] or ""), [])
+            return {
+                "snapshot_id": str(row["snapshot_id"] or ""),
+                "status": str(row["status"] or ""),
+                "started_at": float(row["started_at"] or 0),
+                "finished_at": float(row["finished_at"] or 0),
+                "updated_at": float(row["updated_at"] or 0),
+                "warnings": warnings if isinstance(warnings, list) else [],
+                "counts": counts if isinstance(counts, dict) else {},
+                "meta": meta if isinstance(meta, dict) else {},
+                "error": str(row["error"] or ""),
+            }
+
+        return {
+            "active": row_payload(active),
+            "last_failed": row_payload(failed),
+            "manifest_count": int(total["c"] or 0) if total else 0,
+        }
+
+    def cleanup_source_snapshots(
+        self, *, keep_success: int = 3, keep_failed: int = 5
+    ) -> dict[str, int]:
+        if not self.db_path.exists():
+            return {"deleted_manifests": 0, "deleted_records": 0}
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                rows = conn.execute(
+                    """
+                    SELECT snapshot_id, status
+                    FROM source_snapshot_manifest
+                    ORDER BY updated_at DESC
+                    """
+                ).fetchall()
+                success_seen = 0
+                failed_seen = 0
+                delete_ids: list[str] = []
+                for row in rows:
+                    snapshot_id = str(row["snapshot_id"] or "")
+                    status = str(row["status"] or "")
+                    if status in {"active", "retained"}:
+                        success_seen += 1
+                        if success_seen > max(1, int(keep_success or 3)):
+                            delete_ids.append(snapshot_id)
+                    elif status == "failed":
+                        failed_seen += 1
+                        if failed_seen > max(0, int(keep_failed or 5)):
+                            delete_ids.append(snapshot_id)
+                    elif status != "building":
+                        delete_ids.append(snapshot_id)
+                deleted_records = 0
+                deleted_manifests = 0
+                if delete_ids:
+                    conn.execute("BEGIN IMMEDIATE")
+                    for snapshot_id in delete_ids:
+                        cur = conn.execute(
+                            "DELETE FROM source_snapshot_records WHERE snapshot_id = ?",
+                            (snapshot_id,),
+                        )
+                        deleted_records += int(cur.rowcount or 0)
+                        cur = conn.execute(
+                            "DELETE FROM source_snapshot_manifest WHERE snapshot_id = ?",
+                            (snapshot_id,),
+                        )
+                        deleted_manifests += int(cur.rowcount or 0)
+                    conn.commit()
+        return {
+            "deleted_manifests": deleted_manifests,
+            "deleted_records": deleted_records,
         }
 
     def list_source_scope_snapshot_meta(self) -> list[dict[str, Any]]:
@@ -1787,6 +2441,285 @@ class LanPortalStateStore:
             "checked_at": time.time(),
         }
 
+    def upsert_clipboard_candidate(
+        self,
+        candidate_id: str,
+        *,
+        content: str,
+        payload: dict[str, Any] | None = None,
+        status: str = "pending",
+        source_event_id: int | None = None,
+    ) -> bool:
+        candidate_id = self._text(candidate_id)
+        if not candidate_id:
+            return False
+        now = time.time()
+        normalized = dict(payload or {})
+        normalized.setdefault("candidate_id", candidate_id)
+        normalized.setdefault("content", str(content or ""))
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO clipboard_candidates(
+                        candidate_id, status, content, payload_json, source_event_id, created_at, updated_at
+                    )
+                    VALUES (
+                        ?,
+                        ?,
+                        ?,
+                        ?,
+                        ?,
+                        COALESCE((SELECT created_at FROM clipboard_candidates WHERE candidate_id = ?), ?),
+                        ?
+                    )
+                    """,
+                    (
+                        candidate_id,
+                        self._text(status) or "pending",
+                        str(content or ""),
+                        self._json(normalized),
+                        int(source_event_id or 0) if source_event_id is not None else None,
+                        candidate_id,
+                        now,
+                        now,
+                    ),
+                )
+                conn.commit()
+        return True
+
+    def list_clipboard_candidates(
+        self, *, status: str = "pending", limit: int = 100
+    ) -> list[dict[str, Any]]:
+        if not self.db_path.exists():
+            return []
+        limit = max(1, min(int(limit or 100), 500))
+        status = self._text(status)
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                if status:
+                    rows = conn.execute(
+                        """
+                        SELECT candidate_id, status, content, payload_json, source_event_id, created_at, updated_at
+                        FROM clipboard_candidates
+                        WHERE status = ?
+                        ORDER BY updated_at ASC
+                        LIMIT ?
+                        """,
+                        (status, limit),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """
+                        SELECT candidate_id, status, content, payload_json, source_event_id, created_at, updated_at
+                        FROM clipboard_candidates
+                        ORDER BY updated_at ASC
+                        LIMIT ?
+                        """,
+                        (limit,),
+                    ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            payload = self._loads(str(row["payload_json"] or ""), {})
+            result.append(
+                {
+                    "candidate_id": str(row["candidate_id"] or ""),
+                    "status": str(row["status"] or ""),
+                    "content": str(row["content"] or ""),
+                    "payload": payload if isinstance(payload, dict) else {},
+                    "source_event_id": int(row["source_event_id"] or 0),
+                    "created_at": float(row["created_at"] or 0),
+                    "updated_at": float(row["updated_at"] or 0),
+                }
+            )
+        return result
+
+    def mark_clipboard_candidate(
+        self, candidate_id: str, status: str, *, payload: dict[str, Any] | None = None
+    ) -> bool:
+        candidate_id = self._text(candidate_id)
+        status = self._text(status)
+        if not candidate_id or not status or not self.db_path.exists():
+            return False
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                current = conn.execute(
+                    "SELECT payload_json FROM clipboard_candidates WHERE candidate_id = ?",
+                    (candidate_id,),
+                ).fetchone()
+                if not current:
+                    return False
+                current_payload = self._loads(str(current["payload_json"] or ""), {})
+                if not isinstance(current_payload, dict):
+                    current_payload = {}
+                if isinstance(payload, dict):
+                    current_payload.update(payload)
+                cursor = conn.execute(
+                    """
+                    UPDATE clipboard_candidates
+                    SET status = ?, payload_json = ?, updated_at = ?
+                    WHERE candidate_id = ?
+                    """,
+                    (status, self._json(current_payload), now, candidate_id),
+                )
+                conn.commit()
+                return bool(cursor.rowcount)
+
+    def upsert_dialog_session(
+        self,
+        session_id: str,
+        *,
+        session_type: str,
+        payload: dict[str, Any] | None = None,
+        status: str = "pending",
+    ) -> bool:
+        session_id = self._text(session_id)
+        if not session_id:
+            return False
+        now = time.time()
+        normalized = dict(payload or {})
+        normalized.setdefault("session_id", session_id)
+        normalized.setdefault("session_type", str(session_type or "generic"))
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO dialog_sessions(
+                        session_id, session_type, status, payload_json, created_at, updated_at
+                    )
+                    VALUES (
+                        ?,
+                        ?,
+                        ?,
+                        ?,
+                        COALESCE((SELECT created_at FROM dialog_sessions WHERE session_id = ?), ?),
+                        ?
+                    )
+                    """,
+                    (
+                        session_id,
+                        str(session_type or "generic"),
+                        self._text(status) or "pending",
+                        self._json(normalized),
+                        session_id,
+                        now,
+                        now,
+                    ),
+                )
+                conn.commit()
+        return True
+
+    def get_dialog_session(self, session_id: str) -> dict[str, Any] | None:
+        session_id = self._text(session_id)
+        if not session_id or not self.db_path.exists():
+            return None
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    """
+                    SELECT session_id, session_type, status, payload_json, created_at, updated_at
+                    FROM dialog_sessions
+                    WHERE session_id = ?
+                    """,
+                    (session_id,),
+                ).fetchone()
+        if not row:
+            return None
+        payload = self._loads(str(row["payload_json"] or ""), {})
+        return {
+            "session_id": str(row["session_id"] or ""),
+            "session_type": str(row["session_type"] or ""),
+            "status": str(row["status"] or ""),
+            "payload": payload if isinstance(payload, dict) else {},
+            "created_at": float(row["created_at"] or 0),
+            "updated_at": float(row["updated_at"] or 0),
+        }
+
+    def list_dialog_sessions(
+        self, *, status: str = "pending", limit: int = 100
+    ) -> list[dict[str, Any]]:
+        if not self.db_path.exists():
+            return []
+        limit = max(1, min(int(limit or 100), 500))
+        status = self._text(status)
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                if status:
+                    rows = conn.execute(
+                        """
+                        SELECT session_id, session_type, status, payload_json, created_at, updated_at
+                        FROM dialog_sessions
+                        WHERE status = ?
+                        ORDER BY updated_at ASC
+                        LIMIT ?
+                        """,
+                        (status, limit),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """
+                        SELECT session_id, session_type, status, payload_json, created_at, updated_at
+                        FROM dialog_sessions
+                        ORDER BY updated_at ASC
+                        LIMIT ?
+                        """,
+                        (limit,),
+                    ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            payload = self._loads(str(row["payload_json"] or ""), {})
+            result.append(
+                {
+                    "session_id": str(row["session_id"] or ""),
+                    "session_type": str(row["session_type"] or ""),
+                    "status": str(row["status"] or ""),
+                    "payload": payload if isinstance(payload, dict) else {},
+                    "created_at": float(row["created_at"] or 0),
+                    "updated_at": float(row["updated_at"] or 0),
+                }
+            )
+        return result
+
+    def mark_dialog_session(
+        self, session_id: str, status: str, *, payload: dict[str, Any] | None = None
+    ) -> bool:
+        session_id = self._text(session_id)
+        status = self._text(status)
+        if not session_id or not status or not self.db_path.exists():
+            return False
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                current = conn.execute(
+                    "SELECT payload_json FROM dialog_sessions WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()
+                if not current:
+                    return False
+                current_payload = self._loads(str(current["payload_json"] or ""), {})
+                if not isinstance(current_payload, dict):
+                    current_payload = {}
+                if isinstance(payload, dict):
+                    current_payload.update(payload)
+                cursor = conn.execute(
+                    """
+                    UPDATE dialog_sessions
+                    SET status = ?, payload_json = ?, updated_at = ?
+                    WHERE session_id = ?
+                    """,
+                    (status, self._json(current_payload), now, session_id),
+                )
+                conn.commit()
+                return bool(cursor.rowcount)
+
     def get_settings(self) -> dict[str, Any] | None:
         if not self.db_path.exists():
             return None
@@ -2284,6 +3217,21 @@ class LanPortalStateStore:
                         continue
                 stats["table_counts"] = counts
         return stats
+
+    def runtime_health_report(self) -> dict[str, Any]:
+        schema = self.schema_health()
+        database = self.get_database_stats()
+        source_snapshot = self.source_snapshot_stats()
+        write_worker = self.get_write_worker_stats()
+        ok = bool(schema.get("ok")) and bool(database.get("exists"))
+        return {
+            "ok": ok,
+            "schema": schema,
+            "database": database,
+            "source_snapshot": source_snapshot,
+            "write_worker": write_worker,
+            "checked_at": time.time(),
+        }
 
     def checkpoint_database(self, *, truncate: bool = True) -> dict[str, Any]:
         before = self.get_database_stats()

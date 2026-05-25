@@ -41,6 +41,7 @@ from upload_event_module.services.handlers.base import NoticePayload  # noqa: E4
 from upload_event_module.services.handlers.maintenance_notice import (  # noqa: E402
     MaintenanceNoticeHandler,
 )
+from upload_event_module.core.parser import extract_event_info  # noqa: E402
 import upload_event_module.services.feishu_service as feishu_service_module  # noqa: E402
 from upload_event_module.ui.active_cache_store import ActiveCacheStore  # noqa: E402
 from upload_event_module.ui.main_window_workflow import MainWindowWorkflowMixin  # noqa: E402
@@ -98,6 +99,15 @@ class _ChangeSourceFailureService(MaintenancePortalService):
 class _WorkflowRuntimeQueueHarness(MainWindowWorkflowMixin):
     def __init__(self, store):
         self._lan_portal_state_store = store
+
+
+class _WorkflowBackendDelegateHarness(MainWindowWorkflowMixin):
+    def __init__(self, controller):
+        self.lan_template_portal_controller = controller
+        self.finished = []
+
+    def _post_request_finished(self, name, success, msg, record_id):
+        self.finished.append((name, bool(success), msg, record_id))
 
 
 class _HistoryMigrationHarness(MainWindowUiMixin):
@@ -706,6 +716,64 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             1,
         )
 
+    def test_local_qt_notice_upload_create_path_returns_real_record_id(self):
+        request_payload = {
+            "action_type": "upload",
+            "data_dict": {
+                "record_id": "placeholder-1",
+                "notice_type": "维保通告",
+                "text": "【维保通告】状态：开始\n【标题】测试测试测试\n【时间】2026-05-24 09:30~2026-05-24 18:30",
+                "buildings": ["A楼"],
+                "specialty": "测试",
+                "time_str": "2026-05-24 09:30~2026-05-24 18:30",
+                "maintenance_cycle": "/",
+            },
+            "response_time": "2026-05-24 09:30",
+            "recover_selected": False,
+            "robot_group_choice": "auto",
+        }
+        with patch.object(
+            portal_server_module,
+            "create_bitable_record_by_payload",
+            return_value=(True, "rec-backend-1"),
+        ):
+            result = PortalHandler.execute_local_notice_upload(request_payload)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["name"], "上传")
+        self.assertEqual(result["record_id"], "placeholder-1")
+        self.assertEqual(result["real_record_id"], "rec-backend-1")
+
+    def test_workflow_delegate_qt_notice_upload_uses_backend_result(self):
+        class _Controller:
+            def execute_qt_notice_upload(self, payload):
+                return {
+                    "ok": True,
+                    "name": "上传",
+                    "message": "ignored",
+                    "record_id": "placeholder-2",
+                    "real_record_id": "rec-backend-2",
+                }
+
+        harness = _WorkflowBackendDelegateHarness(_Controller())
+        handled = harness._delegate_qt_notice_upload_to_backend(
+            data_snapshot={
+                "record_id": "placeholder-2",
+                "notice_type": "维保通告",
+                "text": "测试测试测试",
+            },
+            screenshot_bytes=None,
+            extra_images=[],
+            action_type="upload",
+            response_time="2026-05-24 09:30",
+            recover_selected=False,
+            robot_group_choice="auto",
+        )
+        self.assertTrue(handled)
+        self.assertEqual(
+            harness.finished,
+            [("上传", True, "rec-backend-2", "placeholder-2")],
+        )
+
     def test_portal_handler_dequeue_falls_back_to_sqlite_queue(self):
         class _FakeService:
             def get_job(self, job_id):
@@ -862,6 +930,78 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(payload["other"][0]["data"]["record_id"], "current-record")
             self.assertEqual([item["active_item_id"] for item in qt_items], ["current-active"])
 
+    def test_backend_clipboard_notice_projects_to_active_upsert_event(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            previous_store = PortalHandler.state_store
+            PortalHandler.state_store = LanPortalStateStore(
+                Path(tmp) / "lan_portal_state.sqlite3"
+            )
+            try:
+                controller = FastAPIPortalController()
+                entry = controller._clipboard_entry_from_content(
+                    "【维保通告】状态：开始\n\n【标题】测试测试测试\n\n【时间】2026-05-25 09:30~2026-05-25 18:30\n\n【位置】A楼"
+                )
+                self.assertIsNotNone(entry)
+                result = controller._project_clipboard_entry_to_active(entry)
+                qt_items = PortalHandler.state_store.list_qt_active_items()
+                events = PortalHandler.state_store.lease_outbox_events(
+                    "qt_action", limit=1, lease_seconds=5
+                )
+
+                self.assertTrue(result["ok"])
+                self.assertEqual(result["item"]["active_item_id"], result["active_item_id"])
+                self.assertEqual(result["item"]["payload"]["title"], "测试测试测试")
+                self.assertEqual(len(qt_items), 1)
+                self.assertEqual(qt_items[0]["payload"]["title"], "测试测试测试")
+                self.assertIn("测试测试测试", qt_items[0]["payload"]["text"])
+                self.assertEqual(events[0]["payload"]["kind"], "active_upsert")
+            finally:
+                PortalHandler.state_store = previous_store
+
+    def test_parser_accepts_legacy_change_notice_marker(self):
+        info = extract_event_info(
+            "【变更通告】状态：开始\n\n"
+            "【标题】测试测试测试变更\n\n"
+            "【等级】低\n\n"
+            "【时间】2026-05-25 09:30~2026-05-25 18:30"
+        )
+
+        self.assertIsNotNone(info)
+        self.assertEqual(info["notice_type"], "设备变更")
+        self.assertEqual(info["title"], "测试测试测试变更")
+        self.assertEqual(info["status"], "开始")
+
+    def test_backend_clipboard_target_record_requires_same_notice_type(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            previous_store = PortalHandler.state_store
+            PortalHandler.state_store = LanPortalStateStore(
+                Path(tmp) / "lan_portal_state.sqlite3"
+            )
+            try:
+                PortalHandler.state_store.upsert_qt_active_item(
+                    {
+                        "active_item_id": "active-change-1",
+                        "record_id": "rec-same-id",
+                        "notice_type": "设备变更",
+                        "text": "【设备变更】状态：开始\n\n【名称】原变更",
+                    },
+                    section="other",
+                    origin="qt",
+                )
+                controller = FastAPIPortalController()
+                entry = controller._clipboard_entry_from_content(
+                    "【维保通告】状态：更新\n\n【标题】测试维保\n\n【时间】2026-05-25 09:30~2026-05-25 18:30"
+                )
+                entry["target_record_id"] = "rec-same-id"
+                result = controller._project_clipboard_entry_to_active(entry)
+                qt_items = PortalHandler.state_store.list_qt_active_items()
+
+                self.assertTrue(result["ignored"])
+                self.assertEqual(len(qt_items), 1)
+                self.assertEqual(qt_items[0]["payload"]["notice_type"], "设备变更")
+            finally:
+                PortalHandler.state_store = previous_store
+
     def test_history_payload_imports_legacy_file_to_sqlite(self):
         with tempfile.TemporaryDirectory() as tmp:
             history_path = Path(tmp) / "history.json"
@@ -911,7 +1051,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
             self.assertEqual(items[0]["record_id"], "current-history")
 
-    def test_portal_frontend_dist_prefers_dist_but_falls_back_to_static_assets(self):
+    def test_portal_frontend_dist_defaults_to_ready_vue_and_supports_legacy_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             dist = root / "frontend" / "dist"
@@ -921,9 +1061,28 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             (dist / "index.html").write_text("vue", encoding="utf-8")
             (dist / "assets" / "app.js").write_text("dist", encoding="utf-8")
             (static / "assets" / "logo.png").write_text("static", encoding="utf-8")
+            ready_marker = dist / "clipflow-frontend-ready.json"
 
             with patch.object(portal_server_module, "FRONTEND_DIST_DIR", dist), patch.object(
                 portal_server_module, "STATIC_DIR", static
+            ), patch.object(
+                portal_server_module, "FRONTEND_READY_MARKER", ready_marker
+            ), patch.dict(os.environ, {"CLIPFLOW_FRONTEND_LEGACY": ""}, clear=False):
+                self.assertEqual(portal_server_module.portal_index_file(), static / "index.html")
+                self.assertEqual(
+                    portal_server_module.portal_asset_file(Path("logo.png")),
+                    static / "assets" / "logo.png",
+                )
+
+            ready_marker.write_text(
+                json.dumps({"app": "clipflow-lan-portal", "productionReady": True}),
+                encoding="utf-8",
+            )
+
+            with patch.object(portal_server_module, "FRONTEND_DIST_DIR", dist), patch.object(
+                portal_server_module, "STATIC_DIR", static
+            ), patch.object(
+                portal_server_module, "FRONTEND_READY_MARKER", ready_marker
             ), patch.dict(os.environ, {"CLIPFLOW_FRONTEND_LEGACY": ""}, clear=False):
                 self.assertEqual(portal_server_module.portal_index_file(), dist / "index.html")
                 self.assertEqual(
@@ -937,6 +1096,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
             with patch.object(portal_server_module, "FRONTEND_DIST_DIR", dist), patch.object(
                 portal_server_module, "STATIC_DIR", static
+            ), patch.object(
+                portal_server_module, "FRONTEND_READY_MARKER", ready_marker
             ), patch.dict(os.environ, {"CLIPFLOW_FRONTEND_LEGACY": "1"}, clear=False):
                 self.assertEqual(portal_server_module.portal_index_file(), static / "index.html")
 
@@ -3630,6 +3791,38 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         finally:
             PortalHandler.source_refresh_run_lock.release()
 
+    def test_source_refresh_failure_records_failed_snapshot_manifest(self):
+        class _FailingSourceRefreshService:
+            _load_warnings: list[str] = []
+
+            def _snapshot_meta(self):
+                return {"warnings": list(self._load_warnings)}
+
+            def refresh(self):
+                raise RuntimeError("boom")
+
+            def process_due_repair_link_tasks(self, *, limit):
+                return {"processed": 0}
+
+        original_store = PortalHandler.state_store
+        original_service = PortalHandler.service
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            PortalHandler.state_store = store
+            PortalHandler.service = _FailingSourceRefreshService()
+            try:
+                with patch.dict(os.environ, {"CLIPFLOW_BACKEND_MOCK_EXTERNAL": ""}, clear=False):
+                    result = PortalHandler.refresh_sources_once(force=True)
+                stats = store.source_snapshot_stats()
+            finally:
+                PortalHandler.state_store = original_store
+                PortalHandler.service = original_service
+        self.assertFalse(result["refreshed"])
+        self.assertTrue(result["warnings"])
+        self.assertEqual(stats["last_failed"]["status"], "failed")
+        self.assertIn("源表后台同步失败", stats["last_failed"]["error"])
+        self.assertFalse(stats["active"])
+
     def test_action_jobs_recover_only_before_external_side_effects(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
@@ -3704,6 +3897,80 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertIsNone(service.get_job(old_failed))
             self.assertEqual(service.get_job(old_running)["phase"], "uploading")
             self.assertEqual(service.get_job(recent_success)["phase"], "success")
+
+    def test_same_target_jobs_are_queued_instead_of_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+
+            first_job_id, should_start = service.create_action_job(
+                {
+                    "action": "update",
+                    "scope": "A",
+                    "work_type": "maintenance",
+                    "active_item_id": "active-queue-1",
+                    "operation_id": "queue-op-1",
+                }
+            )
+            self.assertTrue(should_start)
+
+            second_job_id, should_start = service.create_action_job(
+                {
+                    "action": "update",
+                    "scope": "A",
+                    "work_type": "maintenance",
+                    "active_item_id": "active-queue-1",
+                    "operation_id": "queue-op-2",
+                }
+            )
+            self.assertTrue(should_start)
+            second_job = service.get_job(second_job_id)
+            self.assertEqual(second_job["depends_on_job_id"], first_job_id)
+            self.assertEqual(second_job["depends_on_phase"], "accepted")
+
+    def test_runtime_queue_processable_waits_for_dependent_job(self):
+        original_store = PortalHandler.state_store
+        original_service = PortalHandler.service
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                service = self._new_temp_service(Path(tmp))
+                PortalHandler.state_store = service._state_store
+                PortalHandler.service = service
+                first_job_id, should_start = service.create_action_job(
+                    {
+                        "action": "update",
+                        "scope": "A",
+                        "work_type": "maintenance",
+                        "active_item_id": "active-queue-2",
+                        "operation_id": "queue-runtime-1",
+                    }
+                )
+                self.assertTrue(should_start)
+                second_job_id, should_start = service.create_action_job(
+                    {
+                        "action": "update",
+                        "scope": "A",
+                        "work_type": "maintenance",
+                        "active_item_id": "active-queue-2",
+                        "operation_id": "queue-runtime-2",
+                    }
+                )
+                self.assertTrue(should_start)
+
+                self.assertFalse(
+                    PortalHandler._runtime_queue_job_processable("message", second_job_id)
+                )
+                self.assertEqual(
+                    service.get_job(second_job_id)["depends_on_phase"], "accepted"
+                )
+
+                service.mark_job(first_job_id, phase="success")
+                self.assertTrue(
+                    PortalHandler._runtime_queue_job_processable("message", second_job_id)
+                )
+                self.assertEqual(service.get_job(second_job_id)["depends_on_phase"], "")
+        finally:
+            PortalHandler.state_store = original_store
+            PortalHandler.service = original_service
 
     def test_failed_action_jobs_are_compacted_after_persist(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3783,7 +4050,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(limits["message_worker_count"], 5)
             self.assertEqual(limits["upload_seconds_per_record"], 0.5)
             self.assertEqual(limits["upload_batch_wait_seconds"], 30.0)
-            self.assertEqual(limits["upload_batch_max_records"], 10)
+            self.assertEqual(limits["upload_batch_max_records"], 99)
             self.assertEqual(limits["qt_tick_interval_ms"], 100)
 
     def test_source_refresh_defers_when_runtime_busy(self):
@@ -4640,14 +4907,15 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 PortalHandler.service.last_action_payload["_auth_user_name"],
                 "测试用户",
             )
-            self.assertEqual(delete.status_code, 202)
+            self.assertEqual(delete.status_code, 200)
             self.assertTrue(delete.json().get("ok"))
-            self.assertTrue(delete.json()["data"]["qt_delete_queued"])
+            self.assertEqual(delete.json()["data"]["qt_event_id"], 1)
+            self.assertFalse(delete.json()["data"]["remote_deleted"])
             leased_response = client.get("/api/qt/events?limit=1")
             self.assertEqual(leased_response.status_code, 200)
             leased = leased_response.json()["data"]["items"]
             self.assertEqual(len(leased), 1)
-            self.assertEqual(leased[0]["payload"]["kind"], "ongoing_delete")
+            self.assertEqual(leased[0]["payload"]["kind"], "active_delete")
             ack_delete = client.post(
                 f"/api/qt/events/{leased[0]['id']}/ack",
                 json={"ok": True},
@@ -4714,6 +4982,77 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         finally:
             PortalHandler.service = original_service
             PortalHandler.state_store = original_state_store
+            temp_dir.cleanup()
+            with PortalHandler.auth_manager._lock:
+                PortalHandler.auth_manager._sessions = original_sessions
+
+    def test_fastapi_ongoing_delete_runs_backend_delete_before_qt_projection(self):
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        original_service = PortalHandler.service
+        original_state_store = PortalHandler.state_store
+        original_auth_state_store = PortalHandler.auth_manager._state_store
+        original_sessions = dict(PortalHandler.auth_manager._sessions)
+        PortalHandler.service = _NativeFastAPIRouteService()
+        temp_dir = tempfile.TemporaryDirectory()
+        PortalHandler.state_store = LanPortalStateStore(
+            Path(temp_dir.name) / "state.sqlite3"
+        )
+        PortalHandler.auth_manager._state_store = PortalHandler.state_store
+        PortalHandler.auth_manager.upsert_permission_user(
+            open_id="ou_delete",
+            name="测试用户",
+            role="admin",
+            scopes=["ALL"],
+            enabled=True,
+            updated_by="test",
+        )
+        session_id = "delete-route-session"
+        with PortalHandler.auth_manager._lock:
+            PortalHandler.auth_manager._sessions[session_id] = {
+                "session_id": session_id,
+                "user": {"name": "测试用户", "open_id": "ou_delete"},
+                "role": "admin",
+                "allowed_scopes": ["ALL"],
+                "expires_at": time.time() + 3600,
+            }
+        client = TestClient(controller._build_app())
+        try:
+            headers = {"Cookie": f"{AUTH_COOKIE_NAME}={session_id}"}
+            with patch.object(
+                portal_server_module,
+                "delete_bitable_record",
+                return_value=(True, "deleted"),
+            ) as delete_record:
+                response = client.post(
+                    "/api/ongoing-items/delete",
+                    headers=headers,
+                    json={
+                        "scope": "ALL",
+                        "work_type": "maintenance",
+                        "notice_type": "维保通告",
+                        "active_item_id": "active-del",
+                        "record_id": "rec-del",
+                        "target_record_id": "rec-del",
+                    },
+                )
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()["data"]
+            self.assertTrue(payload["deleted"])
+            self.assertTrue(payload["remote_deleted"])
+            delete_record.assert_called_once_with("rec-del", "维保通告")
+            leased_response = client.get("/api/qt/events?limit=1")
+            self.assertEqual(leased_response.status_code, 200)
+            leased = leased_response.json()["data"]["items"]
+            self.assertEqual(len(leased), 1)
+            self.assertEqual(leased[0]["payload"]["kind"], "active_delete")
+            self.assertEqual(
+                leased[0]["payload"]["payload"]["active_item_id"],
+                "active-del",
+            )
+        finally:
+            PortalHandler.service = original_service
+            PortalHandler.state_store = original_state_store
+            PortalHandler.auth_manager._state_store = original_auth_state_store
             temp_dir.cleanup()
             with PortalHandler.auth_manager._lock:
                 PortalHandler.auth_manager._sessions = original_sessions

@@ -1,10 +1,13 @@
 import os
 import json
-import requests
 import sys
 import urllib.parse
-import time
 from typing import Dict, Any, Tuple, Optional
+
+try:
+    from .http_client import FeishuHttpClient
+except ImportError:
+    from upload_event_module.services.http_client import FeishuHttpClient
 
 # === input params start
 app_id = os.getenv("APP_ID")               # app_id, required, 应用 ID
@@ -19,21 +22,7 @@ user_id_type = os.getenv("USER_ID_TYPE", "open_id")  # string, optional, 用户I
 # 指定返回的用户ID类型，可选值：open_id、union_id、user_id。默认为open_id。
 # === input params end
 
-REQUEST_TIMEOUT = (5, 15)
-REQUEST_RETRY_TIMES = 2
-
-
-def _request_with_retry(method, url, **kwargs):
-    last_error = None
-    for attempt in range(REQUEST_RETRY_TIMES + 1):
-        try:
-            return method(url, timeout=REQUEST_TIMEOUT, **kwargs)
-        except Exception as exc:
-            last_error = exc
-            if attempt >= REQUEST_RETRY_TIMES:
-                raise
-            time.sleep(0.5 * (attempt + 1))
-    raise last_error
+_HTTP_CLIENT = FeishuHttpClient(retries=2)
 
 def get_tenant_access_token(app_id: str, app_secret: str) -> Tuple[str, Exception]:
     """获取 tenant_access_token
@@ -56,24 +45,22 @@ def get_tenant_access_token(app_id: str, app_secret: str) -> Tuple[str, Exceptio
     try:
         print(f"POST: {url}")
         print(f"Request body: {json.dumps(payload)}")
-        response = _request_with_retry(
-            requests.post, url, json=payload, headers=headers
+        result = _HTTP_CLIENT.request_json(
+            "POST",
+            url,
+            json_payload=payload,
+            headers=headers,
         )
-        response.raise_for_status()
-
-        result = response.json()
         print(f"Response: {json.dumps(result)}")
 
         if result.get("code", 0) != 0:
             print(f"ERROR: failed to get tenant_access_token: {result.get('msg', 'unknown error')}", file=sys.stderr)
-            return "", Exception(f"failed to get tenant_access_token: {response.text}")
+            return "", Exception(f"failed to get tenant_access_token: {json.dumps(result, ensure_ascii=False)}")
 
         return result["tenant_access_token"], None
 
     except Exception as e:
         print(f"ERROR: getting tenant_access_token: {e}", file=sys.stderr)
-        if hasattr(e, 'response') and e.response is not None:
-            print(f"ERROR: Response: {e.response.text}", file=sys.stderr)
         return "", e
 
 def get_wiki_node_info(tenant_access_token: str, node_token: str) -> Dict[str, Any]:
@@ -94,10 +81,7 @@ def get_wiki_node_info(tenant_access_token: str, node_token: str) -> Dict[str, A
 
     try:
         print(f"GET: {url}")
-        response = _request_with_retry(requests.get, url, headers=headers)
-        response.raise_for_status()
-
-        result = response.json()
+        result = _HTTP_CLIENT.request_json("GET", url, headers=headers)
         print(f"Response: {json.dumps(result)}")
         
         if result.get("code", 0) != 0:
@@ -175,24 +159,22 @@ def get_bitable_record(tenant_access_token: str, app_token: str, table_id: str, 
     try:
         print(f"GET: {url}")
         print(f"Params: {json.dumps(params)}")
-        response = _request_with_retry(
-            requests.get, url, headers=headers, params=params
+        result = _HTTP_CLIENT.request_json(
+            "GET",
+            url,
+            headers=headers,
+            params=params,
         )
-        response.raise_for_status()
-
-        result = response.json()
         print(f"Response: {json.dumps(result)}")
 
         if result.get("code", 0) != 0:
             print(f"ERROR: 查询记录失败: {result.get('msg', 'unknown error')}", file=sys.stderr)
-            return {}, Exception(f"failed to get record: {response.text}")
+            return {}, Exception(f"failed to get record: {json.dumps(result, ensure_ascii=False)}")
 
         return result["data"], None
 
     except Exception as e:
         print(f"ERROR: getting bitable record: {e}", file=sys.stderr)
-        if hasattr(e, 'response') and e.response is not None:
-            print(f"ERROR: Response: {e.response.text}", file=sys.stderr)
         return {}, e
 
 if __name__ == "__main__":

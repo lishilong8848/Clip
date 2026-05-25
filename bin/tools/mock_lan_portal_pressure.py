@@ -90,6 +90,8 @@ def run_pressure(
     count: int,
     concurrency: int,
     *,
+    scopes: list[str] | None = None,
+    per_scope: int = 0,
     query_jobs: bool = True,
     scenario: str = "accepted",
 ) -> dict:
@@ -123,16 +125,38 @@ def run_pressure(
         client = TestClient(controller._build_app())
         headers = {"Cookie": f"{AUTH_COOKIE_NAME}={session_id}"}
 
-        def submit(index: int) -> tuple[int, int, str]:
+        scope_plan: list[tuple[str, int]] = []
+        normalized_scopes = [
+            str(scope or "").strip().upper()
+            for scope in (scopes or [])
+            if str(scope or "").strip()
+        ]
+        if normalized_scopes and per_scope > 0:
+            for scope in normalized_scopes:
+                for scope_index in range(1, per_scope + 1):
+                    scope_plan.append((scope, scope_index))
+        else:
+            for index in range(1, count + 1):
+                scope_plan.append(("ALL", index))
+        count = len(scope_plan)
+
+        def submit(index: int, scope: str, scope_index: int) -> tuple[int, str, int, int, str]:
             response = client.post(
                 "/api/workbench-actions",
                 headers=headers,
                 json={
-                    "scope": "ALL",
+                    "scope": scope,
                     "work_type": "maintenance",
                     "action": "start",
-                    "record_id": f"mock-record-{index}",
-                    "operation_id": f"mock-op-{index}",
+                    "record_id": f"mock-record-{scope}-{scope_index}",
+                    "operation_id": f"mock-op-{scope}-{scope_index}",
+                    "title": f"{scope}楼测试测试测试{scope_index}",
+                    "location": "测试测试测试",
+                    "content": "测试测试测试",
+                    "reason": "测试测试测试",
+                    "impact": "测试测试测试",
+                    "progress": "测试测试测试",
+                    "maintenance_cycle": "/",
                 },
             )
             job_id = ""
@@ -140,7 +164,7 @@ def run_pressure(
                 job_id = str((response.json().get("data") or {}).get("job_id") or "")
             except Exception:
                 pass
-            return index, response.status_code, job_id
+            return index, scope, scope_index, response.status_code, job_id
 
         def query_job(job_id: str) -> tuple[str, int, str]:
             response = client.get(f"/api/jobs/{job_id}", headers=headers)
@@ -155,12 +179,22 @@ def run_pressure(
         results = []
         submit_started = time.perf_counter()
         with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
-            futures = [pool.submit(submit, index) for index in range(count)]
+            futures = [
+                pool.submit(submit, index, scope, scope_index)
+                for index, (scope, scope_index) in enumerate(scope_plan, start=1)
+            ]
             for future in as_completed(futures):
                 results.append(future.result())
         submit_elapsed = time.perf_counter() - submit_started
-        ok_count = sum(1 for _, status, job_id in results if status == 202 and job_id)
-        job_ids = [job_id for _, status, job_id in results if status == 202 and job_id]
+        ok_count = sum(1 for _, _, _, status, job_id in results if status == 202 and job_id)
+        per_scope_counts: dict[str, dict[str, int]] = {}
+        for _, scope, _, status, job_id in results:
+            bucket = per_scope_counts.setdefault(scope, {"accepted": 0, "failed": 0})
+            if status == 202 and job_id:
+                bucket["accepted"] += 1
+            else:
+                bucket["failed"] += 1
+        job_ids = [job_id for _, _, _, status, job_id in results if status == 202 and job_id]
         job_query_results: list[tuple[str, int, str]] = []
         job_query_elapsed = 0.0
         if query_jobs and job_ids:
@@ -190,6 +224,9 @@ def run_pressure(
         return {
             "count": count,
             "concurrency": concurrency,
+            "scopes": normalized_scopes or ["ALL"],
+            "per_scope": per_scope if normalized_scopes and per_scope > 0 else 0,
+            "per_scope_counts": per_scope_counts,
             "scenario": scenario,
             "accepted": ok_count,
             "failed": count - ok_count,
@@ -225,6 +262,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Mock LAN portal submit pressure test.")
     parser.add_argument("--count", type=int, default=30)
     parser.add_argument("--concurrency", type=int, default=10)
+    parser.add_argument(
+        "--scopes",
+        default="",
+        help="逗号分隔楼栋，例如 A,B,C,D,E,H；配合 --per-scope 模拟多楼并发。",
+    )
+    parser.add_argument(
+        "--per-scope",
+        type=int,
+        default=0,
+        help="每个楼栋提交多少条；大于 0 且指定 --scopes 时覆盖 --count。",
+    )
     parser.add_argument("--repeat", type=int, default=1, help="连续压测轮数。")
     parser.add_argument("--pause", type=float, default=0.2, help="每轮之间暂停秒数。")
     parser.add_argument(
@@ -258,6 +306,8 @@ def main() -> None:
         result = run_pressure(
             max(1, args.count),
             max(1, args.concurrency),
+            scopes=[item.strip() for item in str(args.scopes or "").split(",") if item.strip()],
+            per_scope=max(0, int(args.per_scope or 0)),
             query_jobs=not bool(args.no_job_query),
             scenario=args.scenario,
         )
@@ -283,8 +333,10 @@ def main() -> None:
     summary = {
         "ok": ok,
         "repeat": repeat,
-        "count": max(1, args.count),
+        "count": int(runs[0].get("count") or max(1, args.count)) if runs else max(1, args.count),
         "concurrency": max(1, args.concurrency),
+        "scopes": runs[0].get("scopes") if runs else [],
+        "per_scope": int(runs[0].get("per_scope") or 0) if runs else 0,
         "scenario": args.scenario,
         "runs": runs,
         "max_submit_average_ms": max(

@@ -26,6 +26,201 @@ LAN_ONGOING_SNAPSHOT_REFRESH_MS = 5000
 LAN_ONGOING_SNAPSHOT_STALE_SECONDS = 3.0
 
 class MainWindowRuntimeMixin:
+    def _lan_portal_deferred_store(self) -> dict:
+        store = getattr(self, "_lan_portal_deferred_start_jobs", None)
+        if not isinstance(store, dict):
+            store = {}
+            self._lan_portal_deferred_start_jobs = store
+        return store
+
+    def _lan_portal_materialize_store(self) -> dict:
+        store = getattr(self, "_lan_portal_materialize_jobs", None)
+        if not isinstance(store, dict):
+            store = {}
+            self._lan_portal_materialize_jobs = store
+        return store
+
+    def _lan_qt_materialize_wait_ms(self) -> int:
+        cached = getattr(self, "_lan_qt_materialize_wait_cached_ms", None)
+        cached_at = float(getattr(self, "_lan_qt_materialize_wait_cached_at", 0.0) or 0.0)
+        if cached is not None and time.monotonic() - cached_at < 30.0:
+            return int(cached)
+        wait_seconds = 30.0
+        try:
+            from lan_bitable_template_portal.state_store import LanPortalStateStore
+
+            settings = LanPortalStateStore().get_settings() or {}
+            wait_seconds = max(
+                1.0,
+                min(
+                    60.0,
+                    float(
+                        settings.get("lan_qt_materialize_batch_wait_seconds")
+                        or 30.0
+                    ),
+                ),
+            )
+        except Exception:
+            pass
+        wait_ms = max(1000, int(wait_seconds * 1000))
+        self._lan_qt_materialize_wait_cached_ms = wait_ms
+        self._lan_qt_materialize_wait_cached_at = time.monotonic()
+        return wait_ms
+
+    def _update_lan_portal_materialize_positions(self) -> None:
+        store = self._lan_portal_materialize_store()
+        total = len(store)
+        for index, job_id in enumerate(list(store.keys()), start=1):
+            self._mark_lan_portal_job_progress(
+                str(job_id or "").strip(),
+                phase="qt_displaying",
+                qt_phase="materialize_wait",
+                qt_queue_position=index,
+                qt_queue_size=total,
+                _persist=False,
+            )
+
+    def _queue_lan_portal_materialization(
+        self,
+        job_id: str,
+        *,
+        placeholder_record_id: str = "",
+        real_record_id: str = "",
+    ) -> None:
+        job_id = str(job_id or "").strip()
+        if not job_id:
+            return
+        store = self._lan_portal_materialize_store()
+        store[job_id] = {
+            "job_id": job_id,
+            "placeholder_record_id": str(placeholder_record_id or ""),
+            "real_record_id": str(real_record_id or ""),
+        }
+        self._update_lan_portal_materialize_positions()
+        if not getattr(self, "_lan_portal_materialize_scheduled", False):
+            self._lan_portal_materialize_scheduled = True
+            QTimer.singleShot(
+                self._lan_qt_materialize_wait_ms(),
+                self._flush_lan_portal_materialize_batch,
+            )
+
+    def _flush_lan_portal_materialize_batch(self) -> None:
+        if getattr(self, "_lan_portal_materialize_processing", False):
+            return
+        store = self._lan_portal_materialize_store()
+        if not store:
+            self._lan_portal_materialize_scheduled = False
+            return
+        job_id, payload = next(iter(store.items()))
+        payload = dict(payload or {})
+        store.pop(job_id, None)
+        self._lan_portal_materialize_processing = True
+        self._update_lan_portal_materialize_positions()
+        try:
+            try:
+                active_item_id = self._materialize_deferred_lan_portal_start(
+                    job_id,
+                    placeholder_record_id=str(
+                        payload.get("placeholder_record_id") or ""
+                    ),
+                    real_record_id=str(payload.get("real_record_id") or ""),
+                )
+            except Exception as exc:
+                log_warning(
+                    "局域网维保延迟落地Qt条目失败: "
+                    f"job_id={job_id}, error={exc}"
+                )
+            else:
+                final_record_id = str(
+                    payload.get("real_record_id")
+                    or payload.get("placeholder_record_id")
+                    or ""
+                ).strip()
+                log_info(
+                    "局域网维保延迟落地Qt条目已完成: "
+                    f"job_id={job_id} record_id={final_record_id} active_item_id={active_item_id}"
+                )
+        finally:
+            self._lan_portal_materialize_processing = False
+        if store:
+            self._lan_portal_materialize_scheduled = True
+            QTimer.singleShot(
+                self._lan_qt_action_interval_ms(),
+                self._flush_lan_portal_materialize_batch,
+            )
+        else:
+            self._lan_portal_materialize_scheduled = False
+
+    def _should_defer_lan_portal_start_item(self, work_type: str) -> bool:
+        if str(work_type or "").strip() not in {"maintenance", "change", "repair"}:
+            return False
+        pending_batch = len(getattr(self, "_lan_action_batch", []) or [])
+        if pending_batch >= 2:
+            return True
+        try:
+            from lan_bitable_template_portal.state_store import LanPortalStateStore
+
+            details = LanPortalStateStore().runtime_queue_details() or {}
+            qt_action = details.get("qt_action") if isinstance(details, dict) else {}
+            queued = int((qt_action or {}).get("queued") or 0)
+            processing = int((qt_action or {}).get("processing") or 0)
+            return queued + processing >= 3
+        except Exception:
+            return False
+
+    def _remember_deferred_lan_portal_start(self, job_id: str, data: dict) -> None:
+        job_id = str(job_id or "").strip()
+        if not job_id or not isinstance(data, dict):
+            return
+        self._lan_portal_deferred_store()[job_id] = dict(data)
+
+    def _pop_deferred_lan_portal_start(self, job_id: str) -> dict | None:
+        job_id = str(job_id or "").strip()
+        if not job_id:
+            return None
+        store = self._lan_portal_deferred_store()
+        value = store.pop(job_id, None)
+        return dict(value) if isinstance(value, dict) else None
+
+    def _materialize_deferred_lan_portal_start(
+        self, job_id: str, placeholder_record_id: str = "", real_record_id: str = ""
+    ) -> str:
+        deferred = self._pop_deferred_lan_portal_start(job_id)
+        if not isinstance(deferred, dict):
+            return ""
+        data = dict(deferred)
+        if real_record_id:
+            data["record_id"] = str(real_record_id or "").strip()
+        elif placeholder_record_id:
+            data["record_id"] = str(placeholder_record_id or "").strip()
+        data["_is_placeholder_record"] = False
+        data["_has_unuploaded_changes"] = False
+        data["_pending_upload_hash"] = None
+        data["_upload_in_progress"] = False
+        self._ensure_payload_for_data(data)
+        item, _widget = self.add_active_item(data)
+        if not item or not self._is_valid_list_item(item):
+            return ""
+        list_widget = item.listWidget()
+        try:
+            committed = item.data(Qt.ItemDataRole.UserRole) or data
+        except Exception:
+            committed = data
+        self._rebuild_active_item_widget(
+            list_widget,
+            item,
+            committed,
+            force_status="update",
+            upload_in_progress=False,
+            pending_upload_hash=None,
+            has_unuploaded_changes=False,
+        )
+        if hasattr(self, "schedule_active_cache_save"):
+            self.schedule_active_cache_save(800)
+        else:
+            self.save_active_cache()
+        return str(committed.get("active_item_id") or "")
+
     def _lan_qt_action_interval_ms(self) -> int:
         cached = getattr(self, "_lan_qt_action_interval_cached_ms", None)
         cached_at = float(getattr(self, "_lan_qt_action_interval_cached_at", 0.0) or 0.0)
@@ -136,18 +331,270 @@ class MainWindowRuntimeMixin:
 
     def _on_event_relay_received(self, content: str, status: str, notice_type: str):
         if self.current_screenshot_record_id or self.screenshot_dialog.isVisible():
-            info = extract_event_info(content) or {}
             self._defer_event(
                 {
-                    "content": info.get("content") or content,
-                    "status": status or info.get("status", ""),
-                    "title": info.get("title", ""),
-                    "notice_type": notice_type or info.get("notice_type", ""),
+                    "content": content,
+                    "status": status or "",
+                    "title": "",
+                    "notice_type": notice_type or "",
                     "entry_id": "",
                 }
             )
             return
-        self._process_event(content, status, notice_type)
+        self._submit_notice_text_to_backend_projection(content, source="event_relay")
+
+    def _submit_notice_text_to_backend_projection(
+        self, content: str, *, source: str = "qt", target_record_id: str = ""
+    ) -> dict:
+        text = str(content or "").strip()
+        if not text:
+            return {"ok": False, "error": "内容为空"}
+        controller = getattr(self, "lan_template_portal_controller", None)
+        if controller is None or not hasattr(controller, "post_local_clipboard_event"):
+            message = "本机后端未连接，无法投影通告。"
+            self.show_message(message)
+            return {"ok": False, "error": message}
+        try:
+            result = controller.post_local_clipboard_event(
+                text,
+                ts=int(time.time() * 1000),
+                source=source,
+                target_record_id=target_record_id,
+            )
+            if not isinstance(result, dict):
+                return {"ok": False, "error": "后端返回格式异常"}
+            if not result.get("ok", True):
+                return {"ok": False, "error": str(result.get("error") or "后端未接受")}
+            projection = (
+                result.get("projection") if isinstance(result.get("projection"), dict) else {}
+            )
+            if result.get("ignored") or projection.get("ignored"):
+                return {
+                    "ok": False,
+                    "error": str(
+                        result.get("reason")
+                        or projection.get("reason")
+                        or "不是支持的通告文本。"
+                    ),
+                }
+            try:
+                self._apply_clipboard_projection_result(result)
+            except Exception as exc:
+                log_warning(f"剪贴板投影即时回填 Qt 失败，将等待事件流兜底: {exc}")
+            return {"ok": True, "data": result, "source": source}
+        except Exception as exc:
+            self.show_message(f"通告提交后端失败：{exc}")
+            return {"ok": False, "error": str(exc)}
+
+    def _apply_clipboard_projection_result(self, result: dict | None) -> dict:
+        result = result if isinstance(result, dict) else {}
+        projection = (
+            result.get("projection") if isinstance(result.get("projection"), dict) else {}
+        )
+        if not projection or projection.get("ignored"):
+            return {"ok": True, "skipped": True}
+        item = projection.get("item") if isinstance(projection.get("item"), dict) else None
+        if not item:
+            return {"ok": True, "skipped": True}
+        payload = {"item": item, "source": "clipboard_direct"}
+        enqueue = getattr(self, "_enqueue_ui_mutation", None)
+        if callable(enqueue):
+            enqueue(
+                "clipboard_projection",
+                lambda p=dict(payload): self._apply_backend_active_upsert(p),
+            )
+            return {"ok": True, "queued": True}
+        return self._apply_backend_active_upsert(payload)
+
+    def _build_backend_clipboard_entry(self, payload: dict | None) -> dict | None:
+        payload = payload if isinstance(payload, dict) else {}
+        nested = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+        content = str(payload.get("content") or nested.get("content") or "").strip()
+        if not content:
+            return None
+        info = extract_event_info(content) or {}
+        if not info:
+            return None
+        entry = {
+            "content": info.get("content") or content,
+            "status": info.get("status", ""),
+            "title": info.get("title", ""),
+            "notice_type": info.get("notice_type", ""),
+            "level": info.get("level"),
+            "source": info.get("source", ""),
+            "time_str": info.get("time_str", ""),
+            "unique_key": info.get("unique_key", ""),
+            "ts": int(payload.get("ts") or nested.get("ts") or time.time() * 1000),
+            "entry_id": str(payload.get("candidate_id") or "").strip(),
+        }
+        if not entry["entry_id"] and hasattr(self, "_build_clipboard_entry_id"):
+            try:
+                entry["entry_id"] = self._build_clipboard_entry_id(entry)
+            except Exception:
+                entry["entry_id"] = ""
+        return entry
+
+    def _consume_backend_clipboard_candidate(
+        self, payload: dict | None, *, source: str = "event"
+    ) -> dict:
+        entry = self._build_backend_clipboard_entry(payload)
+        if not isinstance(entry, dict):
+            return {"ok": True, "ignored": True}
+        entry_id = str(entry.get("entry_id") or "").strip()
+        if entry_id:
+            try:
+                if self._is_recent_clipboard_entry(entry_id):
+                    return {"ok": True, "duplicate": True}
+                self._mark_recent_clipboard_entry(entry_id)
+            except Exception:
+                pass
+        if entry_id and not self._has_clipboard_pending_entry(entry_id):
+            self._add_clipboard_pending_entry(entry)
+        enqueue = getattr(self, "_enqueue_ui_mutation", None)
+        if callable(enqueue):
+            enqueue(
+                "clipboard_entry",
+                lambda e=dict(entry): self._on_clipboard_entry_received(e),
+            )
+        else:
+            self._on_clipboard_entry_received(dict(entry))
+        return {"ok": True, "source": source, "entry_id": entry_id}
+
+    def _remember_backend_dialog_session(self, payload: dict | None) -> dict:
+        payload = payload if isinstance(payload, dict) else {}
+        session_id = str(payload.get("session_id") or "").strip()
+        if not session_id:
+            return {"ok": False, "error": "缺少 session_id"}
+        sessions = getattr(self, "_qt_shell_dialog_sessions", None)
+        if not isinstance(sessions, list):
+            sessions = []
+        filtered = [
+            item
+            for item in sessions
+            if str((item or {}).get("session_id") or "").strip() != session_id
+        ]
+        filtered.insert(0, dict(payload))
+        self._qt_shell_dialog_sessions = filtered[:200]
+        return {"ok": True, "session_id": session_id}
+
+    def _apply_backend_active_upsert(self, payload: dict | None) -> dict:
+        payload = payload if isinstance(payload, dict) else {}
+        item_payload = payload.get("item") if isinstance(payload.get("item"), dict) else payload
+        data = item_payload.get("payload") if isinstance(item_payload.get("payload"), dict) else None
+        if data is None:
+            data = item_payload.get("data") if isinstance(item_payload.get("data"), dict) else None
+        if data is None and isinstance(item_payload, dict):
+            data = item_payload
+        if not isinstance(data, dict) or not data.get("text"):
+            return {"ok": False, "error": "active_upsert 缺少有效数据"}
+        data = dict(data)
+        active_item_id = str(
+            data.get("active_item_id") or item_payload.get("active_item_id") or ""
+        ).strip()
+        record_id = str(data.get("record_id") or item_payload.get("record_id") or "").strip()
+        list_widget = None
+        item = None
+        if active_item_id:
+            list_widget, item = self._find_active_item_by_active_item_id(active_item_id)
+        if (not item or not self._is_valid_list_item(item)) and record_id:
+            list_widget, item = self._find_active_item_by_record_id(record_id)
+        if item and self._is_valid_list_item(item):
+            self._set_active_item_data(list_widget, item, data)
+            self._upsert_active_notice_model_item(list_widget, item, data)
+            self._maybe_update_detail_dialog(data, record_id)
+            return {"ok": True, "updated": True}
+        added_item, _ = self.add_active_item(data, insert_top=True, skip_cache=True)
+        return {"ok": bool(added_item), "created": bool(added_item)}
+
+    def _apply_backend_active_delete(self, payload: dict | None) -> dict:
+        payload = payload if isinstance(payload, dict) else {}
+        active_item_id = str(payload.get("active_item_id") or "").strip()
+        record_id = str(payload.get("record_id") or "").strip()
+        list_widget = None
+        item = None
+        if active_item_id:
+            list_widget, item = self._find_active_item_by_active_item_id(active_item_id)
+        if (not item or not self._is_valid_list_item(item)) and record_id:
+            list_widget, item = self._find_active_item_by_record_id(record_id)
+        if item and self._is_valid_list_item(item):
+            self._remove_active_item_from_source(list_widget, item)
+            return {"ok": True, "deleted": True}
+        return {"ok": True, "missing": True}
+
+    def _consume_qt_shell_bootstrap_state(self, payload: dict | None):
+        payload = payload if isinstance(payload, dict) else {}
+        clipboard_candidates = (
+            payload.get("clipboard_candidates")
+            if isinstance(payload.get("clipboard_candidates"), list)
+            else []
+        )
+        dialog_sessions = (
+            payload.get("dialog_sessions")
+            if isinstance(payload.get("dialog_sessions"), list)
+            else []
+        )
+        controller = getattr(self, "lan_template_portal_controller", None)
+        for candidate in clipboard_candidates:
+            if not isinstance(candidate, dict):
+                continue
+            candidate_id = str(candidate.get("candidate_id") or "").strip()
+            if (
+                candidate_id
+                and controller is not None
+                and hasattr(controller, "acknowledge_clipboard_candidate")
+            ):
+                try:
+                    controller.acknowledge_clipboard_candidate(
+                        candidate_id,
+                        ok=True,
+                        status="backend_projected",
+                    )
+                except Exception:
+                    pass
+        for session in dialog_sessions:
+            if not isinstance(session, dict):
+                continue
+            self._remember_backend_dialog_session(session)
+
+    def handle_qt_shell_event(self, kind: str, payload: dict | None = None) -> dict:
+        kind = str(kind or "").strip()
+        if kind == "clipboard_candidate":
+            return {"ok": True, "ignored": True, "reason": "clipboard 解析由后端投影"}
+        if kind == "dialog_request":
+            return self._remember_backend_dialog_session(payload)
+        if kind == "clipboard_status":
+            if isinstance(payload, dict):
+                try:
+                    self._clipboard_last_restore_failure_reason = str(
+                        payload.get("detail") or ""
+                    ).strip()
+                    self._refresh_clipboard_toggle_ui()
+                except Exception:
+                    pass
+            return {"ok": True}
+        if kind == "active_upsert":
+            enqueue = getattr(self, "_enqueue_ui_mutation", None)
+            if callable(enqueue):
+                result_holder = {}
+
+                def _run():
+                    result_holder.update(self._apply_backend_active_upsert(payload))
+
+                enqueue("active_upsert", _run)
+                return {"ok": True, "queued": True}
+            return self._apply_backend_active_upsert(payload)
+        if kind == "active_delete":
+            enqueue = getattr(self, "_enqueue_ui_mutation", None)
+            if callable(enqueue):
+                enqueue(
+                    "active_delete",
+                    lambda p=dict(payload or {}): self._apply_backend_active_delete(p),
+                )
+                return {"ok": True, "queued": True}
+            return self._apply_backend_active_delete(payload)
+        if kind in {"history_append", "status_banner"}:
+            return {"ok": True}
+        return {"ok": True, "ignored": True}
 
     def _stop_event_relay_bridge(self):
         bridge = getattr(self, "_event_relay_bridge", None)
@@ -305,10 +752,9 @@ class MainWindowRuntimeMixin:
             log_warning("局域网模板通告回填失败: 无法解析为通告")
             self.show_message("局域网模板通告无法解析，未加入主界面。")
             return
-        self._process_event(
+        self._submit_notice_text_to_backend_projection(
             info.get("content") or text,
-            info.get("status", ""),
-            info.get("notice_type", ""),
+            source="lan_template_notice",
         )
         log_info(
             "局域网模板通告已加入主界面: "
@@ -741,15 +1187,23 @@ class MainWindowRuntimeMixin:
             return {"ok": False, "error": "该条目正在上传，请等待完成后再删除。"}
         remote_deleted = False
         remote_message = ""
-        notice_type = str(data.get("notice_type") or "").strip()
-        if record_id and not self._is_placeholder_record(data):
-            ok, remote_message = delete_bitable_record(record_id, notice_type)
-            if not ok:
-                return {
-                    "ok": False,
-                    "error": f"多维记录删除失败，Qt 条目已保留：{remote_message}",
-                }
-            remote_deleted = True
+        controller = getattr(self, "lan_template_portal_controller", None)
+        if controller is None or not hasattr(controller, "submit_qt_command"):
+            return {"ok": False, "error": "本机后端未连接，Qt 不再直接执行多维删除。"}
+        try:
+            result = controller.submit_qt_command(
+                "delete_active_item",
+                {"data_dict": dict(data)},
+            )
+        except Exception as exc:
+            return {"ok": False, "error": f"本机后端删除失败：{exc}"}
+        if not bool((result or {}).get("ok")):
+            return {
+                "ok": False,
+                "error": f"多维记录删除失败，Qt 条目已保留：{str((result or {}).get('message') or '')}",
+            }
+        remote_deleted = True
+        remote_message = str((result or {}).get("message") or "")
         self._clear_upload_queue(record_id)
         self._today_in_progress_pending_record_ids.discard(record_id)
         self._today_in_progress_synced_record_ids.discard(record_id)
@@ -946,12 +1400,28 @@ class MainWindowRuntimeMixin:
             qt_queue_position=0,
             qt_queue_size=len(batch),
         )
+        result_active_item_id = ""
         if hasattr(self, "_begin_defer_active_cache_save"):
             self._begin_defer_active_cache_save()
         try:
             try:
-                self._execute_lan_maintenance_action(payload or {})
+                result = self._execute_lan_maintenance_action(payload or {})
+                if isinstance(result, dict):
+                    result_active_item_id = str(result.get("active_item_id") or "")
                 cache_dirty = True
+                if bool((payload or {}).get("ui_only")):
+                    final_record_id = str(
+                        (payload or {}).get("target_record_id")
+                        or (payload or {}).get("record_id")
+                        or ""
+                    ).strip()
+                    self._mark_lan_portal_job_result(
+                        job_id,
+                        success=True,
+                        message=final_record_id,
+                        record_id=final_record_id,
+                        active_item_id=result_active_item_id,
+                    )
             except Exception as exc:
                 log_error(f"局域网维保动作执行失败: job_id={job_id}, error={exc}")
                 self._mark_lan_portal_job_result(
@@ -1099,6 +1569,14 @@ class MainWindowRuntimeMixin:
                 f"name={name} record_id={record_id} real_record_id={real_record_id}"
             )
             return
+        if success and name == "上传" and not active_item_id:
+            self._queue_lan_portal_materialization(
+                job_id,
+                placeholder_record_id=record_id,
+                real_record_id=real_record_id,
+            )
+        else:
+            self._pop_deferred_lan_portal_start(job_id)
         final_record_id = str(real_record_id or record_id or "").strip()
         self._mark_lan_portal_job_result(
             job_id,
@@ -1159,6 +1637,102 @@ class MainWindowRuntimeMixin:
                     return data
         return None
 
+    def _apply_lan_portal_ui_only_action(
+        self,
+        *,
+        payload: dict,
+        action: str,
+        text: str,
+        info: dict,
+        notice_type: str,
+        work_type: str,
+        buildings: list[str],
+        specialty: str,
+        level: str,
+    ) -> None:
+        time_str = info.get("time_str") or ""
+        source_record_id = str(
+            payload.get("source_record_id") or payload.get("record_id") or ""
+        ).strip()
+        target_record_id = str(
+            payload.get("target_record_id") or payload.get("record_id") or ""
+        ).strip()
+        base_data = {
+            "record_id": target_record_id,
+            "text": info.get("content") or text,
+            "notice_type": notice_type,
+            "time_str": time_str,
+            "buildings": buildings,
+            "specialty": specialty,
+            "level": level,
+            "maintenance_cycle": str(payload.get("maintenance_cycle") or ""),
+            "_has_unuploaded_changes": False,
+            "_pending_upload_hash": None,
+            "_upload_in_progress": False,
+            "_is_placeholder_record": False,
+            "lan_source_record_id": source_record_id,
+            "lan_source_app_token": str(payload.get("source_app_token") or ""),
+            "lan_source_table_id": str(payload.get("source_table_id") or ""),
+            "lan_work_type": work_type,
+            "lan_created_from_portal": True,
+            "lan_zhihang_record_id": str(payload.get("zhihang_record_id") or ""),
+            "lan_zhihang_title": str(payload.get("zhihang_title") or ""),
+            "lan_zhihang_progress": str(payload.get("zhihang_progress") or ""),
+        }
+        self._ensure_payload_for_data(base_data)
+        active_item_id = str(payload.get("active_item_id") or "").strip()
+        list_widget = None
+        item = None
+        if active_item_id:
+            list_widget, item = self._find_active_item_by_active_item_id(active_item_id)
+        if (not item or not self._is_valid_list_item(item)) and target_record_id:
+            list_widget, item = self._find_active_item_by_record_id(target_record_id)
+        if action == "start":
+            if item and self._is_valid_list_item(item):
+                committed = self._commit_active_record(
+                    {**dict(item.data(Qt.ItemDataRole.UserRole) or {}), **base_data},
+                    refresh_detail=False,
+                    rebuild_widget=True,
+                    list_widget=list_widget,
+                    item=item,
+                ) or base_data
+            else:
+                item, _widget = self.add_active_item(base_data)
+                if not item or not self._is_valid_list_item(item):
+                    raise RuntimeError("Qt 主界面创建门户条目失败。")
+                committed = item.data(Qt.ItemDataRole.UserRole) or base_data
+            if hasattr(self, "schedule_active_cache_save"):
+                self.schedule_active_cache_save(800)
+            else:
+                self.save_active_cache()
+            return {"active_item_id": str((committed or {}).get("active_item_id") or "")}
+
+        if (
+            (not item or not self._is_valid_list_item(item))
+            and target_record_id
+        ):
+            item, _widget = self.add_active_item(base_data)
+            if item and self._is_valid_list_item(item):
+                list_widget = item.listWidget()
+        if not item or not self._is_valid_list_item(item):
+            raise RuntimeError("Qt 主界面未找到待更新条目。")
+        current = dict(item.data(Qt.ItemDataRole.UserRole) or {})
+        current.update(base_data)
+        committed = self._commit_active_record(
+            current,
+            refresh_detail=False,
+            rebuild_widget=True,
+            list_widget=list_widget,
+            item=item,
+        ) or current
+        if action == "end":
+            self._do_move_to_history(item, committed, track_rollback=False)
+        elif hasattr(self, "schedule_active_cache_save"):
+            self.schedule_active_cache_save(800)
+        else:
+            self.save_active_cache()
+        return {"active_item_id": str((committed or {}).get("active_item_id") or active_item_id)}
+
     def _execute_lan_maintenance_action(self, payload: dict):
         job_id = str(payload.get("job_id") or "").strip()
         action = str(payload.get("action") or "").strip().lower()
@@ -1197,6 +1771,20 @@ class MainWindowRuntimeMixin:
             buildings = [building] if building else []
         level = str(payload.get("level") or info.get("level") or "").strip()
 
+        if bool(payload.get("ui_only")):
+            return self._apply_lan_portal_ui_only_action(
+                payload=payload,
+                action=action,
+                text=text,
+                info=info,
+                notice_type=notice_type,
+                work_type=work_type,
+                buildings=buildings,
+                specialty=specialty,
+                level=level,
+            )
+            return
+
         if action == "start":
             duplicate = self._find_lan_maintenance_duplicate_start(
                 str(payload.get("record_id") or ""),
@@ -1232,11 +1820,16 @@ class MainWindowRuntimeMixin:
                 "lan_zhihang_progress": str(payload.get("zhihang_progress") or ""),
             }
             self._ensure_payload_for_data(data)
-            item, _ = self.add_active_item(data)
-            if not item:
-                raise RuntimeError("主界面创建通告条目失败。")
-            committed = item.data(Qt.ItemDataRole.UserRole) or data
-            active_item_id = str(committed.get("active_item_id") or "")
+            active_item_id = ""
+            committed = data
+            if self._should_defer_lan_portal_start_item(work_type):
+                self._remember_deferred_lan_portal_start(job_id, data)
+            else:
+                item, _ = self.add_active_item(data)
+                if not item:
+                    raise RuntimeError("主界面创建通告条目失败。")
+                committed = item.data(Qt.ItemDataRole.UserRole) or data
+                active_item_id = str(committed.get("active_item_id") or "")
             self._register_lan_portal_upload_job(job_id, placeholder_id, active_item_id)
             self.do_feishu_upload(
                 committed,
@@ -1434,6 +2027,12 @@ class MainWindowRuntimeMixin:
                         controller.set_maintenance_action_callback(
                             self.enqueue_lan_maintenance_action
                         )
+                    if hasattr(controller, "set_shell_event_callback") and hasattr(
+                        self, "handle_qt_shell_event"
+                    ):
+                        controller.set_shell_event_callback(
+                            self.handle_qt_shell_event
+                        )
                 except Exception:
                     controller.host = current_host
                     controller.preferred_port = current_port
@@ -1454,6 +2053,12 @@ class MainWindowRuntimeMixin:
                         if hasattr(controller, "set_maintenance_action_callback"):
                             controller.set_maintenance_action_callback(
                                 self.enqueue_lan_maintenance_action
+                            )
+                        if hasattr(controller, "set_shell_event_callback") and hasattr(
+                            self, "handle_qt_shell_event"
+                        ):
+                            controller.set_shell_event_callback(
+                                self.handle_qt_shell_event
                             )
                     except Exception:
                         self.lan_template_portal_url = previous_url

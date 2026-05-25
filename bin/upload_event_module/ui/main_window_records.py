@@ -27,7 +27,7 @@ from .display_state import (
     notice_supports_level_lock,
 )
 from .active_notice_store import ActiveNoticeStore
-from .active_notice_model import ActiveNoticeModel
+from .active_notice_model import ActiveNoticeModel, ActiveNoticeModelItem
 
 class MainWindowRecordsMixin:
     _EVENT_TIMER_STATE_FIELDS = (
@@ -221,7 +221,9 @@ class MainWindowRecordsMixin:
         return widget
 
     def _safe_item_widget(self, list_widget, item):
-        if not list_widget or not item:
+        if list_widget is None or item is None:
+            return None
+        if isinstance(item, ActiveNoticeModelItem):
             return None
         try:
             if sip.isdeleted(list_widget):
@@ -266,9 +268,89 @@ class MainWindowRecordsMixin:
             setattr(self, attr, model)
         return model
 
+    def _active_model_item(self, list_widget, data_dict: dict | None):
+        model = self._active_notice_model_for_list(list_widget)
+        identity = ActiveNoticeModel.identity_for_record(data_dict)
+        if model is None or not identity:
+            return None
+        if model.row_for_identity(identity) < 0:
+            return None
+        return ActiveNoticeModelItem(list_widget, model, identity)
+
+    def _active_item_row(self, list_widget, item) -> int:
+        if isinstance(item, ActiveNoticeModelItem):
+            return item.row()
+        if list_widget is None or item is None:
+            return -1
+        try:
+            return list_widget.row(item)
+        except Exception:
+            return -1
+
+    def _active_item_data(self, item):
+        if not item:
+            return None
+        try:
+            data = item.data(Qt.ItemDataRole.UserRole)
+        except Exception:
+            data = None
+        return dict(data) if isinstance(data, dict) else None
+
+    def _set_active_item_data(self, list_widget, item, data_dict: dict) -> bool:
+        if item is None or not isinstance(data_dict, dict):
+            return False
+        try:
+            return bool(item.setData(Qt.ItemDataRole.UserRole, dict(data_dict)))
+        except Exception:
+            return False
+
+    def _remove_active_item_from_source(self, list_widget, item) -> bool:
+        if list_widget is None or item is None:
+            return False
+        if isinstance(item, ActiveNoticeModelItem):
+            model = self._active_notice_model_for_list(list_widget)
+            data = self._active_item_data(item)
+            if model is None or not isinstance(data, dict):
+                return False
+            return bool(model.remove_record(data))
+        row = self._active_item_row(list_widget, item)
+        if row < 0:
+            return False
+        try:
+            list_widget.takeItem(row)
+            return True
+        except Exception:
+            return False
+
+    def _move_active_item_to_row(self, list_widget, item, target_row: int) -> bool:
+        if list_widget is None or item is None:
+            return False
+        target_row = max(0, int(target_row or 0))
+        if isinstance(item, ActiveNoticeModelItem):
+            model = self._active_notice_model_for_list(list_widget)
+            if model is None:
+                return False
+            return bool(model.move_record(item.identity(), target_row))
+        row = self._active_item_row(list_widget, item)
+        if row < 0:
+            return False
+        if row == target_row:
+            return True
+        widget = self._safe_item_widget(list_widget, item)
+        try:
+            list_widget.takeItem(row)
+            list_widget.insertItem(target_row, item)
+            if widget:
+                list_widget.setItemWidget(item, widget)
+            return True
+        except Exception:
+            return False
+
     def _sync_active_notice_model_for_list(self, list_widget) -> None:
         model = self._active_notice_model_for_list(list_widget)
-        if model is None or not list_widget:
+        if model is None or list_widget is None:
+            return
+        if self._active_model_view_visible():
             return
         records = []
         try:
@@ -293,20 +375,14 @@ class MainWindowRecordsMixin:
 
     def _upsert_active_notice_model_item(self, list_widget, item, data_dict=None) -> None:
         model = self._active_notice_model_for_list(list_widget)
-        if model is None or not list_widget or not item:
+        if model is None or list_widget is None or item is None:
             return
-        try:
-            row = list_widget.row(item)
-        except Exception:
-            row = -1
+        row = self._active_item_row(list_widget, item)
         if row < 0:
             return
         data = data_dict
         if not isinstance(data, dict):
-            try:
-                data = item.data(Qt.ItemDataRole.UserRole)
-            except Exception:
-                data = None
+            data = self._active_item_data(item)
         if isinstance(data, dict):
             model.upsert_record(dict(data), row=row)
 
@@ -382,14 +458,13 @@ class MainWindowRecordsMixin:
         return max(0, top - buffer_rows), min(count - 1, bottom + buffer_rows)
 
     def _active_item_in_virtual_range(self, list_widget, item) -> bool:
-        if not list_widget or not item or not self._is_valid_list_item(item):
+        if list_widget is None or item is None or not self._is_valid_list_item(item):
             return False
         start, end = self._active_list_visible_row_bounds(list_widget)
         if end < start:
             return False
-        try:
-            row = list_widget.row(item)
-        except Exception:
+        row = self._active_item_row(list_widget, item)
+        if row < 0:
             return False
         return start <= row <= end
 
@@ -495,7 +570,7 @@ class MainWindowRecordsMixin:
         widget = self._safe_item_widget(list_widget, item)
         if widget:
             return widget
-        if not list_widget or not item or not self._is_valid_list_item(item):
+        if list_widget is None or item is None or not self._is_valid_list_item(item):
             return None
         data = item.data(Qt.ItemDataRole.UserRole)
         if not isinstance(data, dict):
@@ -737,7 +812,7 @@ class MainWindowRecordsMixin:
         pending_upload_hash: str | None = None,
         has_unuploaded_changes: bool | None = None,
     ):
-        if not list_widget or not item or not data_dict:
+        if list_widget is None or item is None or not data_dict:
             return None
         if not self._is_valid_list_item(item):
             return None
@@ -900,19 +975,14 @@ class MainWindowRecordsMixin:
             return "active_event"
         if list_widget is self.list_active_other:
             return "active_other"
-        if list_widget is self.list_history_event:
-            return "history_event"
-        if list_widget is self.list_history_other:
-            return "history_other"
         return getattr(list_widget, "objectName", lambda: "")() or "unknown_list"
 
     def _debug_list_item(self, list_widget, item):
-        row = None
-        try:
-            if list_widget and item:
-                row = list_widget.row(item)
-        except Exception:
-            row = None
+        row = (
+            self._active_item_row(list_widget, item)
+            if list_widget is not None and item is not None
+            else None
+        )
         widget = None
         try:
             widget = self._safe_item_widget(list_widget, item)
@@ -1365,6 +1435,8 @@ class MainWindowRecordsMixin:
         )
 
     def _schedule_record_binding_validation(self, data_dict: dict | None):
+        if os.environ.get("CLIPFLOW_QT_REMOTE_VALIDATION", "0") != "1":
+            return
         if bool(getattr(self, "_active_cache_restore_in_progress", False)):
             return
         if not isinstance(data_dict, dict):
@@ -1687,14 +1759,14 @@ class MainWindowRecordsMixin:
         )
 
     def _remove_active_item_widget_only(self, list_widget, item):
-        if not list_widget or not item or not self._is_valid_list_item(item):
+        if list_widget is None or item is None or not self._is_valid_list_item(item):
             return
-        try:
-            data = item.data(Qt.ItemDataRole.UserRole)
-        except Exception:
-            data = None
+        data = self._active_item_data(item)
         if isinstance(data, dict):
             self._remove_active_notice_model_record(data)
+        if isinstance(item, ActiveNoticeModelItem):
+            self._remove_active_item_from_source(list_widget, item)
+            return
         try:
             widget = list_widget.itemWidget(item)
         except Exception:
@@ -1704,7 +1776,7 @@ class MainWindowRecordsMixin:
         except Exception:
             pass
         try:
-            row = list_widget.row(item)
+            row = self._active_item_row(list_widget, item)
             if row != -1:
                 list_widget.takeItem(row)
         except Exception:
@@ -1979,6 +2051,11 @@ class MainWindowRecordsMixin:
                     time.sleep(min(2.0, interval))
 
     def _run_today_in_progress_sync(self, data_dict: dict | None):
+        if os.environ.get("CLIPFLOW_QT_REMOTE_VALIDATION", "0") != "1":
+            record_id = str((data_dict or {}).get("record_id") or "").strip()
+            if record_id:
+                self._today_in_progress_pending_record_ids.discard(record_id)
+            return
         data_dict = dict(data_dict or {})
         record_id = str(data_dict.get("record_id") or "").strip()
         notice_type = str(data_dict.get("notice_type") or "").strip()
@@ -2079,13 +2156,30 @@ class MainWindowRecordsMixin:
         self._today_in_progress_pending_record_ids.add(record_id)
         field_name = self._get_today_in_progress_field_name(notice_type)
         field_value = self._today_in_progress_option_for_state(desired_state)
+        controller = getattr(self, "lan_template_portal_controller", None)
+        if controller is None or not hasattr(controller, "submit_qt_command"):
+            self._today_in_progress_pending_record_ids.discard(record_id)
+            if widget and hasattr(widget, "set_today_progress_state"):
+                widget.set_today_progress_state(current_state, enabled=True)
+            self.show_message("本机后端未连接，Qt 不再直接执行多维字段更新。")
+            return
 
         def worker():
-            success, result = update_bitable_record_fields(
-                record_id,
-                notice_type,
-                {field_name: field_value},
-            )
+            try:
+                result_payload = controller.submit_qt_command(
+                    "set_today_in_progress",
+                    {
+                        "record_id": record_id,
+                        "notice_type": notice_type,
+                        "field_name": field_name,
+                        "field_value": field_value,
+                    },
+                )
+                success = bool((result_payload or {}).get("ok"))
+                result = str((result_payload or {}).get("message") or "")
+            except Exception as exc:
+                success = False
+                result = str(exc)
 
             def apply_result():
                 self._today_in_progress_pending_record_ids.discard(record_id)
@@ -2222,13 +2316,10 @@ class MainWindowRecordsMixin:
             or normalized
         )
 
-        if not list_widget or not item:
+        if list_widget is None or item is None:
             list_widget, item = self._find_active_item_by_record_id(record_id)
         if item and self._is_valid_list_item(item):
-            try:
-                item.setData(Qt.ItemDataRole.UserRole, committed)
-            except Exception:
-                pass
+            self._set_active_item_data(list_widget, item, committed)
             self._upsert_active_notice_model_item(list_widget, item, committed)
             if rebuild_widget:
                 self._rebuild_active_item_widget(
@@ -2351,7 +2442,7 @@ class MainWindowRecordsMixin:
         QTimer.singleShot(150, _run)
 
     def _apply_cache_to_item(self, list_widget, item, cache_data: dict):
-        if not list_widget or not item or not cache_data:
+        if list_widget is None or item is None or not cache_data:
             return
         self._rebuild_active_item_widget(
             list_widget,
@@ -2364,6 +2455,8 @@ class MainWindowRecordsMixin:
         )
 
     def _repair_missing_item_widgets(self):
+        if self._active_model_view_visible():
+            return 0
         if self._active_list_virtualization_enabled():
             self._schedule_active_list_virtualization_refresh(None, 0)
             return 0
@@ -2516,14 +2609,18 @@ class MainWindowRecordsMixin:
             else self.list_active_other
         )
 
-    def _get_history_list_for_notice(self, notice_type):
-        return (
-            self.list_history_event
-            if self._is_event_notice(notice_type)
-            else self.list_history_other
-        )
-
     def _iter_active_items(self):
+        if self._active_model_view_visible():
+            for list_widget in (self.list_active_event, self.list_active_other):
+                model = self._active_notice_model_for_list(list_widget)
+                if model is None:
+                    continue
+                for record in model.records():
+                    item = self._active_model_item(list_widget, record)
+                    if item is None or not item.is_valid():
+                        continue
+                    yield list_widget, item
+            return
         for list_widget in (self.list_active_event, self.list_active_other):
             for i in range(list_widget.count()):
                 item = list_widget.item(i)
@@ -2532,12 +2629,7 @@ class MainWindowRecordsMixin:
                 yield list_widget, item
 
     def _iter_history_items(self):
-        for list_widget in (self.list_history_event, self.list_history_other):
-            for i in range(list_widget.count()):
-                item = list_widget.item(i)
-                if not self._is_valid_list_item(item):
-                    continue
-                yield list_widget, item
+        return iter(())
 
     def _active_notice_store(self) -> ActiveNoticeStore:
         store = getattr(self, "_active_notice_store_obj", None)
@@ -3130,6 +3222,8 @@ class MainWindowRecordsMixin:
     def _is_valid_list_item(self, item) -> bool:
         if item is None:
             return False
+        if isinstance(item, ActiveNoticeModelItem):
+            return item.is_valid()
         try:
             list_widget = item.listWidget()
         except Exception:
@@ -3158,6 +3252,25 @@ class MainWindowRecordsMixin:
         notice_type = self._get_notice_type(data_dict)
         self._ensure_payload_for_data(data_dict)
         list_widget = self._get_active_list_for_notice(notice_type)
+        if self._active_model_view_visible():
+            model = self._active_notice_model_for_list(list_widget)
+            if model is None:
+                return None, None
+            row = 0 if insert_top else model.rowCount()
+            model.upsert_record(dict(data_dict), row=row)
+            item = self._active_model_item(list_widget, data_dict)
+            if item is None:
+                return None, None
+            self._schedule_today_in_progress_sync(data_dict)
+            self._schedule_record_binding_validation(data_dict)
+            self._schedule_active_route_reconcile(data_dict)
+            if not skip_cache:
+                if not (
+                    hasattr(self, "_upsert_active_cache_record")
+                    and self._upsert_active_cache_record(data_dict)
+                ):
+                    self.save_active_cache()
+            return item, None
         item = QListWidgetItem()
         widget = None
         widgets_required = self._active_item_widgets_required()
@@ -3304,7 +3417,7 @@ class MainWindowRecordsMixin:
             if item and not self._is_valid_list_item(item):
                 item = None
                 list_widget = None
-            if list_widget and item:
+            if list_widget is not None and item is not None:
                 data = item.data(Qt.ItemDataRole.UserRole) or {}
                 if not success:
                     rollback = self.pending_upload_rollback_by_record_id.pop(

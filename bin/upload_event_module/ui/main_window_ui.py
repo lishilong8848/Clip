@@ -10,7 +10,6 @@ from PyQt6.QtWidgets import (
     QLabel,
     QListView,
     QListWidget,
-    QListWidgetItem,
     QStackedWidget,
     QSystemTrayIcon,
     QStyle,
@@ -26,7 +25,6 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import (
     Qt,
     QTimer,
-    QSize,
     QPropertyAnimation,
     QEasingCurve,
 )
@@ -40,7 +38,6 @@ from ..core.parser import extract_event_info
 from ..core.speech import speech_manager
 from lan_bitable_template_portal.state_store import LanPortalStateStore
 from .styles import get_stylesheet
-from .widgets import HistoryItemWidget
 from .dialogs import AddDialog
 from .active_notice_delegate import ActiveNoticeDelegate
 from .display_state import normalize_active_item_data
@@ -110,11 +107,6 @@ class MainWindowUiMixin:
         container_layout.addWidget(notice_tab_container)
 
         nav_layout = QHBoxLayout()
-        self.nav_btn = QPushButton("历史")
-        self.nav_btn.setObjectName("NavBtn")
-        self.nav_btn.setFixedSize(50, 36)
-        self.nav_btn.clicked.connect(self.toggle_view_mode)
-
         self.patch_btn = QPushButton("更新")
         self.patch_btn.setObjectName("PatchBtn")
         self.patch_btn.setFixedSize(50, 36)
@@ -128,13 +120,6 @@ class MainWindowUiMixin:
         self.title_label = QLabel("剪贴板助手")
         self.title_label.setObjectName("TitleLabel")
         self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        self.clear_btn = QPushButton("清空")
-        self.clear_btn.setObjectName("ClearBtn")
-        self.clear_btn.setFixedSize(50, 36)
-        self.clear_btn.setToolTip("清空历史记录")
-        self.clear_btn.clicked.connect(self.clear_history_action)
-        self.clear_btn.hide()
 
         self.add_btn = QPushButton("手动添加")
         self.add_btn.setObjectName("AddBtn")
@@ -160,14 +145,12 @@ class MainWindowUiMixin:
         self.minimize_btn.setToolTip("最小化")
         self.minimize_btn.clicked.connect(self.hide)
 
-        nav_layout.addWidget(self.nav_btn)
         nav_layout.addWidget(self.patch_btn)
         nav_layout.addWidget(self.title_label, 1)
         nav_layout.addWidget(self.theme_btn)
         nav_layout.addWidget(self.minimize_btn)
         nav_layout.addWidget(self.preview_btn)
         nav_layout.addWidget(self.add_btn)
-        nav_layout.addWidget(self.clear_btn)
 
         self.stack = QStackedWidget()
         self.active_container = QWidget()
@@ -193,21 +176,7 @@ class MainWindowUiMixin:
             self.active_stack.addWidget(self.list_active_other)
         active_layout.addWidget(self.active_stack)
 
-        self.history_container = QWidget()
-        history_layout = QVBoxLayout(self.history_container)
-        history_layout.setContentsMargins(0, 0, 0, 0)
-
-        self.history_stack = QStackedWidget()
-        self.list_history_event = QListWidget()
-        self._init_list_widget(self.list_history_event)
-        self.list_history_other = QListWidget()
-        self._init_list_widget(self.list_history_other)
-        self.history_stack.addWidget(self.list_history_event)
-        self.history_stack.addWidget(self.list_history_other)
-        history_layout.addWidget(self.history_stack)
-
         self.stack.addWidget(self.active_container)
-        self.stack.addWidget(self.history_container)
         container_layout.addLayout(nav_layout)
         container_layout.addWidget(self.stack)
 
@@ -290,9 +259,7 @@ class MainWindowUiMixin:
         return self.list_active_event if is_event else self.list_active_other
 
     def _current_visible_content_widget(self):
-        if self._is_active_view():
-            return self._active_stack_widget_for_tab(self.notice_tab == "event")
-        return self._current_list_widget()
+        return self._active_stack_widget_for_tab(self.notice_tab == "event")
 
     def _active_view_for_backing_list(self, list_widget):
         if not self._active_model_view_visible():
@@ -305,13 +272,13 @@ class MainWindowUiMixin:
 
     def _scroll_active_model_view_to_item(self, list_widget, item):
         view = self._active_view_for_backing_list(list_widget)
-        if not view or not item or not self._is_valid_list_item(item):
+        if view is None or item is None or not self._is_valid_list_item(item):
             return
         model = view.model()
         if model is None:
             return
         try:
-            row = list_widget.row(item)
+            row = self._active_item_row(list_widget, item)
             if row < 0:
                 return
             index = model.index(row, 0)
@@ -362,10 +329,7 @@ class MainWindowUiMixin:
     def _active_model_current_data(self, backing_list: QListWidget, data_dict: dict):
         item = self._active_model_backing_item(backing_list, data_dict)
         if item and self._is_valid_list_item(item):
-            try:
-                current = item.data(Qt.ItemDataRole.UserRole)
-            except Exception:
-                current = None
+            current = self._active_item_data(item)
             if isinstance(current, dict):
                 return item, current
         return item, data_dict if isinstance(data_dict, dict) else {}
@@ -406,16 +370,10 @@ class MainWindowUiMixin:
             self._delete_active_item(dict(current))
 
     def _current_list_widget(self):
-        if self._is_active_view():
-            return (
-                self.list_active_event
-                if self.notice_tab == "event"
-                else self.list_active_other
-            )
         return (
-            self.list_history_event
+            self.list_active_event
             if self.notice_tab == "event"
-            else self.list_history_other
+            else self.list_active_other
         )
 
     def _refresh_tab_button(self, button):
@@ -435,9 +393,6 @@ class MainWindowUiMixin:
         self._refresh_tab_button(self.other_tab_btn)
 
         self.active_stack.setCurrentWidget(self._active_stack_widget_for_tab(is_event))
-        self.history_stack.setCurrentWidget(
-            self.list_history_event if is_event else self.list_history_other
-        )
         current_list = self._current_list_widget()
         self._fade_in_widget(self._current_visible_content_widget())
         if hasattr(self, "_schedule_active_list_virtualization_refresh"):
@@ -475,29 +430,27 @@ class MainWindowUiMixin:
         widget._fade_anim = anim
 
     def _pin_item_to_top(self, list_widget, item):
-        if not list_widget or not item:
+        if list_widget is None or item is None:
             return
         if not self._is_valid_list_item(item):
             return
-        try:
-            row = list_widget.row(item)
-        except Exception:
-            return
+        row = self._active_item_row(list_widget, item)
         if row == -1:
             return
         if row <= 0:
             return
-        widget = self._safe_item_widget(list_widget, item)
-        list_widget.takeItem(row)
-        list_widget.insertItem(0, item)
-        if widget:
-            list_widget.setItemWidget(item, widget)
-        if hasattr(self, "_sync_active_notice_model_for_list"):
-            self._sync_active_notice_model_for_list(list_widget)
+        if not self._move_active_item_to_row(list_widget, item, 0):
+            return
         try:
-            list_widget.setCurrentItem(item)
-            list_widget.scrollToItem(item)
-            self._scroll_active_model_view_to_item(list_widget, item)
+            view = self._active_view_for_backing_list(list_widget)
+            if view is not None:
+                index = view.model().index(0, 0)
+                view.setCurrentIndex(index)
+                view.scrollTo(index)
+            else:
+                list_widget.setCurrentItem(item)
+                list_widget.scrollToItem(item)
+                self._scroll_active_model_view_to_item(list_widget, item)
         except Exception:
             return
         if hasattr(self, "_schedule_active_list_virtualization_refresh"):
@@ -505,19 +458,9 @@ class MainWindowUiMixin:
             self._schedule_active_list_virtualization_refresh(list_widget, 250)
 
     def _set_view_mode(self, active):
-        if active:
-            self.stack.setCurrentWidget(self.active_container)
-            self.title_label.setText("剪贴板助手")
-            self.nav_btn.setText("历史")
-            self.clear_btn.hide()
-            self.add_btn.show()
-        else:
-            self.reload_history_view()
-            self.stack.setCurrentWidget(self.history_container)
-            self.title_label.setText("已结束的剪贴板")
-            self.nav_btn.setText("返回")
-            self.clear_btn.show()
-            self.add_btn.hide()
+        self.stack.setCurrentWidget(self.active_container)
+        self.title_label.setText("剪贴板助手")
+        self.add_btn.show()
         current_list = self._current_list_widget()
         self._fade_in_widget(self._current_visible_content_widget())
         if hasattr(self, "_schedule_active_list_virtualization_refresh"):
@@ -555,11 +498,14 @@ class MainWindowUiMixin:
             widget.trigger_flash()
         if list_widget is not None and item is not None:
             try:
-                if list_widget.row(item) != -1:
-                    list_widget.scrollToItem(item)
-                    self._scroll_active_model_view_to_item(list_widget, item)
-                    if hasattr(self, "_schedule_active_list_virtualization_refresh"):
-                        self._schedule_active_list_virtualization_refresh(list_widget, 0)
+                if self._active_item_row(list_widget, item) != -1:
+                    if self._active_model_view_visible():
+                        self._scroll_active_model_view_to_item(list_widget, item)
+                    else:
+                        list_widget.scrollToItem(item)
+                        self._scroll_active_model_view_to_item(list_widget, item)
+                        if hasattr(self, "_schedule_active_list_virtualization_refresh"):
+                            self._schedule_active_list_virtualization_refresh(list_widget, 0)
             except Exception:
                 return
 
@@ -690,29 +636,15 @@ class MainWindowUiMixin:
         if not text:
             self.show_message("暂无可使用的剪贴板内容。")
             return
-        info = extract_event_info(text)
-        if not info:
+        result = self._submit_notice_text_to_backend_projection(
+            text,
+            source="manual_clipboard",
+        )
+        if not result.get("ok"):
             hint = "当前内容未识别为有效通告，请检查格式后再确认添加。"
-            self.show_message(hint)
+            self.show_message(str(result.get("error") or hint))
             return
-
-        cleaned_content = info.get("content") or text
-        status = str(info.get("status") or "").strip()
-        notice_type = info.get("notice_type", "")
-
-        if status in ("更新", "结束") and not self._manual_update_has_target(
-            cleaned_content
-        ):
-            hint = (
-                "未在列表中找到对应条目，请检查内容。"
-                "如需按记录定位，请改为更新并填写 record_id。"
-            )
-            self.show_message(hint)
-            self._open_manual_add_prefilled(text, hint)
-            return
-
-        entry = self._build_clipboard_entry(text) or None
-        self._process_event(cleaned_content, status, notice_type, entry=entry)
+        self.show_message("通告已提交后端处理。")
 
     def _use_last_clipboard_snapshot(self, content: str = ""):
         block_reason = self._clipboard_preview_use_block_reason()
@@ -910,6 +842,27 @@ class MainWindowUiMixin:
 
         self.current_screenshot_record_id = data["record_id"]
         self.current_screenshot_action_type = action_type
+        self._current_screenshot_dialog_session_id = ""
+        controller = getattr(self, "lan_template_portal_controller", None)
+        if controller is not None and hasattr(controller, "create_qt_dialog_session"):
+            try:
+                created = controller.create_qt_dialog_session(
+                    {
+                        "type": "screenshot_confirm",
+                        "action_type": action_type,
+                        "record_id": str(data.get("record_id") or ""),
+                        "active_item_id": str(data.get("active_item_id") or ""),
+                        "payload": {
+                            "notice_type": str(data.get("notice_type") or ""),
+                            "title": str(data.get("title") or ""),
+                        },
+                    }
+                )
+                self._current_screenshot_dialog_session_id = str(
+                    (created or {}).get("session_id") or ""
+                ).strip()
+            except Exception as exc:
+                log_warning(f"截图确认会话创建失败，继续显示本机弹窗: {exc}")
         self._set_delete_interaction_enabled(False)
         # 截图界面打开期间暂停剪贴板监听，避免替换逻辑与截图流程冲突
         self._pause_clipboard_timer()
@@ -920,7 +873,7 @@ class MainWindowUiMixin:
         if item and not self._is_valid_list_item(item):
             item = None
             list_widget = None
-        if list_widget and item:
+        if list_widget is not None and item is not None:
             data_dict = item.data(Qt.ItemDataRole.UserRole) or data
             pending_hash = data_dict.get("_pending_upload_hash")
             if not pending_hash:
@@ -976,6 +929,19 @@ class MainWindowUiMixin:
 
     def on_screenshot_cancelled(self):
         record_id = self.current_screenshot_record_id
+        session_id = str(getattr(self, "_current_screenshot_dialog_session_id", "") or "")
+        if session_id:
+            controller = getattr(self, "lan_template_portal_controller", None)
+            if controller is not None and hasattr(controller, "submit_qt_dialog_result"):
+                try:
+                    controller.submit_qt_dialog_result(
+                        session_id,
+                        status="cancelled",
+                        result_payload={"record_id": record_id or ""},
+                    )
+                except Exception:
+                    pass
+        self._current_screenshot_dialog_session_id = ""
         self._set_delete_interaction_enabled(True)
         self._resume_clipboard_timer()
         if record_id:
@@ -1027,12 +993,14 @@ class MainWindowUiMixin:
             "saved_at": int(time.time() * 1000),
             "items": history_data if isinstance(history_data, list) else [],
         }
+        self._history_override_records = list(payload["items"])
         self._get_history_state_store().put_document(
             HISTORY_STATE_NAMESPACE, HISTORY_STATE_KEY, payload
         )
         self.last_history_mtime = payload["saved_at"]
 
     def _delete_history_payload(self):
+        self._history_override_records = []
         self._get_history_state_store().delete_document(
             HISTORY_STATE_NAMESPACE, HISTORY_STATE_KEY
         )
@@ -1081,7 +1049,8 @@ class MainWindowUiMixin:
         return trimmed
 
     def load_all_history(self):
-        history_data = self._load_history_payload()
+        override = getattr(self, "_history_override_records", None)
+        history_data = list(override) if isinstance(override, list) else self._load_history_payload()
         updated = False
         for item in history_data:
             if not isinstance(item, dict):
@@ -1130,31 +1099,10 @@ class MainWindowUiMixin:
                 continue
 
     def reload_history_view(self):
-        history_items = self.load_all_history()
-        self.list_history_event.clear()
-        self.list_history_other.clear()
-        for d in history_items:
-            list_widget = self._get_history_list_for_notice(self._get_notice_type(d))
-            info = extract_event_info(d.get("text", ""))
-            display_data = d
-            if info:
-                display_data = dict(d)
-                display_data["text"] = info["content"]
-            item = QListWidgetItem(list_widget)
-            item.setData(Qt.ItemDataRole.UserRole, display_data)
-            item.setSizeHint(QSize(0, 100))
-            list_widget.setItemWidget(item, HistoryItemWidget(display_data))
+        return
 
     def toggle_view_mode(self):
-        self._set_view_mode(not self._is_active_view())
-
-    def clear_history_action(self):
-        self.list_history_event.clear()
-        self.list_history_other.clear()
-        try:
-            self._delete_history_payload()
-        except Exception:
-            pass
+        self._set_view_mode(True)
 
     def show_context_menu(self, pos, src):
         # 已移除右键删除功能，改为滑动删除

@@ -1260,6 +1260,7 @@ def _run_packaging_preflight_tests() -> None:
     log("开始执行打包前自动测试。")
 
     _assert_project_iterator_excludes_runtime_data()
+    _cleanup_vue_dist_assets()
 
     py_targets = [
         PROJECT_ROOT / "bin" / "clipflow_backend" / "main.py",
@@ -1321,7 +1322,44 @@ def _run_packaging_preflight_tests() -> None:
 
         log("未找到 node 或前端文件，跳过 node --check。")
 
+    readiness_script = PROJECT_ROOT / "bin" / "tools" / "release_readiness_check.py"
+    if readiness_script.exists():
+        subprocess.run(
+            [sys.executable, os.fspath(readiness_script)],
+            cwd=PROJECT_ROOT,
+            check=True,
+        )
+        log("发布就绪检查通过。")
+    else:
+        raise RuntimeError("缺少发布就绪检查脚本，已中止打包。")
+
     log("打包前自动测试完成。")
+
+
+def _cleanup_vue_dist_assets() -> None:
+    dist_dir = PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "frontend" / "dist"
+    index_path = dist_dir / "index.html"
+    assets_dir = dist_dir / "assets"
+    if not index_path.exists() or not assets_dir.exists():
+        return
+    html_text = index_path.read_text(encoding="utf-8", errors="ignore")
+    referenced = {
+        match.group(1)
+        for match in re.finditer(r"/assets/([^\"'>]+)", html_text)
+        if match.group(1)
+    }
+    removed = 0
+    for path in assets_dir.glob("*"):
+        if not path.is_file():
+            continue
+        if path.name in referenced:
+            continue
+        if path.suffix.lower() not in {".js", ".css"}:
+            continue
+        path.unlink()
+        removed += 1
+    if removed:
+        log(f"已清理 Vue dist 未引用旧资源: {removed} 个。")
 
 
 def _is_under_bin_build_or_dist(path: Path) -> bool:
@@ -2552,6 +2590,15 @@ def main() -> None:
         help="Run packaging preflight checks and exit without building.",
 
     )
+    parser.add_argument(
+
+        "--skip-preflight",
+
+        action="store_true",
+
+        help="Skip mandatory packaging preflight checks. Only use for local debugging.",
+
+    )
 
     args = parser.parse_args()
 
@@ -2560,6 +2607,10 @@ def main() -> None:
         _run_packaging_preflight_tests()
 
         return
+
+    if not args.skip_preflight:
+
+        _run_packaging_preflight_tests()
 
 
 

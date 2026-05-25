@@ -5,9 +5,8 @@ from .active_notice_index import ActiveNoticeIndex
 class ActiveNoticeStore:
     """Facade for active notice collection operations.
 
-    The current implementation is still backed by QListWidget items, but callers
-    should use this facade instead of depending on index internals. This is a
-    stepping stone toward a real Qt model.
+    Callers should use this facade instead of depending on raw QListWidget or
+    model internals. Entries may be backed by widget items or model handles.
     """
 
     def __init__(

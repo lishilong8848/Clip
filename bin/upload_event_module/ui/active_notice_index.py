@@ -315,7 +315,7 @@ class ActiveNoticeIndex:
             list_widget, item = entry
         except Exception:
             return False
-        return bool(list_widget and item and self._is_valid_item(item))
+        return list_widget is not None and item is not None and self._is_valid_item(item)
 
     def _current_candidate_entry(self, entry):
         try:
@@ -337,7 +337,7 @@ class ActiveNoticeIndex:
             list_widget, item = entry
         except Exception:
             return False
-        if not list_widget or not item or not self._is_valid_item(item):
+        if list_widget is None or item is None or not self._is_valid_item(item):
             return False
         try:
             data = item.data(Qt.ItemDataRole.UserRole)

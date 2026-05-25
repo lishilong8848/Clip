@@ -257,6 +257,18 @@ def main():
             controller.set_maintenance_action_callback(
                 window.enqueue_lan_maintenance_action
             )
+            if hasattr(controller, "set_shell_event_callback") and hasattr(
+                window, "handle_qt_shell_event"
+            ):
+                controller.set_shell_event_callback(window.handle_qt_shell_event)
+            if hasattr(controller, "get_qt_shell_bootstrap") and hasattr(
+                window, "apply_qt_shell_bootstrap"
+            ):
+                try:
+                    bootstrap_payload = controller.get_qt_shell_bootstrap()
+                    window.apply_qt_shell_bootstrap(bootstrap_payload)
+                except Exception as exc:
+                    print(f"[ClipFlow] Qt shell bootstrap 加载失败: {exc}")
             window.refresh_lan_template_portal_link()
             print(f"[ClipFlow] 局域网模板门户已随主程序启动: {controller.get_url()}")
         except Exception as exc:

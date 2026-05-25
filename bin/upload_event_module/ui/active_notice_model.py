@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import uuid
+import weakref
 from typing import Any
 
-from PyQt6.QtCore import QAbstractListModel, QModelIndex, Qt, pyqtSignal
+from PyQt6.QtCore import QAbstractListModel, QModelIndex, QSize, Qt, pyqtSignal
 
 from ..core.parser import extract_event_info
 from .display_state import build_notice_display_snapshot
@@ -13,8 +14,8 @@ from .display_state import build_notice_display_snapshot
 class ActiveNoticeModel(QAbstractListModel):
     """Qt model projection for active notice records.
 
-    The default UI still uses QListWidget for interaction. This model is kept in
-    sync and can be shown through an experimental QListView delegate path.
+    The model is the primary source for the Qt active-notice list when the
+    model/delegate path is enabled.
     """
 
     DataRole = int(Qt.ItemDataRole.UserRole) + 1
@@ -203,6 +204,41 @@ class ActiveNoticeModel(QAbstractListModel):
             return None
         return dict(self._records[row])
 
+    def row_for_identity(self, identity: str) -> int:
+        identity = str(identity or "").strip()
+        if not identity:
+            return -1
+        return int(self._identity_to_row.get(identity, -1))
+
+    def row_for_record(self, record: dict[str, Any] | None) -> int:
+        return self.row_for_identity(self.identity_for_record(record))
+
+    def row_for_record_id(self, record_id: str) -> int:
+        record_id = str(record_id or "").strip()
+        if not record_id:
+            return -1
+        for row, record in enumerate(self._records):
+            if str(record.get("record_id") or "").strip() == record_id:
+                return row
+        return -1
+
+    def row_for_active_item_id(self, active_item_id: str) -> int:
+        active_item_id = str(active_item_id or "").strip()
+        if not active_item_id:
+            return -1
+        for row, record in enumerate(self._records):
+            if str(record.get("active_item_id") or "").strip() == active_item_id:
+                return row
+        return -1
+
+    def record_by_record_id(self, record_id: str) -> dict[str, Any] | None:
+        row = self.row_for_record_id(record_id)
+        return self.record_at(row) if row >= 0 else None
+
+    def record_by_active_item_id(self, active_item_id: str) -> dict[str, Any] | None:
+        row = self.row_for_active_item_id(active_item_id)
+        return self.record_at(row) if row >= 0 else None
+
     def replace_records(self, records: list[dict[str, Any]] | None) -> None:
         normalized = [
             dict(record)
@@ -269,3 +305,64 @@ class ActiveNoticeModel(QAbstractListModel):
             identity = self.identity_for_record(record)
             if identity:
                 self._identity_to_row[identity] = row
+
+
+class ActiveNoticeModelItem:
+    """Lightweight handle used when the active list is model-backed only."""
+
+    def __init__(self, list_widget, model: ActiveNoticeModel, identity: str):
+        self._list_widget = list_widget
+        self._model_ref = weakref.ref(model)
+        self._identity = str(identity or "").strip()
+        self._size_hint = QSize(420, 88)
+
+    def listWidget(self):
+        return self._list_widget
+
+    def _model(self) -> ActiveNoticeModel | None:
+        model = self._model_ref()
+        return model if isinstance(model, ActiveNoticeModel) else None
+
+    def identity(self) -> str:
+        return self._identity
+
+    def row(self) -> int:
+        model = self._model()
+        if model is None:
+            return -1
+        return model.row_for_identity(self._identity)
+
+    def is_valid(self) -> bool:
+        return self.row() >= 0
+
+    def data(self, role=Qt.ItemDataRole.UserRole):  # noqa: A003
+        model = self._model()
+        row = self.row()
+        if model is None or row < 0:
+            return None
+        record = model.record_at(row)
+        if role == Qt.ItemDataRole.UserRole:
+            return record
+        index = model.index(row, 0)
+        if not index.isValid():
+            return None
+        return model.data(index, role)
+
+    def setData(self, role, value):  # noqa: N802,A003
+        if role != Qt.ItemDataRole.UserRole or not isinstance(value, dict):
+            return False
+        model = self._model()
+        row = self.row()
+        if model is None or row < 0:
+            return False
+        updated = model.upsert_record(dict(value), row=row)
+        if updated:
+            self._identity = model.identity_for_record(value) or self._identity
+        return bool(updated)
+
+    def setSizeHint(self, size):  # noqa: N802
+        if isinstance(size, QSize):
+            self._size_hint = QSize(size)
+
+    def sizeHint(self):  # noqa: N802
+        return QSize(self._size_hint)

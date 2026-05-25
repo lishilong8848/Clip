@@ -1,18 +1,23 @@
 <template>
   <div ref="parentRef" class="virtual-list">
+    <div v-if="rows.length === 0" class="virtual-list__empty">{{ emptyText }}</div>
     <div class="virtual-list__spacer" :style="{ height: `${totalSize}px` }">
       <article
         v-for="virtualRow in virtualRows"
         :key="rowKey(virtualRow)"
         class="notice-row"
+        :class="{ selected: rows[virtualRow.index]?.id === selectedId, compact }"
         :style="{ transform: `translateY(${virtualRow.start}px)` }"
+        @click="$emit('select', rows[virtualRow.index])"
       >
         <div class="notice-row__main">
           <span class="notice-row__type">{{ rows[virtualRow.index]?.type || "通告" }}</span>
           <strong>{{ rows[virtualRow.index]?.title || "未命名通告" }}</strong>
           <small>{{ rows[virtualRow.index]?.meta || "" }}</small>
         </div>
-        <span class="notice-row__status">{{ rows[virtualRow.index]?.status || "待处理" }}</span>
+        <span v-if="showStatus" class="notice-row__status">
+          {{ rows[virtualRow.index]?.status || "待处理" }}
+        </span>
       </article>
     </div>
   </div>
@@ -28,17 +33,26 @@ export interface NoticeRow {
   type?: string;
   meta?: string;
   status?: string;
+  raw?: unknown;
 }
 
 const props = defineProps<{
   rows: NoticeRow[];
+  selectedId?: string;
+  emptyText?: string;
+  compact?: boolean;
+  showStatus?: boolean;
+}>();
+
+defineEmits<{
+  select: [row: NoticeRow | undefined];
 }>();
 
 const parentRef = ref<HTMLElement | null>(null);
 const rowVirtualizerOptions = computed(() => ({
   count: props.rows.length,
   getScrollElement: () => parentRef.value,
-  estimateSize: () => 74,
+  estimateSize: () => (props.compact ? 62 : 76),
   overscan: 8,
 }));
 const rowVirtualizer = useVirtualizer(rowVirtualizerOptions);
@@ -52,11 +66,23 @@ function rowKey(virtualRow: { index: number; key: unknown }): string {
 
 <style scoped>
 .virtual-list {
-  height: min(420px, 58vh);
+  position: relative;
+  height: 100%;
+  min-height: 180px;
   overflow: auto;
-  border: 1px solid #d1d5db;
-  border-radius: 8px;
-  background: #ffffff;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+
+.virtual-list__empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  color: #64748b;
+  text-align: center;
+  line-height: 1.6;
 }
 
 .virtual-list__spacer {
@@ -72,10 +98,26 @@ function rowKey(virtualRow: { index: number; key: unknown }): string {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  min-height: 66px;
+  min-height: 68px;
   padding: 10px 14px;
   border-bottom: 1px solid #e5e7eb;
   background: #ffffff;
+  cursor: pointer;
+  transition: background-color 0.14s ease, box-shadow 0.14s ease;
+}
+
+.notice-row.compact {
+  min-height: 56px;
+  padding-block: 8px;
+}
+
+.notice-row:hover {
+  background: #f8fbff;
+}
+
+.notice-row.selected {
+  background: #eff6ff;
+  box-shadow: inset 3px 0 0 #2563eb;
 }
 
 .notice-row__main {

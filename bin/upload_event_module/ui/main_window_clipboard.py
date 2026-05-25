@@ -630,6 +630,16 @@ class MainWindowClipboardMixin:
                 env.insert("CLIPFLOW_STATE_DB", str(state_store.db_path))
             except Exception:
                 pass
+            try:
+                controller = getattr(self, "lan_template_portal_controller", None)
+                local_url_fn = getattr(controller, "_local_url", None)
+                if callable(local_url_fn):
+                    env.insert(
+                        "CLIPFLOW_CLIPBOARD_BACKEND_URL",
+                        f"{local_url_fn()}/api/qt/local/clipboard-event",
+                    )
+            except Exception:
+                pass
             env.insert("PYTHONIOENCODING", "utf-8")
             env.insert("PYTHONUTF8", "1")
             self._clipboard_process.setProcessEnvironment(env)
@@ -931,9 +941,8 @@ class MainWindowClipboardMixin:
                 if not content:
                     continue
                 self._update_last_clipboard_snapshot(content, data.get("ts"))
-                self._clipboard_pending_lines.append(content)
-            if self._clipboard_pending_lines and not cooldown:
-                self._drain_clipboard_pending_lines()
+            # SQLite clipboard events are already parsed and projected by the
+            # backend. Qt only mirrors the latest snapshot here.
             return
         path = self.clipboard_event_file
         if not path.exists():
@@ -1021,30 +1030,37 @@ class MainWindowClipboardMixin:
         self._clipboard_pending_lines = self._clipboard_pending_lines[max_count:]
         self._set_last_ui_op("clipboard_drain", batch=len(batch))
         for text in batch:
-            info = extract_event_info(text)
-            if not info:
-                continue
-            entry = {
-                "content": info.get("content") or text,
-                "status": info.get("status", ""),
-                "title": info.get("title", ""),
-                "notice_type": info.get("notice_type", ""),
-                "level": info.get("level"),
-                "source": info.get("source", ""),
-                "time_str": info.get("time_str", ""),
-                "unique_key": info.get("unique_key", ""),
-                "ts": int(time.time() * 1000),
-            }
-            entry_id = self._build_clipboard_entry_id(entry)
-            entry["entry_id"] = entry_id
-            if entry_id:
-                if self._is_recent_clipboard_entry(entry_id):
-                    continue
-                self._mark_recent_clipboard_entry(entry_id)
-            self._enqueue_ui_mutation(
-                "clipboard_entry",
-                lambda e=entry: self._on_clipboard_entry_received(e),
-            )
+            controller = getattr(self, "lan_template_portal_controller", None)
+            if controller is None or not hasattr(controller, "post_local_clipboard_event"):
+                self._clipboard_pending_lines.insert(0, text)
+                return
+            try:
+                result = controller.post_local_clipboard_event(
+                    text,
+                    ts=int(time.time() * 1000),
+                )
+                if not isinstance(result, dict) or not result.get("ok", True):
+                    error = (
+                        str(result.get("error") or "后端未接受剪贴板事件")
+                        if isinstance(result, dict)
+                        else "后端未接受剪贴板事件"
+                    )
+                    raise RuntimeError(
+                        error
+                    )
+                if isinstance(result, dict) and hasattr(
+                    self, "_apply_clipboard_projection_result"
+                ):
+                    try:
+                        self._apply_clipboard_projection_result(result)
+                    except Exception as exc:
+                        log_warning(
+                            f"剪贴板投影即时回填 Qt 失败，将等待事件流兜底: {exc}"
+                        )
+            except Exception as exc:
+                log_warning(f"剪贴板事件提交后端失败，稍后重试: {exc}")
+                self._clipboard_pending_lines.insert(0, text)
+                return
 
     def _is_in_clipboard_cooldown(self):
         try:

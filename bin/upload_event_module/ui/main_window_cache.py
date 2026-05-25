@@ -12,6 +12,49 @@ from .display_state import normalize_active_item_data
 
 
 class ActiveCacheMixin:
+    def apply_qt_shell_bootstrap(self, payload: dict | None):
+        payload = payload if isinstance(payload, dict) else {}
+        active_items = payload.get("active_items") if isinstance(payload.get("active_items"), list) else []
+        self._qt_shell_clipboard_candidates = []
+        self._qt_shell_dialog_sessions = []
+        history_items = payload.get("history_items") if isinstance(payload.get("history_items"), list) else []
+        history_records = []
+        for item in history_items:
+            if not isinstance(item, dict):
+                continue
+            record = item.get("payload") if isinstance(item.get("payload"), dict) else item
+            if isinstance(record, dict):
+                history_records.append(dict(record))
+        self._history_override_records = history_records
+        self._is_restoring_cache = True
+        try:
+            if getattr(self, "_active_model_view_visible", lambda: False)():
+                event_model = getattr(self, "_active_notice_event_model", None)
+                other_model = getattr(self, "_active_notice_other_model", None)
+                if event_model is not None:
+                    event_model.replace_records([])
+                if other_model is not None:
+                    other_model.replace_records([])
+            self.list_active_event.clear()
+            self.list_active_other.clear()
+            for entry in active_items:
+                data = entry.get("payload") if isinstance(entry, dict) else {}
+                if not isinstance(data, dict):
+                    continue
+                self.add_active_item(
+                    normalize_active_item_data(dict(data)),
+                    insert_top=False,
+                    skip_cache=True,
+                )
+        finally:
+            self._is_restoring_cache = False
+        if hasattr(self, "_sync_all_active_notice_models"):
+            self._sync_all_active_notice_models()
+        if hasattr(self, "reload_history_view"):
+            self.reload_history_view()
+        if hasattr(self, "_consume_qt_shell_bootstrap_state"):
+            self._consume_qt_shell_bootstrap_state(payload)
+
     def _is_ended_active_cache_record(self, data):
         if not isinstance(data, dict):
             return False
@@ -143,11 +186,19 @@ class ActiveCacheMixin:
     def _collect_active_list_cache(self, list_widget, locked_level_map=None):
         locked_level_map = locked_level_map or {}
         items = []
-        for i in range(list_widget.count()):
-            item = list_widget.item(i)
-            data = item.data(Qt.ItemDataRole.UserRole)
-            if not isinstance(data, dict):
-                continue
+        if getattr(self, "_active_model_view_visible", lambda: False)():
+            model = None
+            if hasattr(self, "_active_notice_model_for_list"):
+                model = self._active_notice_model_for_list(list_widget)
+            records = model.records() if model is not None else []
+        else:
+            records = []
+            for i in range(list_widget.count()):
+                item = list_widget.item(i)
+                data = item.data(Qt.ItemDataRole.UserRole)
+                if isinstance(data, dict):
+                    records.append(dict(data))
+        for data in records:
             source_data = dict(data)
             record_id = str(source_data.get("record_id") or "").strip()
             if record_id:

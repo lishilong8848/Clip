@@ -181,6 +181,7 @@ class ActiveNoticeModelTests(unittest.TestCase):
         click_button("action")
         click_button("today")
         click_button("delete")
+        click_button("delete")
 
         self.assertIn(("action", "update"), emitted)
         self.assertIn(("today", "no"), emitted)
@@ -200,10 +201,13 @@ class ActiveNoticeModelTests(unittest.TestCase):
 
         self.assertIsNotNone(item)
         self.assertIsNone(widget)
-        self.assertEqual(harness.list_active_other.count(), 1)
-        self.assertIsNone(harness.list_active_other.itemWidget(item))
+        self.assertEqual(harness.list_active_other.count(), 0)
         model = harness._active_notice_model_for_list(harness.list_active_other)
         self.assertEqual(model.rowCount(), 1)
+        list_widget, found = harness._find_active_item_by_record_id("rid-test")
+        self.assertIs(list_widget, harness.list_active_other)
+        self.assertTrue(harness._is_valid_list_item(found))
+        self.assertEqual(found.data(Qt.ItemDataRole.UserRole)["active_item_id"], "aid-test")
 
 
 if __name__ == "__main__":

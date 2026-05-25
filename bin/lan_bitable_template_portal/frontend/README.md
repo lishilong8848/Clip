@@ -2,9 +2,16 @@
 
 This is the Vue 3 migration workspace for the LAN portal.
 
-The production portal still serves `static/index.html` by default. Build outputs from
-this workspace should be copied into the portal static directory only after the Vue
-version reaches parity. Do not commit `node_modules` or user runtime data.
+The production portal serves the Vue dist by default when the dist contains
+`clipflow-frontend-ready.json` with:
+
+```json
+{"app":"clipflow-lan-portal","productionReady":true}
+```
+
+This marker prevents the migration placeholder from being exposed to field
+users. `CLIPFLOW_FRONTEND_LEGACY=1` forces the legacy static page for rollback.
+Do not commit `node_modules` or user runtime data.
 
 Rollback switches:
 
