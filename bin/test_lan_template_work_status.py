@@ -958,6 +958,68 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             finally:
                 PortalHandler.state_store = previous_store
 
+    def test_backend_ongoing_reads_qt_active_items_without_snapshot_delay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            previous_store = PortalHandler.state_store
+            PortalHandler.state_store = LanPortalStateStore(
+                Path(tmp) / "lan_portal_state.sqlite3"
+            )
+            try:
+                controller = FastAPIPortalController()
+                entry = controller._clipboard_entry_from_content(
+                    "【维保通告】状态：开始\n\n"
+                    "【标题】A楼测试测试测试维保\n\n"
+                    "【时间】2026-05-25 09:30~2026-05-25 18:30\n\n"
+                    "【位置】A楼"
+                )
+                result = controller._project_clipboard_entry_to_active(entry)
+
+                ongoing_a = controller._get_ongoing("A")
+                ongoing_b = controller._get_ongoing("B")
+
+                self.assertTrue(result["ok"])
+                self.assertEqual(len(ongoing_a), 1)
+                self.assertEqual(ongoing_a[0]["title"], "A楼测试测试测试维保")
+                self.assertEqual(ongoing_a[0]["work_type"], "maintenance")
+                self.assertEqual(ongoing_b, [])
+            finally:
+                PortalHandler.state_store = previous_store
+
+    def test_backend_ongoing_filters_deleted_qt_item_from_stale_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            previous_store = PortalHandler.state_store
+            PortalHandler.state_store = LanPortalStateStore(
+                Path(tmp) / "lan_portal_state.sqlite3"
+            )
+            try:
+                stale_item = {
+                    "active_item_id": "active-stale-delete",
+                    "record_id": "rec-stale-delete",
+                    "target_record_id": "rec-stale-delete",
+                    "notice_type": "维保通告",
+                    "work_type": "maintenance",
+                    "title": "A楼已删除测试维保",
+                    "building_codes": ["A"],
+                    "text": "【维保通告】状态：开始\n\n【标题】A楼已删除测试维保",
+                }
+                PortalHandler.state_store.replace_ongoing_items([stale_item])
+                PortalHandler.state_store.upsert_qt_active_item(
+                    stale_item,
+                    section="other",
+                    origin="qt",
+                )
+                PortalHandler.state_store.delete_qt_active_item(
+                    active_item_id="active-stale-delete",
+                    record_id="rec-stale-delete",
+                )
+
+                controller = FastAPIPortalController()
+                ongoing = controller._get_ongoing("A")
+
+                self.assertEqual(ongoing, [])
+            finally:
+                PortalHandler.state_store = previous_store
+
     def test_parser_accepts_legacy_change_notice_marker(self):
         info = extract_event_info(
             "【变更通告】状态：开始\n\n"
@@ -5056,6 +5118,65 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             temp_dir.cleanup()
             with PortalHandler.auth_manager._lock:
                 PortalHandler.auth_manager._sessions = original_sessions
+
+    def test_fastapi_qt_command_delete_clears_active_item_and_read_cache(self):
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        original_service = PortalHandler.service
+        original_state_store = PortalHandler.state_store
+        PortalHandler.service = _NativeFastAPIRouteService()
+        temp_dir = tempfile.TemporaryDirectory()
+        PortalHandler.state_store = LanPortalStateStore(
+            Path(temp_dir.name) / "state.sqlite3"
+        )
+        PortalHandler.state_store.upsert_qt_active_item(
+            {
+                "active_item_id": "active-qt-delete",
+                "record_id": "rec-qt-delete",
+                "notice_type": "维保通告",
+                "work_type": "maintenance",
+                "title": "Qt 删除测试",
+                "building_codes": ["A"],
+            },
+            section="other",
+            origin="qt",
+        )
+        controller._read_cache_put(("health",), {"ok": True})
+        client = TestClient(controller._build_app())
+        try:
+            with patch.object(
+                portal_server_module,
+                "delete_bitable_record",
+                return_value=(True, "deleted"),
+            ) as delete_record:
+                response = client.post(
+                    "/api/qt/commands",
+                    json={
+                        "command": "delete_active_item",
+                        "payload": {
+                            "data_dict": {
+                                "scope": "A",
+                                "work_type": "maintenance",
+                                "notice_type": "维保通告",
+                                "active_item_id": "active-qt-delete",
+                                "record_id": "rec-qt-delete",
+                            }
+                        },
+                    },
+                )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.json().get("ok"))
+            delete_record.assert_called_once_with("rec-qt-delete", "维保通告")
+            self.assertEqual(PortalHandler.state_store.list_qt_active_items(), [])
+            self.assertEqual(controller._read_cache_stats()["entries"], 0)
+            leased = PortalHandler.state_store.lease_outbox_events(
+                "qt_action", limit=1, lease_seconds=5
+            )
+            self.assertEqual(leased[0]["payload"]["kind"], "active_delete")
+        finally:
+            PortalHandler.service = original_service
+            PortalHandler.state_store = original_state_store
+            temp_dir.cleanup()
 
     def test_fastapi_permission_request_routes_are_native(self):
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)

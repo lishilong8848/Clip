@@ -568,6 +568,8 @@ class MainWindowClipboardMixin:
         except Exception as exc:
             log_warning(f"剪贴板监听: 旧事件导入失败: {exc}")
             self._clipboard_sqlite_last_event_id = 0
+        self._clipboard_sqlite_event_failures = {}
+        self._clipboard_sqlite_event_max_failures = 3
         try:
             self._clipboard_file_index = self.clipboard_event_file.stat().st_size
         except Exception:
@@ -930,19 +932,82 @@ class MainWindowClipboardMixin:
         except Exception:
             events = []
         if events:
-            self._clipboard_sqlite_last_event_id = int(
-                events[-1].get("id") or getattr(self, "_clipboard_sqlite_last_event_id", 0) or 0
+            last_processed_event_id = int(
+                getattr(self, "_clipboard_sqlite_last_event_id", 0) or 0
             )
             for event in events:
+                event_id = int(event.get("id") or 0)
                 data = event.get("payload") if isinstance(event, dict) else {}
                 if not isinstance(data, dict):
+                    last_processed_event_id = max(last_processed_event_id, event_id)
                     continue
                 content = (data.get("content") or "").strip()
                 if not content:
+                    last_processed_event_id = max(last_processed_event_id, event_id)
                     continue
+                failure_counts = getattr(
+                    self, "_clipboard_sqlite_event_failures", None
+                )
+                if not isinstance(failure_counts, dict):
+                    failure_counts = {}
+                    self._clipboard_sqlite_event_failures = failure_counts
+                try:
+                    max_failures = max(
+                        1,
+                        int(
+                            getattr(
+                                self, "_clipboard_sqlite_event_max_failures", 3
+                            )
+                            or 3
+                        ),
+                    )
+                except Exception:
+                    max_failures = 3
                 self._update_last_clipboard_snapshot(content, data.get("ts"))
-            # SQLite clipboard events are already parsed and projected by the
-            # backend. Qt only mirrors the latest snapshot here.
+                # Events produced by the backend already have a source marker and
+                # are already projected. Events written directly by the clipboard
+                # listener fallback do not, so submit them to the backend once.
+                if data.get("source"):
+                    failure_counts.pop(event_id, None)
+                    last_processed_event_id = max(last_processed_event_id, event_id)
+                    continue
+                controller = getattr(self, "lan_template_portal_controller", None)
+                if controller is None or not hasattr(controller, "post_local_clipboard_event"):
+                    break
+                try:
+                    result = controller.post_local_clipboard_event(
+                        content,
+                        ts=int(data.get("ts") or time.time() * 1000),
+                        source="clipboard_sqlite_fallback",
+                    )
+                    if isinstance(result, dict) and hasattr(
+                        self, "_apply_clipboard_projection_result"
+                    ):
+                        self._apply_clipboard_projection_result(result)
+                    failure_counts.pop(event_id, None)
+                    last_processed_event_id = max(last_processed_event_id, event_id)
+                except Exception as exc:
+                    attempts = int(failure_counts.get(event_id) or 0) + 1
+                    failure_counts[event_id] = attempts
+                    if attempts >= max_failures:
+                        reason = (
+                            f"SQLite 剪贴板事件连续失败 {attempts} 次，"
+                            f"已跳过 event_id={event_id}: {exc}"
+                        )
+                        log_warning(reason)
+                        try:
+                            self._remember_clipboard_failure(reason)
+                        except Exception:
+                            pass
+                        failure_counts.pop(event_id, None)
+                        last_processed_event_id = max(last_processed_event_id, event_id)
+                        continue
+                    log_warning(
+                        "SQLite 剪贴板事件提交后端失败，稍后重试: "
+                        f"event_id={event_id}, attempt={attempts}/{max_failures}, error={exc}"
+                    )
+                    break
+            self._clipboard_sqlite_last_event_id = last_processed_event_id
             return
         path = self.clipboard_event_file
         if not path.exists():

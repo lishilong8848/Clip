@@ -1720,14 +1720,68 @@ class FastAPIPortalController:
                     command_payload = dict(payload.get("payload") or {})
                     command_payload["action_type"] = action_map[command]
                     data = PortalHandler.execute_local_notice_upload(command_payload)
+                    PortalHandler.clear_payload_cache()
+                    self._clear_read_cache()
                     return {"ok": True, "data": data}
                 if command == "delete_active_item":
                     command_payload = dict(payload.get("payload") or {})
                     data = PortalHandler.execute_local_delete_active_item(command_payload)
+                    if not bool((data or {}).get("ok")):
+                        return {"ok": True, "data": data}
+                    delete_payload = command_payload
+                    if isinstance(command_payload.get("data_dict"), dict):
+                        delete_payload = command_payload.get("data_dict") or {}
+                    elif isinstance(command_payload.get("data"), dict):
+                        delete_payload = command_payload.get("data") or {}
+                    scope = str(delete_payload.get("scope") or "ALL").strip() or "ALL"
+                    try:
+                        data.update(
+                            PortalHandler.service.hide_ongoing_item(
+                                delete_payload,
+                                scope=scope,
+                                deleted_by=str(delete_payload.get("_auth_open_id") or "qt"),
+                            )
+                        )
+                        data.update(
+                            PortalHandler.service.discard_deleted_ongoing_state(
+                                delete_payload,
+                                scope=scope,
+                            )
+                        )
+                    except Exception as cleanup_exc:
+                        data["cleanup_warning"] = str(cleanup_exc)
+                    PortalHandler.clear_payload_cache()
+                    self._clear_read_cache()
+                    PortalHandler.state_store.enqueue_outbox_event(
+                        "qt_action",
+                        {
+                            "kind": "active_delete",
+                            "payload": {
+                                "active_item_id": str(
+                                    data.get("active_item_id")
+                                    or delete_payload.get("active_item_id")
+                                    or ""
+                                ),
+                                "record_id": str(
+                                    data.get("record_id")
+                                    or delete_payload.get("target_record_id")
+                                    or delete_payload.get("record_id")
+                                    or ""
+                                ),
+                                "source_record_id": str(
+                                    delete_payload.get("source_record_id") or ""
+                                ),
+                                "work_type": str(delete_payload.get("work_type") or ""),
+                                "notice_type": str(delete_payload.get("notice_type") or ""),
+                            },
+                        },
+                    )
                     return {"ok": True, "data": data}
                 if command == "set_today_in_progress":
                     command_payload = dict(payload.get("payload") or {})
                     data = PortalHandler.execute_local_today_progress_update(command_payload)
+                    PortalHandler.clear_payload_cache()
+                    self._clear_read_cache()
                     return {"ok": True, "data": data}
                 return JSONResponse(
                     {"ok": False, "error": f"不支持的 Qt command: {command or '-'}"},
@@ -2080,6 +2134,9 @@ class FastAPIPortalController:
                 "done" if projection.get("ok") else "pending",
                 payload={"projection": projection, "entry": entry},
             )
+            if projection.get("ok") and not projection.get("ignored"):
+                PortalHandler.clear_payload_cache()
+                self._clear_read_cache()
             return {
                 "ok": True,
                 "data": {
@@ -2142,6 +2199,8 @@ class FastAPIPortalController:
             ).to_payload()
             try:
                 data = PortalHandler.execute_local_notice_upload(payload)
+                PortalHandler.clear_payload_cache()
+                self._clear_read_cache()
                 return {"ok": True, "data": data}
             except Exception as exc:
                 return JSONResponse(
@@ -2749,20 +2808,130 @@ class FastAPIPortalController:
 
     @staticmethod
     def _get_ongoing(scope: str) -> list[dict]:
+        merged: list[dict] = []
+        seen: set[str] = set()
+        active_rows: list[dict] = []
+        deleted_active_item_ids: set[str] = set()
+        deleted_record_ids: set[str] = set()
+
+        def _key(item: dict) -> str:
+            return "|".join(
+                [
+                    str(item.get("active_item_id") or "").strip(),
+                    str(item.get("target_record_id") or item.get("record_id") or "").strip(),
+                    str(item.get("source_record_id") or "").strip(),
+                    str(item.get("title") or "").strip(),
+                ]
+            )
+
+        def _item_deleted_in_qt_store(item: dict) -> bool:
+            active_item_id = str(item.get("active_item_id") or "").strip()
+            record_id = str(
+                item.get("target_record_id")
+                or item.get("record_id")
+                or item.get("raw_record_id")
+                or ""
+            ).strip()
+            return bool(
+                (active_item_id and active_item_id in deleted_active_item_ids)
+                or (record_id and record_id in deleted_record_ids)
+            )
+
+        def _append(item: dict) -> None:
+            if not isinstance(item, dict):
+                return
+            if _item_deleted_in_qt_store(item):
+                return
+            if not PortalHandler.service._scope_matches_item(scope, item):
+                return
+            key = _key(item)
+            if key in seen:
+                return
+            seen.add(key)
+            merged.append(dict(item))
+
+        try:
+            active_rows = PortalHandler.state_store.list_qt_active_items(
+                include_deleted=True
+            )
+            for active_item in active_rows:
+                if not isinstance(active_item, dict):
+                    continue
+                if active_item.get("deleted_at") is None:
+                    continue
+                active_item_id = str(active_item.get("active_item_id") or "").strip()
+                record_id = str(active_item.get("record_id") or "").strip()
+                if active_item_id:
+                    deleted_active_item_ids.add(active_item_id)
+                if record_id:
+                    deleted_record_ids.add(record_id)
+        except Exception as exc:
+            warning = f"SQLite Qt 活动删除状态读取失败: {exc}"
+            if not PortalHandler.last_ongoing_error:
+                PortalHandler.last_ongoing_error = warning
+            log_warning(warning)
+
         try:
             snapshot = PortalHandler.state_store.get_ongoing_snapshot()
             if snapshot.get("exists"):
                 PortalHandler.last_ongoing_error = ""
-                return [
-                    dict(item)
-                    for item in snapshot.get("items", [])
-                    if isinstance(item, dict)
-                    and PortalHandler.service._scope_matches_item(scope, item)
-                ]
+                for item in snapshot.get("items", []):
+                    _append(item)
         except Exception as exc:
             PortalHandler.last_ongoing_error = f"SQLite 进行中状态读取失败: {exc}"
             log_warning(PortalHandler.last_ongoing_error)
-        return []
+        try:
+            for active_item in active_rows or PortalHandler.state_store.list_qt_active_items():
+                if active_item.get("deleted_at") is not None:
+                    continue
+                payload = (
+                    active_item.get("payload")
+                    if isinstance(active_item, dict)
+                    and isinstance(active_item.get("payload"), dict)
+                    else {}
+                )
+                if not payload:
+                    continue
+                text = str(payload.get("text") or "").strip()
+                info = extract_event_info(text) or {}
+                if str(info.get("status") or "").strip() == "结束":
+                    continue
+                item = dict(payload)
+                item.setdefault("active_item_id", active_item.get("active_item_id"))
+                item.setdefault("record_id", active_item.get("record_id"))
+                item.setdefault("target_record_id", active_item.get("record_id"))
+                item.setdefault("notice_type", active_item.get("notice_type"))
+                item.setdefault("origin", active_item.get("origin"))
+                if not item.get("title") and info.get("title"):
+                    item["title"] = info.get("title")
+                if not item.get("work_type"):
+                    notice_type = str(item.get("notice_type") or "").strip()
+                    if notice_type == "维保通告":
+                        item["work_type"] = "maintenance"
+                    elif notice_type in {"设备变更", "变更通告"}:
+                        item["work_type"] = "change"
+                    elif notice_type == "设备检修":
+                        item["work_type"] = "repair"
+                if not isinstance(item.get("building_codes"), list):
+                    building_text = " ".join(
+                        str(value or "")
+                        for value in (
+                            item.get("building"),
+                            item.get("location"),
+                            item.get("title"),
+                            text,
+                        )
+                    )
+                    item["building_codes"] = (
+                        PortalHandler.service._building_codes_from_value(building_text)
+                    )
+                _append(item)
+        except Exception as exc:
+            warning = f"SQLite Qt 活动条目合并失败: {exc}"
+            if not PortalHandler.last_ongoing_error:
+                PortalHandler.last_ongoing_error = warning
+            log_warning(warning)
+        return merged
 
     @staticmethod
     def _reconcile_orphan_started_items(
@@ -2930,6 +3099,27 @@ class FastAPIPortalController:
             is_placeholder = bool(data.get("_is_placeholder_record"))
         else:
             is_placeholder = not bool(str(data.get("record_id") or "").strip())
+        building_codes = data.get("building_codes")
+        if not isinstance(building_codes, list):
+            building_codes = PortalHandler.service._building_codes_from_value(
+                " ".join(
+                    str(value or "")
+                    for value in (
+                        data.get("building"),
+                        data.get("location"),
+                        entry.get("title"),
+                        content,
+                    )
+                )
+            )
+        work_type = data.get("work_type") or data.get("lan_work_type") or ""
+        if not work_type:
+            if notice_type == "维保通告":
+                work_type = "maintenance"
+            elif notice_type in {"设备变更", "变更通告"}:
+                work_type = "change"
+            elif notice_type == "设备检修":
+                work_type = "repair"
         data.update(
             {
                 "active_item_id": active_item_id,
@@ -2945,6 +3135,9 @@ class FastAPIPortalController:
                 "_pending_upload_hash": None,
                 "_upload_in_progress": False,
                 "origin": data.get("origin") or "clipboard",
+                "building_codes": building_codes,
+                "work_type": work_type,
+                "lan_work_type": work_type,
             }
         )
         section = "event" if notice_type == "事件通告" else "other"

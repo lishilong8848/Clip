@@ -2055,9 +2055,11 @@ class MainWindowWorkflowMixin:
             f"response_time={response_time or '-'} "
             f"notice_time={data_snapshot.get('time_str') or '-'}"
         )
+        backend_notice_upload_only = True
 
         if (
-            action_type == "upload"
+            not backend_notice_upload_only
+            and action_type == "upload"
             and bool(data_snapshot.get("lan_created_from_portal"))
             and not screenshot_bytes
             and not extra_images
@@ -2115,7 +2117,8 @@ class MainWindowWorkflowMixin:
             return
 
         if (
-            action_type in ("update", "end")
+            not backend_notice_upload_only
+            and action_type in ("update", "end")
             and bool(data_snapshot.get("lan_created_from_portal"))
             and not self._is_placeholder_record(data_snapshot)
             and not screenshot_bytes
