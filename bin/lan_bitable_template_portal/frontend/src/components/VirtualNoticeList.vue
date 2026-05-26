@@ -6,7 +6,7 @@
         v-for="virtualRow in virtualRows"
         :key="rowKey(virtualRow)"
         class="notice-row"
-        :class="{ selected: rows[virtualRow.index]?.id === selectedId, compact }"
+        :class="{ selected: rows[virtualRow.index]?.id === selectedId, queued: rows[virtualRow.index]?.selected, compact }"
         :style="{ transform: `translateY(${virtualRow.start}px)` }"
         @click="$emit('select', rows[virtualRow.index])"
       >
@@ -15,7 +15,11 @@
           <strong>{{ rows[virtualRow.index]?.title || "未命名通告" }}</strong>
           <small>{{ rows[virtualRow.index]?.meta || "" }}</small>
         </div>
-        <span v-if="showStatus" class="notice-row__status">
+        <span
+          v-if="showStatus"
+          class="notice-row__status"
+          :class="rows[virtualRow.index]?.statusTone ? `notice-row__status--${rows[virtualRow.index]?.statusTone}` : ''"
+        >
           {{ rows[virtualRow.index]?.status || "待处理" }}
         </span>
       </article>
@@ -33,6 +37,8 @@ export interface NoticeRow {
   type?: string;
   meta?: string;
   status?: string;
+  statusTone?: string;
+  selected?: boolean;
   raw?: unknown;
 }
 
@@ -52,7 +58,7 @@ const parentRef = ref<HTMLElement | null>(null);
 const rowVirtualizerOptions = computed(() => ({
   count: props.rows.length,
   getScrollElement: () => parentRef.value,
-  estimateSize: () => (props.compact ? 62 : 76),
+  estimateSize: () => (props.compact ? 64 : 98),
   overscan: 8,
 }));
 const rowVirtualizer = useVirtualizer(rowVirtualizerOptions);
@@ -92,44 +98,68 @@ function rowKey(virtualRow: { index: number; key: unknown }): string {
 
 .notice-row {
   position: absolute;
-  left: 0;
-  right: 0;
+  left: 6px;
+  right: 6px;
+  height: 90px;
+  box-sizing: border-box;
+  overflow: hidden;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
-  min-height: 68px;
-  padding: 10px 14px;
-  border-bottom: 1px solid #e5e7eb;
+  gap: 10px;
+  min-height: 66px;
+  padding: 8px 10px 8px 12px;
+  border: 1px solid #dbe3ee;
+  border-radius: 8px;
   background: #ffffff;
   cursor: pointer;
-  transition: background-color 0.14s ease, box-shadow 0.14s ease;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  transition: border-color 0.14s ease, background-color 0.14s ease, box-shadow 0.14s ease;
 }
 
 .notice-row.compact {
+  height: 56px;
   min-height: 56px;
   padding-block: 8px;
 }
 
 .notice-row:hover {
   background: #f8fbff;
+  border-color: #bfdbfe;
+}
+
+.notice-row.queued {
+  border-color: #bfdbfe;
+  background: #f8fbff;
 }
 
 .notice-row.selected {
   background: #eff6ff;
-  box-shadow: inset 3px 0 0 #2563eb;
+  border-color: #2563eb;
+  box-shadow: inset 3px 0 0 #2563eb, 0 2px 8px rgba(37, 99, 235, 0.12);
 }
 
 .notice-row__main {
   min-width: 0;
   display: grid;
-  gap: 4px;
+  gap: 2px;
 }
 
 .notice-row__main strong,
 .notice-row__main small {
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.notice-row__main strong {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  line-height: 1.32;
+  font-size: 15px;
+}
+
+.notice-row__main small {
   white-space: nowrap;
 }
 
@@ -138,13 +168,47 @@ function rowKey(virtualRow: { index: number; key: unknown }): string {
   width: fit-content;
   border: 1px solid #cbd5e1;
   border-radius: 999px;
-  padding: 2px 8px;
+  padding: 1px 7px;
   color: #334155;
-  font-size: 12px;
+  font-size: 11px;
   background: #f8fafc;
 }
 
 .notice-row__status {
   flex: 0 0 auto;
+  margin-top: 1px;
+  max-width: 96px;
+  text-align: center;
+  white-space: normal;
+}
+
+.notice-row__status--pending {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+  color: #15803d;
+}
+
+.notice-row__status--update {
+  border-color: #fed7aa;
+  background: #fff7ed;
+  color: #c2410c;
+}
+
+.notice-row__status--ongoing {
+  border-color: #bfdbfe;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.notice-row__status--queued {
+  border-color: #c7d2fe;
+  background: #eef2ff;
+  color: #4338ca;
+}
+
+.notice-row__status--failed {
+  border-color: #fecaca;
+  background: #fef2f2;
+  color: #b91c1c;
 }
 </style>

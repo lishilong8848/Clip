@@ -53,6 +53,48 @@ class PermissionRequestConfirm(APIModel):
     code: str = ""
 
 
+class HandoverLinksSaveRequest(APIModel):
+    links: dict[str, Any] = Field(default_factory=dict)
+    password: str = ""
+
+
+class HandoverLinksAuthRequest(APIModel):
+    password: str = ""
+
+
+class HandoverPasswordResetConfirmRequest(APIModel):
+    reset_id: str = ""
+    code: str = ""
+    new_password: str = ""
+
+
+class AuthPermissionsSaveRequest(APIModel):
+    users: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class GenerateTemplatesRequest(APIModel):
+    scope: str = "ALL"
+    drafts: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class NoticeMemoryImportRequest(APIModel):
+    scope: str = "ALL"
+    text: str = ""
+
+
+class SendGeneratedRequest(APIModel):
+    scope: str = "ALL"
+    items: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class MockPressureRequest(APIModel):
+    count: int = 10
+    concurrency: int = 5
+    scopes: list[str] | str = Field(default_factory=list)
+    per_scope: int = 0
+    scenario: str = "accepted"
+
+
 class QtCommandRequest(APIModel):
     command: str = ""
     payload: dict[str, Any] = Field(default_factory=dict)

@@ -37,6 +37,9 @@ import upload_event_module.config as config_module  # noqa: E402
 from upload_event_module.config import ConfigManager  # noqa: E402
 from upload_event_module.config import MAINTENANCE_NOTICE_FIELDS  # noqa: E402
 from upload_event_module.services.http_client import FeishuHttpClient  # noqa: E402
+from upload_event_module.services.feishu_token_manager import (  # noqa: E402
+    FeishuTokenManager,
+)
 from upload_event_module.services.handlers.base import NoticePayload  # noqa: E402
 from upload_event_module.services.handlers.maintenance_notice import (  # noqa: E402
     MaintenanceNoticeHandler,
@@ -460,25 +463,20 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         service.table_id = ""
         captured = {}
 
-        class _Response:
-            ok = True
-            text = ""
-
+        class _Client:
             @staticmethod
-            def json():
+            def request_json(method, url, **kwargs):
+                captured["method"] = method
+                captured["url"] = url
+                captured["kwargs"] = kwargs
                 return {"code": 0, "data": {"items": []}}
 
-        class _Session:
-            @staticmethod
-            def get(url, **kwargs):
-                captured["url"] = url
-                return _Response()
-
-        service._session = _Session()
+        service._http_client = _Client()
         service._auth_headers = lambda: {"Authorization": "Bearer test"}
 
         service._request_json("fields", params={"page_size": 500})
 
+        self.assertEqual(captured["method"], "GET")
         self.assertIn("/apps/HU38bc1vnamMK9sCeOgclUvXnFc/", captured["url"])
         self.assertIn("/tables/tblzk7WrXxNWQy6V/", captured["url"])
         self.assertNotIn("/apps//", captured["url"])
@@ -2159,6 +2157,54 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(prepared["record_id"], "m-running")
             self.assertEqual(prepared["target_record_id"], "target-m-running")
 
+    def test_maintenance_end_uses_active_item_target_when_frontend_record_is_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            service._records = [
+                _build_record("m-running", "A楼", "过滤网维护", "5月", status="进行中")
+            ]
+            service._upsert_work_status_item_locked(
+                {
+                    "source_record_id": "m-running",
+                    "work_type": "maintenance",
+                    "notice_type": "维保通告",
+                    "target_record_id": "target-m-running",
+                    "feishu_record_id": "target-m-running",
+                    "active_item_id": "active-m-running",
+                    "title": "EA118机房A楼过滤网维护",
+                    "building": "A楼",
+                    "building_code": "A",
+                    "building_codes": ["A"],
+                    "specialty": "电气",
+                    "started_at": "2026-05-08 09:30",
+                },
+                action="start",
+                now="2026-05-08 09:30",
+            )
+
+            job_id, should_start = service.create_action_job(
+                {
+                    "action": "end",
+                    "scope": "A",
+                    "record_id": "m-running",
+                    "source_record_id": "m-running",
+                    "active_item_id": "active-m-running",
+                    "title": "EA118机房A楼过滤网维护",
+                    "building": "A楼",
+                    "specialty": "电气",
+                    "start_time": "2026-05-08T09:30",
+                    "end_time": "2026-05-08T18:30",
+                    "progress": "已完成",
+                    "operation_id": "maintenance-end-source-record",
+                }
+            )
+
+            self.assertTrue(should_start)
+            prepared = service.prepare_action_job(job_id)
+            self.assertEqual(prepared["action"], "end")
+            self.assertEqual(prepared["record_id"], "m-running")
+            self.assertEqual(prepared["target_record_id"], "target-m-running")
+
     def test_change_records_use_precise_scope_and_allowed_progress(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
@@ -2321,6 +2367,55 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(prepared["record_id"], "c-e")
             self.assertEqual(prepared["target_record_id"], "target-change-e")
             self.assertEqual(prepared["source_progress"], "进行中")
+
+    def test_change_end_uses_active_item_target_when_frontend_record_is_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            service._change_records = [
+                _build_change_record("c-e", building="E楼", progress="进行中", title="E楼进行中变更")
+            ]
+            service._upsert_work_status_item_locked(
+                {
+                    "source_record_id": "c-e",
+                    "work_type": "change",
+                    "notice_type": "设备变更",
+                    "target_record_id": "target-change-e",
+                    "feishu_record_id": "target-change-e",
+                    "active_item_id": "active-change-e",
+                    "title": "E楼进行中变更",
+                    "building": "E楼",
+                    "building_code": "E",
+                    "building_codes": ["E"],
+                    "specialty": "网络",
+                    "started_at": "2026-05-08 09:00",
+                },
+                action="start",
+                now="2026-05-08 09:00",
+            )
+
+            job_id, should_start = service.create_action_job(
+                {
+                    "action": "end",
+                    "work_type": "change",
+                    "scope": "E",
+                    "record_id": "c-e",
+                    "source_record_id": "c-e",
+                    "active_item_id": "active-change-e",
+                    "title": "E楼进行中变更",
+                    "building": "E楼",
+                    "building_codes": ["E"],
+                    "start_time": "2026-05-08T09:00",
+                    "end_time": "2026-05-08T18:00",
+                    "progress": "已完成",
+                    "operation_id": "change-end-source-record",
+                }
+            )
+
+            self.assertTrue(should_start)
+            prepared = service.prepare_action_job(job_id)
+            self.assertEqual(prepared["action"], "end")
+            self.assertEqual(prepared["record_id"], "c-e")
+            self.assertEqual(prepared["target_record_id"], "target-change-e")
 
     def test_change_successful_action_persists_work_type_and_completion(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2537,6 +2632,61 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(prepared["record_id"], "r1")
             self.assertEqual(prepared["target_record_id"], "target-r1")
             self.assertEqual(prepared["source_progress"], "进行中")
+
+    def test_repair_end_uses_active_item_target_when_frontend_record_is_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            service._repair_records = [
+                _build_repair_record(
+                    "r1",
+                    building="D楼",
+                    title="D楼UPS检修",
+                    started=True,
+                    target_record_id="",
+                )
+            ]
+            service._upsert_work_status_item_locked(
+                {
+                    "source_record_id": "r1",
+                    "work_type": "repair",
+                    "notice_type": "设备检修",
+                    "target_record_id": "target-r1",
+                    "feishu_record_id": "target-r1",
+                    "active_item_id": "active-r1",
+                    "title": "D楼UPS检修",
+                    "building": "D楼",
+                    "building_code": "D",
+                    "building_codes": ["D"],
+                    "specialty": "电气",
+                    "started_at": "2026-05-08 09:00",
+                },
+                action="start",
+                now="2026-05-08 09:00",
+            )
+
+            job_id, should_start = service.create_action_job(
+                {
+                    "action": "end",
+                    "work_type": "repair",
+                    "scope": "D",
+                    "record_id": "r1",
+                    "source_record_id": "r1",
+                    "active_item_id": "active-r1",
+                    "title": "D楼UPS检修",
+                    "building": "D楼",
+                    "building_codes": ["D"],
+                    "start_time": "2026-05-08T23:50",
+                    "end_time": "2026-05-08T08:20",
+                    "progress": "已完成",
+                    "operation_id": "repair-end-source-record",
+                }
+            )
+
+            self.assertTrue(should_start)
+            prepared = service.prepare_action_job(job_id)
+            self.assertEqual(prepared["action"], "end")
+            self.assertEqual(prepared["record_id"], "r1")
+            self.assertEqual(prepared["target_record_id"], "target-r1")
 
     def test_change_source_failure_does_not_block_maintenance_records(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -4655,40 +4805,23 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertIn("CLIPFLOW_REAL_EXTERNAL_CONFIRMED", message)
 
     def test_bitable_http_400_token_error_refreshes_and_retries(self):
-        class FakeResponse:
-            def __init__(self, status_code, payload):
-                self.status_code = status_code
-                self._payload = payload
-                self.ok = 200 <= status_code < 400
-                self.text = json.dumps(payload, ensure_ascii=False)
-
-            def json(self):
-                return self._payload
-
-            def raise_for_status(self):
-                if not self.ok:
-                    raise RuntimeError(f"{self.status_code} Client Error")
-
-        class FakeSession:
+        class FakeHttpClient:
             def __init__(self):
                 self.calls = 0
 
-            def get(self, *args, **kwargs):
+            def request_json(self, *args, **kwargs):
                 self.calls += 1
                 if self.calls == 1:
-                    return FakeResponse(
-                        400,
-                        {
-                            "code": 99991663,
-                            "msg": "Invalid access token for authorization.",
-                        },
-                    )
-                return FakeResponse(200, {"code": 0, "data": {"items": []}})
+                    return {
+                        "code": 99991663,
+                        "msg": "Invalid access token for authorization.",
+                    }
+                return {"code": 0, "data": {"items": []}}
 
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
-            fake_session = FakeSession()
-            service._session = fake_session
+            fake_client = FakeHttpClient()
+            service._http_client = fake_client
             old_token = config_module.config.user_token
             config_module.config.user_token = "expired-token"
             try:
@@ -4699,7 +4832,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                         "fields", params={"page_size": 500}
                     )
                 self.assertEqual(payload["code"], 0)
-                self.assertEqual(fake_session.calls, 2)
+                self.assertEqual(fake_client.calls, 2)
                 refresh_token.assert_called_once()
             finally:
                 config_module.config.user_token = old_token
@@ -4732,6 +4865,131 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         finally:
             config_module.config.user_token = old_token
             config_module.config.token_expire_time = old_expire
+
+    def test_token_manager_refreshes_once_for_concurrent_callers(self):
+        calls = []
+
+        def handler(request):
+            calls.append(request.url.path)
+            time.sleep(0.03)
+            return httpx.Response(
+                200,
+                json={"code": 0, "tenant_access_token": "shared-token", "expire": 7200},
+            )
+
+        client = FeishuHttpClient(
+            transport=httpx.MockTransport(handler),
+            retries=0,
+        )
+        manager = FeishuTokenManager(http_client=client)
+        old_app_id = config_module.config.app_id
+        old_app_secret = config_module.config.app_secret
+        old_token = config_module.config.user_token
+        old_expire = config_module.config.token_expire_time
+
+        def fake_save(**kwargs):
+            if "user_token" in kwargs:
+                config_module.config.user_token = kwargs["user_token"]
+            if "token_expire_time" in kwargs:
+                config_module.config.token_expire_time = kwargs["token_expire_time"]
+            return True
+
+        try:
+            config_module.config.app_id = "cli_a"
+            config_module.config.app_secret = "secret"
+            config_module.config.user_token = ""
+            config_module.config.token_expire_time = 0
+            results: list[str] = []
+            threads = [
+                threading.Thread(target=lambda: results.append(manager.get_tenant_token()))
+                for _ in range(5)
+            ]
+            with patch.object(config_module.config, "save", side_effect=fake_save):
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join()
+            self.assertEqual(results, ["shared-token"] * 5)
+            self.assertEqual(len(calls), 1)
+        finally:
+            client.close()
+            config_module.config.app_id = old_app_id
+            config_module.config.app_secret = old_app_secret
+            config_module.config.user_token = old_token
+            config_module.config.token_expire_time = old_expire
+
+    def test_robot_webhook_uses_shared_tenant_token_manager(self):
+        from upload_event_module.services import robot_webhook
+
+        with patch.object(
+            robot_webhook.token_manager,
+            "get_tenant_token",
+            return_value="shared-token",
+        ) as get_token, patch.object(
+            robot_webhook,
+            "_send_message_to_open_id",
+            return_value=(True, "ok"),
+        ) as send_message:
+            ok, message, results = robot_webhook.send_text_to_open_ids(
+                "测试消息",
+                ["ou_one", "ou_two"],
+            )
+        self.assertTrue(ok)
+        self.assertEqual(message, "ok")
+        self.assertEqual(len(results), 2)
+        get_token.assert_called_once()
+        self.assertEqual(send_message.call_count, 2)
+        for call_args in send_message.call_args_list:
+            self.assertEqual(call_args.args[0], "shared-token")
+
+    def test_robot_webhook_refreshes_token_once_on_message_token_error(self):
+        from upload_event_module.services import robot_webhook
+
+        auth_headers: list[str] = []
+
+        def fake_request(method, url, *, headers=None, **kwargs):
+            auth_headers.append((headers or {}).get("Authorization", ""))
+            if len(auth_headers) == 1:
+                return {"code": 99991663, "msg": "Invalid access token"}
+            return {"code": 0, "data": {"message_id": "msg1"}}
+
+        with patch.object(
+            robot_webhook,
+            "_request_json",
+            side_effect=fake_request,
+        ), patch.object(
+            robot_webhook.token_manager,
+            "get_tenant_token",
+            return_value="fresh-token",
+        ) as get_token:
+            ok, message = robot_webhook._send_message_to_open_id(
+                "stale-token",
+                "ou_one",
+                "测试消息",
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(message, "ok")
+        self.assertEqual(auth_headers, ["Bearer stale-token", "Bearer fresh-token"])
+        get_token.assert_called_once_with(force_refresh=True)
+
+    def test_portal_auth_login_exchange_uses_shared_token_manager(self):
+        auth = PortalAuthManager()
+        with patch.object(
+            config_module.config,
+            "app_id",
+            "cli_a",
+        ), patch.object(
+            config_module.config,
+            "app_secret",
+            "secret",
+        ), patch(
+            "lan_bitable_template_portal.portal_auth.token_manager.exchange_login_code",
+            return_value={"open_id": "ou_login", "name": "测试用户"},
+        ) as exchange:
+            user = auth._exchange_login_code("login-code")
+        self.assertEqual(user["open_id"], "ou_login")
+        exchange.assert_called_once_with("login-code")
 
     def test_package_runtime_data_scan_blocks_sqlite_outputs(self):
         import package_portable

@@ -160,6 +160,7 @@ class PortalHandler(BaseHTTPRequestHandler):
     payload_cache_lock = threading.RLock()
     payload_cache: dict[tuple, tuple[float, dict]] = {}
     payload_cache_inflight: dict[tuple, threading.Event] = {}
+    payload_cache_inflight_started: dict[tuple, float] = {}
     payload_cache_generation = 0
     payload_cache_ttl_s = 5
     payload_cache_max_entries = 64
@@ -604,6 +605,13 @@ class PortalHandler(BaseHTTPRequestHandler):
         with cls.payload_cache_lock:
             cls.payload_cache_generation += 1
             cls.payload_cache.clear()
+            for event in cls.payload_cache_inflight.values():
+                try:
+                    event.set()
+                except Exception:
+                    pass
+            cls.payload_cache_inflight.clear()
+            cls.payload_cache_inflight_started.clear()
 
     @classmethod
     def _prune_payload_cache_locked(cls, now: float) -> None:
@@ -613,6 +621,19 @@ class PortalHandler(BaseHTTPRequestHandler):
         ]
         for key in expired_keys:
             cls.payload_cache.pop(key, None)
+        stale_inflight_keys = [
+            key
+            for key, started_at in cls.payload_cache_inflight_started.items()
+            if now - float(started_at or 0.0) > 30.0
+        ]
+        for key in stale_inflight_keys:
+            event = cls.payload_cache_inflight.pop(key, None)
+            cls.payload_cache_inflight_started.pop(key, None)
+            if event is not None:
+                try:
+                    event.set()
+                except Exception:
+                    pass
         extra = len(cls.payload_cache) - int(cls.payload_cache_max_entries)
         if extra <= 0:
             return
@@ -678,6 +699,7 @@ class PortalHandler(BaseHTTPRequestHandler):
             if inflight is None:
                 inflight = threading.Event()
                 PortalHandler.payload_cache_inflight[key] = inflight
+                PortalHandler.payload_cache_inflight_started[key] = now
                 owner = True
             else:
                 owner = False
@@ -693,6 +715,7 @@ class PortalHandler(BaseHTTPRequestHandler):
             if owner:
                 with PortalHandler.payload_cache_lock:
                     event = PortalHandler.payload_cache_inflight.pop(key, None)
+                    PortalHandler.payload_cache_inflight_started.pop(key, None)
                     if event is not None:
                         event.set()
             raise
@@ -700,6 +723,7 @@ class PortalHandler(BaseHTTPRequestHandler):
             if owner:
                 with PortalHandler.payload_cache_lock:
                     event = PortalHandler.payload_cache_inflight.pop(key, None)
+                    PortalHandler.payload_cache_inflight_started.pop(key, None)
                     if event is not None:
                         event.set()
             return payload
@@ -721,6 +745,7 @@ class PortalHandler(BaseHTTPRequestHandler):
             if owner:
                 with PortalHandler.payload_cache_lock:
                     event = PortalHandler.payload_cache_inflight.pop(key, None)
+                    PortalHandler.payload_cache_inflight_started.pop(key, None)
                     if event is not None:
                         event.set()
             return payload
@@ -732,6 +757,7 @@ class PortalHandler(BaseHTTPRequestHandler):
             PortalHandler._prune_payload_cache_locked(now)
             if owner:
                 event = PortalHandler.payload_cache_inflight.pop(key, None)
+                PortalHandler.payload_cache_inflight_started.pop(key, None)
                 if event is not None:
                     event.set()
         return payload
@@ -2720,7 +2746,9 @@ class PortalHandler(BaseHTTPRequestHandler):
     @classmethod
     def execute_local_today_progress_update(cls, payload: dict) -> dict:
         payload = dict(payload or {})
-        record_id = str(payload.get("record_id") or "").strip()
+        record_id = str(
+            payload.get("target_record_id") or payload.get("record_id") or ""
+        ).strip()
         notice_type = str(payload.get("notice_type") or "").strip()
         field_name = str(payload.get("field_name") or "").strip()
         field_value = payload.get("field_value")

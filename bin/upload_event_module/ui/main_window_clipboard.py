@@ -593,7 +593,20 @@ class MainWindowClipboardMixin:
         )
 
         if not self._is_clipboard_listener_disabled():
-            self.clipboard_file_timer.start(200)
+            try:
+                poll_interval = max(
+                    300,
+                    min(
+                        int(
+                            os.environ.get("CLIPFLOW_CLIPBOARD_POLL_MS", "750")
+                            or 750
+                        ),
+                        5000,
+                    ),
+                )
+            except Exception:
+                poll_interval = 750
+            self.clipboard_file_timer.start(poll_interval)
             QTimer.singleShot(200, self._start_clipboard_listener)
             QTimer.singleShot(0, self._replay_pending_clipboard_entries)
         else:
@@ -926,8 +939,26 @@ class MainWindowClipboardMixin:
             if store is None:
                 store = LanPortalStateStore()
                 self._clipboard_state_store = store
+            try:
+                sqlite_event_limit = max(
+                    5,
+                    min(
+                        int(
+                            os.environ.get(
+                                "CLIPFLOW_CLIPBOARD_SQLITE_EVENT_LIMIT",
+                                "25",
+                            )
+                            or 25
+                        ),
+                        100,
+                    ),
+                )
+            except Exception:
+                sqlite_event_limit = 25
             events = store.list_events_after(
-                "clipboard", int(getattr(self, "_clipboard_sqlite_last_event_id", 0) or 0), limit=100
+                "clipboard",
+                int(getattr(self, "_clipboard_sqlite_last_event_id", 0) or 0),
+                limit=sqlite_event_limit,
             )
         except Exception:
             events = []

@@ -33,10 +33,20 @@ RUNTIME_SUFFIXES = (
 )
 
 ALLOWED_REQUESTS_FILES = {
-    "bin/lan_bitable_template_portal/portal_service.py",  # explicit legacy fallback only
     "bin/upload_event_module/services/remote_patch_updater.py",  # package/patch download
     "bin/tools/release_readiness_check.py",  # scans for the literal pattern
 }
+
+DISALLOWED_RELEASE_ENV_FLAGS = (
+    "CLIPFLOW_FRONTEND_LEGACY",
+    "CLIPFLOW_LEGACY_PORTAL",
+    "CLIPFLOW_ALLOW_BACKEND_IMPORT_FALLBACK",
+    "CLIPFLOW_FASTAPI_LEGACY_ADAPTER",
+    "CLIPFLOW_LEGACY_QT_WIDGET_LIST",
+    "CLIPFLOW_DISABLE_QT_MODEL_VIEW",
+    "CLIPFLOW_DISABLE_ACTIVE_NOTICE_MODEL",
+    "CLIPFLOW_DISABLE_UNIFIED_FEISHU_HTTP",
+)
 
 
 def _git_tracked_files() -> list[str]:
@@ -135,6 +145,48 @@ def check_frontend_dist() -> tuple[bool, str, bool]:
     return True, f"Vue dist 已标记生产就绪: {dist_index}", True
 
 
+def check_release_env_flags() -> tuple[bool, list[str]]:
+    offenders = [
+        name
+        for name in DISALLOWED_RELEASE_ENV_FLAGS
+        if str(os.environ.get(name) or "").strip() == "1"
+    ]
+    return not offenders, offenders
+
+
+def check_fastapi_models() -> tuple[bool, list[str]]:
+    main_path = BIN_DIR / "clipflow_backend" / "main.py"
+    text = main_path.read_text(encoding="utf-8", errors="ignore")
+    offenders: list[str] = []
+    for match in re.finditer(r"await\s+self\._read_json_request\(request\)", text):
+        prefix = text[max(0, match.start() - 160): match.start()]
+        if "def _read_model_request" in prefix:
+            continue
+        line = text.count("\n", 0, match.start()) + 1
+        offenders.append(f"bin/clipflow_backend/main.py:{line}")
+    return not offenders, offenders
+
+
+def check_qt_model_view_default() -> tuple[bool, str]:
+    ui_path = BIN_DIR / "upload_event_module" / "ui" / "main_window_ui.py"
+    records_path = BIN_DIR / "upload_event_module" / "ui" / "main_window_records.py"
+    ui_text = ui_path.read_text(encoding="utf-8", errors="ignore")
+    records_text = records_path.read_text(encoding="utf-8", errors="ignore")
+    required = (
+        "def _active_model_view_visible" in ui_text
+        and "CLIPFLOW_LEGACY_QT_WIDGET_LIST" in ui_text
+        and "ActiveNoticeListRoute" in ui_text
+        and 'self.list_active_event = ActiveNoticeListRoute("event")' in ui_text
+        and 'self.list_active_other = ActiveNoticeListRoute("other")' in ui_text
+        and "return bool(enabled() if callable(enabled) else True)" in ui_text
+        and "def _active_notice_model_enabled" in records_text
+        and 'os.environ.get("CLIPFLOW_DISABLE_ACTIVE_NOTICE_MODEL") != "1"' in records_text
+    )
+    if not required:
+        return False, "Qt 活动列表默认 model/delegate 路径检查失败。"
+    return True, "Qt 活动列表默认走 model/delegate，legacy widget list 只允许显式回退。"
+
+
 def main() -> int:
     failures: list[str] = []
     warnings: list[str] = []
@@ -158,6 +210,20 @@ def main() -> int:
         failures.append(frontend_message)
     elif not frontend_ready:
         warnings.append(frontend_message)
+
+    ok, env_offenders = check_release_env_flags()
+    if not ok:
+        failures.append("当前环境启用了生产禁用的回退/禁用开关: " + ", ".join(env_offenders))
+
+    ok, model_offenders = check_fastapi_models()
+    if not ok:
+        failures.append("FastAPI 业务接口仍存在未模型化 JSON 请求读取: " + ", ".join(model_offenders))
+
+    ok, qt_model_message = check_qt_model_view_default()
+    if not ok:
+        failures.append(qt_model_message)
+    else:
+        warnings.append(qt_model_message)
 
     if failures:
         print("[ReleaseCheck] FAIL")

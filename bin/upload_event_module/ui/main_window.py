@@ -78,7 +78,22 @@ class ClipboardTool(
         self._clipboard_process = None
         self._clipboard_restart_count = 0
         self._clipboard_pending_lines = []
-        self._clipboard_max_lines_per_tick = 5
+        try:
+            self._clipboard_max_lines_per_tick = max(
+                1,
+                min(
+                    int(
+                        os.environ.get(
+                            "CLIPFLOW_CLIPBOARD_MAX_LINES_PER_TICK",
+                            "2",
+                        )
+                        or 2
+                    ),
+                    10,
+                ),
+            )
+        except Exception:
+            self._clipboard_max_lines_per_tick = 2
         self._clipboard_cooldown_until = 0.0
         self._ui_update_in_progress = False
         self._clipboard_pending_entries = []
@@ -134,7 +149,7 @@ class ClipboardTool(
             host="0.0.0.0",
             port=62345,
         )
-        self._ui_signal_queue = queue.Queue()
+        self._ui_signal_queue = queue.Queue(maxsize=500)
         self._ui_signal_max_per_tick = 3
         self._ui_signal_timer = QTimer(self)
         self.connection_registry.connect(
@@ -144,7 +159,7 @@ class ClipboardTool(
             self._drain_ui_signal_queue,
         )
         self._ui_signal_timer.start(100)
-        self._ui_mutation_queue = queue.Queue()
+        self._ui_mutation_queue = queue.Queue(maxsize=500)
         self._ui_mutation_max_per_tick = 2
         self._ui_slow_threshold_ms = 120.0
         self._ui_slow_log_interval_s = 10.0
@@ -334,6 +349,8 @@ class ClipboardTool(
         if self._cache_id_repair_result.get("changed"):
             self.save_active_cache()
         self._init_active_cache_timer()
+        if hasattr(self, "_init_runtime_payload_cleanup_timer"):
+            self._init_runtime_payload_cleanup_timer()
         self._init_runtime_maintenance_timer()
         self._init_clipboard_ipc()
 

@@ -4359,17 +4359,18 @@
         return;
       }
       const key = recordKey(record);
-      if (state.selected.has(key)) {
-        state.selected.delete(key);
-        if (state.activeDraftKey === key) state.activeDraftKey = "";
-      }
-      else {
-        state.selected.add(key);
-        state.activeDraftKey = key;
-        getDraft(record);
-      }
+      state.selected.add(key);
+      state.activeDraftKey = key;
+      getDraft(record);
       saveDraftState();
       render();
+      window.requestAnimationFrame(() => {
+        try {
+          $("draftList")?.scrollTo({ top: 0, behavior: "smooth" });
+        } catch {
+          if ($("draftList")) $("draftList").scrollTop = 0;
+        }
+      });
     }
 
     function recordCardHtml(record) {
@@ -4740,7 +4741,12 @@
     }
 
     function renderDrafts() {
-      const selectedRecords = Array.from(state.selected)
+      const selectedKeys = Array.from(state.selected);
+      if (state.activeDraftKey && selectedKeys.includes(state.activeDraftKey)) {
+        selectedKeys.splice(selectedKeys.indexOf(state.activeDraftKey), 1);
+        selectedKeys.unshift(state.activeDraftKey);
+      }
+      const selectedRecords = selectedKeys
         .map((key) => draftRecordForKey(key))
         .filter(Boolean);
       if (!selectedRecords.length) {
@@ -4771,7 +4777,10 @@
                 <h3 class="card-title">${html(record.manual ? `纯手填${workTypeLabel(type)}通告` : titleForRecord(record))}</h3>
                 <div class="record-meta">${html([workTypeLabel(record.work_type), buildingForRecord(record), specialtyForRecord(record), extraMeta].filter(Boolean).join(" | "))}</div>
               </div>
-              <button class="btn danger" data-remove-draft="${html(id)}">移除</button>
+              <div class="row-actions">
+                ${active ? `<span class="tag blue">置顶</span>` : ""}
+                <button class="btn danger" data-remove-draft="${html(id)}">移除</button>
+              </div>
             </div>
             <div class="form-grid">
               ${draftFieldsHtml(record, id, draft)}

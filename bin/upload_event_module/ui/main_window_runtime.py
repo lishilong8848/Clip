@@ -2197,8 +2197,19 @@ class MainWindowRuntimeMixin:
     def _enqueue_ui_mutation(self, tag: str, fn):
         if self._closing:
             return
+        tag = str(tag or "unknown")
         try:
             self._ui_mutation_queue.put_nowait((tag, fn, time.time()))
+        except queue.Full:
+            self._ui_mutation_drop_count = (
+                int(getattr(self, "_ui_mutation_drop_count", 0) or 0) + 1
+            )
+            if tag in {"record_binding_validation", "today_in_progress_sync"}:
+                return
+            try:
+                self._ui_mutation_queue.put((tag, fn, time.time()), timeout=0.05)
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -2233,6 +2244,10 @@ class MainWindowRuntimeMixin:
     def _post_request_finished(self, name, success, msg, record_id):
         try:
             self._ui_signal_queue.put_nowait((name, bool(success), msg, record_id))
+        except queue.Full:
+            self._ui_signal_drop_count = (
+                int(getattr(self, "_ui_signal_drop_count", 0) or 0) + 1
+            )
         except Exception:
             pass
 

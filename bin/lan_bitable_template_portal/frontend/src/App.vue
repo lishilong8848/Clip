@@ -2,22 +2,30 @@
   <main class="app-shell">
     <header class="topbar">
       <div class="brand">
-        <div class="brand-mark">21V</div>
+        <img class="brand-logo" :src="brandLogoSrc" alt="世纪互联官方标识" />
         <div>
           <h1>南通基地-运维灯塔工作台</h1>
-          <p>{{ scopeLabel(currentScope) }} · {{ syncText }}</p>
+          <p>{{ isWorkbench ? scopeLabel(currentScope) : "功能选择" }} · {{ syncText }}</p>
         </div>
       </div>
       <div class="topbar-actions">
         <span v-if="auth.loggedIn" class="user-chip">{{ auth.user?.name || auth.user?.open_id || "已登录" }}</span>
+        <button v-if="auth.loggedIn && isWorkbench" class="btn ghost" @click="returnToHome">功能选择</button>
+        <label v-if="auth.loggedIn && isWorkbench && visibleScopeOptions.length > 1" class="scope-switch">
+          <span>切换楼栋</span>
+          <select :value="currentScope" :disabled="loading" @change="switchScope(($event.target as HTMLSelectElement).value)">
+            <option v-for="item in visibleScopeOptions" :key="item.value" :value="normalizeScopeValue(item.value)">
+              {{ item.label }}
+            </option>
+          </select>
+        </label>
         <button v-if="auth.loggedIn && isWorkbench" class="btn ghost" :disabled="loading" @click="loadWorkbench()">
-          刷新本页
+          {{ loading ? "刷新中" : "刷新本页" }}
         </button>
         <button v-if="auth.loggedIn && isWorkbench" class="btn ghost" :disabled="repairRefreshing" @click="refreshRepair">
           {{ repairRefreshing ? "检修刷新中" : "刷新检修" }}
         </button>
         <button v-if="isAdmin" class="btn ghost" @click="showAdminTools = true">管理/诊断</button>
-        <a class="btn ghost" href="/legacy-index.html">兼容页面</a>
         <button v-if="auth.loggedIn" class="btn danger-text" @click="logout">退出</button>
       </div>
     </header>
@@ -51,22 +59,25 @@
     />
 
     <section v-else class="workbench">
+      <div v-if="loading" class="loading-line">
+        正在加载 {{ scopeLabel(currentScope) }} 数据...
+      </div>
       <div class="summary-strip">
         <article>
           <span>已发起</span>
-          <strong>{{ dailyStats.started || 0 }}</strong>
+          <strong>{{ liveDailyStats.started || 0 }}</strong>
         </article>
         <article>
           <span>有更新</span>
-          <strong>{{ dailyStats.updated || 0 }}</strong>
+          <strong>{{ liveDailyStats.updated || 0 }}</strong>
         </article>
         <article>
           <span>已结束</span>
-          <strong>{{ dailyStats.ended || 0 }}</strong>
+          <strong>{{ liveDailyStats.ended || 0 }}</strong>
         </article>
         <article>
           <span>进行中</span>
-          <strong>{{ ongoing.length }}</strong>
+          <strong>{{ liveOngoingCount }}</strong>
         </article>
       </div>
 
@@ -84,11 +95,31 @@
         <input v-model="searchText" class="search" placeholder="搜索标题、楼栋、专业" />
         <button class="btn ghost" @click="addManualDraft">纯手填</button>
         <button class="btn ghost" @click="showPasteParser = !showPasteParser">解析粘贴通告</button>
+        <button class="btn ghost" @click="showMemoryImporter = !showMemoryImporter">导入历史记忆</button>
       </div>
 
       <section v-if="showPasteParser" class="paste-panel">
         <textarea v-model="pasteText" placeholder="粘贴完整维保、变更或检修通告文本"></textarea>
         <button class="btn blue" @click="parsePastedNotice">解析到待发起通告</button>
+      </section>
+
+      <section v-if="showMemoryImporter" class="paste-panel">
+        <div class="panel-head compact-head">
+          <h2>导入历史通告记忆</h2>
+          <span>只写入记忆，不发送、不上传</span>
+        </div>
+        <textarea
+          v-model="memoryImportText"
+          placeholder="可一次粘贴多条历史维保、变更、检修通告。导入后，同楼栋同标题/同维护总项的本月事项会自动回填。"
+        ></textarea>
+        <div class="card-actions">
+          <span class="job-line" :class="{ success: memoryImportLineType === 'success', failed: memoryImportLineType === 'failed' }">
+            {{ memoryImportLine }}
+          </span>
+          <button class="btn blue" :disabled="memoryImportBusy" @click="importHistoricalMemory">
+            {{ memoryImportBusy ? "导入中" : "导入到记忆库" }}
+          </button>
+        </div>
       </section>
 
       <section class="workspace">
@@ -100,6 +131,7 @@
           <VirtualNoticeList
             :rows="filteredRows"
             :selected-id="activeDraftKey"
+            show-status
             empty-text="当前筛选下没有待发起事项"
             @select="toggleRecordSelection"
           />
@@ -113,98 +145,108 @@
           <div v-if="selectedDraftRows.length === 0" class="empty-block">
             从左侧选择事项，或使用纯手填、解析粘贴通告。
           </div>
-          <div v-else class="draft-stack">
+          <div v-else ref="draftStackRef" class="draft-stack">
             <article
               v-for="row in selectedDraftRows"
               :key="row.key"
               class="draft-card"
-              :class="{ active: row.key === activeDraftKey }"
+              :class="{ active: row.key === activeDraftKey, collapsed: row.key !== activeDraftKey }"
               @click="activeDraftKey = row.key"
             >
               <div class="card-title">
                 <strong>{{ row.title }}</strong>
-                <span>{{ workTypeLabel(row.record.work_type) }}</span>
+                <span>{{ workTypeLabel(row.record.work_type) }}{{ row.key === activeDraftKey ? " · 正在编辑" : " · 点击编辑" }}</span>
               </div>
-              <div class="form-grid">
-                <label>
-                  标题
-                  <input v-model="row.draft.title" placeholder="通告标题" @input="saveDrafts" />
-                </label>
-                <label>
-                  专业
-                  <input v-model="row.draft.specialty" placeholder="专业" @input="saveDrafts" />
-                </label>
-                <label v-if="row.record.work_type === 'maintenance'">
-                  维保周期
-                  <select v-model="row.draft.maintenance_cycle" @change="saveDrafts">
-                    <option value="">请选择</option>
-                    <option v-for="item in maintenanceCycleOptions" :key="item" :value="item">{{ item }}</option>
-                  </select>
-                </label>
-                <label v-if="row.record.work_type !== 'maintenance'">
-                  等级
-                  <input v-model="row.draft.level" placeholder="等级" @input="saveDrafts" />
-                </label>
-                <label>
-                  开始 / 期望完成时间
-                  <input v-model="row.draft.start_time" type="datetime-local" @input="saveDrafts" />
-                </label>
-                <label>
-                  结束 / 故障发生时间
-                  <input v-model="row.draft.end_time" type="datetime-local" @input="saveDrafts" />
-                </label>
-                <label class="span-2">
-                  地点
-                  <input v-model="row.draft.location" placeholder="地点" @input="saveDrafts" />
-                </label>
-                <label class="span-2">
-                  内容 / 标题
-                  <textarea v-model="row.draft.content" placeholder="内容" @input="saveDrafts"></textarea>
-                </label>
-                <label>
-                  原因
-                  <textarea v-model="row.draft.reason" placeholder="原因" @input="saveDrafts"></textarea>
-                </label>
-                <label>
-                  影响
-                  <textarea v-model="row.draft.impact" placeholder="影响" @input="saveDrafts"></textarea>
-                </label>
-                <label class="span-2">
-                  进度 / 完成情况
-                  <textarea v-model="row.draft.progress" placeholder="进度" @input="saveDrafts"></textarea>
-                </label>
-              </div>
-              <details v-if="row.record.work_type === 'repair'" class="repair-fields">
-                <summary>检修字段</summary>
-                <div class="form-grid">
-                  <label><span>维修设备</span><input v-model="row.draft.repair_device" @input="saveDrafts" /></label>
-                  <label><span>维修故障</span><input v-model="row.draft.repair_fault" @input="saveDrafts" /></label>
-                  <label><span>故障类型</span><input v-model="row.draft.fault_type" @input="saveDrafts" /></label>
-                  <label><span>维修方式</span><input v-model="row.draft.repair_mode" @input="saveDrafts" /></label>
-                  <label><span>故障发现方式</span><input v-model="row.draft.discovery" @input="saveDrafts" /></label>
-                  <label><span>故障现象</span><input v-model="row.draft.symptom" @input="saveDrafts" /></label>
-                  <label class="span-2"><span>解决方案</span><textarea v-model="row.draft.solution" @input="saveDrafts"></textarea></label>
+              <div v-if="row.key !== activeDraftKey" class="draft-compact">
+                <p>{{ draftSummary(row.record, row.draft) || "已加入待发起通告，点击展开编辑。" }}</p>
+                <div class="card-actions compact-actions">
+                  <span class="job-line" :class="jobClass(row.key)">{{ jobText(row.key) }}</span>
+                  <button class="btn ghost" :disabled="isLineBusy(row.key)" @click.stop="pinDraftInMiddlePanel(row.key)">编辑</button>
+                  <button class="btn ghost" :disabled="isLineBusy(row.key)" @click.stop="removeDraft(row.key)">移除</button>
                 </div>
-              </details>
-              <div v-if="row.record.work_type === 'change'" class="zhihang-line">
-                <label>
-                  <input v-model="row.draft.zhihang_involved" type="checkbox" @change="saveDrafts" />
-                  涉及智航
-                </label>
-                <select v-if="row.draft.zhihang_involved" v-model="row.draft.zhihang_record_id" @change="bindZhihang(row.draft)">
-                  <option value="">选择智航变更</option>
-                  <option v-for="item in zhihangRecords" :key="item.record_id" :value="item.record_id">
-                    {{ item.title || item.record_id }}
-                  </option>
-                </select>
               </div>
-              <div class="card-actions">
-                <span class="job-line" :class="jobClass(row.key)">{{ jobText(row.key) }}</span>
-                <button class="btn blue" :disabled="isLineBusy(row.key)" @click.stop="sendStart(row.key)">
-                  发送{{ sourceActionLabel(row.record) }}
-                </button>
-                <button class="btn ghost" :disabled="isLineBusy(row.key)" @click.stop="removeDraft(row.key)">移除</button>
-              </div>
+              <template v-else>
+                <div class="form-grid">
+                  <label>
+                    标题
+                    <input v-model="row.draft.title" placeholder="通告标题" @input="saveDrafts" />
+                  </label>
+                  <label>
+                    专业
+                    <input v-model="row.draft.specialty" placeholder="专业" @input="saveDrafts" />
+                  </label>
+                  <label v-if="row.record.work_type === 'maintenance'">
+                    维保周期
+                    <select v-model="row.draft.maintenance_cycle" @change="saveDrafts">
+                      <option value="">请选择</option>
+                      <option v-for="item in maintenanceCycleOptions" :key="item" :value="item">{{ item }}</option>
+                    </select>
+                  </label>
+                  <label v-if="row.record.work_type !== 'maintenance'">
+                    等级
+                    <input v-model="row.draft.level" placeholder="等级" @input="saveDrafts" />
+                  </label>
+                  <label>
+                    开始 / 期望完成时间
+                    <input v-model="row.draft.start_time" type="datetime-local" @input="saveDrafts" />
+                  </label>
+                  <label>
+                    结束 / 故障发生时间
+                    <input v-model="row.draft.end_time" type="datetime-local" @input="saveDrafts" />
+                  </label>
+                  <label class="span-2">
+                    地点
+                    <input v-model="row.draft.location" placeholder="地点" @input="saveDrafts" />
+                  </label>
+                  <label class="span-2">
+                    内容 / 标题
+                    <textarea v-model="row.draft.content" placeholder="内容" @input="saveDrafts"></textarea>
+                  </label>
+                  <label>
+                    原因
+                    <textarea v-model="row.draft.reason" placeholder="原因" @input="saveDrafts"></textarea>
+                  </label>
+                  <label>
+                    影响
+                    <textarea v-model="row.draft.impact" placeholder="影响" @input="saveDrafts"></textarea>
+                  </label>
+                  <label class="span-2">
+                    进度 / 完成情况
+                    <textarea v-model="row.draft.progress" placeholder="进度" @input="saveDrafts"></textarea>
+                  </label>
+                </div>
+                <details v-if="row.record.work_type === 'repair'" class="repair-fields">
+                  <summary>检修字段</summary>
+                  <div class="form-grid">
+                    <label><span>维修设备</span><input v-model="row.draft.repair_device" @input="saveDrafts" /></label>
+                    <label><span>维修故障</span><input v-model="row.draft.repair_fault" @input="saveDrafts" /></label>
+                    <label><span>故障类型</span><input v-model="row.draft.fault_type" @input="saveDrafts" /></label>
+                    <label><span>维修方式</span><input v-model="row.draft.repair_mode" @input="saveDrafts" /></label>
+                    <label><span>故障发现方式</span><input v-model="row.draft.discovery" @input="saveDrafts" /></label>
+                    <label><span>故障现象</span><input v-model="row.draft.symptom" @input="saveDrafts" /></label>
+                    <label class="span-2"><span>解决方案</span><textarea v-model="row.draft.solution" @input="saveDrafts"></textarea></label>
+                  </div>
+                </details>
+                <div v-if="row.record.work_type === 'change'" class="zhihang-line">
+                  <label>
+                    <input v-model="row.draft.zhihang_involved" type="checkbox" @change="saveDrafts" />
+                    涉及智航
+                  </label>
+                  <select v-if="row.draft.zhihang_involved" v-model="row.draft.zhihang_record_id" @change="bindZhihang(row.draft)">
+                    <option value="">选择智航变更</option>
+                    <option v-for="item in zhihangRecords" :key="item.record_id" :value="item.record_id">
+                      {{ item.title || item.record_id }}
+                    </option>
+                  </select>
+                </div>
+                <div class="card-actions">
+                  <span class="job-line" :class="jobClass(row.key)">{{ jobText(row.key) }}</span>
+                  <button class="btn blue" :disabled="isLineBusy(row.key)" @click.stop="sendStart(row.key)">
+                    发送{{ sourceActionLabel(row.record) }}
+                  </button>
+                  <button class="btn ghost" :disabled="isLineBusy(row.key)" @click.stop="removeDraft(row.key)">移除</button>
+                </div>
+              </template>
             </article>
           </div>
         </section>
@@ -212,11 +254,11 @@
         <aside class="panel ongoing-panel">
           <div class="panel-head">
             <h2>已开始未结束</h2>
-            <span>{{ ongoing.length }}</span>
+            <span>{{ liveOngoingCount }}</span>
           </div>
           <div v-if="ongoing.length === 0" class="empty-block">当前没有进行中通告</div>
           <div v-else class="ongoing-list">
-            <article v-for="item in ongoing" :key="item.active_item_id || item.record_id" class="ongoing-card">
+            <article v-for="item in ongoing" :key="ongoingLineKey(item)" class="ongoing-card">
               <div class="card-title">
                 <strong>{{ ongoingTitle(item) }}</strong>
                 <span>{{ workTypeLabel(item.work_type) }}</span>
@@ -232,12 +274,12 @@
                 </label>
               </div>
               <div class="card-actions">
-                <span class="job-line" :class="jobClass(item.active_item_id || item.record_id)">
-                  {{ jobText(item.active_item_id || item.record_id) }}
+                <span class="job-line" :class="jobClass(ongoingLineKey(item))">
+                  {{ jobText(ongoingLineKey(item)) }}
                 </span>
-                <button class="btn blue" :disabled="isLineBusy(item.active_item_id || item.record_id)" @click="sendOngoing(item, 'update')">更新</button>
-                <button class="btn green" :disabled="isLineBusy(item.active_item_id || item.record_id)" @click="sendOngoing(item, 'end')">结束</button>
-                <button class="btn danger" :disabled="isLineBusy(item.active_item_id || item.record_id)" @click="deleteOngoing(item)">删除</button>
+                <button class="btn blue" :disabled="isLineBusy(ongoingLineKey(item))" @click="sendOngoing(item, 'update')">更新</button>
+                <button class="btn green" :disabled="isLineBusy(ongoingLineKey(item))" @click="sendOngoing(item, 'end')">结束</button>
+                <button class="btn danger" :disabled="isLineBusy(ongoingLineKey(item))" @click="deleteOngoing(item)">删除</button>
               </div>
             </article>
           </div>
@@ -248,7 +290,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import AdminTools from "./components/AdminTools.vue";
 import AuthPanels from "./components/AuthPanels.vue";
 import ScopeHome from "./components/ScopeHome.vue";
@@ -262,6 +304,7 @@ const workTypes = [
   { value: "change", label: "变更" },
   { value: "repair", label: "检修" },
 ];
+const brandLogoSrc = "/assets/vnet-logo.png";
 const maintenanceCycleOptions = ["每月", "每季", "每年", "半年", "每两年", "每三年", "每五年", "冬季保温每日", "/"];
 const requestableScopes: ScopeOption[] = [
   { value: "110", label: "110站" },
@@ -285,9 +328,18 @@ const userSelectedWorkType = ref(false);
 const searchText = ref("");
 const activeDraftKey = ref("");
 const showPasteParser = ref(false);
+const showMemoryImporter = ref(false);
 const showAdminTools = ref(false);
 const pasteText = ref("");
+const memoryImportText = ref("");
+const memoryImportBusy = ref(false);
+const memoryImportLine = ref("粘贴历史通告后导入。");
+const memoryImportLineType = ref("");
 const eventSource = ref<EventSource | null>(null);
+const sseConnected = ref(false);
+const activeItemsEventSource = ref<EventSource | null>(null);
+const activeItemsConnected = ref(false);
+const activeItemsUpdatePending = ref(false);
 
 const auth = reactive({
   loggedIn: false,
@@ -315,10 +367,28 @@ const drafts = reactive(new Map<string, Dict>());
 const ongoingEdits = reactive(new Map<string, Dict>());
 const jobStates = reactive(new Map<string, Dict>());
 const defaults = reactive({ impact: "无", progress: "" });
+const localSummaryAdjustments = reactive({ started: 0, updated: 0, ended: 0, ongoing: 0 });
+const draftStackRef = ref<HTMLElement | null>(null);
+const fallbackPollTimers = new Map<string, number>();
+const pollingJobs = new Set<string>();
+let workbenchLoadSeq = 0;
+let workbenchRefreshTimer: number | null = null;
+let sseReconnectTimer: number | null = null;
+let activeItemsReconnectTimer: number | null = null;
+let lastActiveItemsSignature = "";
+let activeItemsStreamScope = "";
+let appDisposed = false;
 
 const visibleScopeOptions = computed(() => auth.scopeOptions.length ? auth.scopeOptions : requestableScopes);
 const isAdmin = computed(() => String(auth.user?.role || "").toLowerCase() === "admin");
 const dailyStats = computed(() => dailySummary.value?.stats || {});
+const liveDailyStats = computed(() => ({
+  ...dailyStats.value,
+  started: Math.max(0, Number(dailyStats.value.started || 0) + localSummaryAdjustments.started),
+  updated: Math.max(0, Number(dailyStats.value.updated || 0) + localSummaryAdjustments.updated),
+  ended: Math.max(0, Number(dailyStats.value.ended || 0) + localSummaryAdjustments.ended),
+}));
+const liveOngoingCount = computed(() => Math.max(0, ongoing.value.length + localSummaryAdjustments.ongoing));
 const recordTypeCounts = computed(() => {
   const counts: Record<string, number> = { maintenance: 0, change: 0, repair: 0 };
   for (const record of records.value) {
@@ -343,19 +413,29 @@ const filteredRows = computed<NoticeRow[]>(() => filteredRecords.value.map((reco
   title: recordCardTitle(record),
   type: workTypeLabel(record.work_type),
   meta: [buildingForRecord(record), specialtyForRecord(record), sourceProgressForRecord(record)].filter(Boolean).join(" · "),
-  status: isRecordOngoing(record) ? "右侧处理" : sourceActionLabel(record),
+  status: recordStatusLabel(record),
+  statusTone: recordStatusTone(record),
+  selected: selectedKeys.has(recordKey(record)),
   raw: record,
 })));
-const selectedDraftRows = computed(() => Array.from(selectedKeys).map((key) => {
-  const record = draftRecordForKey(key);
-  if (!record) return null;
-  return {
-    key,
-    record,
-    draft: getDraft(record),
-    title: recordCardTitle(record),
-  };
-}).filter(Boolean) as Array<{ key: string; record: Dict; draft: Dict; title: string }>);
+const selectedDraftRows = computed(() => {
+  const keys = Array.from(selectedKeys);
+  const pinned = activeDraftKey.value;
+  if (pinned && keys.includes(pinned)) {
+    keys.splice(keys.indexOf(pinned), 1);
+    keys.unshift(pinned);
+  }
+  return keys.map((key) => {
+    const record = draftRecordForKey(key);
+    if (!record) return null;
+    return {
+      key,
+      record,
+      draft: getDraft(record),
+      title: recordCardTitle(record),
+    };
+  }).filter(Boolean) as Array<{ key: string; record: Dict; draft: Dict; title: string }>;
+});
 
 function normalizeScopeValue(value: string, fallback = "ALL"): string {
   const text = String(value || "").trim().toUpperCase();
@@ -472,9 +552,65 @@ function sourceActionLabel(record: Dict): string {
   return sourceActionForRecord(record) === "start" ? "开始" : "更新";
 }
 
+function recordStatusLabel(record: Dict): string {
+  const key = recordKey(record);
+  const job = jobStates.get(key);
+  if (job?.phase && !terminalPhase(job.phase)) return "提交中";
+  if (job?.phase === "failed") return "提交失败";
+  if (job?.phase === "success") return "已提交";
+  if (selectedKeys.has(key)) return "已加入待发起";
+  if (isRecordOngoing(record)) return "进行中 · 右侧处理";
+  const progress = sourceProgressForRecord(record);
+  if (!progress || progress === "未开始") return "待发起";
+  return `${progress} · 可更新`;
+}
+
+function recordStatusTone(record: Dict): string {
+  const key = recordKey(record);
+  const job = jobStates.get(key);
+  if (job?.phase && !terminalPhase(job.phase)) return "ongoing";
+  if (job?.phase === "failed") return "failed";
+  if (job?.phase === "success") return "queued";
+  if (selectedKeys.has(key)) return "queued";
+  if (isRecordOngoing(record)) return "ongoing";
+  const progress = sourceProgressForRecord(record);
+  if (!progress || progress === "未开始") return "pending";
+  return "update";
+}
+
 function targetRecordIdForRecord(record: Dict): string {
   const summary = record?.work_summary || {};
   return String(summary.target_record_id || summary.feishu_record_id || summary.record_id || record?.target_record_id || "").trim();
+}
+
+function targetRecordIdForOngoing(item: Dict): string {
+  return String(item.target_record_id || item.feishu_record_id || item.raw_record_id || item.record_id || "").trim();
+}
+
+function ongoingLineKey(item: Dict): string {
+  return String(item.active_item_id || item.record_id || item.target_record_id || item.feishu_record_id || item.raw_record_id || "").trim();
+}
+
+function sourceRecordIdForOngoing(item: Dict, targetRecordId = ""): string {
+  const source = String(item.source_record_id || "").trim();
+  if (source) return source;
+  const recordId = String(item.record_id || "").trim();
+  return recordId && recordId !== targetRecordId ? recordId : "";
+}
+
+function ongoingTimeRange(item: Dict): { start: string; end: string } {
+  const timeText = String(item.time_str || item.time || "").trim();
+  const parts = timeText.split(/~|至|到/).map((part) => part.trim()).filter(Boolean);
+  const isRepair = (item.work_type || "maintenance") === "repair";
+  const start =
+    toDatetimeLocal(isRepair ? (item.expected_time || item.start_time) : item.start_time) ||
+    toDatetimeLocal(parts[0] || "") ||
+    todayInput(isRepair ? 23 : 9, isRepair ? 50 : 30);
+  const end =
+    toDatetimeLocal(isRepair ? (item.fault_time || item.end_time) : item.end_time) ||
+    toDatetimeLocal(parts[1] || "") ||
+    todayInput(isRepair ? 0 : 18, isRepair ? 0 : 30);
+  return { start, end };
 }
 
 function isRecordOngoing(record: Dict): boolean {
@@ -557,23 +693,37 @@ function manualRecordFromDraft(key: string, draft: Dict): Dict {
 }
 
 function repairDraftDefaults(record: Dict): Dict {
+  const memory = record.memory || {};
   return {
     start_time: todayInput(23, 50),
     end_time: toDatetimeLocal(firstRepairField(record, ["故障发生时间", "发现故障时间"])) || "",
-    location: "",
-    content: titleForRecord(record),
-    level: levelForRecord(record),
-    specialty: specialtyForRecord(record),
-    reason: firstRepairField(record, ["故障原因", "故障维修原因"]),
-    impact: "",
+    location: memory.location || "",
+    content: memory.content || titleForRecord(record),
+    level: memory.level || levelForRecord(record),
+    specialty: memory.specialty || specialtyForRecord(record),
+    reason: memory.reason || firstRepairField(record, ["故障原因", "故障维修原因"]),
+    impact: memory.impact || "",
     progress: "",
-    repair_device: repairDeviceText(record),
-    repair_fault: firstRepairField(record, ["维修故障", "故障维修原因"]),
-    fault_type: firstRepairField(record, ["故障类型"]) || "设备故障",
-    repair_mode: firstRepairField(record, ["维修方式", "维修方", "供应商名称"]),
-    discovery: firstRepairField(record, ["对应来源"]),
-    symptom: firstRepairField(record, ["故障发生现象描述", "故障现象"]),
-    solution: firstRepairField(record, ["解决方案", "维修方案", "后续整改措施"]),
+    repair_device: memory.repair_device || repairDeviceText(record),
+    repair_fault: memory.repair_fault || firstRepairField(record, ["维修故障", "故障维修原因"]),
+    fault_type: memory.fault_type || firstRepairField(record, ["故障类型"]) || "设备故障",
+    repair_mode: memory.repair_mode || firstRepairField(record, ["维修方式", "维修方", "供应商名称"]),
+    discovery: memory.discovery || firstRepairField(record, ["对应来源"]),
+    symptom: memory.symptom || firstRepairField(record, ["故障发生现象描述", "故障现象"]),
+    solution: memory.solution || firstRepairField(record, ["解决方案", "维修方案", "后续整改措施"]),
+  };
+}
+
+function rememberedZhihang(memory: Dict): Dict {
+  const rememberedId = String(memory.zhihang_record_id || "").trim();
+  if (!rememberedId) return {};
+  const item = zhihangRecords.value.find((record) => record.record_id === rememberedId);
+  if (!item) return {};
+  return {
+    zhihang_involved: true,
+    zhihang_record_id: rememberedId,
+    zhihang_title: item.title || memory.zhihang_title || "",
+    zhihang_progress: item.progress || memory.zhihang_progress || "",
   };
 }
 
@@ -588,22 +738,23 @@ function getDraft(record: Dict): Dict {
       const f = fieldsOf(record);
       const memory = record.memory || {};
       const isChange = (record.work_type || "maintenance") === "change";
+      const zhihangMemory = isChange ? rememberedZhihang(memory) : {};
       drafts.set(key, {
         title: titleForRecord(record),
-        specialty: specialtyForRecord(record),
-        level: levelForRecord(record),
+        specialty: memory.specialty || specialtyForRecord(record),
+        level: memory.level || levelForRecord(record),
         maintenance_cycle: f["维护周期"] || "",
         start_time: isChange ? (toDatetimeLocal(f["变更开始日期（阿里）"]) || todayInput(9, 30)) : todayInput(9, 30),
         end_time: isChange ? (toDatetimeLocal(f["变更结束日期（阿里）"]) || todayInput(18, 30)) : todayInput(18, 30),
         location: memory.location || "",
-        content: isChange ? titleForRecord(record) : (memory.content || ""),
+        content: isChange ? (memory.content || titleForRecord(record)) : (memory.content || ""),
         reason: memory.reason || "",
         impact: memory.impact || defaults.impact,
         progress: defaults.progress,
-        zhihang_involved: false,
-        zhihang_record_id: "",
-        zhihang_title: "",
-        zhihang_progress: "",
+        zhihang_involved: Boolean(zhihangMemory.zhihang_involved),
+        zhihang_record_id: zhihangMemory.zhihang_record_id || "",
+        zhihang_title: zhihangMemory.zhihang_title || "",
+        zhihang_progress: zhihangMemory.zhihang_progress || "",
       });
     }
     saveDrafts();
@@ -611,17 +762,30 @@ function getDraft(record: Dict): Dict {
   return drafts.get(key) || {};
 }
 
+function currentOpenId(): string {
+  return String(auth.user?.open_id || auth.user?.openid || "anonymous").trim() || "anonymous";
+}
+
 function storageKey(): string {
+  return `clipflow-vue-workbench:${currentOpenId()}:${currentScope.value || "ALL"}`;
+}
+
+function legacyStorageKey(): string {
   return `clipflow-vue-workbench:${currentScope.value || "ALL"}`;
 }
 
 function loadDrafts(): void {
   try {
-    const payload = JSON.parse(localStorage.getItem(storageKey()) || "{}");
+    const raw = localStorage.getItem(storageKey()) || localStorage.getItem(legacyStorageKey()) || "{}";
+    const payload = JSON.parse(raw);
+    if (!payload || typeof payload !== "object") throw new Error("invalid draft payload");
     selectedKeys.clear();
-    for (const key of payload.selected || []) selectedKeys.add(String(key));
+    for (const key of Array.isArray(payload.selected) ? payload.selected : []) selectedKeys.add(String(key));
     drafts.clear();
-    for (const [key, value] of Object.entries(payload.drafts || {})) drafts.set(key, value as Dict);
+    const draftPayload = payload.drafts && typeof payload.drafts === "object" ? payload.drafts : {};
+    for (const [key, value] of Object.entries(draftPayload)) {
+      if (value && typeof value === "object") drafts.set(key, value as Dict);
+    }
   } catch {
     selectedKeys.clear();
     drafts.clear();
@@ -631,7 +795,11 @@ function loadDrafts(): void {
 function saveDrafts(): void {
   const payload: Dict = { selected: Array.from(selectedKeys), drafts: {} };
   for (const [key, value] of drafts.entries()) payload.drafts[key] = value;
-  localStorage.setItem(storageKey(), JSON.stringify(payload));
+  try {
+    localStorage.setItem(storageKey(), JSON.stringify(payload));
+  } catch {
+    syncText.value = "草稿保存失败，请减少待发起通告数量后重试";
+  }
 }
 
 async function api(path: string, options: RequestInit = {}): Promise<Dict> {
@@ -653,8 +821,6 @@ async function loadAuthStatus(): Promise<void> {
     auth.user = data.user || {};
     auth.scopeOptions = data.scope_options || [];
     auth.loginUrl = data.login_url || "/api/auth/login";
-    if (!currentScope.value && data.default_scope) currentScope.value = data.default_scope;
-    if (!currentScope.value && auth.scopeOptions[0]?.value) currentScope.value = auth.scopeOptions[0].value;
   } finally {
     authChecking.value = false;
   }
@@ -694,13 +860,17 @@ async function loadHandoverLinks(): Promise<void> {
 
 async function loadWorkbench(): Promise<void> {
   if (!currentScope.value) return;
+  const requestSeq = ++workbenchLoadSeq;
+  const requestScope = currentScope.value;
   loading.value = true;
   try {
-    const data = await api(`/api/workbench?scope=${encodeURIComponent(currentScope.value)}`);
+    const data = await api(`/api/workbench?scope=${encodeURIComponent(requestScope)}`);
+    if (requestSeq !== workbenchLoadSeq || requestScope !== currentScope.value) return;
     records.value = data.records || [];
     ongoing.value = data.ongoing || [];
     zhihangRecords.value = data.zhihang_change_records || [];
     dailySummary.value = data.daily_summary || { date: "", items: [], stats: {} };
+    resetLocalSummaryAdjustments();
     defaults.impact = data.defaults?.impact || defaults.impact;
     defaults.progress = data.defaults?.progress || defaults.progress;
     if (!userSelectedWorkType.value) {
@@ -709,9 +879,12 @@ async function loadWorkbench(): Promise<void> {
     syncText.value = data.source_snapshot_ready === false ? "后台正在准备数据" : `数据 ${data.last_loaded_at || "已就绪"}`;
     pruneSelection();
   } catch (error: any) {
+    if (requestSeq !== workbenchLoadSeq || requestScope !== currentScope.value) return;
     syncText.value = error?.message || "加载失败";
   } finally {
-    loading.value = false;
+    if (requestSeq === workbenchLoadSeq && requestScope === currentScope.value) {
+      loading.value = false;
+    }
   }
 }
 
@@ -733,25 +906,160 @@ function pruneSelection(): void {
     if (!valid.has(key) && !isManualKey(key)) selectedKeys.delete(key);
   }
   saveDrafts();
+  pruneRuntimeState();
+}
+
+function resetLocalSummaryAdjustments(): void {
+  localSummaryAdjustments.started = 0;
+  localSummaryAdjustments.updated = 0;
+  localSummaryAdjustments.ended = 0;
+  localSummaryAdjustments.ongoing = 0;
+}
+
+function bumpLocalSummary(field: keyof typeof localSummaryAdjustments, delta = 1): void {
+  localSummaryAdjustments[field] += delta;
+}
+
+function removeOngoingLine(key: string): boolean {
+  if (!key) return false;
+  const before = ongoing.value.length;
+  ongoing.value = ongoing.value.filter((item) => ongoingLineKey(item) !== key);
+  ongoingEdits.delete(key);
+  return ongoing.value.length !== before;
+}
+
+function terminalPhase(phase: string): boolean {
+  return ["success", "failed"].includes(String(phase || ""));
+}
+
+function activeLineKeys(): Set<string> {
+  const keys = new Set<string>(Array.from(selectedKeys));
+  for (const item of ongoing.value) {
+    const key = ongoingLineKey(item);
+    if (key) keys.add(key);
+  }
+  return keys;
+}
+
+function clearFallbackPoll(key: string): void {
+  const timer = fallbackPollTimers.get(key);
+  if (timer) window.clearTimeout(timer);
+  fallbackPollTimers.delete(key);
+}
+
+function scheduleWorkbenchReload(delay = 350): void {
+  if (appDisposed) return;
+  if (workbenchRefreshTimer !== null) return;
+  workbenchRefreshTimer = window.setTimeout(() => {
+    workbenchRefreshTimer = null;
+    if (appDisposed) return;
+    if (isUserEditing()) {
+      activeItemsUpdatePending.value = true;
+      syncText.value = "后台有更新，完成输入后自动刷新";
+      scheduleWorkbenchReload(3000);
+      return;
+    }
+    activeItemsUpdatePending.value = false;
+    void loadWorkbench();
+  }, delay);
+}
+
+function isUserEditing(): boolean {
+  const element = document.activeElement as HTMLElement | null;
+  if (!element) return false;
+  const tag = element.tagName.toLowerCase();
+  if (["input", "textarea", "select"].includes(tag)) return true;
+  return Boolean(element.isContentEditable);
+}
+
+function pruneRuntimeState(): void {
+  const visibleKeys = activeLineKeys();
+  const now = Date.now();
+  const staleBefore = now - 30 * 60 * 1000;
+  for (const key of Array.from(ongoingEdits.keys())) {
+    if (!visibleKeys.has(key)) ongoingEdits.delete(key);
+  }
+  for (const [key, state] of Array.from(jobStates.entries())) {
+    const updatedAt = Date.parse(String(state.updated_at || ""));
+    const stale = Number.isFinite(updatedAt) && updatedAt < staleBefore;
+    if (!visibleKeys.has(key) && (terminalPhase(state.phase) || stale)) {
+      jobStates.delete(key);
+      clearFallbackPoll(key);
+    }
+  }
 }
 
 function enterScope(scope: string): void {
-  currentScope.value = normalizeScopeValue(scope, "ALL");
+  switchScope(scope);
+}
+
+function returnToHome(): void {
+  if (currentScope.value) saveDrafts();
+  stopActiveItemsSse();
+  isWorkbench.value = false;
+  currentScope.value = "";
+  activeDraftKey.value = "";
+  selectedKeys.clear();
+  records.value = [];
+  ongoing.value = [];
+  zhihangRecords.value = [];
+  dailySummary.value = { date: "", items: [], stats: {} };
+  resetLocalSummaryAdjustments();
+  syncText.value = "请选择功能";
+  const url = new URL(window.location.href);
+  url.searchParams.delete("scope");
+  window.history.replaceState({}, "", url);
+}
+
+function switchScope(scope: string): void {
+  const nextScope = normalizeScopeValue(scope, "ALL");
+  if (!nextScope) return;
+  if (nextScope === currentScope.value && isWorkbench.value) return;
+  if (currentScope.value && nextScope !== currentScope.value) {
+    saveDrafts();
+  }
+  currentScope.value = nextScope;
   isWorkbench.value = true;
   userSelectedWorkType.value = false;
+  activeDraftKey.value = "";
+  ongoingEdits.clear();
+  records.value = [];
+  ongoing.value = [];
+  zhihangRecords.value = [];
+  dailySummary.value = { date: "", items: [], stats: {} };
+  resetLocalSummaryAdjustments();
+  syncText.value = "切换中";
   const url = new URL(window.location.href);
   url.searchParams.set("scope", currentScope.value);
   window.history.replaceState({}, "", url);
   loadDrafts();
   loadWorkbench();
+  startActiveItemsSse();
+}
+
+function pinDraftInMiddlePanel(key: string): void {
+  if (!key) return;
+  activeDraftKey.value = key;
+  nextTick(() => {
+    draftStackRef.value?.scrollTo({ top: 0, behavior: "smooth" });
+  });
+}
+
+function draftSummary(record: Dict, draft: Dict): string {
+  const timeRange = [draft.start_time, draft.end_time].filter(Boolean).join("~");
+  return [
+    draft.specialty || specialtyForRecord(record),
+    draft.maintenance_cycle || fieldsOf(record)["维护周期"],
+    draft.location,
+    timeRange,
+  ].filter(Boolean).join(" · ");
 }
 
 function toggleRecordSelection(row: NoticeRow | undefined): void {
   const key = row?.id || "";
   if (!key) return;
-  if (selectedKeys.has(key)) selectedKeys.delete(key);
-  else selectedKeys.add(key);
-  activeDraftKey.value = key;
+  selectedKeys.add(key);
+  pinDraftInMiddlePanel(key);
   const record = draftRecordForKey(key);
   if (record) getDraft(record);
   saveDrafts();
@@ -761,13 +1069,15 @@ function addManualDraft(): void {
   const key = `manual:${workType.value}:${Date.now()}-${Math.random().toString(16).slice(2)}`;
   drafts.set(key, manualDraftDefaults(workType.value));
   selectedKeys.add(key);
-  activeDraftKey.value = key;
+  pinDraftInMiddlePanel(key);
   saveDrafts();
 }
 
 function removeDraft(key: string): void {
   selectedKeys.delete(key);
   if (isManualKey(key)) drafts.delete(key);
+  jobStates.delete(key);
+  clearFallbackPoll(key);
   if (activeDraftKey.value === key) activeDraftKey.value = "";
   saveDrafts();
 }
@@ -817,11 +1127,43 @@ function parsePastedNotice(): void {
   draft.solution = sectionValue(sections, ["解决方案"]);
   drafts.set(key, draft);
   selectedKeys.add(key);
-  activeDraftKey.value = key;
+  pinDraftInMiddlePanel(key);
   workType.value = type;
   pasteText.value = "";
   showPasteParser.value = false;
   saveDrafts();
+}
+
+async function importHistoricalMemory(): Promise<void> {
+  const text = memoryImportText.value.trim();
+  if (!text) {
+    memoryImportLine.value = "请先粘贴历史通告。";
+    memoryImportLineType.value = "failed";
+    return;
+  }
+  memoryImportBusy.value = true;
+  memoryImportLine.value = "正在导入历史记忆...";
+  memoryImportLineType.value = "";
+  try {
+    const data = await api("/api/notice-memory/import", {
+      method: "POST",
+      body: JSON.stringify({ scope: currentScope.value || "ALL", text }),
+    });
+    const imported = Number(data.imported_count || 0);
+    const skipped = Number(data.skipped_count || 0);
+    memoryImportLine.value = `已导入 ${imported} 条记忆${skipped ? `，跳过 ${skipped} 条` : ""}。`;
+    memoryImportLineType.value = imported > 0 ? "success" : "failed";
+    if (imported > 0) {
+      memoryImportText.value = "";
+      showMemoryImporter.value = false;
+      await loadWorkbench();
+    }
+  } catch (error: any) {
+    memoryImportLine.value = error?.message || "导入失败";
+    memoryImportLineType.value = "failed";
+  } finally {
+    memoryImportBusy.value = false;
+  }
 }
 
 function bindZhihang(draft: Dict): void {
@@ -897,13 +1239,13 @@ async function sendStart(key: string): Promise<void> {
 }
 
 function ongoingDraft(item: Dict): Dict {
-  const id = item.active_item_id || item.record_id || "";
+  const id = ongoingLineKey(item);
   if (!ongoingEdits.has(id)) ongoingEdits.set(id, { progress: item.progress || item.content || "" });
   return ongoingEdits.get(id) || {};
 }
 
 function setOngoingEdit(item: Dict, key: string, value: string): void {
-  const id = item.active_item_id || item.record_id || "";
+  const id = ongoingLineKey(item);
   const current = ongoingDraft(item);
   current[key] = value;
   ongoingEdits.set(id, current);
@@ -911,29 +1253,47 @@ function setOngoingEdit(item: Dict, key: string, value: string): void {
 
 function buildOngoingPayload(item: Dict, action: string): Dict {
   const edit = ongoingDraft(item);
+  const targetRecordId = targetRecordIdForOngoing(item);
+  const sourceRecordId = sourceRecordIdForOngoing(item, targetRecordId);
+  const timeRange = ongoingTimeRange(item);
+  const workType = item.work_type || "maintenance";
   return {
     action,
     scope: currentScope.value || "ALL",
-    work_type: item.work_type || "maintenance",
+    work_type: workType,
     notice_type: item.notice_type || "",
-    record_id: item.record_id || item.target_record_id || "",
-    target_record_id: item.record_id || item.target_record_id || "",
+    record_id: sourceRecordId || targetRecordId,
+    target_record_id: targetRecordId,
     active_item_id: item.active_item_id || "",
-    source_record_id: item.source_record_id || "",
+    source_record_id: sourceRecordId,
     title: item.title || item.content || "",
     specialty: item.specialty || "",
     building: item.building || "",
+    building_codes: Array.isArray(item.building_codes) ? item.building_codes : [],
+    maintenance_cycle: item.maintenance_cycle || "",
+    level: item.level || "",
+    start_time: timeRange.start,
+    end_time: timeRange.end,
     location: edit.location || item.location || "",
     content: edit.content || item.content || "",
     reason: edit.reason || item.reason || "",
     impact: edit.impact || item.impact || "",
     progress: edit.progress || item.progress || "",
+    repair_device: workType === "repair" ? (edit.repair_device || item.repair_device || "") : "",
+    repair_fault: workType === "repair" ? (edit.repair_fault || item.repair_fault || "") : "",
+    fault_type: workType === "repair" ? (edit.fault_type || item.fault_type || "") : "",
+    repair_mode: workType === "repair" ? (edit.repair_mode || item.repair_mode || "") : "",
+    discovery: workType === "repair" ? (edit.discovery || item.discovery || "") : "",
+    symptom: workType === "repair" ? (edit.symptom || item.symptom || "") : "",
+    solution: workType === "repair" ? (edit.solution || item.solution || "") : "",
+    fault_time: workType === "repair" ? timeRange.end : "",
+    expected_time: workType === "repair" ? timeRange.start : "",
     operation_id: opId(`${item.active_item_id || item.record_id}:${action}`),
   };
 }
 
 async function sendOngoing(item: Dict, action: string): Promise<void> {
-  const key = item.active_item_id || item.record_id || "";
+  const key = ongoingLineKey(item);
   await sendAction(buildOngoingPayload(item, action), key);
 }
 
@@ -948,7 +1308,7 @@ async function sendAction(payload: Dict, lineKey: string): Promise<void> {
       status: "busy",
       phase: data.initial_phase || "accepted",
     });
-    pollJob(data.job_id, lineKey);
+    watchJob(data.job_id, lineKey);
   } catch (error: any) {
     rememberJob(lineKey, { text: error?.message || "提交失败", status: "failed", phase: "failed" });
   }
@@ -956,6 +1316,40 @@ async function sendAction(payload: Dict, lineKey: string): Promise<void> {
 
 function rememberJob(key: string, patch: Dict): void {
   jobStates.set(key, { ...(jobStates.get(key) || {}), ...patch, updated_at: new Date().toISOString() });
+}
+
+function applySuccessfulJobState(lineKey: string): void {
+  const state = jobStates.get(lineKey) || {};
+  if (state.local_applied) return;
+  const payload = state.payload || {};
+  const action = String(payload.action || "").toLowerCase();
+  if (selectedKeys.has(lineKey)) {
+    selectedKeys.delete(lineKey);
+    if (isManualKey(lineKey)) drafts.delete(lineKey);
+    if (activeDraftKey.value === lineKey) activeDraftKey.value = "";
+    saveDrafts();
+  }
+  if (action === "start") {
+    bumpLocalSummary("started", 1);
+    bumpLocalSummary("ongoing", 1);
+  } else if (action === "update") {
+    bumpLocalSummary("updated", 1);
+  } else if (action === "end") {
+    bumpLocalSummary("ended", 1);
+    if (removeOngoingLine(lineKey)) {
+      // The row was already removed locally; no additional ongoing delta needed.
+    } else {
+      bumpLocalSummary("ongoing", -1);
+    }
+  }
+  rememberJob(lineKey, { local_applied: true });
+}
+
+function handleTerminalJob(lineKey: string, phase: string): void {
+  if (phase === "success") {
+    applySuccessfulJobState(lineKey);
+    scheduleWorkbenchReload(0);
+  }
 }
 
 function jobText(key: string): string {
@@ -968,33 +1362,62 @@ function jobClass(key: string): string {
 
 function isLineBusy(key: string): boolean {
   const phase = jobStates.get(key)?.phase || "";
-  return Boolean(phase && !["success", "failed"].includes(phase));
+  return Boolean(phase && !terminalPhase(phase));
+}
+
+function watchJob(jobId: string, lineKey: string): void {
+  clearFallbackPoll(lineKey);
+  if (eventSource.value && eventSource.value.readyState !== EventSource.CLOSED) {
+    const delay = sseConnected.value ? 15000 : 6000;
+    const timer = window.setTimeout(() => {
+      fallbackPollTimers.delete(lineKey);
+      if (!isLineBusy(lineKey)) return;
+      void pollJob(jobId, lineKey);
+    }, delay);
+    fallbackPollTimers.set(lineKey, timer);
+    return;
+  }
+  void pollJob(jobId, lineKey);
 }
 
 async function pollJob(jobId: string, lineKey: string): Promise<void> {
-  for (let i = 0; i < 120; i += 1) {
-    try {
-      const data = await api(`/api/jobs/${encodeURIComponent(jobId)}`);
-      const phase = data.phase || data.status || "";
-      const text = data.message || data.upload_message || phase || "处理中";
-      rememberJob(lineKey, {
-        phase,
-        status: phase === "success" ? "success" : phase === "failed" ? "failed" : "busy",
-        text: phase === "success" ? "成功" : phase === "failed" ? (data.error || text || "失败") : text,
-      });
-      if (["success", "failed"].includes(phase)) {
-        if (phase === "success") await loadWorkbench();
-        return;
+  const pollKey = `${jobId}:${lineKey}`;
+  if (pollingJobs.has(pollKey)) return;
+  pollingJobs.add(pollKey);
+  try {
+    for (let i = 0; i < 120; i += 1) {
+      if (appDisposed) return;
+      try {
+        const data = await api(`/api/jobs/${encodeURIComponent(jobId)}`);
+        const phase = data.phase || data.status || "";
+        const text = data.message || data.upload_message || phase || "处理中";
+        rememberJob(lineKey, {
+          phase,
+          status: phase === "success" ? "success" : phase === "failed" ? "failed" : "busy",
+          text: phase === "success" ? "成功" : phase === "failed" ? (data.error || text || "失败") : text,
+        });
+        if (terminalPhase(phase)) {
+          clearFallbackPoll(lineKey);
+          handleTerminalJob(lineKey, phase);
+          return;
+        }
+      } catch {
+        rememberJob(lineKey, { text: "后台处理中，等待状态同步", status: "busy" });
       }
-    } catch {
-      rememberJob(lineKey, { text: "后台处理中，等待状态同步", status: "busy" });
+      await new Promise((resolve) => setTimeout(resolve, 2000));
     }
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+  } finally {
+    pollingJobs.delete(pollKey);
   }
 }
 
 function startJobSse(): void {
+  if (appDisposed) return;
   if (eventSource.value) eventSource.value.close();
+  if (sseReconnectTimer !== null) {
+    window.clearTimeout(sseReconnectTimer);
+    sseReconnectTimer = null;
+  }
   try {
     const source = new EventSource("/api/jobs/stream");
     const handleJobEvent = (event: MessageEvent) => {
@@ -1008,30 +1431,117 @@ function startJobSse(): void {
       if (!job?.job_id) return;
       for (const [key, value] of jobStates.entries()) {
         if (value.job_id === job.job_id) {
+          const phase = job.phase || "";
           rememberJob(key, {
-            phase: job.phase,
-            status: job.phase === "success" ? "success" : job.phase === "failed" ? "failed" : "busy",
-            text: job.phase === "success" ? "成功" : job.error || job.message || job.phase,
+            phase,
+            status: phase === "success" ? "success" : phase === "failed" ? "failed" : "busy",
+            text: phase === "success" ? "成功" : job.error || job.message || phase,
           });
+          if (terminalPhase(phase)) {
+            clearFallbackPoll(key);
+            handleTerminalJob(key, phase);
+          }
         }
       }
+    };
+    source.onopen = () => {
+      sseConnected.value = true;
     };
     source.onmessage = handleJobEvent;
     source.addEventListener("job", handleJobEvent);
     source.onerror = () => {
+      sseConnected.value = false;
       if (eventSource.value === source && source.readyState === EventSource.CLOSED) {
         eventSource.value = null;
-        window.setTimeout(startJobSse, 5000);
+        if (!appDisposed && sseReconnectTimer === null) {
+          sseReconnectTimer = window.setTimeout(() => {
+            sseReconnectTimer = null;
+            startJobSse();
+          }, 5000);
+        }
       }
     };
     eventSource.value = source;
   } catch {
     eventSource.value = null;
+    sseConnected.value = false;
+  }
+}
+
+function startActiveItemsSse(): void {
+  if (appDisposed || !isWorkbench.value || !currentScope.value) return;
+  const previousSource = activeItemsEventSource.value;
+  activeItemsEventSource.value = null;
+  if (previousSource) previousSource.close();
+  if (activeItemsReconnectTimer !== null) {
+    window.clearTimeout(activeItemsReconnectTimer);
+    activeItemsReconnectTimer = null;
+  }
+  const scope = currentScope.value || "ALL";
+  if (activeItemsStreamScope !== scope) {
+    lastActiveItemsSignature = "";
+    activeItemsStreamScope = scope;
+  }
+  try {
+    const source = new EventSource(`/api/qt-active-items/stream?scope=${encodeURIComponent(scope)}`);
+    source.onopen = () => {
+      activeItemsConnected.value = true;
+    };
+    source.addEventListener("qt_active_items", (event: MessageEvent) => {
+      let payload: Dict;
+      try {
+        payload = JSON.parse(event.data || "{}");
+      } catch {
+        return;
+      }
+      if (String(payload.scope || "") !== scope) return;
+      const signature = String(payload.scope_signature || "");
+      if (!signature) return;
+      if (!lastActiveItemsSignature) {
+        lastActiveItemsSignature = signature;
+        return;
+      }
+      if (signature !== lastActiveItemsSignature) {
+        lastActiveItemsSignature = signature;
+        scheduleWorkbenchReload(isUserEditing() ? 3000 : 250);
+      }
+    });
+    source.addEventListener("error", () => {
+      activeItemsConnected.value = false;
+      if (activeItemsEventSource.value === source && source.readyState === EventSource.CLOSED) {
+        activeItemsEventSource.value = null;
+        if (!appDisposed && isWorkbench.value && activeItemsReconnectTimer === null) {
+          activeItemsReconnectTimer = window.setTimeout(() => {
+            activeItemsReconnectTimer = null;
+            startActiveItemsSse();
+          }, 5000);
+        }
+      }
+    });
+    activeItemsEventSource.value = source;
+  } catch {
+    activeItemsEventSource.value = null;
+    activeItemsConnected.value = false;
+  }
+}
+
+function stopActiveItemsSse(): void {
+  if (activeItemsEventSource.value) activeItemsEventSource.value.close();
+  activeItemsEventSource.value = null;
+  activeItemsConnected.value = false;
+  activeItemsUpdatePending.value = false;
+  lastActiveItemsSignature = "";
+  activeItemsStreamScope = "";
+  if (activeItemsReconnectTimer !== null) {
+    window.clearTimeout(activeItemsReconnectTimer);
+    activeItemsReconnectTimer = null;
   }
 }
 
 async function deleteOngoing(item: Dict): Promise<void> {
-  const key = item.active_item_id || item.record_id || "";
+  const key = ongoingLineKey(item);
+  const targetRecordId = targetRecordIdForOngoing(item);
+  const sourceRecordId = sourceRecordIdForOngoing(item, targetRecordId);
   if (!window.confirm(`确认删除「${ongoingTitle(item)}」？将同步删除 Qt 条目和多维记录。`)) return;
   try {
     rememberJob(key, { text: "删除中", status: "busy", phase: "deleting" });
@@ -1042,11 +1552,12 @@ async function deleteOngoing(item: Dict): Promise<void> {
         work_type: item.work_type || "maintenance",
         notice_type: item.notice_type || "",
         active_item_id: item.active_item_id || "",
-        record_id: item.record_id || "",
-        target_record_id: item.target_record_id || item.record_id || "",
-        source_record_id: item.source_record_id || "",
+        record_id: sourceRecordId || targetRecordId,
+        target_record_id: targetRecordId,
+        source_record_id: sourceRecordId,
       }),
     });
+    removeOngoingLine(key);
     rememberJob(key, { text: "已删除", status: "success", phase: "success" });
     await loadWorkbench();
   } catch (error: any) {
@@ -1109,7 +1620,12 @@ async function confirmPermissionRequest(): Promise<void> {
       body: JSON.stringify({ request_id: permissionRequest.requestId, code: permissionRequest.code }),
     });
     await loadAuthStatus();
-    if (auth.scopeOptions[0]?.value) enterScope(auth.scopeOptions[0].value);
+    if (auth.scopeOptions.length) {
+      await Promise.all([loadOverview(), loadHandoverLinks()]);
+      isWorkbench.value = false;
+      syncText.value = "请选择功能";
+      if (!eventSource.value) startJobSse();
+    }
   } catch (error: any) {
     permissionRequest.message = error?.message || "验证码错误";
   } finally {
@@ -1122,6 +1638,7 @@ watch(workType, () => {
 });
 
 onMounted(async () => {
+  appDisposed = false;
   await loadAuthStatus();
   if (auth.loggedIn && !auth.scopeOptions.length) {
     await loadCurrentPermissionRequest();
@@ -1132,13 +1649,26 @@ onMounted(async () => {
       isWorkbench.value = true;
       loadDrafts();
       await loadWorkbench();
+      startActiveItemsSse();
+    } else {
+      syncText.value = "请选择功能";
     }
     startJobSse();
   }
 });
 
 onBeforeUnmount(() => {
+  appDisposed = true;
   if (eventSource.value) eventSource.value.close();
+  if (activeItemsEventSource.value) activeItemsEventSource.value.close();
+  sseConnected.value = false;
+  activeItemsConnected.value = false;
+  if (sseReconnectTimer !== null) window.clearTimeout(sseReconnectTimer);
+  if (activeItemsReconnectTimer !== null) window.clearTimeout(activeItemsReconnectTimer);
+  if (workbenchRefreshTimer !== null) window.clearTimeout(workbenchRefreshTimer);
+  for (const timer of fallbackPollTimers.values()) window.clearTimeout(timer);
+  fallbackPollTimers.clear();
+  pollingJobs.clear();
 });
 </script>
 
@@ -1175,15 +1705,11 @@ onBeforeUnmount(() => {
   min-width: 0;
 }
 
-.brand-mark {
-  display: grid;
-  place-items: center;
-  width: 46px;
-  height: 46px;
-  border-radius: 6px;
-  background: #0f62fe;
-  color: #ffffff;
-  font-weight: 800;
+.brand-logo {
+  width: 132px;
+  height: 42px;
+  flex: 0 0 auto;
+  object-fit: contain;
 }
 
 h1,
@@ -1211,6 +1737,23 @@ h1 {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.scope-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  color: #475569;
+  font-size: 13px;
+}
+
+.scope-switch select {
+  width: auto;
+  min-width: 104px;
+  max-width: 148px;
+  padding: 7px 30px 7px 10px;
+  font-size: 14px;
 }
 
 .btn,
@@ -1320,6 +1863,16 @@ button:disabled {
   padding: 16px;
 }
 
+.loading-line {
+  margin-bottom: 12px;
+  padding: 9px 12px;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 13px;
+}
+
 .summary-strip {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1336,7 +1889,7 @@ button:disabled {
 }
 
 .summary-strip article {
-  padding: 12px 14px;
+  padding: 10px 14px;
 }
 
 .summary-strip span {
@@ -1346,8 +1899,8 @@ button:disabled {
 
 .summary-strip strong {
   display: block;
-  margin-top: 4px;
-  font-size: 22px;
+  margin-top: 3px;
+  font-size: 21px;
 }
 
 .toolbar,
@@ -1406,6 +1959,17 @@ button:disabled {
   gap: 8px;
 }
 
+.panel-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  margin: -12px -12px 0;
+  padding: 12px 12px 8px;
+  border-bottom: 1px solid #eef2f7;
+  background: rgba(255, 255, 255, 0.96);
+  backdrop-filter: blur(6px);
+}
+
 .panel-head h2 {
   font-size: 17px;
 }
@@ -1424,26 +1988,79 @@ button:disabled {
 .ongoing-list {
   overflow: auto;
   display: grid;
+  align-content: start;
   gap: 10px;
+  scroll-behavior: smooth;
 }
 
 .draft-card,
 .ongoing-card {
-  padding: 12px;
+  padding: 10px;
   border: 1px solid #dbe3ee;
   border-radius: 8px;
   background: #ffffff;
 }
 
+.draft-card {
+  transition: border-color 0.14s ease, background-color 0.14s ease, box-shadow 0.14s ease;
+}
+
+.draft-card.collapsed {
+  padding: 9px 10px;
+  cursor: pointer;
+  background: #fbfdff;
+}
+
+.draft-card.collapsed:hover {
+  border-color: #bfdbfe;
+  background: #f8fbff;
+}
+
+.ongoing-card {
+  display: grid;
+  gap: 8px;
+}
+
+.ongoing-card p {
+  color: #334155;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.ongoing-card textarea {
+  min-height: 54px;
+}
+
 .draft-card.active {
   border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.12);
+}
+
+.draft-compact {
+  display: grid;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.draft-compact p {
+  overflow: hidden;
+  margin: 0;
+  color: #64748b;
+  font-size: 13px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.compact-actions {
+  margin-top: 0;
 }
 
 .form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-  margin-top: 10px;
+  gap: 8px;
+  margin-top: 8px;
 }
 
 label {
@@ -1459,14 +2076,14 @@ textarea {
   width: 100%;
   border: 1px solid #cbd5e1;
   border-radius: 6px;
-  padding: 8px 10px;
+  padding: 7px 9px;
   background: #ffffff;
   color: #0f172a;
   font: inherit;
 }
 
 textarea {
-  min-height: 72px;
+  min-height: 58px;
   resize: vertical;
 }
 
@@ -1506,7 +2123,7 @@ textarea {
 .empty-block {
   display: grid;
   place-items: center;
-  min-height: 180px;
+  min-height: 140px;
   padding: 18px;
   color: #64748b;
   text-align: center;

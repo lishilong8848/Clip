@@ -60,6 +60,7 @@
               <option value="admin">管理员</option>
             </select>
             <label><input v-model="user.enabled" type="checkbox" :disabled="user.locked" /> 启用</label>
+            <button class="btn danger" :disabled="user.locked" @click="removePermissionUser(user)">删除</button>
             <div class="scope-checks">
               <label v-for="scope in scopeOptions" :key="scope.value">
                 <input
@@ -234,6 +235,17 @@ function addPermissionUser(): void {
   permissions.users.push({ open_id: "", name: "", role: "building", scopes: [], enabled: true });
 }
 
+function removePermissionUser(user: Dict): void {
+  if (user.locked) return;
+  const label = String(user.name || user.open_id || "该用户");
+  if (!window.confirm(`确认删除「${label}」的门户权限？保存后生效。`)) return;
+  const index = permissions.users.indexOf(user);
+  if (index >= 0) {
+    permissions.users.splice(index, 1);
+    message.value = "已从列表移除，点击保存权限后生效。";
+  }
+}
+
 function toggleUserScope(user: Dict, scope: string, checked: boolean): void {
   const next = new Set((user.scopes || []) as string[]);
   if (checked) next.add(scope);
@@ -367,6 +379,17 @@ button {
   color: #ffffff;
 }
 
+.btn.danger {
+  border-color: #dc2626;
+  background: #dc2626;
+  color: #ffffff;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
 .tabs {
   padding: 4px;
   border: 1px solid #cbd5e1;
@@ -426,7 +449,7 @@ pre {
 
 .permission-row {
   display: grid;
-  grid-template-columns: minmax(120px, 0.7fr) minmax(180px, 1.2fr) 110px 90px;
+  grid-template-columns: minmax(120px, 0.7fr) minmax(180px, 1.2fr) 110px 90px auto;
   gap: 8px;
   padding: 10px;
   border: 1px solid #dbe3ee;

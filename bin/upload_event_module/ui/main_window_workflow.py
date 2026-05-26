@@ -282,6 +282,24 @@ class MainWindowWorkflowMixin:
             stats["payload_alias_trimmed"] = removed_alias
         return stats
 
+    def _init_runtime_payload_cleanup_timer(self) -> None:
+        if getattr(self, "_runtime_payload_cleanup_timer", None) is not None:
+            return
+        self._runtime_payload_cleanup_timer = QTimer(self)
+        self._runtime_payload_cleanup_timer.timeout.connect(
+            self._run_runtime_payload_cleanup
+        )
+        self._runtime_payload_cleanup_timer.start(5 * 60 * 1000)
+
+    def _run_runtime_payload_cleanup(self) -> None:
+        if getattr(self, "_closing", False):
+            return
+        try:
+            self._cleanup_runtime_payload_state()
+            self._cleanup_finished_upload_workers()
+        except Exception:
+            pass
+
     def _cleanup_finished_upload_workers(self) -> dict[str, int]:
         live_keys = set(
             str(key or "").strip() for key in getattr(self, "_upload_queues", {}).keys()
@@ -1167,23 +1185,29 @@ class MainWindowWorkflowMixin:
         log_info(f"UI操作: 结束事件, Record ID: {data_dict['record_id']}")
         self._show_screenshot_dialog(data_dict, "end")
 
-    def _delete_active_item_remote_and_local(self, data_dict) -> tuple[bool, str]:
+    def _submit_delete_active_item_to_backend(self, data_dict) -> tuple[bool, str, dict]:
         data_dict = dict(data_dict or {})
-        record_id = str(data_dict.get("record_id") or "").strip()
-        active_item_id = str(data_dict.get("active_item_id") or "").strip()
-        notice_type = str(data_dict.get("notice_type") or "").strip()
         controller = getattr(self, "lan_template_portal_controller", None)
         if controller is None or not hasattr(controller, "submit_qt_command"):
-            return False, "本机后端未连接，Qt 不再直接执行多维删除。"
+            return False, "本机后端未连接，Qt 不再直接执行多维删除。", {}
         try:
             result = controller.submit_qt_command(
                 "delete_active_item",
                 {"data_dict": dict(data_dict)},
             )
         except Exception as exc:
-            return False, f"本机后端删除失败：{exc}"
+            return False, f"本机后端删除失败：{exc}", {}
         if not bool((result or {}).get("ok")):
-            return False, str((result or {}).get("message") or "多维记录删除失败。")
+            return False, str((result or {}).get("message") or "多维记录删除失败。"), result if isinstance(result, dict) else {}
+        return True, "", result if isinstance(result, dict) else {}
+
+    def _delete_active_item_remote_and_local(self, data_dict) -> tuple[bool, str]:
+        data_dict = dict(data_dict or {})
+        record_id = str(data_dict.get("record_id") or "").strip()
+        active_item_id = str(data_dict.get("active_item_id") or "").strip()
+        success, error, _ = self._submit_delete_active_item_to_backend(data_dict)
+        if not success:
+            return False, error
         self._clear_upload_queue(record_id)
         self._today_in_progress_pending_record_ids.discard(record_id)
         self._today_in_progress_synced_record_ids.discard(record_id)
@@ -1226,16 +1250,62 @@ class MainWindowWorkflowMixin:
         record_id = str((data_dict or {}).get("record_id") or "").strip()
         list_widget, item = self._find_active_item_by_record_id(record_id)
         widget = self._safe_item_widget(list_widget, item)
-        success, error = self._delete_active_item_remote_and_local(data_dict)
-        if not success:
-            if widget and hasattr(widget, "cancel_delete_visual"):
+
+        def _finish(success: bool, error: str = "") -> None:
+            if not success:
+                if widget and hasattr(widget, "cancel_delete_visual"):
+                    try:
+                        widget.cancel_delete_visual()
+                    except Exception:
+                        pass
+                self.show_message(error or "删除失败。")
+                return
+            active_item_id = str((data_dict or {}).get("active_item_id") or "").strip()
+            self._clear_upload_queue(record_id)
+            self._today_in_progress_pending_record_ids.discard(record_id)
+            self._today_in_progress_synced_record_ids.discard(record_id)
+            self.pending_new_by_record_id.pop(record_id, None)
+            self.pending_replace_by_record_id.pop(record_id, None)
+            self.pending_update_after_upload.pop(record_id, None)
+            self.pending_action_record_ids.discard(record_id)
+            self.pending_action_types.pop(record_id, None)
+            if hasattr(self, "_pop_lan_portal_upload_job"):
                 try:
-                    widget.cancel_delete_visual()
+                    self._pop_lan_portal_upload_job(
+                        record_id=record_id,
+                        active_item_id=active_item_id,
+                    )
                 except Exception:
                     pass
-            self.show_message(error or "删除失败。")
-            return
-        log_info(f"UI操作: 删除事件(同步删除多维), Record ID: {record_id}")
+            list_widget_now, item_now = self._find_active_item_by_record_id(record_id)
+            if (not item_now or not self._is_valid_list_item(item_now)) and active_item_id:
+                list_widget_now, item_now = self._find_active_item_by_active_item_id(active_item_id)
+            if item_now and self._is_valid_list_item(item_now):
+                self._remove_active_item_widget_only(list_widget_now, item_now)
+            if hasattr(self, "_delete_active_cache_record"):
+                self._delete_active_cache_record(data_dict)
+            if hasattr(self, "schedule_active_cache_save"):
+                self.schedule_active_cache_save(800)
+            else:
+                self.save_active_cache()
+            log_info(f"UI操作: 删除事件(同步删除多维), Record ID: {record_id}")
+
+        def _worker() -> None:
+            success, error, _ = self._submit_delete_active_item_to_backend(data_dict)
+            enqueue = getattr(self, "_enqueue_ui_mutation", None)
+            if callable(enqueue):
+                enqueue(
+                    "delete_active_item_result",
+                    lambda s=success, e=error: _finish(s, e),
+                )
+            else:
+                QTimer.singleShot(0, lambda s=success, e=error: _finish(s, e))
+
+        threading.Thread(
+            target=_worker,
+            name="ClipFlowDeleteActiveItem",
+            daemon=True,
+        ).start()
 
     def handle_action(self, data_dict, action_type):
         block_reason = self._dialog_block_reason("screenshot")

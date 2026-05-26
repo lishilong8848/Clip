@@ -98,6 +98,12 @@ class BackendProcessPortalController:
             minimum=15,
             maximum=180,
         )
+        self._event_stream_timeout_s = _env_int(
+            "CLIPFLOW_QT_EVENT_STREAM_TIMEOUT_SECONDS",
+            45,
+            minimum=15,
+            maximum=180,
+        )
 
     def get_url(self) -> str:
         return f"http://{_display_host(self.host)}:{self.bound_port}"
@@ -327,11 +333,11 @@ class BackendProcessPortalController:
                 )
                 items = ((result.get("data") or {}).get("items") or []) if result.get("ok") else []
             except Exception:
-                delay = 2.0
+                delay = 5.0
                 continue
             for item in items:
                 self._dispatch_event(item)
-            delay = 0.25 if items else 1.0
+            delay = 0.5 if items else 2.5
 
     def _event_stream_once(self) -> bool:
         url = f"{self._local_url()}/api/qt/events/stream"
@@ -342,7 +348,10 @@ class BackendProcessPortalController:
         )
         lines: list[str] = []
         try:
-            with urllib.request.urlopen(request, timeout=6.0) as response:
+            with urllib.request.urlopen(
+                request,
+                timeout=float(self._event_stream_timeout_s),
+            ) as response:
                 self._event_stream_connected = True
                 self._event_stream_connect_count += 1
                 self._event_stream_last_connected_at = time.time()

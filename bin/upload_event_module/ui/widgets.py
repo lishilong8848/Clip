@@ -1222,7 +1222,9 @@ class ClipboardItemWidget(QWidget):
 
     def _supports_today_progress(self):
         notice_type = str(self.data.get("notice_type") or "").strip()
-        record_id = str(self.data.get("record_id") or "").strip()
+        record_id = str(
+            self.data.get("target_record_id") or self.data.get("record_id") or ""
+        ).strip()
         return (
             notice_type in ("设备变更", "变更通告")
             and bool(record_id)

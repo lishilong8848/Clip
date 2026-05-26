@@ -1263,6 +1263,7 @@ def _run_packaging_preflight_tests() -> None:
     _cleanup_vue_dist_assets()
 
     py_targets = [
+        PROJECT_ROOT / "bin" / "refactored_main.py",
         PROJECT_ROOT / "bin" / "clipflow_backend" / "main.py",
         PROJECT_ROOT / "bin" / "clipflow_backend" / "process_controller.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "portal_service.py",

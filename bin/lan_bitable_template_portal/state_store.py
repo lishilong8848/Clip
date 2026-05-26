@@ -3203,12 +3203,15 @@ class LanPortalStateStore:
                 for table in (
                     "notice_actions",
                     "event_outbox",
+                    "append_events",
                     "runtime_task_queue",
                     "backend_runtime",
                     "qt_active_items",
                     "daily_summary",
                     "work_status",
                     "source_records_all",
+                    "source_snapshot_manifest",
+                    "source_snapshot_records",
                 ):
                     try:
                         row = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
@@ -3487,6 +3490,57 @@ class LanPortalStateStore:
             "last_error": str(row["last_error"] or ""),
             "created_at": float(row["created_at"] or 0),
             "updated_at": float(row["updated_at"] or 0),
+        }
+
+    def cleanup_outbox_events(
+        self,
+        *,
+        done_retention_seconds: int = 24 * 3600,
+        failed_retention_seconds: int = 7 * 24 * 3600,
+        max_delete: int = 1000,
+    ) -> dict[str, int]:
+        done_retention_seconds = max(60, int(done_retention_seconds or 0))
+        failed_retention_seconds = max(60, int(failed_retention_seconds or 0))
+        max_delete = max(1, min(int(max_delete or 1000), 5000))
+        now = time.time()
+        removed_done = 0
+        removed_failed = 0
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                rows = conn.execute(
+                    """
+                    SELECT id, status, updated_at
+                    FROM event_outbox
+                    WHERE status IN ('done', 'failed', 'cancelled')
+                    ORDER BY updated_at ASC
+                    LIMIT ?
+                    """,
+                    (max_delete,),
+                ).fetchall()
+                for row in rows:
+                    status = str(row["status"] or "")
+                    updated_at = float(row["updated_at"] or 0)
+                    retention = (
+                        failed_retention_seconds
+                        if status == "failed"
+                        else done_retention_seconds
+                    )
+                    if updated_at and now - updated_at < retention:
+                        continue
+                    conn.execute(
+                        "DELETE FROM event_outbox WHERE id = ?",
+                        (int(row["id"] or 0),),
+                    )
+                    if status == "failed":
+                        removed_failed += 1
+                    else:
+                        removed_done += 1
+                conn.commit()
+        return {
+            "removed_done": removed_done,
+            "removed_failed": removed_failed,
+            "removed_total": removed_done + removed_failed,
         }
 
     def upsert_runtime_queue_item(
@@ -3914,3 +3968,73 @@ class LanPortalStateStore:
                 }
             )
         return events
+
+    def cleanup_append_events(
+        self,
+        *,
+        source: str = "",
+        retention_seconds: int = 3 * 24 * 3600,
+        keep_latest: int = 5000,
+        max_delete: int = 2000,
+    ) -> dict[str, int]:
+        source = self._text(source)
+        retention_seconds = max(60, int(retention_seconds or 0))
+        keep_latest = max(0, int(keep_latest or 0))
+        max_delete = max(1, min(int(max_delete or 2000), 10000))
+        now = time.time()
+        cutoff = now - retention_seconds
+        removed = 0
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                params: list[Any] = []
+                source_clause = ""
+                if source:
+                    source_clause = "AND source = ?"
+                    params.append(source)
+                protected_min_id = 0
+                if keep_latest > 0:
+                    row = conn.execute(
+                        f"""
+                        SELECT MIN(id) AS min_id
+                        FROM (
+                            SELECT id
+                            FROM append_events
+                            WHERE 1=1 {source_clause}
+                            ORDER BY id DESC
+                            LIMIT ?
+                        )
+                        """,
+                        (*params, keep_latest),
+                    ).fetchone()
+                    protected_min_id = int((row or {})["min_id"] or 0) if row else 0
+                delete_params: list[Any] = [cutoff]
+                delete_source_clause = ""
+                if source:
+                    delete_source_clause = "AND source = ?"
+                    delete_params.append(source)
+                if protected_min_id > 0:
+                    delete_params.append(protected_min_id)
+                    protected_clause = "AND id < ?"
+                else:
+                    protected_clause = ""
+                rows = conn.execute(
+                    f"""
+                    SELECT id
+                    FROM append_events
+                    WHERE created_at < ? {delete_source_clause} {protected_clause}
+                    ORDER BY id ASC
+                    LIMIT ?
+                    """,
+                    (*delete_params, max_delete),
+                ).fetchall()
+                ids = [int(row["id"] or 0) for row in rows if int(row["id"] or 0) > 0]
+                if ids:
+                    placeholders = ",".join("?" for _ in ids)
+                    conn.execute(
+                        f"DELETE FROM append_events WHERE id IN ({placeholders})",
+                        tuple(ids),
+                    )
+                    removed = len(ids)
+                conn.commit()
+        return {"removed": removed, "source": source or "all"}

@@ -40,6 +40,7 @@ from lan_bitable_template_portal.state_store import LanPortalStateStore
 from .styles import get_stylesheet
 from .dialogs import AddDialog
 from .active_notice_delegate import ActiveNoticeDelegate
+from .active_notice_model import ActiveNoticeListRoute
 from .display_state import normalize_active_item_data
 from .common import show_toast_message
 
@@ -158,11 +159,9 @@ class MainWindowUiMixin:
         active_layout.setContentsMargins(0, 0, 0, 0)
 
         self.active_stack = QStackedWidget()
-        self.list_active_event = QListWidget()
-        self._init_list_widget(self.list_active_event)
-        self.list_active_other = QListWidget()
-        self._init_list_widget(self.list_active_other)
         if self._active_model_view_visible():
+            self.list_active_event = ActiveNoticeListRoute("event")
+            self.list_active_other = ActiveNoticeListRoute("other")
             self.view_active_event = QListView()
             self._init_active_model_view(self.view_active_event, self.list_active_event)
             self.view_active_other = QListView()
@@ -170,6 +169,10 @@ class MainWindowUiMixin:
             self.active_stack.addWidget(self.view_active_event)
             self.active_stack.addWidget(self.view_active_other)
         else:
+            self.list_active_event = QListWidget()
+            self._init_list_widget(self.list_active_event)
+            self.list_active_other = QListWidget()
+            self._init_list_widget(self.list_active_other)
             self.view_active_event = None
             self.view_active_other = None
             self.active_stack.addWidget(self.list_active_event)
@@ -289,7 +292,7 @@ class MainWindowUiMixin:
         except Exception:
             return
 
-    def _init_active_model_view(self, view: QListView, backing_list: QListWidget):
+    def _init_active_model_view(self, view: QListView, backing_list):
         model = self._active_notice_model_for_list(backing_list)
         view.setModel(model)
         view.setItemDelegate(ActiveNoticeDelegate(view))
@@ -326,7 +329,7 @@ class MainWindowUiMixin:
                 lambda data, lw=backing_list: self._handle_active_model_delete(lw, data)
             )
 
-    def _active_model_current_data(self, backing_list: QListWidget, data_dict: dict):
+    def _active_model_current_data(self, backing_list, data_dict: dict):
         item = self._active_model_backing_item(backing_list, data_dict)
         if item and self._is_valid_list_item(item):
             current = self._active_item_data(item)
@@ -334,7 +337,7 @@ class MainWindowUiMixin:
                 return item, current
         return item, data_dict if isinstance(data_dict, dict) else {}
 
-    def _active_model_backing_item(self, backing_list: QListWidget, data_dict: dict):
+    def _active_model_backing_item(self, backing_list, data_dict: dict):
         if not isinstance(data_dict, dict):
             return None
         active_item_id = str(data_dict.get("active_item_id") or "").strip()
@@ -349,22 +352,22 @@ class MainWindowUiMixin:
                 return item
         return None
 
-    def _open_active_model_record(self, backing_list: QListWidget, data_dict: dict):
+    def _open_active_model_record(self, backing_list, data_dict: dict):
         item, _current = self._active_model_current_data(backing_list, data_dict)
         if item and self._is_valid_list_item(item):
             self.on_item_clicked(item)
 
-    def _handle_active_model_action(self, backing_list: QListWidget, data_dict: dict, action: str):
+    def _handle_active_model_action(self, backing_list, data_dict: dict, action: str):
         _item, current = self._active_model_current_data(backing_list, data_dict)
         if isinstance(current, dict) and action:
             self.handle_action(dict(current), action)
 
-    def _handle_active_model_today(self, backing_list: QListWidget, data_dict: dict, state: str):
+    def _handle_active_model_today(self, backing_list, data_dict: dict, state: str):
         _item, current = self._active_model_current_data(backing_list, data_dict)
         if isinstance(current, dict) and state:
             self._handle_today_in_progress_toggle(dict(current), state)
 
-    def _handle_active_model_delete(self, backing_list: QListWidget, data_dict: dict):
+    def _handle_active_model_delete(self, backing_list, data_dict: dict):
         _item, current = self._active_model_current_data(backing_list, data_dict)
         if isinstance(current, dict):
             self._delete_active_item(dict(current))

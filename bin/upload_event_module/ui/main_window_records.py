@@ -27,7 +27,7 @@ from .display_state import (
     notice_supports_level_lock,
 )
 from .active_notice_store import ActiveNoticeStore
-from .active_notice_model import ActiveNoticeModel, ActiveNoticeModelItem
+from .active_notice_model import ActiveNoticeListRoute, ActiveNoticeModel, ActiveNoticeModelItem
 
 class MainWindowRecordsMixin:
     _EVENT_TIMER_STATE_FIELDS = (
@@ -66,10 +66,12 @@ class MainWindowRecordsMixin:
         for data in active_snapshot:
             if not isinstance(data, dict):
                 continue
-            record_id = str(data.get("record_id") or "").strip()
-            if not record_id or self._is_placeholder_record(data):
+            if self._is_placeholder_record(data):
                 continue
-            record_ids.add(record_id)
+            for key in ("record_id", "target_record_id"):
+                record_id = str(data.get(key) or "").strip()
+                if record_id:
+                    record_ids.add(record_id)
         return record_ids
 
     def _collect_busy_runtime_record_ids(self) -> set[str]:
@@ -1910,12 +1912,47 @@ class MainWindowRecordsMixin:
         if not isinstance(data_dict, dict):
             return False
         notice_type = str(data_dict.get("notice_type") or "").strip()
-        record_id = str(data_dict.get("record_id") or "").strip()
+        record_id = self._today_in_progress_target_record_id(data_dict)
         return (
             notice_type in ("设备变更", "变更通告")
             and bool(record_id)
             and not self._is_placeholder_record(data_dict)
         )
+
+    @staticmethod
+    def _today_in_progress_target_record_id(data_dict: dict | None) -> str:
+        if not isinstance(data_dict, dict):
+            return ""
+        return str(
+            data_dict.get("target_record_id") or data_dict.get("record_id") or ""
+        ).strip()
+
+    def _find_today_in_progress_active_item(
+        self,
+        data_dict: dict | None,
+        fallback_record_id: str = "",
+    ):
+        if not isinstance(data_dict, dict):
+            data_dict = {}
+        active_item_id = str(data_dict.get("active_item_id") or "").strip()
+        if active_item_id:
+            list_widget, item = self._find_active_item_by_active_item_id(active_item_id)
+            if item and self._is_valid_list_item(item):
+                return list_widget, item
+        seen: set[str] = set()
+        for value in (
+            data_dict.get("record_id"),
+            data_dict.get("target_record_id"),
+            fallback_record_id,
+        ):
+            record_id = str(value or "").strip()
+            if not record_id or record_id in seen:
+                continue
+            seen.add(record_id)
+            list_widget, item = self._find_active_item_by_record_id(record_id)
+            if item and self._is_valid_list_item(item):
+                return list_widget, item
+        return None, None
 
     def _extract_today_in_progress_state_from_record_fields(
         self, notice_type: str, fields: dict | None
@@ -1986,6 +2023,45 @@ class MainWindowRecordsMixin:
             return
         self._persist_today_in_progress_state(record_id, normalized_state)
 
+    def _apply_today_in_progress_state_to_active_item(
+        self,
+        data_dict: dict | None,
+        state: str,
+        *,
+        fallback_record_id: str = "",
+    ):
+        normalized_state = self._normalize_today_in_progress_state(state)
+        list_widget, item = self._find_today_in_progress_active_item(
+            data_dict,
+            fallback_record_id=fallback_record_id,
+        )
+        if item and list_widget:
+            current = item.data(Qt.ItemDataRole.UserRole) or {}
+            if isinstance(current, dict):
+                updated = dict(current)
+                updated["today_in_progress_state"] = normalized_state
+                self._commit_active_record(
+                    updated,
+                    refresh_detail=True,
+                    rebuild_widget=True,
+                    list_widget=list_widget,
+                    item=item,
+                )
+        seen: set[str] = set()
+        if isinstance(data_dict, dict):
+            values = (
+                data_dict.get("record_id"),
+                data_dict.get("target_record_id"),
+                fallback_record_id,
+            )
+        else:
+            values = (fallback_record_id,)
+        for value in values:
+            record_id = str(value or "").strip()
+            if record_id and record_id not in seen:
+                seen.add(record_id)
+                self._persist_today_in_progress_state(record_id, normalized_state)
+
     def _schedule_today_in_progress_sync(self, data_dict: dict | None):
         if bool(getattr(self, "_active_cache_restore_in_progress", False)):
             return
@@ -1993,7 +2069,7 @@ class MainWindowRecordsMixin:
             return
         if self._is_record_binding_conflicted(data_dict):
             return
-        record_id = str(data_dict.get("record_id") or "").strip()
+        record_id = self._today_in_progress_target_record_id(data_dict)
         notice_type = str(data_dict.get("notice_type") or "").strip()
         if (
             not record_id
@@ -2033,7 +2109,7 @@ class MainWindowRecordsMixin:
             try:
                 self._run_today_in_progress_sync(data_dict)
             except Exception as exc:
-                record_id = str((data_dict or {}).get("record_id") or "").strip()
+                record_id = self._today_in_progress_target_record_id(data_dict)
                 if record_id:
                     self._today_in_progress_pending_record_ids.discard(record_id)
                 log_warning(
@@ -2052,12 +2128,12 @@ class MainWindowRecordsMixin:
 
     def _run_today_in_progress_sync(self, data_dict: dict | None):
         if os.environ.get("CLIPFLOW_QT_REMOTE_VALIDATION", "0") != "1":
-            record_id = str((data_dict or {}).get("record_id") or "").strip()
+            record_id = self._today_in_progress_target_record_id(data_dict)
             if record_id:
                 self._today_in_progress_pending_record_ids.discard(record_id)
             return
         data_dict = dict(data_dict or {})
-        record_id = str(data_dict.get("record_id") or "").strip()
+        record_id = self._today_in_progress_target_record_id(data_dict)
         notice_type = str(data_dict.get("notice_type") or "").strip()
         if not record_id or not notice_type or bool(getattr(self, "_closing", False)):
             if record_id:
@@ -2084,7 +2160,11 @@ class MainWindowRecordsMixin:
                         f"今日是否进行状态同步失败: record_id={record_id}, error={error_text}"
                     )
                 return
-            self._apply_today_in_progress_state_to_record(record_id, state)
+            self._apply_today_in_progress_state_to_active_item(
+                data_dict,
+                state,
+                fallback_record_id=record_id,
+            )
 
         self._enqueue_ui_mutation("today_in_progress_sync", apply_result)
 
@@ -2135,7 +2215,7 @@ class MainWindowRecordsMixin:
         if self._is_record_binding_conflicted(data_dict):
             self.show_message(self._record_binding_error_text(data_dict))
             return
-        record_id = str(data_dict.get("record_id") or "").strip()
+        record_id = self._today_in_progress_target_record_id(data_dict)
         notice_type = str(data_dict.get("notice_type") or "").strip()
         current_state = self._normalize_today_in_progress_state(
             data_dict.get("today_in_progress_state")
@@ -2148,17 +2228,30 @@ class MainWindowRecordsMixin:
         ):
             return
 
-        list_widget, item = self._find_active_item_by_record_id(record_id)
+        list_widget, item = self._find_today_in_progress_active_item(
+            data_dict,
+            fallback_record_id=record_id,
+        )
         widget = self._safe_item_widget(list_widget, item)
         if widget and hasattr(widget, "set_today_progress_state"):
             widget.set_today_progress_state(current_state, enabled=False)
 
         self._today_in_progress_pending_record_ids.add(record_id)
+        self._apply_today_in_progress_state_to_active_item(
+            data_dict,
+            desired_state,
+            fallback_record_id=record_id,
+        )
         field_name = self._get_today_in_progress_field_name(notice_type)
         field_value = self._today_in_progress_option_for_state(desired_state)
         controller = getattr(self, "lan_template_portal_controller", None)
         if controller is None or not hasattr(controller, "submit_qt_command"):
             self._today_in_progress_pending_record_ids.discard(record_id)
+            self._apply_today_in_progress_state_to_active_item(
+                data_dict,
+                current_state,
+                fallback_record_id=record_id,
+            )
             if widget and hasattr(widget, "set_today_progress_state"):
                 widget.set_today_progress_state(current_state, enabled=True)
             self.show_message("本机后端未连接，Qt 不再直接执行多维字段更新。")
@@ -2170,6 +2263,10 @@ class MainWindowRecordsMixin:
                     "set_today_in_progress",
                     {
                         "record_id": record_id,
+                        "target_record_id": record_id,
+                        "active_item_id": str(
+                            data_dict.get("active_item_id") or ""
+                        ).strip(),
                         "notice_type": notice_type,
                         "field_name": field_name,
                         "field_value": field_value,
@@ -2184,14 +2281,24 @@ class MainWindowRecordsMixin:
             def apply_result():
                 self._today_in_progress_pending_record_ids.discard(record_id)
                 widget_now = self._safe_item_widget(
-                    *self._find_active_item_by_record_id(record_id)
+                    *self._find_today_in_progress_active_item(
+                        data_dict,
+                        fallback_record_id=record_id,
+                    )
                 )
                 if success:
                     self._today_in_progress_synced_record_ids.add(record_id)
-                    self._apply_today_in_progress_state_to_record(
-                        record_id, desired_state
+                    self._apply_today_in_progress_state_to_active_item(
+                        data_dict,
+                        desired_state,
+                        fallback_record_id=record_id,
                     )
                     return
+                self._apply_today_in_progress_state_to_active_item(
+                    data_dict,
+                    current_state,
+                    fallback_record_id=record_id,
+                )
                 if widget_now and hasattr(widget_now, "set_today_progress_state"):
                     widget_now.set_today_progress_state(current_state, enabled=True)
                 self.show_message(f"更新“今日是否进行”失败\n{result}")

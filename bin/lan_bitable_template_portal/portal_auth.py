@@ -14,7 +14,10 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from upload_event_module.config import config
-from upload_event_module.services.http_client import FeishuHTTPError, FeishuHttpClient
+from upload_event_module.services.feishu_token_manager import (
+    FeishuTokenError,
+    token_manager,
+)
 from upload_event_module.utils import get_data_file_path
 
 from .portal_service import (
@@ -36,13 +39,7 @@ AUTH_MAX_PENDING_STATES = 200
 AUTH_MAX_SESSIONS = 500
 PERMISSION_REQUEST_TTL_SECONDS = 15 * 60
 PERMISSION_REQUEST_MAX_ATTEMPTS = 5
-FEISHU_APP_TOKEN_TTL_FALLBACK_SECONDS = 90 * 60
 FEISHU_AUTH_INDEX_URL = "https://open.feishu.cn/open-apis/authen/v1/index"
-FEISHU_APP_ACCESS_TOKEN_URL = (
-    "https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal"
-)
-FEISHU_USER_ACCESS_TOKEN_URL = "https://open.feishu.cn/open-apis/authen/v1/access_token"
-FEISHU_USER_INFO_URL = "https://open.feishu.cn/open-apis/authen/v1/user_info"
 REQUIRED_ADMIN_USERS = {
     LI_SHILONG_OPEN_ID: "李世龙",
     MA_JINYU_OPEN_ID: "马进宇",
@@ -56,8 +53,6 @@ class PortalAuthManager:
         self._lock = threading.RLock()
         self._sessions: dict[str, dict[str, Any]] = {}
         self._states: dict[str, dict[str, Any]] = {}
-        self._app_token_cache: dict[str, Any] = {"token": "", "expires_at": 0.0}
-        self._http_client = FeishuHttpClient()
         self._permission_path = Path(get_data_file_path("lan_portal_auth.json"))
         self._permission_path.parent.mkdir(parents=True, exist_ok=True)
         self._state_store = LanPortalStateStore(
@@ -811,90 +806,17 @@ class PortalAuthManager:
         with self._lock:
             self._sessions.pop(str(session_id or "").strip(), None)
 
-    def _request_json(
-        self,
-        method: str,
-        url: str,
-        *,
-        headers: dict[str, str] | None = None,
-        json_payload: Any = None,
-        retries: int = 2,
-    ) -> dict[str, Any]:
-        return self._http_client.request_json(
-            method,
-            url,
-            headers=headers,
-            json_payload=json_payload,
-            retries=retries,
-        )
-
     def _get_app_access_token(self) -> str:
-        now = time.time()
-        with self._lock:
-            token = str(self._app_token_cache.get("token") or "")
-            expires_at = float(self._app_token_cache.get("expires_at") or 0)
-            if token and now < expires_at:
-                return token
-        payload = {
-            "app_id": str(config.app_id or "").strip(),
-            "app_secret": str(config.app_secret or "").strip(),
-        }
         try:
-            result = self._request_json(
-                "POST",
-                FEISHU_APP_ACCESS_TOKEN_URL,
-                headers={"Content-Type": "application/json; charset=utf-8"},
-                json_payload=payload,
-                retries=2,
-            )
-        except FeishuHTTPError as exc:
+            return token_manager.get_app_access_token()
+        except FeishuTokenError as exc:
             raise PortalError(f"获取飞书 app_access_token 失败: {exc}") from exc
-        if result.get("code", 0) != 0:
-            raise PortalError(f"获取飞书 app_access_token 失败: {result.get('msg') or 'unknown'}")
-        token = str(result.get("app_access_token") or "").strip()
-        if not token:
-            raise PortalError("获取飞书 app_access_token 失败: 返回为空")
-        expire = int(result.get("expire") or FEISHU_APP_TOKEN_TTL_FALLBACK_SECONDS)
-        with self._lock:
-            self._app_token_cache = {"token": token, "expires_at": time.time() + expire - 300}
-        return token
 
     def _exchange_login_code(self, code: str) -> dict[str, Any]:
-        app_access_token = self._get_app_access_token()
         try:
-            result = self._request_json(
-                "POST",
-                FEISHU_USER_ACCESS_TOKEN_URL,
-                headers={
-                    "Authorization": f"Bearer {app_access_token}",
-                    "Content-Type": "application/json; charset=utf-8",
-                },
-                json_payload={"grant_type": "authorization_code", "code": code},
-                retries=2,
-            )
-        except FeishuHTTPError as exc:
+            return token_manager.exchange_login_code(code)
+        except FeishuTokenError as exc:
             raise PortalError(f"获取飞书用户身份失败: {exc}") from exc
-        if result.get("code", 0) != 0:
-            raise PortalError(f"获取飞书用户身份失败: {result.get('msg') or 'unknown'}")
-        data = result.get("data") if isinstance(result.get("data"), dict) else {}
-        user = dict(data)
-        if not user.get("open_id") and user.get("access_token"):
-            user.update(self._fetch_user_info(str(user.get("access_token") or "")))
-        return user
 
     def _fetch_user_info(self, user_access_token: str) -> dict[str, Any]:
-        if not user_access_token:
-            return {}
-        try:
-            result = self._request_json(
-                "GET",
-                FEISHU_USER_INFO_URL,
-                headers={"Authorization": f"Bearer {user_access_token}"},
-                retries=2,
-            )
-        except Exception:
-            return {}
-        if result.get("code", 0) != 0:
-            return {}
-        data = result.get("data")
-        return dict(data) if isinstance(data, dict) else {}
+        return token_manager.fetch_user_info(user_access_token)

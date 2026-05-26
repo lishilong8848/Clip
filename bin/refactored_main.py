@@ -40,8 +40,14 @@ else:
         from clipflow_backend.process_controller import (
             BackendProcessPortalController as PortalServerController,
         )
-    except Exception:
-        from lan_bitable_template_portal.server import PortalServerController
+    except Exception as exc:
+        if os.environ.get("CLIPFLOW_ALLOW_BACKEND_IMPORT_FALLBACK") == "1":
+            from lan_bitable_template_portal.server import PortalServerController
+        else:
+            raise RuntimeError(
+                "独立后端控制器导入失败，已阻止自动回退旧门户。"
+                "如需临时回退，请显式设置 CLIPFLOW_LEGACY_PORTAL=1。"
+            ) from exc
 
 _CRASH_TRACE_FP = None
 

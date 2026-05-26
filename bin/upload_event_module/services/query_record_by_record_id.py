@@ -5,9 +5,9 @@ import urllib.parse
 from typing import Dict, Any, Tuple, Optional
 
 try:
-    from .http_client import FeishuHttpClient
+    from .feishu_token_manager import token_manager
 except ImportError:
-    from upload_event_module.services.http_client import FeishuHttpClient
+    from upload_event_module.services.feishu_token_manager import token_manager
 
 # === input params start
 app_id = os.getenv("APP_ID")               # app_id, required, 应用 ID
@@ -22,8 +22,6 @@ user_id_type = os.getenv("USER_ID_TYPE", "open_id")  # string, optional, 用户I
 # 指定返回的用户ID类型，可选值：open_id、union_id、user_id。默认为open_id。
 # === input params end
 
-_HTTP_CLIENT = FeishuHttpClient(retries=2)
-
 def get_tenant_access_token(app_id: str, app_secret: str) -> Tuple[str, Exception]:
     """获取 tenant_access_token
 
@@ -34,34 +32,11 @@ def get_tenant_access_token(app_id: str, app_secret: str) -> Tuple[str, Exceptio
     Returns:
         Tuple[str, Exception]: (access_token, error)
     """
-    url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
-    payload = {
-        "app_id": app_id,
-        "app_secret": app_secret
-    }
-    headers = {
-        "Content-Type": "application/json; charset=utf-8"
-    }
-    try:
-        print(f"POST: {url}")
-        print(f"Request body: {json.dumps(payload)}")
-        result = _HTTP_CLIENT.request_json(
-            "POST",
-            url,
-            json_payload=payload,
-            headers=headers,
-        )
-        print(f"Response: {json.dumps(result)}")
-
-        if result.get("code", 0) != 0:
-            print(f"ERROR: failed to get tenant_access_token: {result.get('msg', 'unknown error')}", file=sys.stderr)
-            return "", Exception(f"failed to get tenant_access_token: {json.dumps(result, ensure_ascii=False)}")
-
-        return result["tenant_access_token"], None
-
-    except Exception as e:
-        print(f"ERROR: getting tenant_access_token: {e}", file=sys.stderr)
-        return "", e
+    token, err = token_manager.get_tenant_token_for_credentials(app_id, app_secret)
+    if err:
+        print(f"ERROR: getting tenant_access_token: {err}", file=sys.stderr)
+        return "", Exception(err)
+    return token, None
 
 def get_wiki_node_info(tenant_access_token: str, node_token: str) -> Dict[str, Any]:
     """获取知识空间节点信息

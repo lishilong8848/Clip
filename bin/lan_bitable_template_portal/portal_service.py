@@ -17,13 +17,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-import requests
-
 from upload_event_module.config import config, get_field_config
 from upload_event_module.services.feishu_service import (
     ensure_feishu_token,
     refresh_feishu_token,
 )
+from upload_event_module.services.feishu_token_manager import TOKEN_ERROR_CODES
 from upload_event_module.services.http_client import FeishuHTTPError, FeishuHttpClient
 from upload_event_module.services.robot_webhook import send_text_to_open_ids
 from upload_event_module.utils import get_data_file_path
@@ -189,9 +188,7 @@ class MaintenancePortalService:
     ) -> None:
         self.app_token = str(app_token or DEFAULT_APP_TOKEN).strip()
         self.table_id = str(table_id or DEFAULT_TABLE_ID).strip()
-        self._session = requests.Session()
         self._http_client = FeishuHttpClient()
-        self._http_lock = threading.RLock()
         self._field_meta_list: list[FieldMeta] = []
         self._field_meta_by_name: dict[str, FieldMeta] = {}
         self._records: list[dict[str, Any]] = []
@@ -249,11 +246,6 @@ class MaintenancePortalService:
             raise PortalError("未配置有效的飞书 user_token。")
         return {"Authorization": f"Bearer {token}"}
 
-    def _use_unified_http_client(self) -> bool:
-        if os.environ.get("CLIPFLOW_DISABLE_UNIFIED_FEISHU_HTTP") == "1":
-            return False
-        return isinstance(self._session, requests.sessions.Session)
-
     def _request_payload(
         self,
         method: str,
@@ -264,56 +256,16 @@ class MaintenancePortalService:
         params: dict[str, Any] | None = None,
         json_payload: Any = None,
     ) -> dict[str, Any]:
-        if self._use_unified_http_client():
-            try:
-                return self._http_client.request_json(
-                    method,
-                    url,
-                    headers=headers,
-                    params=params or {},
-                    json_payload=json_payload,
-                )
-            except FeishuHTTPError as exc:
-                raise PortalError(f"{context} HTTP失败: {exc}") from exc
-        with self._http_lock:
-            if method.upper() == "PATCH":
-                response = self._session.patch(
-                    url,
-                    headers=headers,
-                    json=json_payload,
-                    timeout=(5, 30),
-                )
-            else:
-                response = self._session.get(
-                    url,
-                    headers=headers,
-                    params=params or {},
-                    timeout=(5, 30),
-                )
-        return self._response_json_or_error(response, context)
-
-    @staticmethod
-    def _response_json_or_error(response, context: str) -> dict[str, Any]:
         try:
-            payload = response.json()
-        except ValueError as json_exc:
-            try:
-                response.raise_for_status()
-            except Exception as http_exc:
-                body = str(getattr(response, "text", "") or "").strip()
-                if len(body) > 300:
-                    body = body[:300] + "..."
-                detail = f"，响应={body}" if body else ""
-                raise PortalError(f"{context} HTTP失败: {http_exc}{detail}") from http_exc
-            raise PortalError(f"{context} 返回不是有效 JSON。") from json_exc
-        if not isinstance(payload, dict):
-            raise PortalError(f"{context} 返回格式错误。")
-        if not getattr(response, "ok", False) and int(payload.get("code") or 0) == 0:
-            try:
-                response.raise_for_status()
-            except Exception as exc:
-                raise PortalError(f"{context} HTTP失败: {exc}") from exc
-        return payload
+            return self._http_client.request_json(
+                method,
+                url,
+                headers=headers,
+                params=params or {},
+                json_payload=json_payload,
+            )
+        except FeishuHTTPError as exc:
+            raise PortalError(f"{context} HTTP失败: {exc}") from exc
 
     def _request_json(
         self,
@@ -342,7 +294,7 @@ class MaintenancePortalService:
             )
 
         payload = do_get()
-        if payload.get("code") == 99991663:
+        if int(payload.get("code") or 0) in TOKEN_ERROR_CODES:
             refresh_feishu_token()
             payload = do_get()
         code = payload.get("code", 0)
@@ -382,7 +334,7 @@ class MaintenancePortalService:
             )
 
         payload = do_patch()
-        if payload.get("code") == 99991663:
+        if int(payload.get("code") or 0) in TOKEN_ERROR_CODES:
             refresh_feishu_token()
             payload = do_patch()
         code = payload.get("code", 0)
@@ -699,7 +651,7 @@ class MaintenancePortalService:
                 continue
             if text not in cleaned:
                 cleaned.append(text)
-        return cleaned
+        return cleaned[-20:]
 
     def _current_load_warnings(self) -> list[str]:
         cleaned = self._clean_load_warnings()
@@ -1440,7 +1392,12 @@ class MaintenancePortalService:
 
     def _change_record_building_codes(self, record: dict[str, Any]) -> list[str]:
         fields = record.get("display_fields") or {}
-        raw_building = fields.get("变更楼栋") or fields.get("楼栋") or ""
+        raw_building = (
+            fields.get("变更楼栋")
+            or fields.get("楼栋")
+            or record.get("building_codes")
+            or ""
+        )
         return self._building_codes_from_value(raw_building)
 
     @staticmethod
@@ -1486,6 +1443,9 @@ class MaintenancePortalService:
         title = self._repair_notice_title(fields)
         if title:
             return title
+        fallback_title = str(record.get("title") or "").strip()
+        if fallback_title:
+            return fallback_title
         return str(record.get("record_id") or "").strip()
 
     @staticmethod
@@ -1516,6 +1476,9 @@ class MaintenancePortalService:
             codes = self._repair_building_codes_from_value(fields.get(field_name))
             if codes:
                 return codes
+        fallback_codes = self._repair_building_codes_from_value(record.get("building_codes"))
+        if fallback_codes:
+            return fallback_codes
         return (
             self._repair_building_codes_from_value(self._repair_title(record))
             or self._repair_building_codes_from_value(fields.get("维修名称"))
@@ -3447,16 +3410,37 @@ class MaintenancePortalService:
         return {"removed": removed_count}
 
     def _get_record_memory(self, record: dict[str, Any]) -> dict[str, str]:
+        work_type = str(record.get("work_type") or WORK_TYPE_MAINTENANCE)
         fields = record.get("display_fields") or {}
-        building = str(fields.get("楼栋") or "").strip()
-        maintenance_total = str(fields.get("维护总项") or "").strip()
-        if not building or not maintenance_total:
+        if work_type == WORK_TYPE_CHANGE:
+            building = self._building_label_from_codes(
+                self._change_record_building_codes(record)
+            )
+            memory_name = self._change_title(record)
+        elif work_type == WORK_TYPE_REPAIR:
+            building = self._building_label_from_codes(
+                self._repair_record_building_codes(record)
+            )
+            memory_name = self._repair_title(record)
+        else:
+            building = str(fields.get("楼栋") or "").strip()
+            memory_name = str(fields.get("维护总项") or "").strip()
+            maintenance_cycle = str(
+                fields.get("维护周期") or record.get("maintenance_cycle") or ""
+            ).strip()
+        if not building or not memory_name:
             return {}
-        key = self._normalize_memory_key(maintenance_total)
+        key = self._memory_item_key(
+            work_type,
+            memory_name,
+            maintenance_cycle if work_type == WORK_TYPE_MAINTENANCE else "",
+        )
         with self._memory_lock:
             payload = self._load_building_memory_locked(building)
             items = payload.get("items") or {}
             item = items.get(key) or {}
+            if not item and work_type == WORK_TYPE_MAINTENANCE:
+                item = items.get(self._normalize_memory_key(memory_name)) or {}
         if not isinstance(item, dict):
             return {}
         return {
@@ -3464,8 +3448,34 @@ class MaintenancePortalService:
             "content": str(item.get("content") or ""),
             "reason": str(item.get("reason") or ""),
             "impact": str(item.get("impact") or ""),
+            "maintenance_cycle": str(item.get("maintenance_cycle") or ""),
+            "specialty": str(item.get("specialty") or ""),
+            "level": str(item.get("level") or ""),
+            "repair_device": str(item.get("repair_device") or ""),
+            "repair_fault": str(item.get("repair_fault") or ""),
+            "fault_type": str(item.get("fault_type") or ""),
+            "repair_mode": str(item.get("repair_mode") or ""),
+            "discovery": str(item.get("discovery") or ""),
+            "symptom": str(item.get("symptom") or ""),
+            "solution": str(item.get("solution") or ""),
+            "zhihang_involved": str(item.get("zhihang_involved") or ""),
+            "zhihang_record_id": str(item.get("zhihang_record_id") or ""),
+            "zhihang_title": str(item.get("zhihang_title") or ""),
+            "zhihang_progress": str(item.get("zhihang_progress") or ""),
             "updated_at": str(item.get("updated_at") or ""),
         }
+
+    def _memory_item_key(
+        self, work_type: str, item_name: str, maintenance_cycle: str = ""
+    ) -> str:
+        normalized = self._normalize_memory_key(item_name)
+        work_type = str(work_type or WORK_TYPE_MAINTENANCE).strip() or WORK_TYPE_MAINTENANCE
+        if work_type == WORK_TYPE_MAINTENANCE:
+            cycle = self._normalize_memory_key(maintenance_cycle)
+            if cycle:
+                return f"{normalized}|cycle:{cycle}"
+            return normalized
+        return f"{work_type}:{normalized}"
 
     def _remember_draft_fields(
         self,
@@ -3476,27 +3486,331 @@ class MaintenancePortalService:
         content: str,
         reason: str,
         impact: str,
+        work_type: str = WORK_TYPE_MAINTENANCE,
+        item_name: str = "",
+        maintenance_cycle: str = "",
+        extra_fields: dict[str, Any] | None = None,
     ) -> None:
+        work_type = str(work_type or WORK_TYPE_MAINTENANCE).strip() or WORK_TYPE_MAINTENANCE
         building = str(building or "").strip()
-        maintenance_total = str(maintenance_total or "").strip()
-        if not building or not maintenance_total:
+        memory_name = str(item_name or maintenance_total or "").strip()
+        maintenance_total = str(maintenance_total or memory_name).strip()
+        maintenance_cycle = str(maintenance_cycle or "").strip()
+        if not building or not memory_name:
             return
-        key = self._normalize_memory_key(maintenance_total)
+        key = self._memory_item_key(work_type, memory_name, maintenance_cycle)
         now = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        remembered = {
+            "work_type": work_type,
+            "memory_name": memory_name,
+            "maintenance_total": maintenance_total,
+            "maintenance_cycle": maintenance_cycle,
+            "location": str(location or ""),
+            "content": str(content or ""),
+            "reason": str(reason or ""),
+            "impact": str(impact or ""),
+            "updated_at": now,
+        }
+        for extra_key, extra_value in (extra_fields or {}).items():
+            if extra_key in remembered:
+                continue
+            remembered[str(extra_key)] = str(extra_value or "")
         with self._memory_lock:
             payload = self._load_building_memory_locked(building)
             payload["building"] = building
             payload["updated_at"] = now
             items = payload.setdefault("items", {})
-            items[key] = {
-                "maintenance_total": maintenance_total,
+            items[key] = remembered
+            self._save_building_memory_locked(building, payload)
+
+    @staticmethod
+    def _split_notice_text_blocks(text: str) -> list[str]:
+        text = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not text:
+            return []
+        pattern = re.compile(r"(?=【(?:维保通告|设备变更|设备检修)】\s*状态[:：])")
+        parts = [part.strip() for part in pattern.split(text) if part.strip()]
+        if len(parts) > 1:
+            return parts
+        separator_parts = [
+            part.strip()
+            for part in re.split(r"\n\s*(?:-{4,}|={4,}|#{4,})\s*\n", text)
+            if part.strip()
+        ]
+        return separator_parts or [text]
+
+    @staticmethod
+    def _parse_notice_sections(text: str) -> dict[str, str]:
+        sections: dict[str, str] = {}
+        matches = list(re.finditer(r"【([^】]+)】", text or ""))
+        for index, match in enumerate(matches):
+            label = str(match.group(1) or "").strip()
+            if not label:
+                continue
+            start = match.end()
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+            value = str((text or "")[start:end]).strip()
+            value = re.sub(r"^[：:]\s*", "", value).strip()
+            sections[label] = value
+        return sections
+
+    @staticmethod
+    def _notice_section_value(
+        sections: dict[str, str], names: list[str], fallback: str = ""
+    ) -> str:
+        for name in names:
+            value = str(sections.get(name) or "").strip()
+            if value:
+                return value
+        return str(fallback or "").strip()
+
+    @classmethod
+    def _notice_work_type_from_text(
+        cls, text: str, sections: dict[str, str]
+    ) -> str:
+        raw = str(text or "")
+        if "【设备检修】" in raw or cls._notice_section_value(
+            sections, ["维修设备", "维修故障", "故障现象", "解决方案"]
+        ):
+            return WORK_TYPE_REPAIR
+        if "【设备变更】" in raw or cls._notice_section_value(
+            sections, ["变更等级", "变更楼栋"]
+        ):
+            return WORK_TYPE_CHANGE
+        return WORK_TYPE_MAINTENANCE
+
+    @classmethod
+    def _building_codes_from_notice_text(cls, *values: Any) -> list[str]:
+        codes: list[str] = []
+        text = "\n".join(str(value or "") for value in values if str(value or "").strip())
+        upper = text.upper()
+        if re.search(r"110\s*(?:站|楼|机房|数据中心|DC)?", upper):
+            codes.append("110")
+        for code in ("A", "B", "C", "D", "E", "H"):
+            patterns = (
+                rf"(?<![A-Z0-9]){code}\s*(?:楼|栋|座|区|机房|数据中心|DC)",
+                rf"(?:楼栋|楼宇|数据中心)\s*{code}(?![A-Z0-9])",
+                rf"(?<![A-Z0-9]){code}[-－]\d",
+            )
+            if any(re.search(pattern, upper) for pattern in patterns):
+                codes.append(code)
+        return [code for code in BUILDING_SCOPE_CODES if code in dict.fromkeys(codes)]
+
+    @classmethod
+    def _strip_notice_title_suffix(cls, title: str, work_type: str) -> str:
+        text = re.sub(r"\s+", " ", str(title or "").strip())
+        if not text:
+            return ""
+        if work_type == WORK_TYPE_MAINTENANCE:
+            text = re.sub(r"^EA118机房", "", text, flags=re.IGNORECASE).strip()
+            for code in BUILDING_SCOPE_CODES:
+                label = cls._building_label_from_code(code)
+                text = re.sub(rf"^{re.escape(label)}", "", text).strip()
+            text = re.sub(r"(?:维保|维护)?通告$", "", text).strip()
+            return text or str(title or "").strip()
+        if work_type == WORK_TYPE_CHANGE:
+            stripped = re.sub(r"(?:变更)?通告$", "", text).strip()
+            return stripped or text
+        return text
+
+    def _find_zhihang_record_by_title(self, title: str) -> dict[str, Any] | None:
+        target = self._match_text(title)
+        if not target:
+            return None
+        candidates: list[dict[str, Any]] = []
+        try:
+            candidates.extend(self._source_snapshot_zhihang_records("ALL") or [])
+        except Exception:
+            pass
+        candidates.extend(self._zhihang_change_records)
+        seen: set[str] = set()
+        for record in candidates:
+            if not isinstance(record, dict):
+                continue
+            record_id = str(record.get("record_id") or "").strip()
+            if record_id and record_id in seen:
+                continue
+            if record_id:
+                seen.add(record_id)
+            title_text = str(record.get("title") or "").strip() or self._zhihang_change_title(record)
+            if self._match_text(title_text) == target:
+                return record
+        return None
+
+    def _historical_notice_memory_item(
+        self, block: str, *, scope: str
+    ) -> tuple[dict[str, Any] | None, str]:
+        sections = self._parse_notice_sections(block)
+        work_type = self._notice_work_type_from_text(block, sections)
+        title = self._notice_section_value(sections, ["标题", "名称", "通告名称"])
+        location = self._notice_section_value(sections, ["地点", "位置"])
+        building_text = self._notice_section_value(
+            sections,
+            ["楼栋", "变更楼栋", "所属楼栋", "所属数据中心/楼栋-使用"],
+        )
+        codes = self._building_codes_from_notice_text(building_text, title, location, block)
+        if not codes:
+            return None, "无法识别楼栋"
+        if not self._scope_matches_buildings(scope, codes):
+            return None, f"不属于当前入口 {self._scope_label(scope)}"
+        building = self._building_label_from_codes(codes)
+        specialty = self._notice_section_value(sections, ["专业", "专业类别", "所属专业"])
+        level = self._notice_section_value(sections, ["等级", "变更等级", "紧急程度"])
+        content = self._notice_section_value(sections, ["内容"], title)
+        reason = self._notice_section_value(sections, ["原因", "故障原因"])
+        impact = self._notice_section_value(sections, ["影响", "影响范围"])
+        maintenance_cycle = self._notice_section_value(sections, ["维保周期", "维护周期"])
+        if work_type == WORK_TYPE_MAINTENANCE:
+            memory_name = self._notice_section_value(
+                sections,
+                ["维护总项", "维保总项", "项目", "维护项目"],
+                self._strip_notice_title_suffix(title, work_type),
+            )
+            if not memory_name:
+                return None, "维保通告缺少标题或维护总项"
+            return {
+                "work_type": work_type,
+                "building": building,
+                "memory_name": memory_name,
+                "maintenance_cycle": maintenance_cycle,
                 "location": location,
                 "content": content,
                 "reason": reason,
                 "impact": impact,
-                "updated_at": now,
-            }
-            self._save_building_memory_locked(building, payload)
+                "extra_fields": {"specialty": specialty},
+            }, ""
+        if work_type == WORK_TYPE_CHANGE:
+            memory_name = self._notice_section_value(
+                sections,
+                ["变更简述", "变更标题"],
+                self._strip_notice_title_suffix(title, work_type) or title,
+            )
+            if not memory_name:
+                return None, "变更通告缺少标题"
+            zhihang_title = self._notice_section_value(
+                sections, ["智航变更", "智航侧变更", "互联变更", "互联侧变更"]
+            )
+            zhihang_record_id = self._notice_section_value(
+                sections, ["智航记录ID", "互联记录ID"]
+            )
+            zhihang_progress = ""
+            if zhihang_title and not zhihang_record_id:
+                zhihang_record = self._find_zhihang_record_by_title(zhihang_title)
+                if zhihang_record:
+                    zhihang_record_id = str(zhihang_record.get("record_id") or "").strip()
+                    zhihang_title = str(zhihang_record.get("title") or "").strip() or self._zhihang_change_title(zhihang_record)
+                    zhihang_progress = str(zhihang_record.get("progress") or "").strip() or self._zhihang_change_progress(zhihang_record)
+            return {
+                "work_type": work_type,
+                "building": building,
+                "memory_name": memory_name,
+                "location": location,
+                "content": content or memory_name,
+                "reason": reason,
+                "impact": impact,
+                "extra_fields": {
+                    "specialty": specialty,
+                    "level": level,
+                    "zhihang_involved": "1" if zhihang_record_id else "",
+                    "zhihang_record_id": zhihang_record_id,
+                    "zhihang_title": zhihang_title,
+                    "zhihang_progress": zhihang_progress,
+                },
+            }, ""
+        memory_name = self._notice_section_value(
+            sections,
+            ["检修通告名称", "维修名称"],
+            title,
+        )
+        if not memory_name:
+            return None, "检修通告缺少标题"
+        return {
+            "work_type": work_type,
+            "building": building,
+            "memory_name": memory_name,
+            "location": location,
+            "content": content or memory_name,
+            "reason": reason,
+            "impact": impact,
+            "extra_fields": {
+                "specialty": specialty,
+                "level": level,
+                "repair_device": self._notice_section_value(sections, ["维修设备"]),
+                "repair_fault": self._notice_section_value(sections, ["维修故障"]),
+                "fault_type": self._notice_section_value(sections, ["故障类型"]),
+                "repair_mode": self._notice_section_value(sections, ["维修方式"]),
+                "discovery": self._notice_section_value(sections, ["故障发现方式"]),
+                "symptom": self._notice_section_value(sections, ["故障现象"]),
+                "solution": self._notice_section_value(sections, ["解决方案"]),
+            },
+        }, ""
+
+    def import_historical_notice_memory(
+        self,
+        *,
+        text: str,
+        scope: str = "ALL",
+        allowed_scopes: list[str] | None = None,
+        is_admin: bool = False,
+        imported_by: str = "",
+    ) -> dict[str, Any]:
+        scope = self._normalize_scope(scope)
+        blocks = self._split_notice_text_blocks(text)
+        if not blocks:
+            raise PortalError("请粘贴至少一条历史通告。")
+        if len(blocks) > 200:
+            raise PortalError("一次最多导入 200 条历史通告，请分批导入。")
+        allowed = {self._normalize_scope(item) for item in (allowed_scopes or [])}
+        imported: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        for index, block in enumerate(blocks, start=1):
+            item, reason = self._historical_notice_memory_item(block, scope=scope)
+            if not item:
+                skipped.append({"index": index, "reason": reason or "无法解析"})
+                continue
+            item_codes = self._building_codes_from_value(item.get("building"))
+            item_scope = "CAMPUS" if len(item_codes) >= 2 else (item_codes[0] if item_codes else "")
+            if not is_admin and "ALL" not in allowed and item_scope not in allowed:
+                skipped.append(
+                    {
+                        "index": index,
+                        "title": item.get("memory_name") or "",
+                        "reason": f"无权导入 {self._scope_label(item_scope)} 历史通告",
+                    }
+                )
+                continue
+            extra_fields = item.get("extra_fields") if isinstance(item.get("extra_fields"), dict) else {}
+            self._remember_draft_fields(
+                work_type=str(item.get("work_type") or WORK_TYPE_MAINTENANCE),
+                building=str(item.get("building") or ""),
+                maintenance_total=str(item.get("memory_name") or ""),
+                item_name=str(item.get("memory_name") or ""),
+                maintenance_cycle=str(item.get("maintenance_cycle") or ""),
+                location=str(item.get("location") or ""),
+                content=str(item.get("content") or ""),
+                reason=str(item.get("reason") or ""),
+                impact=str(item.get("impact") or ""),
+                extra_fields={
+                    **extra_fields,
+                    "imported_by": imported_by,
+                    "imported_from": "historical_notice",
+                },
+            )
+            imported.append(
+                {
+                    "index": index,
+                    "work_type": item.get("work_type") or "",
+                    "building": item.get("building") or "",
+                    "title": item.get("memory_name") or "",
+                    "maintenance_cycle": item.get("maintenance_cycle") or "",
+                }
+            )
+        return {
+            "imported_count": len(imported),
+            "skipped_count": len(skipped),
+            "imported": imported,
+            "skipped": skipped,
+        }
 
     def _serialize_record(
         self, record: dict[str, Any], summary_by_record: dict[str, dict[str, Any]] | None = None
@@ -3567,7 +3881,12 @@ class MaintenancePortalService:
 
     def _change_title(self, record: dict[str, Any]) -> str:
         fields = record.get("display_fields") or {}
-        return str(fields.get("变更简述") or record.get("record_id") or "").strip()
+        return str(
+            fields.get("变更简述")
+            or record.get("title")
+            or record.get("record_id")
+            or ""
+        ).strip()
 
     def _change_time_range(self, record: dict[str, Any]) -> tuple[str, str, str]:
         fields = record.get("display_fields") or {}
@@ -4398,6 +4717,7 @@ class MaintenancePortalService:
             fields = record["display_fields"]
             building = str(fields.get("楼栋") or "").strip()
             maintenance_total = str(fields.get("维护总项") or "").strip()
+            maintenance_cycle = str(fields.get("维护周期") or "").strip()
             start_time = self._format_input_datetime(draft.get("start_time"))
             end_time = self._format_input_datetime(draft.get("end_time"))
             location = str(draft.get("location") or "").strip()
@@ -4413,6 +4733,7 @@ class MaintenancePortalService:
                 content=content,
                 reason=reason,
                 impact=impact,
+                maintenance_cycle=maintenance_cycle,
             )
             text = (
                 self.build_notice_text(
@@ -5207,13 +5528,20 @@ class MaintenancePortalService:
             title = str(request_payload.get("title") or "").strip()
             if not title:
                 raise PortalError("更新/结束通告缺少名称。")
-            if not target_record_id:
-                target_record_id = record_id
             if not target_record_id and active_item_id:
                 target_record_id = self._target_record_id_from_work_status(
                     work_type=WORK_TYPE_MAINTENANCE,
                     active_item_id=active_item_id,
                 )
+            if not target_record_id and source_record_id:
+                target_record_id = self._target_record_id_from_work_status(
+                    work_type=WORK_TYPE_MAINTENANCE,
+                    source_record_id=source_record_id,
+                )
+            if not target_record_id and (
+                not source_record_id or str(record_id or "").strip() != source_record_id
+            ):
+                target_record_id = record_id
             record_id = source_record_id or record_id
             if action != "start" and not target_record_id:
                 raise PortalError(
@@ -5236,14 +5564,20 @@ class MaintenancePortalService:
             or (DEFAULT_PROGRESS_TEXT if action == "start" else "")
         )
         if action == "start":
-            maintenance_total = str(fields.get("维护总项") or "").strip()
+            memory_total = (
+                str(maintenance_total or fields.get("维护总项") or "").strip()
+                or str(request_payload.get("title") or "").strip()
+            )
+            if not maintenance_total:
+                maintenance_total = memory_total
             self._remember_draft_fields(
                 building=building,
-                maintenance_total=maintenance_total,
+                maintenance_total=memory_total,
                 location=location,
                 content=content,
                 reason=reason,
                 impact=impact,
+                maintenance_cycle=maintenance_cycle,
             )
 
         text = self.build_notice_text(
@@ -5395,6 +5729,7 @@ class MaintenancePortalService:
                 default_start, default_end, _ = self._change_time_range(record)
         else:
             source_record_id = str(request_payload.get("source_record_id") or "").strip()
+            active_item_id = str(request_payload.get("active_item_id") or "").strip()
             source_record = None
             if source_record_id:
                 try:
@@ -5437,7 +5772,6 @@ class MaintenancePortalService:
             record_id = source_record_id
             target_record_id = str(
                 request_payload.get("target_record_id")
-                or request_payload.get("record_id")
                 or ""
             ).strip()
             if not target_record_id and source_record is not None:
@@ -5446,6 +5780,16 @@ class MaintenancePortalService:
                     notice_type=NOTICE_TYPE_CHANGE,
                     source_record=source_record,
                 )
+            if not target_record_id and active_item_id:
+                target_record_id = self._target_record_id_from_work_status(
+                    work_type=WORK_TYPE_CHANGE,
+                    active_item_id=active_item_id,
+                )
+            request_record_id = str(request_payload.get("record_id") or "").strip()
+            if not target_record_id and (
+                not source_record_id or request_record_id != source_record_id
+            ):
+                target_record_id = request_record_id
 
         if not self._scope_matches_buildings(scope, building_codes):
             raise PortalError(f"当前入口与通告楼栋不匹配: {building or '-'}")
@@ -5488,6 +5832,25 @@ class MaintenancePortalService:
             str(request_payload.get("progress") or "").strip()
             or (DEFAULT_PROGRESS_TEXT if action == "start" else "")
         )
+        if action == "start":
+            self._remember_draft_fields(
+                work_type=WORK_TYPE_CHANGE,
+                building=building,
+                maintenance_total=title,
+                item_name=title,
+                location=location,
+                content=content,
+                reason=reason,
+                impact=impact,
+                extra_fields={
+                    "specialty": specialty,
+                    "level": level,
+                    "zhihang_involved": "1" if zhihang_involved else "",
+                    "zhihang_record_id": zhihang_record_id,
+                    "zhihang_title": zhihang_title,
+                    "zhihang_progress": zhihang_progress,
+                },
+            )
         building_code = "CAMPUS" if len(building_codes) >= 2 else (building_codes[0] if building_codes else "")
         text = self.build_change_notice_text(
             status=status,
@@ -5708,6 +6071,7 @@ class MaintenancePortalService:
                 target_record_id = self._repair_target_record_id(record)
         else:
             source_record_id = str(request_payload.get("source_record_id") or "").strip()
+            active_item_id = str(request_payload.get("active_item_id") or "").strip()
             if source_record_id:
                 try:
                     source_record = self._find_record_by_id(source_record_id, WORK_TYPE_REPAIR)
@@ -5746,7 +6110,6 @@ class MaintenancePortalService:
             record_id = source_record_id
             target_record_id = str(
                 request_payload.get("target_record_id")
-                or request_payload.get("record_id")
                 or ""
             ).strip()
             if not target_record_id and source_record is not None:
@@ -5755,6 +6118,16 @@ class MaintenancePortalService:
                     notice_type=NOTICE_TYPE_REPAIR,
                     source_record=source_record,
                 )
+            if not target_record_id and active_item_id:
+                target_record_id = self._target_record_id_from_work_status(
+                    work_type=WORK_TYPE_REPAIR,
+                    active_item_id=active_item_id,
+                )
+            request_record_id = str(request_payload.get("record_id") or "").strip()
+            if not target_record_id and (
+                not source_record_id or request_record_id != source_record_id
+            ):
+                target_record_id = request_record_id
             repair_device = request_text("repair_device")
             if not repair_device and source_record is not None:
                 repair_device = self._repair_device_text(fields)
@@ -5819,6 +6192,28 @@ class MaintenancePortalService:
         progress = request_text(
             "progress", self._repair_first_field(fields, "维修进展描述", "当前维修进度")
         )
+        if action == "start":
+            self._remember_draft_fields(
+                work_type=WORK_TYPE_REPAIR,
+                building=building,
+                maintenance_total=title,
+                item_name=title,
+                location=location,
+                content=content,
+                reason=reason,
+                impact=impact,
+                extra_fields={
+                    "specialty": specialty,
+                    "level": level,
+                    "repair_device": repair_device,
+                    "repair_fault": repair_fault,
+                    "fault_type": fault_type,
+                    "repair_mode": repair_mode,
+                    "discovery": discovery,
+                    "symptom": symptom,
+                    "solution": solution,
+                },
+            )
         building_code = (
             "CAMPUS"
             if len(building_codes) >= 2

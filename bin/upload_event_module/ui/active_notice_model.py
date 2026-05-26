@@ -109,7 +109,9 @@ class ActiveNoticeModel(QAbstractListModel):
         if not isinstance(record, dict):
             return False
         notice_type = str(record.get("notice_type") or "").strip()
-        record_id = str(record.get("record_id") or "").strip()
+        record_id = str(
+            record.get("target_record_id") or record.get("record_id") or ""
+        ).strip()
         return (
             notice_type in ("设备变更", "变更通告")
             and bool(record_id)
@@ -305,6 +307,54 @@ class ActiveNoticeModel(QAbstractListModel):
             identity = self.identity_for_record(record)
             if identity:
                 self._identity_to_row[identity] = row
+
+
+class ActiveNoticeListRoute:
+    """Lightweight identity route for model-backed active notice lists.
+
+    The production path renders active notices with QListView + model/delegate.
+    Older helpers still pass around a "list" identity to decide whether a notice
+    belongs to the event or non-event tab. This route keeps that identity without
+    allocating a hidden QListWidget in the hot path.
+    """
+
+    def __init__(self, name: str):
+        self.name = str(name or "").strip()
+
+    def clear(self) -> None:
+        return None
+
+    def count(self) -> int:
+        return 0
+
+    def item(self, _row: int):
+        return None
+
+    def row(self, item) -> int:
+        if isinstance(item, ActiveNoticeModelItem) and item.listWidget() is self:
+            return item.row()
+        return -1
+
+    def itemWidget(self, _item):  # noqa: N802
+        return None
+
+    def removeItemWidget(self, _item):  # noqa: N802
+        return None
+
+    def setItemWidget(self, _item, _widget):  # noqa: N802
+        return None
+
+    def takeItem(self, _row: int):  # noqa: N802
+        return None
+
+    def insertItem(self, _row: int, _item):  # noqa: N802
+        return None
+
+    def addItem(self, _item):  # noqa: N802
+        return None
+
+    def __repr__(self) -> str:
+        return f"<ActiveNoticeListRoute {self.name or '-'}>"
 
 
 class ActiveNoticeModelItem:

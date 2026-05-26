@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..config import config
 from ..logger import log_error, log_info
+from .feishu_token_manager import FeishuTokenError, TOKEN_ERROR_CODES, token_manager
 from .http_client import FeishuHTTPError, FeishuHttpClient
 
 
@@ -32,29 +33,19 @@ def _request_json(
     )
 
 
-def _get_tenant_access_token() -> Tuple[str, str]:
-    app_id = config.app_id
-    app_secret = config.app_secret
-    if not app_id or not app_secret:
-        return "", "未配置 App ID 或 App Secret"
-
-    url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
-    payload = {"app_id": app_id, "app_secret": app_secret}
-    headers = {"Content-Type": "application/json; charset=utf-8"}
-
+def _get_tenant_access_token(*, force_refresh: bool = False) -> Tuple[str, str]:
     try:
-        result = _request_json(
-            "POST",
-            url,
-            json_payload=payload,
-            headers=headers,
-            retries=2,
-        )
-        if result.get("code", 0) != 0:
-            return "", result.get("msg", "unknown error")
-        return result.get("tenant_access_token", ""), ""
-    except FeishuHTTPError as exc:
+        return token_manager.get_tenant_token(force_refresh=force_refresh), ""
+    except FeishuTokenError as exc:
         return "", str(exc)
+    except Exception as exc:
+        return "", str(exc)
+
+
+def _is_token_error_result(result: dict[str, Any]) -> bool:
+    code = int(result.get("code") or 0)
+    msg = str(result.get("msg") or "").lower()
+    return code in TOKEN_ERROR_CODES or "token" in msg or "access_token" in msg
 
 
 def _get_bot_chats(
@@ -75,13 +66,21 @@ def _get_bot_chats(
         if page_token:
             params["page_token"] = page_token
         try:
-            result = _request_json(
-                "GET",
-                url,
-                headers=headers,
-                params=params,
-                retries=2,
-            )
+            result = _request_json("GET", url, headers=headers, params=params, retries=2)
+            if _is_token_error_result(result):
+                tenant_access_token, token_err = _get_tenant_access_token(
+                    force_refresh=True
+                )
+                if token_err:
+                    return [], token_err
+                headers["Authorization"] = f"Bearer {tenant_access_token}"
+                result = _request_json(
+                    "GET",
+                    url,
+                    headers=headers,
+                    params=params,
+                    retries=2,
+                )
             if result.get("code", 0) != 0:
                 return [], result.get("msg", "unknown error")
             data = result.get("data", {})
@@ -185,6 +184,21 @@ def _send_message_to_receive_id(
             json_payload=payload,
             retries=2,
         )
+        if _is_token_error_result(result):
+            tenant_access_token, token_err = _get_tenant_access_token(
+                force_refresh=True
+            )
+            if token_err:
+                return False, token_err
+            headers["Authorization"] = f"Bearer {tenant_access_token}"
+            result = _request_json(
+                "POST",
+                url,
+                headers=headers,
+                params=params,
+                json_payload=payload,
+                retries=2,
+            )
         if result.get("code", 0) != 0:
             return False, result.get("msg", "unknown error")
         return True, "ok"

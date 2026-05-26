@@ -3,14 +3,9 @@ import logging
 import os
 import tempfile
 import threading
-import time
 from typing import Callable
 
 import lark_oapi as lark
-from lark_oapi.api.auth.v3 import (
-    InternalTenantAccessTokenRequest,
-    InternalTenantAccessTokenRequestBody,
-)
 from lark_oapi.api.bitable.v1 import (
     AppTableRecord,
     BatchCreateAppTableRecordRequest,
@@ -28,7 +23,11 @@ from lark_oapi.api.wiki.v2 import GetNodeSpaceRequest
 
 from ..config import config
 from ..logger import log_error, log_info
-from .http_client import FeishuHTTPError, FeishuHttpClient
+from .feishu_token_manager import (
+    TOKEN_REFRESH_MARGIN_SECONDS,
+    FeishuTokenError,
+    token_manager,
+)
 from .handlers import NoticePayload, get_notice_handler
 
 
@@ -51,9 +50,7 @@ FEISHU_ERROR_SUGGESTIONS = {
     99991665: "Token 已过期，正在自动刷新",
 }
 
-TOKEN_REFRESH_MARGIN_SECONDS = 60
 _token_refresh_lock = threading.RLock()
-_TOKEN_HTTP_CLIENT = FeishuHttpClient(retries=3)
 
 
 def _info_logging_enabled() -> bool:
@@ -72,36 +69,6 @@ def _build_client() -> lark.Client:
         .log_level(lark.LogLevel.ERROR)
         .build()
     )
-
-
-def _save_refreshed_token(new_token: str, expire_in: int | float | None = None) -> str:
-    expire_seconds = int(expire_in or 7200)
-    expire_time = int(time.time()) + expire_seconds - 300
-    config.save(user_token=new_token, token_expire_time=expire_time)
-    log_info(f"Token 刷新成功: {new_token[:10]}... (过期时间: {expire_time})")
-    return new_token
-
-
-def _refresh_feishu_token_via_http(app_id: str, app_secret: str) -> tuple[str, str]:
-    url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
-    try:
-        payload = _TOKEN_HTTP_CLIENT.request_json(
-            "POST",
-            url,
-            headers={"Content-Type": "application/json; charset=utf-8"},
-            json_payload={"app_id": app_id, "app_secret": app_secret},
-            retries=3,
-        )
-    except FeishuHTTPError as exc:
-        return "", str(exc)
-    except Exception as exc:
-        return "", str(exc)
-    if int(payload.get("code") or 0) != 0:
-        return "", f"{payload.get('code')} - {payload.get('msg') or 'unknown error'}"
-    token = str(payload.get("tenant_access_token") or "").strip()
-    if not token:
-        return "", "接口未返回 tenant_access_token"
-    return _save_refreshed_token(token, payload.get("expire")), ""
 
 
 def _with_token_retry(request_fn: Callable[[str], object]):
@@ -262,58 +229,18 @@ def refresh_feishu_token():
     """刷新飞书 Token (Tenant Access Token)"""
     with _token_refresh_lock:
         log_info("正在尝试刷新飞书 Token...")
-        app_id = config.app_id
-        app_secret = config.app_secret
-
-        if not app_id or not app_secret:
-            log_error("Token 刷新失败: 未配置 App ID 或 App Secret")
-            return None
-
-        http_token, http_error = _refresh_feishu_token_via_http(app_id, app_secret)
-        if http_token:
-            return http_token
-
         try:
-            client = lark.Client.builder().build()
-
-            req = (
-                InternalTenantAccessTokenRequest.builder()
-                .request_body(
-                    InternalTenantAccessTokenRequestBody.builder()
-                    .app_id(app_id)
-                    .app_secret(app_secret)
-                    .build()
-                )
-                .build()
-            )
-
-            resp = client.auth.v3.tenant_access_token.internal(req)
-
-            if resp.success():
-                data = json.loads(resp.raw.content)
-                new_token = data["tenant_access_token"]
-                return _save_refreshed_token(new_token, data.get("expire", 7200))
-            else:
-                log_error(
-                    "Token 刷新失败: "
-                    f"HTTP直连={http_error or '-'}; SDK={resp.code} - {resp.msg}"
-                )
-                return None
+            return token_manager.refresh_tenant_token()
+        except FeishuTokenError as exc:
+            log_error(f"Token 刷新失败: {exc}")
+            return None
         except Exception as e:
-            log_error(f"Token 刷新异常: HTTP直连={http_error or '-'}; SDK异常={e}")
+            log_error(f"Token 刷新异常: {e}")
             return None
 
 
 def _token_refresh_needed(*, margin_seconds: int = TOKEN_REFRESH_MARGIN_SECONDS) -> bool:
-    if not str(config.user_token or "").strip():
-        return True
-    try:
-        expire_time = int(float(config.token_expire_time or 0))
-    except Exception:
-        expire_time = 0
-    if expire_time <= 0:
-        return True
-    return int(time.time()) + max(0, int(margin_seconds or 0)) >= expire_time
+    return token_manager.tenant_token_refresh_needed(margin_seconds=margin_seconds)
 
 
 def ensure_feishu_token(*, margin_seconds: int = TOKEN_REFRESH_MARGIN_SECONDS) -> str | None:
@@ -329,28 +256,7 @@ def ensure_feishu_token(*, margin_seconds: int = TOKEN_REFRESH_MARGIN_SECONDS) -
 def _get_tenant_access_token_with_credentials(
     app_id: str, app_secret: str
 ) -> tuple[str, str]:
-    try:
-        if not app_id or not app_secret:
-            return "", "missing app_id/app_secret"
-
-        client = lark.Client.builder().build()
-        req = (
-            InternalTenantAccessTokenRequest.builder()
-            .request_body(
-                InternalTenantAccessTokenRequestBody.builder()
-                .app_id(app_id)
-                .app_secret(app_secret)
-                .build()
-            )
-            .build()
-        )
-        resp = client.auth.v3.tenant_access_token.internal(req)
-        if resp.success():
-            data = json.loads(resp.raw.content)
-            return data.get("tenant_access_token", ""), ""
-        return "", f"{resp.code} - {resp.msg}"
-    except Exception as exc:
-        return "", str(exc)
+    return token_manager.get_tenant_token_for_credentials(app_id, app_secret)
 
 
 def resolve_bitable_app_token(

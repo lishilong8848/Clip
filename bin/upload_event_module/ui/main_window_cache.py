@@ -35,8 +35,9 @@ class ActiveCacheMixin:
                     event_model.replace_records([])
                 if other_model is not None:
                     other_model.replace_records([])
-            self.list_active_event.clear()
-            self.list_active_other.clear()
+            else:
+                self.list_active_event.clear()
+                self.list_active_other.clear()
             for entry in active_items:
                 data = entry.get("payload") if isinstance(entry, dict) else {}
                 if not isinstance(data, dict):
@@ -89,7 +90,22 @@ class ActiveCacheMixin:
         self._active_cache_last_save_at = 0.0
         self._active_cache_save_deferred = False
         self._active_cache_dirty = True
-        self._active_cache_periodic_full_scan_seconds = 300.0
+        try:
+            self._active_cache_periodic_full_scan_seconds = max(
+                300.0,
+                min(
+                    float(
+                        os.environ.get(
+                            "CLIPFLOW_ACTIVE_CACHE_FULL_SCAN_SECONDS",
+                            "900",
+                        )
+                        or 900
+                    ),
+                    3600.0,
+                ),
+            )
+        except Exception:
+            self._active_cache_periodic_full_scan_seconds = 900.0
         self.active_cache_timer = QTimer(self)
         self.active_cache_timer.timeout.connect(self._periodic_active_cache_save)
         self.active_cache_timer.start(30000)
@@ -114,6 +130,17 @@ class ActiveCacheMixin:
 
     def _periodic_active_cache_save(self):
         if self._is_restoring_cache:
+            return
+        mutation_queue = getattr(self, "_ui_mutation_queue", None)
+        signal_queue = getattr(self, "_ui_signal_queue", None)
+        try:
+            ui_backlog = int(mutation_queue.qsize() if mutation_queue else 0) + int(
+                signal_queue.qsize() if signal_queue else 0
+            )
+        except Exception:
+            ui_backlog = 0
+        if ui_backlog > 0:
+            self._mark_active_cache_dirty()
             return
         now = time.time()
         last_save_at = float(getattr(self, "_active_cache_last_save_at", 0.0) or 0.0)

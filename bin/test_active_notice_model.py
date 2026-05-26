@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import QApplication, QListWidget, QStyleOptionViewItem
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
 
-from upload_event_module.ui.active_notice_model import ActiveNoticeModel
+from upload_event_module.ui.active_notice_model import ActiveNoticeListRoute, ActiveNoticeModel
 from upload_event_module.ui.active_notice_delegate import ActiveNoticeDelegate
 from upload_event_module.ui.main_window_records import MainWindowRecordsMixin
 
@@ -28,8 +28,12 @@ class _RecordsFlagHarness(MainWindowRecordsMixin):
 class _AddItemHarness(MainWindowRecordsMixin):
     def __init__(self, model_view_visible=True):
         self._model_view_visible = model_view_visible
-        self.list_active_event = QListWidget()
-        self.list_active_other = QListWidget()
+        if model_view_visible:
+            self.list_active_event = ActiveNoticeListRoute("event")
+            self.list_active_other = ActiveNoticeListRoute("other")
+        else:
+            self.list_active_event = QListWidget()
+            self.list_active_other = QListWidget()
         self._delete_interaction_enabled = True
 
     def _active_model_view_visible(self):
@@ -50,8 +54,42 @@ class _AddItemHarness(MainWindowRecordsMixin):
     def _schedule_record_binding_validation(self, data):
         return None
 
-    def _schedule_active_route_reconcile(self, data):
+    def _schedule_active_route_reconcile(self, data=None, **_kwargs):
         return None
+
+
+class _TodayProgressController:
+    def __init__(self):
+        self.calls = []
+
+    def submit_qt_command(self, command, payload):
+        self.calls.append((command, dict(payload or {})))
+        return {"ok": True, "message": ""}
+
+
+class _TodayProgressHarness(_AddItemHarness):
+    def __init__(self):
+        super().__init__(model_view_visible=True)
+        self.cache_store = None
+        self.lan_template_portal_controller = _TodayProgressController()
+        self._today_in_progress_pending_record_ids = set()
+        self._today_in_progress_synced_record_ids = set()
+        self.messages = []
+
+    def _enqueue_ui_mutation(self, _label, func):
+        func()
+
+    def _build_clipboard_entry(self, raw_text):
+        return {"content": raw_text}
+
+    def _ensure_payload_for_data(self, data, entry=None):
+        return dict(entry or {"content": data.get("text", "")})
+
+    def _maybe_update_detail_dialog(self, *args, **kwargs):
+        return None
+
+    def show_message(self, message):
+        self.messages.append(str(message))
 
 
 class ActiveNoticeModelTests(unittest.TestCase):
@@ -140,6 +178,17 @@ class ActiveNoticeModelTests(unittest.TestCase):
         self.assertEqual(ActiveNoticeModel.today_progress_label(change), "在进行")
         self.assertEqual(ActiveNoticeModel.next_today_progress_state(change), "no")
 
+    def test_today_progress_supports_target_record_id(self):
+        change = {
+            "notice_type": "设备变更",
+            "record_id": "",
+            "target_record_id": "target-1",
+            "_is_placeholder_record": False,
+            "today_in_progress_state": "unknown",
+        }
+
+        self.assertTrue(ActiveNoticeModel.supports_today_progress(change))
+
     def test_model_view_mode_disables_widget_virtualization(self):
         self.assertFalse(_RecordsFlagHarness(True)._active_item_widgets_required())
         self.assertFalse(_RecordsFlagHarness(True)._active_list_virtualization_enabled())
@@ -201,6 +250,7 @@ class ActiveNoticeModelTests(unittest.TestCase):
 
         self.assertIsNotNone(item)
         self.assertIsNone(widget)
+        self.assertIsInstance(harness.list_active_other, ActiveNoticeListRoute)
         self.assertEqual(harness.list_active_other.count(), 0)
         model = harness._active_notice_model_for_list(harness.list_active_other)
         self.assertEqual(model.rowCount(), 1)
@@ -208,6 +258,35 @@ class ActiveNoticeModelTests(unittest.TestCase):
         self.assertIs(list_widget, harness.list_active_other)
         self.assertTrue(harness._is_valid_list_item(found))
         self.assertEqual(found.data(Qt.ItemDataRole.UserRole)["active_item_id"], "aid-test")
+
+    def test_today_progress_toggle_updates_model_and_uses_target_record_id(self):
+        harness = _TodayProgressHarness()
+        item, _widget = harness.add_active_item(
+            {
+                "active_item_id": "aid-change",
+                "record_id": "source-1",
+                "target_record_id": "target-1",
+                "notice_type": "设备变更",
+                "today_in_progress_state": "unknown",
+                "_is_placeholder_record": False,
+                "_has_unuploaded_changes": False,
+                "text": "【设备变更】状态：开始\n\n【标题】A楼变更\n\n【时间】2026-01-01",
+            },
+            skip_cache=True,
+        )
+
+        harness._handle_today_in_progress_toggle(
+            item.data(Qt.ItemDataRole.UserRole),
+            "yes",
+        )
+
+        model = harness._active_notice_model_for_list(harness.list_active_other)
+        updated = model.record_by_active_item_id("aid-change")
+        self.assertEqual(updated["today_in_progress_state"], "yes")
+        self.assertEqual(
+            harness.lan_template_portal_controller.calls[0][1]["record_id"],
+            "target-1",
+        )
 
 
 if __name__ == "__main__":
