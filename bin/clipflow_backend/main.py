@@ -1905,7 +1905,18 @@ class FastAPIPortalController:
             deny = self._local_only_response(request)
             if deny is not None:
                 return deny
-            active_items = PortalHandler.state_store.list_qt_active_items()
+            active_items = []
+            for row in PortalHandler.state_store.list_qt_active_items():
+                payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+                info = extract_event_info(str(payload.get("text") or "")) or {}
+                payload_status = str(payload.get("status") or "").strip()
+                if payload_status == "结束" or str(info.get("status") or "").strip() == "结束":
+                    PortalHandler.state_store.delete_qt_active_item(
+                        active_item_id=str(row.get("active_item_id") or ""),
+                        record_id=str(row.get("record_id") or ""),
+                    )
+                    continue
+                active_items.append(row)
             clipboard_candidates = PortalHandler.state_store.list_clipboard_candidates(
                 status="pending",
                 limit=100,
@@ -3172,8 +3183,20 @@ class FastAPIPortalController:
                 or (record_id and record_id in deleted_record_ids)
             )
 
+        def _item_is_ended(item: dict) -> bool:
+            status = str(item.get("status") or "").strip()
+            if status == "结束":
+                return True
+            text = str(item.get("text") or item.get("content") or "").strip()
+            if not text:
+                return False
+            info = extract_event_info(text) or {}
+            return str(info.get("status") or "").strip() == "结束"
+
         def _append(item: dict) -> None:
             if not isinstance(item, dict):
+                return
+            if _item_is_ended(item):
                 return
             if _item_deleted_in_qt_store(item):
                 return

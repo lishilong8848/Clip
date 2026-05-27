@@ -41,6 +41,7 @@ from upload_event_module.services.service_registry import (
 )
 from upload_event_module.services.feishu_service import delete_bitable_record
 from upload_event_module.services.robot_webhook import send_text_to_open_ids
+from upload_event_module.core.parser import extract_event_info
 
 
 FRONTEND_DIST_DIR = Path(__file__).resolve().parent / "frontend" / "dist"
@@ -1635,6 +1636,16 @@ class PortalHandler(BaseHTTPRequestHandler):
         return self._send_json(404, {"ok": False, "error": "Not Found"})
 
     def _get_ongoing(self, scope: str) -> list[dict]:
+        def _is_ended(item: dict) -> bool:
+            status = str(item.get("status") or "").strip()
+            if status == "结束":
+                return True
+            text = str(item.get("text") or item.get("content") or "").strip()
+            if not text:
+                return False
+            info = extract_event_info(text) or {}
+            return str(info.get("status") or "").strip() == "结束"
+
         try:
             snapshot = PortalHandler.state_store.get_ongoing_snapshot()
             if snapshot.get("exists"):
@@ -1643,6 +1654,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                     dict(item)
                     for item in snapshot.get("items", [])
                     if isinstance(item, dict)
+                    and not _is_ended(item)
                     and self.service._scope_matches_item(scope, item)
                 ]
         except Exception as exc:
@@ -1672,7 +1684,9 @@ class PortalHandler(BaseHTTPRequestHandler):
         return [
             dict(item)
             for item in result
-            if isinstance(item, dict) and self.service._scope_matches_item(scope, item)
+            if isinstance(item, dict)
+            and not _is_ended(item)
+            and self.service._scope_matches_item(scope, item)
         ]
 
     @classmethod
@@ -2812,6 +2826,52 @@ class PortalHandler(BaseHTTPRequestHandler):
         prepared["target_record_id"] = target_record_id
         return prepared
 
+    @classmethod
+    def _enqueue_active_delete_for_ended_notice(
+        cls, prepared: dict, *, remote_record_id: str = "", job_id: str = ""
+    ) -> str:
+        prepared = dict(prepared or {})
+        target_record_id = (
+            str(remote_record_id or "").strip()
+            or str(prepared.get("target_record_id") or "").strip()
+            or str(prepared.get("record_id") or "").strip()
+        )
+        active_item_id = str(prepared.get("active_item_id") or "").strip()
+        try:
+            cls.state_store.delete_qt_active_item(
+                active_item_id=active_item_id,
+                record_id=target_record_id,
+            )
+        except Exception:
+            pass
+        return cls.state_store.enqueue_outbox_event(
+            "qt_action",
+            {
+                "kind": "active_delete",
+                "job_id": str(job_id or prepared.get("job_id") or ""),
+                "payload": {
+                    "active_item_id": active_item_id,
+                    "record_id": target_record_id,
+                    "target_record_id": target_record_id,
+                    "source_record_id": str(
+                        prepared.get("source_record_id")
+                        or prepared.get("lan_source_record_id")
+                        or (
+                            prepared.get("record_id")
+                            if str(prepared.get("record_id") or "").strip()
+                            != target_record_id
+                            else ""
+                        )
+                        or ""
+                    ),
+                    "work_type": str(
+                        prepared.get("work_type") or prepared.get("lan_work_type") or ""
+                    ),
+                    "notice_type": str(prepared.get("notice_type") or ""),
+                },
+            },
+        )
+
     @staticmethod
     def _decode_local_notice_bytes(encoded: str) -> bytes:
         text = str(encoded or "").strip()
@@ -2957,6 +3017,12 @@ class PortalHandler(BaseHTTPRequestHandler):
                 checkpoint_id,
                 "failed",
                 error=str(result or "多维更新失败。"),
+            )
+        if success and action_type == "end":
+            cls._enqueue_active_delete_for_ended_notice(
+                data,
+                remote_record_id=target_record_id,
+                job_id=str(payload.get("job_id") or ""),
             )
         return {
             "ok": bool(success),
@@ -3151,6 +3217,27 @@ class PortalHandler(BaseHTTPRequestHandler):
                 record_id=str(remote_record_id or ""),
                 active_item_id=str(prepared.get("active_item_id") or ""),
             )
+            if str(prepared.get("action") or "").strip().lower() == "end":
+                try:
+                    event_id = cls._enqueue_active_delete_for_ended_notice(
+                        prepared,
+                        remote_record_id=remote_record_id,
+                        job_id=job_id,
+                    )
+                    cls.service.mark_job(
+                        job_id,
+                        qt_phase="outbox",
+                        qt_queue_position=0,
+                        qt_queue_size=0,
+                        qt_event_id=event_id,
+                    )
+                except Exception as exc:
+                    log_warning(f"Qt 结束删除事件投递失败: job_id={job_id}, error={exc}")
+                try:
+                    cls.state_store.mark_runtime_queue_item("qt_action", job_id, "done")
+                except Exception:
+                    pass
+                return
             event_payload = cls._prepared_to_qt_ui_payload(
                 prepared,
                 remote_record_id=remote_record_id,

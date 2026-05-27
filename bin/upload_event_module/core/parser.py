@@ -36,11 +36,11 @@ SUPPORTED_NOTICE_MARKERS = tuple(f"【{notice_type}】" for notice_type in SUPPO
 
 # 预编译正则表达式
 PATTERN_STATUS = re.compile(r"状态[：:]\s*(.*?)(?:\s*[\n【]|$)", re.DOTALL)
-PATTERN_TITLE = re.compile(r"【名称】(.*?)【", re.DOTALL)
-PATTERN_TITLE_ALT = re.compile(r"【标题】(.*?)【", re.DOTALL)  # 事件通告使用【标题】
-PATTERN_TIME = re.compile(r"【时间】(.*?)【", re.DOTALL)
-PATTERN_LOCATION = re.compile(r"【位置】(.*?)【", re.DOTALL)
-PATTERN_LEVEL = re.compile(r"【等级】(.*?)【", re.DOTALL)  # 设备变更特有
+PATTERN_TITLE = re.compile(r"【名称】(.*?)(?:【|$)", re.DOTALL)
+PATTERN_TITLE_ALT = re.compile(r"【标题】(.*?)(?:【|$)", re.DOTALL)  # 事件通告使用【标题】
+PATTERN_TIME = re.compile(r"【时间】(.*?)(?:【|$)", re.DOTALL)
+PATTERN_LOCATION = re.compile(r"【位置】(.*?)(?:【|$)", re.DOTALL)
+PATTERN_LEVEL = re.compile(r"【等级】(.*?)(?:【|$)", re.DOTALL)  # 设备变更特有
 PATTERN_REASON = re.compile(r"【(?:原因|故障原因|故障维修原因)】(.*?)(?:【|$)", re.DOTALL)
 
 

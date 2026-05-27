@@ -2723,6 +2723,14 @@ class MaintenancePortalService:
             payload["updated_at"] = now
             self._save_day_summary_locked(payload)
             self._upsert_work_status_item_locked(item, action=action, now=now)
+            if action == "end":
+                try:
+                    self._state_store.delete_qt_active_item(
+                        active_item_id=active_item_id,
+                        record_id=feishu_record_id,
+                    )
+                except Exception:
+                    pass
         self._schedule_repair_link_task_after_success(
             prepared,
             action=action,

@@ -2432,6 +2432,21 @@ class MainWindowWorkflowMixin:
                                         except Exception:
                                             pass
 
+                    if name == "结束" and record_id:
+                        list_widget, item = self._find_active_item_by_record_id(
+                            record_id
+                        )
+                        if item and not self._is_valid_list_item(item):
+                            item = None
+                            list_widget = None
+                        if item and list_widget:
+                            data = item.data(Qt.ItemDataRole.UserRole) or {}
+                            self._do_move_to_history(
+                                item,
+                                data if isinstance(data, dict) else {"record_id": record_id},
+                                track_rollback=False,
+                            )
+
                     # 检查是否有pending的新内容需要处理（强制上传完旧内容后）
                     if name in ["上传", "更新"] and record_id:
                         pending = self.pending_new_by_record_id.pop(record_id, None)

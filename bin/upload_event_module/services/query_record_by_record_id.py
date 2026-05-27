@@ -5,9 +5,12 @@ import urllib.parse
 from typing import Dict, Any, Tuple, Optional
 
 try:
-    from .feishu_token_manager import token_manager
+    from .http_client import FeishuHttpClient
 except ImportError:
-    from upload_event_module.services.feishu_token_manager import token_manager
+    from upload_event_module.services.http_client import FeishuHttpClient
+
+_HTTP_CLIENT = FeishuHttpClient(retries=3)
+TENANT_TOKEN_URL = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
 
 # === input params start
 app_id = os.getenv("APP_ID")               # app_id, required, 应用 ID
@@ -32,11 +35,27 @@ def get_tenant_access_token(app_id: str, app_secret: str) -> Tuple[str, Exceptio
     Returns:
         Tuple[str, Exception]: (access_token, error)
     """
-    token, err = token_manager.get_tenant_token_for_credentials(app_id, app_secret)
-    if err:
+    url = TENANT_TOKEN_URL
+    headers = {"Content-Type": "application/json; charset=utf-8"}
+    payload = {"app_id": app_id, "app_secret": app_secret}
+    try:
+        result = _HTTP_CLIENT.request_json(
+            "POST",
+            url,
+            headers=headers,
+            json_payload=payload,
+        )
+        if int(result.get("code") or 0) != 0:
+            message = result.get("msg") or f"code={result.get('code')}"
+            print(f"ERROR: getting tenant_access_token: {message}", file=sys.stderr)
+            return "", Exception(str(message))
+        token = str(result.get("tenant_access_token") or "").strip()
+        if not token:
+            return "", Exception("empty tenant_access_token")
+        return token, None
+    except Exception as err:
         print(f"ERROR: getting tenant_access_token: {err}", file=sys.stderr)
-        return "", Exception(err)
-    return token, None
+        return "", err
 
 def get_wiki_node_info(tenant_access_token: str, node_token: str) -> Dict[str, Any]:
     """获取知识空间节点信息

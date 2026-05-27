@@ -1078,6 +1078,81 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             finally:
                 PortalHandler.state_store = previous_store
 
+    def test_backend_ongoing_filters_ended_item_from_stale_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            previous_store = PortalHandler.state_store
+            PortalHandler.state_store = LanPortalStateStore(
+                Path(tmp) / "lan_portal_state.sqlite3"
+            )
+            try:
+                PortalHandler.state_store.replace_ongoing_items(
+                    [
+                        {
+                            "active_item_id": "active-ended-change",
+                            "record_id": "rec-ended-change",
+                            "target_record_id": "rec-ended-change",
+                            "notice_type": "设备变更",
+                            "work_type": "change",
+                            "title": "D楼已结束变更",
+                            "building_codes": ["D"],
+                            "text": "【设备变更】状态:结束【名称】D楼已结束变更",
+                        },
+                        {
+                            "active_item_id": "active-running-change",
+                            "record_id": "rec-running-change",
+                            "target_record_id": "rec-running-change",
+                            "notice_type": "设备变更",
+                            "work_type": "change",
+                            "title": "D楼进行中变更",
+                            "building_codes": ["D"],
+                            "text": "【设备变更】状态:更新【名称】D楼进行中变更",
+                        },
+                    ]
+                )
+
+                controller = FastAPIPortalController()
+                ongoing = controller._get_ongoing("D")
+
+                self.assertEqual(len(ongoing), 1)
+                self.assertEqual(ongoing[0]["active_item_id"], "active-running-change")
+            finally:
+                PortalHandler.state_store = previous_store
+
+    def test_qt_shell_bootstrap_removes_ended_active_item(self):
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        original_state_store = PortalHandler.state_store
+        temp_dir = tempfile.TemporaryDirectory()
+        PortalHandler.state_store = LanPortalStateStore(
+            Path(temp_dir.name) / "state.sqlite3"
+        )
+        PortalHandler.state_store.upsert_qt_active_item(
+            {
+                "active_item_id": "active-ended-bootstrap",
+                "record_id": "rec-ended-bootstrap",
+                "notice_type": "设备变更",
+                "work_type": "change",
+                "title": "D楼已结束变更",
+                "building_codes": ["D"],
+                "status": "结束",
+                "text": "【设备变更】状态:结束【名称】D楼已结束变更",
+            },
+            section="other",
+            origin="qt",
+        )
+        client = TestClient(controller._build_app())
+        try:
+            response = client.get("/api/qt/shell/bootstrap")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["data"]["active_items"], [])
+            self.assertEqual(PortalHandler.state_store.list_qt_active_items(), [])
+            deleted = PortalHandler.state_store.list_qt_active_items(include_deleted=True)
+            self.assertEqual(len(deleted), 1)
+            self.assertIsNotNone(deleted[0].get("deleted_at"))
+        finally:
+            PortalHandler.state_store = original_state_store
+            temp_dir.cleanup()
+
     def test_parser_accepts_legacy_change_notice_marker(self):
         info = extract_event_info(
             "【变更通告】状态：开始\n\n"
@@ -1090,6 +1165,16 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(info["notice_type"], "设备变更")
         self.assertEqual(info["title"], "测试测试测试变更")
         self.assertEqual(info["status"], "开始")
+
+    def test_parser_accepts_compact_ended_change_notice(self):
+        info = extract_event_info(
+            "【设备变更】状态:结束【名称】EA118-D楼直流屏蓄电池整组更换变更"
+        )
+
+        self.assertIsNotNone(info)
+        self.assertEqual(info["notice_type"], "设备变更")
+        self.assertEqual(info["status"], "结束")
+        self.assertEqual(info["title"], "EA118-D楼直流屏蓄电池整组更换变更")
 
     def test_backend_clipboard_target_record_requires_same_notice_type(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1501,6 +1586,44 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 result = PortalHandler._get_ongoing(dummy, "A")
 
             self.assertEqual([item["active_item_id"] for item in result], ["active-a"])
+
+    def test_server_get_ongoing_filters_ended_items(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            store.replace_ongoing_items(
+                [
+                    {
+                        "active_item_id": "active-ended",
+                        "work_type": "change",
+                        "notice_type": "设备变更",
+                        "title": "A楼已结束变更",
+                        "building": "A楼",
+                        "building_codes": ["A"],
+                        "text": "【设备变更】状态:结束【名称】A楼已结束变更",
+                    },
+                    {
+                        "active_item_id": "active-running",
+                        "work_type": "change",
+                        "notice_type": "设备变更",
+                        "title": "A楼进行中变更",
+                        "building": "A楼",
+                        "building_codes": ["A"],
+                        "text": "【设备变更】状态:更新【名称】A楼进行中变更",
+                    },
+                ]
+            )
+
+            dummy = type(
+                "_DummyPortalHandler",
+                (),
+                {"service": _TestMaintenancePortalService()},
+            )()
+            with patch.object(PortalHandler, "state_store", store), patch.object(
+                PortalHandler, "ongoing_callback", None
+            ):
+                result = PortalHandler._get_ongoing(dummy, "A")
+
+            self.assertEqual([item["active_item_id"] for item in result], ["active-running"])
 
     def test_append_events_import_legacy_jsonl_once(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2446,6 +2569,61 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(prepared["action"], "end")
             self.assertEqual(prepared["record_id"], "c-e")
             self.assertEqual(prepared["target_record_id"], "target-change-e")
+
+    def test_successful_end_removes_qt_active_item(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            service._change_records = [
+                _build_change_record("c-e", building="E楼", progress="进行中", title="E楼进行中变更")
+            ]
+            service._state_store.upsert_qt_active_item(
+                {
+                    "active_item_id": "active-change-e",
+                    "record_id": "target-change-e",
+                    "target_record_id": "target-change-e",
+                    "source_record_id": "c-e",
+                    "notice_type": "设备变更",
+                    "work_type": "change",
+                    "title": "E楼进行中变更",
+                    "text": "【设备变更】状态：开始\n【名称】E楼进行中变更",
+                    "building": "E楼",
+                    "building_codes": ["E"],
+                },
+                origin="portal",
+            )
+            self.assertEqual(len(service._state_store.list_qt_active_items()), 1)
+
+            job_id, should_start = service.create_action_job(
+                {
+                    "action": "end",
+                    "work_type": "change",
+                    "scope": "E",
+                    "record_id": "c-e",
+                    "source_record_id": "c-e",
+                    "target_record_id": "target-change-e",
+                    "active_item_id": "active-change-e",
+                    "title": "E楼进行中变更",
+                    "building": "E楼",
+                    "building_codes": ["E"],
+                    "start_time": "2026-05-08T09:00",
+                    "end_time": "2026-05-08T18:00",
+                    "progress": "已完成",
+                    "operation_id": "change-end-removes-active",
+                }
+            )
+            self.assertTrue(should_start)
+            service.prepare_action_job(job_id)
+            service.mark_action_upload_result(
+                job_id,
+                success=True,
+                record_id="target-change-e",
+                active_item_id="active-change-e",
+            )
+
+            self.assertEqual(service._state_store.list_qt_active_items(), [])
+            deleted = service._state_store.list_qt_active_items(include_deleted=True)
+            self.assertEqual(len(deleted), 1)
+            self.assertIsNotNone(deleted[0].get("deleted_at"))
 
     def test_change_successful_action_persists_work_type_and_completion(self):
         with tempfile.TemporaryDirectory() as tmp:
