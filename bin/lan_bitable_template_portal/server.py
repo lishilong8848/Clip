@@ -29,8 +29,10 @@ from .portal_service import (
     external_real_write_guard,
 )
 from .state_store import LanPortalStateStore
+from upload_event_module.config import get_field_config
 from upload_event_module.services.handlers import NoticePayload
 from upload_event_module.services.service_registry import (
+    create_bitable_record_fields,
     create_bitable_record_by_payload,
     query_record_by_id,
     upload_media_to_feishu,
@@ -41,9 +43,7 @@ from upload_event_module.services.feishu_service import delete_bitable_record
 from upload_event_module.services.robot_webhook import send_text_to_open_ids
 
 
-STATIC_DIR = Path(__file__).resolve().parent / "static"
 FRONTEND_DIST_DIR = Path(__file__).resolve().parent / "frontend" / "dist"
-FRONTEND_READY_MARKER = FRONTEND_DIST_DIR / "clipflow-frontend-ready.json"
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 18766
 CLIENT_DISCONNECT_WINERRORS = {10053, 10054, 10058}
@@ -51,51 +51,23 @@ MAX_JSON_BODY_BYTES = 512 * 1024
 
 
 def portal_frontend_dist_enabled() -> bool:
-    if os.environ.get("CLIPFLOW_FRONTEND_LEGACY") == "1":
-        return False
-    return portal_frontend_dist_ready()
+    return (FRONTEND_DIST_DIR / "index.html").is_file()
 
 
 def portal_frontend_dist_ready() -> bool:
-    """Return true only when the Vue dist has been marked production-ready.
-
-    The repository may contain a migration/preview Vue build. Serving that build
-    to site users is worse than falling back to the legacy page, so the runtime
-    requires an explicit marker file produced by the release process.
-    """
-    if not (FRONTEND_DIST_DIR / "index.html").is_file():
-        return False
-    try:
-        payload = json.loads(FRONTEND_READY_MARKER.read_text(encoding="utf-8"))
-    except Exception:
-        return False
-    if not isinstance(payload, dict):
-        return False
-    return (
-        payload.get("productionReady") is True
-        and str(payload.get("app") or "").strip() == "clipflow-lan-portal"
-    )
+    return portal_frontend_dist_enabled()
 
 
 def portal_index_file() -> Path:
-    if portal_frontend_dist_enabled():
-        return FRONTEND_DIST_DIR / "index.html"
-    return STATIC_DIR / "index.html"
+    return FRONTEND_DIST_DIR / "index.html"
 
 
 def portal_asset_file(relative: Path) -> Path:
-    if portal_frontend_dist_enabled():
-        candidate = FRONTEND_DIST_DIR / "assets" / relative
-        if candidate.is_file():
-            return candidate
-    return STATIC_DIR / "assets" / relative
+    return FRONTEND_DIST_DIR / "assets" / relative
 
 
 def portal_static_roots() -> list[Path]:
-    roots = [STATIC_DIR.resolve()]
-    if portal_frontend_dist_enabled():
-        roots.append(FRONTEND_DIST_DIR.resolve())
-    return roots
+    return [FRONTEND_DIST_DIR.resolve()]
 
 
 def find_available_port(host: str, preferred_port: int) -> int:
@@ -184,6 +156,13 @@ class PortalHandler(BaseHTTPRequestHandler):
     repair_refresh_last_error = ""
     repair_refresh_last_finished = 0.0
     repair_refresh_reuse_window_s = 10.0
+    change_refresh_lock = threading.RLock()
+    change_refresh_inflight = False
+    change_refresh_event = threading.Event()
+    change_refresh_last_result: dict = {}
+    change_refresh_last_error = ""
+    change_refresh_last_finished = 0.0
+    change_refresh_reuse_window_s = 10.0
     qt_action_interval_ms = 250
     source_refresh_defer_when_busy = True
 
@@ -895,6 +874,79 @@ class PortalHandler(BaseHTTPRequestHandler):
             "repair_refresh_reused": False,
         }
 
+    @classmethod
+    def request_change_source_refresh(cls) -> dict:
+        """Refresh change and Zhihang change source tables with singleflight."""
+        if os.environ.get("CLIPFLOW_BACKEND_MOCK_EXTERNAL") == "1":
+            return {
+                "change_refresh_started": False,
+                "change_refresh_inflight": False,
+                "change_refresh_reused": False,
+                "mock_external": True,
+            }
+        now = time.monotonic()
+        with cls.change_refresh_lock:
+            if (
+                cls.change_refresh_last_result
+                and now - float(cls.change_refresh_last_finished or 0)
+                <= float(cls.change_refresh_reuse_window_s)
+            ):
+                result = copy.deepcopy(cls.change_refresh_last_result)
+                result["change_refresh_started"] = False
+                result["change_refresh_inflight"] = False
+                result["change_refresh_reused"] = True
+                return result
+            if cls.change_refresh_inflight:
+                event = cls.change_refresh_event
+                owner = False
+            else:
+                event = threading.Event()
+                cls.change_refresh_event = event
+                cls.change_refresh_inflight = True
+                cls.change_refresh_last_error = ""
+                owner = True
+
+        if not owner:
+            if not event.wait(timeout=120):
+                raise PortalError("变更源表刷新仍在进行，请稍后查看。")
+            with cls.change_refresh_lock:
+                if cls.change_refresh_last_error:
+                    raise PortalError(cls.change_refresh_last_error)
+                if not cls.change_refresh_last_result:
+                    raise PortalError("变更源表刷新未返回结果，请稍后重试。")
+                result = copy.deepcopy(cls.change_refresh_last_result)
+                result["change_refresh_started"] = False
+                result["change_refresh_inflight"] = False
+                result["change_refresh_reused"] = True
+                return result
+
+        try:
+            result = cls.service.refresh_change_source()
+            if not isinstance(result, dict):
+                result = {}
+            result = copy.deepcopy(result)
+            result["change_refresh_started"] = True
+            result["change_refresh_inflight"] = False
+            result["change_refresh_reused"] = False
+            cls.clear_payload_cache()
+            with cls.change_refresh_lock:
+                cls.change_refresh_last_result = copy.deepcopy(result)
+                cls.change_refresh_last_error = ""
+                cls.change_refresh_last_finished = time.monotonic()
+            return result
+        except Exception as exc:
+            error = str(exc)
+            with cls.change_refresh_lock:
+                cls.change_refresh_last_error = error
+                cls.change_refresh_last_finished = time.monotonic()
+            if isinstance(exc, PortalError):
+                raise
+            raise PortalError(error) from exc
+        finally:
+            with cls.change_refresh_lock:
+                cls.change_refresh_inflight = False
+                event.set()
+
     def _reconcile_orphan_started_items(
         self, scope: str, ongoing: list[dict] | None, *, force: bool = False
     ) -> None:
@@ -1235,6 +1287,31 @@ class PortalHandler(BaseHTTPRequestHandler):
                 )
                 data.update(refresh_result)
                 data["repair_source_refreshed"] = True
+                return self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "data": self._with_auth_context(
+                            self._with_runtime_warnings(data), session
+                        ),
+                    },
+                )
+            except PortalError as exc:
+                return self._send_json(403, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/change-refresh":
+            qs = parse_qs(parsed.query)
+            try:
+                scope = self._authorized_scope_or_error(
+                    session, (qs.get("scope") or ["ALL"])[0]
+                )
+                refresh_result = PortalHandler.request_change_source_refresh()
+                ongoing = self._get_ongoing(scope)
+                self._reconcile_orphan_started_items(scope, ongoing)
+                data = self.service.get_bootstrap(
+                    scope=scope, ongoing_items=ongoing
+                )
+                data.update(refresh_result)
+                data["change_source_refreshed"] = True
                 return self._send_json(
                     200,
                     {
@@ -2501,6 +2578,157 @@ class PortalHandler(BaseHTTPRequestHandler):
             maintenance_cycle=str(prepared.get("maintenance_cycle") or "").strip() or None,
         )
 
+    @staticmethod
+    def _undo_restore_fields(notice_type: str, fields: dict) -> dict:
+        fields = fields if isinstance(fields, dict) else {}
+        writable_names = {
+            str(name or "").strip()
+            for name in get_field_config(notice_type).values()
+            if str(name or "").strip()
+        }
+        if not writable_names:
+            return dict(fields)
+        return {
+            str(name): value
+            for name, value in fields.items()
+            if str(name or "").strip() in writable_names
+        }
+
+    @classmethod
+    def _create_backend_undo_checkpoint(
+        cls,
+        action_type: str,
+        context: dict,
+        *,
+        remote_fields: dict | None = None,
+        remote_missing: bool = False,
+        job_id: str = "",
+    ) -> str:
+        creator = getattr(cls.service, "create_notice_undo_checkpoint", None)
+        if not callable(creator):
+            return ""
+        try:
+            return creator(
+                action_type,
+                context,
+                remote_fields=remote_fields or {},
+                remote_missing=remote_missing,
+                job_id=job_id,
+                created_by=str((context or {}).get("_auth_open_id") or ""),
+                scope=str((context or {}).get("scope") or "ALL"),
+            )
+        except Exception as exc:
+            raise PortalError(f"创建回退点失败: {exc}") from exc
+
+    @classmethod
+    def execute_notice_undo(cls, undo_id: str, *, job_id: str = "", requested_by: str = "") -> dict:
+        undo = cls.state_store.get_notice_undo_action(undo_id)
+        if not undo:
+            raise PortalError("回退记录不存在。")
+        if str(undo.get("status") or "") != "available":
+            raise PortalError("该回退记录不可用或已处理。")
+        if float(undo.get("expires_at") or 0) <= time.time():
+            cls.state_store.mark_notice_undo_action(undo_id, "expired", error="回退记录已过期")
+            raise PortalError("该回退记录已过期。")
+        notice_type = str(undo.get("notice_type") or "").strip()
+        target_record_id = str(undo.get("target_record_id") or "").strip()
+        action_type = str(undo.get("action_type") or "").strip().lower()
+        remote = undo.get("remote") if isinstance(undo.get("remote"), dict) else {}
+        remote_fields = cls._undo_restore_fields(
+            notice_type,
+            remote.get("fields") if isinstance(remote.get("fields"), dict) else {},
+        )
+        restored_record_id = target_record_id
+        remote_message = ""
+        guard = external_real_write_guard()
+        if remote_fields and not bool(remote.get("missing")):
+            if guard["mock_external"]:
+                remote_message = "mock external undo skipped"
+            elif not guard["real_write_allowed"]:
+                raise PortalError(str(guard["reason"] or "真实外部写入未确认。"))
+            elif action_type in {"update", "end"}:
+                ok, result = update_bitable_record_fields(
+                    target_record_id,
+                    notice_type,
+                    remote_fields,
+                )
+                if not ok:
+                    raise PortalError(str(result or "回退多维失败。"))
+                restored_record_id = str(result or target_record_id)
+                remote_message = "多维已恢复"
+            elif action_type == "delete":
+                ok, query_result = query_record_by_id(target_record_id, notice_type)
+                if ok:
+                    ok_update, result = update_bitable_record_fields(
+                        target_record_id,
+                        notice_type,
+                        remote_fields,
+                    )
+                    if not ok_update:
+                        raise PortalError(str(result or "回退多维失败。"))
+                    restored_record_id = target_record_id
+                    remote_message = "多维已恢复"
+                else:
+                    ok_create, result = create_bitable_record_fields(
+                        notice_type,
+                        remote_fields,
+                    )
+                    if not ok_create:
+                        raise PortalError(str(result or "重建多维记录失败。"))
+                    restored_record_id = str(result or "").strip()
+                    remote_message = "多维已重建"
+        else:
+            remote_message = "远端记录不可恢复，仅恢复本地状态。"
+
+        if job_id:
+            cls.service.mark_job(job_id, phase="undoing_local", upload_message=remote_message)
+        local_result = cls.service.restore_notice_undo_local(
+            undo,
+            target_record_id=restored_record_id,
+            applied_by=requested_by,
+            job_id=job_id,
+        )
+        cls.state_store.mark_notice_undo_action(
+            undo_id,
+            "undone",
+            payload_patch={
+                "restored_target_record_id": restored_record_id,
+                "remote_message": remote_message,
+                "applied_by": requested_by,
+                "applied_job_id": job_id,
+            },
+        )
+        event_payload = local_result.get("active_payload") if isinstance(local_result, dict) else {}
+        if isinstance(event_payload, dict) and event_payload:
+            cls.state_store.enqueue_outbox_event(
+                "qt_action",
+                {
+                    "kind": "active_upsert",
+                    "payload": event_payload,
+                },
+            )
+        else:
+            cls.state_store.enqueue_outbox_event(
+                "qt_action",
+                {
+                    "kind": "active_delete",
+                    "payload": {
+                        "active_item_id": str(undo.get("active_item_id") or ""),
+                        "record_id": restored_record_id,
+                        "source_record_id": str(undo.get("source_record_id") or ""),
+                        "work_type": str(undo.get("work_type") or ""),
+                        "notice_type": notice_type,
+                    },
+                },
+            )
+        return {
+            "ok": True,
+            "undo_id": undo_id,
+            "record_id": restored_record_id,
+            "message": remote_message,
+            **(local_result if isinstance(local_result, dict) else {}),
+        }
+
     @classmethod
     def _execute_backend_prepared_upload(
         cls, prepared: dict
@@ -2538,6 +2766,17 @@ class PortalHandler(BaseHTTPRequestHandler):
         if not ok_query:
             return False, f"查询失败: {query_result}", record_id
         fields = query_result.get("fields", {}) if isinstance(query_result, dict) else {}
+        checkpoint_id = cls._create_backend_undo_checkpoint(
+            "end" if action == "end" else "update",
+            {
+                **prepared,
+                "target_record_id": record_id,
+                "_record_id_kind": "source",
+            },
+            remote_fields=fields,
+            remote_missing=False,
+            job_id=str(prepared.get("job_id") or ""),
+        )
         existing_tokens, existing_extra_tokens, existing_response_time = (
             cls._existing_tokens_for_notice_type(notice_type, fields)
         )
@@ -2548,6 +2787,12 @@ class PortalHandler(BaseHTTPRequestHandler):
             existing_response_time=existing_response_time if action == "update" else "",
         )
         ok, result = update_bitable_record_by_payload(record_id, notice_type, payload)
+        if not ok and checkpoint_id:
+            cls.state_store.mark_notice_undo_action(
+                checkpoint_id,
+                "failed",
+                error=str(result or "多维更新失败。"),
+            )
         return bool(ok), str(result or ""), record_id
 
     @classmethod
@@ -2654,6 +2899,7 @@ class PortalHandler(BaseHTTPRequestHandler):
         existing_extra_tokens: list[str] = []
         existing_response_time = ""
         target_record_id = record_id
+        checkpoint_id = ""
         if not bool(data.get("_is_placeholder_record")):
             ok_query, query_result = query_record_by_id(record_id, notice_type)
             if not ok_query:
@@ -2666,6 +2912,18 @@ class PortalHandler(BaseHTTPRequestHandler):
                     "real_record_id": "",
                 }
             fields = query_result.get("fields", {}) if isinstance(query_result, dict) else {}
+            if action_type in {"update", "end"}:
+                checkpoint_id = cls._create_backend_undo_checkpoint(
+                    "end" if action_type == "end" else "update",
+                    {
+                        **data,
+                        "target_record_id": record_id,
+                        "_record_id_kind": "target",
+                    },
+                    remote_fields=fields,
+                    remote_missing=False,
+                    job_id=str(payload.get("job_id") or ""),
+                )
             (
                 existing_tokens,
                 existing_extra_tokens,
@@ -2694,6 +2952,12 @@ class PortalHandler(BaseHTTPRequestHandler):
             notice_type,
             notice_payload,
         )
+        if not success and checkpoint_id:
+            cls.state_store.mark_notice_undo_action(
+                checkpoint_id,
+                "failed",
+                error=str(result or "多维更新失败。"),
+            )
         return {
             "ok": bool(success),
             "name": action_name,
@@ -2710,18 +2974,57 @@ class PortalHandler(BaseHTTPRequestHandler):
             payload = dict(nested)
         elif isinstance(payload.get("data"), dict):
             payload = dict(payload.get("data") or {})
-        record_id = str(payload.get("record_id") or "").strip()
-        if not record_id:
-            record_id = str(
-                payload.get("target_record_id") or payload.get("raw_record_id") or ""
-            ).strip()
+        target_record_id = str(
+            payload.get("target_record_id")
+            or payload.get("feishu_record_id")
+            or payload.get("raw_record_id")
+            or ""
+        ).strip()
+        record_id = target_record_id or str(payload.get("record_id") or "").strip()
+        source_record_id = str(payload.get("source_record_id") or "").strip()
+        if source_record_id and record_id == source_record_id and not target_record_id:
+            record_id = ""
+            payload["_source_only_delete"] = True
         active_item_id = str(payload.get("active_item_id") or "").strip()
         notice_type = str(payload.get("notice_type") or "").strip()
         is_placeholder = bool(payload.get("_is_placeholder_record"))
         remote_deleted = False
+        checkpoint_fields: dict = {}
+        checkpoint_remote_missing = True
+        supports_undo = callable(
+            getattr(cls.service, "create_notice_undo_checkpoint", None)
+        )
+        if supports_undo and record_id and notice_type and not is_placeholder:
+            guard = external_real_write_guard()
+            if guard.get("mock_external"):
+                checkpoint_remote_missing = False
+            else:
+                ok_query, query_result = query_record_by_id(record_id, notice_type)
+                if ok_query and isinstance(query_result, dict):
+                    checkpoint_fields = query_result.get("fields", {}) if isinstance(query_result.get("fields"), dict) else {}
+                    checkpoint_remote_missing = False
+        checkpoint_id = ""
+        if supports_undo:
+            checkpoint_id = cls._create_backend_undo_checkpoint(
+                "delete",
+                {
+                    **payload,
+                    "target_record_id": record_id,
+                    "_record_id_kind": "target",
+                },
+                remote_fields=checkpoint_fields,
+                remote_missing=checkpoint_remote_missing,
+                job_id=str(payload.get("job_id") or ""),
+            )
         if record_id and notice_type and not is_placeholder:
             ok, result = delete_bitable_record(record_id, notice_type)
             if not ok:
+                if checkpoint_id:
+                    cls.state_store.mark_notice_undo_action(
+                        checkpoint_id,
+                        "failed",
+                        error=str(result or "多维记录删除失败。"),
+                    )
                 return {
                     "ok": False,
                     "message": str(result or "多维记录删除失败。"),
@@ -2741,6 +3044,8 @@ class PortalHandler(BaseHTTPRequestHandler):
             "record_id": record_id,
             "active_item_id": active_item_id,
             "remote_deleted": remote_deleted,
+            "undo_id": checkpoint_id,
+            "undo_available": bool(checkpoint_id),
         }
 
     @classmethod

@@ -19,6 +19,7 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
     (10, "repair_link_tasks"),
     (11, "source_scope_snapshots"),
     (12, "source_snapshot_manifest"),
+    (13, "notice_undo_actions"),
 )
 
 

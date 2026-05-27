@@ -6,9 +6,10 @@
         v-for="virtualRow in virtualRows"
         :key="rowKey(virtualRow)"
         class="notice-row"
-        :class="{ selected: rows[virtualRow.index]?.id === selectedId, queued: rows[virtualRow.index]?.selected, compact }"
+        :class="{ selected: rows[virtualRow.index]?.id === selectedId, queued: rows[virtualRow.index]?.selected, disabled: rows[virtualRow.index]?.disabled, compact }"
         :style="{ transform: `translateY(${virtualRow.start}px)` }"
-        @click="$emit('select', rows[virtualRow.index])"
+        :title="rows[virtualRow.index]?.disabledReason || ''"
+        @click="handleSelect(rows[virtualRow.index])"
       >
         <div class="notice-row__main">
           <span class="notice-row__type">{{ rows[virtualRow.index]?.type || "通告" }}</span>
@@ -39,6 +40,8 @@ export interface NoticeRow {
   status?: string;
   statusTone?: string;
   selected?: boolean;
+  disabled?: boolean;
+  disabledReason?: string;
   raw?: unknown;
 }
 
@@ -50,7 +53,7 @@ const props = defineProps<{
   showStatus?: boolean;
 }>();
 
-defineEmits<{
+const emit = defineEmits<{
   select: [row: NoticeRow | undefined];
 }>();
 
@@ -67,6 +70,11 @@ const totalSize = computed(() => rowVirtualizer.value.getTotalSize());
 
 function rowKey(virtualRow: { index: number; key: unknown }): string {
   return props.rows[virtualRow.index]?.id || String(virtualRow.key);
+}
+
+function handleSelect(row: NoticeRow | undefined): void {
+  if (!row || row.disabled) return;
+  emit("select", row);
 }
 </script>
 
@@ -126,6 +134,19 @@ function rowKey(virtualRow: { index: number; key: unknown }): string {
 .notice-row:hover {
   background: #f8fbff;
   border-color: #bfdbfe;
+}
+
+.notice-row.disabled {
+  cursor: not-allowed;
+  background: #f8fafc;
+  border-color: #e2e8f0;
+  opacity: 0.78;
+}
+
+.notice-row.disabled:hover {
+  background: #f8fafc;
+  border-color: #e2e8f0;
+  box-shadow: none;
 }
 
 .notice-row.queued {

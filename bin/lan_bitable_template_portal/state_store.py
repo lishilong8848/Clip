@@ -39,7 +39,7 @@ class LanPortalStateStore:
     are migration inputs only and are never deleted or overwritten here.
     """
 
-    SCHEMA_VERSION = 12
+    SCHEMA_VERSION = 13
     SOURCE_SCOPE_TABLES = {
         "110": "source_records_110",
         "A": "source_records_a",
@@ -74,6 +74,7 @@ class LanPortalStateStore:
         "repair_link_tasks",
         "source_snapshot_manifest",
         "source_snapshot_records",
+        "notice_undo_actions",
         "schema_migrations",
     ]
     REQUIRED_INDEXES = [
@@ -81,6 +82,7 @@ class LanPortalStateStore:
         "idx_qt_active_items_record_id",
         "idx_source_snapshot_manifest_status_time",
         "idx_source_snapshot_records_scope_order",
+        "idx_notice_undo_status_scope",
         "idx_permission_requests_open_status",
     ]
 
@@ -593,6 +595,41 @@ class LanPortalStateStore:
             """
             CREATE INDEX IF NOT EXISTS idx_repair_link_tasks_source_target
             ON repair_link_tasks(source_record_id, target_record_id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS notice_undo_actions (
+                undo_id TEXT PRIMARY KEY,
+                identity_key TEXT NOT NULL,
+                status TEXT NOT NULL,
+                action_type TEXT NOT NULL,
+                scope TEXT,
+                work_type TEXT,
+                notice_type TEXT,
+                active_item_id TEXT,
+                source_record_id TEXT,
+                target_record_id TEXT,
+                title TEXT,
+                payload_json TEXT NOT NULL,
+                error TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                applied_at REAL,
+                expires_at REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_notice_undo_status_scope
+            ON notice_undo_actions(status, scope, created_at)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_notice_undo_identity_status
+            ON notice_undo_actions(identity_key, status, created_at)
             """
         )
         conn.execute(
@@ -2322,6 +2359,227 @@ class LanPortalStateStore:
                     )
                 conn.commit()
                 return bool(cursor.rowcount)
+
+    def create_notice_undo_action(self, payload: dict[str, Any]) -> str:
+        if not isinstance(payload, dict):
+            return ""
+        undo_id = self._text(payload.get("undo_id")) or uuid.uuid4().hex
+        identity_key = self._text(payload.get("identity_key"))
+        action_type = self._text(payload.get("action_type"))
+        if not identity_key or not action_type:
+            return ""
+        now = time.time()
+        created_at = float(payload.get("created_at") or now)
+        expires_at = float(payload.get("expires_at") or (created_at + 7 * 24 * 60 * 60))
+        status = self._text(payload.get("status")) or "available"
+        scope = self._text(payload.get("scope"))
+        work_type = self._text(payload.get("work_type"))
+        notice_type = self._text(payload.get("notice_type"))
+        active_item_id = self._text(payload.get("active_item_id"))
+        source_record_id = self._text(payload.get("source_record_id"))
+        target_record_id = self._text(payload.get("target_record_id"))
+        title = self._text(payload.get("title"))
+        stored_payload = dict(payload)
+        stored_payload["undo_id"] = undo_id
+        stored_payload["identity_key"] = identity_key
+        stored_payload["status"] = status
+        stored_payload["created_at"] = created_at
+        stored_payload["updated_at"] = now
+        stored_payload["expires_at"] = expires_at
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute(
+                    """
+                    UPDATE notice_undo_actions
+                    SET status = 'superseded', updated_at = ?
+                    WHERE identity_key = ? AND status = 'available'
+                    """,
+                    (now, identity_key),
+                )
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO notice_undo_actions(
+                        undo_id, identity_key, status, action_type, scope,
+                        work_type, notice_type, active_item_id, source_record_id,
+                        target_record_id, title, payload_json, error, created_at,
+                        updated_at, applied_at, expires_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        undo_id,
+                        identity_key,
+                        status,
+                        action_type,
+                        scope,
+                        work_type,
+                        notice_type,
+                        active_item_id,
+                        source_record_id,
+                        target_record_id,
+                        title,
+                        self._json(stored_payload),
+                        self._text(payload.get("error")),
+                        created_at,
+                        now,
+                        None,
+                        expires_at,
+                    ),
+                )
+                conn.commit()
+        return undo_id
+
+    def _notice_undo_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        payload = self._loads(str(row["payload_json"] or ""), {})
+        payload = payload if isinstance(payload, dict) else {}
+        payload.update(
+            {
+                "undo_id": str(row["undo_id"] or ""),
+                "identity_key": str(row["identity_key"] or ""),
+                "status": str(row["status"] or ""),
+                "action_type": str(row["action_type"] or ""),
+                "scope": str(row["scope"] or ""),
+                "work_type": str(row["work_type"] or ""),
+                "notice_type": str(row["notice_type"] or ""),
+                "active_item_id": str(row["active_item_id"] or ""),
+                "source_record_id": str(row["source_record_id"] or ""),
+                "target_record_id": str(row["target_record_id"] or ""),
+                "title": str(row["title"] or ""),
+                "error": str(row["error"] or ""),
+                "created_at": float(row["created_at"] or 0),
+                "updated_at": float(row["updated_at"] or 0),
+                "applied_at": (
+                    float(row["applied_at"] or 0)
+                    if row["applied_at"] is not None
+                    else 0.0
+                ),
+                "expires_at": float(row["expires_at"] or 0),
+            }
+        )
+        return payload
+
+    def get_notice_undo_action(self, undo_id: str) -> dict[str, Any] | None:
+        undo_id = self._text(undo_id)
+        if not undo_id or not self.db_path.exists():
+            return None
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    """
+                    SELECT *
+                    FROM notice_undo_actions
+                    WHERE undo_id = ?
+                    """,
+                    (undo_id,),
+                ).fetchone()
+        return self._notice_undo_from_row(row) if row else None
+
+    def list_notice_undo_actions(
+        self,
+        *,
+        status: str = "available",
+        scope: str = "",
+        include_expired: bool = False,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        if not self.db_path.exists():
+            return []
+        status = self._text(status) or "available"
+        scope = self._text(scope)
+        now = time.time()
+        clauses = ["status = ?"]
+        params: list[Any] = [status]
+        if scope:
+            clauses.append("(scope = ? OR scope = 'ALL' OR scope = '')")
+            params.append(scope)
+        if not include_expired:
+            clauses.append("expires_at > ?")
+            params.append(now)
+        params.append(max(1, min(1000, int(limit or 200))))
+        where_sql = " AND ".join(clauses)
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                rows = conn.execute(
+                    f"""
+                    SELECT *
+                    FROM notice_undo_actions
+                    WHERE {where_sql}
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    tuple(params),
+                ).fetchall()
+        return [self._notice_undo_from_row(row) for row in rows]
+
+    def mark_notice_undo_action(
+        self,
+        undo_id: str,
+        status: str,
+        *,
+        error: str = "",
+        payload_patch: dict[str, Any] | None = None,
+    ) -> bool:
+        undo_id = self._text(undo_id)
+        status = self._text(status)
+        if not undo_id or not status:
+            return False
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    "SELECT payload_json FROM notice_undo_actions WHERE undo_id = ?",
+                    (undo_id,),
+                ).fetchone()
+                if not row:
+                    return False
+                payload = self._loads(str(row["payload_json"] or ""), {})
+                payload = payload if isinstance(payload, dict) else {}
+                if isinstance(payload_patch, dict):
+                    payload.update(payload_patch)
+                payload["status"] = status
+                payload["updated_at"] = now
+                payload["error"] = self._text(error)
+                applied_at = now if status == "undone" else None
+                conn.execute(
+                    """
+                    UPDATE notice_undo_actions
+                    SET status = ?, error = ?, payload_json = ?, updated_at = ?,
+                        applied_at = COALESCE(?, applied_at)
+                    WHERE undo_id = ?
+                    """,
+                    (
+                        status,
+                        self._text(error),
+                        self._json(payload),
+                        now,
+                        applied_at,
+                        undo_id,
+                    ),
+                )
+                conn.commit()
+        return True
+
+    def cleanup_notice_undo_actions(self, *, retain_days: int = 7) -> int:
+        if not self.db_path.exists():
+            return 0
+        cutoff = time.time() - max(1, int(retain_days or 7)) * 24 * 60 * 60
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                cursor = conn.execute(
+                    """
+                    DELETE FROM notice_undo_actions
+                    WHERE updated_at < ?
+                       OR (status = 'available' AND expires_at < ?)
+                    """,
+                    (cutoff, time.time()),
+                )
+                conn.commit()
+                return int(cursor.rowcount or 0)
 
     def replace_qt_active_items_from_payload(
         self, payload: dict[str, Any] | None

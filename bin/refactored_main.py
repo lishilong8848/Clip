@@ -33,21 +33,9 @@ from upload_event_module.config import (
     config,
 )
 
-if os.environ.get("CLIPFLOW_LEGACY_PORTAL") == "1":
-    from lan_bitable_template_portal.server import PortalServerController
-else:
-    try:
-        from clipflow_backend.process_controller import (
-            BackendProcessPortalController as PortalServerController,
-        )
-    except Exception as exc:
-        if os.environ.get("CLIPFLOW_ALLOW_BACKEND_IMPORT_FALLBACK") == "1":
-            from lan_bitable_template_portal.server import PortalServerController
-        else:
-            raise RuntimeError(
-                "独立后端控制器导入失败，已阻止自动回退旧门户。"
-                "如需临时回退，请显式设置 CLIPFLOW_LEGACY_PORTAL=1。"
-            ) from exc
+from clipflow_backend.process_controller import (
+    BackendProcessPortalController as PortalServerController,
+)
 
 _CRASH_TRACE_FP = None
 

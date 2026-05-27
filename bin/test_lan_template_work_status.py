@@ -98,6 +98,26 @@ class _ChangeSourceFailureService(MaintenancePortalService):
     def _load_change_fields(self):
         raise RuntimeError("mock change source down")
 
+    def _load_zhihang_change_fields(self):
+        self._zhihang_change_field_meta_list = []
+        self._zhihang_change_field_meta_by_name = {}
+        return []
+
+    def _load_zhihang_change_records(self):
+        self._zhihang_change_records = []
+        self._zhihang_change_loaded_once = True
+        return self._zhihang_change_records
+
+    def _load_repair_fields(self):
+        self._repair_field_meta_list = []
+        self._repair_field_meta_by_name = {}
+        return []
+
+    def _load_repair_records(self):
+        self._repair_records = []
+        self._repair_loaded_once = True
+        return self._repair_records
+
 
 class _WorkflowRuntimeQueueHarness(MainWindowWorkflowMixin):
     def __init__(self, store):
@@ -153,6 +173,9 @@ class _NativeFastAPIRouteService:
 
     def refresh_repair_source(self):
         return {"repair_refresh_reused": False, "repair_refresh_mock": True}
+
+    def refresh_change_source(self):
+        return {"change_refresh_reused": False, "change_refresh_mock": True}
 
     def get_scope_overview(self, *, ongoing_items, scopes, include_prepared):
         return {
@@ -956,6 +979,43 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             finally:
                 PortalHandler.state_store = previous_store
 
+    def test_backend_clipboard_maintenance_same_title_different_reason_is_distinct(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            previous_store = PortalHandler.state_store
+            PortalHandler.state_store = LanPortalStateStore(
+                Path(tmp) / "lan_portal_state.sqlite3"
+            )
+            try:
+                controller = FastAPIPortalController()
+                first = controller._clipboard_entry_from_content(
+                    "【维保通告】状态：开始\n\n"
+                    "【名称】EA118机房C楼冷却塔清洗\n\n"
+                    "【时间】2026-05-27 10:40~2026-05-27 18:00\n\n"
+                    "【位置】C楼楼顶屋面\n\n"
+                    "【原因】5#冷却塔脏堵\n\n"
+                    "【进度】准备工作已完成"
+                )
+                second = controller._clipboard_entry_from_content(
+                    "【维保通告】状态：开始\n\n"
+                    "【名称】EA118机房C楼冷却塔清洗\n\n"
+                    "【时间】2026-05-27 10:40~2026-05-27 18:00\n\n"
+                    "【位置】C楼楼顶屋面\n\n"
+                    "【原因】1#冷却塔脏堵\n\n"
+                    "【进度】准备工作已完成"
+                )
+                self.assertIsNotNone(first)
+                self.assertIsNotNone(second)
+                self.assertNotEqual(first["entry_id"], second["entry_id"])
+                self.assertTrue(controller._project_clipboard_entry_to_active(first)["ok"])
+                self.assertTrue(controller._project_clipboard_entry_to_active(second)["ok"])
+
+                qt_items = PortalHandler.state_store.list_qt_active_items()
+                reasons = sorted(item["payload"].get("reason") for item in qt_items)
+                self.assertEqual(len(qt_items), 2)
+                self.assertEqual(reasons, ["1#冷却塔脏堵", "5#冷却塔脏堵"])
+            finally:
+                PortalHandler.state_store = previous_store
+
     def test_backend_ongoing_reads_qt_active_items_without_snapshot_delay(self):
         with tempfile.TemporaryDirectory() as tmp:
             previous_store = PortalHandler.state_store
@@ -1111,39 +1171,16 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
             self.assertEqual(items[0]["record_id"], "current-history")
 
-    def test_portal_frontend_dist_defaults_to_ready_vue_and_supports_legacy_fallback(self):
+    def test_portal_frontend_dist_is_production_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             dist = root / "frontend" / "dist"
-            static = root / "static"
             (dist / "assets").mkdir(parents=True)
-            (static / "assets").mkdir(parents=True)
             (dist / "index.html").write_text("vue", encoding="utf-8")
             (dist / "assets" / "app.js").write_text("dist", encoding="utf-8")
-            (static / "assets" / "logo.png").write_text("static", encoding="utf-8")
-            ready_marker = dist / "clipflow-frontend-ready.json"
+            (dist / "assets" / "logo.png").write_text("dist-logo", encoding="utf-8")
 
-            with patch.object(portal_server_module, "FRONTEND_DIST_DIR", dist), patch.object(
-                portal_server_module, "STATIC_DIR", static
-            ), patch.object(
-                portal_server_module, "FRONTEND_READY_MARKER", ready_marker
-            ), patch.dict(os.environ, {"CLIPFLOW_FRONTEND_LEGACY": ""}, clear=False):
-                self.assertEqual(portal_server_module.portal_index_file(), static / "index.html")
-                self.assertEqual(
-                    portal_server_module.portal_asset_file(Path("logo.png")),
-                    static / "assets" / "logo.png",
-                )
-
-            ready_marker.write_text(
-                json.dumps({"app": "clipflow-lan-portal", "productionReady": True}),
-                encoding="utf-8",
-            )
-
-            with patch.object(portal_server_module, "FRONTEND_DIST_DIR", dist), patch.object(
-                portal_server_module, "STATIC_DIR", static
-            ), patch.object(
-                portal_server_module, "FRONTEND_READY_MARKER", ready_marker
-            ), patch.dict(os.environ, {"CLIPFLOW_FRONTEND_LEGACY": ""}, clear=False):
+            with patch.object(portal_server_module, "FRONTEND_DIST_DIR", dist):
                 self.assertEqual(portal_server_module.portal_index_file(), dist / "index.html")
                 self.assertEqual(
                     portal_server_module.portal_asset_file(Path("app.js")),
@@ -1151,15 +1188,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     portal_server_module.portal_asset_file(Path("logo.png")),
-                    static / "assets" / "logo.png",
+                    dist / "assets" / "logo.png",
                 )
-
-            with patch.object(portal_server_module, "FRONTEND_DIST_DIR", dist), patch.object(
-                portal_server_module, "STATIC_DIR", static
-            ), patch.object(
-                portal_server_module, "FRONTEND_READY_MARKER", ready_marker
-            ), patch.dict(os.environ, {"CLIPFLOW_FRONTEND_LEGACY": "1"}, clear=False):
-                self.assertEqual(portal_server_module.portal_index_file(), static / "index.html")
 
     def test_lan_portal_state_store_replaces_source_scope_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3086,6 +3116,94 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(prepared["zhihang_record_id"], "z-c")
             self.assertEqual(prepared["zhihang_title"], "EA118机房C楼链路调整")
 
+    def test_change_start_uses_scoped_snapshot_codes_for_zhihang_binding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            stale_memory_record = _build_change_record(
+                "ali-e",
+                building="A楼、B楼",
+                progress="未开始",
+                title="E楼阿里侧变更",
+            )
+            scoped_record = _build_change_record(
+                "ali-e",
+                building="E楼",
+                progress="未开始",
+                title="E楼阿里侧变更",
+            )
+            service._change_records = [stale_memory_record]
+            service._zhihang_change_records = [
+                _build_zhihang_change_record("z-e", title="EA118机房E楼链路调整")
+            ]
+            zhihang_record = service._zhihang_change_records[0]
+            service._state_store.replace_all_source_scope_snapshots(
+                {
+                    "ALL": {
+                        "records": [stale_memory_record],
+                        "zhihang_records": [zhihang_record],
+                    },
+                    "E": {"records": [scoped_record], "zhihang_records": [zhihang_record]},
+                },
+                meta={},
+            )
+
+            prepared = service.prepare_change_action(
+                {
+                    "action": "start",
+                    "scope": "E",
+                    "work_type": WORK_TYPE_CHANGE,
+                    "record_id": "ali-e",
+                    "building_codes": ["E"],
+                    "specialty": "电气",
+                    "start_time": "2026-05-08T09:00",
+                    "end_time": "2026-05-08T18:00",
+                    "location": "E楼",
+                    "content": "测试内容",
+                    "reason": "测试原因",
+                    "impact": "测试影响",
+                    "progress": "准备开始",
+                    "zhihang_involved": True,
+                    "zhihang_record_id": "z-e",
+                },
+                job_id="job-z-e",
+            )
+
+            self.assertEqual(prepared["building_codes"], ["E"])
+            self.assertEqual(prepared["building"], "E楼")
+            self.assertEqual(prepared["zhihang_record_id"], "z-e")
+
+    def test_change_start_rejects_payload_codes_without_scoped_snapshot_match(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            service._change_records = [
+                _build_change_record(
+                    "ali-ab",
+                    building="A楼、B楼",
+                    progress="未开始",
+                    title="园区阿里侧变更",
+                )
+            ]
+
+            with self.assertRaisesRegex(PortalError, "当前入口与通告楼栋不匹配"):
+                service.prepare_change_action(
+                    {
+                        "action": "start",
+                        "scope": "E",
+                        "work_type": WORK_TYPE_CHANGE,
+                        "record_id": "ali-ab",
+                        "building_codes": ["E"],
+                        "specialty": "电气",
+                        "start_time": "2026-05-08T09:00",
+                        "end_time": "2026-05-08T18:00",
+                        "location": "E楼",
+                        "content": "测试内容",
+                        "reason": "测试原因",
+                        "impact": "测试影响",
+                        "progress": "准备开始",
+                    },
+                    job_id="job-z-reject",
+                )
+
     def test_source_ongoing_repair_is_not_surfaced_without_qt_item(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
@@ -3204,6 +3322,67 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
             hidden_file = Path(tmp) / "lan_template_hidden_ongoing.json"
             self.assertFalse(hidden_file.exists())
+
+    def test_validate_ongoing_delete_enriches_scope_from_qt_active_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            service._state_store.upsert_qt_active_item(
+                {
+                    "active_item_id": "active-a-delete",
+                    "record_id": "target-a-delete",
+                    "target_record_id": "target-a-delete",
+                    "source_record_id": "source-a-delete",
+                    "work_type": WORK_TYPE_CHANGE,
+                    "notice_type": "设备变更",
+                    "title": "A楼删除校验变更",
+                    "building": "A楼",
+                    "building_codes": ["A"],
+                },
+                origin="portal",
+            )
+            payload = {
+                "active_item_id": "active-a-delete",
+                "record_id": "source-a-delete",
+                "target_record_id": "target-a-delete",
+                "source_record_id": "source-a-delete",
+                "work_type": WORK_TYPE_CHANGE,
+                "notice_type": "设备变更",
+            }
+
+            keys = service.validate_ongoing_delete_item(payload, scope="A")
+
+            self.assertIn("change:active:active-a-delete", keys)
+            self.assertEqual(payload["record_id"], "target-a-delete")
+            self.assertEqual(payload["building_codes"], ["A"])
+            self.assertEqual(payload["building"], "A楼")
+
+    def test_validate_ongoing_delete_keeps_rejecting_other_scope_after_enrich(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            service._state_store.upsert_qt_active_item(
+                {
+                    "active_item_id": "active-a-delete",
+                    "record_id": "target-a-delete",
+                    "target_record_id": "target-a-delete",
+                    "work_type": WORK_TYPE_CHANGE,
+                    "notice_type": "设备变更",
+                    "title": "A楼删除校验变更",
+                    "building": "A楼",
+                    "building_codes": ["A"],
+                },
+                origin="portal",
+            )
+
+            with self.assertRaises(PortalError):
+                service.validate_ongoing_delete_item(
+                    {
+                        "active_item_id": "active-a-delete",
+                        "target_record_id": "target-a-delete",
+                        "work_type": WORK_TYPE_CHANGE,
+                        "notice_type": "设备变更",
+                    },
+                    scope="C",
+                )
 
     def test_qt_ongoing_item_is_kept_even_if_target_record_is_completed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -4341,6 +4520,181 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 PortalHandler.repair_refresh_last_error = ""
                 PortalHandler.repair_refresh_last_finished = 0.0
 
+    def test_change_source_refresh_request_is_blocking_singleflight(self):
+        class _SlowChangeRefreshService:
+            _load_warnings: list[str] = []
+
+            def __init__(self):
+                self.calls = 0
+                self.entered = threading.Event()
+                self.release = threading.Event()
+
+            def refresh_change_source(self):
+                self.calls += 1
+                self.entered.set()
+                self.release.wait(timeout=5)
+                return {
+                    "change_count": 4,
+                    "zhihang_change_count": 2,
+                    "change_refreshed_at": "17:02",
+                }
+
+        original_service = PortalHandler.service
+        service = _SlowChangeRefreshService()
+        with PortalHandler.change_refresh_lock:
+            PortalHandler.change_refresh_inflight = False
+            PortalHandler.change_refresh_event = threading.Event()
+            PortalHandler.change_refresh_last_result = {}
+            PortalHandler.change_refresh_last_error = ""
+            PortalHandler.change_refresh_last_finished = 0.0
+        PortalHandler.service = service
+        results = []
+        errors = []
+
+        def _call_refresh():
+            try:
+                results.append(PortalHandler.request_change_source_refresh())
+            except Exception as exc:
+                errors.append(str(exc))
+
+        try:
+            first_thread = threading.Thread(target=_call_refresh, daemon=True)
+            first_thread.start()
+            self.assertTrue(service.entered.wait(timeout=2))
+            second_thread = threading.Thread(target=_call_refresh, daemon=True)
+            second_thread.start()
+            time.sleep(0.05)
+            with PortalHandler.change_refresh_lock:
+                self.assertTrue(PortalHandler.change_refresh_inflight)
+            service.release.set()
+            first_thread.join(timeout=2)
+            second_thread.join(timeout=2)
+            self.assertFalse(errors)
+            self.assertEqual(service.calls, 1)
+            self.assertEqual(len(results), 2)
+            self.assertTrue(any(item.get("change_refresh_reused") for item in results))
+            self.assertTrue(any(item.get("change_refresh_started") for item in results))
+            self.assertEqual(results[0]["change_count"], 4)
+        finally:
+            service.release.set()
+            PortalHandler.service = original_service
+            with PortalHandler.change_refresh_lock:
+                PortalHandler.change_refresh_inflight = False
+                PortalHandler.change_refresh_event = threading.Event()
+                PortalHandler.change_refresh_last_result = {}
+                PortalHandler.change_refresh_last_error = ""
+                PortalHandler.change_refresh_last_finished = 0.0
+
+    def test_refresh_change_source_preserves_other_snapshot_records(self):
+        class _ChangeRefreshService(MaintenancePortalService):
+            def _load_change_fields(self):
+                self._change_field_meta_list = []
+                self._change_field_meta_by_name = {}
+                return []
+
+            def _load_change_records(self):
+                self._change_records = [
+                    _build_change_record("c-new", building="A楼", progress="未开始")
+                ]
+                self._change_loaded_once = True
+                return self._change_records
+
+            def _load_zhihang_change_fields(self):
+                self._zhihang_change_field_meta_list = []
+                self._zhihang_change_field_meta_by_name = {}
+                return []
+
+            def _load_zhihang_change_records(self):
+                self._zhihang_change_records = [
+                    _build_zhihang_change_record("z-new", title="EA118机房A楼割接")
+                ]
+                self._zhihang_change_loaded_once = True
+                return self._zhihang_change_records
+
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp), _ChangeRefreshService)
+            service._state_store.replace_all_source_scope_snapshots(
+                {
+                    "ALL": {
+                        "records": [
+                            _build_record("m-old", "A楼", "维护", "5月"),
+                            _build_repair_record("r-old", building="A楼"),
+                        ],
+                        "zhihang_records": [],
+                    }
+                },
+                meta={"last_loaded_at": "old"},
+            )
+
+            result = service.refresh_change_source()
+            snapshot = service._state_store.get_source_scope_snapshot("ALL")
+            record_ids = {item["record_id"] for item in snapshot["records"]}
+            zhihang_ids = {item["record_id"] for item in snapshot["zhihang_records"]}
+
+            self.assertEqual(result["change_count"], 1)
+            self.assertIn("m-old", record_ids)
+            self.assertIn("r-old", record_ids)
+            self.assertIn("c-new", record_ids)
+            self.assertIn("z-new", zhihang_ids)
+
+    def test_change_source_month_window_accepts_plan_date_aliases(self):
+        service = MaintenancePortalService()
+        month_start = service._recent_month_starts()[0]
+        plan_start = month_start.replace(day=min(27, month_start.day), hour=9, minute=0)
+        plan_end = month_start.replace(day=min(27, month_start.day), hour=23, minute=0)
+        plan_start_text = plan_start.strftime("%Y-%m-%d %H:%M")
+        plan_end_text = plan_end.strftime("%Y-%m-%d %H:%M")
+        month_key = month_start.strftime("%Y-%m")
+        record = _build_change_record(
+            "c-plan-date",
+            building="A楼",
+            progress="未开始",
+            start_time="",
+            end_time="",
+        )
+        fields = record["display_fields"]
+        fields.pop("变更开始日期（阿里）", None)
+        fields.pop("变更结束日期（阿里）", None)
+        fields["计划开始日期（阿里）"] = plan_start_text
+        fields["计划结束日期（阿里）"] = plan_end_text
+
+        self.assertEqual(
+            service._change_time_range(record),
+            (
+                plan_start_text,
+                plan_end_text,
+                f"{plan_start_text}至{plan_end_text}",
+            ),
+        )
+        self.assertIn(month_key, service._source_record_month_keys(record))
+        self.assertTrue(service._source_record_matches_month_window(record))
+
+    def test_refresh_change_source_failure_keeps_active_snapshot(self):
+        class _FailingChangeRefreshService(MaintenancePortalService):
+            def _load_change_fields(self):
+                raise RuntimeError("change down")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp), _FailingChangeRefreshService)
+            service._state_store.replace_all_source_scope_snapshots(
+                {
+                    "ALL": {
+                        "records": [_build_record("m-old", "A楼", "维护", "5月")],
+                        "zhihang_records": [],
+                    }
+                },
+                meta={"last_loaded_at": "old"},
+            )
+            before = service._state_store.source_snapshot_stats()["active"]["snapshot_id"]
+
+            with self.assertRaisesRegex(PortalError, "变更源表同步失败"):
+                service.refresh_change_source()
+
+            after = service._state_store.source_snapshot_stats()["active"]["snapshot_id"]
+            snapshot = service._state_store.get_source_scope_snapshot("ALL")
+            self.assertEqual(after, before)
+            self.assertEqual(snapshot["records"][0]["record_id"], "m-old")
+
     def test_source_refresh_request_is_background_singleflight(self):
         class _SlowSourceRefreshService:
             _load_warnings: list[str] = []
@@ -5152,6 +5506,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "/api/repair-refresh?scope=ALL",
                     headers=headers,
                 )
+                change_refresh = client.get(
+                    "/api/change-refresh?scope=ALL",
+                    headers=headers,
+                )
                 action = client.post(
                     "/api/workbench-actions",
                     headers=headers,
@@ -5216,6 +5574,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 current_request,
                 refresh,
                 repair_refresh,
+                change_refresh,
             ]:
                 self.assertEqual(response.status_code, 200)
                 self.assertTrue(response.json().get("ok"))
@@ -5606,7 +5965,6 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                         (health.get("data") or {}).get("backend"),
                         "fastapi",
                     )
-                    self.assertFalse((health.get("data") or {}).get("legacy_adapter"))
                     self.assertTrue((health.get("data") or {}).get("mock_external"))
                     events = controller._request_json("GET", "/api/qt/events", timeout=3.0)
                     self.assertTrue(events.get("ok"))

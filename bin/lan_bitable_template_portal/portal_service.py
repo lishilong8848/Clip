@@ -890,6 +890,54 @@ class MaintenancePortalService:
                 "repair_count": len(self._repair_records),
             }
 
+    def refresh_change_source(self) -> dict[str, Any]:
+        """Refresh only change-related source tables and rewrite SQLite snapshots."""
+        with self._refresh_lock:
+            if not (
+                self._maintenance_loaded_once
+                and self._change_loaded_once
+                and self._repair_loaded_once
+                and self._zhihang_change_loaded_once
+            ):
+                self._hydrate_source_records_from_sqlite()
+            warnings = [
+                str(item)
+                for item in (self._load_warnings or [])
+                if not (
+                    str(item or "").startswith("变更源表同步失败")
+                    or str(item or "").startswith("智航变更源表同步失败")
+                )
+            ]
+            try:
+                self._load_change_fields()
+                self._load_change_records()
+            except Exception as exc:
+                warning = f"变更源表同步失败: {exc}"
+                if warning not in warnings:
+                    warnings.append(warning)
+                self._load_warnings = warnings
+                raise PortalError(warning) from exc
+            try:
+                self._load_zhihang_change_fields()
+                self._load_zhihang_change_records()
+            except Exception as exc:
+                warning = f"智航变更源表同步失败: {exc}"
+                if warning not in warnings:
+                    warnings.append(warning)
+                self._load_warnings = warnings
+                raise PortalError(warning) from exc
+            now = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self._last_loaded_at = now
+            self._last_loaded_ts = time.time()
+            self._load_warnings = warnings
+            self._save_source_scope_snapshots()
+            self._touch_state_cache_version()
+            return {
+                "change_refreshed_at": now,
+                "change_count": len(self._change_records),
+                "zhihang_change_count": len(self._zhihang_change_records),
+            }
+
     def refresh_if_interval_elapsed(self, *, min_interval_seconds: int = 60) -> bool:
         min_interval = max(0, int(min_interval_seconds or 0))
         with self._refresh_lock:
@@ -1081,6 +1129,11 @@ class MaintenancePortalService:
         }
         return {
             "record_id": str(item.get("record_id") or item.get("id") or ""),
+            "created_time": item.get("created_time") or item.get("created_at") or "",
+            "last_modified_time": item.get("last_modified_time")
+            or item.get("updated_time")
+            or item.get("updated_at")
+            or "",
             "raw_fields": raw_fields,
             "display_fields": display_fields,
             "work_type": work_type,
@@ -1294,6 +1347,70 @@ class MaintenancePortalService:
         if not codes:
             codes = cls._building_codes_from_value(item.get("building"))
         return cls._scope_matches_buildings(scope, codes)
+
+    @classmethod
+    def _clean_building_codes(cls, building_codes: Any) -> list[str]:
+        codes = building_codes if isinstance(building_codes, (list, tuple, set)) else []
+        normalized: list[str] = []
+        for code in codes:
+            value = str(code or "").strip().upper()
+            if value in BUILDING_SCOPE_CODES and value not in normalized:
+                normalized.append(value)
+        return [code for code in BUILDING_SCOPE_CODES if code in normalized]
+
+    def _building_codes_from_request_payload(
+        self, request_payload: dict[str, Any]
+    ) -> list[str]:
+        codes = self._clean_building_codes(request_payload.get("building_codes"))
+        if codes:
+            return codes
+        return self._building_codes_from_value(request_payload.get("building"))
+
+    def _source_record_in_scope_snapshot(
+        self, *, record_id: str, work_type: str, scope: str
+    ) -> dict[str, Any] | None:
+        record_id = str(record_id or "").strip()
+        if not record_id:
+            return None
+        records = self._source_snapshot_records(scope)
+        if records is None:
+            return None
+        for record in records:
+            if (
+                self._record_work_type(record) == work_type
+                and str(record.get("record_id") or "").strip() == record_id
+            ):
+                return record
+        return None
+
+    def _resolve_scoped_source_building_codes(
+        self,
+        *,
+        scope: str,
+        work_type: str,
+        record_id: str,
+        source_codes: list[str] | tuple[str, ...] | set[str],
+        payload_codes: list[str] | tuple[str, ...] | set[str],
+    ) -> list[str]:
+        source_building_codes = self._clean_building_codes(source_codes)
+        payload_building_codes = self._clean_building_codes(payload_codes)
+        if self._scope_matches_buildings(scope, source_building_codes):
+            return source_building_codes
+        if (
+            payload_building_codes
+            and self._scope_matches_buildings(scope, payload_building_codes)
+            and (
+                not source_building_codes
+                or self._source_record_in_scope_snapshot(
+                    record_id=record_id,
+                    work_type=work_type,
+                    scope=scope,
+                )
+                is not None
+            )
+        ):
+            return payload_building_codes
+        return source_building_codes or payload_building_codes
 
     def _sorted_unique_option_names(self, field_name: str) -> list[str]:
         if field_name == "计划维护月份":
@@ -1998,6 +2115,7 @@ class MaintenancePortalService:
         source_record_id: str = "",
         title: str = "",
         building: str = "",
+        reason: str = "",
         work_type: str = "",
     ) -> str:
         source_record_id = str(source_record_id or "").strip()
@@ -2007,14 +2125,24 @@ class MaintenancePortalService:
             return f"{prefix}source:{source_record_id}"
         title_key = re.sub(r"\s+", "", str(title or ""))
         building_key = re.sub(r"\s+", "", str(building or ""))
-        return f"{prefix}title:{building_key}:{title_key}" if title_key else ""
+        reason_key = re.sub(r"\s+", "", str(reason or ""))
+        suffix = f":reason:{reason_key}" if reason_key else ""
+        return f"{prefix}title:{building_key}:{title_key}{suffix}" if title_key else ""
 
     @staticmethod
-    def _work_status_fallback_key(*, title: str = "", building: str = "", plan_month: str = "") -> str:
+    def _work_status_fallback_key(
+        *,
+        title: str = "",
+        building: str = "",
+        plan_month: str = "",
+        reason: str = "",
+    ) -> str:
         title_key = re.sub(r"\s+", "", str(title or ""))
         building_key = re.sub(r"\s+", "", str(building or ""))
         month_key = re.sub(r"\s+", "", str(plan_month or ""))
-        return f"{building_key}:{month_key}:{title_key}" if title_key else ""
+        reason_key = re.sub(r"\s+", "", str(reason or ""))
+        suffix = f":reason:{reason_key}" if reason_key else ""
+        return f"{building_key}:{month_key}:{title_key}{suffix}" if title_key else ""
 
     def _record_fallback_key(self, record: dict[str, Any]) -> str:
         fields = record.get("display_fields") or {}
@@ -2187,10 +2315,12 @@ class MaintenancePortalService:
         active_item_id: str = "",
         title: str = "",
         building: str = "",
+        reason: str = "",
         work_type: str = "",
     ) -> dict[str, Any] | None:
         key = str(key or "").strip()
         active_item_id = str(active_item_id or "").strip()
+        reason_key = re.sub(r"\s+", "", str(reason or ""))
         if key:
             for item in items:
                 if str(item.get("key") or "") == key:
@@ -2200,7 +2330,7 @@ class MaintenancePortalService:
                 if str(item.get("active_item_id") or "") == active_item_id:
                     return item
         fallback_key = self._summary_key(
-            title=title, building=building, work_type=work_type
+            title=title, building=building, reason=reason, work_type=work_type
         )
         if fallback_key:
             for item in items:
@@ -2209,7 +2339,11 @@ class MaintenancePortalService:
         legacy_fallback_key = self._summary_key(title=title, building=building)
         if legacy_fallback_key and legacy_fallback_key != fallback_key:
             for item in items:
-                if str(item.get("fallback_key") or "") == legacy_fallback_key:
+                item_reason_key = re.sub(r"\s+", "", str(item.get("reason") or ""))
+                if (
+                    str(item.get("fallback_key") or "") == legacy_fallback_key
+                    and (not reason_key or item_reason_key == reason_key)
+                ):
                     return item
         return None
 
@@ -2308,6 +2442,7 @@ class MaintenancePortalService:
             title=str(incoming.get("title") or ""),
             building=building,
             plan_month=str(incoming.get("plan_month") or ""),
+            reason=str(incoming.get("reason") or ""),
         )
         item = self._find_work_status_item(
             items,
@@ -2455,16 +2590,18 @@ class MaintenancePortalService:
         now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
         source_record_id = str(prepared.get("record_id") or "").strip()
         title = str(prepared.get("title") or "").strip()
+        reason = str(prepared.get("reason") or "").strip()
         building = str(prepared.get("building") or "").strip()
         work_type = str(prepared.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
         key = self._summary_key(
             source_record_id=source_record_id,
             title=title,
             building=building,
+            reason=reason,
             work_type=work_type,
         )
         fallback_key = self._summary_key(
-            title=title, building=building, work_type=work_type
+            title=title, building=building, reason=reason, work_type=work_type
         )
         active_item_id = str(active_item_id or prepared.get("active_item_id") or job.get("active_item_id") or "").strip()
         feishu_record_id = str(record_id or job.get("record_id") or "").strip()
@@ -2477,6 +2614,7 @@ class MaintenancePortalService:
                 active_item_id=active_item_id,
                 title=title,
                 building=building,
+                reason=reason,
                 work_type=work_type,
             )
             if item is None:
@@ -3448,6 +3586,7 @@ class MaintenancePortalService:
             "content": str(item.get("content") or ""),
             "reason": str(item.get("reason") or ""),
             "impact": str(item.get("impact") or ""),
+            "progress": str(item.get("progress") or ""),
             "maintenance_cycle": str(item.get("maintenance_cycle") or ""),
             "specialty": str(item.get("specialty") or ""),
             "level": str(item.get("level") or ""),
@@ -3812,6 +3951,580 @@ class MaintenancePortalService:
             "skipped": skipped,
         }
 
+    @staticmethod
+    def _history_work_type_label(work_type: str) -> str:
+        return {
+            WORK_TYPE_MAINTENANCE: "维保",
+            WORK_TYPE_CHANGE: "变更",
+            WORK_TYPE_REPAIR: "检修",
+        }.get(str(work_type or ""), "维保")
+
+    @classmethod
+    def _coerce_history_work_types(cls, work_types: Any) -> list[str]:
+        if isinstance(work_types, str):
+            raw_values = [item.strip() for item in work_types.split(",")]
+        elif isinstance(work_types, (list, tuple, set)):
+            raw_values = [str(item or "").strip() for item in work_types]
+        else:
+            raw_values = []
+        aliases = {
+            "maintenance": WORK_TYPE_MAINTENANCE,
+            "维保": WORK_TYPE_MAINTENANCE,
+            "维保通告": WORK_TYPE_MAINTENANCE,
+            "change": WORK_TYPE_CHANGE,
+            "变更": WORK_TYPE_CHANGE,
+            "设备变更": WORK_TYPE_CHANGE,
+            "repair": WORK_TYPE_REPAIR,
+            "检修": WORK_TYPE_REPAIR,
+            "设备检修": WORK_TYPE_REPAIR,
+        }
+        result: list[str] = []
+        for value in raw_values:
+            normalized = aliases.get(value.lower()) or aliases.get(value)
+            if normalized and normalized not in result:
+                result.append(normalized)
+        return result or [WORK_TYPE_MAINTENANCE, WORK_TYPE_CHANGE, WORK_TYPE_REPAIR]
+
+    @staticmethod
+    def _history_month_floor(months: int) -> dt.datetime:
+        count = max(1, min(int(months or 3), 12))
+        current = dt.datetime(dt.datetime.now().year, dt.datetime.now().month, 1)
+        month = current.month - (count - 1)
+        year = current.year
+        while month <= 0:
+            month += 12
+            year -= 1
+        return dt.datetime(year, month, 1)
+
+    def _history_target_config(self, work_type: str) -> dict[str, str]:
+        work_type = str(work_type or WORK_TYPE_MAINTENANCE).strip()
+        if work_type == WORK_TYPE_CHANGE:
+            return {
+                "work_type": WORK_TYPE_CHANGE,
+                "notice_type": NOTICE_TYPE_CHANGE,
+                "app_token": str(config.app_token or "").strip(),
+                "table_id": str(config.table_id_biangeng or "").strip(),
+            }
+        if work_type == WORK_TYPE_REPAIR:
+            return {
+                "work_type": WORK_TYPE_REPAIR,
+                "notice_type": NOTICE_TYPE_REPAIR,
+                "app_token": str(config.app_token or "").strip(),
+                "table_id": str(config.table_id_overhaul or "").strip(),
+            }
+        return {
+            "work_type": WORK_TYPE_MAINTENANCE,
+            "notice_type": NOTICE_TYPE_MAINTENANCE,
+            "app_token": str(config.app_token or "").strip(),
+            "table_id": str(config.table_id_weibao or "").strip(),
+        }
+
+    def _history_datetime_from_values(self, *values: Any) -> dt.datetime | None:
+        for value in values:
+            formatted = self._format_source_datetime(value)
+            if not formatted:
+                continue
+            match = re.search(
+                r"(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})"
+                r"(?:[日\sT]*(\d{1,2})[:点时](\d{1,2})?)?",
+                formatted,
+            )
+            if not match:
+                continue
+            year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
+            hour = int(match.group(4) or 0)
+            minute = int(match.group(5) or 0)
+            try:
+                return dt.datetime(year, month, day, hour, minute)
+            except ValueError:
+                continue
+        return None
+
+    def _target_history_datetime(
+        self, record: dict[str, Any], work_type: str
+    ) -> tuple[dt.datetime | None, str]:
+        fields = record.get("display_fields") or {}
+        raw_values: list[Any] = []
+        if work_type == WORK_TYPE_CHANGE:
+            raw_values.extend(
+                [
+                    fields.get("变更开始时间"),
+                    fields.get("过程更新时间"),
+                    fields.get("变更结束时间"),
+                    fields.get("计划开始时间"),
+                    fields.get("计划开始"),
+                ]
+            )
+        elif work_type == WORK_TYPE_REPAIR:
+            raw_values.extend(
+                [
+                    fields.get("实际开始时间"),
+                    fields.get("发生故障时间"),
+                    fields.get("期望完成时间"),
+                    fields.get("实际结束时间"),
+                ]
+            )
+        else:
+            raw_values.extend(
+                [
+                    fields.get("实际开始时间"),
+                    fields.get("计划开始时间"),
+                    fields.get("实际结束时间"),
+                    fields.get("计划结束时间"),
+                ]
+            )
+        raw_values.extend([record.get("created_time"), record.get("last_modified_time")])
+        parsed = self._history_datetime_from_values(*raw_values)
+        return parsed, parsed.strftime("%Y-%m-%d %H:%M") if parsed else ""
+
+    def _canonical_history_notice_title(self, value: Any, work_type: str) -> str:
+        text = str(value or "").strip()
+        text = re.sub(r"【[^】]+】\s*状态[：:]\s*\S+", "", text)
+        if work_type == WORK_TYPE_MAINTENANCE:
+            text = re.sub(r"(?:通告)+$", "", text).strip()
+        else:
+            text = self._strip_notice_title_suffix(text, work_type)
+        text = re.sub(r"^EA118\s*(?:机房)?", "", text, flags=re.IGNORECASE).strip()
+        text = re.sub(r"^(?:南通基地|南通)?", "", text).strip()
+        for code in BUILDING_SCOPE_CODES:
+            label = self._building_label_from_code(code)
+            text = re.sub(rf"^{re.escape(label)}", "", text).strip()
+        text = re.sub(r"(?:通告)+$", "", text).strip()
+        text = re.sub(r"[\s,，;；:：。.【】（）()《》<>\"'“”‘’\-－_/\\]+", "", text)
+        return text.lower()
+
+    def _history_target_memory_fields(
+        self, record: dict[str, Any], work_type: str
+    ) -> dict[str, str]:
+        fields = record.get("display_fields") or {}
+        if work_type == WORK_TYPE_REPAIR:
+            return {
+                "location": str(fields.get("位置") or "").strip(),
+                "content": str(fields.get("名称（标题）") or fields.get("名称") or "").strip(),
+                "reason": str(fields.get("故障原因") or "").strip(),
+                "impact": str(fields.get("影响范围") or fields.get("影响") or "").strip(),
+                "progress": str(fields.get("进度（完成情况）") or fields.get("进度") or "").strip(),
+                "specialty": str(fields.get("专业") or "").strip(),
+                "level": str(fields.get("紧急程度") or "").strip(),
+                "repair_device": str(fields.get("维修设备") or "").strip(),
+                "repair_fault": str(fields.get("维修故障") or "").strip(),
+                "fault_type": str(fields.get("故障类型") or "").strip(),
+                "repair_mode": str(fields.get("维修方式") or "").strip(),
+                "discovery": str(fields.get("故障发现方式（来源）") or fields.get("故障发现方式") or "").strip(),
+                "symptom": str(fields.get("故障现象") or "").strip(),
+                "solution": str(fields.get("解决方案") or "").strip(),
+            }
+        return {
+            "location": str(fields.get("位置") or "").strip(),
+            "content": str(fields.get("内容") or "").strip(),
+            "reason": str(fields.get("原因") or "").strip(),
+            "impact": str(fields.get("影响") or fields.get("影响范围") or "").strip(),
+            "progress": str(fields.get("进度") or "").strip(),
+            "specialty": str(fields.get("专业") or "").strip(),
+            "level": str(fields.get("阿里-变更等级") or fields.get("智航-变更等级") or "").strip(),
+        }
+
+    def _history_candidate_from_target_record(
+        self, record: dict[str, Any], *, work_type: str, since: dt.datetime
+    ) -> tuple[dict[str, Any] | None, str]:
+        fields = record.get("display_fields") or {}
+        if work_type == WORK_TYPE_CHANGE:
+            title = str(fields.get("名称") or record.get("record_id") or "").strip()
+            building_codes = self._building_codes_from_value(fields.get("楼栋") or title)
+            maintenance_cycle = ""
+        elif work_type == WORK_TYPE_REPAIR:
+            title = str(fields.get("名称（标题）") or fields.get("名称") or record.get("record_id") or "").strip()
+            building_codes = self._building_codes_from_value(fields.get("楼栋") or title)
+            maintenance_cycle = ""
+        else:
+            title = str(fields.get("名称") or record.get("record_id") or "").strip()
+            building_codes = self._building_codes_from_value(fields.get("楼栋") or title)
+            maintenance_cycle = str(fields.get("维保周期") or "").strip()
+        if not title:
+            return None, "历史记录缺少标题"
+        if not building_codes:
+            return None, f"历史记录无法识别楼栋: {title}"
+        business_dt, business_time = self._target_history_datetime(record, work_type)
+        if business_dt is None or business_dt < since:
+            return None, "不在近3个月范围内"
+        if work_type == WORK_TYPE_MAINTENANCE:
+            memory_name = re.sub(r"(?:通告)+$", "", title).strip() or title
+        else:
+            memory_name = self._strip_notice_title_suffix(title, work_type) or title
+        canonical = self._canonical_history_notice_title(memory_name, work_type)
+        if not canonical:
+            return None, "标题标准化后为空"
+        memory_fields = self._history_target_memory_fields(record, work_type)
+        if work_type == WORK_TYPE_CHANGE:
+            memory_fields["zhihang_title"] = str(fields.get("智航变更") or "").strip()
+        return {
+            "id": f"{work_type}:{record.get('record_id') or uuid.uuid4().hex}",
+            "record_id": str(record.get("record_id") or ""),
+            "work_type": work_type,
+            "work_type_label": self._history_work_type_label(work_type),
+            "notice_type": str(record.get("notice_type") or ""),
+            "title": title,
+            "memory_name": memory_name,
+            "canonical_title": canonical,
+            "building": self._building_label_from_codes(building_codes),
+            "building_codes": building_codes,
+            "maintenance_cycle": maintenance_cycle,
+            "business_time": business_time,
+            "fields": memory_fields,
+            "display_fields": fields,
+        }, ""
+
+    def _history_source_current_fields(self, record: dict[str, Any]) -> dict[str, str]:
+        fields = record.get("display_fields") or {}
+        work_type = self._record_work_type(record)
+        if work_type == WORK_TYPE_REPAIR:
+            return {
+                "location": self._repair_location_text(fields),
+                "content": self._repair_title(record),
+                "reason": self._repair_first_field(fields, "故障原因", "故障维修原因"),
+                "impact": self._repair_first_field(fields, "影响范围", "影响"),
+                "progress": self._repair_first_field(fields, "完成情况", "进度", "维修进展"),
+                "specialty": self._repair_specialty(record),
+                "level": self._repair_level(fields),
+                "repair_device": self._repair_device_text(fields),
+                "repair_fault": self._repair_first_field(fields, "维修故障", "故障维修原因"),
+                "fault_type": self._repair_first_field(fields, "故障类型") or "设备故障",
+                "repair_mode": self._repair_first_field(fields, "维修方式", "维修方", "供应商名称"),
+                "discovery": self._repair_first_field(fields, "对应来源"),
+                "symptom": self._repair_first_field(fields, "故障发生现象描述", "故障现象"),
+                "solution": self._repair_first_field(fields, "解决方案", "维修方案", "后续整改措施"),
+            }
+        if work_type == WORK_TYPE_CHANGE:
+            return {
+                "location": str(fields.get("位置") or fields.get("变更楼栋") or "").strip(),
+                "content": self._change_title(record),
+                "reason": str(fields.get("变更原因") or fields.get("原因") or "").strip(),
+                "impact": str(fields.get("影响") or fields.get("影响范围") or "").strip(),
+                "progress": str(fields.get("进度") or fields.get("变更进度") or "").strip(),
+                "specialty": str(fields.get("专业") or "").strip(),
+                "level": str(fields.get("变更等级（阿里）") or fields.get("变更等级") or "").strip(),
+                "zhihang_title": "",
+                "zhihang_record_id": "",
+                "zhihang_progress": "",
+            }
+        maintenance_total = str(fields.get("维护总项") or "").strip()
+        return {
+            "location": str(fields.get("位置") or fields.get("楼栋") or "").strip(),
+            "content": str(fields.get("内容") or fields.get("维护内容") or maintenance_total).strip(),
+            "reason": str(fields.get("原因") or fields.get("维护原因") or "").strip(),
+            "impact": str(fields.get("影响") or fields.get("影响范围") or "").strip(),
+            "progress": str(fields.get("进度") or fields.get("维护进度") or "").strip(),
+            "specialty": str(fields.get("专业类别") or fields.get("专业") or "").strip(),
+            "level": "",
+            "maintenance_cycle": str(fields.get("维护周期") or "").strip(),
+        }
+
+    def _history_source_item_from_record(self, record: dict[str, Any]) -> dict[str, Any] | None:
+        work_type = self._record_work_type(record)
+        fields = record.get("display_fields") or {}
+        if work_type == WORK_TYPE_CHANGE:
+            title = self._change_title(record)
+            memory_name = title
+            building_codes = self._change_record_building_codes(record)
+            maintenance_cycle = ""
+            specialty = str(fields.get("专业") or "").strip()
+        elif work_type == WORK_TYPE_REPAIR:
+            title = self._repair_title(record)
+            memory_name = title
+            building_codes = self._repair_record_building_codes(record)
+            maintenance_cycle = ""
+            specialty = self._repair_specialty(record)
+        else:
+            maintenance_total = str(fields.get("维护总项") or "").strip()
+            building = str(fields.get("楼栋") or "").strip()
+            maintenance_cycle = str(fields.get("维护周期") or "").strip()
+            title = f"{building}{maintenance_total}{('-' + maintenance_cycle) if maintenance_cycle else ''}".strip()
+            memory_name = maintenance_total
+            building_codes = self._building_codes_from_value(building)
+            specialty = str(fields.get("专业类别") or "").strip()
+        if not memory_name:
+            return None
+        canonical = self._canonical_history_notice_title(memory_name, work_type)
+        source_id = f"{work_type}:{record.get('record_id') or uuid.uuid4().hex}"
+        if work_type == WORK_TYPE_CHANGE:
+            source_status = self._change_progress_value(record)
+        elif work_type == WORK_TYPE_REPAIR:
+            source_status = self._repair_source_status(record)
+        else:
+            source_status = self._maintenance_status_value(record)
+        return {
+            "id": source_id,
+            "source_record_id": str(record.get("record_id") or ""),
+            "work_type": work_type,
+            "work_type_label": self._history_work_type_label(work_type),
+            "title": title or memory_name,
+            "memory_name": memory_name,
+            "canonical_title": canonical,
+            "building": self._building_label_from_codes(building_codes),
+            "building_codes": building_codes,
+            "maintenance_cycle": maintenance_cycle,
+            "specialty": specialty,
+            "source_status": source_status,
+            "memory": self._get_record_memory(record),
+            "current_fields": self._history_source_current_fields(record),
+            "display_fields": fields,
+        }
+
+    def _history_source_items(self, work_types: list[str]) -> list[dict[str, Any]]:
+        records = self._source_snapshot_records("ALL") or []
+        current_month = self._current_month_label()
+        items: list[dict[str, Any]] = []
+        for record in records:
+            work_type = self._record_work_type(record)
+            if work_type not in work_types:
+                continue
+            if not self._source_record_matches_month_window(record, current_month):
+                continue
+            item = self._history_source_item_from_record(record)
+            if item:
+                items.append(item)
+        return items
+
+    def _scan_target_history_candidates(
+        self, *, work_type: str, months: int
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        target = self._history_target_config(work_type)
+        app_token = target["app_token"]
+        table_id = target["table_id"]
+        if not app_token or not table_id:
+            return [], [f"{self._history_work_type_label(work_type)}目标表未配置，已跳过。"]
+        metas, meta_by_name = self._load_table_fields(app_token=app_token, table_id=table_id)
+        records = self._load_table_records(
+            app_token=app_token,
+            table_id=table_id,
+            meta_by_name=meta_by_name,
+            work_type=work_type,
+            notice_type=target["notice_type"],
+        )
+        since = self._history_month_floor(months)
+        candidates: list[dict[str, Any]] = []
+        skipped: dict[str, int] = {}
+        for record in records:
+            candidate, reason = self._history_candidate_from_target_record(
+                record, work_type=work_type, since=since
+            )
+            if not candidate:
+                skipped[reason or "无法解析"] = skipped.get(reason or "无法解析", 0) + 1
+                continue
+            candidates.append(candidate)
+        deduped: dict[tuple, dict[str, Any]] = {}
+        for candidate in candidates:
+            key = (
+                candidate.get("work_type"),
+                tuple(candidate.get("building_codes") or []),
+                candidate.get("canonical_title"),
+                candidate.get("maintenance_cycle") if work_type == WORK_TYPE_MAINTENANCE else "",
+            )
+            current = deduped.get(key)
+            if current is None or str(candidate.get("business_time") or "") >= str(current.get("business_time") or ""):
+                deduped[key] = candidate
+        warnings = [
+            f"{self._history_work_type_label(work_type)}历史记录跳过 {count} 条：{reason}"
+            for reason, count in sorted(skipped.items())
+            if reason != "不在近3个月范围内"
+        ]
+        return list(deduped.values()), warnings
+
+    @staticmethod
+    def _history_building_score(source: dict[str, Any], candidate: dict[str, Any]) -> int:
+        source_codes = set(source.get("building_codes") or [])
+        candidate_codes = set(candidate.get("building_codes") or [])
+        if not source_codes or not candidate_codes:
+            return 5
+        if source_codes == candidate_codes:
+            return 20
+        if source_codes & candidate_codes:
+            return 10
+        return -100
+
+    def _recommend_history_memory_matches(
+        self, source_items: list[dict[str, Any]], candidates: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        matches: list[dict[str, Any]] = []
+        by_type: dict[str, list[dict[str, Any]]] = {}
+        for candidate in candidates:
+            by_type.setdefault(str(candidate.get("work_type") or ""), []).append(candidate)
+        for source in source_items:
+            best: dict[str, Any] | None = None
+            best_score = -999
+            best_reason = ""
+            for candidate in by_type.get(str(source.get("work_type") or ""), []):
+                score = self._history_building_score(source, candidate)
+                if score < 0:
+                    continue
+                source_title = str(source.get("canonical_title") or "")
+                candidate_title = str(candidate.get("canonical_title") or "")
+                if source_title and source_title == candidate_title:
+                    score += 70
+                    reason = "标题与楼栋匹配"
+                elif source_title and candidate_title and (
+                    source_title in candidate_title or candidate_title in source_title
+                ):
+                    score += 45
+                    reason = "标题相似"
+                else:
+                    reason = "楼栋相同"
+                if source.get("work_type") == WORK_TYPE_MAINTENANCE:
+                    source_cycle = self._normalize_memory_key(str(source.get("maintenance_cycle") or ""))
+                    candidate_cycle = self._normalize_memory_key(str(candidate.get("maintenance_cycle") or ""))
+                    if source_cycle and candidate_cycle and source_cycle == candidate_cycle:
+                        score += 10
+                        reason += "，周期一致"
+                    elif source_cycle and candidate_cycle and source_cycle != candidate_cycle:
+                        score -= 25
+                        reason += "，周期不同"
+                if score > best_score:
+                    best = candidate
+                    best_score = score
+                    best_reason = reason
+            if not best:
+                continue
+            selected = best_score >= 80
+            matches.append(
+                {
+                    "source_id": source.get("id") or "",
+                    "candidate_id": best.get("id") or "",
+                    "score": best_score,
+                    "confidence": "high" if best_score >= 90 else "medium" if best_score >= 70 else "low",
+                    "selected": selected,
+                    "reason": best_reason,
+                    "fields": copy.deepcopy(best.get("fields") or {}),
+                }
+            )
+        return matches
+
+    def scan_historical_notice_memory_candidates(
+        self, *, work_types: Any = None, months: int = 3
+    ) -> dict[str, Any]:
+        work_type_list = self._coerce_history_work_types(work_types)
+        months = max(1, min(int(months or 3), 12))
+        source_work_types = [WORK_TYPE_MAINTENANCE, WORK_TYPE_CHANGE, WORK_TYPE_REPAIR]
+        source_items = self._history_source_items(source_work_types)
+        candidates: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        for work_type in work_type_list:
+            try:
+                items, item_warnings = self._scan_target_history_candidates(
+                    work_type=work_type, months=months
+                )
+                candidates.extend(items)
+                warnings.extend(item_warnings)
+            except Exception as exc:
+                warnings.append(f"{self._history_work_type_label(work_type)}历史扫描失败: {exc}")
+        candidates.sort(
+            key=lambda item: (
+                str(item.get("work_type") or ""),
+                str(item.get("building") or ""),
+                str(item.get("business_time") or ""),
+            ),
+            reverse=True,
+        )
+        matches = self._recommend_history_memory_matches(source_items, candidates)
+        return {
+            "months": months,
+            "work_types": work_type_list,
+            "source_snapshot_ready": bool(self._source_snapshot_records("ALL") is not None),
+            "source_items": source_items,
+            "candidates": candidates,
+            "matches": matches,
+            "counts": {
+                "source": len(source_items),
+                "candidates": len(candidates),
+                "recommended": sum(1 for item in matches if item.get("selected")),
+            },
+            "warnings": warnings,
+        }
+
+    def save_historical_notice_memory_matches(
+        self, *, matches: list[dict[str, Any]], imported_by: str = ""
+    ) -> dict[str, Any]:
+        if not isinstance(matches, list):
+            raise PortalError("保存参数格式错误。")
+        saved: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        overwritten_count = 0
+        now = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        for index, match in enumerate(matches, start=1):
+            if not isinstance(match, dict) or not bool(match.get("selected", True)):
+                skipped.append({"index": index, "reason": "未勾选"})
+                continue
+            source = match.get("source_item") if isinstance(match.get("source_item"), dict) else {}
+            fields = match.get("fields") if isinstance(match.get("fields"), dict) else {}
+            work_type = str(source.get("work_type") or match.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
+            building = str(source.get("building") or match.get("building") or "").strip()
+            memory_name = str(source.get("memory_name") or source.get("title") or match.get("memory_name") or "").strip()
+            maintenance_cycle = str(
+                source.get("maintenance_cycle")
+                or fields.get("maintenance_cycle")
+                or match.get("maintenance_cycle")
+                or ""
+            ).strip()
+            if not building or not memory_name:
+                skipped.append({"index": index, "reason": "缺少楼栋或记忆名称"})
+                continue
+            key = self._memory_item_key(work_type, memory_name, maintenance_cycle)
+            with self._memory_lock:
+                payload = self._load_building_memory_locked(building)
+                existed = key in (payload.get("items") or {})
+            if existed:
+                overwritten_count += 1
+            extra_fields = {
+                "specialty": str(fields.get("specialty") or ""),
+                "level": str(fields.get("level") or ""),
+                "progress": str(fields.get("progress") or ""),
+                "repair_device": str(fields.get("repair_device") or ""),
+                "repair_fault": str(fields.get("repair_fault") or ""),
+                "fault_type": str(fields.get("fault_type") or ""),
+                "repair_mode": str(fields.get("repair_mode") or ""),
+                "discovery": str(fields.get("discovery") or ""),
+                "symptom": str(fields.get("symptom") or ""),
+                "solution": str(fields.get("solution") or ""),
+                "zhihang_involved": str(fields.get("zhihang_involved") or ""),
+                "zhihang_record_id": str(fields.get("zhihang_record_id") or ""),
+                "zhihang_title": str(fields.get("zhihang_title") or ""),
+                "zhihang_progress": str(fields.get("zhihang_progress") or ""),
+                "imported_by": imported_by,
+                "imported_from": "target_history_scan",
+                "history_candidate_id": str(match.get("candidate_id") or ""),
+                "history_imported_at": now,
+            }
+            self._remember_draft_fields(
+                work_type=work_type,
+                building=building,
+                maintenance_total=memory_name,
+                item_name=memory_name,
+                maintenance_cycle=maintenance_cycle,
+                location=str(fields.get("location") or ""),
+                content=str(fields.get("content") or ""),
+                reason=str(fields.get("reason") or ""),
+                impact=str(fields.get("impact") or ""),
+                extra_fields=extra_fields,
+            )
+            saved.append(
+                {
+                    "index": index,
+                    "work_type": work_type,
+                    "building": building,
+                    "title": memory_name,
+                    "maintenance_cycle": maintenance_cycle,
+                    "overwritten": existed,
+                }
+            )
+        if saved:
+            self._touch_state_cache_version()
+        return {
+            "saved_count": len(saved),
+            "skipped_count": len(skipped),
+            "overwritten_count": overwritten_count,
+            "saved": saved,
+            "skipped": skipped,
+        }
+
     def _serialize_record(
         self, record: dict[str, Any], summary_by_record: dict[str, dict[str, Any]] | None = None
     ) -> dict[str, Any]:
@@ -3890,8 +4603,22 @@ class MaintenancePortalService:
 
     def _change_time_range(self, record: dict[str, Any]) -> tuple[str, str, str]:
         fields = record.get("display_fields") or {}
-        start_time = str(fields.get("变更开始日期（阿里）") or "").strip()
-        end_time = str(fields.get("变更结束日期（阿里）") or "").strip()
+        start_time = str(
+            fields.get("变更开始日期（阿里）")
+            or fields.get("计划开始日期（阿里）")
+            or fields.get("计划开始")
+            or fields.get("计划开始时间")
+            or fields.get("计划延迟开始日期")
+            or ""
+        ).strip()
+        end_time = str(
+            fields.get("变更结束日期（阿里）")
+            or fields.get("计划结束日期（阿里）")
+            or fields.get("计划结束")
+            or fields.get("计划结束时间")
+            or fields.get("计划延迟结束日期")
+            or ""
+        ).strip()
         time_text = f"{start_time}至{end_time}" if start_time or end_time else ""
         return start_time, end_time, time_text
 
@@ -3953,10 +4680,14 @@ class MaintenancePortalService:
                 start_time,
                 end_time,
                 fields.get("变更开始日期（阿里）至变更结束日期（阿里）"),
+                fields.get("计划开始日期（阿里）"),
+                fields.get("计划结束日期（阿里）"),
                 fields.get("计划开始"),
                 fields.get("计划开始时间"),
                 fields.get("计划结束"),
                 fields.get("计划结束时间"),
+                fields.get("计划延迟开始日期"),
+                fields.get("计划延迟结束日期"),
             )
         if work_type == WORK_TYPE_REPAIR:
             return self._year_month_keys_from_values(
@@ -4141,18 +4872,630 @@ class MaintenancePortalService:
             "daily_summary_removed": daily_summary_removed,
         }
 
+    @staticmethod
+    def _undo_action_label(action_type: str) -> str:
+        return {
+            "update": "更新",
+            "end": "结束",
+            "delete": "删除",
+        }.get(str(action_type or "").strip().lower(), "操作")
+
+    def _undo_identity_from_context(
+        self, context: dict[str, Any], *, action_type: str = ""
+    ) -> dict[str, Any]:
+        context = context if isinstance(context, dict) else {}
+        work_type = str(context.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
+        notice_type = str(context.get("notice_type") or NOTICE_TYPE_MAINTENANCE).strip()
+        active_item_id = str(context.get("active_item_id") or "").strip()
+        source_record_id = str(context.get("source_record_id") or "").strip()
+        target_record_id = str(
+            context.get("target_record_id")
+            or context.get("feishu_record_id")
+            or context.get("raw_record_id")
+            or ""
+        ).strip()
+        if not target_record_id:
+            candidate = str(context.get("record_id") or "").strip()
+            if action_type == "delete" or str(context.get("_record_id_kind") or "") == "target":
+                target_record_id = candidate
+            elif not source_record_id:
+                source_record_id = candidate
+        if not source_record_id:
+            source_record_id = str(context.get("source_id") or "").strip()
+        title = str(context.get("title") or context.get("name") or "").strip()
+        reason = str(context.get("reason") or "").strip()
+        building = str(context.get("building") or "").strip()
+        building_codes = context.get("building_codes")
+        if not isinstance(building_codes, list):
+            building_codes = self._building_codes_from_value(building)
+        identity_item = {
+            "work_type": work_type,
+            "notice_type": notice_type,
+            "active_item_id": active_item_id,
+            "source_record_id": source_record_id,
+            "target_record_id": target_record_id,
+            "feishu_record_id": target_record_id,
+            "title": title,
+            "reason": reason,
+            "building": building,
+            "building_code": str(context.get("building_code") or "").strip(),
+            "building_codes": building_codes,
+        }
+        identity_keys = self._work_status_identity_keys(identity_item)
+        if target_record_id:
+            identity_keys.add(f"{work_type}:record:{target_record_id}")
+        fallback_key = self._summary_key(
+            title=title,
+            building=building,
+            reason=reason,
+            work_type=work_type,
+        )
+        if fallback_key:
+            identity_item["fallback_key"] = fallback_key
+            identity_keys.add(f"{work_type}:key:{fallback_key}")
+        if active_item_id:
+            identity_key = f"{work_type}:active:{active_item_id}"
+        elif target_record_id:
+            identity_key = f"{work_type}:target:{target_record_id}"
+        elif source_record_id:
+            identity_key = f"{work_type}:source:{source_record_id}"
+        elif fallback_key:
+            identity_key = f"{work_type}:key:{fallback_key}"
+        else:
+            identity_key = f"{work_type}:title:{hashlib.sha1(title.encode('utf-8', errors='ignore')).hexdigest()}"
+        return {
+            "identity_key": identity_key,
+            "identity_item": identity_item,
+            "identity_keys": sorted(identity_keys),
+            "work_type": work_type,
+            "notice_type": notice_type,
+            "active_item_id": active_item_id,
+            "source_record_id": source_record_id,
+            "target_record_id": target_record_id,
+            "title": title,
+            "reason": reason,
+            "building": building,
+            "building_codes": building_codes,
+        }
+
+    @staticmethod
+    def _items_identity_intersects(keys: set[str], item_keys: set[str]) -> bool:
+        return bool(keys and item_keys and keys.intersection(item_keys))
+
+    def _find_qt_active_snapshot(self, identity: dict[str, Any]) -> dict[str, Any] | None:
+        active_item_id = str(identity.get("active_item_id") or "").strip()
+        target_record_id = str(identity.get("target_record_id") or "").strip()
+        source_record_id = str(identity.get("source_record_id") or "").strip()
+        title = str(identity.get("title") or "").strip()
+        for row in self._state_store.list_qt_active_items(include_deleted=True):
+            payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+            if active_item_id and (
+                str(row.get("active_item_id") or "") == active_item_id
+                or str(payload.get("active_item_id") or "") == active_item_id
+            ):
+                return copy.deepcopy(row)
+            if target_record_id and (
+                str(row.get("record_id") or "") == target_record_id
+                or str(payload.get("record_id") or "") == target_record_id
+                or str(payload.get("target_record_id") or "") == target_record_id
+            ):
+                return copy.deepcopy(row)
+            if source_record_id and str(payload.get("source_record_id") or "") == source_record_id:
+                return copy.deepcopy(row)
+            if title and title == str(payload.get("title") or "").strip():
+                return copy.deepcopy(row)
+        return None
+
+    @staticmethod
+    def _first_text_value(*values: Any) -> str:
+        for value in values:
+            text = str(value or "").strip()
+            if text:
+                return text
+        return ""
+
+    def _source_record_building_codes_for_delete(
+        self, work_type: str, source_record_id: str, scope: str
+    ) -> list[str]:
+        source_record_id = str(source_record_id or "").strip()
+        if not source_record_id:
+            return []
+        record = self._source_record_in_scope_snapshot(
+            record_id=source_record_id,
+            work_type=work_type,
+            scope=scope,
+        ) or self._source_record_in_scope_snapshot(
+            record_id=source_record_id,
+            work_type=work_type,
+            scope="ALL",
+        )
+        if not isinstance(record, dict):
+            return []
+        if work_type == WORK_TYPE_CHANGE:
+            return self._change_record_building_codes(record)
+        if work_type == WORK_TYPE_REPAIR:
+            return self._repair_record_building_codes(record)
+        fields = record.get("display_fields") if isinstance(record.get("display_fields"), dict) else {}
+        return self._building_codes_from_value(
+            record.get("building_codes")
+            or record.get("building")
+            or fields.get("楼栋")
+            or fields.get("所属楼栋")
+        )
+
+    def _enrich_ongoing_identity_item(
+        self, item: dict[str, Any], *, scope: str = "ALL"
+    ) -> dict[str, Any]:
+        enriched = copy.deepcopy(item) if isinstance(item, dict) else {}
+        enriched.setdefault("work_type", WORK_TYPE_MAINTENANCE)
+        enriched.setdefault("notice_type", NOTICE_TYPE_MAINTENANCE)
+        work_type = str(enriched.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
+        identity = self._undo_identity_from_context(enriched, action_type="delete")
+        qt_snapshot = self._find_qt_active_snapshot(identity)
+        qt_payload = (
+            qt_snapshot.get("payload")
+            if isinstance(qt_snapshot, dict) and isinstance(qt_snapshot.get("payload"), dict)
+            else {}
+        )
+
+        def set_text_if_missing(field: str, *values: Any) -> None:
+            if str(enriched.get(field) or "").strip():
+                return
+            value = self._first_text_value(*values)
+            if value:
+                enriched[field] = value
+
+        set_text_if_missing("active_item_id", qt_payload.get("active_item_id"), (qt_snapshot or {}).get("active_item_id"))
+        set_text_if_missing("notice_type", qt_payload.get("notice_type"), (qt_snapshot or {}).get("notice_type"))
+        set_text_if_missing("source_record_id", qt_payload.get("source_record_id"))
+        set_text_if_missing(
+            "target_record_id",
+            qt_payload.get("target_record_id"),
+            qt_payload.get("feishu_record_id"),
+            qt_payload.get("raw_record_id"),
+            (qt_snapshot or {}).get("record_id"),
+            qt_payload.get("record_id"),
+        )
+        qt_sections = self._parse_notice_sections(str(qt_payload.get("text") or ""))
+        set_text_if_missing(
+            "title",
+            qt_payload.get("title"),
+            self._notice_section_value(qt_sections, ["名称", "标题", "事件描述"]),
+            qt_payload.get("content"),
+        )
+        set_text_if_missing(
+            "reason",
+            qt_payload.get("reason"),
+            self._notice_section_value(qt_sections, ["原因", "故障原因", "故障维修原因"]),
+        )
+        set_text_if_missing("building", qt_payload.get("building"))
+        set_text_if_missing("building_code", qt_payload.get("building_code"))
+
+        building_codes = self._building_codes_from_request_payload(enriched)
+        if not building_codes:
+            building_codes = self._clean_building_codes(qt_payload.get("building_codes"))
+        if not building_codes:
+            building_codes = self._building_codes_from_value(
+                qt_payload.get("building")
+                or qt_payload.get("title")
+                or qt_payload.get("content")
+            )
+        if not building_codes:
+            building_codes = self._source_record_building_codes_for_delete(
+                work_type,
+                str(enriched.get("source_record_id") or "").strip(),
+                scope,
+            )
+        if building_codes:
+            enriched["building_codes"] = building_codes
+            if not str(enriched.get("building") or "").strip():
+                enriched["building"] = self._building_label_from_codes(building_codes)
+
+        target_record_id = self._first_text_value(
+            enriched.get("target_record_id"),
+            enriched.get("feishu_record_id"),
+            enriched.get("raw_record_id"),
+        )
+        source_record_id = str(enriched.get("source_record_id") or "").strip()
+        current_record_id = str(enriched.get("record_id") or "").strip()
+        if target_record_id:
+            enriched["target_record_id"] = target_record_id
+            enriched["record_id"] = target_record_id
+        elif source_record_id and current_record_id == source_record_id:
+            enriched["_source_only_delete"] = True
+        return enriched
+
+    def create_notice_undo_checkpoint(
+        self,
+        action_type: str,
+        context: dict[str, Any],
+        *,
+        remote_fields: dict[str, Any] | None = None,
+        remote_missing: bool = False,
+        job_id: str = "",
+        created_by: str = "",
+        scope: str = "ALL",
+    ) -> str:
+        action_type = str(action_type or "").strip().lower()
+        if action_type not in {"update", "end", "delete"}:
+            return ""
+        context = copy.deepcopy(context) if isinstance(context, dict) else {}
+        scope = self._normalize_scope(scope or context.get("scope") or "ALL")
+        context = self._enrich_ongoing_identity_item(context, scope=scope)
+        identity = self._undo_identity_from_context(context, action_type=action_type)
+        identity_keys = set(identity.get("identity_keys") or [])
+        if not identity.get("identity_key") or not identity_keys:
+            raise PortalError("创建回退点失败：缺少通告身份。")
+        qt_active = self._find_qt_active_snapshot(identity)
+        daily_item = None
+        daily_document_key = ""
+        work_items: list[dict[str, Any]] = []
+        with self._summary_lock:
+            summary_payload = self._load_day_summary_locked()
+            for item in summary_payload.get("items") or []:
+                if isinstance(item, dict) and self._items_identity_intersects(
+                    identity_keys, self._work_status_identity_keys(item)
+                ):
+                    daily_item = copy.deepcopy(item)
+                    daily_document_key = str(summary_payload.get("date") or "").strip()
+                    break
+            if daily_item is None:
+                for document in self._state_store.list_documents(STATE_NS_DAILY_SUMMARY):
+                    payload = document.get("payload")
+                    if not isinstance(payload, dict):
+                        continue
+                    for item in payload.get("items") or []:
+                        if isinstance(item, dict) and self._items_identity_intersects(
+                            identity_keys, self._work_status_identity_keys(item)
+                        ):
+                            daily_item = copy.deepcopy(item)
+                            daily_document_key = str(document.get("key") or "").strip()
+                            break
+                    if daily_item is not None:
+                        break
+            self._migrate_legacy_work_status_locked()
+            for document in self._state_store.list_documents(STATE_NS_WORK_STATUS):
+                payload = document.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                for item in payload.get("items") or []:
+                    if isinstance(item, dict) and self._items_identity_intersects(
+                        identity_keys, self._work_status_identity_keys(item)
+                    ):
+                        work_items.append(
+                            {
+                                "document_key": str(document.get("key") or ""),
+                                "item": copy.deepcopy(item),
+                            }
+                        )
+        now = time.time()
+        title = str(identity.get("title") or (daily_item or {}).get("title") or "").strip()
+        payload = {
+            "undo_id": uuid.uuid4().hex,
+            "identity_key": str(identity.get("identity_key") or ""),
+            "identity_keys": sorted(identity_keys),
+            "status": "available",
+            "action_type": action_type,
+            "action_label": self._undo_action_label(action_type),
+            "scope": scope,
+            "work_type": str(identity.get("work_type") or ""),
+            "notice_type": str(identity.get("notice_type") or ""),
+            "active_item_id": str(identity.get("active_item_id") or ""),
+            "source_record_id": str(identity.get("source_record_id") or ""),
+            "target_record_id": str(identity.get("target_record_id") or ""),
+            "title": title,
+            "reason": str(identity.get("reason") or ""),
+            "building": str(identity.get("building") or ""),
+            "building_codes": list(identity.get("building_codes") or []),
+            "created_by": str(created_by or context.get("_auth_open_id") or ""),
+            "job_id": str(job_id or ""),
+            "created_at": now,
+            "expires_at": now + 7 * 24 * 60 * 60,
+            "context": context,
+            "remote": {
+                "missing": bool(remote_missing),
+                "fields": copy.deepcopy(remote_fields or {}),
+            },
+            "local": {
+                "qt_active": qt_active,
+                "daily_document_key": daily_document_key,
+                "daily_item": daily_item,
+                "work_items": work_items,
+            },
+        }
+        undo_id = self._state_store.create_notice_undo_action(payload)
+        if not undo_id:
+            raise PortalError("创建回退点失败：SQLite 写入失败。")
+        self._state_store.append_event_async(
+            "notice_undo",
+            {
+                "event": "checkpoint_created",
+                "undo_id": undo_id,
+                "action_type": action_type,
+                "title": title,
+                "target_record_id": str(identity.get("target_record_id") or ""),
+            },
+        )
+        return undo_id
+
+    def _undo_key_candidates(self, item: dict[str, Any]) -> set[str]:
+        identity = self._undo_identity_from_context(item, action_type="delete")
+        return set(identity.get("identity_keys") or [])
+
+    def _available_undo_map(self, scope: str = "ALL") -> dict[str, dict[str, Any]]:
+        scope = self._normalize_scope(scope)
+        result: dict[str, dict[str, Any]] = {}
+        for undo in self._state_store.list_notice_undo_actions(scope=scope):
+            enriched_undo = self._enrich_ongoing_identity_item(undo, scope=scope)
+            if not self._scope_matches_item(scope, enriched_undo):
+                continue
+            keys = set(enriched_undo.get("identity_keys") or undo.get("identity_keys") or [])
+            for key in keys:
+                if key and key not in result:
+                    result[key] = enriched_undo
+        return result
+
+    @staticmethod
+    def _public_undo_fields(undo: dict[str, Any]) -> dict[str, Any]:
+        created_at = float((undo or {}).get("created_at") or 0)
+        action_type = str((undo or {}).get("action_type") or "")
+        label = MaintenancePortalService._undo_action_label(action_type)
+        return {
+            "undo_available": True,
+            "undo_id": str((undo or {}).get("undo_id") or ""),
+            "undo_action_type": action_type,
+            "undo_created_at": created_at,
+            "undo_label": f"回退上一步{label}",
+        }
+
+    def _annotate_undo_items(
+        self, items: list[dict[str, Any]], *, scope: str = "ALL"
+    ) -> list[dict[str, Any]]:
+        undo_map = self._available_undo_map(scope)
+        annotated: list[dict[str, Any]] = []
+        for item in items or []:
+            row = copy.deepcopy(item)
+            for key in self._undo_key_candidates(row):
+                undo = undo_map.get(key)
+                if undo:
+                    row.update(self._public_undo_fields(undo))
+                    break
+            annotated.append(row)
+        return annotated
+
+    def list_available_notice_undos(
+        self,
+        *,
+        scope: str = "ALL",
+        action_type: str = "",
+        since_seconds: float = 0,
+    ) -> list[dict[str, Any]]:
+        scope = self._normalize_scope(scope)
+        action_type = str(action_type or "").strip().lower()
+        cutoff = time.time() - float(since_seconds or 0) if float(since_seconds or 0) > 0 else 0
+        items: list[dict[str, Any]] = []
+        for undo in self._state_store.list_notice_undo_actions(scope=scope):
+            enriched_undo = self._enrich_ongoing_identity_item(undo, scope=scope)
+            if not self._scope_matches_item(scope, enriched_undo):
+                continue
+            undo_action_type = str(enriched_undo.get("action_type") or "").strip().lower()
+            created_at = float(enriched_undo.get("created_at") or 0)
+            if action_type and undo_action_type != action_type:
+                continue
+            if cutoff and created_at < cutoff:
+                continue
+            items.append(
+                {
+                    **self._public_undo_fields(enriched_undo),
+                    "title": str(enriched_undo.get("title") or ""),
+                    "scope": str(enriched_undo.get("scope") or ""),
+                    "work_type": str(enriched_undo.get("work_type") or ""),
+                    "notice_type": str(enriched_undo.get("notice_type") or ""),
+                    "building": str(enriched_undo.get("building") or ""),
+                }
+            )
+        items.sort(key=lambda row: float(row.get("undo_created_at") or 0), reverse=True)
+        return items
+
+    def create_notice_undo_job(
+        self,
+        undo_id: str,
+        *,
+        scope: str = "ALL",
+        auth_open_id: str = "",
+        auth_user_name: str = "",
+    ) -> str:
+        undo = self._state_store.get_notice_undo_action(undo_id)
+        if not undo or str(undo.get("status") or "") != "available":
+            raise PortalError("该回退记录不可用或已过期。")
+        scope = self._normalize_scope(scope or undo.get("scope") or "ALL")
+        undo = self._enrich_ongoing_identity_item(undo, scope=scope)
+        if not self._scope_matches_item(scope, undo):
+            raise PortalError("当前账号无权回退该通告。")
+        request_payload = {
+            "action": "undo",
+            "undo_id": str(undo.get("undo_id") or ""),
+            "scope": scope,
+            "work_type": str(undo.get("work_type") or WORK_TYPE_MAINTENANCE),
+            "notice_type": str(undo.get("notice_type") or ""),
+            "active_item_id": str(undo.get("active_item_id") or ""),
+            "source_record_id": str(undo.get("source_record_id") or ""),
+            "target_record_id": str(undo.get("target_record_id") or ""),
+            "_auth_open_id": str(auth_open_id or ""),
+            "_auth_user_name": str(auth_user_name or ""),
+        }
+        job = self._base_job(request_payload)
+        job["phase"] = "undo_queued"
+        job["operation_id"] = f"undo:{undo_id}"
+        job["target_key"] = f"undo:{str(undo.get('identity_key') or undo_id)}"
+        with self._jobs_lock:
+            for existing in self._jobs.values():
+                if str(existing.get("target_key") or "") != job["target_key"]:
+                    continue
+                if str(existing.get("phase") or "") in {
+                    "accepted",
+                    "queued",
+                    "sending_message",
+                    "message_sent",
+                    "upload_queued",
+                    "qt_queued",
+                    "qt_displaying",
+                    "upload_waiting",
+                    "uploading",
+                    "undo_queued",
+                    "undoing_remote",
+                    "undoing_local",
+                }:
+                    raise PortalError("该通告正在处理，请稍后再试。")
+            self._jobs[job["job_id"]] = job
+            self._persist_action_job_locked(job)
+            self._trim_jobs_locked()
+        return str(job["job_id"])
+
+    def _remove_hidden_ongoing_keys(self, keys: set[str]) -> None:
+        if not keys:
+            return
+        with self._hidden_ongoing_lock:
+            payload = self._load_hidden_ongoing_locked()
+            hidden = payload.get("hidden") if isinstance(payload.get("hidden"), dict) else {}
+            removed = False
+            for key in list(keys):
+                if key in hidden:
+                    hidden.pop(key, None)
+                    removed = True
+            if removed:
+                payload["hidden"] = hidden
+                self._save_hidden_ongoing_locked(payload)
+
+    def restore_notice_undo_local(
+        self,
+        undo: dict[str, Any],
+        *,
+        target_record_id: str = "",
+        applied_by: str = "",
+        job_id: str = "",
+    ) -> dict[str, Any]:
+        if not isinstance(undo, dict):
+            raise PortalError("回退记录格式错误。")
+        local = undo.get("local") if isinstance(undo.get("local"), dict) else {}
+        identity_keys = set(str(key or "") for key in (undo.get("identity_keys") or []) if str(key or ""))
+        now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+        restored_active = False
+        removed_active = False
+        with self._summary_lock:
+            daily_item = local.get("daily_item") if isinstance(local.get("daily_item"), dict) else None
+            daily_document_key = str(
+                local.get("daily_document_key") or (daily_item or {}).get("date") or ""
+            ).strip()
+            summary_payload = self._load_day_summary_locked(daily_document_key or None)
+            current_summary = summary_payload.get("items")
+            if not isinstance(current_summary, list):
+                current_summary = []
+            summary_payload["items"] = [
+                item
+                for item in current_summary
+                if not (
+                    isinstance(item, dict)
+                    and self._items_identity_intersects(
+                        identity_keys, self._work_status_identity_keys(item)
+                    )
+                )
+            ]
+            if daily_item:
+                restored_daily = copy.deepcopy(daily_item)
+                if target_record_id:
+                    restored_daily["target_record_id"] = target_record_id
+                    restored_daily["feishu_record_id"] = target_record_id
+                summary_payload["items"].append(restored_daily)
+            summary_payload["updated_at"] = now
+            self._save_day_summary_locked(summary_payload)
+
+            self._migrate_legacy_work_status_locked()
+            for document in self._state_store.list_documents(STATE_NS_WORK_STATUS):
+                payload = document.get("payload")
+                if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+                    continue
+                kept = [
+                    item
+                    for item in payload.get("items") or []
+                    if not (
+                        isinstance(item, dict)
+                        and self._items_identity_intersects(
+                            identity_keys, self._work_status_identity_keys(item)
+                        )
+                    )
+                ]
+                if len(kept) != len(payload.get("items") or []):
+                    payload["items"] = kept
+                    payload["updated_at"] = now
+                    self._state_store.put_document(
+                        STATE_NS_WORK_STATUS, str(document.get("key") or ""), payload
+                    )
+            for saved in local.get("work_items") or []:
+                if not isinstance(saved, dict) or not isinstance(saved.get("item"), dict):
+                    continue
+                document_key = str(saved.get("document_key") or "ALL").strip() or "ALL"
+                payload = self._state_store.get_document(STATE_NS_WORK_STATUS, document_key)
+                if not isinstance(payload, dict):
+                    payload = {"version": 1, "items": []}
+                if not isinstance(payload.get("items"), list):
+                    payload["items"] = []
+                item = copy.deepcopy(saved.get("item") or {})
+                if target_record_id:
+                    item["target_record_id"] = target_record_id
+                    item["feishu_record_id"] = target_record_id
+                payload["items"].append(item)
+                payload["updated_at"] = now
+                self._state_store.put_document(STATE_NS_WORK_STATUS, document_key, payload)
+            self._work_status_cache_signature = None
+            self._work_status_cache_items = None
+        qt_snapshot = local.get("qt_active") if isinstance(local.get("qt_active"), dict) else None
+        if qt_snapshot and isinstance(qt_snapshot.get("payload"), dict):
+            qt_payload = copy.deepcopy(qt_snapshot.get("payload") or {})
+            if target_record_id:
+                qt_payload["record_id"] = target_record_id
+                qt_payload["target_record_id"] = target_record_id
+            restored_active = self._state_store.upsert_qt_active_item(
+                qt_payload,
+                section=str(qt_snapshot.get("section") or ""),
+                sort_order=int(qt_snapshot.get("sort_order") or 0),
+                origin=str(qt_snapshot.get("origin") or ""),
+            )
+        else:
+            removed_active = self._state_store.delete_qt_active_item(
+                active_item_id=str(undo.get("active_item_id") or ""),
+                record_id=str(target_record_id or undo.get("target_record_id") or ""),
+            )
+        self._remove_hidden_ongoing_keys(identity_keys)
+        self._touch_state_cache_version()
+        self._state_store.append_event_async(
+            "notice_undo",
+            {
+                "event": "undo_applied_local",
+                "undo_id": str(undo.get("undo_id") or ""),
+                "job_id": str(job_id or ""),
+                "applied_by": str(applied_by or ""),
+                "target_record_id": str(target_record_id or undo.get("target_record_id") or ""),
+            },
+        )
+        return {
+            "restored_active": restored_active,
+            "removed_active": removed_active,
+            "active_payload": (qt_snapshot or {}).get("payload") if qt_snapshot else {},
+        }
+
     def validate_ongoing_delete_item(
         self, item: dict[str, Any], *, scope: str = "ALL"
     ) -> list[str]:
         if not isinstance(item, dict):
             raise PortalError("删除参数格式错误。")
         scope = self._normalize_scope(scope)
-        item = copy.deepcopy(item)
-        item.setdefault("work_type", WORK_TYPE_MAINTENANCE)
-        item.setdefault("notice_type", NOTICE_TYPE_MAINTENANCE)
-        if not self._scope_matches_item(scope, item):
+        enriched = self._enrich_ongoing_identity_item(item, scope=scope)
+        item.clear()
+        item.update(enriched)
+        if not self._scope_matches_item(scope, enriched):
             raise PortalError("当前账号无权删除该楼栋的进行中通告。")
-        keys = self._ongoing_hidden_keys(item)
+        keys = self._ongoing_hidden_keys(enriched)
         if not keys:
             raise PortalError("该进行中通告缺少可删除身份。")
         return keys
@@ -4340,6 +5683,87 @@ class MaintenancePortalService:
             if record_id:
                 matches.append(record_id)
         return matches[0] if len(set(matches)) == 1 else ""
+
+    def lookup_change_target_candidates(
+        self,
+        *,
+        scope: str,
+        title: str,
+        start_time: str = "",
+        end_time: str = "",
+        action: str = "update",
+        limit: int = 30,
+    ) -> dict[str, Any]:
+        scope = self._normalize_scope(scope)
+        title = str(title or "").strip()
+        if not title:
+            raise PortalError("变更通告缺少【名称】，无法查询目标记录。")
+        title_key = self._match_text(title)
+        query_dates = self._date_keys_from_values(start_time, end_time)
+        if not query_dates:
+            raise PortalError("变更通告缺少可识别的【时间】，无法查询目标记录。")
+        field_config = get_field_config(NOTICE_TYPE_CHANGE)
+        title_field = field_config.get("title") or field_config.get("name") or "名称"
+        status_field = field_config.get("status", "")
+        date_fields = [
+            field_name
+            for field_name in self._target_match_date_fields(WORK_TYPE_CHANGE, field_config)
+            if field_name
+        ]
+        try:
+            target_records = self._target_records_for_notice_type(
+                NOTICE_TYPE_CHANGE,
+                WORK_TYPE_CHANGE,
+                force_refresh=True,
+            )
+        except Exception as exc:
+            raise PortalError(f"查询设备变更目标表失败：{exc}") from exc
+        candidates: list[dict[str, Any]] = []
+        for target in target_records:
+            fields = target.get("display_fields") or {}
+            target_title = str(fields.get(title_field) or "").strip()
+            if self._match_text(target_title) != title_key:
+                continue
+            target_dates = self._date_keys_from_values(
+                *[fields.get(field_name) for field_name in date_fields],
+                fields.get("时间"),
+                fields.get("计划时间"),
+            )
+            if target_dates and not (query_dates & target_dates):
+                continue
+            building_codes = self._target_record_building_codes(fields, field_config)
+            if not self._scope_matches_buildings(scope, building_codes):
+                continue
+            record_id = str(target.get("record_id") or "").strip()
+            if not record_id:
+                continue
+            target_start = str(fields.get(field_config.get("start_time", "")) or "").strip()
+            target_end = str(fields.get(field_config.get("end_time", "")) or "").strip()
+            status = str(fields.get(status_field) or "").strip() if status_field else ""
+            candidates.append(
+                {
+                    "record_id": record_id,
+                    "target_record_id": record_id,
+                    "title": target_title or title,
+                    "building": self._building_label_from_codes(building_codes),
+                    "building_codes": building_codes,
+                    "status": status,
+                    "start_time": target_start,
+                    "end_time": target_end,
+                    "date_matched": bool(query_dates & target_dates) if target_dates else False,
+                }
+            )
+            if len(candidates) >= max(1, int(limit or 30)):
+                break
+        return {
+            "scope": scope,
+            "action": str(action or "update").strip().lower(),
+            "title": title,
+            "start_time": str(start_time or "").strip(),
+            "end_time": str(end_time or "").strip(),
+            "count": len(candidates),
+            "candidates": candidates,
+        }
 
     def _target_record_id_from_work_status(
         self, *, work_type: str, source_record_id: str = "", active_item_id: str = ""
@@ -4555,6 +5979,10 @@ class MaintenancePortalService:
         daily_summary = self.get_daily_summary(
             scope=scope, ongoing_items=merged_ongoing
         )
+        merged_ongoing = self._annotate_undo_items(merged_ongoing, scope=scope)
+        daily_summary["items"] = self._annotate_undo_items(
+            daily_summary.get("items") or [], scope=scope
+        )
         summary_by_record = self._work_status_by_records(
             filtered_records,
             scope=scope,
@@ -4646,6 +6074,10 @@ class MaintenancePortalService:
             ]
         daily_summary = self.get_daily_summary(
             scope=scope, ongoing_items=merged_ongoing
+        )
+        merged_ongoing = self._annotate_undo_items(merged_ongoing, scope=scope)
+        daily_summary["items"] = self._annotate_undo_items(
+            daily_summary.get("items") or [], scope=scope
         )
         summary_by_record = self._work_status_by_records(
             filtered_records,
@@ -5722,7 +7154,15 @@ class MaintenancePortalService:
                         f"该变更当前源进度不是{CHANGE_PROGRESS_NOT_STARTED}: {source_progress or '-'}"
                     )
                 title = self._change_title(record)
-                building_codes = self._change_record_building_codes(record)
+                building_codes = self._resolve_scoped_source_building_codes(
+                    scope=scope,
+                    work_type=WORK_TYPE_CHANGE,
+                    record_id=record_id,
+                    source_codes=self._change_record_building_codes(record),
+                    payload_codes=self._building_codes_from_request_payload(
+                        request_payload
+                    ),
+                )
                 building = self._building_label_from_codes(building_codes)
                 specialty = str(fields.get("专业") or "").strip()
                 level = str(fields.get("变更等级（阿里）") or "").strip()
@@ -5743,17 +7183,25 @@ class MaintenancePortalService:
                 title = self._change_title(source_record)
             if not title:
                 raise PortalError("更新/结束通告缺少名称。")
-            building_codes = [
-                str(code or "").strip().upper()
-                for code in (request_payload.get("building_codes") or [])
-                if str(code or "").strip()
-            ]
-            if not building_codes and source_record is not None:
-                building_codes = self._change_record_building_codes(source_record)
-            if not building_codes:
-                building_codes = self._building_codes_from_value(
-                    request_payload.get("building")
+            payload_building_codes = self._building_codes_from_request_payload(
+                request_payload
+            )
+            source_building_codes = (
+                self._change_record_building_codes(source_record)
+                if source_record is not None
+                else []
+            )
+            building_codes = payload_building_codes or source_building_codes
+            if source_record is not None:
+                building_codes = self._resolve_scoped_source_building_codes(
+                    scope=scope,
+                    work_type=WORK_TYPE_CHANGE,
+                    record_id=source_record_id,
+                    source_codes=source_building_codes,
+                    payload_codes=payload_building_codes,
                 )
+            if not building_codes:
+                building_codes = self._building_codes_from_value(request_payload.get("building"))
             building = (
                 str(request_payload.get("building") or "").strip()
                 or self._building_label_from_codes(building_codes)

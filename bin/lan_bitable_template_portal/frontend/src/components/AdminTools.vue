@@ -21,6 +21,7 @@
       <section v-if="tab === 'status'" class="pane">
         <div class="actions">
           <button class="btn blue" @click="loadStatus">刷新状态</button>
+          <button class="btn green" @click="openHistoryMemory">历史记忆导入</button>
           <button class="btn ghost" @click="runPreflight">真实联调预检</button>
           <button class="btn ghost" @click="cleanupJobs">清理终态任务</button>
         </div>
@@ -168,6 +169,10 @@ async function api(path: string, options: RequestInit = {}): Promise<Dict> {
 
 function pretty(value: unknown): string {
   return JSON.stringify(value || {}, null, 2);
+}
+
+function openHistoryMemory(): void {
+  window.location.href = "/admin/history-memory";
 }
 
 async function loadStatus(): Promise<void> {

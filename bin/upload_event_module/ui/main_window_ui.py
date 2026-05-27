@@ -118,6 +118,12 @@ class MainWindowUiMixin:
         self.patch_btn.clicked.connect(self.apply_patch_update)
         self.patch_btn.hide()
 
+        self.deleted_history_btn = QPushButton("历史删除")
+        self.deleted_history_btn.setObjectName("NavBtn")
+        self.deleted_history_btn.setFixedSize(80, 40)
+        self.deleted_history_btn.setToolTip("查看近两天已删除且可回退的通告")
+        self.deleted_history_btn.clicked.connect(self._show_deleted_notice_history)
+
         self.title_label = QLabel("剪贴板助手")
         self.title_label.setObjectName("TitleLabel")
         self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -147,6 +153,7 @@ class MainWindowUiMixin:
         self.minimize_btn.clicked.connect(self.hide)
 
         nav_layout.addWidget(self.patch_btn)
+        nav_layout.addWidget(self.deleted_history_btn)
         nav_layout.addWidget(self.title_label, 1)
         nav_layout.addWidget(self.theme_btn)
         nav_layout.addWidget(self.minimize_btn)
@@ -159,27 +166,41 @@ class MainWindowUiMixin:
         active_layout.setContentsMargins(0, 0, 0, 0)
 
         self.active_stack = QStackedWidget()
-        if self._active_model_view_visible():
-            self.list_active_event = ActiveNoticeListRoute("event")
-            self.list_active_other = ActiveNoticeListRoute("other")
-            self.view_active_event = QListView()
-            self._init_active_model_view(self.view_active_event, self.list_active_event)
-            self.view_active_other = QListView()
-            self._init_active_model_view(self.view_active_other, self.list_active_other)
-            self.active_stack.addWidget(self.view_active_event)
-            self.active_stack.addWidget(self.view_active_other)
-        else:
-            self.list_active_event = QListWidget()
-            self._init_list_widget(self.list_active_event)
-            self.list_active_other = QListWidget()
-            self._init_list_widget(self.list_active_other)
-            self.view_active_event = None
-            self.view_active_other = None
-            self.active_stack.addWidget(self.list_active_event)
-            self.active_stack.addWidget(self.list_active_other)
+        self.list_active_event = ActiveNoticeListRoute("event")
+        self.list_active_other = ActiveNoticeListRoute("other")
+        self.view_active_event = QListView()
+        self._init_active_model_view(self.view_active_event, self.list_active_event)
+        self.view_active_other = QListView()
+        self._init_active_model_view(self.view_active_other, self.list_active_other)
+        self.active_stack.addWidget(self.view_active_event)
+        self.active_stack.addWidget(self.view_active_other)
         active_layout.addWidget(self.active_stack)
 
+        self.deleted_history_container = QWidget()
+        deleted_history_layout = QVBoxLayout(self.deleted_history_container)
+        deleted_history_layout.setContentsMargins(0, 0, 0, 0)
+        deleted_history_layout.setSpacing(8)
+
+        deleted_history_head = QHBoxLayout()
+        self.deleted_history_info = QLabel("近两天已删除且仍可回退的通告。")
+        self.deleted_history_info.setStyleSheet("color: #64748B; font-size: 12px;")
+        self.deleted_history_info.setWordWrap(True)
+        deleted_history_head.addWidget(self.deleted_history_info, 1)
+
+        self.deleted_history_back_btn = QPushButton("返回通告")
+        self.deleted_history_back_btn.setObjectName("NavBtn")
+        self.deleted_history_back_btn.setFixedSize(80, 30)
+        self.deleted_history_back_btn.clicked.connect(lambda: self._set_view_mode(True))
+        deleted_history_head.addWidget(self.deleted_history_back_btn)
+
+        deleted_history_layout.addLayout(deleted_history_head)
+
+        self.deleted_history_list = QListWidget()
+        self.deleted_history_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        deleted_history_layout.addWidget(self.deleted_history_list, 1)
+
         self.stack.addWidget(self.active_container)
+        self.stack.addWidget(self.deleted_history_container)
         container_layout.addLayout(nav_layout)
         container_layout.addWidget(self.stack)
 
@@ -249,12 +270,7 @@ class MainWindowUiMixin:
         self._refresh_patch_button()
 
     def _active_model_view_visible(self) -> bool:
-        if os.environ.get("CLIPFLOW_LEGACY_QT_WIDGET_LIST") == "1":
-            return False
-        if os.environ.get("CLIPFLOW_DISABLE_QT_MODEL_VIEW") == "1":
-            return False
-        enabled = getattr(self, "_active_notice_model_enabled", None)
-        return bool(enabled() if callable(enabled) else True)
+        return True
 
     def _active_stack_widget_for_tab(self, is_event: bool):
         if self._active_model_view_visible() and getattr(self, "view_active_event", None):
@@ -386,6 +402,9 @@ class MainWindowUiMixin:
     def set_notice_tab(self, tab):
         if tab not in ("event", "other"):
             return
+        if hasattr(self, "stack") and hasattr(self, "active_container"):
+            self.stack.setCurrentWidget(self.active_container)
+            self.title_label.setText("剪贴板助手")
         self.notice_tab = tab
         is_event = tab == "event"
         self.event_tab_btn.setProperty("active", is_event)

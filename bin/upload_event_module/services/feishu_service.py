@@ -527,6 +527,51 @@ def create_bitable_record_by_payload(notice_type: str, payload: NoticePayload):
     return True, record_id
 
 
+def create_bitable_record_fields(notice_type: str, fields: dict):
+    """
+    Directly create a bitable record from already-captured target-table fields.
+    This is used for local undo restore and intentionally does not send robot messages.
+    """
+    check_token_status()
+
+    if not config.user_token:
+        return False, "未配置飞书用户令牌"
+    if not isinstance(fields, dict) or not fields:
+        return False, "创建字段不能为空"
+
+    _handler, table_id, err = _resolve_handler(notice_type)
+    if err:
+        return False, err
+
+    if _info_logging_enabled():
+        log_info(f"Creating record fields({notice_type}) with fields: {fields}")
+
+    client = _build_client()
+    request = (
+        CreateAppTableRecordRequest.builder()
+        .app_token(config.app_token)
+        .table_id(table_id)
+        .request_body(AppTableRecord.builder().fields(fields).build())
+        .build()
+    )
+
+    def do_create(token: str):
+        option = lark.RequestOption.builder().user_access_token(token).build()
+        return client.bitable.v1.app_table_record.create(request, option)
+
+    response = _with_token_retry(do_create)
+
+    if not response.success():
+        error_msg = f"创建记录失败: {_parse_field_error(response, notice_type, fields)}"
+        log_error(f"飞书创建记录字段: {error_msg}")
+        return False, error_msg
+
+    record_id = response.data.record.record_id
+    log_info(f"飞书创建记录字段: 成功, record_id={record_id}")
+    _log_record_action("回退恢复", notice_type, record_id, fields, "")
+    return True, record_id
+
+
 def batch_create_bitable_records_by_payload(notice_type: str, payloads: list[NoticePayload]):
     """
     Batch-create multiple independent bitable records in the same target table.

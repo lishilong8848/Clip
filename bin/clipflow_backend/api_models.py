@@ -43,6 +43,10 @@ class OngoingDeleteRequest(APIModel):
     source_record_id: str = ""
 
 
+class NoticeUndoApplyRequest(APIModel):
+    scope: str = "ALL"
+
+
 class PermissionRequestCreate(APIModel):
     scopes: list[str] = Field(default_factory=list)
     reason: str = ""
@@ -80,6 +84,23 @@ class GenerateTemplatesRequest(APIModel):
 class NoticeMemoryImportRequest(APIModel):
     scope: str = "ALL"
     text: str = ""
+
+
+class NoticeMemoryHistoryScanRequest(APIModel):
+    work_types: list[str] | str = Field(default_factory=list)
+    months: int = 3
+
+
+class NoticeMemoryHistorySaveRequest(APIModel):
+    matches: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ChangeTargetLookupRequest(APIModel):
+    scope: str = "ALL"
+    title: str = ""
+    start_time: str = ""
+    end_time: str = ""
+    action: str = "update"
 
 
 class SendGeneratedRequest(APIModel):

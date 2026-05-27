@@ -5,7 +5,7 @@
         <img class="brand-logo" :src="brandLogoSrc" alt="世纪互联官方标识" />
         <div>
           <h1>南通基地-运维灯塔工作台</h1>
-          <p>{{ isWorkbench ? scopeLabel(currentScope) : "功能选择" }} · {{ syncText }}</p>
+          <p>{{ isHistoryMemoryPage ? "历史记忆导入" : isWorkbench ? scopeLabel(currentScope) : "功能选择" }} · {{ syncText }}</p>
         </div>
       </div>
       <div class="topbar-actions">
@@ -25,6 +25,9 @@
         <button v-if="auth.loggedIn && isWorkbench" class="btn ghost" :disabled="repairRefreshing" @click="refreshRepair">
           {{ repairRefreshing ? "检修刷新中" : "刷新检修" }}
         </button>
+        <button v-if="auth.loggedIn && isWorkbench" class="btn ghost" :disabled="changeRefreshing" @click="refreshChange">
+          {{ changeRefreshing ? "变更刷新中" : "刷新变更" }}
+        </button>
         <button v-if="isAdmin" class="btn ghost" @click="showAdminTools = true">管理/诊断</button>
         <button v-if="auth.loggedIn" class="btn danger-text" @click="logout">退出</button>
       </div>
@@ -36,8 +39,16 @@
       @close="showAdminTools = false"
     />
 
+    <HistoryMemoryPage
+      v-if="isHistoryMemoryPage"
+      :checking="authChecking"
+      :logged-in="auth.loggedIn"
+      :is-admin="isAdmin"
+      :login-url="auth.loginUrl"
+    />
+
     <AuthPanels
-      v-if="authChecking || !auth.loggedIn || (auth.loggedIn && !auth.scopeOptions.length)"
+      v-else-if="authChecking || !auth.loggedIn || (auth.loggedIn && !auth.scopeOptions.length)"
       :checking="authChecking"
       :logged-in="auth.loggedIn"
       :user="auth.user"
@@ -95,15 +106,37 @@
         <input v-model="searchText" class="search" placeholder="搜索标题、楼栋、专业" />
         <button class="btn ghost" @click="addManualDraft">纯手填</button>
         <button class="btn ghost" @click="showPasteParser = !showPasteParser">解析粘贴通告</button>
-        <button class="btn ghost" @click="showMemoryImporter = !showMemoryImporter">导入历史记忆</button>
+        <button v-if="isAdmin" class="btn ghost" @click="showMemoryImporter = !showMemoryImporter">导入历史记忆</button>
       </div>
 
       <section v-if="showPasteParser" class="paste-panel">
         <textarea v-model="pasteText" placeholder="粘贴完整维保、变更或检修通告文本"></textarea>
-        <button class="btn blue" @click="parsePastedNotice">解析到待发起通告</button>
+        <div class="card-actions">
+          <span class="job-line" :class="{ failed: pasteParseStatus === 'failed', success: pasteParseStatus === 'success' }">
+            {{ pasteParseLine }}
+          </span>
+          <button class="btn blue" :disabled="pasteParseBusy" @click="parsePastedNotice">
+            {{ pasteParseBusy ? "解析中" : "解析到待发起通告" }}
+          </button>
+        </div>
+        <div v-if="pendingChangeTargetSelection" class="target-choice-panel">
+          <div>
+            <strong>请选择要{{ pendingChangeTargetSelection.actionLabel }}的设备变更记录</strong>
+            <p>原文状态为“{{ pendingChangeTargetSelection.actionLabel }}”，选择后会作为{{ pendingChangeTargetSelection.actionLabel }}通告加入待发起通告。</p>
+          </div>
+          <button
+            v-for="item in pendingChangeTargetSelection.candidates"
+            :key="item.record_id"
+            class="target-choice"
+            @click="choosePastedChangeTarget(item)"
+          >
+            <strong>{{ item.title || item.record_id }}</strong>
+            <span>{{ item.building || "-" }} · {{ item.status || "未标记状态" }} · {{ item.start_time || "-" }} 至 {{ item.end_time || "-" }}</span>
+          </button>
+        </div>
       </section>
 
-      <section v-if="showMemoryImporter" class="paste-panel">
+      <section v-if="showMemoryImporter && isAdmin" class="paste-panel">
         <div class="panel-head compact-head">
           <h2>导入历史通告记忆</h2>
           <span>只写入记忆，不发送、不上传</span>
@@ -176,11 +209,15 @@
                     <input v-model="row.draft.specialty" placeholder="专业" @input="saveDrafts" />
                   </label>
                   <label v-if="row.record.work_type === 'maintenance'">
-                    维保周期
+                    {{ row.record.manual ? "维护周期" : "维保周期" }}
                     <select v-model="row.draft.maintenance_cycle" @change="saveDrafts">
                       <option value="">请选择</option>
                       <option v-for="item in maintenanceCycleOptions" :key="item" :value="item">{{ item }}</option>
                     </select>
+                  </label>
+                  <label v-if="row.record.manual && row.record.work_type === 'maintenance'" class="checkbox-field span-2">
+                    <input v-model="row.draft.non_plan" type="checkbox" @change="saveDrafts" />
+                    <span>非计划，发送时标题末尾自动追加“（非计划性）”</span>
                   </label>
                   <label v-if="row.record.work_type !== 'maintenance'">
                     等级
@@ -242,7 +279,7 @@
                 <div class="card-actions">
                   <span class="job-line" :class="jobClass(row.key)">{{ jobText(row.key) }}</span>
                   <button class="btn blue" :disabled="isLineBusy(row.key)" @click.stop="sendStart(row.key)">
-                    发送{{ sourceActionLabel(row.record) }}
+                    发送{{ draftActionLabel(row.record, row.draft) }}
                   </button>
                   <button class="btn ghost" :disabled="isLineBusy(row.key)" @click.stop="removeDraft(row.key)">移除</button>
                 </div>
@@ -258,29 +295,193 @@
           </div>
           <div v-if="ongoing.length === 0" class="empty-block">当前没有进行中通告</div>
           <div v-else class="ongoing-list">
-            <article v-for="item in ongoing" :key="ongoingLineKey(item)" class="ongoing-card">
-              <div class="card-title">
+            <article
+              v-for="item in ongoing"
+              :key="ongoingLineKey(item)"
+              class="ongoing-card"
+              :class="{ active: isOngoingExpanded(item), collapsed: !isOngoingExpanded(item) }"
+              @click="expandOngoingCard(item)"
+            >
+              <div class="card-title" @click.stop="toggleOngoingCard(item)">
                 <strong>{{ ongoingTitle(item) }}</strong>
-                <span>{{ workTypeLabel(item.work_type) }}</span>
+                <span>{{ workTypeLabel(item.work_type) }}{{ isOngoingExpanded(item) ? " · 正在编辑" : " · 点击展开编辑" }}</span>
               </div>
               <p>{{ ongoingMeta(item) }}</p>
-              <div class="form-grid">
-                <label class="span-2">
-                  进度 / 完成情况
-                  <textarea
-                    :value="ongoingDraft(item).progress"
-                    @input="setOngoingEdit(item, 'progress', ($event.target as HTMLTextAreaElement).value)"
-                  ></textarea>
-                </label>
+              <div v-if="!isOngoingExpanded(item)" class="ongoing-compact">
+                <p>{{ ongoingCompactSummary(item) || "已开始未结束，点击展开后可更新、结束或删除。" }}</p>
+                <div class="card-actions compact-actions">
+                  <span class="job-line" :class="jobClass(ongoingLineKey(item))">{{ jobText(ongoingLineKey(item)) }}</span>
+                </div>
               </div>
-              <div class="card-actions">
-                <span class="job-line" :class="jobClass(ongoingLineKey(item))">
-                  {{ jobText(ongoingLineKey(item)) }}
-                </span>
-                <button class="btn blue" :disabled="isLineBusy(ongoingLineKey(item))" @click="sendOngoing(item, 'update')">更新</button>
-                <button class="btn green" :disabled="isLineBusy(ongoingLineKey(item))" @click="sendOngoing(item, 'end')">结束</button>
-                <button class="btn danger" :disabled="isLineBusy(ongoingLineKey(item))" @click="deleteOngoing(item)">删除</button>
+              <template v-else>
+                <div class="ongoing-expanded" @click.stop>
+                  <div class="form-grid">
+                    <label>
+                      标题
+                      <input
+                        :value="ongoingDraft(item).title"
+                        placeholder="通告标题"
+                        @input="setOngoingEdit(item, 'title', ($event.target as HTMLInputElement).value)"
+                      />
+                    </label>
+                    <label>
+                      专业
+                      <input
+                        :value="ongoingDraft(item).specialty"
+                        placeholder="专业"
+                        @input="setOngoingEdit(item, 'specialty', ($event.target as HTMLInputElement).value)"
+                      />
+                    </label>
+                    <label v-if="(item.work_type || 'maintenance') === 'maintenance'">
+                      维保周期
+                      <select
+                        :value="ongoingDraft(item).maintenance_cycle"
+                        @change="setOngoingEdit(item, 'maintenance_cycle', ($event.target as HTMLSelectElement).value)"
+                      >
+                        <option value="">请选择</option>
+                        <option v-for="cycle in maintenanceCycleOptions" :key="cycle" :value="cycle">{{ cycle }}</option>
+                      </select>
+                    </label>
+                    <label v-if="(item.work_type || 'maintenance') !== 'maintenance'">
+                      等级
+                      <input
+                        :value="ongoingDraft(item).level"
+                        placeholder="等级"
+                        @input="setOngoingEdit(item, 'level', ($event.target as HTMLInputElement).value)"
+                      />
+                    </label>
+                    <label>
+                      开始 / 期望完成时间
+                      <input
+                        :value="ongoingDraft(item).start_time"
+                        type="datetime-local"
+                        @input="setOngoingEdit(item, 'start_time', ($event.target as HTMLInputElement).value)"
+                      />
+                    </label>
+                    <label>
+                      结束 / 故障发生时间
+                      <input
+                        :value="ongoingDraft(item).end_time"
+                        type="datetime-local"
+                        @input="setOngoingEdit(item, 'end_time', ($event.target as HTMLInputElement).value)"
+                      />
+                    </label>
+                    <label class="span-2">
+                      地点
+                      <input
+                        :value="ongoingDraft(item).location"
+                        placeholder="地点"
+                        @input="setOngoingEdit(item, 'location', ($event.target as HTMLInputElement).value)"
+                      />
+                    </label>
+                    <label class="span-2">
+                      内容 / 标题
+                      <textarea
+                        :value="ongoingDraft(item).content"
+                        placeholder="内容"
+                        @input="setOngoingEdit(item, 'content', ($event.target as HTMLTextAreaElement).value)"
+                      ></textarea>
+                    </label>
+                    <label>
+                      原因
+                      <textarea
+                        :value="ongoingDraft(item).reason"
+                        placeholder="原因"
+                        @input="setOngoingEdit(item, 'reason', ($event.target as HTMLTextAreaElement).value)"
+                      ></textarea>
+                    </label>
+                    <label>
+                      影响
+                      <textarea
+                        :value="ongoingDraft(item).impact"
+                        placeholder="影响"
+                        @input="setOngoingEdit(item, 'impact', ($event.target as HTMLTextAreaElement).value)"
+                      ></textarea>
+                    </label>
+                    <label class="span-2">
+                      进度 / 完成情况
+                      <textarea
+                        :value="ongoingDraft(item).progress"
+                        placeholder="进度"
+                        @input="setOngoingEdit(item, 'progress', ($event.target as HTMLTextAreaElement).value)"
+                      ></textarea>
+                    </label>
+                  </div>
+                  <details v-if="(item.work_type || 'maintenance') === 'repair'" class="repair-fields">
+                    <summary>检修字段</summary>
+                    <div class="form-grid">
+                      <label><span>维修设备</span><input :value="ongoingDraft(item).repair_device" @input="setOngoingEdit(item, 'repair_device', ($event.target as HTMLInputElement).value)" /></label>
+                      <label><span>维修故障</span><input :value="ongoingDraft(item).repair_fault" @input="setOngoingEdit(item, 'repair_fault', ($event.target as HTMLInputElement).value)" /></label>
+                      <label><span>故障类型</span><input :value="ongoingDraft(item).fault_type" @input="setOngoingEdit(item, 'fault_type', ($event.target as HTMLInputElement).value)" /></label>
+                      <label><span>维修方式</span><input :value="ongoingDraft(item).repair_mode" @input="setOngoingEdit(item, 'repair_mode', ($event.target as HTMLInputElement).value)" /></label>
+                      <label><span>故障发现方式</span><input :value="ongoingDraft(item).discovery" @input="setOngoingEdit(item, 'discovery', ($event.target as HTMLInputElement).value)" /></label>
+                      <label><span>故障现象</span><input :value="ongoingDraft(item).symptom" @input="setOngoingEdit(item, 'symptom', ($event.target as HTMLInputElement).value)" /></label>
+                      <label class="span-2"><span>解决方案</span><textarea :value="ongoingDraft(item).solution" @input="setOngoingEdit(item, 'solution', ($event.target as HTMLTextAreaElement).value)"></textarea></label>
+                    </div>
+                  </details>
+                  <div v-if="(item.work_type || 'maintenance') === 'change'" class="zhihang-line">
+                    <label>
+                      <input
+                        :checked="Boolean(ongoingDraft(item).zhihang_involved)"
+                        type="checkbox"
+                        @change="setOngoingEdit(item, 'zhihang_involved', ($event.target as HTMLInputElement).checked)"
+                      />
+                      涉及智航
+                    </label>
+                    <select
+                      v-if="ongoingDraft(item).zhihang_involved"
+                      :value="ongoingDraft(item).zhihang_record_id"
+                      @change="bindOngoingZhihang(item, ($event.target as HTMLSelectElement).value)"
+                    >
+                      <option value="">选择智航变更</option>
+                      <option v-for="change in zhihangRecords" :key="change.record_id" :value="change.record_id">
+                        {{ change.title || change.record_id }}
+                      </option>
+                    </select>
+                  </div>
+                  <div class="card-actions">
+                    <span class="job-line" :class="jobClass(ongoingLineKey(item))">
+                      {{ jobText(ongoingLineKey(item)) }}
+                    </span>
+                    <button class="btn blue" :disabled="isLineBusy(ongoingLineKey(item))" @click="sendOngoing(item, 'update')">更新</button>
+                    <button class="btn green" :disabled="isLineBusy(ongoingLineKey(item))" @click="sendOngoing(item, 'end')">结束</button>
+                    <button class="btn danger" :disabled="isLineBusy(ongoingLineKey(item))" @click="deleteOngoing(item)">删除</button>
+                    <button v-if="item.undo_available" class="btn ghost" :disabled="isLineBusy(undoLineKey(item))" @click="applyUndo(item)">回退</button>
+                  </div>
+                  <div v-if="item.undo_available" class="undo-line">
+                    {{ item.undo_label || "可回退上一步" }}
+                    <span :class="jobClass(undoLineKey(item))">{{ jobText(undoLineKey(item)) }}</span>
+                  </div>
+                </div>
+              </template>
+            </article>
+          </div>
+          <div v-if="deletedUndoItems.length" class="closed-today">
+            <div class="panel-head compact">
+              <h3>最近删除可回退</h3>
+              <span>{{ deletedUndoItems.length }}</span>
+            </div>
+            <article v-for="item in deletedUndoItems" :key="undoLineKey(item)" class="closed-card">
+              <div>
+                <strong>{{ item.title || "未命名通告" }}</strong>
+                <p>{{ workTypeLabel(item.work_type) }} · {{ item.building || "-" }} · {{ formatUndoTime(item.undo_created_at) }}</p>
               </div>
+              <button class="btn ghost" :disabled="isLineBusy(undoLineKey(item))" @click="applyUndo(item)">回退删除</button>
+              <span class="job-line" :class="jobClass(undoLineKey(item))">{{ jobText(undoLineKey(item)) }}</span>
+            </article>
+          </div>
+          <div v-if="closedSummaryItems.length" class="closed-today">
+            <div class="panel-head compact">
+              <h3>今日结束通告</h3>
+              <span>{{ closedSummaryItems.length }}</span>
+            </div>
+            <article v-for="item in closedSummaryItems" :key="closedLineKey(item)" class="closed-card">
+              <div>
+                <strong>{{ item.title || "未命名通告" }}</strong>
+                <p>{{ workTypeLabel(item.work_type) }} · {{ item.building || "-" }} · {{ item.ended_at || item.updated_at || "-" }}</p>
+              </div>
+              <button v-if="item.undo_available" class="btn ghost" :disabled="isLineBusy(undoLineKey(item))" @click="applyUndo(item)">回退</button>
+              <span class="job-line" :class="jobClass(undoLineKey(item))">{{ jobText(undoLineKey(item)) }}</span>
             </article>
           </div>
         </aside>
@@ -293,6 +494,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import AdminTools from "./components/AdminTools.vue";
 import AuthPanels from "./components/AuthPanels.vue";
+import HistoryMemoryPage from "./components/HistoryMemoryPage.vue";
 import ScopeHome from "./components/ScopeHome.vue";
 import VirtualNoticeList, { type NoticeRow } from "./components/VirtualNoticeList.vue";
 
@@ -305,7 +507,9 @@ const workTypes = [
   { value: "repair", label: "检修" },
 ];
 const brandLogoSrc = "/assets/vnet-logo.png";
+const buildingScopeCodes = ["110", "A", "B", "C", "D", "E", "H"];
 const maintenanceCycleOptions = ["每月", "每季", "每年", "半年", "每两年", "每三年", "每五年", "冬季保温每日", "/"];
+const nonPlanTitleSuffix = "（非计划性）";
 const requestableScopes: ScopeOption[] = [
   { value: "110", label: "110站" },
   { value: "A", label: "A楼" },
@@ -319,7 +523,9 @@ const requestableScopes: ScopeOption[] = [
 
 const authChecking = ref(true);
 const loading = ref(false);
+const isHistoryMemoryPage = ref(window.location.pathname.replace(/\/$/, "") === "/admin/history-memory");
 const repairRefreshing = ref(false);
+const changeRefreshing = ref(false);
 const isWorkbench = ref(false);
 const currentScope = ref(new URLSearchParams(window.location.search).get("scope") || "");
 const syncText = ref("准备中");
@@ -327,10 +533,15 @@ const workType = ref("maintenance");
 const userSelectedWorkType = ref(false);
 const searchText = ref("");
 const activeDraftKey = ref("");
+const activeOngoingKey = ref("");
 const showPasteParser = ref(false);
 const showMemoryImporter = ref(false);
 const showAdminTools = ref(false);
 const pasteText = ref("");
+const pasteParseBusy = ref(false);
+const pasteParseLine = ref("粘贴通告后解析。");
+const pasteParseStatus = ref("");
+const pendingChangeTargetSelection = ref<Dict | null>(null);
 const memoryImportText = ref("");
 const memoryImportBusy = ref(false);
 const memoryImportLine = ref("粘贴历史通告后导入。");
@@ -360,6 +571,7 @@ const records = ref<Dict[]>([]);
 const ongoing = ref<Dict[]>([]);
 const zhihangRecords = ref<Dict[]>([]);
 const dailySummary = ref<Dict>({ date: "", items: [], stats: {} });
+const availableUndoItems = ref<Dict[]>([]);
 const scopeOverview = ref<Record<string, Dict>>({});
 const handoverLinks = ref<Record<string, string>>({});
 const selectedKeys = reactive(new Set<string>());
@@ -382,6 +594,11 @@ let appDisposed = false;
 const visibleScopeOptions = computed(() => auth.scopeOptions.length ? auth.scopeOptions : requestableScopes);
 const isAdmin = computed(() => String(auth.user?.role || "").toLowerCase() === "admin");
 const dailyStats = computed(() => dailySummary.value?.stats || {});
+const closedSummaryItems = computed(() => {
+  const items = Array.isArray(dailySummary.value?.items) ? dailySummary.value.items : [];
+  return items.filter((item: Dict) => String(item?.status || "") === "已结束" || Boolean(item?.ended_at));
+});
+const deletedUndoItems = computed(() => availableUndoItems.value.filter((item: Dict) => String(item?.undo_action_type || item?.action_type || "").toLowerCase() === "delete"));
 const liveDailyStats = computed(() => ({
   ...dailyStats.value,
   started: Math.max(0, Number(dailyStats.value.started || 0) + localSummaryAdjustments.started),
@@ -389,9 +606,10 @@ const liveDailyStats = computed(() => ({
   ended: Math.max(0, Number(dailyStats.value.ended || 0) + localSummaryAdjustments.ended),
 }));
 const liveOngoingCount = computed(() => Math.max(0, ongoing.value.length + localSummaryAdjustments.ongoing));
+const scopedRecords = computed(() => records.value.filter((record) => recordMatchesCurrentScope(record)));
 const recordTypeCounts = computed(() => {
   const counts: Record<string, number> = { maintenance: 0, change: 0, repair: 0 };
-  for (const record of records.value) {
+  for (const record of scopedRecords.value) {
     const type = record.work_type || "maintenance";
     if (Object.prototype.hasOwnProperty.call(counts, type)) counts[type] += 1;
   }
@@ -399,7 +617,7 @@ const recordTypeCounts = computed(() => {
 });
 const filteredRecords = computed(() => {
   const query = searchText.value.trim().toLowerCase();
-  return records.value.filter((record) => {
+  return scopedRecords.value.filter((record) => {
     if ((record.work_type || "maintenance") !== workType.value) return false;
     if (!query) return true;
     return [recordCardTitle(record), buildingForRecord(record), specialtyForRecord(record), sourceProgressForRecord(record)]
@@ -416,6 +634,8 @@ const filteredRows = computed<NoticeRow[]>(() => filteredRecords.value.map((reco
   status: recordStatusLabel(record),
   statusTone: recordStatusTone(record),
   selected: selectedKeys.has(recordKey(record)),
+  disabled: isRecordOngoing(record),
+  disabledReason: "已在进行中，请在右侧更新、结束或删除",
   raw: record,
 })));
 const selectedDraftRows = computed(() => {
@@ -445,6 +665,25 @@ function normalizeScopeValue(value: string, fallback = "ALL"): string {
   return match ? match[0] : fallback;
 }
 
+function normalizedRecordBuildingCodes(record: Dict): string[] {
+  const raw = Array.isArray(record?.building_codes) ? record.building_codes : [];
+  const codes: string[] = [];
+  for (const item of raw) {
+    const code = String(item || "").trim().toUpperCase();
+    if (buildingScopeCodes.includes(code) && !codes.includes(code)) codes.push(code);
+  }
+  return buildingScopeCodes.filter((code) => codes.includes(code));
+}
+
+function recordMatchesCurrentScope(record: Dict): boolean {
+  const scope = normalizeScopeValue(currentScope.value || "ALL");
+  if (scope === "ALL") return true;
+  const codes = normalizedRecordBuildingCodes(record);
+  if (!codes.length) return true;
+  if (scope === "CAMPUS") return codes.length >= 2;
+  return codes.length === 1 && codes[0] === scope;
+}
+
 function scopeLabel(value: string): string {
   const normalized = normalizeScopeValue(value, "ALL");
   const found = [...visibleScopeOptions.value, { value: "ALL", label: "全部" }].find((item) => normalizeScopeValue(item.value, "") === normalized);
@@ -468,7 +707,7 @@ function todayInput(hour: number, minute: number): string {
 
 function toDatetimeLocal(value: string): string {
   const text = String(value || "").trim();
-  const m = text.match(/(\d{4})[/-](\d{1,2})[/-](\d{1,2})\D+(\d{1,2})[:点](\d{1,2})?/);
+  const m = text.match(/(\d{4})[年/-](\d{1,2})[月/-](\d{1,2})日?\D+(\d{1,2})[：:点](\d{1,2})?/);
   if (!m) return text.includes("T") ? text.slice(0, 16) : "";
   return `${m[1]}-${m[2].padStart(2, "0")}-${m[3].padStart(2, "0")}T${m[4].padStart(2, "0")}:${(m[5] || "00").padStart(2, "0")}`;
 }
@@ -521,6 +760,21 @@ function specialtyForRecord(record: Dict): string {
   return f["专业类别"] || "";
 }
 
+function stripNonPlanTitleSuffix(title: string): string {
+  return String(title || "").trim().replace(/（非计划性）$|（非计划）$/u, "").trim();
+}
+
+function appendNonPlanTitleSuffix(title: string, enabled: boolean): string {
+  const value = String(title || "").trim();
+  if (!enabled || !value) return value;
+  return `${stripNonPlanTitleSuffix(value)}${nonPlanTitleSuffix}`;
+}
+
+function manualDraftTitle(draft: Dict, type: string): string {
+  const title = String(draft.title || draft.content || "").trim();
+  return type === "maintenance" ? appendNonPlanTitleSuffix(title, Boolean(draft.non_plan)) : title;
+}
+
 function buildingForRecord(record: Dict): string {
   const f = fieldsOf(record);
   if (record.manual) return f["楼栋"] || f["变更楼栋"] || f["所属数据中心/楼栋-使用"] || "";
@@ -552,6 +806,21 @@ function sourceActionLabel(record: Dict): string {
   return sourceActionForRecord(record) === "start" ? "开始" : "更新";
 }
 
+function draftActionForRecord(record: Dict, draft: Dict): string {
+  if (record?.manual && (record.work_type || "maintenance") === "change") {
+    const action = String(draft?.parsed_action || "").toLowerCase();
+    if (["start", "update", "end"].includes(action)) return action;
+  }
+  return sourceActionForRecord(record);
+}
+
+function draftActionLabel(record: Dict, draft: Dict): string {
+  const action = draftActionForRecord(record, draft);
+  if (action === "end") return "结束";
+  if (action === "update") return "更新";
+  return "开始";
+}
+
 function recordStatusLabel(record: Dict): string {
   const key = recordKey(record);
   const job = jobStates.get(key);
@@ -559,7 +828,7 @@ function recordStatusLabel(record: Dict): string {
   if (job?.phase === "failed") return "提交失败";
   if (job?.phase === "success") return "已提交";
   if (selectedKeys.has(key)) return "已加入待发起";
-  if (isRecordOngoing(record)) return "进行中 · 右侧处理";
+  if (isRecordOngoing(record)) return "已在进行中 · 右侧处理";
   const progress = sourceProgressForRecord(record);
   if (!progress || progress === "未开始") return "待发起";
   return `${progress} · 可更新`;
@@ -589,6 +858,30 @@ function targetRecordIdForOngoing(item: Dict): string {
 
 function ongoingLineKey(item: Dict): string {
   return String(item.active_item_id || item.record_id || item.target_record_id || item.feishu_record_id || item.raw_record_id || "").trim();
+}
+
+function isOngoingExpanded(item: Dict): boolean {
+  const key = ongoingLineKey(item);
+  return Boolean(key && activeOngoingKey.value === key);
+}
+
+function expandOngoingCard(item: Dict): void {
+  const key = ongoingLineKey(item);
+  if (key) activeOngoingKey.value = key;
+}
+
+function toggleOngoingCard(item: Dict): void {
+  const key = ongoingLineKey(item);
+  if (!key) return;
+  activeOngoingKey.value = activeOngoingKey.value === key ? "" : key;
+}
+
+function closedLineKey(item: Dict): string {
+  return `closed:${item.key || item.active_item_id || item.target_record_id || item.feishu_record_id || item.title || ""}`;
+}
+
+function undoLineKey(item: Dict): string {
+  return `undo:${item.undo_id || item.active_item_id || item.target_record_id || item.record_id || item.key || item.title || ""}`;
 }
 
 function sourceRecordIdForOngoing(item: Dict, targetRecordId = ""): string {
@@ -648,6 +941,7 @@ function manualDraftDefaults(type: string): Dict {
     specialty: "",
     level: "",
     maintenance_cycle: "",
+    non_plan: false,
     start_time: "",
     end_time: "",
     location: "",
@@ -671,6 +965,7 @@ function manualDraftDefaults(type: string): Dict {
 
 function manualRecordFromDraft(key: string, draft: Dict): Dict {
   const type = draft.work_type || "maintenance";
+  const title = manualDraftTitle(draft, type);
   return {
     manual: true,
     manual_key: key,
@@ -678,9 +973,9 @@ function manualRecordFromDraft(key: string, draft: Dict): Dict {
     source_record_id: "",
     work_type: type,
     notice_type: type === "change" ? "设备变更" : type === "repair" ? "设备检修" : "维保通告",
-    title: draft.title || draft.content || `手动${workTypeLabel(type)}通告`,
+    title: title || `手动${workTypeLabel(type)}通告`,
     display_fields: {
-      "手动标题": draft.title || draft.content || "",
+      "手动标题": title,
       "楼栋": draft.building || "",
       "变更楼栋": draft.building || "",
       "所属数据中心/楼栋-使用": draft.building || "",
@@ -688,7 +983,10 @@ function manualRecordFromDraft(key: string, draft: Dict): Dict {
       "专业": draft.specialty || "",
       "所属专业": draft.specialty || "",
       "维护周期": draft.maintenance_cycle || "",
+      "非计划性": draft.non_plan ? "是" : "",
     },
+    target_record_id: draft.target_record_id || draft.record_id || "",
+    building_codes: Array.isArray(draft.building_codes) ? draft.building_codes : [],
   };
 }
 
@@ -703,7 +1001,7 @@ function repairDraftDefaults(record: Dict): Dict {
     specialty: memory.specialty || specialtyForRecord(record),
     reason: memory.reason || firstRepairField(record, ["故障原因", "故障维修原因"]),
     impact: memory.impact || "",
-    progress: "",
+    progress: memory.progress || "",
     repair_device: memory.repair_device || repairDeviceText(record),
     repair_fault: memory.repair_fault || firstRepairField(record, ["维修故障", "故障维修原因"]),
     fault_type: memory.fault_type || firstRepairField(record, ["故障类型"]) || "设备故障",
@@ -744,13 +1042,17 @@ function getDraft(record: Dict): Dict {
         specialty: memory.specialty || specialtyForRecord(record),
         level: memory.level || levelForRecord(record),
         maintenance_cycle: f["维护周期"] || "",
-        start_time: isChange ? (toDatetimeLocal(f["变更开始日期（阿里）"]) || todayInput(9, 30)) : todayInput(9, 30),
-        end_time: isChange ? (toDatetimeLocal(f["变更结束日期（阿里）"]) || todayInput(18, 30)) : todayInput(18, 30),
+        start_time: isChange
+          ? (toDatetimeLocal(f["变更开始日期（阿里）"] || f["计划开始日期（阿里）"] || f["计划开始"] || f["计划开始时间"] || f["计划延迟开始日期"]) || todayInput(9, 30))
+          : todayInput(9, 30),
+        end_time: isChange
+          ? (toDatetimeLocal(f["变更结束日期（阿里）"] || f["计划结束日期（阿里）"] || f["计划结束"] || f["计划结束时间"] || f["计划延迟结束日期"]) || todayInput(18, 30))
+          : todayInput(18, 30),
         location: memory.location || "",
         content: isChange ? (memory.content || titleForRecord(record)) : (memory.content || ""),
         reason: memory.reason || "",
         impact: memory.impact || defaults.impact,
-        progress: defaults.progress,
+        progress: memory.progress || defaults.progress,
         zhihang_involved: Boolean(zhihangMemory.zhihang_involved),
         zhihang_record_id: zhihangMemory.zhihang_record_id || "",
         zhihang_title: zhihangMemory.zhihang_title || "",
@@ -868,6 +1170,7 @@ async function loadWorkbench(): Promise<void> {
     if (requestSeq !== workbenchLoadSeq || requestScope !== currentScope.value) return;
     records.value = data.records || [];
     ongoing.value = data.ongoing || [];
+    pruneOngoingExpansion();
     zhihangRecords.value = data.zhihang_change_records || [];
     dailySummary.value = data.daily_summary || { date: "", items: [], stats: {} };
     resetLocalSummaryAdjustments();
@@ -877,6 +1180,7 @@ async function loadWorkbench(): Promise<void> {
       workType.value = resolveInitialWorkType(data.default_work_type || workType.value);
     }
     syncText.value = data.source_snapshot_ready === false ? "后台正在准备数据" : `数据 ${data.last_loaded_at || "已就绪"}`;
+    await loadAvailableUndos(requestScope, requestSeq);
     pruneSelection();
   } catch (error: any) {
     if (requestSeq !== workbenchLoadSeq || requestScope !== currentScope.value) return;
@@ -884,6 +1188,22 @@ async function loadWorkbench(): Promise<void> {
   } finally {
     if (requestSeq === workbenchLoadSeq && requestScope === currentScope.value) {
       loading.value = false;
+    }
+  }
+}
+
+async function loadAvailableUndos(scope = currentScope.value, requestSeq = workbenchLoadSeq): Promise<void> {
+  if (!scope) {
+    availableUndoItems.value = [];
+    return;
+  }
+  try {
+    const data = await api(`/api/notice-undo/available?scope=${encodeURIComponent(scope)}`);
+    if (requestSeq !== workbenchLoadSeq || scope !== currentScope.value) return;
+    availableUndoItems.value = Array.isArray(data.items) ? data.items : [];
+  } catch {
+    if (requestSeq === workbenchLoadSeq && scope === currentScope.value) {
+      availableUndoItems.value = [];
     }
   }
 }
@@ -903,7 +1223,12 @@ function selectWorkType(value: string): void {
 function pruneSelection(): void {
   const valid = new Set(records.value.map(recordKey));
   for (const key of Array.from(selectedKeys)) {
-    if (!valid.has(key) && !isManualKey(key)) selectedKeys.delete(key);
+    if (!valid.has(key) && !isManualKey(key)) {
+      selectedKeys.delete(key);
+      continue;
+    }
+    const record = records.value.find((item) => recordKey(item) === key);
+    if (record && isRecordOngoing(record)) selectedKeys.delete(key);
   }
   saveDrafts();
   pruneRuntimeState();
@@ -925,7 +1250,14 @@ function removeOngoingLine(key: string): boolean {
   const before = ongoing.value.length;
   ongoing.value = ongoing.value.filter((item) => ongoingLineKey(item) !== key);
   ongoingEdits.delete(key);
+  if (activeOngoingKey.value === key) activeOngoingKey.value = "";
   return ongoing.value.length !== before;
+}
+
+function pruneOngoingExpansion(): void {
+  if (!activeOngoingKey.value) return;
+  const exists = ongoing.value.some((item) => ongoingLineKey(item) === activeOngoingKey.value);
+  if (!exists) activeOngoingKey.value = "";
 }
 
 function terminalPhase(phase: string): boolean {
@@ -937,6 +1269,12 @@ function activeLineKeys(): Set<string> {
   for (const item of ongoing.value) {
     const key = ongoingLineKey(item);
     if (key) keys.add(key);
+  }
+  for (const item of closedSummaryItems.value) {
+    if (item.undo_available) keys.add(undoLineKey(item));
+  }
+  for (const item of deletedUndoItems.value) {
+    keys.add(undoLineKey(item));
   }
   return keys;
 }
@@ -999,11 +1337,13 @@ function returnToHome(): void {
   isWorkbench.value = false;
   currentScope.value = "";
   activeDraftKey.value = "";
+  activeOngoingKey.value = "";
   selectedKeys.clear();
   records.value = [];
   ongoing.value = [];
   zhihangRecords.value = [];
   dailySummary.value = { date: "", items: [], stats: {} };
+  availableUndoItems.value = [];
   resetLocalSummaryAdjustments();
   syncText.value = "请选择功能";
   const url = new URL(window.location.href);
@@ -1022,11 +1362,13 @@ function switchScope(scope: string): void {
   isWorkbench.value = true;
   userSelectedWorkType.value = false;
   activeDraftKey.value = "";
+  activeOngoingKey.value = "";
   ongoingEdits.clear();
   records.value = [];
   ongoing.value = [];
   zhihangRecords.value = [];
   dailySummary.value = { date: "", items: [], stats: {} };
+  availableUndoItems.value = [];
   resetLocalSummaryAdjustments();
   syncText.value = "切换中";
   const url = new URL(window.location.href);
@@ -1050,6 +1392,7 @@ function draftSummary(record: Dict, draft: Dict): string {
   return [
     draft.specialty || specialtyForRecord(record),
     draft.maintenance_cycle || fieldsOf(record)["维护周期"],
+    draft.non_plan ? "非计划性" : "",
     draft.location,
     timeRange,
   ].filter(Boolean).join(" · ");
@@ -1058,9 +1401,13 @@ function draftSummary(record: Dict, draft: Dict): string {
 function toggleRecordSelection(row: NoticeRow | undefined): void {
   const key = row?.id || "";
   if (!key) return;
+  const record = draftRecordForKey(key);
+  if (row?.disabled || (record && isRecordOngoing(record))) {
+    syncText.value = "该事项已在进行中，请在右侧卡片更新、结束或删除";
+    return;
+  }
   selectedKeys.add(key);
   pinDraftInMiddlePanel(key);
-  const record = draftRecordForKey(key);
   if (record) getDraft(record);
   saveDrafts();
 }
@@ -1102,36 +1449,177 @@ function sectionValue(sections: Dict, names: string[], fallback = ""): string {
   return fallback;
 }
 
-function parsePastedNotice(): void {
-  const text = pasteText.value.trim();
-  if (!text) return;
-  const sections = parseSections(text);
-  const type = /设备检修|检修通告/.test(text) ? "repair" : /设备变更|变更通告/.test(text) ? "change" : "maintenance";
+function pastedNoticeStatus(text: string): string {
+  const match = String(text || "").match(/状态\s*[：:]\s*(开始|更新|结束)/);
+  return match?.[1] || "开始";
+}
+
+function inferBuildingText(...values: string[]): string {
+  const text = values.filter(Boolean).join("\n").toUpperCase();
+  const patterns: Array<[RegExp, string]> = [
+    [/110\s*(?:站|KV)?|110站/i, "110站"],
+    [/(?:A楼|A栋|\bA\b)/i, "A楼"],
+    [/(?:B楼|B栋|\bB\b)/i, "B楼"],
+    [/(?:C楼|C栋|\bC\b)/i, "C楼"],
+    [/(?:D楼|D栋|\bD\b)/i, "D楼"],
+    [/(?:E楼|E栋|\bE\b)/i, "E楼"],
+    [/(?:H楼|H栋|\bH\b)/i, "H楼"],
+    [/园区|ABC|A\/B\/C|A、B、C/i, "园区"],
+  ];
+  for (const [pattern, label] of patterns) if (pattern.test(text)) return label;
+  return "";
+}
+
+function splitNoticeTimeRange(value: string): { start: string; end: string } {
+  const text = String(value || "").trim();
+  if (!text) return { start: "", end: "" };
+  const sameDayRange = text.match(
+    /(\d{4}[年/-]\d{1,2}[月/-]\d{1,2}[日]?)\s*(\d{1,2}[：:点]\d{1,2})\s*(?:-|至|~|～|—|--)\s*(\d{1,2}[：:点]\d{1,2})/
+  );
+  if (sameDayRange) {
+    const datePrefix = sameDayRange[1];
+    return {
+      start: toDatetimeLocal(`${datePrefix} ${sameDayRange[2]}`),
+      end: toDatetimeLocal(`${datePrefix} ${sameDayRange[3]}`),
+    };
+  }
+  const parts = text.split(/\s*(?:至|~|～|—|--)\s*/).filter(Boolean);
+  if (parts.length >= 2) {
+    const startRaw = parts[0];
+    const endRaw = parts.slice(1).join(" ");
+    const start = toDatetimeLocal(startRaw);
+    let end = toDatetimeLocal(endRaw);
+    if (!end && start) {
+      const datePrefix = startRaw.match(/(\d{4}[年/-]\d{1,2}[月/-]\d{1,2}[日]?)/)?.[1] || "";
+      const endClock = endRaw.match(/(\d{1,2})[：:点](\d{1,2})?/)?.[0] || "";
+      if (datePrefix && endClock) end = toDatetimeLocal(`${datePrefix} ${endClock}`);
+    }
+    return { start, end };
+  }
+  const matches = [...text.matchAll(/(\d{4}[年/-]\d{1,2}[月/-]\d{1,2}[日]?\s*\d{1,2}[：:点]\d{0,2})/g)].map((item) => item[1]);
+  if (matches.length >= 2) return { start: toDatetimeLocal(matches[0]), end: toDatetimeLocal(matches[1]) };
+  return { start: toDatetimeLocal(text), end: "" };
+}
+
+function parsedActionFromStatus(status: string): string {
+  if (status === "更新") return "update";
+  if (status === "结束") return "end";
+  return "start";
+}
+
+function parsedActionLabel(action: string): string {
+  if (action === "update") return "更新";
+  if (action === "end") return "结束";
+  return "开始";
+}
+
+function completeParsedNoticeDraft(type: string, draft: Dict, options: Dict = {}): void {
   const key = `manual:${type}:${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  const draft = manualDraftDefaults(type);
-  draft.title = sectionValue(sections, ["标题"]);
-  draft.location = sectionValue(sections, ["地点", "位置"]);
-  draft.specialty = sectionValue(sections, ["专业", "专业类别"]);
-  draft.reason = sectionValue(sections, ["原因", "故障原因"]);
-  draft.impact = sectionValue(sections, ["影响", "影响范围"]);
-  draft.progress = sectionValue(sections, ["进度", "完成情况"]);
-  draft.maintenance_cycle = sectionValue(sections, ["维保周期", "维护周期"]);
-  draft.level = sectionValue(sections, ["等级", "变更等级", "紧急程度"]);
-  draft.content = type === "repair" ? "" : sectionValue(sections, ["内容"], draft.title);
-  draft.repair_device = sectionValue(sections, ["维修设备"]);
-  draft.repair_fault = sectionValue(sections, ["维修故障"]);
-  draft.fault_type = sectionValue(sections, ["故障类型"]);
-  draft.repair_mode = sectionValue(sections, ["维修方式"]);
-  draft.discovery = sectionValue(sections, ["故障发现方式"]);
-  draft.symptom = sectionValue(sections, ["故障现象"]);
-  draft.solution = sectionValue(sections, ["解决方案"]);
+  Object.assign(draft, options);
   drafts.set(key, draft);
   selectedKeys.add(key);
   pinDraftInMiddlePanel(key);
   workType.value = type;
   pasteText.value = "";
+  pendingChangeTargetSelection.value = null;
   showPasteParser.value = false;
+  pasteParseLine.value = `已解析为${workTypeLabel(type)}${parsedActionLabel(draft.parsed_action || "start")}通告。`;
+  pasteParseStatus.value = "success";
   saveDrafts();
+}
+
+async function parsePastedNotice(): Promise<void> {
+  const text = pasteText.value.trim();
+  if (!text) return;
+  pasteParseBusy.value = true;
+  pasteParseLine.value = "正在解析通告...";
+  pasteParseStatus.value = "";
+  pendingChangeTargetSelection.value = null;
+  try {
+    const sections = parseSections(text);
+    const type = /设备检修|检修通告/.test(text) ? "repair" : /设备变更|变更通告/.test(text) ? "change" : "maintenance";
+    const draft = manualDraftDefaults(type);
+    const status = pastedNoticeStatus(text);
+    const action = parsedActionFromStatus(status);
+    const timeRange = splitNoticeTimeRange(sectionValue(sections, ["时间"]));
+    draft.parsed_action = action;
+    draft.title = type === "change" ? sectionValue(sections, ["名称", "标题"]) : sectionValue(sections, ["标题", "名称"]);
+    draft.non_plan = /（非计划性）|（非计划）/.test(draft.title);
+    draft.location = sectionValue(sections, ["地点", "位置"]);
+    draft.specialty = sectionValue(sections, ["专业", "专业类别"]);
+    draft.reason = sectionValue(sections, ["原因", "故障原因"]);
+    draft.impact = sectionValue(sections, ["影响", "影响范围"]);
+    draft.progress = sectionValue(sections, ["进度", "完成情况"]);
+    draft.maintenance_cycle = sectionValue(sections, ["维保周期", "维护周期"]);
+    draft.level = sectionValue(sections, ["等级", "变更等级", "紧急程度"]);
+    draft.start_time = timeRange.start || draft.start_time;
+    draft.end_time = timeRange.end || draft.end_time;
+    draft.building = sectionValue(sections, ["楼栋", "变更楼栋", "所属楼栋"]) || inferBuildingText(draft.title, draft.location, text);
+    draft.content = type === "repair" ? "" : sectionValue(sections, ["内容"], draft.title);
+    draft.repair_device = sectionValue(sections, ["维修设备"]);
+    draft.repair_fault = sectionValue(sections, ["维修故障"]);
+    draft.fault_type = sectionValue(sections, ["故障类型"]);
+    draft.repair_mode = sectionValue(sections, ["维修方式"]);
+    draft.discovery = sectionValue(sections, ["故障发现方式"]);
+    draft.symptom = sectionValue(sections, ["故障现象"]);
+    draft.solution = sectionValue(sections, ["解决方案"]);
+    if (type === "change" && action !== "start") {
+      if (!draft.title || !draft.start_time || !draft.end_time) {
+        throw new Error("变更更新/结束通告必须包含【名称】和【时间】两个时间点。");
+      }
+      const data = await api("/api/change-target-candidates", {
+        method: "POST",
+        body: JSON.stringify({
+          scope: currentScope.value || "ALL",
+          title: draft.title,
+          start_time: draft.start_time,
+          end_time: draft.end_time,
+          action,
+        }),
+      });
+      const candidates = Array.isArray(data.candidates) ? data.candidates : [];
+      if (candidates.length === 1) {
+        completeParsedNoticeDraft(type, draft, {
+          target_record_id: candidates[0].record_id || candidates[0].target_record_id || "",
+          record_id: candidates[0].record_id || candidates[0].target_record_id || "",
+          building: draft.building || candidates[0].building || "",
+          building_codes: candidates[0].building_codes || [],
+        });
+        return;
+      }
+      if (candidates.length > 1) {
+        pendingChangeTargetSelection.value = {
+          type,
+          draft,
+          action,
+          actionLabel: parsedActionLabel(action),
+          candidates,
+        };
+        pasteParseLine.value = `找到 ${candidates.length} 条同名同日期设备变更记录，请选择要${parsedActionLabel(action)}的记录。`;
+        pasteParseStatus.value = "";
+        return;
+      }
+      throw new Error("未在设备变更目标表中找到同名同日期记录，不能作为更新/结束通告发送。");
+    }
+    completeParsedNoticeDraft(type, draft);
+  } catch (error: any) {
+    pasteParseLine.value = error?.message || "解析失败";
+    pasteParseStatus.value = "failed";
+  } finally {
+    pasteParseBusy.value = false;
+  }
+}
+
+function choosePastedChangeTarget(candidate: Dict): void {
+  const pending = pendingChangeTargetSelection.value;
+  if (!pending) return;
+  const draft = { ...(pending.draft || {}) };
+  completeParsedNoticeDraft(String(pending.type || "change"), draft, {
+    target_record_id: candidate.record_id || candidate.target_record_id || "",
+    record_id: candidate.record_id || candidate.target_record_id || "",
+    building: draft.building || candidate.building || "",
+    building_codes: candidate.building_codes || [],
+  });
 }
 
 async function importHistoricalMemory(): Promise<void> {
@@ -1173,6 +1661,13 @@ function bindZhihang(draft: Dict): void {
   saveDrafts();
 }
 
+function bindOngoingZhihang(item: Dict, recordId: string): void {
+  const change = zhihangRecords.value.find((record) => record.record_id === recordId);
+  setOngoingEdit(item, "zhihang_record_id", recordId);
+  setOngoingEdit(item, "zhihang_title", change?.title || "");
+  setOngoingEdit(item, "zhihang_progress", change?.progress || "");
+}
+
 function opId(key: string): string {
   return `${key}:${Date.now()}`;
 }
@@ -1182,8 +1677,8 @@ function buildStartPayload(key: string): Dict | null {
   const draft = drafts.get(key);
   if (!record || !draft) return null;
   const type = record.work_type || "maintenance";
-  const action = record.manual ? "start" : sourceActionForRecord(record);
-  const targetRecordId = targetRecordIdForRecord(record);
+  const action = record.manual ? draftActionForRecord(record, draft) : sourceActionForRecord(record);
+  const targetRecordId = record.manual ? String(draft.target_record_id || draft.record_id || "").trim() : targetRecordIdForRecord(record);
   return {
     action,
     scope: currentScope.value || "ALL",
@@ -1197,11 +1692,12 @@ function buildStartPayload(key: string): Dict | null {
     specialty: draft.specialty || specialtyForRecord(record),
     record_id: action === "start" ? record.record_id : targetRecordId,
     source_record_id: record.manual ? "" : record.record_id,
-    target_record_id: action === "update" ? targetRecordId : "",
+    target_record_id: action !== "start" ? targetRecordId : "",
     source_progress: sourceProgressForRecord(record),
-    building_codes: record.manual ? [] : (record.building_codes || []),
+    building_codes: record.manual ? (draft.building_codes || []) : (record.building_codes || []),
     building: record.manual ? (draft.building || "") : buildingForRecord(record),
-    title: record.manual ? (draft.title || "") : (type === "repair" ? draft.content : titleForRecord(record)),
+    title: record.manual ? manualDraftTitle(draft, type) : (type === "repair" ? draft.content : titleForRecord(record)),
+    non_plan: record.manual && type === "maintenance" ? Boolean(draft.non_plan) : false,
     level: record.manual ? (draft.level || "") : (type === "repair" ? (draft.level || "") : (type === "change" ? levelForRecord(record) : "")),
     start_time: draft.start_time,
     end_time: draft.end_time,
@@ -1230,6 +1726,11 @@ function buildStartPayload(key: string): Dict | null {
 async function sendStart(key: string): Promise<void> {
   const payload = buildStartPayload(key);
   if (!payload) return;
+  const record = draftRecordForKey(key);
+  if (record && !recordMatchesCurrentScope(record)) {
+    rememberJob(key, { text: "当前入口与通告楼栋不匹配，请切换到对应楼栋或园区后再发送", status: "failed", phase: "failed" });
+    return;
+  }
   if (payload.work_type === "maintenance" && payload.manual && !payload.maintenance_cycle) {
     rememberJob(key, { text: "纯手填维保必须选择维保周期", status: "failed", phase: "failed" });
     return;
@@ -1240,23 +1741,55 @@ async function sendStart(key: string): Promise<void> {
 
 function ongoingDraft(item: Dict): Dict {
   const id = ongoingLineKey(item);
-  if (!ongoingEdits.has(id)) ongoingEdits.set(id, { progress: item.progress || item.content || "" });
+  if (!ongoingEdits.has(id)) {
+    const timeRange = ongoingTimeRange(item);
+    ongoingEdits.set(id, {
+      title: item.title || item.content || "",
+      specialty: item.specialty || "",
+      maintenance_cycle: item.maintenance_cycle || "",
+      level: item.level || "",
+      start_time: timeRange.start,
+      end_time: timeRange.end,
+      location: item.location || "",
+      content: item.content || "",
+      reason: item.reason || "",
+      impact: item.impact || "",
+      progress: item.progress || item.content || "",
+      zhihang_involved: Boolean(item.zhihang_involved || item.zhihang_record_id),
+      zhihang_record_id: item.zhihang_record_id || "",
+      zhihang_title: item.zhihang_title || "",
+      zhihang_progress: item.zhihang_progress || "",
+      repair_device: item.repair_device || "",
+      repair_fault: item.repair_fault || "",
+      fault_type: item.fault_type || "",
+      repair_mode: item.repair_mode || "",
+      discovery: item.discovery || "",
+      symptom: item.symptom || "",
+      solution: item.solution || "",
+    });
+  }
   return ongoingEdits.get(id) || {};
 }
 
-function setOngoingEdit(item: Dict, key: string, value: string): void {
+function setOngoingEdit(item: Dict, key: string, value: any): void {
   const id = ongoingLineKey(item);
   const current = ongoingDraft(item);
   current[key] = value;
   ongoingEdits.set(id, current);
 }
 
+function draftValue(edit: Dict, key: string, fallback = ""): string {
+  if (Object.prototype.hasOwnProperty.call(edit, key)) return String(edit[key] ?? "");
+  return String(fallback ?? "");
+}
+
 function buildOngoingPayload(item: Dict, action: string): Dict {
   const edit = ongoingDraft(item);
   const targetRecordId = targetRecordIdForOngoing(item);
   const sourceRecordId = sourceRecordIdForOngoing(item, targetRecordId);
-  const timeRange = ongoingTimeRange(item);
   const workType = item.work_type || "maintenance";
+  const startTime = draftValue(edit, "start_time", ongoingTimeRange(item).start);
+  const endTime = draftValue(edit, "end_time", ongoingTimeRange(item).end);
   return {
     action,
     scope: currentScope.value || "ALL",
@@ -1266,28 +1799,32 @@ function buildOngoingPayload(item: Dict, action: string): Dict {
     target_record_id: targetRecordId,
     active_item_id: item.active_item_id || "",
     source_record_id: sourceRecordId,
-    title: item.title || item.content || "",
-    specialty: item.specialty || "",
+    title: draftValue(edit, "title", item.title || item.content || ""),
+    specialty: draftValue(edit, "specialty", item.specialty || ""),
     building: item.building || "",
     building_codes: Array.isArray(item.building_codes) ? item.building_codes : [],
-    maintenance_cycle: item.maintenance_cycle || "",
-    level: item.level || "",
-    start_time: timeRange.start,
-    end_time: timeRange.end,
-    location: edit.location || item.location || "",
-    content: edit.content || item.content || "",
-    reason: edit.reason || item.reason || "",
-    impact: edit.impact || item.impact || "",
-    progress: edit.progress || item.progress || "",
-    repair_device: workType === "repair" ? (edit.repair_device || item.repair_device || "") : "",
-    repair_fault: workType === "repair" ? (edit.repair_fault || item.repair_fault || "") : "",
-    fault_type: workType === "repair" ? (edit.fault_type || item.fault_type || "") : "",
-    repair_mode: workType === "repair" ? (edit.repair_mode || item.repair_mode || "") : "",
-    discovery: workType === "repair" ? (edit.discovery || item.discovery || "") : "",
-    symptom: workType === "repair" ? (edit.symptom || item.symptom || "") : "",
-    solution: workType === "repair" ? (edit.solution || item.solution || "") : "",
-    fault_time: workType === "repair" ? timeRange.end : "",
-    expected_time: workType === "repair" ? timeRange.start : "",
+    maintenance_cycle: draftValue(edit, "maintenance_cycle", item.maintenance_cycle || ""),
+    level: draftValue(edit, "level", item.level || ""),
+    start_time: startTime,
+    end_time: endTime,
+    location: draftValue(edit, "location", item.location || ""),
+    content: draftValue(edit, "content", item.content || ""),
+    reason: draftValue(edit, "reason", item.reason || ""),
+    impact: draftValue(edit, "impact", item.impact || ""),
+    progress: draftValue(edit, "progress", item.progress || ""),
+    zhihang_involved: workType === "change" ? Boolean(edit.zhihang_involved) : false,
+    zhihang_record_id: workType === "change" ? draftValue(edit, "zhihang_record_id", item.zhihang_record_id || "") : "",
+    zhihang_title: workType === "change" ? draftValue(edit, "zhihang_title", item.zhihang_title || "") : "",
+    zhihang_progress: workType === "change" ? draftValue(edit, "zhihang_progress", item.zhihang_progress || "") : "",
+    repair_device: workType === "repair" ? draftValue(edit, "repair_device", item.repair_device || "") : "",
+    repair_fault: workType === "repair" ? draftValue(edit, "repair_fault", item.repair_fault || "") : "",
+    fault_type: workType === "repair" ? draftValue(edit, "fault_type", item.fault_type || "") : "",
+    repair_mode: workType === "repair" ? draftValue(edit, "repair_mode", item.repair_mode || "") : "",
+    discovery: workType === "repair" ? draftValue(edit, "discovery", item.discovery || "") : "",
+    symptom: workType === "repair" ? draftValue(edit, "symptom", item.symptom || "") : "",
+    solution: workType === "repair" ? draftValue(edit, "solution", item.solution || "") : "",
+    fault_time: workType === "repair" ? endTime : "",
+    expected_time: workType === "repair" ? startTime : "",
     operation_id: opId(`${item.active_item_id || item.record_id}:${action}`),
   };
 }
@@ -1435,7 +1972,7 @@ function startJobSse(): void {
           rememberJob(key, {
             phase,
             status: phase === "success" ? "success" : phase === "failed" ? "failed" : "busy",
-            text: phase === "success" ? "成功" : job.error || job.message || phase,
+            text: phase === "success" ? "成功" : job.error || job.message || job.upload_message || phase,
           });
           if (terminalPhase(phase)) {
             clearFallbackPoll(key);
@@ -1495,7 +2032,7 @@ function startActiveItemsSse(): void {
         return;
       }
       if (String(payload.scope || "") !== scope) return;
-      const signature = String(payload.scope_signature || "");
+      const signature = String(payload.display_signature || payload.scope_signature || "");
       if (!signature) return;
       if (!lastActiveItemsSignature) {
         lastActiveItemsSignature = signature;
@@ -1552,9 +2089,12 @@ async function deleteOngoing(item: Dict): Promise<void> {
         work_type: item.work_type || "maintenance",
         notice_type: item.notice_type || "",
         active_item_id: item.active_item_id || "",
-        record_id: sourceRecordId || targetRecordId,
+        record_id: targetRecordId || sourceRecordId,
         target_record_id: targetRecordId,
         source_record_id: sourceRecordId,
+        title: item.title || item.content || "",
+        building: item.building || "",
+        building_codes: Array.isArray(item.building_codes) ? item.building_codes : [],
       }),
     });
     removeOngoingLine(key);
@@ -1563,6 +2103,40 @@ async function deleteOngoing(item: Dict): Promise<void> {
   } catch (error: any) {
     rememberJob(key, { text: error?.message || "删除失败", status: "failed", phase: "failed" });
   }
+}
+
+async function applyUndo(item: Dict): Promise<void> {
+  const undoId = String(item.undo_id || "").trim();
+  if (!undoId) return;
+  const key = undoLineKey(item);
+  if (isLineBusy(key)) return;
+  const title = String(item.title || ongoingTitle(item) || "该通告").trim();
+  const label = String(item.undo_label || "回退上一步").trim();
+  if (!window.confirm(`确认对「${title}」执行${label}？\n\n回退会同步恢复本地状态、Qt/前端展示和多维目标表记录。`)) return;
+  try {
+    rememberJob(key, { text: "已受理，正在回退", status: "busy", phase: "undo_queued" });
+    const data = await api(`/api/notice-undo/${encodeURIComponent(undoId)}/apply`, {
+      method: "POST",
+      body: JSON.stringify({ scope: currentScope.value || "ALL" }),
+    });
+    rememberJob(key, {
+      job_id: data.job_id,
+      payload: { action: "undo", undo_id: undoId },
+      text: "已受理，正在回退",
+      status: "busy",
+      phase: data.initial_phase || "undo_queued",
+    });
+    watchJob(data.job_id, key);
+  } catch (error: any) {
+    rememberJob(key, { text: error?.message || "回退失败", status: "failed", phase: "failed" });
+  }
+}
+
+function formatUndoTime(value: any): string {
+  const numeric = Number(value || 0);
+  const date = numeric > 0 ? new Date(numeric * 1000) : new Date(String(value || ""));
+  if (Number.isNaN(date.getTime())) return "-";
+  return date.toLocaleString("zh-CN", { hour12: false });
 }
 
 function ongoingTitle(item: Dict): string {
@@ -1577,13 +2151,34 @@ function ongoingMeta(item: Dict): string {
   return [item.building, item.specialty, item.maintenance_cycle, item.time_str || item.start_time].filter(Boolean).join(" · ");
 }
 
+function ongoingCompactSummary(item: Dict): string {
+  const edit = ongoingEdits.get(ongoingLineKey(item)) || {};
+  const progress = draftValue(edit, "progress", item.progress || "");
+  const location = draftValue(edit, "location", item.location || "");
+  return [location, progress].filter(Boolean).join(" · ");
+}
+
 async function refreshRepair(): Promise<void> {
   repairRefreshing.value = true;
   try {
     await api(`/api/repair-refresh?scope=${encodeURIComponent(currentScope.value || "ALL")}`);
     await loadWorkbench();
+  } catch (error: any) {
+    syncText.value = error?.message || "刷新检修失败";
   } finally {
     repairRefreshing.value = false;
+  }
+}
+
+async function refreshChange(): Promise<void> {
+  changeRefreshing.value = true;
+  try {
+    await api(`/api/change-refresh?scope=${encodeURIComponent(currentScope.value || "ALL")}`);
+    await loadWorkbench();
+  } catch (error: any) {
+    syncText.value = error?.message || "刷新变更失败";
+  } finally {
+    changeRefreshing.value = false;
   }
 }
 
@@ -1909,6 +2504,44 @@ button:disabled {
   padding: 10px;
 }
 
+.target-choice-panel {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  background: #eff6ff;
+}
+
+.target-choice-panel p {
+  margin: 4px 0 0;
+  color: #475569;
+  font-size: 13px;
+}
+
+.target-choice {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px solid #dbe3ee;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #0f172a;
+  text-align: left;
+  cursor: pointer;
+}
+
+.target-choice:hover {
+  border-color: #2563eb;
+}
+
+.target-choice span {
+  color: #64748b;
+  font-size: 12px;
+}
+
 .segmented {
   display: inline-flex;
   gap: 4px;
@@ -1974,6 +2607,17 @@ button:disabled {
   font-size: 17px;
 }
 
+.panel-head.compact {
+  position: static;
+  margin: 4px 0 0;
+  padding: 10px 0 6px;
+  backdrop-filter: none;
+}
+
+.panel-head.compact h3 {
+  font-size: 14px;
+}
+
 .panel-head span,
 .card-title span {
   flex: 0 0 auto;
@@ -2019,6 +2663,23 @@ button:disabled {
 .ongoing-card {
   display: grid;
   gap: 8px;
+  transition: border-color 0.14s ease, background-color 0.14s ease, box-shadow 0.14s ease;
+}
+
+.ongoing-card.collapsed {
+  padding: 9px 10px;
+  cursor: pointer;
+  background: #fbfdff;
+}
+
+.ongoing-card.collapsed:hover {
+  border-color: #bfdbfe;
+  background: #f8fbff;
+}
+
+.ongoing-card.active {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.12);
 }
 
 .ongoing-card p {
@@ -2027,8 +2688,57 @@ button:disabled {
   line-height: 1.45;
 }
 
+.ongoing-compact {
+  display: grid;
+  gap: 6px;
+}
+
+.ongoing-compact p {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  color: #475569;
+}
+
+.ongoing-expanded {
+  display: grid;
+  gap: 8px;
+}
+
 .ongoing-card textarea {
   min-height: 54px;
+}
+
+.undo-line {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.closed-today {
+  display: grid;
+  gap: 8px;
+}
+
+.closed-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+  border: 1px solid #dbe3ee;
+  border-radius: 8px;
+  background: #fbfdff;
+}
+
+.closed-card p {
+  margin: 3px 0 0;
+  color: #64748b;
+  font-size: 12px;
 }
 
 .draft-card.active {
@@ -2068,6 +2778,17 @@ label {
   gap: 5px;
   color: #475569;
   font-size: 13px;
+}
+
+.checkbox-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.checkbox-field input {
+  width: auto;
+  flex: 0 0 auto;
 }
 
 input,

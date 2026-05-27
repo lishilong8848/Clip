@@ -105,6 +105,14 @@ def create_bitable_record_by_payload(*args, **kwargs):
         )
 
 
+def create_bitable_record_fields(*args, **kwargs):
+    with _feishu_lock:
+        create_fn = getattr(service_registry.feishu_module, "create_bitable_record_fields", None)
+        if callable(create_fn):
+            return create_fn(*args, **kwargs)
+        return False, "当前服务不支持按字段恢复创建记录"
+
+
 def batch_create_bitable_records_by_payload(*args, **kwargs):
     with _feishu_lock:
         batch_fn = getattr(

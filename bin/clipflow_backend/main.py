@@ -27,12 +27,16 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from clipflow_backend.api_models import (
     APIModel,
     AuthPermissionsSaveRequest,
+    ChangeTargetLookupRequest,
     GenerateTemplatesRequest,
     HandoverLinksAuthRequest,
     HandoverLinksSaveRequest,
     HandoverPasswordResetConfirmRequest,
     MockPressureRequest,
+    NoticeMemoryHistorySaveRequest,
+    NoticeMemoryHistoryScanRequest,
     NoticeMemoryImportRequest,
+    NoticeUndoApplyRequest,
     OngoingDeleteRequest,
     PermissionRequestConfirm,
     PermissionRequestCreate,
@@ -57,7 +61,6 @@ from lan_bitable_template_portal.server import (
     DEFAULT_PORT,
     MAX_JSON_BODY_BYTES,
     PortalHandler,
-    PortalServerController,
     find_available_port,
     portal_asset_file,
     portal_frontend_dist_enabled,
@@ -96,36 +99,6 @@ try:
     from apscheduler.schedulers.background import BackgroundScheduler
 except Exception:
     BackgroundScheduler = None
-
-
-HOP_BY_HOP_HEADERS = {
-    "connection",
-    "keep-alive",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "te",
-    "trailer",
-    "transfer-encoding",
-    "upgrade",
-    "content-encoding",
-    "content-length",
-}
-
-
-def _find_loopback_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
-def _response_headers(headers: httpx.Headers) -> dict[str, str]:
-    result: dict[str, str] = {}
-    for name, value in headers.items():
-        lower = name.lower()
-        if lower in HOP_BY_HOP_HEADERS:
-            continue
-        result[name] = value
-    return result
 
 
 def _wait_until_listening(host: str, port: int, *, timeout_s: float = 3.0) -> bool:
@@ -175,10 +148,6 @@ def _send_text_to_open_ids_guarded(text: str, recipients: list[str]) -> tuple[bo
     return send_text_to_open_ids(text, clean_recipients)
 
 
-def _legacy_adapter_enabled() -> bool:
-    return os.environ.get("CLIPFLOW_FASTAPI_LEGACY_ADAPTER") == "1"
-
-
 def _queue_stats() -> dict:
     qt_outbox_counts: dict[str, int] = {}
     try:
@@ -206,6 +175,8 @@ def _queue_stats() -> dict:
         source_refresh_inflight = bool(PortalHandler.source_refresh_inflight)
     with PortalHandler.repair_refresh_lock:
         repair_refresh_inflight = bool(PortalHandler.repair_refresh_inflight)
+    with PortalHandler.change_refresh_lock:
+        change_refresh_inflight = bool(PortalHandler.change_refresh_inflight)
     return {
         "message_queue_size": message_queue_size,
         "message_worker_count": int(PortalHandler.message_worker_count or 0),
@@ -223,6 +194,7 @@ def _queue_stats() -> dict:
         ),
         "source_refresh_inflight": source_refresh_inflight,
         "repair_refresh_inflight": repair_refresh_inflight,
+        "change_refresh_inflight": change_refresh_inflight,
         "payload_cache_entries": len(PortalHandler.payload_cache),
         "runtime_limits": PortalHandler.runtime_limits(),
         "runtime_pressure": PortalHandler.runtime_pressure(),
@@ -453,18 +425,12 @@ def _build_backend_preflight_report(service: MaintenancePortalService) -> dict:
         "warnings": warnings,
         "checks": checks,
         "external_guard": _external_guard_status(),
-        "legacy_adapter_enabled": _legacy_adapter_enabled(),
     }
     return report
 
 
 class FastAPIPortalController:
-    """FastAPI/Uvicorn front controller.
-
-    Native FastAPI routes are the default runtime path. The legacy
-    BaseHTTPRequestHandler portal can still be enabled with
-    CLIPFLOW_FASTAPI_LEGACY_ADAPTER=1 as a temporary fallback.
-    """
+    """FastAPI/Uvicorn front controller for the production portal."""
 
     def __init__(
         self,
@@ -479,8 +445,6 @@ class FastAPIPortalController:
         self.app_token = str(app_token or DEFAULT_APP_TOKEN).strip()
         self.table_id = str(table_id or DEFAULT_TABLE_ID).strip()
         self.bound_port: int | None = None
-        self._legacy_controller: PortalServerController | None = None
-        self._legacy_url = ""
         self._app: FastAPI | None = None
         self._server = None
         self._thread: threading.Thread | None = None
@@ -586,6 +550,11 @@ class FastAPIPortalController:
                 return oauth_response
             return self._static_file_response(request, portal_index_file(), html=True)
 
+        @app.get("/admin/history-memory")
+        @app.get("/admin/history-memory/")
+        async def admin_history_memory_page(request: Request):
+            return self._static_file_response(request, portal_index_file(), html=True)
+
         @app.get("/assets/{asset_path:path}")
         async def assets(asset_path: str, request: Request):
             relative = Path(*str(asset_path or "").split("/"))
@@ -661,26 +630,17 @@ class FastAPIPortalController:
                 request.state.cache_hit = True
                 return cached
             request.state.cache_miss = True
-            legacy_alive = bool(
-                self._legacy_controller
-                and self._legacy_controller.thread
-                and self._legacy_controller.thread.is_alive()
-            )
             payload = {
                 "ok": True,
                 "data": {
                     "service": "clipflow_backend",
                     "backend": "fastapi",
-                    "legacy_adapter": legacy_alive,
                     "mock_external": _mock_external_enabled(),
                     "external_guard": _external_guard_status(),
                     "url": self.get_url(),
-                    "internal_url": self._legacy_url,
                     "frontend": {
-                        "vue_requested": os.environ.get("CLIPFLOW_FRONTEND_LEGACY") != "1",
                         "vue_ready": portal_frontend_dist_ready(),
                         "vue_enabled": portal_frontend_dist_enabled(),
-                        "legacy_forced": os.environ.get("CLIPFLOW_FRONTEND_LEGACY") == "1",
                     },
                     "time": time.time(),
                     "runtime": PortalHandler.state_store.get_backend_runtime("backend") or {},
@@ -802,13 +762,9 @@ class FastAPIPortalController:
                     **_queue_stats(),
                     "mock_external": _mock_external_enabled(),
                     "external_guard": _external_guard_status(),
-                    "legacy_adapter_enabled": _legacy_adapter_enabled(),
-                    "legacy_fallback_env": os.environ.get("CLIPFLOW_LEGACY_PORTAL", ""),
                     "frontend": {
-                        "vue_requested": os.environ.get("CLIPFLOW_FRONTEND_LEGACY") != "1",
                         "vue_ready": portal_frontend_dist_ready(),
                         "vue_enabled": portal_frontend_dist_enabled(),
-                        "legacy_forced": os.environ.get("CLIPFLOW_FRONTEND_LEGACY") == "1",
                     },
                     "last_loaded_at": last_loaded_at,
                     "last_loaded_ts": last_loaded_ts,
@@ -1308,9 +1264,9 @@ class FastAPIPortalController:
 
         @app.post("/api/notice-memory/import")
         async def notice_memory_import(request: Request):
-            session = self._current_session(request)
-            if session is None:
-                return self._auth_required_response()
+            admin_response, session = self._require_admin_response(request)
+            if admin_response is not None:
+                return admin_response
             try:
                 payload = (
                     await self._read_model_request(
@@ -1329,6 +1285,53 @@ class FastAPIPortalController:
                     scope=scope,
                     allowed_scopes=PortalHandler.auth_manager.session_scopes(session),
                     is_admin=PortalHandler.auth_manager.is_admin(session),
+                    imported_by=str(user.get("open_id") or ""),
+                )
+                PortalHandler.clear_payload_cache()
+                self._clear_read_cache()
+                return self._json_ok(request, session, result)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
+        @app.post("/api/admin/notice-memory/history-scan")
+        async def admin_notice_memory_history_scan(request: Request):
+            admin_response, session = self._require_admin_response(request)
+            if admin_response is not None:
+                return admin_response
+            try:
+                payload = (
+                    await self._read_model_request(
+                        request,
+                        NoticeMemoryHistoryScanRequest,
+                        max_bytes=256 * 1024,
+                    )
+                ).to_payload()
+                result = await asyncio.to_thread(
+                    PortalHandler.service.scan_historical_notice_memory_candidates,
+                    work_types=payload.get("work_types"),
+                    months=int(payload.get("months") or 3),
+                )
+                return self._json_ok(request, session, result)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
+        @app.post("/api/admin/notice-memory/history-save")
+        async def admin_notice_memory_history_save(request: Request):
+            admin_response, session = self._require_admin_response(request)
+            if admin_response is not None:
+                return admin_response
+            try:
+                payload = (
+                    await self._read_model_request(
+                        request,
+                        NoticeMemoryHistorySaveRequest,
+                        max_bytes=4 * 1024 * 1024,
+                    )
+                ).to_payload()
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                result = await asyncio.to_thread(
+                    PortalHandler.service.save_historical_notice_memory_matches,
+                    matches=payload.get("matches") or [],
                     imported_by=str(user.get("open_id") or ""),
                 )
                 PortalHandler.clear_payload_cache()
@@ -1382,6 +1385,32 @@ class FastAPIPortalController:
                 )
                 data.update(refresh_result)
                 data["repair_source_refreshed"] = True
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
+        @app.get("/api/change-refresh")
+        async def change_refresh(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_scope_or_error(
+                    session, request.query_params.get("scope") or "ALL"
+                )
+                refresh_result = await asyncio.to_thread(
+                    PortalHandler.request_change_source_refresh
+                )
+                self._clear_read_cache()
+                ongoing = self._get_ongoing(scope)
+                self._reconcile_orphan_started_items(scope, ongoing)
+                data = await asyncio.to_thread(
+                    PortalHandler.service.get_bootstrap,
+                    scope=scope,
+                    ongoing_items=ongoing,
+                )
+                data.update(refresh_result)
+                data["change_source_refreshed"] = True
                 return self._json_ok(request, session, data)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)
@@ -1524,6 +1553,89 @@ class FastAPIPortalController:
                 data["qt_event_id"] = event_id
                 data["remote_deleted"] = bool(delete_result.get("remote_deleted"))
                 return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
+        @app.get("/api/notice-undo/available")
+        async def notice_undo_available(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_scope_or_error(
+                    session, request.query_params.get("scope") or "ALL"
+                )
+                items = await asyncio.to_thread(
+                    PortalHandler.service.list_available_notice_undos,
+                    scope=scope,
+                    action_type=str(request.query_params.get("action_type") or ""),
+                    since_seconds=float(request.query_params.get("since_seconds") or 0),
+                )
+                return self._json_ok(request, session, {"items": items})
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
+        @app.post("/api/notice-undo/{undo_id}/apply")
+        async def notice_undo_apply(undo_id: str, request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                payload = (
+                    await self._read_model_request(request, NoticeUndoApplyRequest)
+                ).to_payload()
+                scope = self._authorized_scope_or_error(
+                    session, payload.get("scope") or "ALL"
+                )
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                job_id = PortalHandler.service.create_notice_undo_job(
+                    str(undo_id or ""),
+                    scope=scope,
+                    auth_open_id=str(user.get("open_id") or ""),
+                    auth_user_name=str(user.get("name") or user.get("en_name") or ""),
+                )
+                threading.Thread(
+                    target=self._run_notice_undo_job,
+                    args=(job_id,),
+                    name=f"NoticeUndo-{job_id[:8]}",
+                    daemon=True,
+                ).start()
+                job = PortalHandler.service.get_job(job_id) or {}
+                return JSONResponse(
+                    {
+                        "ok": True,
+                        "data": {
+                            "job_id": job_id,
+                            "accepted_at": job.get("accepted_at") or 0,
+                            "initial_phase": job.get("phase") or "undo_queued",
+                        },
+                    },
+                    status_code=202,
+                )
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
+        @app.post("/api/change-target-candidates")
+        async def change_target_candidates(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                payload = (
+                    await self._read_model_request(request, ChangeTargetLookupRequest)
+                ).to_payload()
+                scope = self._authorized_scope_or_error(
+                    session, payload.get("scope") or "ALL"
+                )
+                result = await asyncio.to_thread(
+                    PortalHandler.service.lookup_change_target_candidates,
+                    scope=scope,
+                    title=payload.get("title") or "",
+                    start_time=payload.get("start_time") or "",
+                    end_time=payload.get("end_time") or "",
+                    action=payload.get("action") or "update",
+                )
+                return self._json_ok(request, session, result)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)
 
@@ -1899,6 +2011,45 @@ class FastAPIPortalController:
                         },
                     )
                     return {"ok": True, "data": data}
+                if command == "apply_notice_undo":
+                    command_payload = dict(payload.get("payload") or {})
+                    undo_id = str(command_payload.get("undo_id") or "").strip()
+                    if not undo_id:
+                        return JSONResponse(
+                            {"ok": False, "error": "缺少 undo_id"},
+                            status_code=400,
+                        )
+                    job_id = await asyncio.to_thread(
+                        PortalHandler.service.create_notice_undo_job,
+                        undo_id,
+                        scope=str(command_payload.get("scope") or "ALL"),
+                        auth_open_id=str(command_payload.get("auth_open_id") or "qt"),
+                        auth_user_name=str(command_payload.get("auth_user_name") or "Qt"),
+                    )
+                    threading.Thread(
+                        target=self._run_notice_undo_job,
+                        args=(job_id,),
+                        name=f"ClipFlowUndoJob-{job_id[:8]}",
+                        daemon=True,
+                    ).start()
+                    job = PortalHandler.service.get_job(job_id) or {}
+                    return {
+                        "ok": True,
+                        "data": {
+                            "ok": True,
+                            "job_id": job_id,
+                            "initial_phase": job.get("phase") or "undo_queued",
+                        },
+                    }
+                if command == "list_notice_undos":
+                    command_payload = dict(payload.get("payload") or {})
+                    items = await asyncio.to_thread(
+                        PortalHandler.service.list_available_notice_undos,
+                        scope=str(command_payload.get("scope") or "ALL").strip() or "ALL",
+                        action_type=str(command_payload.get("action_type") or ""),
+                        since_seconds=float(command_payload.get("since_seconds") or 0),
+                    )
+                    return {"ok": True, "data": {"ok": True, "items": items}}
                 if command == "set_today_in_progress":
                     command_payload = dict(payload.get("payload") or {})
                     data = await asyncio.to_thread(
@@ -3178,7 +3329,6 @@ class FastAPIPortalController:
                 {
                     "backend": "fastapi",
                     "url": self.get_url(),
-                    "internal_url": self._legacy_url,
                     "stats": _queue_stats(),
                     "heartbeat_at": time.time(),
                 },
@@ -3188,7 +3338,6 @@ class FastAPIPortalController:
                     {
                         "backend": "fastapi",
                         "url": self.get_url(),
-                        "internal_url": self._legacy_url,
                         "stats": _queue_stats(),
                         "heartbeat_at": time.time(),
                     },
@@ -3211,7 +3360,8 @@ class FastAPIPortalController:
     def _clipboard_entry_id(entry: dict) -> str:
         key = (
             f"{entry.get('unique_key', '')}|{entry.get('status', '')}|"
-            f"{entry.get('notice_type', '')}|{entry.get('title', '')}"
+            f"{entry.get('notice_type', '')}|{entry.get('title', '')}|"
+            f"{entry.get('reason', '')}"
         )
         return hashlib.md5(key.encode("utf-8", errors="ignore")).hexdigest()
 
@@ -3230,6 +3380,7 @@ class FastAPIPortalController:
             "level": info.get("level"),
             "source": str(info.get("source") or source or "").strip(),
             "time_str": str(info.get("time_str") or "").strip(),
+            "reason": str(info.get("reason") or "").strip(),
             "unique_key": str(info.get("unique_key") or "").strip(),
             "ts": int(ts or time.time() * 1000),
         }
@@ -3241,6 +3392,7 @@ class FastAPIPortalController:
         notice_type = str(entry.get("notice_type") or "").strip()
         unique_key = str(entry.get("unique_key") or "").strip()
         title = str(entry.get("title") or "").strip()
+        reason = str(entry.get("reason") or "").strip()
         target_record_id = str(entry.get("target_record_id") or "").strip()
         if not notice_type or not (unique_key or title):
             return None
@@ -3254,9 +3406,14 @@ class FastAPIPortalController:
             info = extract_event_info(str(payload.get("text") or "")) or {}
             item_key = str(info.get("unique_key") or "").strip()
             item_title = str(info.get("title") or payload.get("title") or "").strip()
+            item_reason = str(info.get("reason") or payload.get("reason") or "").strip()
             if unique_key and item_key and item_key == unique_key:
                 return item
             if title and item_title and item_title == title and notice_type != "事件通告":
+                if notice_type == "维保通告" and reason and item_reason and reason != item_reason:
+                    continue
+                if notice_type == "维保通告" and reason and not item_reason:
+                    continue
                 return item
         return None
 
@@ -3315,6 +3472,7 @@ class FastAPIPortalController:
                 "level": entry.get("level") or data.get("level"),
                 "source": entry.get("source") or data.get("source", ""),
                 "time_str": entry.get("time_str") or data.get("time_str", ""),
+                "reason": entry.get("reason") or data.get("reason", ""),
                 "_has_unuploaded_changes": True,
                 "_pending_upload_hash": None,
                 "_upload_in_progress": False,
@@ -3417,11 +3575,15 @@ class FastAPIPortalController:
                 keep_latest=5000,
                 max_delete=2000,
             )
+            undo_removed = PortalHandler.state_store.cleanup_notice_undo_actions(
+                retain_days=7,
+            )
             payload = {
                 **cleanup,
                 "runtime_queue_removed": queue_removed,
                 "outbox_removed": outbox_removed,
                 "append_events_removed": append_events_removed,
+                "undo_removed": undo_removed,
                 "cleaned_at": time.time(),
             }
             if not PortalHandler.state_store.put_backend_runtime_async(
@@ -3518,6 +3680,49 @@ class FastAPIPortalController:
                 )
         except Exception as exc:
             log_warning(f"SQLite 后台维护失败: {exc}")
+
+    def _run_notice_undo_job(self, job_id: str) -> None:
+        job_id = str(job_id or "").strip()
+        if not job_id:
+            return
+        job = PortalHandler.service.get_job(job_id) or {}
+        request = job.get("request") if isinstance(job.get("request"), dict) else {}
+        undo_id = str(request.get("undo_id") or "").strip()
+        requested_by = str(request.get("_auth_open_id") or "").strip()
+        try:
+            PortalHandler.service.mark_job(
+                job_id,
+                phase="undoing_remote",
+                upload_message="正在回退多维记录",
+            )
+            result = PortalHandler.execute_notice_undo(
+                undo_id,
+                job_id=job_id,
+                requested_by=requested_by,
+            )
+            PortalHandler.service.mark_job(
+                job_id,
+                phase="success",
+                record_id=str((result or {}).get("record_id") or ""),
+                upload_message=str((result or {}).get("message") or "回退成功"),
+                error="",
+                error_retryable=False,
+            )
+            PortalHandler.clear_payload_cache()
+            self._clear_read_cache()
+        except Exception as exc:
+            if undo_id:
+                PortalHandler.state_store.mark_notice_undo_action(
+                    undo_id,
+                    "available",
+                    error=str(exc),
+                )
+            PortalHandler.service.mark_job(
+                job_id,
+                phase="failed",
+                error=str(exc),
+                upload_message=str(exc),
+            )
 
     def _start_scheduler(self) -> None:
         if self._scheduler is not None:
@@ -3764,6 +3969,22 @@ class FastAPIPortalController:
                 )
                 qt_active_items = dict(PortalHandler.state_store.qt_active_items_stats())
                 qt_active_items.pop("checked_at", None)
+                source_snapshot_stats = PortalHandler.state_store.source_snapshot_stats()
+                source_active = (
+                    source_snapshot_stats.get("active")
+                    if isinstance(source_snapshot_stats, dict)
+                    else {}
+                )
+                source_active = source_active if isinstance(source_active, dict) else {}
+                source_signature = ":".join(
+                    [
+                        str(source_active.get("snapshot_id") or ""),
+                        str(source_active.get("updated_at") or ""),
+                    ]
+                )
+                display_signature = hashlib.sha1(
+                    f"{scoped_signature}|{source_signature}".encode("utf-8")
+                ).hexdigest()
                 payload = json.dumps(
                     {
                         "scope": scope,
@@ -3771,6 +3992,9 @@ class FastAPIPortalController:
                         "count": snapshot.get("count", 0),
                         "scope_count": scoped_count,
                         "scope_signature": scoped_signature,
+                        "display_signature": display_signature,
+                        "source_snapshot_id": source_active.get("snapshot_id", ""),
+                        "source_snapshot_updated_at": source_active.get("updated_at", 0),
                         "updated_at": snapshot.get("updated_at", 0),
                         "qt_active_items": qt_active_items,
                     },
@@ -3790,48 +4014,10 @@ class FastAPIPortalController:
             self._unregister_sse(sse_key, sse_id)
 
     async def _proxy_request(self, path: str, request: Request) -> Response:
-        if not self._legacy_url:
-            return Response(
-                json.dumps({"ok": False, "error": "Not Found"}, ensure_ascii=False),
-                status_code=404,
-                media_type="application/json",
-            )
-        url = f"{self._legacy_url}/{path}"
-        if request.url.query:
-            url = f"{url}?{request.url.query}"
-        headers = {
-            key: value
-            for key, value in request.headers.items()
-            if key.lower() not in HOP_BY_HOP_HEADERS and key.lower() != "host"
-        }
-        if request.headers.get("host"):
-            headers["host"] = str(request.headers.get("host") or "")
-        headers["x-forwarded-proto"] = request.url.scheme or "http"
-        body = await request.body()
-        timeout = httpx.Timeout(connect=3.0, read=120.0, write=30.0, pool=3.0)
-        try:
-            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
-                proxied = await client.request(
-                    request.method,
-                    url,
-                    content=body,
-                    headers=headers,
-                )
-        except Exception as exc:
-            log_error(f"FastAPI门户代理失败: {exc}")
-            return Response(
-                json.dumps(
-                    {"ok": False, "error": f"内部门户代理失败: {exc}"},
-                    ensure_ascii=False,
-                ),
-                status_code=502,
-                media_type="application/json",
-            )
         return Response(
-            content=proxied.content,
-            status_code=proxied.status_code,
-            headers=_response_headers(proxied.headers),
-            media_type=proxied.headers.get("content-type"),
+            json.dumps({"ok": False, "error": "Not Found"}, ensure_ascii=False),
+            status_code=404,
+            media_type="application/json",
         )
 
     def start(self) -> str:
@@ -3842,31 +4028,12 @@ class FastAPIPortalController:
         except Exception as exc:
             raise RuntimeError(f"Uvicorn 不可用: {exc}") from exc
 
-        if _legacy_adapter_enabled():
-            internal_port = _find_loopback_port()
-            legacy = PortalServerController(
-                host="127.0.0.1",
-                port=internal_port,
-                app_token=self.app_token,
-                table_id=self.table_id,
-                start_source_refresh_worker=False,
-            )
-            legacy.notice_callback = self.notice_callback
-            legacy.ongoing_callback = self.ongoing_callback
-            legacy.ongoing_delete_callback = self.ongoing_delete_callback
-            legacy.maintenance_action_callback = self.maintenance_action_callback
-            self._legacy_url = legacy.start()
-            self._legacy_controller = legacy
-            self._state_store = PortalHandler.state_store
-        else:
-            self._initialize_portal_handler_state()
-            self._legacy_url = ""
-            self._legacy_controller = None
-            PortalHandler.ensure_message_workers()
-            PortalHandler.ensure_action_worker()
-            PortalHandler.ensure_source_refresh_worker()
-            for job_id in PortalHandler.service.recoverable_action_job_ids():
-                PortalHandler.enqueue_initial_message_or_upload_job(job_id)
+        self._initialize_portal_handler_state()
+        PortalHandler.ensure_message_workers()
+        PortalHandler.ensure_action_worker()
+        PortalHandler.ensure_source_refresh_worker()
+        for job_id in PortalHandler.service.recoverable_action_job_ids():
+            PortalHandler.enqueue_initial_message_or_upload_job(job_id)
 
         bound_port = find_available_port(self.host, self.preferred_port)
         self.bound_port = bound_port
@@ -3896,7 +4063,7 @@ class FastAPIPortalController:
         if not _wait_until_listening(self.host, bound_port):
             log_warning(f"FastAPI门户端口监听确认超时: {self.get_url()}")
         self._start_scheduler()
-        log_info(f"FastAPI门户已启动: public={self.get_url()} internal={self._legacy_url}")
+        log_info(f"FastAPI门户已启动: public={self.get_url()}")
         return self.get_url()
 
     def stop(self) -> None:
@@ -3916,24 +4083,18 @@ class FastAPIPortalController:
             thread.join(timeout=1)
         self._thread = None
         self._server = None
-        legacy = self._legacy_controller
-        self._legacy_controller = None
-        if legacy:
-            legacy.stop()
-        else:
-            PortalHandler.stop_message_workers()
-            PortalHandler.stop_action_worker()
-            PortalHandler.stop_upload_wait_worker()
-            PortalHandler.notice_callback = None
-            PortalHandler.ongoing_callback = None
-            PortalHandler.ongoing_delete_callback = None
-            PortalHandler.maintenance_action_callback = None
+        PortalHandler.stop_message_workers()
+        PortalHandler.stop_action_worker()
+        PortalHandler.stop_upload_wait_worker()
+        PortalHandler.notice_callback = None
+        PortalHandler.ongoing_callback = None
+        PortalHandler.ongoing_delete_callback = None
+        PortalHandler.maintenance_action_callback = None
         try:
             PortalHandler.state_store.shutdown_write_worker(timeout=2.0)
         except Exception as exc:
             log_warning(f"SQLite写入队列停止失败: {exc}")
         self.bound_port = None
-        self._legacy_url = ""
         self._shutdown_event.set()
 
     def wait(self) -> None:
@@ -3947,37 +4108,23 @@ class FastAPIPortalController:
     def set_notice_callback(self, callback) -> None:
         self.notice_callback = callback
         PortalHandler.notice_callback = callback
-        if self._legacy_controller:
-            self._legacy_controller.set_notice_callback(callback)
 
     def set_ongoing_callback(self, callback) -> None:
         self.ongoing_callback = callback
         PortalHandler.ongoing_callback = callback
-        if self._legacy_controller:
-            self._legacy_controller.set_ongoing_callback(callback)
 
     def set_ongoing_delete_callback(self, callback) -> None:
         self.ongoing_delete_callback = callback
         PortalHandler.ongoing_delete_callback = callback
-        if self._legacy_controller:
-            self._legacy_controller.set_ongoing_delete_callback(callback)
 
     def set_maintenance_action_callback(self, callback) -> None:
         self.maintenance_action_callback = callback
         PortalHandler.maintenance_action_callback = callback
-        if self._legacy_controller:
-            self._legacy_controller.set_maintenance_action_callback(callback)
 
     def mark_job_upload_result(self, job_id: str, **kwargs) -> None:
-        if self._legacy_controller:
-            self._legacy_controller.mark_job_upload_result(job_id, **kwargs)
-            return
         PortalHandler.service.mark_action_upload_result(job_id, **kwargs)
 
     def mark_job_progress(self, job_id: str, **patch) -> None:
-        if self._legacy_controller and hasattr(self._legacy_controller, "mark_job_progress"):
-            self._legacy_controller.mark_job_progress(job_id, **patch)
-            return
         if not job_id:
             return
         PortalHandler.service.mark_job(job_id, **patch)
@@ -3989,8 +4136,6 @@ class FastAPIPortalController:
                 PortalHandler.upload_wait_jobs.pop(job_id, None)
 
     def get_job(self, job_id: str) -> dict | None:
-        if self._legacy_controller:
-            return self._legacy_controller.get_job(job_id)
         return PortalHandler.service.get_job(job_id)
 
 

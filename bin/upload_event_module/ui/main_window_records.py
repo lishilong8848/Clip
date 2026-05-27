@@ -247,7 +247,7 @@ class MainWindowRecordsMixin:
         )
 
     def _active_notice_model_enabled(self) -> bool:
-        return os.environ.get("CLIPFLOW_DISABLE_ACTIVE_NOTICE_MODEL") != "1"
+        return True
 
     def _active_item_widgets_required(self) -> bool:
         visible = getattr(self, "_active_model_view_visible", None)
@@ -402,8 +402,6 @@ class MainWindowRecordsMixin:
     def _active_list_virtualization_enabled(self) -> bool:
         visible = getattr(self, "_active_model_view_visible", None)
         if callable(visible) and visible():
-            return False
-        if os.environ.get("CLIPFLOW_LEGACY_QT_WIDGET_LIST") == "1":
             return False
         if os.environ.get("CLIPFLOW_DISABLE_ACTIVE_LIST_VIRTUALIZATION") == "1":
             return False
@@ -1104,6 +1102,10 @@ class MainWindowRecordsMixin:
         resolved_time = self._normalize_match_text(
             time_str or info.get("time_str") or ""
         )
+        resolved_reason = self._normalize_match_text(
+            info.get("reason")
+            or self._extract_section_text(text, ("原因", "故障原因", "故障维修原因"))
+        )
         if not resolved_notice_type or not resolved_title:
             return resolved_title, ""
         if self._is_event_notice(resolved_notice_type):
@@ -1112,6 +1114,12 @@ class MainWindowRecordsMixin:
             return (
                 resolved_title,
                 f"{resolved_notice_type}|{resolved_title}|{resolved_time}",
+            )
+        if resolved_notice_type == "维保通告" and resolved_reason:
+            match_title = f"{resolved_title}|原因:{resolved_reason}"
+            return (
+                match_title,
+                f"{resolved_notice_type}|{resolved_title}|{resolved_reason}",
             )
         return resolved_title, f"{resolved_notice_type}|{resolved_title}"
 

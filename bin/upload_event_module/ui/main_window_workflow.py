@@ -8,23 +8,21 @@ import hashlib
 import uuid
 import os
 from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QListWidgetItem,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from ..logger import log_info, log_error, log_warning
 from ..services.service_registry import (
-    upload_media_to_feishu,
     query_record_by_id,
-    create_bitable_record_by_payload,
-    batch_create_bitable_records_by_payload,
-    update_bitable_record_by_payload,
-    batch_update_bitable_records_by_payload,
 )
-from ..services.feishu_service import delete_bitable_record
 from ..services.handlers import NoticePayload, get_notice_handler
 from ..core.parser import extract_event_info
-
-PORTAL_BATCH_MAX_RECORDS = 100
-PORTAL_BATCH_WAIT_SECONDS = 30.0
-PORTAL_UPLOAD_SECONDS_PER_RECORD = 2.0
 
 class MainWindowWorkflowMixin:
     @staticmethod
@@ -1201,13 +1199,222 @@ class MainWindowWorkflowMixin:
             return False, str((result or {}).get("message") or "多维记录删除失败。"), result if isinstance(result, dict) else {}
         return True, "", result if isinstance(result, dict) else {}
 
+    def _submit_notice_undo_to_backend(self, undo_id: str) -> tuple[bool, str, dict]:
+        undo_id = str(undo_id or "").strip()
+        if not undo_id:
+            return False, "没有可回退的删除记录。", {}
+        controller = getattr(self, "lan_template_portal_controller", None)
+        if controller is None or not hasattr(controller, "submit_qt_command"):
+            return False, "本机后端未连接，无法执行回退。", {}
+        try:
+            result = controller.submit_qt_command(
+                "apply_notice_undo",
+                {
+                    "undo_id": undo_id,
+                    "scope": "ALL",
+                    "auth_open_id": "qt",
+                    "auth_user_name": "Qt",
+                },
+            )
+        except Exception as exc:
+            return False, f"本机后端回退失败：{exc}", {}
+        if not bool((result or {}).get("ok")):
+            return False, str((result or {}).get("message") or "回退提交失败。"), result if isinstance(result, dict) else {}
+        return True, "", result if isinstance(result, dict) else {}
+
+    def _list_deleted_notice_undos_from_backend(self, *, days: int = 2) -> tuple[bool, str, list[dict]]:
+        controller = getattr(self, "lan_template_portal_controller", None)
+        if controller is None or not hasattr(controller, "submit_qt_command"):
+            return False, "本机后端未连接，无法读取历史删除。", []
+        try:
+            result = controller.submit_qt_command(
+                "list_notice_undos",
+                {
+                    "scope": "ALL",
+                    "action_type": "delete",
+                    "since_seconds": max(1, int(days)) * 24 * 60 * 60,
+                },
+            )
+        except Exception as exc:
+            return False, f"读取历史删除失败：{exc}", []
+        if not bool((result or {}).get("ok", True)):
+            return False, str((result or {}).get("message") or "读取历史删除失败。"), []
+        items = result.get("items")
+        return True, "", list(items or []) if isinstance(items, list) else []
+
+    @staticmethod
+    def _format_undo_deleted_item(item: dict) -> str:
+        created = float((item or {}).get("undo_created_at") or (item or {}).get("created_at") or 0)
+        if created > 0:
+            time_text = time.strftime("%m-%d %H:%M", time.localtime(created))
+        else:
+            time_text = "--"
+        title = str((item or {}).get("title") or "未命名通告").strip()
+        notice_type = str((item or {}).get("notice_type") or (item or {}).get("work_type") or "").strip()
+        building = str((item or {}).get("building") or "").strip()
+        meta = " · ".join(part for part in [notice_type, building, time_text] if part)
+        return f"{title}\n{meta}" if meta else title
+
+    def _create_deleted_history_row_widget(self, item: dict) -> QWidget:
+        payload = dict(item or {})
+        undo_id = str(payload.get("undo_id") or "").strip()
+        title = str(payload.get("title") or "未命名通告").strip()
+        lines = self._format_undo_deleted_item(payload).splitlines()
+        meta = lines[1] if len(lines) > 1 else ""
+
+        widget = QWidget()
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(10)
+
+        text_box = QVBoxLayout()
+        text_box.setContentsMargins(0, 0, 0, 0)
+        text_box.setSpacing(3)
+        title_label = QLabel(title)
+        title_label.setWordWrap(True)
+        title_label.setStyleSheet("font-weight: 600; color: #0F172A; font-size: 13px;")
+        text_box.addWidget(title_label)
+        if meta:
+            meta_label = QLabel(meta)
+            meta_label.setWordWrap(True)
+            meta_label.setStyleSheet("color: #64748B; font-size: 11px;")
+            text_box.addWidget(meta_label)
+        layout.addLayout(text_box, 1)
+
+        button = QPushButton("回退删除")
+        button.setObjectName("AddBtn")
+        button.setFixedSize(82, 30)
+        button.setEnabled(bool(undo_id))
+        button.clicked.connect(
+            lambda _checked=False, u=undo_id, t=title, b=button: self._confirm_or_undo_deleted_history_item(u, t, b)
+        )
+        layout.addWidget(button)
+        return widget
+
+    def _show_deleted_notice_history(self):
+        button = getattr(self, "deleted_history_btn", None)
+        if button is not None:
+            button.setEnabled(False)
+            button.setText("读取中...")
+
+        def _finish(success: bool, error: str = "", items: list[dict] | None = None) -> None:
+            if button is not None:
+                button.setEnabled(True)
+                button.setText("历史删除")
+            if not success:
+                self.show_message(error or "读取历史删除失败。")
+                return
+            self._render_deleted_notice_history(items or [])
+
+        def _worker() -> None:
+            success, error, items = self._list_deleted_notice_undos_from_backend(days=2)
+            enqueue = getattr(self, "_enqueue_ui_mutation", None)
+            if callable(enqueue):
+                enqueue(
+                    "show_deleted_notice_history",
+                    lambda s=success, e=error, rows=items: _finish(s, e, rows),
+                )
+            else:
+                QTimer.singleShot(0, lambda s=success, e=error, rows=items: _finish(s, e, rows))
+
+        threading.Thread(
+            target=_worker,
+            name="ClipFlowDeletedNoticeHistory",
+            daemon=True,
+        ).start()
+
+    def _render_deleted_notice_history(self, items: list[dict]) -> None:
+        self.title_label.setText("历史删除")
+        self.stack.setCurrentWidget(self.deleted_history_container)
+        list_widget = getattr(self, "deleted_history_list", None)
+        if list_widget is None:
+            self.show_message("历史删除页面未初始化。")
+            return
+        list_widget.clear()
+        for item in items:
+            row = QListWidgetItem()
+            row.setData(Qt.ItemDataRole.UserRole, dict(item or {}))
+            row_widget = self._create_deleted_history_row_widget(item)
+            row.setSizeHint(row_widget.sizeHint())
+            list_widget.addItem(row)
+            list_widget.setItemWidget(row, row_widget)
+        if not items:
+            empty_item = QListWidgetItem("近两天没有可回退的删除记录。")
+            empty_item.setFlags(empty_item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+            list_widget.addItem(empty_item)
+
+    def _confirm_or_undo_deleted_history_item(self, undo_id: str, title: str, button: QPushButton) -> None:
+        undo_id = str(undo_id or "").strip()
+        if not undo_id:
+            self.show_message("该删除记录缺少回退标识。")
+            return
+        if button.property("undo_confirmed") is not True:
+            button.setProperty("undo_confirmed", True)
+            button.setText("ok")
+            return
+        self._undo_deleted_history_item(undo_id, title, button)
+
+    def _undo_deleted_history_item(self, undo_id: str, title: str, button: QPushButton) -> None:
+        undo_id = str(undo_id or "").strip()
+        if not undo_id:
+            self.show_message("该删除记录缺少回退标识。")
+            return
+        if button is not None:
+            button.setEnabled(False)
+            button.setText("提交中...")
+
+        def _finish(success: bool, error: str = "") -> None:
+            if button is not None:
+                button.setText("回退删除")
+                button.setEnabled(True)
+            if success:
+                self.show_message(f"已提交「{title}」的删除回退，稍后会恢复显示。")
+                self._show_deleted_notice_history()
+                return
+            if button is not None:
+                button.setProperty("undo_confirmed", False)
+            self.show_message(error or "回退提交失败。")
+
+        def _worker() -> None:
+            success, error, _ = self._submit_notice_undo_to_backend(undo_id)
+            enqueue = getattr(self, "_enqueue_ui_mutation", None)
+            if callable(enqueue):
+                enqueue(
+                    "undo_deleted_notice_history_result",
+                    lambda s=success, e=error: _finish(s, e),
+                )
+            else:
+                QTimer.singleShot(0, lambda s=success, e=error: _finish(s, e))
+
+        threading.Thread(
+            target=_worker,
+            name="ClipFlowUndoDeletedNoticeHistory",
+            daemon=True,
+        ).start()
+
+    def _remember_delete_undo(self, data_dict: dict, backend_result: dict | None) -> None:
+        result = backend_result if isinstance(backend_result, dict) else {}
+        undo_id = str(result.get("undo_id") or result.get("checkpoint_id") or "").strip()
+        if not undo_id:
+            return
+        title = ""
+        try:
+            info = extract_event_info((data_dict or {}).get("text", "")) or {}
+            title = str(info.get("title") or "").strip()
+        except Exception:
+            title = ""
+        if not title:
+            title = str((data_dict or {}).get("title") or (data_dict or {}).get("match_title") or "刚删除的通告")
+        self.show_message(f"已删除「{title}」。如误删，可进入“历史删除”对单条通告回退。")
+
     def _delete_active_item_remote_and_local(self, data_dict) -> tuple[bool, str]:
         data_dict = dict(data_dict or {})
         record_id = str(data_dict.get("record_id") or "").strip()
         active_item_id = str(data_dict.get("active_item_id") or "").strip()
-        success, error, _ = self._submit_delete_active_item_to_backend(data_dict)
+        success, error, result = self._submit_delete_active_item_to_backend(data_dict)
         if not success:
             return False, error
+        self._remember_delete_undo(data_dict, result)
         self._clear_upload_queue(record_id)
         self._today_in_progress_pending_record_ids.discard(record_id)
         self._today_in_progress_synced_record_ids.discard(record_id)
@@ -1251,7 +1458,7 @@ class MainWindowWorkflowMixin:
         list_widget, item = self._find_active_item_by_record_id(record_id)
         widget = self._safe_item_widget(list_widget, item)
 
-        def _finish(success: bool, error: str = "") -> None:
+        def _finish(success: bool, error: str = "", result: dict | None = None) -> None:
             if not success:
                 if widget and hasattr(widget, "cancel_delete_visual"):
                     try:
@@ -1288,18 +1495,19 @@ class MainWindowWorkflowMixin:
                 self.schedule_active_cache_save(800)
             else:
                 self.save_active_cache()
+            self._remember_delete_undo(data_dict, result or {})
             log_info(f"UI操作: 删除事件(同步删除多维), Record ID: {record_id}")
 
         def _worker() -> None:
-            success, error, _ = self._submit_delete_active_item_to_backend(data_dict)
+            success, error, result = self._submit_delete_active_item_to_backend(data_dict)
             enqueue = getattr(self, "_enqueue_ui_mutation", None)
             if callable(enqueue):
                 enqueue(
                     "delete_active_item_result",
-                    lambda s=success, e=error: _finish(s, e),
+                    lambda s=success, e=error, r=result: _finish(s, e, r),
                 )
             else:
-                QTimer.singleShot(0, lambda s=success, e=error: _finish(s, e))
+                QTimer.singleShot(0, lambda s=success, e=error, r=result: _finish(s, e, r))
 
         threading.Thread(
             target=_worker,
@@ -1430,6 +1638,12 @@ class MainWindowWorkflowMixin:
             self._qt_upload_next_release_at = release_at + interval
         return release_at
 
+    @staticmethod
+    def _sleep_until_timestamp(release_at: float) -> None:
+        delay = max(0.0, float(release_at or 0.0) - time.time())
+        if delay:
+            time.sleep(delay)
+
     def _start_upload_worker(self, key, task_queue):
         def worker():
             while True:
@@ -1500,7 +1714,7 @@ class MainWindowWorkflowMixin:
         )
         task_queue.put(task)
 
-    def _mark_upload_queued(self, record_id, portal_phase: str = "uploading"):
+    def _mark_upload_queued(self, record_id):
         if not record_id:
             return
         if record_id in self.pending_action_record_ids:
@@ -1516,18 +1730,6 @@ class MainWindowWorkflowMixin:
             data["_has_unuploaded_changes"] = False
             data["_upload_in_progress"] = True
             item.setData(Qt.ItemDataRole.UserRole, data)
-            if bool(data.get("lan_created_from_portal")) and portal_phase:
-                job_id = self._portal_upload_job_id_for_record(
-                    record_id,
-                    str(data.get("active_item_id") or ""),
-                )
-                if job_id:
-                    self._mark_lan_portal_upload_progress(
-                        {"job_id": job_id},
-                        phase=str(portal_phase or "uploading"),
-                        upload_queue_position=0,
-                        upload_queue_size=0,
-                    )
             self._rebuild_active_item_widget(
                 list_widget,
                 item,
@@ -1619,342 +1821,6 @@ class MainWindowWorkflowMixin:
             self._maybe_update_detail_dialog(new_data, record_id)
             self.save_active_cache()
 
-    def _ensure_portal_batch_upload_state(self):
-        if not hasattr(self, "_portal_batch_upload_lock"):
-            self._portal_batch_upload_lock = threading.RLock()
-            self._portal_batch_create_buffer = []
-            self._portal_batch_update_buffer = []
-            self._portal_batch_create_timer = None
-            self._portal_batch_update_timer = None
-            self._portal_upload_release_lock = threading.RLock()
-            self._portal_upload_next_release_at = 0.0
-            self._portal_batch_max_records = PORTAL_BATCH_MAX_RECORDS
-            self._portal_batch_wait_seconds = PORTAL_BATCH_WAIT_SECONDS
-            self._portal_upload_seconds_per_record = PORTAL_UPLOAD_SECONDS_PER_RECORD
-            try:
-                from lan_bitable_template_portal.state_store import LanPortalStateStore
-
-                settings = LanPortalStateStore().get_settings() or {}
-                self._portal_batch_max_records = max(
-                    1,
-                    min(100, int(settings.get("lan_upload_batch_max_records") or PORTAL_BATCH_MAX_RECORDS)),
-                )
-                self._portal_batch_wait_seconds = max(
-                    1.0,
-                    min(30.0, float(settings.get("lan_upload_batch_wait_seconds") or PORTAL_BATCH_WAIT_SECONDS)),
-                )
-                self._portal_upload_seconds_per_record = max(
-                    0.5,
-                    min(10.0, float(settings.get("lan_upload_seconds_per_record") or PORTAL_UPLOAD_SECONDS_PER_RECORD)),
-                )
-            except Exception:
-                pass
-
-    def _portal_upload_job_id_for_record(
-        self, record_id: str = "", active_item_id: str = ""
-    ) -> str:
-        if hasattr(self, "_peek_lan_portal_upload_job"):
-            try:
-                return str(
-                    self._peek_lan_portal_upload_job(record_id, active_item_id) or ""
-                )
-            except Exception:
-                return ""
-        return ""
-
-    def _mark_lan_portal_upload_progress(self, request: dict, **patch) -> None:
-        job_id = str((request or {}).get("job_id") or "").strip()
-        if not job_id:
-            return
-        if hasattr(self, "_mark_lan_portal_job_progress"):
-            self._mark_lan_portal_job_progress(job_id, **patch)
-
-    def _reserve_portal_upload_release(self, item_count: int) -> float:
-        self._ensure_portal_batch_upload_state()
-        units = max(1, int(item_count or 1))
-        now = time.time()
-        with self._portal_upload_release_lock:
-            release_at = max(now, float(self._portal_upload_next_release_at or 0.0))
-            self._portal_upload_next_release_at = (
-                release_at + float(self._portal_upload_seconds_per_record or PORTAL_UPLOAD_SECONDS_PER_RECORD) * units
-            )
-        return release_at
-
-    @staticmethod
-    def _sleep_until_timestamp(release_at: float) -> None:
-        delay = max(0.0, float(release_at or 0.0) - time.time())
-        if delay:
-            time.sleep(delay)
-
-    def _mark_portal_upload_batch_waiting(
-        self, requests: list[dict], release_at: float
-    ) -> None:
-        total = len(requests)
-        for index, request in enumerate(requests, start=1):
-            self._mark_lan_portal_upload_progress(
-                request,
-                phase="upload_waiting",
-                upload_release_at=release_at,
-                upload_queue_position=index,
-                upload_queue_size=total,
-            )
-
-    def _mark_portal_upload_batch_started(self, requests: list[dict]) -> None:
-        for request in requests:
-            self._mark_lan_portal_upload_progress(
-                request,
-                phase="uploading",
-                upload_queue_position=0,
-                upload_queue_size=0,
-            )
-
-    def _enqueue_portal_batch_create_upload(self, request: dict) -> None:
-        self._ensure_portal_batch_upload_state()
-        should_flush = False
-        with self._portal_batch_upload_lock:
-            self._portal_batch_create_buffer.append(request)
-            total = len(self._portal_batch_create_buffer)
-            for index, queued in enumerate(self._portal_batch_create_buffer, start=1):
-                self._mark_lan_portal_upload_progress(
-                    queued,
-                    phase="upload_waiting",
-                    upload_queue_position=index,
-                    upload_queue_size=total,
-                    _persist=False,
-                )
-            batch_max = int(self._portal_batch_max_records or PORTAL_BATCH_MAX_RECORDS)
-            if len(self._portal_batch_create_buffer) >= batch_max:
-                should_flush = True
-                timer = self._portal_batch_create_timer
-                self._portal_batch_create_timer = None
-                if timer:
-                    try:
-                        timer.cancel()
-                    except Exception:
-                        pass
-            elif self._portal_batch_create_timer is None:
-                timer = threading.Timer(
-                    float(self._portal_batch_wait_seconds or PORTAL_BATCH_WAIT_SECONDS),
-                    self._flush_portal_batch_create_uploads,
-                )
-                timer.daemon = True
-                self._portal_batch_create_timer = timer
-                timer.start()
-        if should_flush:
-            threading.Thread(
-                target=self._flush_portal_batch_create_uploads,
-                name="LANPortalBatchCreateUpload",
-                daemon=True,
-            ).start()
-
-    def _flush_portal_batch_create_uploads(self) -> None:
-        self._ensure_portal_batch_upload_state()
-        with self._portal_batch_upload_lock:
-            batch_max = int(self._portal_batch_max_records or PORTAL_BATCH_MAX_RECORDS)
-            batch = list(self._portal_batch_create_buffer[:batch_max])
-            self._portal_batch_create_buffer = list(
-                self._portal_batch_create_buffer[batch_max:]
-            )
-            self._portal_batch_create_timer = None
-            has_more = bool(self._portal_batch_create_buffer)
-            if has_more:
-                total = len(self._portal_batch_create_buffer)
-                for index, queued in enumerate(self._portal_batch_create_buffer, start=1):
-                    self._mark_lan_portal_upload_progress(
-                        queued,
-                        phase="upload_waiting",
-                        upload_queue_position=index,
-                        upload_queue_size=total,
-                        _persist=False,
-                    )
-        if not batch:
-            return
-        grouped = {}
-        for request in batch:
-            notice_type = str((request or {}).get("notice_type") or "").strip()
-            grouped.setdefault(notice_type, []).append(request)
-        for notice_type, requests in grouped.items():
-            payloads = [copy.deepcopy(item.get("payload")) for item in requests]
-            release_at = self._reserve_portal_upload_release(1)
-            self._mark_portal_upload_batch_waiting(requests, release_at)
-            self._sleep_until_timestamp(release_at)
-            self._mark_portal_upload_batch_started(requests)
-            try:
-                results = batch_create_bitable_records_by_payload(notice_type, payloads)
-            except Exception as exc:
-                log_warning(f"批量上传失败，改为单条上传: notice_type={notice_type}, error={exc}")
-                results = [(False, str(exc)) for _ in requests]
-            if len(results or []) != len(requests) or any(not ok for ok, _ in results):
-                fallback_results = []
-                for request, result in zip(requests, results or []):
-                    ok, value = result
-                    if ok:
-                        fallback_results.append(result)
-                        continue
-                    try:
-                        fallback_results.append(
-                            create_bitable_record_by_payload(
-                                notice_type,
-                                copy.deepcopy(request.get("payload")),
-                            )
-                        )
-                    except Exception as exc:
-                        fallback_results.append((False, str(exc)))
-                if len(fallback_results) < len(requests):
-                    for request in requests[len(fallback_results):]:
-                        try:
-                            fallback_results.append(
-                                create_bitable_record_by_payload(
-                                    notice_type,
-                                    copy.deepcopy(request.get("payload")),
-                                )
-                            )
-                        except Exception as exc:
-                            fallback_results.append((False, str(exc)))
-                results = fallback_results
-            for request, result in zip(requests, results or []):
-                ok, value = result
-                self._post_request_finished(
-                    "上传",
-                    bool(ok),
-                    value,
-                    str(request.get("record_id") or ""),
-                )
-        if has_more:
-            threading.Thread(
-                target=self._flush_portal_batch_create_uploads,
-                name="LANPortalBatchCreateUpload",
-                daemon=True,
-            ).start()
-
-    def _enqueue_portal_batch_update_upload(self, request: dict) -> None:
-        self._ensure_portal_batch_upload_state()
-        should_flush = False
-        with self._portal_batch_upload_lock:
-            self._portal_batch_update_buffer.append(request)
-            total = len(self._portal_batch_update_buffer)
-            for index, queued in enumerate(self._portal_batch_update_buffer, start=1):
-                self._mark_lan_portal_upload_progress(
-                    queued,
-                    phase="upload_waiting",
-                    upload_queue_position=index,
-                    upload_queue_size=total,
-                    _persist=False,
-                )
-            batch_max = int(self._portal_batch_max_records or PORTAL_BATCH_MAX_RECORDS)
-            if len(self._portal_batch_update_buffer) >= batch_max:
-                should_flush = True
-                timer = self._portal_batch_update_timer
-                self._portal_batch_update_timer = None
-                if timer:
-                    try:
-                        timer.cancel()
-                    except Exception:
-                        pass
-            elif self._portal_batch_update_timer is None:
-                timer = threading.Timer(
-                    float(self._portal_batch_wait_seconds or PORTAL_BATCH_WAIT_SECONDS),
-                    self._flush_portal_batch_update_uploads,
-                )
-                timer.daemon = True
-                self._portal_batch_update_timer = timer
-                timer.start()
-        if should_flush:
-            threading.Thread(
-                target=self._flush_portal_batch_update_uploads,
-                name="LANPortalBatchUpdateUpload",
-                daemon=True,
-            ).start()
-
-    def _flush_portal_batch_update_uploads(self) -> None:
-        self._ensure_portal_batch_upload_state()
-        with self._portal_batch_upload_lock:
-            batch_max = int(self._portal_batch_max_records or PORTAL_BATCH_MAX_RECORDS)
-            batch = list(self._portal_batch_update_buffer[:batch_max])
-            self._portal_batch_update_buffer = list(
-                self._portal_batch_update_buffer[batch_max:]
-            )
-            self._portal_batch_update_timer = None
-            has_more = bool(self._portal_batch_update_buffer)
-            if has_more:
-                total = len(self._portal_batch_update_buffer)
-                for index, queued in enumerate(self._portal_batch_update_buffer, start=1):
-                    self._mark_lan_portal_upload_progress(
-                        queued,
-                        phase="upload_waiting",
-                        upload_queue_position=index,
-                        upload_queue_size=total,
-                        _persist=False,
-                    )
-        if not batch:
-            return
-        grouped = {}
-        for request in batch:
-            key = (
-                str((request or {}).get("notice_type") or "").strip(),
-                str((request or {}).get("action_type") or "").strip(),
-            )
-            grouped.setdefault(key, []).append(request)
-        for (notice_type, action_type), requests in grouped.items():
-            updates = [
-                (str(item.get("record_id") or ""), copy.deepcopy(item.get("payload")))
-                for item in requests
-            ]
-            release_at = self._reserve_portal_upload_release(1)
-            self._mark_portal_upload_batch_waiting(requests, release_at)
-            self._sleep_until_timestamp(release_at)
-            self._mark_portal_upload_batch_started(requests)
-            try:
-                results = batch_update_bitable_records_by_payload(notice_type, updates)
-            except Exception as exc:
-                log_warning(f"批量更新失败，改为单条更新: notice_type={notice_type}, error={exc}")
-                results = [(False, str(exc)) for _ in requests]
-            if len(results or []) != len(requests) or any(not ok for ok, _ in results):
-                fallback_results = []
-                for request, result in zip(requests, results or []):
-                    ok, value = result
-                    if ok:
-                        fallback_results.append(result)
-                        continue
-                    try:
-                        fallback_results.append(
-                            update_bitable_record_by_payload(
-                                str(request.get("record_id") or ""),
-                                notice_type,
-                                copy.deepcopy(request.get("payload")),
-                            )
-                        )
-                    except Exception as exc:
-                        fallback_results.append((False, str(exc)))
-                if len(fallback_results) < len(requests):
-                    for request in requests[len(fallback_results):]:
-                        try:
-                            fallback_results.append(
-                                update_bitable_record_by_payload(
-                                    str(request.get("record_id") or ""),
-                                    notice_type,
-                                    copy.deepcopy(request.get("payload")),
-                                )
-                            )
-                        except Exception as exc:
-                            fallback_results.append((False, str(exc)))
-                results = fallback_results
-            finished_name = "结束" if action_type == "end" else "更新"
-            for request, result in zip(requests, results or []):
-                ok, value = result
-                self._post_request_finished(
-                    finished_name,
-                    bool(ok),
-                    value,
-                    str(request.get("record_id") or ""),
-                )
-        if has_more:
-            threading.Thread(
-                target=self._flush_portal_batch_update_uploads,
-                name="LANPortalBatchUpdateUpload",
-                daemon=True,
-            ).start()
-
     def do_feishu_upload(
         self,
         data_dict,
@@ -1972,9 +1838,6 @@ class MainWindowWorkflowMixin:
     ):
         if not data_dict:
             return
-        if not hasattr(self, "_feishu_request_lock"):
-            self._feishu_request_lock = threading.Lock()
-        end_item_ref = None
         if self._pending_cache_refresh:
             self._refresh_ui_from_cache()
         self._try_process_pending_force_uploads()
@@ -2088,9 +1951,7 @@ class MainWindowWorkflowMixin:
                         buildings=_buildings,
                         level=data_dict.get("level"),
                     )
-        if bool(data_dict.get("lan_created_from_portal")) and hasattr(
-            self, "schedule_active_cache_save"
-        ):
+        if hasattr(self, "schedule_active_cache_save"):
             self.schedule_active_cache_save(800)
         else:
             self.save_active_cache()
@@ -2110,12 +1971,6 @@ class MainWindowWorkflowMixin:
                 data_dict.get("time_str") or payload.occurrence_date
             )
             payload.transfer_to_overhaul = data_dict.get("transfer_to_overhaul")
-        payload_base = copy.deepcopy(payload) if payload else None
-
-        if action_type == "end" and not data_dict.get("_ended_moved"):
-            self._do_move_to_history(end_item_ref, data_dict, track_rollback=True)
-            data_dict["_ended_moved"] = True
-
         data_snapshot = dict(data_dict) if isinstance(data_dict, dict) else data_dict
         log_info(
             "UploadTime: "
@@ -2125,169 +1980,9 @@ class MainWindowWorkflowMixin:
             f"response_time={response_time or '-'} "
             f"notice_time={data_snapshot.get('time_str') or '-'}"
         )
-        backend_notice_upload_only = True
 
-        if (
-            not backend_notice_upload_only
-            and action_type == "upload"
-            and bool(data_snapshot.get("lan_created_from_portal"))
-            and not screenshot_bytes
-            and not extra_images
-        ):
-            payload = (
-                copy.deepcopy(payload_base)
-                if payload_base
-                else NoticePayload(
-                    text=data_snapshot.get("text", ""),
-                    robot_group_choice=robot_group_choice,
-                )
-            )
-            payload.transfer_to_overhaul = data_snapshot.get("transfer_to_overhaul")
-            payload.text = data_snapshot.get("text", "")
-            payload.maintenance_cycle = (
-                data_snapshot.get("maintenance_cycle") or payload.maintenance_cycle
-            )
-            payload.level = (
-                change_level
-                if notice_type in ("设备变更", "变更通告")
-                else event_level
-                if notice_type == "事件通告"
-                else data_snapshot.get("level") or payload.level
-            )
-            payload.buildings = _buildings
-            payload.specialty = specialty
-            payload.event_source = event_source
-            payload.robot_group_choice = robot_group_choice
-            payload.file_tokens = None
-            payload.extra_file_tokens = None
-            payload.response_time = response_time
-            payload.occurrence_date = data_snapshot.get("time_str", "")
-            payload.existing_file_tokens = None
-            payload.existing_extra_file_tokens = None
-            payload.existing_response_time = None
-            payload.recover = recover_selected
-            portal_job_id = self._portal_upload_job_id_for_record(
-                record_id,
-                str(data_snapshot.get("active_item_id") or ""),
-            )
-            self._enqueue_portal_batch_create_upload(
-                {
-                    "record_id": record_id,
-                    "active_item_id": str(data_snapshot.get("active_item_id") or ""),
-                    "job_id": portal_job_id,
-                    "notice_type": notice_type,
-                    "payload": payload,
-                }
-            )
-            self._mark_upload_queued(record_id, portal_phase="")
-            if self.current_screenshot_record_id == record_id:
-                self.current_screenshot_record_id = None
-                self.current_screenshot_action_type = None
-            self._try_process_deferred_events()
-            return
-
-        if (
-            not backend_notice_upload_only
-            and action_type in ("update", "end")
-            and bool(data_snapshot.get("lan_created_from_portal"))
-            and not self._is_placeholder_record(data_snapshot)
-            and not screenshot_bytes
-            and not extra_images
-            and not (
-                action_type == "update"
-                and notice_type in ("设备变更", "变更通告", "事件通告")
-            )
-        ):
-            payload = (
-                copy.deepcopy(payload_base)
-                if payload_base
-                else NoticePayload(
-                    text=data_snapshot.get("text", ""),
-                    robot_group_choice=robot_group_choice,
-                )
-            )
-            payload.transfer_to_overhaul = data_snapshot.get("transfer_to_overhaul")
-            payload.text = data_snapshot.get("text", "")
-            payload.maintenance_cycle = (
-                data_snapshot.get("maintenance_cycle") or payload.maintenance_cycle
-            )
-            payload.level = (
-                change_level
-                if notice_type in ("设备变更", "变更通告")
-                else event_level
-                if notice_type == "事件通告"
-                else data_snapshot.get("level") or payload.level
-            )
-            payload.buildings = _buildings
-            payload.specialty = specialty
-            payload.event_source = event_source
-            payload.robot_group_choice = robot_group_choice
-            payload.file_tokens = None
-            payload.extra_file_tokens = None
-            payload.existing_file_tokens = None
-            payload.existing_extra_file_tokens = None
-            payload.response_time = response_time
-            payload.existing_response_time = ""
-            payload.recover = recover_selected
-            portal_job_id = self._portal_upload_job_id_for_record(
-                record_id,
-                str(data_snapshot.get("active_item_id") or ""),
-            )
-            self._enqueue_portal_batch_update_upload(
-                {
-                    "record_id": record_id,
-                    "active_item_id": str(data_snapshot.get("active_item_id") or ""),
-                    "job_id": portal_job_id,
-                    "notice_type": notice_type,
-                    "action_type": action_type,
-                    "payload": payload,
-                }
-            )
-            self._mark_upload_queued(record_id, portal_phase="")
-            if self.current_screenshot_record_id == record_id:
-                self.current_screenshot_record_id = None
-                self.current_screenshot_action_type = None
-            self._try_process_deferred_events()
-            return
-
-        def task():
-            # 从外部作用域获取参数
-            # 解决 UnboundLocalError: 先从 data_snapshot 获取 notice_type，覆盖外部同名变量
-            notice_type = data_snapshot.get("notice_type", "")
-            record_id = data_snapshot.get("record_id")
-
-            if notice_type == "事件通告":
-                _level = event_level or data_snapshot.get("level")
-            elif notice_type in ("设备变更", "变更通告"):
-                _level = change_level or data_snapshot.get("level")
-            else:
-                _level = data_snapshot.get("level")
-
-            # 首次上传未回填真实 record_id 时：
-            # 对“更新/结束”先入等待队列，待 record_id 回填后再真正上传，避免重复上传媒体。
-            if action_type in ("update", "end") and self._is_placeholder_record(
-                data_snapshot
-            ):
-                self._queue_update_after_upload(
-                    record_id,
-                    {
-                        "action_type": action_type,
-                        "data": data_snapshot,
-                        "screenshot_bytes": screenshot_bytes,
-                        "response_time": response_time,
-                        "buildings": list(_buildings),
-                        "extra_images": extra_images,
-                        "specialty": specialty,
-                        "change_level": change_level,
-                        "event_level": event_level,
-                        "event_source": event_source,
-                        "recover_selected": recover_selected,
-                        "robot_group_choice": robot_group_choice,
-                    },
-                )
-                return
-
-            if self._delegate_qt_notice_upload_to_backend(
+        def backend_task():
+            self._delegate_qt_notice_upload_to_backend(
                 data_snapshot=data_snapshot if isinstance(data_snapshot, dict) else {},
                 screenshot_bytes=screenshot_bytes,
                 extra_images=extra_images,
@@ -2295,406 +1990,15 @@ class MainWindowWorkflowMixin:
                 response_time=response_time,
                 recover_selected=recover_selected,
                 robot_group_choice=robot_group_choice,
-            ):
-                return
+            )
 
-            file_tokens = []
-            if screenshot_bytes:
-                with self._feishu_request_lock:
-                    success, result = upload_media_to_feishu(screenshot_bytes)
-                if success:
-                    file_tokens.append(result)
-                else:
-                    self._post_request_finished(
-                        "截图上传",
-                        False,
-                        result,
-                        data_snapshot.get("record_id"),
-                    )
-                    return
-
-            extra_file_tokens = []
-            if extra_images:
-                for idx, item in enumerate(extra_images, start=1):
-                    if isinstance(item, (list, tuple)) and len(item) >= 2:
-                        image_bytes = item[0]
-                        file_name = item[1] or f"extra_{idx}.png"
-                    else:
-                        image_bytes = item
-                        file_name = f"extra_{idx}.png"
-                    if not image_bytes:
-                        continue
-                    with self._feishu_request_lock:
-                        success, result = upload_media_to_feishu(
-                            image_bytes, file_name=file_name
-                        )
-                    if success:
-                        extra_file_tokens.append(result)
-                    else:
-                        self._post_request_finished(
-                            "截图上传",
-                            False,
-                            result,
-                            data_snapshot.get("record_id"),
-                        )
-                        return
-
-            record_id = data_snapshot["record_id"]
-            notice_type = data_snapshot.get("notice_type", "")
-            time_str = data_snapshot.get("time_str", "")  # 发生日期
-            transfer_to_overhaul = data_snapshot.get("transfer_to_overhaul")
-
-            if action_type == "upload":
-                payload = (
-                    copy.deepcopy(payload_base)
-                    if payload_base
-                    else NoticePayload(
-                        text=data_snapshot["text"],
-                        robot_group_choice=robot_group_choice,
-                    )
-                )
-                payload.transfer_to_overhaul = transfer_to_overhaul
-                payload.text = data_snapshot["text"]
-                payload.maintenance_cycle = (
-                    data_snapshot.get("maintenance_cycle")
-                    or payload.maintenance_cycle
-                )
-                payload.level = _level or payload.level
-                payload.buildings = _buildings
-                payload.specialty = specialty
-                payload.event_source = event_source
-                payload.robot_group_choice = robot_group_choice
-                payload.file_tokens = file_tokens if file_tokens else None
-                payload.extra_file_tokens = (
-                    extra_file_tokens if extra_file_tokens else None
-                )
-                payload.response_time = response_time
-                payload.occurrence_date = time_str
-                payload.existing_file_tokens = None
-                payload.existing_extra_file_tokens = None
-                payload.existing_response_time = None
-                payload.recover = recover_selected
-                with self._feishu_request_lock:
-                    s, r = create_bitable_record_by_payload(notice_type, payload)
-                self._post_request_finished("上传", s, r if s else r, record_id)
-            elif action_type == "update":
-                with self._feishu_request_lock:
-                    s, qr = query_record_by_id(record_id, notice_type)
-                if s:
-                    # record_id = qr["record_id"] # already have it check validity?
-                    existing_tokens = []
-                    existing_extra_tokens = []
-                    fields = qr.get("fields", {}) if qr else {}
-                    if notice_type == "事件通告":
-                        for f in fields.get("进展更新截图", []) or []:
-                            if "file_token" in f:
-                                existing_tokens.append(f["file_token"])
-                        for f in fields.get("事件恢复截图", []) or []:
-                            if "file_token" in f:
-                                existing_extra_tokens.append(f["file_token"])
-                    elif notice_type == "维保通告":
-                        for f in fields.get("过程通告图片", []) or []:
-                            if "file_token" in f:
-                                existing_tokens.append(f["file_token"])
-                        for f in fields.get("过程现场图片", []) or []:
-                            if "file_token" in f:
-                                existing_extra_tokens.append(f["file_token"])
-                    elif notice_type == "设备检修":
-                        for f in fields.get("过程通告截图", []) or []:
-                            if "file_token" in f:
-                                existing_tokens.append(f["file_token"])
-                        for f in fields.get("过程现场图片", []) or []:
-                            if "file_token" in f:
-                                existing_extra_tokens.append(f["file_token"])
-                    elif notice_type in ("设备变更", "变更通告"):
-                        for f in fields.get("过程更新钉钉截图", []) or []:
-                            if "file_token" in f:
-                                existing_tokens.append(f["file_token"])
-                    elif notice_type in (
-                        "上下电通告",
-                        "上电通告",
-                        "下电通告",
-                        "设备轮巡",
-                        "设备调整",
-                    ):
-                        for f in fields.get("过程通告截图", []) or []:
-                            if "file_token" in f:
-                                existing_tokens.append(f["file_token"])
-                    else:
-                        for f in fields.get("截图", []) or []:
-                            if "file_token" in f:
-                                existing_tokens.append(f["file_token"])
-
-                    if notice_type in ("设备变更", "变更通告"):
-                        existing_resp_time = qr.get("fields", {}).get(
-                            "过程更新时间", ""
-                        )
-                    else:
-                        existing_resp_time = qr.get("fields", {}).get(
-                            "进展更新时间", ""
-                        )
-                    payload = (
-                        copy.deepcopy(payload_base)
-                        if payload_base
-                        else NoticePayload(
-                            text=data_snapshot["text"],
-                            robot_group_choice=robot_group_choice,
-                        )
-                    )
-                    payload.transfer_to_overhaul = transfer_to_overhaul
-                    payload.text = data_snapshot["text"]
-                    payload.maintenance_cycle = (
-                        data_snapshot.get("maintenance_cycle")
-                        or payload.maintenance_cycle
-                    )
-                    payload.level = _level or payload.level
-                    payload.buildings = _buildings
-                    payload.specialty = specialty
-                    payload.event_source = event_source
-                    payload.robot_group_choice = robot_group_choice
-                    payload.file_tokens = file_tokens
-                    payload.extra_file_tokens = extra_file_tokens
-                    payload.existing_file_tokens = existing_tokens
-                    payload.existing_extra_file_tokens = existing_extra_tokens
-                    payload.response_time = response_time
-                    payload.existing_response_time = existing_resp_time
-                    payload.recover = recover_selected
-                    with self._feishu_request_lock:
-                        s2, r2 = update_bitable_record_by_payload(
-                            record_id,
-                            notice_type,
-                            payload,
-                        )
-                    self._post_request_finished("更新", s2, r2, record_id)
-                else:
-                    self._post_request_finished(
-                        "更新", False, f"查询失败: {qr}", record_id
-                    )
-            elif action_type == "end":
-                with self._feishu_request_lock:
-                    s, qr = query_record_by_id(record_id, notice_type)
-                if s:
-                    existing_tokens = []
-                    existing_extra_tokens = []
-                    fields = qr.get("fields", {}) if qr else {}
-                    if notice_type == "维保通告":
-                        for f in fields.get("过程通告图片", []) or []:
-                            if "file_token" in f:
-                                existing_tokens.append(f["file_token"])
-                        for f in fields.get("过程现场图片", []) or []:
-                            if "file_token" in f:
-                                existing_extra_tokens.append(f["file_token"])
-                    elif notice_type == "设备检修":
-                        for f in fields.get("过程通告截图", []) or []:
-                            if "file_token" in f:
-                                existing_tokens.append(f["file_token"])
-                        for f in fields.get("过程现场图片", []) or []:
-                            if "file_token" in f:
-                                existing_extra_tokens.append(f["file_token"])
-                    elif notice_type in ("设备变更", "变更通告"):
-                        for f in fields.get("过程更新钉钉截图", []) or []:
-                            if "file_token" in f:
-                                existing_tokens.append(f["file_token"])
-                    elif notice_type in (
-                        "上下电通告",
-                        "上电通告",
-                        "下电通告",
-                        "设备轮巡",
-                        "设备调整",
-                    ):
-                        for f in fields.get("过程通告截图", []) or []:
-                            if "file_token" in f:
-                                existing_tokens.append(f["file_token"])
-                    else:
-                        for f in fields.get("截图", []) or []:
-                            if "file_token" in f:
-                                existing_tokens.append(f["file_token"])
-                    payload = (
-                        copy.deepcopy(payload_base)
-                        if payload_base
-                        else NoticePayload(
-                            text=data_snapshot["text"],
-                            robot_group_choice=robot_group_choice,
-                        )
-                    )
-                    payload.transfer_to_overhaul = transfer_to_overhaul
-                    payload.text = data_snapshot["text"]
-                    payload.maintenance_cycle = (
-                        data_snapshot.get("maintenance_cycle")
-                        or payload.maintenance_cycle
-                    )
-                    payload.level = _level or payload.level
-                    payload.buildings = _buildings
-                    payload.specialty = specialty
-                    payload.event_source = event_source
-                    payload.robot_group_choice = robot_group_choice
-                    payload.file_tokens = file_tokens if file_tokens else None
-                    payload.extra_file_tokens = (
-                        extra_file_tokens if extra_file_tokens else None
-                    )
-                    payload.existing_file_tokens = existing_tokens
-                    payload.existing_extra_file_tokens = existing_extra_tokens
-                    payload.response_time = response_time
-                    payload.existing_response_time = None
-                    payload.recover = recover_selected
-                    with self._feishu_request_lock:
-                        s_end, r_end = update_bitable_record_by_payload(
-                            record_id,
-                            notice_type,
-                            payload,
-                        )
-                    self._post_request_finished("结束", s_end, r_end, record_id)
-                else:
-                    self._post_request_finished(
-                        "结束", False, f"查询失败: {qr}", record_id
-                    )
-            elif action_type == "upload_replace":
-                # 如果已有真实 record_id，则更新原记录；否则新建
-                if self._is_placeholder_record(data_snapshot):
-                    payload = (
-                        copy.deepcopy(payload_base)
-                        if payload_base
-                        else NoticePayload(
-                            text=data_snapshot["text"],
-                            robot_group_choice=robot_group_choice,
-                        )
-                    )
-                    payload.transfer_to_overhaul = transfer_to_overhaul
-                    payload.text = data_snapshot["text"]
-                    payload.maintenance_cycle = (
-                        data_snapshot.get("maintenance_cycle")
-                        or payload.maintenance_cycle
-                    )
-                    payload.level = _level or payload.level
-                    payload.buildings = _buildings
-                    payload.specialty = specialty
-                    payload.event_source = event_source
-                    payload.robot_group_choice = robot_group_choice
-                    payload.file_tokens = file_tokens if file_tokens else None
-                    payload.extra_file_tokens = (
-                        extra_file_tokens if extra_file_tokens else None
-                    )
-                    payload.response_time = response_time
-                    payload.occurrence_date = time_str
-                    payload.existing_file_tokens = None
-                    payload.existing_extra_file_tokens = None
-                    payload.existing_response_time = None
-                    payload.recover = recover_selected
-
-                    # service_registry 内部已实现全局锁，此处直接调用
-                    s, r = create_bitable_record_by_payload(
-                        notice_type,
-                        payload,
-                    )
-                else:
-                    existing_tokens = []
-                    existing_extra_tokens = []
-                    existing_resp_time = ""
-
-                    # service_registry 内部已实现全局锁，此处直接调用
-                    try:
-                        s_query, qr = query_record_by_id(record_id, notice_type)
-                    except Exception as e:
-                        log_error(f"查询飞书记录失败 (SSL 错误): {e}")
-                        self._post_request_finished(
-                            "上传", False, f"查询记录失败: {e}", None
-                        )
-                        return
-
-                    if s_query:
-                        fields = qr.get("fields", {}) if qr else {}
-                        if notice_type == "事件通告":
-                            for f in fields.get("进展更新截图", []) or []:
-                                if "file_token" in f:
-                                    existing_tokens.append(f["file_token"])
-                            for f in fields.get("事件恢复截图", []) or []:
-                                if "file_token" in f:
-                                    existing_extra_tokens.append(f["file_token"])
-                        elif notice_type == "维保通告":
-                            for f in fields.get("过程通告图片", []) or []:
-                                if "file_token" in f:
-                                    existing_tokens.append(f["file_token"])
-                            for f in fields.get("过程现场图片", []) or []:
-                                if "file_token" in f:
-                                    existing_extra_tokens.append(f["file_token"])
-                        elif notice_type == "设备检修":
-                            for f in fields.get("过程通告截图", []) or []:
-                                if "file_token" in f:
-                                    existing_tokens.append(f["file_token"])
-                            for f in fields.get("过程现场图片", []) or []:
-                                if "file_token" in f:
-                                    existing_extra_tokens.append(f["file_token"])
-                        elif notice_type in ("设备变更", "变更通告"):
-                            for f in fields.get("过程更新钉钉截图", []) or []:
-                                if "file_token" in f:
-                                    existing_tokens.append(f["file_token"])
-                        elif notice_type in (
-                            "上下电通告",
-                            "上电通告",
-                            "下电通告",
-                            "设备轮巡",
-                            "设备调整",
-                        ):
-                            for f in fields.get("过程通告截图", []) or []:
-                                if "file_token" in f:
-                                    existing_tokens.append(f["file_token"])
-                        else:
-                            for f in fields.get("截图", []) or []:
-                                if "file_token" in f:
-                                    existing_tokens.append(f["file_token"])
-                        if notice_type in ("设备变更", "变更通告"):
-                            existing_resp_time = fields.get("过程更新时间", "")
-                        else:
-                            existing_resp_time = fields.get("进展更新时间", "")
-
-                    payload = (
-                        copy.deepcopy(payload_base)
-                        if payload_base
-                        else NoticePayload(
-                            text=data_snapshot["text"],
-                            robot_group_choice=robot_group_choice,
-                        )
-                    )
-                    payload.transfer_to_overhaul = transfer_to_overhaul
-                    payload.text = data_snapshot["text"]
-                    payload.maintenance_cycle = (
-                        data_snapshot.get("maintenance_cycle")
-                        or payload.maintenance_cycle
-                    )
-                    payload.level = _level or payload.level
-                    payload.buildings = _buildings
-                    payload.specialty = specialty
-                    payload.event_source = event_source
-                    payload.robot_group_choice = robot_group_choice
-                    payload.file_tokens = file_tokens if file_tokens else None
-                    payload.extra_file_tokens = (
-                        extra_file_tokens if extra_file_tokens else None
-                    )
-                    payload.existing_file_tokens = existing_tokens
-                    payload.existing_extra_file_tokens = existing_extra_tokens
-                    payload.response_time = response_time
-                    payload.existing_response_time = existing_resp_time
-                    payload.recover = recover_selected
-
-                    # service_registry 内部已实现全局锁，此处直接调用
-                    s, r = update_bitable_record_by_payload(
-                        record_id,
-                        notice_type,
-                        payload,
-                    )
-
-                if s:
-                    self._post_request_finished("归档", True, r, record_id)
-                else:
-                    self._post_request_finished("归档", False, r, record_id)
-
-        self._enqueue_upload(record_id, task)
+        self._enqueue_upload(record_id, backend_task)
         self._mark_upload_queued(record_id)
-        # 截图确认后无需等待上传完成即可继续处理新内容
         if self.current_screenshot_record_id == record_id:
             self.current_screenshot_record_id = None
             self.current_screenshot_action_type = None
         self._try_process_deferred_events()
+        return
 
     def _do_move_to_history(self, item, data_dict, track_rollback=False):
         self._set_last_ui_op(

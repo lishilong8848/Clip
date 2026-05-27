@@ -15,7 +15,6 @@ from ..logger import log_info, log_error, log_warning, write_crash_trace_message
 from ..utils import BASE_DIR
 from ..hot_reload.manager import HotReloadManager
 from ..services.system_alert_webhook import send_system_alert
-from ..services.feishu_service import delete_bitable_record
 from ..core.parser import extract_event_info
 from ..core.speech import speech_manager
 from ..time_parser import parse_time_range
@@ -1126,6 +1125,7 @@ class MainWindowRuntimeMixin:
         source_record_id = str((payload or {}).get("source_record_id") or "").strip()
         notice_type = str((payload or {}).get("notice_type") or "").strip()
         title_key = re.sub(r"\s+", "", str((payload or {}).get("title") or ""))
+        reason_key = re.sub(r"\s+", "", str((payload or {}).get("reason") or ""))
         try:
             store = self._active_notice_store()
         except Exception:
@@ -1157,12 +1157,22 @@ class MainWindowRuntimeMixin:
                 continue
             text = str(data.get("text") or "")
             info = extract_event_info(text) or {}
+            sections = self._lan_notice_sections(text)
             current_title = re.sub(
                 r"\s+",
                 "",
-                str(info.get("title") or self._lan_notice_sections(text)["title"] or ""),
+                str(info.get("title") or sections["title"] or ""),
             )
-            if current_title and current_title == title_key:
+            current_reason = re.sub(r"\s+", "", str(info.get("reason") or sections["reason"] or ""))
+            if (
+                current_title
+                and current_title == title_key
+                and (
+                    notice_type != "维保通告"
+                    or not reason_key
+                    or current_reason == reason_key
+                )
+            ):
                 return list_widget, item
         return None, None
 
@@ -1591,10 +1601,15 @@ class MainWindowRuntimeMixin:
         )
 
     def _find_lan_maintenance_duplicate_start(
-        self, source_record_id: str = "", title: str = "", notice_type: str = "维保通告"
+        self,
+        source_record_id: str = "",
+        title: str = "",
+        notice_type: str = "维保通告",
+        reason: str = "",
     ) -> dict | None:
         source_record_id = str(source_record_id or "").strip()
         normalized_title = re.sub(r"\s+", "", str(title or ""))
+        normalized_reason = re.sub(r"\s+", "", str(reason or ""))
         notice_type = str(notice_type or "维保通告").strip()
         try:
             store = self._active_notice_store()
@@ -1630,10 +1645,19 @@ class MainWindowRuntimeMixin:
             if source_record_id and str(data.get("lan_source_record_id") or "") == source_record_id:
                 return data
             if normalized_title:
+                sections = self._lan_notice_sections(text)
                 current_title = re.sub(
-                    r"\s+", "", str(info.get("title") or self._lan_notice_sections(text)["title"] or "")
+                    r"\s+", "", str(info.get("title") or sections["title"] or "")
                 )
-                if current_title == normalized_title:
+                current_reason = re.sub(r"\s+", "", str(info.get("reason") or sections["reason"] or ""))
+                if (
+                    current_title == normalized_title
+                    and (
+                        notice_type != "维保通告"
+                        or not normalized_reason
+                        or current_reason == normalized_reason
+                    )
+                ):
                     return data
         return None
 
@@ -1790,6 +1814,7 @@ class MainWindowRuntimeMixin:
                 str(payload.get("record_id") or ""),
                 str(payload.get("title") or ""),
                 notice_type,
+                str(payload.get("reason") or info.get("reason") or self._lan_notice_sections(text)["reason"] or ""),
             )
             if duplicate:
                 duplicate_id = str(duplicate.get("record_id") or "").strip()

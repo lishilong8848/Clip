@@ -3177,7 +3177,7 @@
           ${backendStatHtml("Qt outbox 待确认", data.qt_outbox_pending, `${data.qt_outbox_leased || 0} leased / ${data.qt_outbox_failed || 0} failed`)}
           ${backendStatHtml("Qt 桥", qtBridge.connected ? "在线" : "未连接", qtBridge.age_seconds ? `${qtBridge.age_seconds}s 前` : "无心跳")}
           ${backendStatHtml("Qt 慢事件", qtBridge.slow_event_count || 0, `${qtBridge.last_event_duration_ms || 0}ms / ${qtBridge.last_event_kind || "-"}`)}
-          ${backendStatHtml("旧门户回退", data.legacy_adapter_enabled || data.legacy_fallback_env ? "已启用" : "未启用", data.legacy_fallback_env ? "CLIPFLOW_LEGACY_PORTAL" : "默认 FastAPI")}
+          ${backendStatHtml("后端路径", "FastAPI", "生产路径")}
           ${backendStatHtml("上传等待", data.upload_wait_size, data.upload_wait_alive ? "监控中" : "未运行")}
           ${backendStatHtml(
             "外部写入",
@@ -3210,7 +3210,6 @@
         </div>
         ${state.backendStats.message ? `<div class="job-line failed">${html(state.backendStats.message)}</div>` : ""}
         ${externalGuard.reason ? `<div class="job-line failed">${html(externalGuard.reason)}</div>` : ""}
-        ${(data.legacy_adapter_enabled || data.legacy_fallback_env) ? `<div class="job-line failed">当前启用了旧门户回退路径；稳定后建议关闭 CLIPFLOW_LEGACY_PORTAL / CLIPFLOW_FASTAPI_LEGACY_ADAPTER。</div>` : ""}
         ${phaseLines.length ? `
           <div class="work-detail" style="margin-top:10px">
             <strong>任务阶段分布</strong>

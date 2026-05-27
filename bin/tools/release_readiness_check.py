@@ -38,13 +38,6 @@ ALLOWED_REQUESTS_FILES = {
 }
 
 DISALLOWED_RELEASE_ENV_FLAGS = (
-    "CLIPFLOW_FRONTEND_LEGACY",
-    "CLIPFLOW_LEGACY_PORTAL",
-    "CLIPFLOW_ALLOW_BACKEND_IMPORT_FALLBACK",
-    "CLIPFLOW_FASTAPI_LEGACY_ADAPTER",
-    "CLIPFLOW_LEGACY_QT_WIDGET_LIST",
-    "CLIPFLOW_DISABLE_QT_MODEL_VIEW",
-    "CLIPFLOW_DISABLE_ACTIVE_NOTICE_MODEL",
     "CLIPFLOW_DISABLE_UNIFIED_FEISHU_HTTP",
 )
 
@@ -114,9 +107,7 @@ def check_frontend_dist() -> tuple[bool, str, bool]:
         return False, f"Vue 构建产物不存在: {dist_index}", False
     ready = portal_server.portal_frontend_dist_ready()
     if not ready:
-        if os.environ.get("CLIPFLOW_FRONTEND_LEGACY") == "1":
-            return True, "Vue dist 未标记生产就绪；当前显式强制 legacy 回退。", False
-        return False, "Vue dist 未标记生产就绪；生产默认页面不能回退到旧占位或 legacy。", False
+        return False, "Vue dist 不可用；生产默认页面必须使用 Vue dist。", False
     html = dist_index.read_text(encoding="utf-8", errors="ignore")
     referenced_assets = set(re.findall(r"/assets/([^\"'>]+)", html))
     if not referenced_assets:
@@ -142,7 +133,7 @@ def check_frontend_dist() -> tuple[bool, str, bool]:
             placeholder_hits.append(name)
     if placeholder_hits:
         return False, "Vue dist 仍包含迁移占位文案: " + ", ".join(placeholder_hits[:10]), False
-    return True, f"Vue dist 已标记生产就绪: {dist_index}", True
+    return True, f"Vue dist 已就绪: {dist_index}", True
 
 
 def check_release_env_flags() -> tuple[bool, list[str]]:
@@ -174,17 +165,16 @@ def check_qt_model_view_default() -> tuple[bool, str]:
     records_text = records_path.read_text(encoding="utf-8", errors="ignore")
     required = (
         "def _active_model_view_visible" in ui_text
-        and "CLIPFLOW_LEGACY_QT_WIDGET_LIST" in ui_text
         and "ActiveNoticeListRoute" in ui_text
         and 'self.list_active_event = ActiveNoticeListRoute("event")' in ui_text
         and 'self.list_active_other = ActiveNoticeListRoute("other")' in ui_text
-        and "return bool(enabled() if callable(enabled) else True)" in ui_text
+        and "return True" in ui_text
         and "def _active_notice_model_enabled" in records_text
-        and 'os.environ.get("CLIPFLOW_DISABLE_ACTIVE_NOTICE_MODEL") != "1"' in records_text
+        and "return True" in records_text
     )
     if not required:
         return False, "Qt 活动列表默认 model/delegate 路径检查失败。"
-    return True, "Qt 活动列表默认走 model/delegate，legacy widget list 只允许显式回退。"
+    return True, "Qt 活动列表固定走 model/delegate。"
 
 
 def main() -> int:
