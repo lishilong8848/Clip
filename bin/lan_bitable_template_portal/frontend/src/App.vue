@@ -121,18 +121,68 @@
         </div>
         <div v-if="pendingChangeTargetSelection" class="target-choice-panel">
           <div>
-            <strong>请选择要{{ pendingChangeTargetSelection.actionLabel }}的设备变更记录</strong>
-            <p>原文状态为“{{ pendingChangeTargetSelection.actionLabel }}”，选择后会作为{{ pendingChangeTargetSelection.actionLabel }}通告加入待发起通告。</p>
+            <strong>请选择要{{ pendingChangeTargetSelection.actionLabel }}的{{ workTypeLabel(pendingChangeTargetSelection.type) }}记录</strong>
+            <p>原文状态为“{{ pendingChangeTargetSelection.actionLabel }}”。可同时选择目标多维记录和源表记录；如果缺少主界面条目，也能用这两类记录继续上传。</p>
           </div>
-          <button
-            v-for="item in pendingChangeTargetSelection.candidates"
-            :key="item.record_id"
-            class="target-choice"
-            @click="choosePastedChangeTarget(item)"
-          >
-            <strong>{{ item.title || item.record_id }}</strong>
-            <span>{{ item.building || "-" }} · {{ item.status || "未标记状态" }} · {{ item.start_time || "-" }} 至 {{ item.end_time || "-" }}</span>
-          </button>
+          <div class="target-choice-layout">
+            <div class="target-choice-list">
+              <p v-if="!pendingChangeTargetSelection.candidates.length" class="target-empty-line">未找到同名目标多维记录，可先选择源表记录继续尝试关联。</p>
+              <button
+                v-for="item in pendingChangeTargetSelection.candidates"
+                :key="changeTargetCandidateId(item)"
+                class="target-choice"
+                :class="{ active: selectedChangeTargetId === changeTargetCandidateId(item) }"
+                @mouseenter="previewChangeTarget(item)"
+                @focus="previewChangeTarget(item)"
+                @click="selectChangeTarget(item)"
+              >
+                <strong>{{ item.title || item.record_id }}</strong>
+                <span>{{ item.building || "-" }} · {{ item.status || "未标记状态" }} · {{ item.start_time || "-" }} 至 {{ item.end_time || "-" }}</span>
+                <small>{{ item.date_matched ? "时间匹配" : "按名称匹配" }}</small>
+              </button>
+            </div>
+            <aside v-if="activeChangeTargetCandidate" class="target-detail-popover">
+              <div class="target-detail-head">
+                <strong>{{ activeChangeTargetCandidate.title || `${workTypeLabel(pendingChangeTargetSelection.type)}记录` }}</strong>
+                <span>{{ activeChangeTargetCandidate.building || "-" }} · {{ activeChangeTargetCandidate.status || "未标记状态" }}</span>
+              </div>
+              <dl class="target-detail-grid">
+                <template v-for="row in changeTargetDetailRows(activeChangeTargetCandidate)" :key="row.label">
+                  <dt>{{ row.label }}</dt>
+                  <dd>{{ row.value }}</dd>
+                </template>
+              </dl>
+              <button class="btn blue target-confirm" :disabled="changeTargetConfirming || !selectedChangeTargetId" @click="confirmPastedChangeTarget">
+                {{ changeTargetConfirming ? "确认中" : "确认关联这条记录" }}
+              </button>
+            </aside>
+          </div>
+          <div v-if="changeSourceCandidates.length" class="source-choice-panel">
+            <div>
+              <strong>对应源表记录</strong>
+              <p>选择源表记录后，后续状态、闭环和来源追踪会更准确；不选择也可用目标多维记录继续上传。</p>
+            </div>
+            <div class="source-choice-list">
+              <button
+                v-for="item in changeSourceCandidates"
+                :key="changeSourceCandidateId(item)"
+                class="source-choice"
+                :class="{ active: selectedChangeSourceId === changeSourceCandidateId(item) }"
+                @click="selectedChangeSourceId = changeSourceCandidateId(item)"
+              >
+                <strong>{{ item.title || item.record_id }}</strong>
+                <span>{{ item.building || "-" }} · {{ item.status || "未标记状态" }} · {{ item.start_time || "-" }} 至 {{ item.end_time || "-" }}</span>
+              </button>
+            </div>
+            <button
+              v-if="!pendingChangeTargetSelection.candidates.length"
+              class="btn blue target-confirm"
+              :disabled="changeTargetConfirming || !selectedChangeSourceId"
+              @click="confirmPastedChangeTarget"
+            >
+              {{ changeTargetConfirming ? "确认中" : "确认关联源表记录" }}
+            </button>
+          </div>
         </div>
       </section>
 
@@ -201,11 +251,20 @@
               <template v-else>
                 <div class="form-grid">
                   <label>
-                    标题
+                    {{ noticeFieldLabel(row.record.work_type, "title") }}
                     <input v-model="row.draft.title" placeholder="通告标题" @input="saveDrafts" />
                   </label>
+                  <label v-if="row.record.manual">
+                    楼栋/范围
+                    <select v-model="row.draft.building" @change="onDraftBuildingChange(row.draft)">
+                      <option value="">请选择</option>
+                      <option v-for="item in requestableScopes" :key="item.value" :value="item.label">
+                        {{ item.label }}
+                      </option>
+                    </select>
+                  </label>
                   <label>
-                    专业
+                    {{ noticeFieldLabel(row.record.work_type, "specialty") }}
                     <input v-model="row.draft.specialty" placeholder="专业" @input="saveDrafts" />
                   </label>
                   <label v-if="row.record.work_type === 'maintenance'">
@@ -220,40 +279,53 @@
                     <span>非计划，发送时标题末尾自动追加“（非计划性）”</span>
                   </label>
                   <label v-if="row.record.work_type !== 'maintenance'">
-                    等级
+                    {{ noticeFieldLabel(row.record.work_type, "level") }}
                     <input v-model="row.draft.level" placeholder="等级" @input="saveDrafts" />
                   </label>
                   <label>
-                    开始 / 期望完成时间
+                    {{ noticeFieldLabel(row.record.work_type, "start_time") }}
                     <input v-model="row.draft.start_time" type="datetime-local" @input="saveDrafts" />
                   </label>
                   <label>
-                    结束 / 故障发生时间
+                    {{ noticeFieldLabel(row.record.work_type, "end_time") }}
                     <input v-model="row.draft.end_time" type="datetime-local" @input="saveDrafts" />
                   </label>
                   <label class="span-2">
-                    地点
+                    {{ noticeFieldLabel(row.record.work_type, "location") }}
                     <input v-model="row.draft.location" placeholder="地点" @input="saveDrafts" />
                   </label>
                   <label class="span-2">
-                    内容 / 标题
+                    {{ noticeFieldLabel(row.record.work_type, "content") }}
                     <textarea v-model="row.draft.content" placeholder="内容" @input="saveDrafts"></textarea>
                   </label>
                   <label>
-                    原因
+                    {{ noticeFieldLabel(row.record.work_type, "reason") }}
                     <textarea v-model="row.draft.reason" placeholder="原因" @input="saveDrafts"></textarea>
                   </label>
                   <label>
-                    影响
+                    {{ noticeFieldLabel(row.record.work_type, "impact") }}
                     <textarea v-model="row.draft.impact" placeholder="影响" @input="saveDrafts"></textarea>
                   </label>
                   <label class="span-2">
-                    进度 / 完成情况
+                    {{ noticeFieldLabel(row.record.work_type, "progress") }}
                     <textarea v-model="row.draft.progress" placeholder="进度" @input="saveDrafts"></textarea>
                   </label>
                 </div>
-                <details v-if="row.record.work_type === 'repair'" class="repair-fields">
-                  <summary>检修字段</summary>
+                <section v-if="row.record.work_type === 'power'" class="repair-fields">
+                  <h3>上电字段</h3>
+                  <div class="form-grid">
+                    <label><span>柜号</span><input v-model="row.draft.cabinet" @input="saveDrafts" /></label>
+                    <label><span>数量</span><input v-model="row.draft.quantity" @input="saveDrafts" /></label>
+                  </div>
+                </section>
+                <section v-if="row.record.work_type === 'polling'" class="repair-fields">
+                  <h3>轮巡字段</h3>
+                  <div class="form-grid">
+                    <label class="span-2"><span>设备</span><input v-model="row.draft.device" @input="saveDrafts" /></label>
+                  </div>
+                </section>
+                <section v-if="row.record.work_type === 'repair'" class="repair-fields">
+                  <h3>检修字段</h3>
                   <div class="form-grid">
                     <label><span>维修设备</span><input v-model="row.draft.repair_device" @input="saveDrafts" /></label>
                     <label><span>维修故障</span><input v-model="row.draft.repair_fault" @input="saveDrafts" /></label>
@@ -263,7 +335,7 @@
                     <label><span>故障现象</span><input v-model="row.draft.symptom" @input="saveDrafts" /></label>
                     <label class="span-2"><span>解决方案</span><textarea v-model="row.draft.solution" @input="saveDrafts"></textarea></label>
                   </div>
-                </details>
+                </section>
                 <div v-if="row.record.work_type === 'change'" class="zhihang-line">
                   <label>
                     <input v-model="row.draft.zhihang_involved" type="checkbox" @change="saveDrafts" />
@@ -317,7 +389,7 @@
                 <div class="ongoing-expanded" @click.stop>
                   <div class="form-grid">
                     <label>
-                      标题
+                      {{ noticeFieldLabel(item.work_type || "maintenance", "title") }}
                       <input
                         :value="ongoingDraft(item).title"
                         placeholder="通告标题"
@@ -325,7 +397,7 @@
                       />
                     </label>
                     <label>
-                      专业
+                      {{ noticeFieldLabel(item.work_type || "maintenance", "specialty") }}
                       <input
                         :value="ongoingDraft(item).specialty"
                         placeholder="专业"
@@ -343,7 +415,7 @@
                       </select>
                     </label>
                     <label v-if="(item.work_type || 'maintenance') !== 'maintenance'">
-                      等级
+                      {{ noticeFieldLabel(item.work_type || "maintenance", "level") }}
                       <input
                         :value="ongoingDraft(item).level"
                         placeholder="等级"
@@ -351,7 +423,7 @@
                       />
                     </label>
                     <label>
-                      开始 / 期望完成时间
+                      {{ noticeFieldLabel(item.work_type || "maintenance", "start_time") }}
                       <input
                         :value="ongoingDraft(item).start_time"
                         type="datetime-local"
@@ -359,7 +431,7 @@
                       />
                     </label>
                     <label>
-                      结束 / 故障发生时间
+                      {{ noticeFieldLabel(item.work_type || "maintenance", "end_time") }}
                       <input
                         :value="ongoingDraft(item).end_time"
                         type="datetime-local"
@@ -367,7 +439,7 @@
                       />
                     </label>
                     <label class="span-2">
-                      地点
+                      {{ noticeFieldLabel(item.work_type || "maintenance", "location") }}
                       <input
                         :value="ongoingDraft(item).location"
                         placeholder="地点"
@@ -375,7 +447,7 @@
                       />
                     </label>
                     <label class="span-2">
-                      内容 / 标题
+                      {{ noticeFieldLabel(item.work_type || "maintenance", "content") }}
                       <textarea
                         :value="ongoingDraft(item).content"
                         placeholder="内容"
@@ -383,7 +455,7 @@
                       ></textarea>
                     </label>
                     <label>
-                      原因
+                      {{ noticeFieldLabel(item.work_type || "maintenance", "reason") }}
                       <textarea
                         :value="ongoingDraft(item).reason"
                         placeholder="原因"
@@ -391,7 +463,7 @@
                       ></textarea>
                     </label>
                     <label>
-                      影响
+                      {{ noticeFieldLabel(item.work_type || "maintenance", "impact") }}
                       <textarea
                         :value="ongoingDraft(item).impact"
                         placeholder="影响"
@@ -399,7 +471,7 @@
                       ></textarea>
                     </label>
                     <label class="span-2">
-                      进度 / 完成情况
+                      {{ noticeFieldLabel(item.work_type || "maintenance", "progress") }}
                       <textarea
                         :value="ongoingDraft(item).progress"
                         placeholder="进度"
@@ -407,8 +479,21 @@
                       ></textarea>
                     </label>
                   </div>
-                  <details v-if="(item.work_type || 'maintenance') === 'repair'" class="repair-fields">
-                    <summary>检修字段</summary>
+                  <section v-if="(item.work_type || 'maintenance') === 'power'" class="repair-fields">
+                    <h3>上电字段</h3>
+                    <div class="form-grid">
+                      <label><span>柜号</span><input :value="ongoingDraft(item).cabinet" @input="setOngoingEdit(item, 'cabinet', ($event.target as HTMLInputElement).value)" /></label>
+                      <label><span>数量</span><input :value="ongoingDraft(item).quantity" @input="setOngoingEdit(item, 'quantity', ($event.target as HTMLInputElement).value)" /></label>
+                    </div>
+                  </section>
+                  <section v-if="(item.work_type || 'maintenance') === 'polling'" class="repair-fields">
+                    <h3>轮巡字段</h3>
+                    <div class="form-grid">
+                      <label class="span-2"><span>设备</span><input :value="ongoingDraft(item).device" @input="setOngoingEdit(item, 'device', ($event.target as HTMLInputElement).value)" /></label>
+                    </div>
+                  </section>
+                  <section v-if="(item.work_type || 'maintenance') === 'repair'" class="repair-fields">
+                    <h3>检修字段</h3>
                     <div class="form-grid">
                       <label><span>维修设备</span><input :value="ongoingDraft(item).repair_device" @input="setOngoingEdit(item, 'repair_device', ($event.target as HTMLInputElement).value)" /></label>
                       <label><span>维修故障</span><input :value="ongoingDraft(item).repair_fault" @input="setOngoingEdit(item, 'repair_fault', ($event.target as HTMLInputElement).value)" /></label>
@@ -418,7 +503,7 @@
                       <label><span>故障现象</span><input :value="ongoingDraft(item).symptom" @input="setOngoingEdit(item, 'symptom', ($event.target as HTMLInputElement).value)" /></label>
                       <label class="span-2"><span>解决方案</span><textarea :value="ongoingDraft(item).solution" @input="setOngoingEdit(item, 'solution', ($event.target as HTMLTextAreaElement).value)"></textarea></label>
                     </div>
-                  </details>
+                  </section>
                   <div v-if="(item.work_type || 'maintenance') === 'change'" class="zhihang-line">
                     <label>
                       <input
@@ -505,6 +590,9 @@ const workTypes = [
   { value: "maintenance", label: "维保" },
   { value: "change", label: "变更" },
   { value: "repair", label: "检修" },
+  { value: "power", label: "上电" },
+  { value: "polling", label: "轮巡" },
+  { value: "adjust", label: "调整" },
 ];
 const brandLogoSrc = "/assets/vnet-logo.png";
 const buildingScopeCodes = ["110", "A", "B", "C", "D", "E", "H"];
@@ -542,6 +630,10 @@ const pasteParseBusy = ref(false);
 const pasteParseLine = ref("粘贴通告后解析。");
 const pasteParseStatus = ref("");
 const pendingChangeTargetSelection = ref<Dict | null>(null);
+const selectedChangeTargetId = ref("");
+const hoveredChangeTargetId = ref("");
+const selectedChangeSourceId = ref("");
+const changeTargetConfirming = ref(false);
 const memoryImportText = ref("");
 const memoryImportBusy = ref(false);
 const memoryImportLine = ref("粘贴历史通告后导入。");
@@ -608,7 +700,7 @@ const liveDailyStats = computed(() => ({
 const liveOngoingCount = computed(() => Math.max(0, ongoing.value.length + localSummaryAdjustments.ongoing));
 const scopedRecords = computed(() => records.value.filter((record) => recordMatchesCurrentScope(record)));
 const recordTypeCounts = computed(() => {
-  const counts: Record<string, number> = { maintenance: 0, change: 0, repair: 0 };
+  const counts: Record<string, number> = Object.fromEntries(workTypes.map((item) => [item.value, 0]));
   for (const record of scopedRecords.value) {
     const type = record.work_type || "maintenance";
     if (Object.prototype.hasOwnProperty.call(counts, type)) counts[type] += 1;
@@ -690,8 +782,101 @@ function scopeLabel(value: string): string {
   return found?.label || normalized;
 }
 
+function defaultBuildingForCurrentScope(): string {
+  const scope = normalizeScopeValue(currentScope.value || "", "");
+  if (!scope || scope === "ALL") return "";
+  return scopeLabel(scope);
+}
+
+function buildingCodesFromText(value: string): string[] {
+  const code = normalizeScopeValue(value, "");
+  if (buildingScopeCodes.includes(code)) return [code];
+  if (code === "CAMPUS") return ["A", "B", "C"];
+  return [];
+}
+
+function onDraftBuildingChange(draft: Dict): void {
+  draft.building_codes = buildingCodesFromText(draft.building || "");
+  saveDrafts();
+}
+
 function workTypeLabel(value: string): string {
   return workTypes.find((item) => item.value === value)?.label || "维保";
+}
+
+function noticeFieldLabel(type: string, field: string): string {
+  const workType = type || "maintenance";
+  const labels: Record<string, Record<string, string>> = {
+    maintenance: {
+      title: "名称",
+      specialty: "专业",
+      start_time: "计划开始时间",
+      end_time: "计划结束时间",
+      location: "位置",
+      content: "内容",
+      reason: "原因",
+      impact: "影响",
+      progress: "进度",
+    },
+    change: {
+      title: "名称",
+      specialty: "专业",
+      level: "变更等级",
+      start_time: "计划开始时间",
+      end_time: "计划结束时间",
+      location: "位置",
+      content: "内容",
+      reason: "原因",
+      impact: "影响",
+      progress: "进度",
+    },
+    repair: {
+      title: "标题",
+      specialty: "专业",
+      level: "紧急程度",
+      start_time: "期望完成时间",
+      end_time: "发现故障时间",
+      location: "地点",
+      content: "标题/补充内容",
+      reason: "故障原因",
+      impact: "影响范围",
+      progress: "完成情况",
+    },
+    power: {
+      title: "名称",
+      specialty: "专业",
+      start_time: "计划开始时间",
+      end_time: "计划结束时间",
+      location: "位置",
+      content: "内容",
+      reason: "原因",
+      impact: "影响",
+      progress: "进度",
+    },
+    polling: {
+      title: "标题",
+      specialty: "专业",
+      start_time: "计划开始时间",
+      end_time: "计划结束时间",
+      location: "位置",
+      content: "内容",
+      reason: "原因",
+      impact: "影响",
+      progress: "进度",
+    },
+    adjust: {
+      title: "名称",
+      specialty: "专业",
+      start_time: "计划开始时间",
+      end_time: "计划结束时间",
+      location: "位置",
+      content: "内容",
+      reason: "原因",
+      impact: "影响",
+      progress: "进度",
+    },
+  };
+  return labels[workType]?.[field] || labels.maintenance[field] || field;
 }
 
 function fieldsOf(record: Dict | undefined): Dict {
@@ -807,7 +992,7 @@ function sourceActionLabel(record: Dict): string {
 }
 
 function draftActionForRecord(record: Dict, draft: Dict): string {
-  if (record?.manual && (record.work_type || "maintenance") === "change") {
+  if (record?.manual) {
     const action = String(draft?.parsed_action || "").toLowerCase();
     if (["start", "update", "end"].includes(action)) return action;
   }
@@ -933,13 +1118,16 @@ function draftRecordForKey(key: string): Dict | null {
 }
 
 function manualDraftDefaults(type: string): Dict {
+  const building = defaultBuildingForCurrentScope();
+  const normalizedType = workTypes.some((item) => item.value === type) ? type : "maintenance";
   return {
     manual: true,
-    work_type: workTypes.some((item) => item.value === type) ? type : "maintenance",
+    work_type: normalizedType,
     title: "",
-    building: "",
+    building,
+    building_codes: buildingCodesFromText(building),
     specialty: "",
-    level: "",
+    level: normalizedType === "change" ? "I3" : "",
     maintenance_cycle: "",
     non_plan: false,
     start_time: "",
@@ -960,19 +1148,33 @@ function manualDraftDefaults(type: string): Dict {
     discovery: "",
     symptom: "",
     solution: "",
+    device: "",
+    cabinet: "",
+    quantity: "",
   };
 }
 
 function manualRecordFromDraft(key: string, draft: Dict): Dict {
   const type = draft.work_type || "maintenance";
   const title = manualDraftTitle(draft, type);
+  const noticeTypeMap: Record<string, string> = {
+    maintenance: "维保通告",
+    change: "设备变更",
+    repair: "设备检修",
+    power: "上下电通告",
+    polling: "设备轮巡",
+    adjust: "设备调整",
+  };
+  const buildingCodes = Array.isArray(draft.building_codes) && draft.building_codes.length
+    ? draft.building_codes
+    : buildingCodesFromText(draft.building || "");
   return {
     manual: true,
     manual_key: key,
     record_id: key,
-    source_record_id: "",
+    source_record_id: draft.source_record_id || "",
     work_type: type,
-    notice_type: type === "change" ? "设备变更" : type === "repair" ? "设备检修" : "维保通告",
+    notice_type: noticeTypeMap[type] || "维保通告",
     title: title || `手动${workTypeLabel(type)}通告`,
     display_fields: {
       "手动标题": title,
@@ -984,9 +1186,12 @@ function manualRecordFromDraft(key: string, draft: Dict): Dict {
       "所属专业": draft.specialty || "",
       "维护周期": draft.maintenance_cycle || "",
       "非计划性": draft.non_plan ? "是" : "",
+      "设备": draft.device || "",
+      "柜号": draft.cabinet || "",
+      "数量": draft.quantity || "",
     },
     target_record_id: draft.target_record_id || draft.record_id || "",
-    building_codes: Array.isArray(draft.building_codes) ? draft.building_codes : [],
+    building_codes: buildingCodes,
   };
 }
 
@@ -1040,7 +1245,7 @@ function getDraft(record: Dict): Dict {
       drafts.set(key, {
         title: titleForRecord(record),
         specialty: memory.specialty || specialtyForRecord(record),
-        level: memory.level || levelForRecord(record),
+        level: memory.level || levelForRecord(record) || (isChange ? "I3" : ""),
         maintenance_cycle: f["维护周期"] || "",
         start_time: isChange
           ? (toDatetimeLocal(f["变更开始日期（阿里）"] || f["计划开始日期（阿里）"] || f["计划开始"] || f["计划开始时间"] || f["计划延迟开始日期"]) || todayInput(9, 30))
@@ -1513,6 +1718,121 @@ function parsedActionLabel(action: string): string {
   return "开始";
 }
 
+function pastedNoticeWorkType(text: string): string {
+  if (/设备检修|检修通告/.test(text)) return "repair";
+  if (/设备变更|变更通告/.test(text)) return "change";
+  if (/上电通告|上下电通告|下电通告/.test(text)) return "power";
+  if (/设备轮巡|轮巡通告/.test(text)) return "polling";
+  if (/设备调整|调整通告/.test(text)) return "adjust";
+  return "maintenance";
+}
+
+function changeTargetCandidateId(item: Dict): string {
+  return String(item?.record_id || item?.target_record_id || "").trim();
+}
+
+function changeSourceCandidateId(item: Dict): string {
+  return String(item?.source_record_id || item?.record_id || "").trim();
+}
+
+const activeChangeTargetCandidate = computed(() => {
+  const pending = pendingChangeTargetSelection.value;
+  const candidates = Array.isArray(pending?.candidates) ? pending.candidates : [];
+  if (!candidates.length) return null;
+  const detailId = hoveredChangeTargetId.value || selectedChangeTargetId.value;
+  return candidates.find((item: Dict) => changeTargetCandidateId(item) === detailId) || candidates[0];
+});
+
+const changeSourceCandidates = computed(() => {
+  const pending = pendingChangeTargetSelection.value;
+  return Array.isArray(pending?.sourceCandidates) ? pending.sourceCandidates : [];
+});
+
+const selectedChangeSourceCandidate = computed(() => {
+  const id = selectedChangeSourceId.value;
+  if (!id) return null;
+  return changeSourceCandidates.value.find((item: Dict) => changeSourceCandidateId(item) === id) || null;
+});
+
+function changeTargetDetailRows(item: Dict | null): Array<{ label: string; value: string }> {
+  if (!item) return [];
+  const source = Array.isArray(item.field_items)
+    ? item.field_items
+    : Object.entries(item.fields || {}).map(([label, value]) => ({ label, value }));
+  const rows = source
+    .map((row: Dict) => ({
+      label: String(row.label || "").trim(),
+      value: String(row.value ?? "").trim(),
+    }))
+    .filter((row: { label: string; value: string }) => row.label && row.value);
+  if (rows.length) return rows;
+  return [
+    { label: "名称", value: String(item.title || "") },
+    { label: "楼栋", value: String(item.building || "") },
+    { label: "状态", value: String(item.status || "") },
+    { label: "开始时间", value: String(item.start_time || "") },
+    { label: "结束时间", value: String(item.end_time || "") },
+  ].filter((row) => row.value);
+}
+
+function previewChangeTarget(item: Dict): void {
+  hoveredChangeTargetId.value = changeTargetCandidateId(item);
+}
+
+function selectChangeTarget(item: Dict): void {
+  const id = changeTargetCandidateId(item);
+  selectedChangeTargetId.value = id;
+  hoveredChangeTargetId.value = id;
+}
+
+function firstCandidateField(fields: Dict, names: string[]): string {
+  for (const name of names) {
+    const value = fields?.[name];
+    if (String(value ?? "").trim()) return String(value).trim();
+  }
+  return "";
+}
+
+function fillDraftBlank(draft: Dict, key: string, value: string): void {
+  const text = String(value || "").trim();
+  if (!text) return;
+  if (String(draft[key] ?? "").trim()) return;
+  draft[key] = text;
+}
+
+function fillDraftBlankDatetime(draft: Dict, key: string, value: string): void {
+  const normalized = toDatetimeLocal(value);
+  fillDraftBlank(draft, key, normalized || value);
+}
+
+function applyChangeTargetCandidateDefaults(draft: Dict, candidate: Dict): Dict {
+  const fields = candidate?.fields || {};
+  const next = { ...draft };
+  fillDraftBlank(next, "title", firstCandidateField(fields, ["名称", "标题", "变更简述"]) || candidate.title || "");
+  fillDraftBlank(next, "building", firstCandidateField(fields, ["楼栋", "变更楼栋"]) || candidate.building || "");
+  fillDraftBlank(next, "specialty", firstCandidateField(fields, ["专业", "专业类别"]));
+  fillDraftBlank(next, "maintenance_cycle", firstCandidateField(fields, ["维保周期", "维护周期"]));
+  fillDraftBlank(next, "level", firstCandidateField(fields, ["阿里-变更等级", "智航-变更等级", "变更等级", "变更等级（阿里）", "紧急程度", "等级"]));
+  fillDraftBlankDatetime(next, "start_time", firstCandidateField(fields, ["变更开始时间", "计划开始时间", "计划开始", "开始时间", "期望完成时间"]) || candidate.start_time || "");
+  fillDraftBlankDatetime(next, "end_time", firstCandidateField(fields, ["计划结束时间", "计划结束", "结束时间", "发生故障时间", "故障发生时间"]) || candidate.end_time || "");
+  fillDraftBlank(next, "location", firstCandidateField(fields, ["位置", "地点"]));
+  fillDraftBlank(next, "content", firstCandidateField(fields, ["内容", "变更内容", "变更简述"]));
+  fillDraftBlank(next, "reason", firstCandidateField(fields, ["原因", "变更原因"]));
+  fillDraftBlank(next, "impact", firstCandidateField(fields, ["影响", "影响范围"]));
+  fillDraftBlank(next, "progress", firstCandidateField(fields, ["进度", "完成情况"]));
+  fillDraftBlank(next, "repair_device", firstCandidateField(fields, ["维修设备"]));
+  fillDraftBlank(next, "repair_fault", firstCandidateField(fields, ["维修故障"]));
+  fillDraftBlank(next, "fault_type", firstCandidateField(fields, ["故障类型"]));
+  fillDraftBlank(next, "repair_mode", firstCandidateField(fields, ["维修方式"]));
+  fillDraftBlank(next, "discovery", firstCandidateField(fields, ["故障发现方式（来源）", "故障发现方式"]));
+  fillDraftBlank(next, "symptom", firstCandidateField(fields, ["故障现象"]));
+  fillDraftBlank(next, "solution", firstCandidateField(fields, ["解决方案"]));
+  fillDraftBlank(next, "device", firstCandidateField(fields, ["设备", "维修设备"]));
+  fillDraftBlank(next, "cabinet", firstCandidateField(fields, ["柜号"]));
+  fillDraftBlank(next, "quantity", firstCandidateField(fields, ["数量（个）", "数量"]));
+  return next;
+}
+
 function completeParsedNoticeDraft(type: string, draft: Dict, options: Dict = {}): void {
   const key = `manual:${type}:${Date.now()}-${Math.random().toString(16).slice(2)}`;
   Object.assign(draft, options);
@@ -1522,6 +1842,9 @@ function completeParsedNoticeDraft(type: string, draft: Dict, options: Dict = {}
   workType.value = type;
   pasteText.value = "";
   pendingChangeTargetSelection.value = null;
+  selectedChangeTargetId.value = "";
+  hoveredChangeTargetId.value = "";
+  selectedChangeSourceId.value = "";
   showPasteParser.value = false;
   pasteParseLine.value = `已解析为${workTypeLabel(type)}${parsedActionLabel(draft.parsed_action || "start")}通告。`;
   pasteParseStatus.value = "success";
@@ -1535,15 +1858,23 @@ async function parsePastedNotice(): Promise<void> {
   pasteParseLine.value = "正在解析通告...";
   pasteParseStatus.value = "";
   pendingChangeTargetSelection.value = null;
+  selectedChangeTargetId.value = "";
+  hoveredChangeTargetId.value = "";
+  selectedChangeSourceId.value = "";
   try {
     const sections = parseSections(text);
-    const type = /设备检修|检修通告/.test(text) ? "repair" : /设备变更|变更通告/.test(text) ? "change" : "maintenance";
+    if (/事件通告/.test(text)) {
+      throw new Error("前端暂不支持事件通告纯手填或解析，请在 Qt 主界面处理事件通告。");
+    }
+    const type = pastedNoticeWorkType(text);
     const draft = manualDraftDefaults(type);
     const status = pastedNoticeStatus(text);
     const action = parsedActionFromStatus(status);
     const timeRange = splitNoticeTimeRange(sectionValue(sections, ["时间"]));
     draft.parsed_action = action;
-    draft.title = type === "change" ? sectionValue(sections, ["名称", "标题"]) : sectionValue(sections, ["标题", "名称"]);
+    draft.title = type === "change"
+      ? sectionValue(sections, ["名称", "标题"])
+      : sectionValue(sections, ["标题", "名称", "维修名称"]);
     draft.non_plan = /（非计划性）|（非计划）/.test(draft.title);
     draft.location = sectionValue(sections, ["地点", "位置"]);
     draft.specialty = sectionValue(sections, ["专业", "专业类别"]);
@@ -1551,11 +1882,14 @@ async function parsePastedNotice(): Promise<void> {
     draft.impact = sectionValue(sections, ["影响", "影响范围"]);
     draft.progress = sectionValue(sections, ["进度", "完成情况"]);
     draft.maintenance_cycle = sectionValue(sections, ["维保周期", "维护周期"]);
-    draft.level = sectionValue(sections, ["等级", "变更等级", "紧急程度"]);
+    draft.level = sectionValue(sections, ["等级", "变更等级", "紧急程度"]) || (type === "change" ? "I3" : "");
     draft.start_time = timeRange.start || draft.start_time;
     draft.end_time = timeRange.end || draft.end_time;
-    draft.building = sectionValue(sections, ["楼栋", "变更楼栋", "所属楼栋"]) || inferBuildingText(draft.title, draft.location, text);
-    draft.content = type === "repair" ? "" : sectionValue(sections, ["内容"], draft.title);
+    draft.building = sectionValue(sections, ["楼栋", "变更楼栋", "所属楼栋"])
+      || inferBuildingText(draft.title, draft.location, text)
+      || defaultBuildingForCurrentScope();
+    draft.building_codes = buildingCodesFromText(draft.building);
+    draft.content = type === "repair" ? (sectionValue(sections, ["内容"], draft.title) || draft.title) : sectionValue(sections, ["内容"], draft.title);
     draft.repair_device = sectionValue(sections, ["维修设备"]);
     draft.repair_fault = sectionValue(sections, ["维修故障"]);
     draft.fault_type = sectionValue(sections, ["故障类型"]);
@@ -1563,13 +1897,26 @@ async function parsePastedNotice(): Promise<void> {
     draft.discovery = sectionValue(sections, ["故障发现方式"]);
     draft.symptom = sectionValue(sections, ["故障现象"]);
     draft.solution = sectionValue(sections, ["解决方案"]);
-    if (type === "change" && action !== "start") {
-      if (!draft.title || !draft.start_time || !draft.end_time) {
-        throw new Error("变更更新/结束通告必须包含【名称】和【时间】两个时间点。");
+    draft.device = sectionValue(sections, ["设备"]);
+    draft.cabinet = sectionValue(sections, ["柜号"]);
+    draft.quantity = sectionValue(sections, ["数量"]);
+    if (type === "repair") {
+      const expectedTime = sectionValue(sections, ["期望完成时间"]);
+      const faultTime = sectionValue(sections, ["发现故障时间", "故障发生时间", "发生故障时间"]);
+      draft.start_time = toDatetimeLocal(expectedTime) || timeRange.end || timeRange.start || draft.start_time;
+      draft.end_time = toDatetimeLocal(faultTime) || timeRange.start || draft.end_time;
+      draft.reason = sectionValue(sections, ["故障原因", "原因"], draft.reason);
+      draft.impact = sectionValue(sections, ["影响范围", "影响"], draft.impact);
+      draft.progress = sectionValue(sections, ["完成情况", "进度"], draft.progress);
+    }
+    if (action !== "start") {
+      if (!draft.title) {
+        throw new Error(`${workTypeLabel(type)}更新/结束通告必须包含【名称】或【标题】。`);
       }
-      const data = await api("/api/change-target-candidates", {
+      const data = await api(type === "change" ? "/api/change-target-candidates" : "/api/notice-target-candidates", {
         method: "POST",
         body: JSON.stringify({
+          work_type: type,
           scope: currentScope.value || "ALL",
           title: draft.title,
           start_time: draft.start_time,
@@ -1578,28 +1925,26 @@ async function parsePastedNotice(): Promise<void> {
         }),
       });
       const candidates = Array.isArray(data.candidates) ? data.candidates : [];
-      if (candidates.length === 1) {
-        completeParsedNoticeDraft(type, draft, {
-          target_record_id: candidates[0].record_id || candidates[0].target_record_id || "",
-          record_id: candidates[0].record_id || candidates[0].target_record_id || "",
-          building: draft.building || candidates[0].building || "",
-          building_codes: candidates[0].building_codes || [],
-        });
-        return;
-      }
-      if (candidates.length > 1) {
+      const sourceCandidates = Array.isArray(data.source_candidates) ? data.source_candidates : [];
+      if (candidates.length > 0 || sourceCandidates.length > 0) {
         pendingChangeTargetSelection.value = {
           type,
           draft,
           action,
           actionLabel: parsedActionLabel(action),
           candidates,
+          sourceCandidates,
         };
-        pasteParseLine.value = `找到 ${candidates.length} 条同名同日期设备变更记录，请选择要${parsedActionLabel(action)}的记录。`;
+        selectedChangeTargetId.value = changeTargetCandidateId(candidates[0]);
+        hoveredChangeTargetId.value = selectedChangeTargetId.value;
+        selectedChangeSourceId.value = sourceCandidates.length ? changeSourceCandidateId(sourceCandidates[0]) : "";
+        pasteParseLine.value = candidates.length
+          ? `找到 ${candidates.length} 条同名${workTypeLabel(type)}目标记录，请确认要${parsedActionLabel(action)}的记录。`
+          : `未找到同名目标记录，但找到 ${sourceCandidates.length} 条源表记录；可先关联源表记录后继续提交。`;
         pasteParseStatus.value = "";
         return;
       }
-      throw new Error("未在设备变更目标表中找到同名同日期记录，不能作为更新/结束通告发送。");
+      throw new Error(`未在${workTypeLabel(type)}目标表或源表中找到同名记录，不能作为更新/结束通告发送。`);
     }
     completeParsedNoticeDraft(type, draft);
   } catch (error: any) {
@@ -1613,13 +1958,73 @@ async function parsePastedNotice(): Promise<void> {
 function choosePastedChangeTarget(candidate: Dict): void {
   const pending = pendingChangeTargetSelection.value;
   if (!pending) return;
-  const draft = { ...(pending.draft || {}) };
+  const source = selectedChangeSourceCandidate.value || {};
+  const targetId = candidate.record_id || candidate.target_record_id || "";
+  const draft = applyChangeTargetCandidateDefaults(
+    applyChangeTargetCandidateDefaults({ ...(pending.draft || {}) }, candidate),
+    source,
+  );
   completeParsedNoticeDraft(String(pending.type || "change"), draft, {
-    target_record_id: candidate.record_id || candidate.target_record_id || "",
-    record_id: candidate.record_id || candidate.target_record_id || "",
+    target_record_id: targetId,
+    record_id: targetId || source.source_record_id || source.record_id || "",
+    source_record_id: source.source_record_id || source.record_id || "",
+    source_app_token: source.source_app_token || "",
+    source_table_id: source.source_table_id || "",
     building: draft.building || candidate.building || "",
-    building_codes: candidate.building_codes || [],
+    building_codes: source.building_codes || candidate.building_codes || [],
   });
+}
+
+async function confirmPastedChangeTarget(): Promise<void> {
+  const pending = pendingChangeTargetSelection.value;
+  if (!pending || changeTargetConfirming.value) return;
+  const candidates = Array.isArray(pending.candidates) ? pending.candidates : [];
+  const candidate =
+    candidates.find((item: Dict) => changeTargetCandidateId(item) === selectedChangeTargetId.value) ||
+    activeChangeTargetCandidate.value;
+  const sourceOnly = !candidate && selectedChangeSourceCandidate.value;
+  if (!candidate && !sourceOnly) {
+    pasteParseLine.value = "请先选择一条目标多维记录或源表记录。";
+    pasteParseStatus.value = "failed";
+    return;
+  }
+  changeTargetConfirming.value = true;
+  pasteParseLine.value = "正在确认目标记录...";
+  pasteParseStatus.value = "";
+  try {
+    let selected = candidate || {};
+    if (candidate && String(pending.type || "") === "change" && String(pending.action || "") === "update") {
+      const data = await api("/api/change-target-candidates/confirm", {
+        method: "POST",
+        body: JSON.stringify({
+          scope: currentScope.value || "ALL",
+          title: pending.draft?.title || candidate.title || "",
+          start_time: pending.draft?.start_time || "",
+          end_time: pending.draft?.end_time || "",
+          action: pending.action || "update",
+          record_id: changeTargetCandidateId(candidate || {}),
+        }),
+      });
+      selected = data.candidate || candidate;
+      if (Array.isArray(data.source_candidates)) {
+        pending.sourceCandidates = data.source_candidates;
+        if (
+          pending.sourceCandidates.length &&
+          !pending.sourceCandidates.some((item: Dict) => changeSourceCandidateId(item) === selectedChangeSourceId.value)
+        ) {
+          selectedChangeSourceId.value = changeSourceCandidateId(pending.sourceCandidates[0]);
+        }
+      }
+      const cleared = data.clear_actual_end?.cleared;
+      pasteParseLine.value = cleared ? "已确认目标记录，并清空原实际结束时间。" : "已确认目标记录。";
+    }
+    choosePastedChangeTarget(selected || {});
+  } catch (error: any) {
+    pasteParseLine.value = error?.message || "确认目标记录失败";
+    pasteParseStatus.value = "failed";
+  } finally {
+    changeTargetConfirming.value = false;
+  }
 }
 
 async function importHistoricalMemory(): Promise<void> {
@@ -1686,19 +2091,19 @@ function buildStartPayload(key: string): Dict | null {
     notice_type: record.notice_type || "",
     manual: Boolean(record.manual),
     manual_id: record.manual ? key : "",
-    source_app_token: record.manual ? "" : (record.source_app_token || ""),
-    source_table_id: record.manual ? "" : (record.source_table_id || ""),
+    source_app_token: record.manual ? (draft.source_app_token || "") : (record.source_app_token || ""),
+    source_table_id: record.manual ? (draft.source_table_id || "") : (record.source_table_id || ""),
     maintenance_cycle: record.manual ? (draft.maintenance_cycle || "") : (fieldsOf(record)["维护周期"] || ""),
     specialty: draft.specialty || specialtyForRecord(record),
     record_id: action === "start" ? record.record_id : targetRecordId,
-    source_record_id: record.manual ? "" : record.record_id,
+    source_record_id: record.manual ? (draft.source_record_id || "") : record.record_id,
     target_record_id: action !== "start" ? targetRecordId : "",
     source_progress: sourceProgressForRecord(record),
     building_codes: record.manual ? (draft.building_codes || []) : (record.building_codes || []),
     building: record.manual ? (draft.building || "") : buildingForRecord(record),
     title: record.manual ? manualDraftTitle(draft, type) : (type === "repair" ? draft.content : titleForRecord(record)),
     non_plan: record.manual && type === "maintenance" ? Boolean(draft.non_plan) : false,
-    level: record.manual ? (draft.level || "") : (type === "repair" ? (draft.level || "") : (type === "change" ? levelForRecord(record) : "")),
+    level: record.manual ? (draft.level || (type === "change" ? "I3" : "")) : (type === "repair" ? (draft.level || "") : (type === "change" ? (levelForRecord(record) || "I3") : "")),
     start_time: draft.start_time,
     end_time: draft.end_time,
     location: draft.location,
@@ -1717,6 +2122,9 @@ function buildStartPayload(key: string): Dict | null {
     discovery: type === "repair" ? (draft.discovery || "") : "",
     symptom: type === "repair" ? (draft.symptom || "") : "",
     solution: type === "repair" ? (draft.solution || "") : "",
+    device: type === "polling" ? (draft.device || "") : "",
+    cabinet: type === "power" ? (draft.cabinet || "") : "",
+    quantity: type === "power" ? (draft.quantity || "") : "",
     fault_time: type === "repair" ? (draft.end_time || "") : "",
     expected_time: type === "repair" ? (draft.start_time || "") : "",
     operation_id: draft.operation_id || (draft.operation_id = opId(`${key}:${action}`)),
@@ -1766,6 +2174,9 @@ function ongoingDraft(item: Dict): Dict {
       discovery: item.discovery || "",
       symptom: item.symptom || "",
       solution: item.solution || "",
+      device: item.device || "",
+      cabinet: item.cabinet || "",
+      quantity: item.quantity || "",
     });
   }
   return ongoingEdits.get(id) || {};
@@ -1823,6 +2234,9 @@ function buildOngoingPayload(item: Dict, action: string): Dict {
     discovery: workType === "repair" ? draftValue(edit, "discovery", item.discovery || "") : "",
     symptom: workType === "repair" ? draftValue(edit, "symptom", item.symptom || "") : "",
     solution: workType === "repair" ? draftValue(edit, "solution", item.solution || "") : "",
+    device: workType === "polling" ? draftValue(edit, "device", item.device || "") : "",
+    cabinet: workType === "power" ? draftValue(edit, "cabinet", item.cabinet || "") : "",
+    quantity: workType === "power" ? draftValue(edit, "quantity", item.quantity || "") : "",
     fault_time: workType === "repair" ? endTime : "",
     expected_time: workType === "repair" ? startTime : "",
     operation_id: opId(`${item.active_item_id || item.record_id}:${action}`),
@@ -2520,6 +2934,20 @@ button:disabled {
   font-size: 13px;
 }
 
+.target-choice-layout {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.9fr) minmax(280px, 1.1fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.target-choice-list {
+  display: grid;
+  gap: 7px;
+  max-height: 360px;
+  overflow: auto;
+}
+
 .target-choice {
   display: grid;
   gap: 4px;
@@ -2537,7 +2965,107 @@ button:disabled {
   border-color: #2563eb;
 }
 
+.target-choice.active {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.12);
+}
+
 .target-choice span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.target-choice small {
+  color: #2563eb;
+  font-size: 12px;
+}
+
+.target-detail-popover {
+  position: sticky;
+  top: 10px;
+  padding: 10px;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.12);
+}
+
+.target-detail-head {
+  display: grid;
+  gap: 3px;
+  margin-bottom: 8px;
+}
+
+.target-detail-head span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.target-detail-grid {
+  display: grid;
+  grid-template-columns: 96px 1fr;
+  gap: 6px 10px;
+  max-height: 300px;
+  margin: 0;
+  overflow: auto;
+}
+
+.target-detail-grid dt {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.target-detail-grid dd {
+  margin: 0;
+  color: #0f172a;
+  font-size: 13px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.target-confirm {
+  width: 100%;
+  margin-top: 10px;
+}
+
+.source-choice-panel {
+  display: grid;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid #bfdbfe;
+}
+
+.source-choice-panel p {
+  margin: 4px 0 0;
+  color: #475569;
+  font-size: 13px;
+}
+
+.source-choice-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+}
+
+.source-choice {
+  display: grid;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid #dbe3ee;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #0f172a;
+  text-align: left;
+  cursor: pointer;
+}
+
+.source-choice.active {
+  border-color: #0f766e;
+  background: #f0fdfa;
+  box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.1);
+}
+
+.source-choice span {
   color: #64748b;
   font-size: 12px;
 }

@@ -24,6 +24,8 @@ from lan_bitable_template_portal.portal_service import MaintenancePortalService 
 from lan_bitable_template_portal.portal_service import PortalError  # noqa: E402
 from lan_bitable_template_portal.portal_service import RECENT_MONTH_FILTER_LABEL  # noqa: E402
 from lan_bitable_template_portal.portal_service import WORK_TYPE_CHANGE  # noqa: E402
+from lan_bitable_template_portal.portal_service import WORK_TYPE_MAINTENANCE  # noqa: E402
+from lan_bitable_template_portal.portal_service import WORK_TYPE_POWER  # noqa: E402
 from lan_bitable_template_portal.portal_service import WORK_TYPE_REPAIR  # noqa: E402
 from lan_bitable_template_portal.portal_auth import AUTH_COOKIE_NAME  # noqa: E402
 from lan_bitable_template_portal.portal_auth import PortalAuthManager  # noqa: E402
@@ -35,7 +37,11 @@ from clipflow_backend.process_controller import BackendProcessPortalController  
 from fastapi.testclient import TestClient  # noqa: E402
 import upload_event_module.config as config_module  # noqa: E402
 from upload_event_module.config import ConfigManager  # noqa: E402
+from upload_event_module.config import ADJUST_NOTICE_FIELDS  # noqa: E402
 from upload_event_module.config import MAINTENANCE_NOTICE_FIELDS  # noqa: E402
+from upload_event_module.config import POLLING_NOTICE_FIELDS  # noqa: E402
+from upload_event_module.config import POWER_NOTICE_FIELDS  # noqa: E402
+from upload_event_module.config import STATUS_START  # noqa: E402
 from upload_event_module.services.http_client import FeishuHttpClient  # noqa: E402
 from upload_event_module.services.feishu_token_manager import (  # noqa: E402
     FeishuTokenManager,
@@ -43,6 +49,18 @@ from upload_event_module.services.feishu_token_manager import (  # noqa: E402
 from upload_event_module.services.handlers.base import NoticePayload  # noqa: E402
 from upload_event_module.services.handlers.maintenance_notice import (  # noqa: E402
     MaintenanceNoticeHandler,
+)
+from upload_event_module.services.handlers.change_notice import (  # noqa: E402
+    ChangeNoticeHandler,
+)
+from upload_event_module.services.handlers.polling_notice import (  # noqa: E402
+    PollingNoticeHandler,
+)
+from upload_event_module.services.handlers.power_notice import (  # noqa: E402
+    PowerNoticeHandler,
+)
+from upload_event_module.services.handlers.device_adjust_notice import (  # noqa: E402
+    AdjustNoticeHandler,
 )
 from upload_event_module.core.parser import extract_event_info  # noqa: E402
 import upload_event_module.services.feishu_service as feishu_service_module  # noqa: E402
@@ -2625,6 +2643,447 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(len(deleted), 1)
             self.assertIsNotNone(deleted[0].get("deleted_at"))
 
+    def test_change_target_candidates_match_title_without_required_date(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            target_records = [
+                {
+                    "record_id": "target-a",
+                    "display_fields": {
+                        "名称": "A楼测试变更",
+                        "楼栋": "A楼",
+                        "变更状态": "结束",
+                        "变更开始时间": "2026-05-08 09:00",
+                        "变更结束时间": "2026-05-08 18:00",
+                        "实际结束时间": "2026-05-08 18:10",
+                        "原因": "测试原因",
+                    },
+                }
+            ]
+            with patch.object(
+                service,
+                "_target_records_for_notice_type",
+                return_value=target_records,
+            ):
+                result = service.lookup_change_target_candidates(
+                    scope="A",
+                    title="A楼测试变更",
+                    action="update",
+                )
+
+            self.assertEqual(result["count"], 1)
+            candidate = result["candidates"][0]
+            self.assertEqual(candidate["record_id"], "target-a")
+            self.assertFalse(candidate["date_matched"])
+            self.assertEqual(candidate["fields"]["实际结束时间"], "2026-05-08 18:10")
+            self.assertIn({"label": "原因", "value": "测试原因"}, candidate["field_items"])
+
+            service._change_records = [
+                _build_change_record(
+                    "source-a",
+                    building="A楼",
+                    progress="进行中",
+                    title="A楼测试变更",
+                    start_time="2026-05-08 09:00",
+                    end_time="2026-05-08 18:00",
+                )
+            ]
+            with patch.object(
+                service,
+                "_target_records_for_notice_type",
+                return_value=target_records,
+            ):
+                result = service.lookup_change_target_candidates(
+                    scope="A",
+                    title="A楼测试变更",
+                    action="update",
+                )
+
+            self.assertEqual(result["source_candidates"][0]["source_record_id"], "source-a")
+            self.assertEqual(
+                result["source_candidates"][0]["source_app_token"],
+                "JhiVwgfoIimAqEk8YwEc09sknGd",
+            )
+
+    def test_update_action_job_allows_target_record_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            job_id, should_start = service.create_action_job(
+                {
+                    "action": "update",
+                    "work_type": "change",
+                    "notice_type": "设备变更",
+                    "scope": "A",
+                    "manual": True,
+                    "manual_id": "manual-change-update",
+                    "record_id": "target-change-only",
+                    "target_record_id": "target-change-only",
+                    "title": "A楼测试变更",
+                    "building": "A楼",
+                    "building_codes": ["A"],
+                    "start_time": "2026-05-08T09:00",
+                    "end_time": "2026-05-08T18:00",
+                    "operation_id": "target-only-update",
+                }
+            )
+
+            self.assertTrue(job_id)
+            self.assertTrue(should_start)
+
+    def test_notice_target_candidates_support_maintenance_lookup(self):
+        service = _TestMaintenancePortalService()
+        service._records = [
+            _build_record(
+                "maint-source",
+                "A楼",
+                "过滤网维护",
+                "5月",
+                status="进行中",
+                maintenance_cycle="每月",
+            )
+        ]
+        target_records = [
+            {
+                "record_id": "maint-target",
+                "display_fields": {
+                    "名称": "EA118机房A楼过滤网维护",
+                    "楼栋": "A楼",
+                    "维保状态": "开始",
+                    "计划开始时间": "2026-05-08 09:00",
+                    "计划结束时间": "2026-05-08 18:00",
+                    "维保周期": "每月",
+                },
+            }
+        ]
+        with patch.object(
+            service,
+            "_target_records_for_notice_type",
+            return_value=target_records,
+        ):
+            result = service.lookup_notice_target_candidates(
+                work_type="maintenance",
+                scope="A",
+                title="EA118机房A楼过滤网维护",
+                action="update",
+            )
+        self.assertEqual(result["candidates"][0]["target_record_id"], "maint-target")
+        self.assertEqual(result["candidates"][0]["notice_type"], "维保通告")
+        self.assertEqual(result["source_candidates"][0]["source_record_id"], "maint-source")
+        self.assertEqual(result["source_candidates"][0]["source_app_token"], service.app_token)
+
+    def test_notice_target_candidates_support_repair_source_lookup(self):
+        service = _TestMaintenancePortalService()
+        service._repair_records = [
+            _build_repair_record(
+                "repair-source",
+                title="A楼UPS检修通告",
+                building="A楼",
+                started=True,
+            )
+        ]
+        with patch.object(
+            service,
+            "_target_records_for_notice_type",
+            return_value=[],
+        ):
+            result = service.lookup_notice_target_candidates(
+                work_type="repair",
+                scope="A",
+                title="A楼UPS检修通告",
+                action="update",
+            )
+        self.assertFalse(result["candidates"])
+        self.assertEqual(result["source_candidates"][0]["source_record_id"], "repair-source")
+        self.assertEqual(
+            result["source_candidates"][0]["source_app_token"],
+            "AnEBwJlvGiJfDdkOB32cUPuknzg",
+        )
+
+    def test_simple_manual_power_action_prepares_upload_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            payload = {
+                "action": "start",
+                "work_type": WORK_TYPE_POWER,
+                "notice_type": "上下电通告",
+                "scope": "A",
+                "manual": True,
+                "manual_id": "manual-power-start",
+                "record_id": "manual-power-start",
+                "title": "A楼PDU上电",
+                "building": "A楼",
+                "building_codes": ["A"],
+                "specialty": "电气",
+                "start_time": "2026-05-08T09:00",
+                "end_time": "2026-05-08T18:00",
+                "cabinet": "A-101",
+                "quantity": "2",
+                "progress": "准备上电",
+                "operation_id": "manual-power-start",
+            }
+            job_id, should_start = service.create_action_job(payload)
+            prepared = service.prepare_workbench_action(
+                {
+                    **payload,
+                    "operation_id": "manual-power-prepare",
+                },
+                job_id=job_id,
+            )
+
+            self.assertTrue(should_start)
+            self.assertEqual(prepared.get("work_type"), WORK_TYPE_POWER)
+            self.assertEqual(prepared.get("notice_type"), "上下电通告")
+            self.assertTrue(prepared.get("skip_personal_message"))
+            self.assertIn("【上电通告】状态：开始", prepared.get("text") or "")
+            self.assertIn("【柜号】A-101", prepared.get("text") or "")
+            self.assertIn("【数量】2", prepared.get("text") or "")
+
+    def test_simple_manual_polling_and_adjust_prepare_complete_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            polling = service.prepare_workbench_action(
+                {
+                    "action": "start",
+                    "work_type": "polling",
+                    "scope": "B",
+                    "manual": True,
+                    "manual_id": "manual-polling-start",
+                    "record_id": "manual-polling-start",
+                    "title": "B楼冷源设备轮巡",
+                    "building": "B楼",
+                    "building_codes": ["B"],
+                    "specialty": "暖通",
+                    "start_time": "2026-05-08T09:00",
+                    "end_time": "2026-05-08T18:00",
+                    "device": "B-CH-01",
+                    "content": "检查冷机运行参数",
+                    "progress": "轮巡准备中",
+                },
+                job_id="job-polling",
+            )
+            self.assertEqual(polling.get("notice_type"), "设备轮巡")
+            self.assertIn("【设备轮巡】状态：开始", polling.get("text") or "")
+            self.assertIn("【设备】B-CH-01", polling.get("text") or "")
+            self.assertIn("【内容】检查冷机运行参数", polling.get("text") or "")
+
+            adjust = service.prepare_workbench_action(
+                {
+                    "action": "start",
+                    "work_type": "adjust",
+                    "scope": "C",
+                    "manual": True,
+                    "manual_id": "manual-adjust-start",
+                    "record_id": "manual-adjust-start",
+                    "title": "C楼配电设备调整",
+                    "building": "C楼",
+                    "building_codes": ["C"],
+                    "specialty": "电气",
+                    "start_time": "2026-05-08T09:00",
+                    "end_time": "2026-05-08T18:00",
+                    "location": "C楼配电室",
+                    "content": "调整开关柜回路",
+                    "reason": "负载优化",
+                    "impact": "无业务影响",
+                    "progress": "准备调整",
+                },
+                job_id="job-adjust",
+            )
+            self.assertEqual(adjust.get("notice_type"), "设备调整")
+            self.assertIn("【设备调整】状态：开始", adjust.get("text") or "")
+            self.assertIn("【位置】C楼配电室", adjust.get("text") or "")
+            self.assertIn("【原因】负载优化", adjust.get("text") or "")
+            self.assertIn("【影响】无业务影响", adjust.get("text") or "")
+
+    def test_polling_and_adjust_handlers_map_frontend_fields_to_bitable_fields(self):
+        power_text = MaintenancePortalService.build_simple_notice_text(
+            work_type="power",
+            status="开始",
+            title="A楼PDU上电",
+            start_time="2026-05-08 09:00",
+            end_time="2026-05-08 18:00",
+            building="A楼",
+            specialty="电气",
+            cabinet="A-101",
+            quantity="2",
+            progress="准备上电",
+        )
+        power_fields = PowerNoticeHandler().build_create_fields(
+            NoticePayload(
+                text=power_text,
+                buildings=["A楼"],
+                specialty="电气",
+                response_time="2026-05-08 09:05",
+            )
+        )
+        self.assertEqual(power_fields[POWER_NOTICE_FIELDS["title"]], "A楼PDU上电")
+        self.assertEqual(power_fields[POWER_NOTICE_FIELDS["building"]], ["A楼"])
+        self.assertEqual(power_fields[POWER_NOTICE_FIELDS["status"]], STATUS_START)
+        self.assertEqual(power_fields[POWER_NOTICE_FIELDS["specialty"]], "电气")
+        self.assertEqual(power_fields[POWER_NOTICE_FIELDS["cabinet"]], "A-101")
+        self.assertEqual(power_fields[POWER_NOTICE_FIELDS["quantity"]], 2)
+        self.assertEqual(power_fields[POWER_NOTICE_FIELDS["progress"]], "准备上电")
+        self.assertIn(POWER_NOTICE_FIELDS["plan_start"], power_fields)
+        self.assertIn(POWER_NOTICE_FIELDS["plan_end"], power_fields)
+
+        polling_text = MaintenancePortalService.build_simple_notice_text(
+            work_type="polling",
+            status="开始",
+            title="B楼冷源设备轮巡",
+            start_time="2026-05-08 09:00",
+            end_time="2026-05-08 18:00",
+            building="B楼",
+            specialty="暖通",
+            device="B-CH-01",
+            content="检查冷机运行参数",
+            progress="轮巡准备中",
+        )
+        polling_fields = PollingNoticeHandler().build_create_fields(
+            NoticePayload(
+                text=polling_text,
+                buildings=["B楼"],
+                specialty="暖通",
+                response_time="2026-05-08 09:05",
+            )
+        )
+        self.assertEqual(polling_fields[POLLING_NOTICE_FIELDS["title"]], "B楼冷源设备轮巡")
+        self.assertEqual(polling_fields[POLLING_NOTICE_FIELDS["building"]], ["B楼"])
+        self.assertEqual(polling_fields[POLLING_NOTICE_FIELDS["status"]], STATUS_START)
+        self.assertEqual(polling_fields[POLLING_NOTICE_FIELDS["specialty"]], "暖通")
+        self.assertEqual(polling_fields[POLLING_NOTICE_FIELDS["device"]], "B-CH-01")
+        self.assertEqual(polling_fields[POLLING_NOTICE_FIELDS["content"]], "检查冷机运行参数")
+        self.assertEqual(polling_fields[POLLING_NOTICE_FIELDS["progress"]], "轮巡准备中")
+        self.assertIn(POLLING_NOTICE_FIELDS["plan_start"], polling_fields)
+        self.assertIn(POLLING_NOTICE_FIELDS["plan_end"], polling_fields)
+
+        adjust_text = MaintenancePortalService.build_simple_notice_text(
+            work_type="adjust",
+            status="开始",
+            title="C楼配电设备调整",
+            start_time="2026-05-08 09:00",
+            end_time="2026-05-08 18:00",
+            building="C楼",
+            specialty="电气",
+            location="C楼配电室",
+            content="调整开关柜回路",
+            reason="负载优化",
+            impact="无业务影响",
+            progress="准备调整",
+        )
+        adjust_fields = AdjustNoticeHandler().build_create_fields(
+            NoticePayload(
+                text=adjust_text,
+                buildings=["C楼"],
+                specialty="电气",
+                response_time="2026-05-08 09:05",
+            )
+        )
+        self.assertEqual(adjust_fields[ADJUST_NOTICE_FIELDS["title"]], "C楼配电设备调整")
+        self.assertEqual(adjust_fields[ADJUST_NOTICE_FIELDS["building"]], ["C楼"])
+        self.assertEqual(adjust_fields[ADJUST_NOTICE_FIELDS["status"]], STATUS_START)
+        self.assertEqual(adjust_fields[ADJUST_NOTICE_FIELDS["specialty"]], "电气")
+        self.assertEqual(adjust_fields[ADJUST_NOTICE_FIELDS["location"]], "C楼配电室")
+        self.assertEqual(adjust_fields[ADJUST_NOTICE_FIELDS["content"]], "调整开关柜回路")
+        self.assertEqual(adjust_fields[ADJUST_NOTICE_FIELDS["reason"]], "负载优化")
+        self.assertEqual(adjust_fields[ADJUST_NOTICE_FIELDS["impact"]], "无业务影响")
+        self.assertEqual(adjust_fields[ADJUST_NOTICE_FIELDS["progress"]], "准备调整")
+        self.assertIn(ADJUST_NOTICE_FIELDS["plan_start"], adjust_fields)
+        self.assertIn(ADJUST_NOTICE_FIELDS["plan_end"], adjust_fields)
+
+    def test_history_memory_scan_loads_current_month_ended_maintenance_and_change(self):
+        service = _TestMaintenancePortalService()
+        service._load_fields = lambda: []
+        service._load_change_fields = lambda: []
+
+        def fake_load_table_records(**kwargs):
+            if kwargs.get("work_type") == WORK_TYPE_CHANGE:
+                return [
+                    _build_change_record(
+                        "change-ended",
+                        building="A楼",
+                        progress="已结束",
+                        title="A楼测试变更",
+                        start_time="2026-05-08 09:00",
+                        end_time="2026-05-08 18:00",
+                    )
+                ]
+            return [
+                _build_record(
+                    "maint-ended",
+                    "A楼",
+                    "过滤网维护",
+                    "5月",
+                    status="已结束",
+                    maintenance_cycle="每月",
+                )
+            ]
+
+        service._load_table_records = fake_load_table_records
+        service._scan_target_history_candidates = lambda **_kwargs: ([], [])
+        result = service.scan_historical_notice_memory_candidates(
+            work_types=["maintenance", "change"],
+            months=3,
+        )
+        source_ids = {item.get("source_record_id") for item in result["source_items"]}
+        self.assertIn("maint-ended", source_ids)
+        self.assertIn("change-ended", source_ids)
+        self.assertEqual(result["counts"]["source"], 2)
+        self.assertTrue(result["source_items_full_current_month"])
+
+    def test_confirm_change_target_candidate_clears_actual_end_fields(self):
+        class _ConfirmService:
+            def __init__(self):
+                self.cache_cleared = False
+
+            def lookup_change_target_candidates(self, **_kwargs):
+                return {
+                    "candidates": [
+                        {
+                            "record_id": "target-change",
+                            "target_record_id": "target-change",
+                            "title": "A楼测试变更",
+                            "building": "A楼",
+                            "building_codes": ["A"],
+                            "fields": {
+                                "名称": "A楼测试变更",
+                                "实际结束时间": "2026-05-08 18:10",
+                                "变更结束时间": "2026-05-08 18:00",
+                            },
+                        }
+                    ]
+                }
+
+            def clear_target_record_cache(self):
+                self.cache_cleared = True
+
+        previous_service = PortalHandler.service
+        fake_service = _ConfirmService()
+        PortalHandler.service = fake_service
+        try:
+            with patch(
+                "lan_bitable_template_portal.server.external_real_write_guard",
+                return_value={"mock_external": False, "real_write_allowed": True},
+            ), patch(
+                "lan_bitable_template_portal.server.update_bitable_record_fields",
+                return_value=(True, "target-change"),
+            ) as update_fields:
+                result = PortalHandler.confirm_change_target_candidate(
+                    scope="A",
+                    title="A楼测试变更",
+                    action="update",
+                    record_id="target-change",
+                )
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["clear_actual_end"]["cleared"])
+            self.assertTrue(fake_service.cache_cleared)
+            update_fields.assert_called_once_with(
+                "target-change",
+                "设备变更",
+                {"实际结束时间": None, "变更结束时间": None},
+            )
+        finally:
+            PortalHandler.service = previous_service
+
     def test_change_successful_action_persists_work_type_and_completion(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
@@ -3293,6 +3752,74 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertTrue(prepared["zhihang_involved"])
             self.assertEqual(prepared["zhihang_record_id"], "z-c")
             self.assertEqual(prepared["zhihang_title"], "EA118机房C楼链路调整")
+
+    def test_prepare_change_action_defaults_missing_level_to_i3_group_route(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            prepared = service.prepare_change_action(
+                {
+                    "action": "start",
+                    "scope": "A",
+                    "work_type": WORK_TYPE_CHANGE,
+                    "manual": True,
+                    "manual_id": "manual-change-a",
+                    "title": "A楼手动变更",
+                    "building": "A楼",
+                    "building_codes": ["A"],
+                    "specialty": "电气",
+                    "start_time": "2026-05-08T09:00",
+                    "end_time": "2026-05-08T18:00",
+                    "location": "A楼",
+                    "content": "测试内容",
+                    "reason": "测试原因",
+                    "impact": "测试影响",
+                    "progress": "准备开始",
+                },
+                job_id="job-change-default-i3",
+            )
+
+            self.assertEqual(prepared["level"], "I3")
+            self.assertIn("【等级】I3", prepared["text"])
+            _, _, _, route_level = ChangeNoticeHandler().build_robot_message(
+                NoticePayload(text=prepared["text"], level=prepared["level"])
+            )
+            self.assertEqual(route_level, "I3")
+
+    def test_prepare_change_action_keeps_explicit_ali_medium_level_out_of_i3_group(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            record = _build_change_record(
+                "ali-medium",
+                building="A楼",
+                progress="未开始",
+                title="A楼中等级变更",
+            )
+            record["display_fields"]["变更等级（阿里）"] = "中"
+            service._change_records = [record]
+
+            prepared = service.prepare_change_action(
+                {
+                    "action": "start",
+                    "scope": "A",
+                    "work_type": WORK_TYPE_CHANGE,
+                    "record_id": "ali-medium",
+                    "specialty": "电气",
+                    "start_time": "2026-05-08T09:00",
+                    "end_time": "2026-05-08T18:00",
+                    "location": "A楼",
+                    "content": "测试内容",
+                    "reason": "测试原因",
+                    "impact": "测试影响",
+                    "progress": "准备开始",
+                },
+                job_id="job-change-medium",
+            )
+
+            self.assertEqual(prepared["level"], "中")
+            _, _, _, route_level = ChangeNoticeHandler().build_robot_message(
+                NoticePayload(text=prepared["text"], level=prepared["level"])
+            )
+            self.assertEqual(route_level, "")
 
     def test_change_start_uses_scoped_snapshot_codes_for_zhihang_binding(self):
         with tempfile.TemporaryDirectory() as tmp:

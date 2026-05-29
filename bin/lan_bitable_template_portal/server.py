@@ -1385,6 +1385,32 @@ class PortalHandler(BaseHTTPRequestHandler):
                 )
             except (PortalError, ValueError, json.JSONDecodeError) as exc:
                 return self._send_json(403, {"ok": False, "error": str(exc)})
+        if parsed.path in {"/api/change-target-candidates", "/api/notice-target-candidates"}:
+            try:
+                payload = self._read_json_body()
+                scope = self._authorized_scope_or_error(
+                    session, payload.get("scope") or "ALL"
+                )
+                if parsed.path == "/api/change-target-candidates":
+                    data = self.service.lookup_change_target_candidates(
+                        scope=scope,
+                        title=payload.get("title") or "",
+                        start_time=payload.get("start_time") or "",
+                        end_time=payload.get("end_time") or "",
+                        action=payload.get("action") or "update",
+                    )
+                else:
+                    data = self.service.lookup_notice_target_candidates(
+                        work_type=payload.get("work_type") or "maintenance",
+                        scope=scope,
+                        title=payload.get("title") or "",
+                        start_time=payload.get("start_time") or "",
+                        end_time=payload.get("end_time") or "",
+                        action=payload.get("action") or "update",
+                    )
+                return self._send_json(200, {"ok": True, "data": data})
+            except (PortalError, ValueError, json.JSONDecodeError) as exc:
+                return self._send_json(403, {"ok": False, "error": str(exc)})
         if parsed.path == "/api/ongoing-items/delete":
             try:
                 payload = self._read_json_body()
@@ -2808,6 +2834,92 @@ class PortalHandler(BaseHTTPRequestHandler):
                 error=str(result or "多维更新失败。"),
             )
         return bool(ok), str(result or ""), record_id
+
+    @classmethod
+    def confirm_change_target_candidate(
+        cls,
+        *,
+        scope: str,
+        title: str,
+        start_time: str = "",
+        end_time: str = "",
+        action: str = "update",
+        record_id: str = "",
+    ) -> dict:
+        action = str(action or "update").strip().lower()
+        if action != "update":
+            raise PortalError("只有更新通告需要确认目标变更记录。")
+        record_id = str(record_id or "").strip()
+        if not record_id:
+            raise PortalError("请选择要关联的设备变更记录。")
+        result = cls.service.lookup_change_target_candidates(
+            scope=scope,
+            title=title,
+            start_time=start_time,
+            end_time=end_time,
+            action=action,
+            limit=50,
+        )
+        candidates = [
+            item
+            for item in result.get("candidates", [])
+            if str(item.get("record_id") or item.get("target_record_id") or "").strip()
+            == record_id
+        ]
+        if not candidates:
+            raise PortalError("选择的设备变更记录不在当前入口可关联范围内。")
+        candidate = candidates[0]
+        fields = candidate.get("fields") if isinstance(candidate.get("fields"), dict) else {}
+        field_config = get_field_config("设备变更")
+        clear_field_names: list[str] = []
+        for field_name in (
+            "实际结束时间",
+            field_config.get("actual_end", ""),
+            field_config.get("end_time", ""),
+        ):
+            field_name = str(field_name or "").strip()
+            if not field_name or field_name in clear_field_names:
+                continue
+            value = fields.get(field_name)
+            if value in (None, "", [], {}):
+                continue
+            if str(value).strip():
+                clear_field_names.append(field_name)
+
+        clear_result = {"cleared": False, "fields": [], "message": ""}
+        if clear_field_names:
+            guard = external_real_write_guard()
+            if guard.get("mock_external"):
+                clear_result = {
+                    "cleared": True,
+                    "fields": clear_field_names,
+                    "message": "mock external update skipped",
+                }
+            elif not guard.get("real_write_allowed"):
+                raise PortalError(str(guard.get("reason") or "真实外部写入未确认。"))
+            else:
+                ok, update_result = update_bitable_record_fields(
+                    record_id,
+                    "设备变更",
+                    {field_name: None for field_name in clear_field_names},
+                )
+                if not ok:
+                    raise PortalError(f"清空设备变更实际结束时间失败：{update_result}")
+                cls.service.clear_target_record_cache()
+                clear_result = {
+                    "cleared": True,
+                    "fields": clear_field_names,
+                    "message": str(update_result or ""),
+                }
+
+        return {
+            "ok": True,
+            "candidate": candidate,
+            "record_id": record_id,
+            "target_record_id": record_id,
+                "clear_actual_end": clear_result,
+            "source_candidates": result.get("source_candidates") or [],
+        }
 
     @classmethod
     def _prepared_to_qt_ui_payload(

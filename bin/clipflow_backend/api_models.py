@@ -103,6 +103,14 @@ class ChangeTargetLookupRequest(APIModel):
     action: str = "update"
 
 
+class NoticeTargetLookupRequest(ChangeTargetLookupRequest):
+    work_type: str = "change"
+
+
+class ChangeTargetConfirmRequest(ChangeTargetLookupRequest):
+    record_id: str = ""
+
+
 class SendGeneratedRequest(APIModel):
     scope: str = "ALL"
     items: list[dict[str, Any]] = Field(default_factory=list)

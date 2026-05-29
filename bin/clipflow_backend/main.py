@@ -27,6 +27,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from clipflow_backend.api_models import (
     APIModel,
     AuthPermissionsSaveRequest,
+    ChangeTargetConfirmRequest,
     ChangeTargetLookupRequest,
     GenerateTemplatesRequest,
     HandoverLinksAuthRequest,
@@ -36,6 +37,7 @@ from clipflow_backend.api_models import (
     NoticeMemoryHistorySaveRequest,
     NoticeMemoryHistoryScanRequest,
     NoticeMemoryImportRequest,
+    NoticeTargetLookupRequest,
     NoticeUndoApplyRequest,
     OngoingDeleteRequest,
     PermissionRequestConfirm,
@@ -1634,6 +1636,56 @@ class FastAPIPortalController:
                     start_time=payload.get("start_time") or "",
                     end_time=payload.get("end_time") or "",
                     action=payload.get("action") or "update",
+                )
+                return self._json_ok(request, session, result)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
+        @app.post("/api/notice-target-candidates")
+        async def notice_target_candidates(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                payload = (
+                    await self._read_model_request(request, NoticeTargetLookupRequest)
+                ).to_payload()
+                scope = self._authorized_scope_or_error(
+                    session, payload.get("scope") or "ALL"
+                )
+                result = await asyncio.to_thread(
+                    PortalHandler.service.lookup_notice_target_candidates,
+                    work_type=payload.get("work_type") or "maintenance",
+                    scope=scope,
+                    title=payload.get("title") or "",
+                    start_time=payload.get("start_time") or "",
+                    end_time=payload.get("end_time") or "",
+                    action=payload.get("action") or "update",
+                )
+                return self._json_ok(request, session, result)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
+        @app.post("/api/change-target-candidates/confirm")
+        async def change_target_candidates_confirm(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                payload = (
+                    await self._read_model_request(request, ChangeTargetConfirmRequest)
+                ).to_payload()
+                scope = self._authorized_scope_or_error(
+                    session, payload.get("scope") or "ALL"
+                )
+                result = await asyncio.to_thread(
+                    PortalHandler.confirm_change_target_candidate,
+                    scope=scope,
+                    title=payload.get("title") or "",
+                    start_time=payload.get("start_time") or "",
+                    end_time=payload.get("end_time") or "",
+                    action=payload.get("action") or "update",
+                    record_id=payload.get("record_id") or "",
                 )
                 return self._json_ok(request, session, result)
             except Exception as exc:

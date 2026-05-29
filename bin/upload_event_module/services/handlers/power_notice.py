@@ -36,8 +36,8 @@ class PowerNoticeHandler(BaseNoticeHandler):
             )
         fields[POWER_NOTICE_FIELDS["status"]] = status or STATUS_START
         fields[POWER_NOTICE_FIELDS["specialty"]] = (
-            POWER_DEFAULT_SPECIALTY
-        )  # TODO: 目前固定值，后续根据通告内容优化
+            payload.specialty or POWER_DEFAULT_SPECIALTY
+        )
 
         cabinet = self._extract_section(payload.text, "柜号")
         if cabinet:
@@ -88,6 +88,9 @@ class PowerNoticeHandler(BaseNoticeHandler):
             fields[POWER_NOTICE_FIELDS["building"]] = self._normalize_buildings_multi(
                 payload.buildings
             )
+        fields[POWER_NOTICE_FIELDS["specialty"]] = (
+            payload.specialty or POWER_DEFAULT_SPECIALTY
+        )
 
         cabinet = self._extract_section(payload.text, "柜号")
         if cabinet:
