@@ -154,10 +154,6 @@ class EventNoticeHandler(BaseNoticeHandler):
             return fields
 
         if response_dt:
-            fields[EVENT_NOTICE_FIELDS["response_time"]] = self._to_timestamp_ms(
-                response_dt
-            )
-
             if not payload.recover:
                 existing_text = self._normalize_response_text(
                     payload.existing_response_time

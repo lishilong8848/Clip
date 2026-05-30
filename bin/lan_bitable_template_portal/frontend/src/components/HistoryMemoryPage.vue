@@ -34,7 +34,10 @@
         <button class="btn blue" :disabled="busy || selectedWorkTypes.length === 0" @click="scanHistory">
           {{ busy ? "扫描中" : "扫描历史通告" }}
         </button>
-        <button class="btn green" :disabled="busy || selectedCount === 0" @click="saveSelected">
+        <button class="btn green" :disabled="busy || recommendedMatchCount === 0" @click="fillCandidatesAndConfirmSave">
+          一键填充推荐并保存 {{ recommendedMatchCount }}
+        </button>
+        <button class="btn ghost" :disabled="busy || selectedCount === 0" @click="saveSelected">
           保存已勾选 {{ selectedCount }}
         </button>
       </section>
@@ -77,6 +80,7 @@
         <article><span>当前源表事项</span><strong>{{ sourceItems.length }}</strong></article>
         <article><span>历史候选</span><strong>{{ candidates.length }}</strong></article>
         <article><span>已勾选</span><strong>{{ selectedCount }}</strong></article>
+        <article><span>可一键填充</span><strong>{{ recommendedMatchCount }}</strong></article>
         <article><span>可保存覆盖</span><strong>{{ overwriteHint }}</strong></article>
       </section>
 
@@ -211,6 +215,45 @@
           </div>
         </aside>
       </section>
+
+      <div v-if="saveConfirmOpen" class="modal-backdrop" @click.self="cancelSaveConfirm">
+        <section class="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="history-save-title">
+          <header>
+            <div>
+              <strong id="history-save-title">{{ saveConfirmTitle }}</strong>
+              <p>{{ saveConfirmSubtitle }}</p>
+            </div>
+            <button class="icon-btn" type="button" aria-label="关闭" @click="cancelSaveConfirm">×</button>
+          </header>
+
+          <div class="confirm-metrics">
+            <article><span>保存数量</span><strong>{{ saveSummary.total }}</strong></article>
+            <article><span>历史候选填充</span><strong>{{ saveSummary.candidate }}</strong></article>
+            <article><span>会覆盖旧记忆</span><strong>{{ saveSummary.overwrite }}</strong></article>
+          </div>
+
+          <div class="confirm-detail">
+            <strong>即将保存的事项</strong>
+            <ul>
+              <li v-for="item in savePreviewItems" :key="item.key">
+                <span>{{ item.type }} · {{ item.building || "-" }}</span>
+                <strong>{{ item.title }}</strong>
+                <small>{{ item.origin }}</small>
+              </li>
+            </ul>
+            <p v-if="saveSummary.total > savePreviewItems.length">
+              还有 {{ saveSummary.total - savePreviewItems.length }} 条未展示，确认后会一起保存。
+            </p>
+          </div>
+
+          <footer>
+            <button class="btn ghost" type="button" :disabled="busy" @click="cancelSaveConfirm">取消</button>
+            <button class="btn green" type="button" :disabled="busy || pendingSavePayload.length === 0" @click="confirmSaveSelected">
+              {{ busy ? "保存中" : "确认批量保存" }}
+            </button>
+          </footer>
+        </section>
+      </div>
     </template>
   </section>
 </template>
@@ -272,6 +315,9 @@ const selectedMap = reactive<Record<string, boolean>>({});
 const candidateMap = reactive<Record<string, string>>({});
 const fieldEdits = reactive<Record<string, Dict>>({});
 const fieldOriginMap = reactive<Record<string, string>>({});
+const saveConfirmOpen = ref(false);
+const pendingSavePayload = ref<Dict[]>([]);
+const saveConfirmMode = ref<"selected" | "filled">("selected");
 
 const buildingOptions = computed(() => {
   const values = new Set<string>();
@@ -281,6 +327,16 @@ const buildingOptions = computed(() => {
 const matchBySource = computed(() => {
   const map = new Map<string, Dict>();
   for (const item of matches.value) map.set(String(item.source_id || ""), item);
+  return map;
+});
+const sourceById = computed(() => {
+  const map = new Map<string, Dict>();
+  for (const item of sourceItems.value) if (item.id) map.set(String(item.id), item);
+  return map;
+});
+const candidateById = computed(() => {
+  const map = new Map<string, Dict>();
+  for (const item of candidates.value) if (item.id) map.set(String(item.id), item);
   return map;
 });
 const activeSource = computed(() => sourceItems.value.find((item) => item.id === activeSourceId.value));
@@ -305,7 +361,46 @@ const activeFields = computed(() => {
   return fieldEdits[activeSourceId.value];
 });
 const selectedCount = computed(() => Object.keys(selectedMap).filter((key) => selectedMap[key]).length);
-const overwriteHint = computed(() => selectedCount.value ? "保存时覆盖同键旧记忆" : "-");
+const recommendedMatches = computed(() => {
+  return matches.value
+    .filter((match) => match.selected !== false)
+    .map((match) => {
+      const sourceId = String(match.source_id || "");
+      const candidateId = String(match.candidate_id || "");
+      const source = sourceById.value.get(sourceId);
+      const candidate = candidateById.value.get(candidateId);
+      return source && candidate ? { match, source, candidate } : null;
+    })
+    .filter(Boolean) as Array<{ match: Dict; source: Dict; candidate: Dict }>;
+});
+const recommendedMatchCount = computed(() => recommendedMatches.value.length);
+const overwriteHint = computed(() => selectedCount.value ? `${selectedOverwriteCount.value} 条` : "-");
+const selectedOverwriteCount = computed(() => sourceItems.value.filter((source) => isSelected(source.id) && sourceHasMemory(source)).length);
+const saveSummary = computed(() => {
+  const payload = pendingSavePayload.value;
+  return {
+    total: payload.length,
+    candidate: payload.filter((item) => item.field_origin === "candidate").length,
+    overwrite: payload.filter((item) => sourceHasMemory(item.source_item)).length,
+  };
+});
+const saveConfirmTitle = computed(() => saveConfirmMode.value === "filled" ? "确认一键填充并保存" : "确认保存已勾选记忆");
+const saveConfirmSubtitle = computed(() => {
+  if (saveConfirmMode.value === "filled") {
+    return "系统会把所有已匹配历史候选的字段填入当前月源表事项，并批量写入本地记忆。";
+  }
+  return "系统会保存当前已勾选事项的字段内容，同键旧记忆会被覆盖。";
+});
+const savePreviewItems = computed(() => pendingSavePayload.value.slice(0, 6).map((item, index) => {
+  const source = item.source_item || {};
+  return {
+    key: String(source.id || source.source_record_id || item.candidate_id || `preview-${index}`),
+    type: workTypeLabel(source.work_type || "maintenance"),
+    building: source.building || "",
+    title: source.title || source.memory_name || "未命名事项",
+    origin: item.field_origin === "candidate" ? "使用历史候选字段" : sourceFieldOriginLabel(source.id || ""),
+  };
+}));
 const filteredSources = computed(() => {
   const q = query.value.trim().toLowerCase();
   return sourceItems.value.filter((item) => {
@@ -458,10 +553,15 @@ async function scanHistory(): Promise<void> {
 
 function chooseCandidate(candidate: Dict): void {
   if (!activeSourceId.value) return;
-  candidateMap[activeSourceId.value] = String(candidate.id || "");
-  selectedMap[activeSourceId.value] = true;
-  fieldEdits[activeSourceId.value] = { ...(candidate.fields || {}) };
-  fieldOriginMap[activeSourceId.value] = "candidate";
+  applyCandidateToSource(activeSourceId.value, candidate);
+}
+
+function applyCandidateToSource(sourceId: string, candidate: Dict): void {
+  if (!sourceId || !candidate?.id) return;
+  candidateMap[sourceId] = String(candidate.id || "");
+  selectedMap[sourceId] = true;
+  fieldEdits[sourceId] = { ...(candidate.fields || {}) };
+  fieldOriginMap[sourceId] = "candidate";
 }
 
 function touchFields(): void {
@@ -470,18 +570,61 @@ function touchFields(): void {
   }
 }
 
-async function saveSelected(): Promise<void> {
-  const payload = sourceItems.value
+function buildSavePayloadForSources(sources: Dict[]): Dict[] {
+  return sources
     .filter((source) => isSelected(source.id))
     .map((source) => ({
       selected: true,
       source_item: source,
       candidate_id: candidateMap[source.id],
       fields: fieldEdits[source.id] || {},
+      field_origin: fieldOriginMap[source.id] || sourceInitialOrigin(source),
     }));
+}
+
+function buildSavePayload(): Dict[] {
+  return buildSavePayloadForSources(sourceItems.value);
+}
+
+function openSaveConfirm(mode: "selected" | "filled", explicitPayload: Dict[] | null = null): void {
+  const payload = explicitPayload || buildSavePayload();
   if (!payload.length) return;
-  const confirmText = `确认保存 ${payload.length} 条历史记忆？同楼栋同标题/周期的旧记忆会被覆盖。`;
-  if (!window.confirm(confirmText)) return;
+  pendingSavePayload.value = payload;
+  saveConfirmMode.value = mode;
+  saveConfirmOpen.value = true;
+}
+
+function saveSelected(): void {
+  openSaveConfirm("selected");
+}
+
+function fillCandidatesAndConfirmSave(): void {
+  if (!recommendedMatches.value.length) {
+    message.value = "当前没有可一键填充的推荐历史候选。";
+    messageType.value = "failed";
+    return;
+  }
+  const filledSources: Dict[] = [];
+  for (const item of recommendedMatches.value) {
+    applyCandidateToSource(String(item.source.id || ""), item.candidate);
+    filledSources.push(item.source);
+  }
+  activeSourceId.value = recommendedMatches.value[0]?.source?.id || activeSourceId.value;
+  const payload = buildSavePayloadForSources(filledSources);
+  message.value = `已填充 ${payload.length} 条推荐历史候选，确认后会批量保存。`;
+  messageType.value = "success";
+  openSaveConfirm("filled", payload);
+}
+
+function cancelSaveConfirm(): void {
+  if (busy.value) return;
+  saveConfirmOpen.value = false;
+  pendingSavePayload.value = [];
+}
+
+async function confirmSaveSelected(): Promise<void> {
+  const payload = pendingSavePayload.value;
+  if (!payload.length) return;
   busy.value = true;
   message.value = "正在保存历史记忆...";
   messageType.value = "";
@@ -492,6 +635,8 @@ async function saveSelected(): Promise<void> {
     });
     message.value = `保存完成：成功 ${data.saved_count || 0}，覆盖 ${data.overwritten_count || 0}，跳过 ${data.skipped_count || 0}。`;
     messageType.value = "success";
+    saveConfirmOpen.value = false;
+    pendingSavePayload.value = [];
   } catch (error: any) {
     message.value = error?.message || "保存失败";
     messageType.value = "failed";
@@ -616,7 +761,7 @@ textarea {
 
 .summary-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
 }
 
 .summary-grid article {
@@ -853,6 +998,121 @@ textarea {
   background: #f8fafc;
 }
 
+.icon-btn {
+  width: 34px;
+  height: 34px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #334155;
+  cursor: pointer;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(15, 23, 42, 0.32);
+}
+
+.confirm-modal {
+  width: min(720px, 100%);
+  max-height: calc(100vh - 36px);
+  overflow: auto;
+  border: 1px solid #dbe3ee;
+  border-radius: 10px;
+  background: #ffffff;
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.18);
+}
+
+.confirm-modal header,
+.confirm-modal footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+}
+
+.confirm-modal header {
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.confirm-modal header strong {
+  font-size: 18px;
+}
+
+.confirm-modal header p,
+.confirm-detail p,
+.confirm-detail small {
+  color: #64748b;
+}
+
+.confirm-modal footer {
+  border-top: 1px solid #e2e8f0;
+  justify-content: flex-end;
+}
+
+.confirm-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.confirm-metrics article {
+  padding: 12px 16px;
+  border-right: 1px solid #e2e8f0;
+}
+
+.confirm-metrics article:last-child {
+  border-right: 0;
+}
+
+.confirm-metrics span {
+  display: block;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.confirm-metrics strong {
+  display: block;
+  margin-top: 4px;
+  font-size: 24px;
+}
+
+.confirm-detail {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+}
+
+.confirm-detail ul {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.confirm-detail li {
+  display: grid;
+  gap: 3px;
+  padding: 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.confirm-detail li span {
+  color: #64748b;
+  font-size: 12px;
+}
+
 @media (max-width: 1100px) {
   .match-layout {
     grid-template-columns: 1fr;
@@ -864,6 +1124,16 @@ textarea {
   }
   .summary-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .confirm-metrics {
+    grid-template-columns: 1fr;
+  }
+  .confirm-metrics article {
+    border-right: 0;
+    border-bottom: 1px solid #e2e8f0;
+  }
+  .confirm-metrics article:last-child {
+    border-bottom: 0;
   }
 }
 </style>
