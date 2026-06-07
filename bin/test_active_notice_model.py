@@ -120,6 +120,28 @@ class ActiveNoticeModelTests(unittest.TestCase):
         self.assertTrue(index.data(ActiveNoticeModel.UploadedRole))
         self.assertIn("A楼维保", index.data(Qt.ItemDataRole.DisplayRole))
 
+    def test_roles_and_lookup_use_target_record_id(self):
+        model = ActiveNoticeModel()
+        model.replace_records(
+            [
+                {
+                    "record_id": "src-old",
+                    "source_record_id": "src-old",
+                    "target_record_id": "target-real",
+                    "notice_type": "设备变更",
+                    "text": "【设备变更】状态：更新\n\n【名称】A楼变更",
+                    "_is_placeholder_record": False,
+                }
+            ]
+        )
+
+        index = model.index(0, 0)
+
+        self.assertEqual(index.data(ActiveNoticeModel.RecordIdRole), "target-real")
+        self.assertEqual(model.row_for_record_id("target-real"), 0)
+        self.assertEqual(model.row_for_record_id("src-old"), -1)
+        self.assertEqual(model.row_for_source_record_id("src-old"), 0)
+
     def test_upsert_move_and_remove(self):
         model = ActiveNoticeModel()
         first = {"active_item_id": "aid-1", "text": "one"}
@@ -192,7 +214,7 @@ class ActiveNoticeModelTests(unittest.TestCase):
     def test_model_view_mode_disables_widget_virtualization(self):
         self.assertFalse(_RecordsFlagHarness(True)._active_item_widgets_required())
         self.assertFalse(_RecordsFlagHarness(True)._active_list_virtualization_enabled())
-        self.assertTrue(_RecordsFlagHarness(False)._active_item_widgets_required())
+        self.assertFalse(_RecordsFlagHarness(False)._active_item_widgets_required())
 
     def test_delegate_emits_action_today_and_delete_signals(self):
         model = ActiveNoticeModel()

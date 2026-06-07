@@ -6,21 +6,19 @@ import unicodedata
 import uuid
 import os
 import queue
-from PyQt6.QtWidgets import QListWidgetItem, QInputDialog
+from PyQt6.QtWidgets import QInputDialog
 from PyQt6.QtCore import Qt, QSize, QTimer, QPoint, QObject
 from PyQt6 import sip
 
 from ..config import get_field_config
 from ..logger import LOG_FILE, log_error, log_info, log_warning
 from ..utils import WHITESPACE_TRANSLATOR
-from ..services.service_registry import query_record_by_id, update_bitable_record_fields
 from ..core.parser import extract_event_info
 from ..time_parser import parse_time_range
 from ..building_normalizer import (
     normalize_building_name,
     normalize_buildings_value as normalize_buildings_list,
 )
-from .widgets import ClipboardItemWidget
 from .display_state import (
     detect_level_from_notice_text,
     normalize_active_item_data,
@@ -223,22 +221,7 @@ class MainWindowRecordsMixin:
         return widget
 
     def _safe_item_widget(self, list_widget, item):
-        if list_widget is None or item is None:
-            return None
-        if isinstance(item, ActiveNoticeModelItem):
-            return None
-        try:
-            if sip.isdeleted(list_widget):
-                return None
-        except Exception:
-            return None
-        if not self._is_valid_list_item(item):
-            return None
-        try:
-            widget = list_widget.itemWidget(item)
-        except Exception:
-            return None
-        return self._safe_widget(widget)
+        return None
 
     def _is_active_list_widget(self, list_widget) -> bool:
         return list_widget in (
@@ -250,10 +233,7 @@ class MainWindowRecordsMixin:
         return True
 
     def _active_item_widgets_required(self) -> bool:
-        visible = getattr(self, "_active_model_view_visible", None)
-        if callable(visible) and visible():
-            return False
-        return True
+        return False
 
     def _active_notice_model_for_list(self, list_widget):
         if not self._active_notice_model_enabled():
@@ -315,14 +295,7 @@ class MainWindowRecordsMixin:
             if model is None or not isinstance(data, dict):
                 return False
             return bool(model.remove_record(data))
-        row = self._active_item_row(list_widget, item)
-        if row < 0:
-            return False
-        try:
-            list_widget.takeItem(row)
-            return True
-        except Exception:
-            return False
+        return False
 
     def _move_active_item_to_row(self, list_widget, item, target_row: int) -> bool:
         if list_widget is None or item is None:
@@ -333,43 +306,10 @@ class MainWindowRecordsMixin:
             if model is None:
                 return False
             return bool(model.move_record(item.identity(), target_row))
-        row = self._active_item_row(list_widget, item)
-        if row < 0:
-            return False
-        if row == target_row:
-            return True
-        widget = self._safe_item_widget(list_widget, item)
-        try:
-            list_widget.takeItem(row)
-            list_widget.insertItem(target_row, item)
-            if widget:
-                list_widget.setItemWidget(item, widget)
-            return True
-        except Exception:
-            return False
+        return False
 
     def _sync_active_notice_model_for_list(self, list_widget) -> None:
-        model = self._active_notice_model_for_list(list_widget)
-        if model is None or list_widget is None:
-            return
-        if self._active_model_view_visible():
-            return
-        records = []
-        try:
-            count = list_widget.count()
-        except Exception:
-            count = 0
-        for row in range(count):
-            try:
-                item = list_widget.item(row)
-                if not self._is_valid_list_item(item):
-                    continue
-                data = item.data(Qt.ItemDataRole.UserRole)
-            except Exception:
-                continue
-            if isinstance(data, dict):
-                records.append(dict(data))
-        model.replace_records(records)
+        return
 
     def _sync_all_active_notice_models(self) -> None:
         self._sync_active_notice_model_for_list(getattr(self, "list_active_event", None))
@@ -469,14 +409,7 @@ class MainWindowRecordsMixin:
         return start <= row <= end
 
     def _create_active_item_widget(self, data_dict):
-        widget = ClipboardItemWidget(data_dict)
-        widget.action_clicked.connect(self.handle_action)
-        widget.today_progress_clicked.connect(self._handle_today_in_progress_toggle)
-        widget.ended_signal.connect(self.move_to_history)
-        widget.delete_requested.connect(self._delete_active_item)
-        if hasattr(widget, "set_delete_interaction_enabled"):
-            widget.set_delete_interaction_enabled(self._delete_interaction_enabled)
-        return widget
+        return None
 
     def _apply_active_widget_state(
         self,
@@ -522,83 +455,13 @@ class MainWindowRecordsMixin:
             widget.set_uploaded_visual(True)
 
     def _sync_item_data_from_widget(self, list_widget, item) -> None:
-        widget = self._safe_item_widget(list_widget, item)
-        if not widget:
-            return
-        try:
-            if hasattr(widget, "_sync_timer_state_to_data"):
-                widget._sync_timer_state_to_data()
-            data = dict(widget.data or item.data(Qt.ItemDataRole.UserRole) or {})
-            data["_has_unuploaded_changes"] = bool(
-                getattr(widget, "has_unuploaded_changes", data.get("_has_unuploaded_changes", True))
-            )
-            data["_upload_in_progress"] = bool(
-                getattr(widget, "upload_in_progress", data.get("_upload_in_progress", False))
-            )
-            pending_hash = getattr(widget, "pending_upload_hash", None)
-            if pending_hash:
-                data["_pending_upload_hash"] = pending_hash
-            elif "_pending_upload_hash" in data:
-                data.pop("_pending_upload_hash", None)
-            item.setData(Qt.ItemDataRole.UserRole, data)
-        except Exception:
-            return
+        return
 
     def _unmount_active_item_widget(self, list_widget, item) -> None:
-        widget = self._safe_item_widget(list_widget, item)
-        if not widget:
-            return
-        state = getattr(widget, "_state", None)
-        if str(state).endswith("DELETING"):
-            return
-        self._sync_item_data_from_widget(list_widget, item)
-        try:
-            if hasattr(widget, "stop_timer"):
-                widget.stop_timer()
-        except Exception:
-            pass
-        try:
-            list_widget.removeItemWidget(item)
-        except Exception:
-            pass
-        try:
-            widget.deleteLater()
-        except Exception:
-            pass
+        return
 
     def _ensure_active_item_widget(self, list_widget, item):
-        widget = self._safe_item_widget(list_widget, item)
-        if widget:
-            return widget
-        if list_widget is None or item is None or not self._is_valid_list_item(item):
-            return None
-        data = item.data(Qt.ItemDataRole.UserRole)
-        if not isinstance(data, dict):
-            return None
-        try:
-            widget = self._create_active_item_widget(data)
-            list_widget.setItemWidget(item, widget)
-        except Exception as exc:
-            try:
-                log_warning(
-                    f"活动条目虚拟化挂载失败: record_id={data.get('record_id','')}, error={exc}"
-                )
-            except Exception:
-                pass
-            try:
-                if widget:
-                    widget.deleteLater()
-            except Exception:
-                pass
-            return None
-        self._apply_active_widget_state(
-            widget,
-            data,
-            upload_in_progress=data.get("_upload_in_progress"),
-            pending_upload_hash=data.get("_pending_upload_hash"),
-            has_unuploaded_changes=data.get("_has_unuploaded_changes"),
-        )
-        return widget
+        return None
 
     def _schedule_active_list_virtualization_refresh(self, list_widget=None, delay_ms: int = 0):
         if not self._active_list_virtualization_enabled():
@@ -816,151 +679,24 @@ class MainWindowRecordsMixin:
             return None
         if not self._is_valid_list_item(item):
             return None
-        if not self._active_item_widgets_required():
-            if has_unuploaded_changes is not None:
-                data_dict["_has_unuploaded_changes"] = bool(has_unuploaded_changes)
-                if not data_dict["_has_unuploaded_changes"]:
-                    data_dict["_pending_upload_hash"] = None
-                    pending_upload_hash = None
-            if upload_in_progress is not None:
-                data_dict["_upload_in_progress"] = bool(upload_in_progress)
-            if pending_upload_hash is not None:
-                data_dict["_pending_upload_hash"] = pending_upload_hash
-            try:
-                item.setSizeHint(QSize(420, 88))
-                item.setData(Qt.ItemDataRole.UserRole, data_dict)
-            except Exception:
-                return None
-            self._upsert_active_notice_model_item(list_widget, item, data_dict)
-            self._schedule_today_in_progress_sync(data_dict)
-            return None
-        if (
-            self._active_list_virtualization_enabled()
-            and self._is_active_list_widget(list_widget)
-            and not self._safe_item_widget(list_widget, item)
-            and not self._active_item_in_virtual_range(list_widget, item)
-        ):
-            try:
-                item.setSizeHint(QSize(420, 80))
-                item.setData(Qt.ItemDataRole.UserRole, data_dict)
-            except Exception:
-                pass
-            return None
-        refreshed = self._refresh_existing_active_item_widget(
-            list_widget,
-            item,
-            data_dict,
-            force_status=force_status,
-            upload_in_progress=upload_in_progress,
-            pending_upload_hash=pending_upload_hash,
-            has_unuploaded_changes=has_unuploaded_changes,
-        )
-        if refreshed is not None:
-            return refreshed
-        old_widget = None
-        try:
-            old_widget = list_widget.itemWidget(item)
-        except Exception:
-            old_widget = None
-
-        try:
-            new_widget = ClipboardItemWidget(data_dict)
-            new_widget.action_clicked.connect(self.handle_action)
-            new_widget.today_progress_clicked.connect(
-                self._handle_today_in_progress_toggle
-            )
-            new_widget.ended_signal.connect(self.move_to_history)
-            new_widget.delete_requested.connect(self._delete_active_item)
-            if hasattr(new_widget, "set_delete_interaction_enabled"):
-                new_widget.set_delete_interaction_enabled(
-                    self._delete_interaction_enabled
-                )
-        except Exception as exc:
-            try:
-                record_id = (data_dict or {}).get("record_id", "")
-                log_warning(
-                    f"活动条目重建失败，保留旧widget: record_id={record_id}, error={exc}"
-                )
-            except Exception:
-                pass
-            self._mark_cache_refresh_needed()
-            return self._safe_widget(old_widget)
-
-        try:
-            item.setSizeHint(QSize(420, 80))
-        except Exception:
-            pass
-
-        try:
-            if old_widget:
-                try:
-                    list_widget.removeItemWidget(item)
-                except Exception:
-                    pass
-            list_widget.setItemWidget(item, new_widget)
-        except Exception as exc:
-            try:
-                record_id = (data_dict or {}).get("record_id", "")
-                log_warning(
-                    f"活动条目挂载新widget失败: record_id={record_id}, error={exc}"
-                )
-            except Exception:
-                pass
-            try:
-                new_widget.deleteLater()
-            except Exception:
-                pass
-            self._mark_cache_refresh_needed()
-            return self._safe_widget(old_widget)
-
-        if old_widget:
-            try:
-                old_widget.deleteLater()
-            except Exception:
-                pass
-
-        if upload_in_progress is None:
-            upload_in_progress = data_dict.get("_upload_in_progress")
-        if pending_upload_hash is None:
-            pending_upload_hash = data_dict.get("_pending_upload_hash")
-        if has_unuploaded_changes is None:
-            has_unuploaded_changes = data_dict.get("_has_unuploaded_changes")
-
         if has_unuploaded_changes is not None:
             data_dict["_has_unuploaded_changes"] = bool(has_unuploaded_changes)
             if not data_dict["_has_unuploaded_changes"]:
                 data_dict["_pending_upload_hash"] = None
                 pending_upload_hash = None
+        if upload_in_progress is not None:
+            data_dict["_upload_in_progress"] = bool(upload_in_progress)
+        if pending_upload_hash is not None:
+            data_dict["_pending_upload_hash"] = pending_upload_hash
 
         try:
+            item.setSizeHint(QSize(420, 88))
             item.setData(Qt.ItemDataRole.UserRole, data_dict)
         except Exception:
             return None
-
-        if upload_in_progress is not None:
-            new_widget.upload_in_progress = bool(upload_in_progress)
-        if pending_upload_hash is not None:
-            new_widget.pending_upload_hash = pending_upload_hash
-        if has_unuploaded_changes is not None:
-            new_widget.has_unuploaded_changes = bool(has_unuploaded_changes)
-
-        status = force_status
-        if not status:
-            info = extract_event_info(data_dict.get("text", ""))
-            if info and info.get("status") == "结束":
-                status = "end"
-            elif not data_dict.get("_is_placeholder_record", True):
-                status = "update"
-        if status == "end":
-            new_widget.set_button_to_end_mode()
-        elif status == "update":
-            new_widget.set_button_to_update_mode()
-        elif has_unuploaded_changes is False:
-            new_widget.set_uploaded_visual(True)
-
+        self._upsert_active_notice_model_item(list_widget, item, data_dict)
         self._schedule_today_in_progress_sync(data_dict)
-
-        return new_widget
+        return None
 
     def _is_deleted(self, obj):
         if not obj:
@@ -1509,6 +1245,25 @@ class MainWindowRecordsMixin:
                 if interval > 0:
                     time.sleep(min(2.0, interval))
 
+    def _backend_query_record_by_id(self, record_id: str, notice_type: str):
+        controller = getattr(self, "lan_template_portal_controller", None)
+        if controller is None or not hasattr(controller, "submit_qt_command"):
+            return False, "本机后端未连接，无法查询多维记录。"
+        try:
+            result = controller.submit_qt_command(
+                "query_record_by_id",
+                {
+                    "record_id": str(record_id or "").strip(),
+                    "notice_type": str(notice_type or "").strip(),
+                },
+            )
+        except Exception as exc:
+            return False, str(exc)
+        if bool((result or {}).get("ok")):
+            record = result.get("record") if isinstance(result, dict) else {}
+            return True, record if isinstance(record, dict) else {}
+        return False, str((result or {}).get("message") or "查询记录失败。")
+
     def _run_record_binding_validation(self, local_data: dict | None):
         local_data = dict(local_data or {})
         record_id = str(local_data.get("record_id") or "").strip()
@@ -1520,7 +1275,7 @@ class MainWindowRecordsMixin:
         if bool(getattr(self, "_closing", False)):
             self._record_binding_validation_pending_ids.discard(record_id)
             return
-        success, result = query_record_by_id(record_id, notice_type)
+        success, result = self._backend_query_record_by_id(record_id, notice_type)
         conflict = False
         conflict_error = ""
         missing_remote_record = False
@@ -1690,7 +1445,7 @@ class MainWindowRecordsMixin:
         local_data = dict(data)
 
         def worker():
-            success, result = query_record_by_id(new_record_id, notice_type)
+            success, result = self._backend_query_record_by_id(new_record_id, notice_type)
             conflict = False
             error_text = ""
             if success:
@@ -1776,26 +1531,7 @@ class MainWindowRecordsMixin:
             self._remove_active_notice_model_record(data)
         if isinstance(item, ActiveNoticeModelItem):
             self._remove_active_item_from_source(list_widget, item)
-            return
-        try:
-            widget = list_widget.itemWidget(item)
-        except Exception:
-            widget = None
-        try:
-            list_widget.removeItemWidget(item)
-        except Exception:
-            pass
-        try:
-            row = self._active_item_row(list_widget, item)
-            if row != -1:
-                list_widget.takeItem(row)
-        except Exception:
-            pass
-        try:
-            if widget:
-                widget.deleteLater()
-        except Exception:
-            pass
+        return
 
     def _build_route_conflict_error(self, match_key: str) -> str:
         preview = str(match_key or "").split("|", 1)[-1]
@@ -2147,7 +1883,7 @@ class MainWindowRecordsMixin:
             if record_id:
                 self._today_in_progress_pending_record_ids.discard(record_id)
             return
-        success, result = query_record_by_id(record_id, notice_type)
+        success, result = self._backend_query_record_by_id(record_id, notice_type)
         state = "unknown"
         error_text = ""
         if success:
@@ -3386,80 +3122,9 @@ class MainWindowRecordsMixin:
                 ):
                     self.save_active_cache()
             return item, None
-        item = QListWidgetItem()
-        widget = None
-        widgets_required = self._active_item_widgets_required()
-        if widgets_required:
-            try:
-                widget = ClipboardItemWidget(data_dict)
-                widget.action_clicked.connect(self.handle_action)
-                widget.today_progress_clicked.connect(self._handle_today_in_progress_toggle)
-                widget.ended_signal.connect(self.move_to_history)
-                widget.delete_requested.connect(self._delete_active_item)
-                if hasattr(widget, "set_delete_interaction_enabled"):
-                    widget.set_delete_interaction_enabled(self._delete_interaction_enabled)
-            except Exception as exc:
-                record_id = str(data_dict.get("record_id") or "").strip()
-                log_warning(
-                    f"活动条目创建失败，未插入列表: notice_type={notice_type}, "
-                    f"record_id={record_id}, error={exc}"
-                )
-                try:
-                    if widget:
-                        widget.deleteLater()
-                except Exception:
-                    pass
-                self._schedule_pending_cache_refresh()
-                return None, None
-        try:
-            item.setSizeHint(QSize(420, 88 if not widgets_required else 80))
-            item.setData(Qt.ItemDataRole.UserRole, data_dict)
-            if insert_top:
-                list_widget.insertItem(0, item)
-            else:
-                list_widget.addItem(item)
-            if widget:
-                list_widget.setItemWidget(item, widget)
-            self._upsert_active_notice_model_item(list_widget, item, data_dict)
-        except Exception as exc:
-            record_id = str(data_dict.get("record_id") or "").strip()
-            log_warning(
-                f"活动条目挂载失败，已回滚插入: notice_type={notice_type}, "
-                f"record_id={record_id}, error={exc}"
-            )
-            try:
-                row = list_widget.row(item)
-                if row != -1:
-                    list_widget.takeItem(row)
-            except Exception:
-                pass
-            try:
-                if widget:
-                    widget.deleteLater()
-            except Exception:
-                pass
-            self._schedule_pending_cache_refresh()
-            return None, None
-        if widget:
-            # 根据内容状态设置按钮
-            info = extract_event_info(data_dict.get("text", ""))
-            if info and info.get("status") == "结束":
-                widget.set_button_to_end_mode()
-            elif not data_dict.get("_is_placeholder_record", True):
-                widget.set_button_to_update_mode()
-            if data_dict.get("_has_unuploaded_changes") is False:
-                widget.mark_as_uploaded()
-        self._schedule_today_in_progress_sync(data_dict)
-        self._schedule_record_binding_validation(data_dict)
-        self._schedule_active_route_reconcile(data_dict)
-        if not skip_cache:
-            if not (
-                hasattr(self, "_upsert_active_cache_record")
-                and self._upsert_active_cache_record(data_dict)
-            ):
-                self.save_active_cache()
-        self._schedule_active_list_virtualization_refresh(list_widget, 0)
-        return item, widget
+        log_warning("活动列表 model/delegate 未初始化，拒绝回退到旧 QWidget 列表。")
+        self._schedule_pending_cache_refresh()
+        return None, None
 
     def sync_record_id_to_widget(self, old_record_id, new_record_id):
         if not old_record_id or not new_record_id:

@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 from PyQt6.QtCore import Qt
 
+from lan_bitable_template_portal.identity_utils import (
+    canonical_source_record_id,
+    canonical_target_record_id,
+)
+
 
 class ActiveNoticeIndex:
-    """Lightweight lookup index for active QListWidget items.
-
-    This keeps the current QListWidget implementation cheaper without making it
-    part of the long-term data model. A later QListView model can reuse the same
-    lookup contract while replacing the stored item references.
-    """
+    """Lightweight lookup index for model-backed active notice handles."""
 
     def __init__(
         self,
@@ -72,13 +72,9 @@ class ActiveNoticeIndex:
                 continue
             data_copy = dict(data)
             entries.append((list_widget, item, data_copy))
-            record_id = str(data.get("record_id") or "").strip()
+            record_id = canonical_target_record_id(data)
             active_item_id = str(data.get("active_item_id") or "").strip()
-            source_record_id = str(
-                data.get("lan_source_record_id")
-                or data.get("source_record_id")
-                or ""
-            ).strip()
+            source_record_id = canonical_source_record_id(data)
             if record_id:
                 by_record_id[record_id] = (list_widget, item)
                 by_record_id_candidates.setdefault(record_id, []).append(
@@ -290,13 +286,9 @@ class ActiveNoticeIndex:
         if source == "compact_text":
             value = self._compact_text_normalizer(data.get("text"))
         elif source == "record_id":
-            value = str(data.get("record_id") or "").strip()
+            value = canonical_target_record_id(data)
         elif source == "source_record_id":
-            value = str(
-                data.get("lan_source_record_id")
-                or data.get("source_record_id")
-                or ""
-            ).strip()
+            value = canonical_source_record_id(data)
         elif source == "match_key":
             value = str(data.get("match_key") or "").strip()
         elif source == "match_title":
@@ -345,4 +337,10 @@ class ActiveNoticeIndex:
             return False
         if not isinstance(data, dict):
             return False
-        return str(data.get(field) or "").strip() == str(key or "").strip()
+        if field == "record_id":
+            value = canonical_target_record_id(data)
+        elif field == "source_record_id":
+            value = canonical_source_record_id(data)
+        else:
+            value = str(data.get(field) or "").strip()
+        return str(value or "").strip() == str(key or "").strip()

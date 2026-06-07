@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import re
+import json
 import subprocess
 import sys
 import tempfile
@@ -102,7 +103,24 @@ def check_requests_usage() -> tuple[bool, list[str]]:
 
 
 def check_frontend_dist() -> tuple[bool, str, bool]:
+    frontend_dir = BIN_DIR / "lan_bitable_template_portal" / "frontend"
+    package_path = frontend_dir / "package.json"
+    smoke_script = BIN_DIR / "tools" / "frontend_runtime_smoke.py"
     dist_index = BIN_DIR / "lan_bitable_template_portal" / "frontend" / "dist" / "index.html"
+    if not smoke_script.is_file():
+        return False, "缺少 Vue 生产页浏览器 smoke 工具。", False
+    try:
+        package_data = json.loads(package_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return False, f"frontend/package.json 读取失败: {exc}", False
+    scripts = package_data.get("scripts") if isinstance(package_data, dict) else {}
+    dev_dependencies = package_data.get("devDependencies") if isinstance(package_data, dict) else {}
+    if not isinstance(scripts, dict) or "frontend_runtime_smoke.py" not in str(
+        scripts.get("smoke") or ""
+    ):
+        return False, "frontend/package.json 未接入 smoke 脚本。", False
+    if not isinstance(dev_dependencies, dict) or "playwright" not in dev_dependencies:
+        return False, "frontend/package.json 未声明 Playwright smoke 依赖。", False
     if not dist_index.is_file():
         return False, f"Vue 构建产物不存在: {dist_index}", False
     ready = portal_server.portal_frontend_dist_ready()
@@ -124,6 +142,8 @@ def check_frontend_dist() -> tuple[bool, str, bool]:
     if extra_assets:
         return False, "Vue dist 存在入口未引用的旧资源: " + ", ".join(extra_assets[:10]), False
     placeholder_hits: list[str] = []
+    forbidden_hits: list[str] = []
+    syntax_failures: list[str] = []
     for name in sorted(referenced_assets):
         path = dist_assets / name
         if path.suffix.lower() not in {".js", ".css"}:
@@ -131,8 +151,32 @@ def check_frontend_dist() -> tuple[bool, str, bool]:
         text = path.read_text(encoding="utf-8", errors="ignore")
         if "Vue migration workspace" in text or "当前生产页面仍由 legacy" in text:
             placeholder_hits.append(name)
+        if path.suffix.lower() == ".js":
+            for pattern in ("window.prompt", "chooseCandidateByPrompt"):
+                if pattern in text:
+                    forbidden_hits.append(f"{name}:{pattern}")
+            try:
+                subprocess.run(
+                    ["node", "--check", str(path)],
+                    cwd=PROJECT_ROOT,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+            except FileNotFoundError:
+                syntax_failures.append(f"{name}: node 不可用")
+            except subprocess.CalledProcessError as exc:
+                detail = (exc.stderr or exc.stdout or "").strip().splitlines()
+                syntax_failures.append(f"{name}: {detail[0] if detail else exc}")
+            except Exception as exc:
+                syntax_failures.append(f"{name}: {exc}")
     if placeholder_hits:
         return False, "Vue dist 仍包含迁移占位文案: " + ", ".join(placeholder_hits[:10]), False
+    if forbidden_hits:
+        return False, "Vue dist 包含禁用的旧前端交互: " + ", ".join(forbidden_hits[:10]), False
+    if syntax_failures:
+        return False, "Vue dist JS 语法检查失败: " + ", ".join(syntax_failures[:5]), False
     return True, f"Vue dist 已就绪: {dist_index}", True
 
 
@@ -174,7 +218,38 @@ def check_qt_model_view_default() -> tuple[bool, str]:
     )
     if not required:
         return False, "Qt 活动列表默认 model/delegate 路径检查失败。"
+    if "self.deleted_history_list = QListWidget()" in ui_text:
+        return False, "Qt 历史删除列表仍在使用 QListWidget。"
+    if "DeletedNoticeModel" not in ui_text or "DeletedNoticeDelegate" not in ui_text:
+        return False, "Qt 历史删除列表未接入 model/delegate。"
+    if "ClipboardItemWidget" in records_text or "setItemWidget(" in records_text:
+        return False, "Qt 活动列表主代码仍保留 QWidget 卡片挂载热路径。"
     return True, "Qt 活动列表固定走 model/delegate。"
+
+
+def check_fastapi_backend_entry() -> tuple[bool, str]:
+    main_path = BIN_DIR / "refactored_main.py"
+    backend_main_path = BIN_DIR / "clipflow_backend" / "main.py"
+    runtime_path = BIN_DIR / "upload_event_module" / "ui" / "main_window_runtime.py"
+    server_path = BIN_DIR / "lan_bitable_template_portal" / "server.py"
+    main_text = main_path.read_text(encoding="utf-8", errors="ignore")
+    backend_main_text = backend_main_path.read_text(encoding="utf-8", errors="ignore")
+    runtime_text = runtime_path.read_text(encoding="utf-8", errors="ignore")
+    server_text = server_path.read_text(encoding="utf-8", errors="ignore")
+    if "BackendProcessPortalController as PortalServerController" not in main_text:
+        return False, "主入口没有固定使用 FastAPI 后端子进程控制器。"
+    legacy_runtime_name = "Portal" + "Handler"
+    if "PortalRuntime" not in backend_main_text or legacy_runtime_name in backend_main_text:
+        return False, "FastAPI 后端主模块仍未切到 PortalRuntime 运行态命名。"
+    if "class PortalRuntime" not in server_text:
+        return False, "门户运行态未暴露 PortalRuntime。"
+    if legacy_runtime_name in server_text:
+        return False, "门户服务模块仍暴露旧运行态兼容别名。"
+    if "LanTemplatePortalServer(" in main_text or "LanTemplatePortalServer(" in runtime_text:
+        return False, "生产入口仍可能直接启动旧 ThreadingHTTPServer 门户。"
+    if "from http.server import" in server_text or "ThreadingHTTPServer(" in server_text:
+        return False, "旧 ThreadingHTTPServer 门户实现仍未物理移除。"
+    return True, "生产入口固定拉起 FastAPI 后端子进程。"
 
 
 def main() -> int:
@@ -214,6 +289,12 @@ def main() -> int:
         failures.append(qt_model_message)
     else:
         warnings.append(qt_model_message)
+
+    ok, fastapi_entry_message = check_fastapi_backend_entry()
+    if not ok:
+        failures.append(fastapi_entry_message)
+    else:
+        warnings.append(fastapi_entry_message)
 
     if failures:
         print("[ReleaseCheck] FAIL")

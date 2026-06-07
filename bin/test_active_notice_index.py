@@ -51,6 +51,22 @@ class ActiveNoticeIndexTests(unittest.TestCase):
         self.assertIs(index.candidates_by_match_key("key-1", factory)[0][1], item)
         self.assertIs(index.candidates_by_match_title(" title one ", factory)[0][1], item)
 
+    def test_record_lookup_prefers_target_id_over_source_id(self):
+        item = _DummyItem(
+            {
+                "record_id": "src-legacy",
+                "source_record_id": "src-legacy",
+                "target_record_id": "target-real",
+                "active_item_id": "aid-target",
+                "text": "target",
+            }
+        )
+        index, factory = self._build_index([item])
+
+        self.assertIs(index.find_by_record_id("target-real", factory)[1], item)
+        self.assertEqual(index.find_by_record_id("src-legacy", factory), (None, None))
+        self.assertIs(index.candidates_by_source_record_id("src-legacy", factory)[0][1], item)
+
     def test_rebuilds_when_cached_entry_changes(self):
         item = _DummyItem({"record_id": "old", "active_item_id": "aid", "text": "old"})
         index, factory = self._build_index([item])

@@ -5,6 +5,10 @@ import time
 import uuid
 from typing import Any
 
+from lan_bitable_template_portal.identity_utils import (
+    canonical_target_record_id,
+    normalize_notice_identity_payload,
+)
 from lan_bitable_template_portal.state_store import LanPortalStateStore
 
 from ..logger import log_warning
@@ -266,6 +270,19 @@ class ActiveCacheStore:
             if new_id not in existing_ids:
                 return new_id
 
+    @classmethod
+    def _record_matches_target_id(cls, data: dict | None, target_id: str = "") -> bool:
+        if not isinstance(data, dict):
+            return False
+        target_id = cls._normalize_key(target_id)
+        if not target_id:
+            return False
+        canonical = cls._normalize_key(canonical_target_record_id(data))
+        if canonical:
+            return canonical == target_id
+        legacy = cls._normalize_key(data.get("record_id"))
+        return bool(legacy and legacy == target_id)
+
     @staticmethod
     def _section_for_data(data: dict) -> str:
         notice_type = str((data or {}).get("notice_type") or "").strip()
@@ -277,7 +294,7 @@ class ActiveCacheStore:
             return None, None, None, "missing_id"
         matched: list[tuple[str, dict, dict]] = []
         for section, entry, data in self._iter_record_entries_unlocked(payload):
-            if self._normalize_key(data.get("record_id")) == rid:
+            if self._record_matches_target_id(data, rid):
                 matched.append((section, entry, data))
         if not matched:
             return None, None, None, "not_found"
@@ -322,7 +339,9 @@ class ActiveCacheStore:
             for _, _, data in self._iter_record_entries_unlocked(payload):
                 if not isinstance(data, dict):
                     continue
-                record_id = self._normalize_key(data.get("record_id"))
+                record_id = self._normalize_key(
+                    canonical_target_record_id(data) or data.get("record_id")
+                )
                 if not record_id or not bool(data.get("level_locked")):
                     continue
                 result[record_id] = {
@@ -345,7 +364,7 @@ class ActiveCacheStore:
                     matches = [
                         item
                         for item in self._state_store.list_qt_active_items()
-                        if self._normalize_key((item.get("payload") or {}).get("record_id")) == rid
+                        if self._record_matches_target_id(item.get("payload") or {}, rid)
                     ]
                 except Exception:
                     matches = []
@@ -402,8 +421,14 @@ class ActiveCacheStore:
     def upsert_record(self, data_dict: dict | None = None) -> bool:
         if not isinstance(data_dict, dict):
             return False
-        normalized = normalize_active_item_data(data_dict)
-        record_id = self._normalize_key(normalized.get("record_id"))
+        normalized = normalize_notice_identity_payload(
+            normalize_active_item_data(data_dict)
+        )
+        record_id = self._normalize_key(
+            canonical_target_record_id(normalized)
+            or normalized.get("record_id")
+            or normalized.get("active_item_id")
+        )
         if not record_id:
             return False
         target_section = self._section_for_data(normalized)
@@ -451,9 +476,10 @@ class ActiveCacheStore:
                 changed = False
                 for item in self._state_store.list_qt_active_items():
                     data = dict(item.get("payload") or {})
-                    if self._normalize_key(data.get("record_id")) != old_id:
+                    if not self._record_matches_target_id(data, old_id):
                         continue
                     data["record_id"] = new_id
+                    data["target_record_id"] = new_id
                     self._state_store.upsert_qt_active_item(
                         data,
                         section=str(item.get("section") or ""),
@@ -470,8 +496,9 @@ class ActiveCacheStore:
             payload = self._load_payload_unlocked()
             changed = False
             for _, _, data in self._iter_record_entries_unlocked(payload):
-                if self._normalize_key(data.get("record_id")) == old_id:
+                if self._record_matches_target_id(data, old_id):
                     data["record_id"] = new_id
+                    data["target_record_id"] = new_id
                     changed = True
             if not changed:
                 return False

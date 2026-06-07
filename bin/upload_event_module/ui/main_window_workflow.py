@@ -7,22 +7,24 @@ import time
 import hashlib
 import uuid
 import os
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtWidgets import (
+    QDialog,
+    QDialogButtonBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
+    QListWidget,
     QListWidgetItem,
     QPushButton,
+    QTextEdit,
     QVBoxLayout,
-    QWidget,
 )
 
 from ..logger import log_info, log_error, log_warning
-from ..services.service_registry import (
-    query_record_by_id,
-)
 from ..services.handlers import NoticePayload, get_notice_handler
 from ..core.parser import extract_event_info
+from .styles import get_stylesheet
 
 class MainWindowWorkflowMixin:
     @staticmethod
@@ -30,6 +32,325 @@ class MainWindowWorkflowMixin:
         if not data:
             return ""
         return base64.b64encode(bytes(data)).decode("utf-8")
+
+    @staticmethod
+    def _candidate_record_id(candidate: dict) -> str:
+        candidate = candidate if isinstance(candidate, dict) else {}
+        return str(
+            candidate.get("target_record_id")
+            or candidate.get("record_id")
+            or ""
+        ).strip()
+
+    @staticmethod
+    def _candidate_summary(candidate: dict, index: int) -> str:
+        candidate = candidate if isinstance(candidate, dict) else {}
+        title = str(candidate.get("title") or "未命名通告").strip()
+        building = str(candidate.get("building") or "").strip()
+        status = str(candidate.get("status") or "").strip()
+        start_time = str(candidate.get("start_time") or "").strip()
+        end_time = str(candidate.get("end_time") or "").strip()
+        score = str(candidate.get("match_score") or "").strip()
+        parts = [f"{index}. {title}"]
+        meta = " / ".join(
+            item
+            for item in (
+                building,
+                f"状态 {status}" if status else "",
+                f"{start_time} ~ {end_time}" if start_time or end_time else "",
+                f"匹配 {score}" if score else "",
+            )
+            if item
+        )
+        if meta:
+            parts.append(meta)
+        return "\n".join(parts)
+
+    @staticmethod
+    def _candidate_detail_text(candidate: dict) -> str:
+        candidate = candidate if isinstance(candidate, dict) else {}
+        lines = [
+            f"标题：{candidate.get('title') or '-'}",
+            f"楼栋：{candidate.get('building') or '-'}",
+            f"状态：{candidate.get('status') or '-'}",
+            f"时间：{candidate.get('start_time') or '-'} ~ {candidate.get('end_time') or '-'}",
+            f"匹配分：{candidate.get('match_score') or '-'}",
+        ]
+        field_items = candidate.get("field_items")
+        if isinstance(field_items, list) and field_items:
+            lines.append("")
+            lines.append("字段信息：")
+            for item in field_items[:30]:
+                if not isinstance(item, dict):
+                    continue
+                label = str(item.get("label") or "").strip()
+                value = str(item.get("value") or "").strip()
+                if label and value:
+                    lines.append(f"{label}：{value}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _backend_upload_action_name(action_type: str, result: dict | None = None) -> str:
+        if isinstance(result, dict):
+            name = str(result.get("name") or "").strip()
+            if name:
+                return name
+        return (
+            "归档"
+            if action_type == "upload_replace"
+            else "结束"
+            if action_type == "end"
+            else "更新"
+            if action_type == "update"
+            else "上传"
+        )
+
+    def _target_candidate_dialog_stylesheet(self) -> str:
+        theme = str(getattr(self, "current_theme", "dark") or "dark")
+        if theme == "light":
+            return """
+            QLabel#TargetCandidateHint {
+                color: #6C757D;
+                margin: 8px 0;
+            }
+            QListWidget#TargetCandidateList {
+                background-color: #FAFAFA;
+                border: 1px solid #E0E0E0;
+                border-radius: 8px;
+                padding: 4px;
+            }
+            QListWidget#TargetCandidateList::item {
+                min-height: 56px;
+                padding: 8px 10px;
+                margin: 4px;
+            }
+            QTextEdit#TargetCandidateDetail {
+                background-color: #FAFAFA;
+                border: 1px solid #E0E0E0;
+                border-radius: 8px;
+                color: #212529;
+            }
+            """
+        return """
+        QLabel#TargetCandidateHint {
+            color: #9CA3AF;
+            margin: 8px 0;
+        }
+        QListWidget#TargetCandidateList {
+            background-color: #2A2A3C;
+            border: 1px solid #4F4F7A;
+            border-radius: 8px;
+            padding: 4px;
+        }
+        QListWidget#TargetCandidateList::item {
+            min-height: 56px;
+            padding: 8px 10px;
+            margin: 4px;
+        }
+        QTextEdit#TargetCandidateDetail {
+            background-color: #2A2A3C;
+            border: 1px solid #4F4F7A;
+            border-radius: 8px;
+            color: #E5E7EB;
+        }
+        """
+
+    def _prompt_target_record_candidate(self, result: dict) -> dict | None:
+        candidates = [
+            item
+            for item in (result.get("target_candidates") or [])
+            if isinstance(item, dict) and self._candidate_record_id(item)
+        ]
+        if not candidates:
+            return None
+        dialog = QDialog(self)
+        dialog.setWindowTitle("选择对应的多维记录")
+        dialog.setObjectName("ScreenshotWindow")
+        dialog.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+        )
+        dialog.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        dialog.resize(760, 560)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(5, 5, 5, 5)
+        container = QFrame(dialog)
+        container.setObjectName("ScreenshotWindow")
+        inner_layout = QVBoxLayout(container)
+
+        top_bar = QHBoxLayout()
+        title = QLabel("选择多维记录")
+        title.setObjectName("TitleLabel")
+        close_btn = QPushButton("×", dialog)
+        close_btn.setObjectName("CloseBtn")
+        close_btn.clicked.connect(dialog.reject)
+        top_bar.addWidget(title)
+        top_bar.addStretch()
+        top_bar.addWidget(close_btn)
+
+        hint = QLabel(str(result.get("message") or "请选择最匹配的一条记录后继续上传。"))
+        hint.setObjectName("TargetCandidateHint")
+        hint.setWordWrap(True)
+        list_widget = QListWidget(dialog)
+        list_widget.setObjectName("TargetCandidateList")
+        detail = QTextEdit(dialog)
+        detail.setObjectName("TargetCandidateDetail")
+        detail.setReadOnly(True)
+        detail.setMinimumHeight(180)
+        for index, candidate in enumerate(candidates, start=1):
+            item = QListWidgetItem(self._candidate_summary(candidate, index))
+            item.setData(Qt.ItemDataRole.UserRole, candidate)
+            list_widget.addItem(item)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel,
+            parent=dialog,
+        )
+        ok_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        cancel_button = buttons.button(QDialogButtonBox.StandardButton.Cancel)
+        if ok_button:
+            ok_button.setText("使用选中记录继续")
+            ok_button.setObjectName("ConfirmBtn")
+        if cancel_button:
+            cancel_button.setText("取消")
+            cancel_button.setObjectName("DiffCancelBtn")
+
+        def update_detail():
+            current = list_widget.currentItem()
+            candidate = (
+                current.data(Qt.ItemDataRole.UserRole)
+                if current is not None
+                else candidates[0]
+            )
+            detail.setPlainText(self._candidate_detail_text(candidate))
+
+        list_widget.currentItemChanged.connect(lambda *_args: update_detail())
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        inner_layout.addLayout(top_bar)
+        inner_layout.addWidget(hint)
+        inner_layout.addWidget(list_widget, 1)
+        inner_layout.addWidget(detail)
+        inner_layout.addWidget(buttons)
+        layout.addWidget(container)
+        dialog.setStyleSheet(
+            get_stylesheet(getattr(self, "current_theme", "dark"))
+            + self._target_candidate_dialog_stylesheet()
+        )
+        list_widget.setCurrentRow(0)
+        update_detail()
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        current = list_widget.currentItem()
+        if current is None:
+            return None
+        candidate = current.data(Qt.ItemDataRole.UserRole)
+        return candidate if isinstance(candidate, dict) else None
+
+    def _continue_backend_upload_with_selected_target(
+        self,
+        *,
+        selected_data: dict,
+        screenshot_bytes,
+        extra_images: list,
+        action_type: str,
+        response_time: str,
+        recover_selected: bool,
+        robot_group_choice: str,
+    ) -> None:
+        target_record_id = str((selected_data or {}).get("record_id") or "").strip()
+        if not target_record_id:
+            self._post_request_finished(
+                self._backend_upload_action_name(action_type),
+                False,
+                "所选目标记录缺少 record_id。",
+                "",
+            )
+            return
+
+        def backend_task():
+            self._delegate_qt_notice_upload_to_backend(
+                data_snapshot=dict(selected_data or {}),
+                screenshot_bytes=screenshot_bytes,
+                extra_images=list(extra_images or []),
+                action_type=action_type,
+                response_time=response_time,
+                recover_selected=recover_selected,
+                robot_group_choice=robot_group_choice,
+                allow_target_selection=False,
+            )
+
+        self._enqueue_upload(target_record_id, backend_task)
+        self._mark_upload_queued(target_record_id)
+        self.show_message("已选择对应多维记录，正在后台继续处理。")
+
+    def _handle_backend_target_selection(
+        self,
+        *,
+        result: dict,
+        data_snapshot: dict,
+        screenshot_bytes,
+        extra_images: list,
+        action_type: str,
+        response_time: str,
+        recover_selected: bool,
+        robot_group_choice: str,
+    ) -> bool:
+        def select_and_continue() -> None:
+            candidate = self._prompt_target_record_candidate(result)
+            old_id = str((data_snapshot or {}).get("record_id") or "").strip()
+            action_name = self._backend_upload_action_name(action_type, result)
+            if not candidate:
+                self._post_request_finished(
+                    action_name,
+                    False,
+                    "已取消选择目标多维记录，本次未继续上传。",
+                    old_id,
+                )
+                return
+            target_record_id = self._candidate_record_id(candidate)
+            if not target_record_id:
+                self._post_request_finished(
+                    action_name,
+                    False,
+                    "所选目标记录缺少 record_id。",
+                    old_id,
+                )
+                return
+            selected_data = dict(data_snapshot or {})
+            selected_data["target_record_id"] = target_record_id
+            selected_data["record_id"] = target_record_id
+            selected_data["feishu_record_id"] = target_record_id
+            selected_data["raw_record_id"] = target_record_id
+            selected_data["_record_id_kind"] = "target"
+            selected_data["_is_placeholder_record"] = False
+            if old_id and old_id != target_record_id and hasattr(
+                self, "_replace_record_id_everywhere"
+            ):
+                self._replace_record_id_everywhere(old_id, target_record_id)
+            if not self._apply_selected_target_record_to_active_item(
+                old_record_id=old_id,
+                target_record_id=target_record_id,
+                selected_data=selected_data,
+            ):
+                self._update_active_item_data(target_record_id, selected_data)
+            self._continue_backend_upload_with_selected_target(
+                selected_data=selected_data,
+                screenshot_bytes=screenshot_bytes,
+                extra_images=extra_images,
+                action_type=action_type,
+                response_time=response_time,
+                recover_selected=recover_selected,
+                robot_group_choice=robot_group_choice,
+            )
+
+        enqueue = getattr(self, "_enqueue_ui_mutation", None)
+        if callable(enqueue):
+            enqueue("target_record_selection", select_and_continue)
+        else:
+            select_and_continue()
+        return True
 
     def _delegate_qt_notice_upload_to_backend(
         self,
@@ -41,11 +362,12 @@ class MainWindowWorkflowMixin:
         response_time: str,
         recover_selected: bool,
         robot_group_choice: str,
+        allow_target_selection: bool = True,
     ) -> bool:
         controller = getattr(self, "lan_template_portal_controller", None)
         if controller is None or not hasattr(controller, "execute_qt_notice_upload"):
             self._post_request_finished(
-                "归档" if action_type == "upload_replace" else "结束" if action_type == "end" else "更新" if action_type == "update" else "上传",
+                self._backend_upload_action_name(action_type),
                 False,
                 "本机后端未连接，Qt 不再直接执行多维写入。",
                 str((data_snapshot or {}).get("record_id") or ""),
@@ -84,7 +406,7 @@ class MainWindowWorkflowMixin:
             result = controller.execute_qt_notice_upload(request_payload)
         except Exception as exc:
             self._post_request_finished(
-                "归档" if action_type == "upload_replace" else "结束" if action_type == "end" else "更新" if action_type == "update" else "上传",
+                self._backend_upload_action_name(action_type),
                 False,
                 f"本机后端执行失败：{exc}",
                 str((data_snapshot or {}).get("record_id") or ""),
@@ -92,7 +414,7 @@ class MainWindowWorkflowMixin:
             return True
         if not isinstance(result, dict):
             self._post_request_finished(
-                "归档" if action_type == "upload_replace" else "结束" if action_type == "end" else "更新" if action_type == "update" else "上传",
+                self._backend_upload_action_name(action_type),
                 False,
                 "本机后端返回格式异常。",
                 str((data_snapshot or {}).get("record_id") or ""),
@@ -102,11 +424,30 @@ class MainWindowWorkflowMixin:
         success = bool(result.get("ok"))
         record_id = str((data_snapshot or {}).get("record_id") or "")
         message = str(result.get("message") or "")
+        if result.get("needs_target_selection"):
+            if not allow_target_selection:
+                self._post_request_finished(
+                    self._backend_upload_action_name(action_type, result),
+                    False,
+                    message or "所选目标记录仍无法绑定，请重新选择后再试。",
+                    record_id,
+                )
+                return True
+            return self._handle_backend_target_selection(
+                result=result,
+                data_snapshot=data_snapshot,
+                screenshot_bytes=screenshot_bytes,
+                extra_images=extra_images,
+                action_type=action_type,
+                response_time=response_time,
+                recover_selected=recover_selected,
+                robot_group_choice=robot_group_choice,
+            )
         real_record_id = str(result.get("real_record_id") or "").strip()
         if success and name in {"上传", "归档"} and real_record_id:
             message = real_record_id
         self._post_request_finished(
-            name or ("归档" if action_type == "upload_replace" else "结束" if action_type == "end" else "更新" if action_type == "update" else "上传"),
+            name or self._backend_upload_action_name(action_type),
             success,
             message,
             record_id,
@@ -614,10 +955,22 @@ class MainWindowWorkflowMixin:
         notice_type = info.get("notice_type", "")
         if not notice_type:
             return False, "无法识别通告类型，无法校验记录ID。"
-        success, result = query_record_by_id(record_id, notice_type)
-        if success:
+        controller = getattr(self, "lan_template_portal_controller", None)
+        if controller is None or not hasattr(controller, "submit_qt_command"):
+            return False, "本机后端未连接，无法校验记录ID。"
+        try:
+            result = controller.submit_qt_command(
+                "validate_record_id",
+                {
+                    "record_id": str(record_id or "").strip(),
+                    "notice_type": str(notice_type or "").strip(),
+                },
+            )
+        except Exception as exc:
+            return False, f"后端校验记录ID失败：{exc}"
+        if bool((result or {}).get("ok")):
             return True, ""
-        return False, str(result)
+        return False, str((result or {}).get("message") or "未找到对应记录。")
 
     def _handle_manual_update(
         self,
@@ -1255,42 +1608,6 @@ class MainWindowWorkflowMixin:
         meta = " · ".join(part for part in [notice_type, building, time_text] if part)
         return f"{title}\n{meta}" if meta else title
 
-    def _create_deleted_history_row_widget(self, item: dict) -> QWidget:
-        payload = dict(item or {})
-        undo_id = str(payload.get("undo_id") or "").strip()
-        title = str(payload.get("title") or "未命名通告").strip()
-        lines = self._format_undo_deleted_item(payload).splitlines()
-        meta = lines[1] if len(lines) > 1 else ""
-
-        widget = QWidget()
-        layout = QHBoxLayout(widget)
-        layout.setContentsMargins(8, 6, 8, 6)
-        layout.setSpacing(10)
-
-        text_box = QVBoxLayout()
-        text_box.setContentsMargins(0, 0, 0, 0)
-        text_box.setSpacing(3)
-        title_label = QLabel(title)
-        title_label.setWordWrap(True)
-        title_label.setStyleSheet("font-weight: 600; color: #0F172A; font-size: 13px;")
-        text_box.addWidget(title_label)
-        if meta:
-            meta_label = QLabel(meta)
-            meta_label.setWordWrap(True)
-            meta_label.setStyleSheet("color: #64748B; font-size: 11px;")
-            text_box.addWidget(meta_label)
-        layout.addLayout(text_box, 1)
-
-        button = QPushButton("回退删除")
-        button.setObjectName("AddBtn")
-        button.setFixedSize(82, 30)
-        button.setEnabled(bool(undo_id))
-        button.clicked.connect(
-            lambda _checked=False, u=undo_id, t=title, b=button: self._confirm_or_undo_deleted_history_item(u, t, b)
-        )
-        layout.addWidget(button)
-        return widget
-
     def _show_deleted_notice_history(self):
         button = getattr(self, "deleted_history_btn", None)
         if button is not None:
@@ -1326,53 +1643,37 @@ class MainWindowWorkflowMixin:
     def _render_deleted_notice_history(self, items: list[dict]) -> None:
         self.title_label.setText("历史删除")
         self.stack.setCurrentWidget(self.deleted_history_container)
-        list_widget = getattr(self, "deleted_history_list", None)
-        if list_widget is None:
+        model = getattr(self, "deleted_history_model", None)
+        if model is None or not hasattr(model, "replace_records"):
             self.show_message("历史删除页面未初始化。")
             return
-        list_widget.clear()
+        rows = []
         for item in items:
-            row = QListWidgetItem()
-            row.setData(Qt.ItemDataRole.UserRole, dict(item or {}))
-            row_widget = self._create_deleted_history_row_widget(item)
-            row.setSizeHint(row_widget.sizeHint())
-            list_widget.addItem(row)
-            list_widget.setItemWidget(row, row_widget)
-        if not items:
-            empty_item = QListWidgetItem("近两天没有可回退的删除记录。")
-            empty_item.setFlags(empty_item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
-            list_widget.addItem(empty_item)
+            payload = dict(item or {})
+            lines = self._format_undo_deleted_item(payload).splitlines()
+            payload["_meta"] = lines[1] if len(lines) > 1 else ""
+            rows.append(payload)
+        model.replace_records(rows)
 
-    def _confirm_or_undo_deleted_history_item(self, undo_id: str, title: str, button: QPushButton) -> None:
+    def _handle_deleted_history_undo_request(self, item: dict) -> None:
+        payload = dict(item or {})
+        if payload.get("_empty"):
+            return
+        undo_id = str(payload.get("undo_id") or "").strip()
+        title = str(payload.get("title") or "未命名通告").strip()
+        self._undo_deleted_history_item(undo_id, title)
+
+    def _undo_deleted_history_item(self, undo_id: str, title: str) -> None:
         undo_id = str(undo_id or "").strip()
         if not undo_id:
             self.show_message("该删除记录缺少回退标识。")
             return
-        if button.property("undo_confirmed") is not True:
-            button.setProperty("undo_confirmed", True)
-            button.setText("ok")
-            return
-        self._undo_deleted_history_item(undo_id, title, button)
-
-    def _undo_deleted_history_item(self, undo_id: str, title: str, button: QPushButton) -> None:
-        undo_id = str(undo_id or "").strip()
-        if not undo_id:
-            self.show_message("该删除记录缺少回退标识。")
-            return
-        if button is not None:
-            button.setEnabled(False)
-            button.setText("提交中...")
 
         def _finish(success: bool, error: str = "") -> None:
-            if button is not None:
-                button.setText("回退删除")
-                button.setEnabled(True)
             if success:
                 self.show_message(f"已提交「{title}」的删除回退，稍后会恢复显示。")
                 self._show_deleted_notice_history()
                 return
-            if button is not None:
-                button.setProperty("undo_confirmed", False)
             self.show_message(error or "回退提交失败。")
 
         def _worker() -> None:
@@ -2241,7 +2542,12 @@ class MainWindowWorkflowMixin:
                     continue
                 data = dict(data)
                 data["record_id"] = new_id
+                data["target_record_id"] = new_id
+                for legacy_key in ("feishu_record_id", "raw_record_id"):
+                    if str(data.get(legacy_key) or "").strip() == old_id:
+                        data[legacy_key] = new_id
                 data["_is_placeholder_record"] = False
+                data["_record_id_kind"] = "target"
                 if data.get("payload_key") == old_id:
                     data["payload_key"] = new_id
                 item.setData(Qt.ItemDataRole.UserRole, data)
@@ -2350,6 +2656,55 @@ class MainWindowWorkflowMixin:
             except Exception:
                 pass
         return changed
+
+    def _apply_selected_target_record_to_active_item(
+        self,
+        *,
+        old_record_id: str,
+        target_record_id: str,
+        selected_data: dict,
+    ) -> bool:
+        target_id = str(target_record_id or "").strip()
+        if not target_id or not isinstance(selected_data, dict):
+            return False
+        old_id = str(old_record_id or "").strip()
+        active_item_id = str(selected_data.get("active_item_id") or "").strip()
+        list_widget, item = self._find_active_item_by_record_id(target_id)
+        if (not item or not self._is_valid_list_item(item)) and active_item_id:
+            list_widget, item = self._find_active_item_by_active_item_id(active_item_id)
+        if (not item or not self._is_valid_list_item(item)) and old_id:
+            list_widget, item = self._find_active_item_by_record_id(old_id)
+        if not item or not self._is_valid_list_item(item):
+            return False
+        committed = dict(selected_data)
+        committed["record_id"] = target_id
+        committed["target_record_id"] = target_id
+        committed["feishu_record_id"] = target_id
+        committed["raw_record_id"] = target_id
+        committed["_record_id_kind"] = "target"
+        committed["_is_placeholder_record"] = False
+        try:
+            item.setData(Qt.ItemDataRole.UserRole, committed)
+        except Exception:
+            return False
+        if hasattr(self, "_upsert_active_notice_model_item"):
+            self._upsert_active_notice_model_item(list_widget, item, committed)
+        if getattr(self, "cache_store", None):
+            try:
+                self.cache_store.patch_record_fields(
+                    record_id=target_id,
+                    patch={
+                        "record_id": target_id,
+                        "target_record_id": target_id,
+                        "feishu_record_id": target_id,
+                        "raw_record_id": target_id,
+                        "_record_id_kind": "target",
+                        "_is_placeholder_record": False,
+                    },
+                )
+            except Exception:
+                pass
+        return True
 
     def on_request_finished(self, name, success, msg, record_id=None):
         self._set_last_ui_op(

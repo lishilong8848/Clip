@@ -30,7 +30,7 @@ from lan_bitable_template_portal.portal_service import WORK_TYPE_REPAIR  # noqa:
 from lan_bitable_template_portal.portal_auth import AUTH_COOKIE_NAME  # noqa: E402
 from lan_bitable_template_portal.portal_auth import PortalAuthManager  # noqa: E402
 import lan_bitable_template_portal.server as portal_server_module  # noqa: E402
-from lan_bitable_template_portal.server import PortalHandler  # noqa: E402
+from lan_bitable_template_portal.server import PortalRuntime  # noqa: E402
 from lan_bitable_template_portal.state_store import LanPortalStateStore  # noqa: E402
 from clipflow_backend.main import FastAPIPortalController  # noqa: E402
 from clipflow_backend.process_controller import BackendProcessPortalController  # noqa: E402
@@ -776,7 +776,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             "create_bitable_record_by_payload",
             return_value=(True, "rec-backend-1"),
         ):
-            result = PortalHandler.execute_local_notice_upload(request_payload)
+            result = PortalRuntime.execute_local_notice_upload(request_payload)
         self.assertTrue(result["ok"])
         self.assertEqual(result["name"], "上传")
         self.assertEqual(result["record_id"], "placeholder-1")
@@ -820,27 +820,27 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
-            old_store = PortalHandler.state_store
-            old_service = PortalHandler.service
-            old_queue = list(PortalHandler.message_queue)
-            old_event = PortalHandler.message_queue_event
+            old_store = PortalRuntime.state_store
+            old_service = PortalRuntime.service
+            old_queue = list(PortalRuntime.message_queue)
+            old_event = PortalRuntime.message_queue_event
             try:
-                PortalHandler.state_store = store
-                PortalHandler.service = _FakeService()
-                PortalHandler.message_queue = []
-                PortalHandler.message_queue_event = threading.Event()
+                PortalRuntime.state_store = store
+                PortalRuntime.service = _FakeService()
+                PortalRuntime.message_queue = []
+                PortalRuntime.message_queue_event = threading.Event()
                 store.upsert_runtime_queue_item("message", "job-sqlite")
 
-                job_id = PortalHandler._dequeue_runtime_job("message")
+                job_id = PortalRuntime._dequeue_runtime_job("message")
 
                 self.assertEqual(job_id, "job-sqlite")
                 counts = store.runtime_queue_counts()
                 self.assertEqual(counts["message"]["processing"], 1)
             finally:
-                PortalHandler.state_store = old_store
-                PortalHandler.service = old_service
-                PortalHandler.message_queue = old_queue
-                PortalHandler.message_queue_event = old_event
+                PortalRuntime.state_store = old_store
+                PortalRuntime.service = old_service
+                PortalRuntime.message_queue = old_queue
+                PortalRuntime.message_queue_event = old_event
 
     def test_portal_handler_dequeue_skips_terminal_sqlite_jobs(self):
         class _FakeService:
@@ -853,29 +853,29 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
-            old_store = PortalHandler.state_store
-            old_service = PortalHandler.service
-            old_queue = list(PortalHandler.message_queue)
-            old_event = PortalHandler.message_queue_event
+            old_store = PortalRuntime.state_store
+            old_service = PortalRuntime.service
+            old_queue = list(PortalRuntime.message_queue)
+            old_event = PortalRuntime.message_queue_event
             try:
-                PortalHandler.state_store = store
-                PortalHandler.service = _FakeService()
-                PortalHandler.message_queue = []
-                PortalHandler.message_queue_event = threading.Event()
+                PortalRuntime.state_store = store
+                PortalRuntime.service = _FakeService()
+                PortalRuntime.message_queue = []
+                PortalRuntime.message_queue_event = threading.Event()
                 store.upsert_runtime_queue_item("message", "job-done")
                 store.upsert_runtime_queue_item("message", "job-valid")
 
-                job_id = PortalHandler._dequeue_runtime_job("message")
+                job_id = PortalRuntime._dequeue_runtime_job("message")
 
                 self.assertEqual(job_id, "job-valid")
                 counts = store.runtime_queue_counts()
                 self.assertEqual(counts["message"]["done"], 1)
                 self.assertEqual(counts["message"]["processing"], 1)
             finally:
-                PortalHandler.state_store = old_store
-                PortalHandler.service = old_service
-                PortalHandler.message_queue = old_queue
-                PortalHandler.message_queue_event = old_event
+                PortalRuntime.state_store = old_store
+                PortalRuntime.service = old_service
+                PortalRuntime.message_queue = old_queue
+                PortalRuntime.message_queue_event = old_event
 
     def test_lan_portal_state_store_checkpoints_database(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -971,8 +971,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
     def test_backend_clipboard_notice_projects_to_active_upsert_event(self):
         with tempfile.TemporaryDirectory() as tmp:
-            previous_store = PortalHandler.state_store
-            PortalHandler.state_store = LanPortalStateStore(
+            previous_store = PortalRuntime.state_store
+            PortalRuntime.state_store = LanPortalStateStore(
                 Path(tmp) / "lan_portal_state.sqlite3"
             )
             try:
@@ -982,8 +982,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 )
                 self.assertIsNotNone(entry)
                 result = controller._project_clipboard_entry_to_active(entry)
-                qt_items = PortalHandler.state_store.list_qt_active_items()
-                events = PortalHandler.state_store.lease_outbox_events(
+                qt_items = PortalRuntime.state_store.list_qt_active_items()
+                events = PortalRuntime.state_store.lease_outbox_events(
                     "qt_action", limit=1, lease_seconds=5
                 )
 
@@ -995,12 +995,12 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 self.assertIn("测试测试测试", qt_items[0]["payload"]["text"])
                 self.assertEqual(events[0]["payload"]["kind"], "active_upsert")
             finally:
-                PortalHandler.state_store = previous_store
+                PortalRuntime.state_store = previous_store
 
     def test_backend_clipboard_maintenance_same_title_different_reason_is_distinct(self):
         with tempfile.TemporaryDirectory() as tmp:
-            previous_store = PortalHandler.state_store
-            PortalHandler.state_store = LanPortalStateStore(
+            previous_store = PortalRuntime.state_store
+            PortalRuntime.state_store = LanPortalStateStore(
                 Path(tmp) / "lan_portal_state.sqlite3"
             )
             try:
@@ -1027,17 +1027,17 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 self.assertTrue(controller._project_clipboard_entry_to_active(first)["ok"])
                 self.assertTrue(controller._project_clipboard_entry_to_active(second)["ok"])
 
-                qt_items = PortalHandler.state_store.list_qt_active_items()
+                qt_items = PortalRuntime.state_store.list_qt_active_items()
                 reasons = sorted(item["payload"].get("reason") for item in qt_items)
                 self.assertEqual(len(qt_items), 2)
                 self.assertEqual(reasons, ["1#冷却塔脏堵", "5#冷却塔脏堵"])
             finally:
-                PortalHandler.state_store = previous_store
+                PortalRuntime.state_store = previous_store
 
     def test_backend_ongoing_reads_qt_active_items_without_snapshot_delay(self):
         with tempfile.TemporaryDirectory() as tmp:
-            previous_store = PortalHandler.state_store
-            PortalHandler.state_store = LanPortalStateStore(
+            previous_store = PortalRuntime.state_store
+            PortalRuntime.state_store = LanPortalStateStore(
                 Path(tmp) / "lan_portal_state.sqlite3"
             )
             try:
@@ -1059,12 +1059,12 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 self.assertEqual(ongoing_a[0]["work_type"], "maintenance")
                 self.assertEqual(ongoing_b, [])
             finally:
-                PortalHandler.state_store = previous_store
+                PortalRuntime.state_store = previous_store
 
     def test_backend_ongoing_filters_deleted_qt_item_from_stale_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
-            previous_store = PortalHandler.state_store
-            PortalHandler.state_store = LanPortalStateStore(
+            previous_store = PortalRuntime.state_store
+            PortalRuntime.state_store = LanPortalStateStore(
                 Path(tmp) / "lan_portal_state.sqlite3"
             )
             try:
@@ -1078,13 +1078,13 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "building_codes": ["A"],
                     "text": "【维保通告】状态：开始\n\n【标题】A楼已删除测试维保",
                 }
-                PortalHandler.state_store.replace_ongoing_items([stale_item])
-                PortalHandler.state_store.upsert_qt_active_item(
+                PortalRuntime.state_store.replace_ongoing_items([stale_item])
+                PortalRuntime.state_store.upsert_qt_active_item(
                     stale_item,
                     section="other",
                     origin="qt",
                 )
-                PortalHandler.state_store.delete_qt_active_item(
+                PortalRuntime.state_store.delete_qt_active_item(
                     active_item_id="active-stale-delete",
                     record_id="rec-stale-delete",
                 )
@@ -1094,16 +1094,16 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
                 self.assertEqual(ongoing, [])
             finally:
-                PortalHandler.state_store = previous_store
+                PortalRuntime.state_store = previous_store
 
     def test_backend_ongoing_filters_ended_item_from_stale_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
-            previous_store = PortalHandler.state_store
-            PortalHandler.state_store = LanPortalStateStore(
+            previous_store = PortalRuntime.state_store
+            PortalRuntime.state_store = LanPortalStateStore(
                 Path(tmp) / "lan_portal_state.sqlite3"
             )
             try:
-                PortalHandler.state_store.replace_ongoing_items(
+                PortalRuntime.state_store.replace_ongoing_items(
                     [
                         {
                             "active_item_id": "active-ended-change",
@@ -1134,16 +1134,16 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 self.assertEqual(len(ongoing), 1)
                 self.assertEqual(ongoing[0]["active_item_id"], "active-running-change")
             finally:
-                PortalHandler.state_store = previous_store
+                PortalRuntime.state_store = previous_store
 
     def test_qt_shell_bootstrap_removes_ended_active_item(self):
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)
-        original_state_store = PortalHandler.state_store
+        original_state_store = PortalRuntime.state_store
         temp_dir = tempfile.TemporaryDirectory()
-        PortalHandler.state_store = LanPortalStateStore(
+        PortalRuntime.state_store = LanPortalStateStore(
             Path(temp_dir.name) / "state.sqlite3"
         )
-        PortalHandler.state_store.upsert_qt_active_item(
+        PortalRuntime.state_store.upsert_qt_active_item(
             {
                 "active_item_id": "active-ended-bootstrap",
                 "record_id": "rec-ended-bootstrap",
@@ -1163,12 +1163,12 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.json()["data"]["active_items"], [])
-            self.assertEqual(PortalHandler.state_store.list_qt_active_items(), [])
-            deleted = PortalHandler.state_store.list_qt_active_items(include_deleted=True)
+            self.assertEqual(PortalRuntime.state_store.list_qt_active_items(), [])
+            deleted = PortalRuntime.state_store.list_qt_active_items(include_deleted=True)
             self.assertEqual(len(deleted), 1)
             self.assertIsNotNone(deleted[0].get("deleted_at"))
         finally:
-            PortalHandler.state_store = original_state_store
+            PortalRuntime.state_store = original_state_store
             temp_dir.cleanup()
 
     def test_parser_accepts_legacy_change_notice_marker(self):
@@ -1196,12 +1196,12 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
     def test_backend_clipboard_target_record_requires_same_notice_type(self):
         with tempfile.TemporaryDirectory() as tmp:
-            previous_store = PortalHandler.state_store
-            PortalHandler.state_store = LanPortalStateStore(
+            previous_store = PortalRuntime.state_store
+            PortalRuntime.state_store = LanPortalStateStore(
                 Path(tmp) / "lan_portal_state.sqlite3"
             )
             try:
-                PortalHandler.state_store.upsert_qt_active_item(
+                PortalRuntime.state_store.upsert_qt_active_item(
                     {
                         "active_item_id": "active-change-1",
                         "record_id": "rec-same-id",
@@ -1217,13 +1217,13 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 )
                 entry["target_record_id"] = "rec-same-id"
                 result = controller._project_clipboard_entry_to_active(entry)
-                qt_items = PortalHandler.state_store.list_qt_active_items()
+                qt_items = PortalRuntime.state_store.list_qt_active_items()
 
                 self.assertTrue(result["ignored"])
                 self.assertEqual(len(qt_items), 1)
                 self.assertEqual(qt_items[0]["payload"]["notice_type"], "设备变更")
             finally:
-                PortalHandler.state_store = previous_store
+                PortalRuntime.state_store = previous_store
 
     def test_history_payload_imports_legacy_file_to_sqlite(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1594,14 +1594,14 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 raise AssertionError(f"Qt callback should not be called: {scope}")
 
             dummy = type(
-                "_DummyPortalHandler",
+                "_DummyPortalRuntime",
                 (),
                 {"service": _TestMaintenancePortalService()},
             )()
-            with patch.object(PortalHandler, "state_store", store), patch.object(
-                PortalHandler, "ongoing_callback", unexpected_callback
+            with patch.object(PortalRuntime, "state_store", store), patch.object(
+                PortalRuntime, "ongoing_callback", unexpected_callback
             ):
-                result = PortalHandler._get_ongoing(dummy, "A")
+                result = PortalRuntime._get_ongoing(dummy, "A")
 
             self.assertEqual([item["active_item_id"] for item in result], ["active-a"])
 
@@ -1632,14 +1632,14 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             )
 
             dummy = type(
-                "_DummyPortalHandler",
+                "_DummyPortalRuntime",
                 (),
                 {"service": _TestMaintenancePortalService()},
             )()
-            with patch.object(PortalHandler, "state_store", store), patch.object(
-                PortalHandler, "ongoing_callback", None
+            with patch.object(PortalRuntime, "state_store", store), patch.object(
+                PortalRuntime, "ongoing_callback", None
             ):
-                result = PortalHandler._get_ongoing(dummy, "A")
+                result = PortalRuntime._get_ongoing(dummy, "A")
 
             self.assertEqual([item["active_item_id"] for item in result], ["active-running"])
 
@@ -1985,12 +1985,24 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
     def test_successful_actions_persist_building_work_status_for_month_query(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
+            previous_start = service._recent_month_starts()[1]
+            month_label = f"{previous_start.month}月"
+            action_day = previous_start.replace(
+                day=min(28, previous_start.day + 1),
+                hour=9,
+                minute=30,
+                second=0,
+                microsecond=0,
+            )
+            end_day = action_day.replace(hour=18, minute=30)
+            start_text = action_day.strftime("%Y-%m-%dT%H:%M")
+            end_text = end_day.strftime("%Y-%m-%dT%H:%M")
             service._records = [
                 _build_record(
                     "rec1",
                     "A楼",
                     "过滤网维护",
-                    "4月",
+                    month_label,
                     maintenance_cycle="每月",
                 )
             ]
@@ -2001,8 +2013,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "scope": "A",
                     "record_id": "rec1",
                     "specialty": "全部",
-                    "start_time": "2026-04-30T09:30",
-                    "end_time": "2026-04-30T18:30",
+                    "start_time": start_text,
+                    "end_time": end_text,
                     "location": "测试位置",
                     "content": "测试内容",
                     "reason": "测试原因",
@@ -2028,8 +2040,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "title": "EA118机房A楼过滤网维护",
                     "building": "A楼",
                     "specialty": "电气",
-                    "start_time": "2026-04-30T09:30",
-                    "end_time": "2026-04-30T18:30",
+                    "start_time": start_text,
+                    "end_time": end_text,
                     "location": "测试位置",
                     "content": "测试内容",
                     "reason": "测试原因",
@@ -2047,7 +2059,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 active_item_id="active-1",
             )
 
-            result = service.query_records(month="4月", scope="A")
+            result = service.query_records(month=month_label, scope="A")
             summary = result["records"][0]["work_summary"]
             self.assertEqual(summary["status"], "已结束")
             self.assertEqual(summary["source_record_id"], "rec1")
@@ -2239,42 +2251,59 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             root = Path(tmp)
             summary_dir = root / "lan_template_daily_summary"
             summary_dir.mkdir(parents=True)
-            (summary_dir / "2026-04-30.json").write_text(
-                """
-{
-  "date": "2026-04-30",
-  "items": [
-    {
-      "key": "source:rec1",
-      "fallback_key": "title:A楼:EA118机房A楼过滤网维护",
-      "source_record_id": "rec1",
-      "active_item_id": "active-1",
-      "feishu_record_id": "bitable-rec-1",
-      "title": "EA118机房A楼过滤网维护",
-      "building": "A楼",
-      "building_code": "A",
-      "specialty": "电气",
-      "status": "已结束",
-      "started_at": "2026-04-30 09:30",
-      "ended_at": "2026-04-30 18:30",
-      "actions": [
-        {"action": "start", "label": "开始", "time": "2026-04-30 09:30", "job_id": "job-start"},
-        {"action": "end", "label": "结束", "time": "2026-04-30 18:30", "job_id": "job-end"}
-      ]
-    }
-  ]
-}
-""".strip(),
+            service = self._new_temp_service(root)
+            previous_start = service._recent_month_starts()[1]
+            completed_day = previous_start.replace(day=min(28, previous_start.day + 1))
+            completed_date = completed_day.strftime("%Y-%m-%d")
+            started_at = f"{completed_date} 09:30"
+            ended_at = f"{completed_date} 18:30"
+            (summary_dir / f"{completed_date}.json").write_text(
+                json.dumps(
+                    {
+                        "date": completed_date,
+                        "items": [
+                            {
+                                "key": "source:rec1",
+                                "fallback_key": "title:A楼:EA118机房A楼过滤网维护",
+                                "source_record_id": "rec1",
+                                "active_item_id": "active-1",
+                                "feishu_record_id": "bitable-rec-1",
+                                "title": "EA118机房A楼过滤网维护",
+                                "building": "A楼",
+                                "building_code": "A",
+                                "specialty": "电气",
+                                "status": "已结束",
+                                "started_at": started_at,
+                                "ended_at": ended_at,
+                                "actions": [
+                                    {
+                                        "action": "start",
+                                        "label": "开始",
+                                        "time": started_at,
+                                        "job_id": "job-start",
+                                    },
+                                    {
+                                        "action": "end",
+                                        "label": "结束",
+                                        "time": ended_at,
+                                        "job_id": "job-end",
+                                    },
+                                ],
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
                 encoding="utf-8",
             )
-            service = self._new_temp_service(root)
-            service._records = [_build_record("rec1", "A楼", "过滤网维护", "4月")]
+            month_label = f"{previous_start.month}月"
+            service._records = [_build_record("rec1", "A楼", "过滤网维护", month_label)]
 
-            result = service.query_records(month="4月", scope="A")
+            result = service.query_records(month=month_label, scope="A")
             summary = result["records"][0]["work_summary"]
             self.assertEqual(summary["status"], "已结束")
-            self.assertEqual(summary["completed_date"], "2026-04-30")
-            self.assertEqual(summary["ended_at"], "2026-04-30 18:30")
+            self.assertEqual(summary["completed_date"], completed_date)
+            self.assertEqual(summary["ended_at"], ended_at)
 
     def test_maintenance_source_ongoing_is_displayed_and_updates_target(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2993,6 +3022,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         service = _TestMaintenancePortalService()
         service._load_fields = lambda: []
         service._load_change_fields = lambda: []
+        current_month = service._current_month_label()
+        current_start = service._recent_month_starts()[0]
+        change_start = current_start.replace(day=min(28, current_start.day + 1), hour=9, minute=0)
+        change_end = change_start.replace(hour=18, minute=0)
 
         def fake_load_table_records(**kwargs):
             if kwargs.get("work_type") == WORK_TYPE_CHANGE:
@@ -3002,8 +3035,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                         building="A楼",
                         progress="已结束",
                         title="A楼测试变更",
-                        start_time="2026-05-08 09:00",
-                        end_time="2026-05-08 18:00",
+                        start_time=change_start.strftime("%Y-%m-%d %H:%M"),
+                        end_time=change_end.strftime("%Y-%m-%d %H:%M"),
                     )
                 ]
             return [
@@ -3011,7 +3044,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "maint-ended",
                     "A楼",
                     "过滤网维护",
-                    "5月",
+                    current_month,
                     status="已结束",
                     maintenance_cycle="每月",
                 )
@@ -3055,9 +3088,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             def clear_target_record_cache(self):
                 self.cache_cleared = True
 
-        previous_service = PortalHandler.service
+        previous_service = PortalRuntime.service
         fake_service = _ConfirmService()
-        PortalHandler.service = fake_service
+        PortalRuntime.service = fake_service
         try:
             with patch(
                 "lan_bitable_template_portal.server.external_real_write_guard",
@@ -3066,7 +3099,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "lan_bitable_template_portal.server.update_bitable_record_fields",
                 return_value=(True, "target-change"),
             ) as update_fields:
-                result = PortalHandler.confirm_change_target_candidate(
+                result = PortalRuntime.confirm_change_target_candidate(
                     scope="A",
                     title="A楼测试变更",
                     action="update",
@@ -3082,7 +3115,257 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 {"实际结束时间": None, "变更结束时间": None},
             )
         finally:
-            PortalHandler.service = previous_service
+            PortalRuntime.service = previous_service
+
+    def test_change_update_rebinds_missing_target_record_from_unique_candidate(self):
+        class _RebindService:
+            def __init__(self):
+                self.lookup_calls = []
+
+            def lookup_notice_target_candidates(self, **kwargs):
+                self.lookup_calls.append(kwargs)
+                return {
+                    "candidates": [
+                        {
+                            "record_id": "fresh-change-target",
+                            "target_record_id": "fresh-change-target",
+                            "title": "A楼测试变更",
+                            "building_codes": ["A"],
+                            "date_matched": True,
+                        }
+                    ]
+                }
+
+        class _StateStore:
+            def __init__(self):
+                self.identity_payloads = []
+
+            def upsert_notice_identity(self, payload, *, origin=""):
+                self.identity_payloads.append((dict(payload), origin))
+                return dict(payload)
+
+        previous_service = PortalRuntime.service
+        previous_state_store = PortalRuntime.state_store
+        fake_service = _RebindService()
+        fake_state = _StateStore()
+        PortalRuntime.service = fake_service
+        PortalRuntime.state_store = fake_state
+        prepared = {
+            "job_id": "job-rebind",
+            "action": "update",
+            "work_type": "change",
+            "notice_type": "设备变更",
+            "scope": "A",
+            "title": "A楼测试变更",
+            "source_record_id": "source-change",
+            "target_record_id": "stale-change-target",
+            "active_item_id": "active-change",
+            "start_time": "2026-05-27 10:40",
+            "end_time": "2026-05-27 18:00",
+            "text": "【设备变更】状态：更新\n【名称】A楼测试变更",
+        }
+        try:
+            with patch(
+                "lan_bitable_template_portal.server.external_real_write_guard",
+                return_value={"mock_external": False, "real_write_allowed": True, "reason": ""},
+            ), patch(
+                "lan_bitable_template_portal.server.query_record_by_id",
+                side_effect=[
+                    (False, "查询记录失败：1254043-RecordidNotFound"),
+                    (True, {"fields": {"名称": "A楼测试变更"}}),
+                ],
+            ) as query_record, patch(
+                "lan_bitable_template_portal.server.update_bitable_record_by_payload",
+                return_value=(True, "更新成功"),
+            ) as update_record:
+                ok, message, record_id = PortalRuntime._execute_backend_prepared_upload(prepared)
+
+            self.assertTrue(ok)
+            self.assertEqual(message, "更新成功")
+            self.assertEqual(record_id, "fresh-change-target")
+            self.assertEqual(query_record.call_args_list[0].args[0], "stale-change-target")
+            self.assertEqual(query_record.call_args_list[1].args[0], "fresh-change-target")
+            update_record.assert_called_once()
+            self.assertEqual(update_record.call_args.args[0], "fresh-change-target")
+            self.assertEqual(fake_service.lookup_calls[0]["work_type"], "change")
+            self.assertEqual(fake_service.lookup_calls[0]["title"], "A楼测试变更")
+            self.assertTrue(fake_state.identity_payloads)
+            identity_payload, origin = fake_state.identity_payloads[0]
+            self.assertEqual(origin, "auto_rebind_target")
+            self.assertEqual(identity_payload["target_record_id"], "fresh-change-target")
+        finally:
+            PortalRuntime.service = previous_service
+            PortalRuntime.state_store = previous_state_store
+
+    def test_qt_update_missing_target_returns_selection_before_media_upload(self):
+        class _SelectionService:
+            def lookup_notice_target_candidates(self, **_kwargs):
+                self.last_kwargs = dict(_kwargs)
+                return {
+                    "candidates": [
+                        {
+                            "record_id": "fresh-change-target",
+                            "target_record_id": "fresh-change-target",
+                            "title": "A楼测试变更",
+                            "building": "A楼",
+                            "building_codes": ["A"],
+                            "status": "进行中",
+                            "start_time": "2026-05-27 10:40",
+                            "end_time": "2026-05-27 18:00",
+                            "date_matched": True,
+                            "field_items": [{"label": "名称", "value": "A楼测试变更"}],
+                        }
+                    ]
+                }
+
+        previous_service = PortalRuntime.service
+        PortalRuntime.service = _SelectionService()
+        try:
+            with patch(
+                "lan_bitable_template_portal.server.query_record_by_id",
+                return_value=(False, "查询记录失败：1254043-RecordIdNotFound"),
+            ), patch(
+                "lan_bitable_template_portal.server.upload_media_to_feishu"
+            ) as upload_media:
+                result = PortalRuntime.execute_local_notice_upload(
+                    {
+                        "action_type": "update",
+                        "data_dict": {
+                            "record_id": "stale-change-target",
+                            "target_record_id": "stale-change-target",
+                            "_record_id_kind": "target",
+                            "source_record_id": "source-change",
+                            "active_item_id": "active-change",
+                            "work_type": "change",
+                            "notice_type": "设备变更",
+                            "scope": "A",
+                            "title": "A楼测试变更",
+                            "building_codes": ["A"],
+                            "start_time": "2026-05-27 10:40",
+                            "end_time": "2026-05-27 18:00",
+                            "text": "【设备变更】状态：更新\n【名称】A楼测试变更",
+                            "content": "工程师对A楼设备进行变更",
+                        },
+                        "screenshot_bytes_b64": base64.b64encode(b"fake-image").decode("utf-8"),
+                    }
+                )
+
+            self.assertFalse(result["ok"])
+            self.assertTrue(result["needs_target_selection"])
+            self.assertTrue(result["target_record_missing"])
+            self.assertEqual(
+                result["target_candidates"][0]["target_record_id"],
+                "fresh-change-target",
+            )
+            self.assertEqual(
+                PortalRuntime.service.last_kwargs["content"],
+                "工程师对A楼设备进行变更",
+            )
+            upload_media.assert_not_called()
+        finally:
+            PortalRuntime.service = previous_service
+
+    def test_qt_update_missing_target_uses_notice_text_for_selection_lookup(self):
+        class _TextLookupService:
+            def lookup_notice_target_candidates(self, **_kwargs):
+                self.last_kwargs = dict(_kwargs)
+                return {
+                    "candidates": [
+                        {
+                            "record_id": "fresh-by-text",
+                            "target_record_id": "fresh-by-text",
+                            "title": "A楼真实目标记录",
+                            "building": "A楼",
+                            "building_codes": ["A"],
+                            "status": "进行中",
+                            "date_matched": True,
+                            "business_match_count": 1,
+                        }
+                    ]
+                }
+
+            @staticmethod
+            def _parse_notice_sections(text):
+                return MaintenancePortalService._parse_notice_sections(text)
+
+        previous_service = PortalRuntime.service
+        fake_service = _TextLookupService()
+        PortalRuntime.service = fake_service
+        notice_text = (
+            "【设备变更】状态：更新\n"
+            "【名称】A楼UPS设备变更\n"
+            "【时间】2026年5月27日10：40-18：00\n"
+            "【内容】工程师对A楼UPS设备进行变更测试\n"
+            "【原因】测试测试测试\n"
+            "【影响】无影响\n"
+            "【进度】准备更新"
+        )
+        try:
+            with patch(
+                "lan_bitable_template_portal.server.query_record_by_id",
+                return_value=(False, "查询记录失败：1254043-RecordIdNotFound"),
+            ):
+                result = PortalRuntime.execute_local_notice_upload(
+                    {
+                        "action_type": "update",
+                        "data_dict": {
+                            "record_id": "stale-change-target",
+                            "target_record_id": "stale-change-target",
+                            "_record_id_kind": "target",
+                            "work_type": "change",
+                            "notice_type": "设备变更",
+                            "scope": "A",
+                            "text": notice_text,
+                        },
+                    }
+                )
+
+            self.assertFalse(result["ok"])
+            self.assertTrue(result["needs_target_selection"])
+            self.assertEqual(result["target_candidates"][0]["target_record_id"], "fresh-by-text")
+            self.assertEqual(fake_service.last_kwargs["title"], "A楼UPS设备变更")
+            self.assertIn("2026年5月27日", fake_service.last_kwargs["start_time"])
+            self.assertEqual(
+                fake_service.last_kwargs["content"],
+                "工程师对A楼UPS设备进行变更测试",
+            )
+        finally:
+            PortalRuntime.service = previous_service
+
+    def test_change_target_lookup_can_match_by_content_when_title_differs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            service._target_records_for_notice_type = lambda *_args, **_kwargs: [
+                {
+                    "record_id": "target-by-content",
+                    "display_fields": {
+                        "名称": "A楼旧标题",
+                        "内容": "工程师对A楼UPS设备进行变更测试",
+                        "原因": "测试测试测试",
+                        "时间": "2026-05-27 10:40 至 2026-05-27 18:00",
+                        "状态": "进行中",
+                    },
+                }
+            ]
+            service._target_record_building_codes = lambda _fields, _config: []
+
+            result = service.lookup_change_target_candidates(
+                scope="A",
+                title="A楼新标题",
+                start_time="2026-05-27 10:40",
+                end_time="2026-05-27 18:00",
+                action="update",
+                content="工程师对A楼UPS设备进行变更测试",
+                reason="测试测试测试",
+            )
+
+            self.assertEqual(result["count"], 1)
+            candidate = result["candidates"][0]
+            self.assertEqual(candidate["target_record_id"], "target-by-content")
+            self.assertFalse(candidate["title_matched"])
+            self.assertTrue(candidate["business_text_matched"])
+            self.assertGreaterEqual(candidate["business_match_count"], 2)
+            self.assertTrue(candidate["date_matched"])
 
     def test_change_successful_action_persists_work_type_and_completion(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3395,24 +3678,24 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(prepared["record_id"], "rec1")
 
     def test_ongoing_callback_failure_is_exposed_as_runtime_warning(self):
-        handler = object.__new__(PortalHandler)
+        handler = object.__new__(PortalRuntime)
 
         def fail_ongoing(scope):
             raise RuntimeError(f"{scope} unavailable")
 
-        old_state_store = PortalHandler.state_store
+        old_state_store = PortalRuntime.state_store
         try:
             with tempfile.TemporaryDirectory() as tmp:
-                PortalHandler.state_store = LanPortalStateStore(
+                PortalRuntime.state_store = LanPortalStateStore(
                     Path(tmp) / "lan_portal_state.sqlite3"
                 )
-                PortalHandler.ongoing_callback = fail_ongoing
+                PortalRuntime.ongoing_callback = fail_ongoing
                 result = handler._get_ongoing("ALL")
-                payload = PortalHandler._with_runtime_warnings({"warnings": []})
+                payload = PortalRuntime._with_runtime_warnings({"warnings": []})
         finally:
-            PortalHandler.state_store = old_state_store
-            PortalHandler.ongoing_callback = None
-            PortalHandler.last_ongoing_error = ""
+            PortalRuntime.state_store = old_state_store
+            PortalRuntime.ongoing_callback = None
+            PortalRuntime.last_ongoing_error = ""
 
         self.assertEqual(result, [])
         self.assertIn("主界面进行中状态读取失败", payload["warnings"][0])
@@ -4710,31 +4993,31 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             "/",
         )
         self.assertEqual(
-            PortalHandler._safe_host_value("127.0.0.1:18766", "fallback:1"),
+            PortalRuntime._safe_host_value("127.0.0.1:18766", "fallback:1"),
             "127.0.0.1:18766",
         )
         self.assertEqual(
-            PortalHandler._safe_host_value("[::1]:18766", "fallback:1"),
+            PortalRuntime._safe_host_value("[::1]:18766", "fallback:1"),
             "[::1]:18766",
         )
         self.assertEqual(
-            PortalHandler._safe_host_value("evil.example\r\nX-Test: 1", "fallback:1"),
+            PortalRuntime._safe_host_value("evil.example\r\nX-Test: 1", "fallback:1"),
             "fallback:1",
         )
         self.assertEqual(
-            PortalHandler._safe_host_value("evil.example/path", "fallback:1"),
+            PortalRuntime._safe_host_value("evil.example/path", "fallback:1"),
             "fallback:1",
         )
         self.assertEqual(
-            PortalHandler._safe_host_value("evil.example@127.0.0.1", "fallback:1"),
+            PortalRuntime._safe_host_value("evil.example@127.0.0.1", "fallback:1"),
             "fallback:1",
         )
         self.assertEqual(
-            PortalHandler._safe_host_value("0.0.0.0:18766", "fallback:1"),
+            PortalRuntime._safe_host_value("0.0.0.0:18766", "fallback:1"),
             "fallback:1",
         )
-        self.assertEqual(PortalHandler._safe_proto_value("https, http"), "https")
-        self.assertEqual(PortalHandler._safe_proto_value("javascript"), "http")
+        self.assertEqual(PortalRuntime._safe_proto_value("https, http"), "https")
+        self.assertEqual(PortalRuntime._safe_proto_value("javascript"), "http")
 
     def test_parse_field_metas_accepts_items_list(self):
         service = _TestMaintenancePortalService()
@@ -4876,16 +5159,16 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertIsNone(counts.get("leased"))
 
     def test_source_refresh_singleflight_returns_inflight_status(self):
-        acquired = PortalHandler.source_refresh_run_lock.acquire(blocking=False)
+        acquired = PortalRuntime.source_refresh_run_lock.acquire(blocking=False)
         self.assertTrue(acquired)
         try:
             with patch.dict(os.environ, {"CLIPFLOW_BACKEND_MOCK_EXTERNAL": ""}, clear=False):
-                result = PortalHandler.refresh_sources_once(force=True)
+                result = PortalRuntime.refresh_sources_once(force=True)
             self.assertFalse(result["refreshed"])
             self.assertTrue(result["source_refresh_inflight"])
             self.assertTrue(result["source_refresh_reused"])
         finally:
-            PortalHandler.source_refresh_run_lock.release()
+            PortalRuntime.source_refresh_run_lock.release()
 
     def test_source_refresh_failure_records_failed_snapshot_manifest(self):
         class _FailingSourceRefreshService:
@@ -4900,19 +5183,19 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             def process_due_repair_link_tasks(self, *, limit):
                 return {"processed": 0}
 
-        original_store = PortalHandler.state_store
-        original_service = PortalHandler.service
+        original_store = PortalRuntime.state_store
+        original_service = PortalRuntime.service
         with tempfile.TemporaryDirectory() as tmp:
             store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
-            PortalHandler.state_store = store
-            PortalHandler.service = _FailingSourceRefreshService()
+            PortalRuntime.state_store = store
+            PortalRuntime.service = _FailingSourceRefreshService()
             try:
                 with patch.dict(os.environ, {"CLIPFLOW_BACKEND_MOCK_EXTERNAL": ""}, clear=False):
-                    result = PortalHandler.refresh_sources_once(force=True)
+                    result = PortalRuntime.refresh_sources_once(force=True)
                 stats = store.source_snapshot_stats()
             finally:
-                PortalHandler.state_store = original_store
-                PortalHandler.service = original_service
+                PortalRuntime.state_store = original_store
+                PortalRuntime.service = original_service
         self.assertFalse(result["refreshed"])
         self.assertTrue(result["warnings"])
         self.assertEqual(stats["last_failed"]["status"], "failed")
@@ -5024,13 +5307,13 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(second_job["depends_on_phase"], "accepted")
 
     def test_runtime_queue_processable_waits_for_dependent_job(self):
-        original_store = PortalHandler.state_store
-        original_service = PortalHandler.service
+        original_store = PortalRuntime.state_store
+        original_service = PortalRuntime.service
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 service = self._new_temp_service(Path(tmp))
-                PortalHandler.state_store = service._state_store
-                PortalHandler.service = service
+                PortalRuntime.state_store = service._state_store
+                PortalRuntime.service = service
                 first_job_id, should_start = service.create_action_job(
                     {
                         "action": "update",
@@ -5053,7 +5336,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 self.assertTrue(should_start)
 
                 self.assertFalse(
-                    PortalHandler._runtime_queue_job_processable("message", second_job_id)
+                    PortalRuntime._runtime_queue_job_processable("message", second_job_id)
                 )
                 self.assertEqual(
                     service.get_job(second_job_id)["depends_on_phase"], "accepted"
@@ -5061,12 +5344,12 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
                 service.mark_job(first_job_id, phase="success")
                 self.assertTrue(
-                    PortalHandler._runtime_queue_job_processable("message", second_job_id)
+                    PortalRuntime._runtime_queue_job_processable("message", second_job_id)
                 )
                 self.assertEqual(service.get_job(second_job_id)["depends_on_phase"], "")
         finally:
-            PortalHandler.state_store = original_store
-            PortalHandler.service = original_service
+            PortalRuntime.state_store = original_store
+            PortalRuntime.service = original_service
 
     def test_failed_action_jobs_are_compacted_after_persist(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -5114,13 +5397,13 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         )
 
     def test_runtime_settings_are_bounded(self):
-        original_store = PortalHandler.state_store
-        original_count = PortalHandler.message_worker_count
-        original_upload_seconds = getattr(PortalHandler, "upload_seconds_per_record", 2.0)
-        original_batch_wait = getattr(PortalHandler, "upload_batch_wait_seconds", 5.0)
-        original_batch_max = getattr(PortalHandler, "upload_batch_max_records", 5)
-        original_qt_interval = getattr(PortalHandler, "qt_action_interval_ms", 250)
-        original_source_defer = getattr(PortalHandler, "source_refresh_defer_when_busy", True)
+        original_store = PortalRuntime.state_store
+        original_count = PortalRuntime.message_worker_count
+        original_upload_seconds = getattr(PortalRuntime, "upload_seconds_per_record", 2.0)
+        original_batch_wait = getattr(PortalRuntime, "upload_batch_wait_seconds", 5.0)
+        original_batch_max = getattr(PortalRuntime, "upload_batch_max_records", 5)
+        original_qt_interval = getattr(PortalRuntime, "qt_action_interval_ms", 250)
+        original_source_defer = getattr(PortalRuntime, "source_refresh_defer_when_busy", True)
         with tempfile.TemporaryDirectory() as tmp:
             store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
             store.put_settings(
@@ -5132,17 +5415,17 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "lan_qt_action_interval_ms": 1,
                 }
             )
-            PortalHandler.state_store = store
+            PortalRuntime.state_store = store
             try:
-                limits = PortalHandler.apply_runtime_settings()
+                limits = PortalRuntime.apply_runtime_settings()
             finally:
-                PortalHandler.state_store = original_store
-                PortalHandler.message_worker_count = original_count
-                PortalHandler.upload_seconds_per_record = original_upload_seconds
-                PortalHandler.upload_batch_wait_seconds = original_batch_wait
-                PortalHandler.upload_batch_max_records = original_batch_max
-                PortalHandler.qt_action_interval_ms = original_qt_interval
-                PortalHandler.source_refresh_defer_when_busy = original_source_defer
+                PortalRuntime.state_store = original_store
+                PortalRuntime.message_worker_count = original_count
+                PortalRuntime.upload_seconds_per_record = original_upload_seconds
+                PortalRuntime.upload_batch_wait_seconds = original_batch_wait
+                PortalRuntime.upload_batch_max_records = original_batch_max
+                PortalRuntime.qt_action_interval_ms = original_qt_interval
+                PortalRuntime.source_refresh_defer_when_busy = original_source_defer
             self.assertEqual(limits["message_worker_count"], 5)
             self.assertEqual(limits["upload_seconds_per_record"], 0.5)
             self.assertEqual(limits["upload_batch_wait_seconds"], 30.0)
@@ -5150,26 +5433,26 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(limits["qt_tick_interval_ms"], 100)
 
     def test_source_refresh_defers_when_runtime_busy(self):
-        original_store = PortalHandler.state_store
-        original_service = PortalHandler.service
-        original_defer = getattr(PortalHandler, "source_refresh_defer_when_busy", True)
+        original_store = PortalRuntime.state_store
+        original_service = PortalRuntime.service
+        original_defer = getattr(PortalRuntime, "source_refresh_defer_when_busy", True)
         with tempfile.TemporaryDirectory() as tmp:
             store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
             service = _NativeFastAPIRouteService()
-            PortalHandler.state_store = store
-            PortalHandler.service = service
-            PortalHandler.source_refresh_defer_when_busy = True
+            PortalRuntime.state_store = store
+            PortalRuntime.service = service
+            PortalRuntime.source_refresh_defer_when_busy = True
             try:
                 store.upsert_runtime_queue_item("qt_action", "job-busy")
                 with patch.dict(os.environ, {"CLIPFLOW_BACKEND_MOCK_EXTERNAL": ""}, clear=False):
-                    result = PortalHandler.refresh_sources_once(
+                    result = PortalRuntime.refresh_sources_once(
                         force=True,
                         defer_if_busy=True,
                     )
             finally:
-                PortalHandler.state_store = original_store
-                PortalHandler.service = original_service
-                PortalHandler.source_refresh_defer_when_busy = original_defer
+                PortalRuntime.state_store = original_store
+                PortalRuntime.service = original_service
+                PortalRuntime.source_refresh_defer_when_busy = original_defer
         self.assertFalse(result["refreshed"])
         self.assertTrue(result["source_refresh_deferred"])
 
@@ -5188,42 +5471,42 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 self.release.wait(timeout=5)
                 return {"repair_count": 3, "repair_refreshed_at": "17:01"}
 
-        original_service = PortalHandler.service
+        original_service = PortalRuntime.service
         service = _SlowRepairRefreshService()
-        with PortalHandler.repair_refresh_lock:
-            PortalHandler.repair_refresh_inflight = False
-            PortalHandler.repair_refresh_event = threading.Event()
-            PortalHandler.repair_refresh_last_result = {}
-            PortalHandler.repair_refresh_last_error = ""
-            PortalHandler.repair_refresh_last_finished = 0.0
-        PortalHandler.service = service
+        with PortalRuntime.repair_refresh_lock:
+            PortalRuntime.repair_refresh_inflight = False
+            PortalRuntime.repair_refresh_event = threading.Event()
+            PortalRuntime.repair_refresh_last_result = {}
+            PortalRuntime.repair_refresh_last_error = ""
+            PortalRuntime.repair_refresh_last_finished = 0.0
+        PortalRuntime.service = service
         try:
-            first = PortalHandler.request_repair_source_refresh()
+            first = PortalRuntime.request_repair_source_refresh()
             self.assertTrue(first["repair_refresh_started"])
             self.assertTrue(service.entered.wait(timeout=2))
-            second = PortalHandler.request_repair_source_refresh()
+            second = PortalRuntime.request_repair_source_refresh()
             self.assertFalse(second["repair_refresh_started"])
             self.assertTrue(second["repair_refresh_inflight"])
             service.release.set()
             deadline = time.monotonic() + 2
             while time.monotonic() < deadline:
-                with PortalHandler.repair_refresh_lock:
-                    if not PortalHandler.repair_refresh_inflight:
+                with PortalRuntime.repair_refresh_lock:
+                    if not PortalRuntime.repair_refresh_inflight:
                         break
                 time.sleep(0.02)
-            with PortalHandler.repair_refresh_lock:
-                self.assertFalse(PortalHandler.repair_refresh_inflight)
-                self.assertEqual(PortalHandler.repair_refresh_last_result["repair_count"], 3)
+            with PortalRuntime.repair_refresh_lock:
+                self.assertFalse(PortalRuntime.repair_refresh_inflight)
+                self.assertEqual(PortalRuntime.repair_refresh_last_result["repair_count"], 3)
             self.assertEqual(service.calls, 1)
         finally:
             service.release.set()
-            PortalHandler.service = original_service
-            with PortalHandler.repair_refresh_lock:
-                PortalHandler.repair_refresh_inflight = False
-                PortalHandler.repair_refresh_event = threading.Event()
-                PortalHandler.repair_refresh_last_result = {}
-                PortalHandler.repair_refresh_last_error = ""
-                PortalHandler.repair_refresh_last_finished = 0.0
+            PortalRuntime.service = original_service
+            with PortalRuntime.repair_refresh_lock:
+                PortalRuntime.repair_refresh_inflight = False
+                PortalRuntime.repair_refresh_event = threading.Event()
+                PortalRuntime.repair_refresh_last_result = {}
+                PortalRuntime.repair_refresh_last_error = ""
+                PortalRuntime.repair_refresh_last_finished = 0.0
 
     def test_change_source_refresh_request_is_blocking_singleflight(self):
         class _SlowChangeRefreshService:
@@ -5244,21 +5527,21 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "change_refreshed_at": "17:02",
                 }
 
-        original_service = PortalHandler.service
+        original_service = PortalRuntime.service
         service = _SlowChangeRefreshService()
-        with PortalHandler.change_refresh_lock:
-            PortalHandler.change_refresh_inflight = False
-            PortalHandler.change_refresh_event = threading.Event()
-            PortalHandler.change_refresh_last_result = {}
-            PortalHandler.change_refresh_last_error = ""
-            PortalHandler.change_refresh_last_finished = 0.0
-        PortalHandler.service = service
+        with PortalRuntime.change_refresh_lock:
+            PortalRuntime.change_refresh_inflight = False
+            PortalRuntime.change_refresh_event = threading.Event()
+            PortalRuntime.change_refresh_last_result = {}
+            PortalRuntime.change_refresh_last_error = ""
+            PortalRuntime.change_refresh_last_finished = 0.0
+        PortalRuntime.service = service
         results = []
         errors = []
 
         def _call_refresh():
             try:
-                results.append(PortalHandler.request_change_source_refresh())
+                results.append(PortalRuntime.request_change_source_refresh())
             except Exception as exc:
                 errors.append(str(exc))
 
@@ -5269,8 +5552,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             second_thread = threading.Thread(target=_call_refresh, daemon=True)
             second_thread.start()
             time.sleep(0.05)
-            with PortalHandler.change_refresh_lock:
-                self.assertTrue(PortalHandler.change_refresh_inflight)
+            with PortalRuntime.change_refresh_lock:
+                self.assertTrue(PortalRuntime.change_refresh_inflight)
             service.release.set()
             first_thread.join(timeout=2)
             second_thread.join(timeout=2)
@@ -5282,13 +5565,13 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(results[0]["change_count"], 4)
         finally:
             service.release.set()
-            PortalHandler.service = original_service
-            with PortalHandler.change_refresh_lock:
-                PortalHandler.change_refresh_inflight = False
-                PortalHandler.change_refresh_event = threading.Event()
-                PortalHandler.change_refresh_last_result = {}
-                PortalHandler.change_refresh_last_error = ""
-                PortalHandler.change_refresh_last_finished = 0.0
+            PortalRuntime.service = original_service
+            with PortalRuntime.change_refresh_lock:
+                PortalRuntime.change_refresh_inflight = False
+                PortalRuntime.change_refresh_event = threading.Event()
+                PortalRuntime.change_refresh_last_result = {}
+                PortalRuntime.change_refresh_last_error = ""
+                PortalRuntime.change_refresh_last_finished = 0.0
 
     def test_refresh_change_source_preserves_other_snapshot_records(self):
         class _ChangeRefreshService(MaintenancePortalService):
@@ -5423,41 +5706,41 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 self.link_calls += 1
                 return {"processed": 0}
 
-        original_service = PortalHandler.service
+        original_service = PortalRuntime.service
         service = _SlowSourceRefreshService()
-        with PortalHandler.source_refresh_lock:
-            PortalHandler.source_refresh_inflight = False
-            PortalHandler.source_refresh_last_result = {}
-            PortalHandler.source_refresh_last_finished = 0.0
-        PortalHandler.service = service
+        with PortalRuntime.source_refresh_lock:
+            PortalRuntime.source_refresh_inflight = False
+            PortalRuntime.source_refresh_last_result = {}
+            PortalRuntime.source_refresh_last_finished = 0.0
+        PortalRuntime.service = service
         try:
-            first = PortalHandler.request_source_refresh(force=True)
+            first = PortalRuntime.request_source_refresh(force=True)
             self.assertTrue(first["source_refresh_started"])
             self.assertTrue(service.entered.wait(timeout=2))
-            second = PortalHandler.request_source_refresh(force=True)
+            second = PortalRuntime.request_source_refresh(force=True)
             self.assertFalse(second["source_refresh_started"])
             self.assertTrue(second["source_refresh_inflight"])
             service.release.set()
             deadline = time.monotonic() + 2
             while time.monotonic() < deadline:
-                with PortalHandler.source_refresh_lock:
-                    inflight = PortalHandler.source_refresh_inflight
-                if not inflight and not PortalHandler.source_refresh_run_lock.locked():
+                with PortalRuntime.source_refresh_lock:
+                    inflight = PortalRuntime.source_refresh_inflight
+                if not inflight and not PortalRuntime.source_refresh_run_lock.locked():
                     break
                 time.sleep(0.02)
-            with PortalHandler.source_refresh_lock:
-                self.assertFalse(PortalHandler.source_refresh_inflight)
-                self.assertTrue(PortalHandler.source_refresh_last_result["refreshed"])
-            self.assertFalse(PortalHandler.source_refresh_run_lock.locked())
+            with PortalRuntime.source_refresh_lock:
+                self.assertFalse(PortalRuntime.source_refresh_inflight)
+                self.assertTrue(PortalRuntime.source_refresh_last_result["refreshed"])
+            self.assertFalse(PortalRuntime.source_refresh_run_lock.locked())
             self.assertEqual(service.calls, 1)
             self.assertEqual(service.link_calls, 1)
         finally:
             service.release.set()
-            PortalHandler.service = original_service
-            with PortalHandler.source_refresh_lock:
-                PortalHandler.source_refresh_inflight = False
-                PortalHandler.source_refresh_last_result = {}
-                PortalHandler.source_refresh_last_finished = 0.0
+            PortalRuntime.service = original_service
+            with PortalRuntime.source_refresh_lock:
+                PortalRuntime.source_refresh_inflight = False
+                PortalRuntime.source_refresh_last_result = {}
+                PortalRuntime.source_refresh_last_finished = 0.0
 
     def test_fastapi_qt_local_endpoints_work_without_auth(self):
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)
@@ -5486,9 +5769,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(heartbeat.status_code, 200)
         self.assertEqual(client.get("/api/backend/stats").status_code, 401)
         session_id = "local-admin-stats-session"
-        original_sessions = dict(PortalHandler.auth_manager._sessions)
-        with PortalHandler.auth_manager._lock:
-            PortalHandler.auth_manager._sessions[session_id] = {
+        original_sessions = dict(PortalRuntime.auth_manager._sessions)
+        with PortalRuntime.auth_manager._lock:
+            PortalRuntime.auth_manager._sessions[session_id] = {
                 "session_id": session_id,
                 "user": {"name": "admin", "open_id": ""},
                 "role": "admin",
@@ -5500,8 +5783,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "/api/backend/stats",
                 headers={"Cookie": f"{AUTH_COOKIE_NAME}={session_id}"},
             )
-            with PortalHandler.auth_manager._lock:
-                PortalHandler.auth_manager._sessions["local-user-stats-session"] = {
+            with PortalRuntime.auth_manager._lock:
+                PortalRuntime.auth_manager._sessions["local-user-stats-session"] = {
                     "session_id": "local-user-stats-session",
                     "user": {"name": "building", "open_id": ""},
                     "role": "building",
@@ -5517,8 +5800,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 headers={"Cookie": f"{AUTH_COOKIE_NAME}=local-user-stats-session"},
             )
         finally:
-            with PortalHandler.auth_manager._lock:
-                PortalHandler.auth_manager._sessions = original_sessions
+            with PortalRuntime.auth_manager._lock:
+                PortalRuntime.auth_manager._sessions = original_sessions
         self.assertEqual(stats.status_code, 200)
         self.assertEqual(non_admin_stats.status_code, 403)
         self.assertEqual(non_admin_stream.status_code, 200)
@@ -5534,16 +5817,16 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
     def test_fastapi_recent_jobs_returns_compact_admin_summary(self):
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)
-        original_service = PortalHandler.service
-        original_state_store = PortalHandler.state_store
-        original_auth_state_store = PortalHandler.auth_manager._state_store
-        original_sessions = dict(PortalHandler.auth_manager._sessions)
+        original_service = PortalRuntime.service
+        original_state_store = PortalRuntime.state_store
+        original_auth_state_store = PortalRuntime.auth_manager._state_store
+        original_sessions = dict(PortalRuntime.auth_manager._sessions)
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
-            PortalHandler.service = service
-            PortalHandler.state_store = service._state_store
-            PortalHandler.auth_manager._state_store = service._state_store
-            PortalHandler.auth_manager.upsert_permission_user(
+            PortalRuntime.service = service
+            PortalRuntime.state_store = service._state_store
+            PortalRuntime.auth_manager._state_store = service._state_store
+            PortalRuntime.auth_manager.upsert_permission_user(
                 open_id="ou_admin",
                 name="admin",
                 role="admin",
@@ -5569,8 +5852,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 error="网络连接失败",
             )
             session_id = "recent-jobs-session"
-            with PortalHandler.auth_manager._lock:
-                PortalHandler.auth_manager._sessions[session_id] = {
+            with PortalRuntime.auth_manager._lock:
+                PortalRuntime.auth_manager._sessions[session_id] = {
                     "session_id": session_id,
                     "user": {"name": "admin", "open_id": "ou_admin"},
                     "role": "building",
@@ -5601,7 +5884,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     job_id,
                 )
                 with patch.object(
-                    PortalHandler,
+                    PortalRuntime,
                     "enqueue_initial_message_or_upload_job",
                     return_value=None,
                 ) as enqueue_job:
@@ -5622,18 +5905,18 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 self.assertEqual(cleared.status_code, 200)
                 self.assertIsNone(service.get_job(job_id))
             finally:
-                PortalHandler.service = original_service
-                PortalHandler.state_store = original_state_store
-                PortalHandler.auth_manager._state_store = original_auth_state_store
-                with PortalHandler.auth_manager._lock:
-                    PortalHandler.auth_manager._sessions = original_sessions
+                PortalRuntime.service = original_service
+                PortalRuntime.state_store = original_state_store
+                PortalRuntime.auth_manager._state_store = original_auth_state_store
+                with PortalRuntime.auth_manager._lock:
+                    PortalRuntime.auth_manager._sessions = original_sessions
 
     def test_fastapi_backend_admin_tools_are_native_and_safe(self):
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)
-        original_service = PortalHandler.service
-        original_state_store = PortalHandler.state_store
-        original_auth_state_store = PortalHandler.auth_manager._state_store
-        original_sessions = dict(PortalHandler.auth_manager._sessions)
+        original_service = PortalRuntime.service
+        original_state_store = PortalRuntime.state_store
+        original_auth_state_store = PortalRuntime.auth_manager._state_store
+        original_sessions = dict(PortalRuntime.auth_manager._sessions)
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
 
@@ -5704,10 +5987,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 return metas, {meta.field_name: meta for meta in metas}
 
             service._load_table_fields = fake_load_table_fields
-            PortalHandler.service = service
-            PortalHandler.state_store = service._state_store
-            PortalHandler.auth_manager._state_store = service._state_store
-            PortalHandler.auth_manager.upsert_permission_user(
+            PortalRuntime.service = service
+            PortalRuntime.state_store = service._state_store
+            PortalRuntime.auth_manager._state_store = service._state_store
+            PortalRuntime.auth_manager.upsert_permission_user(
                 open_id="ou_admin",
                 name="admin",
                 role="admin",
@@ -5716,8 +5999,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 updated_by="test",
             )
             session_id = "backend-tools-session"
-            with PortalHandler.auth_manager._lock:
-                PortalHandler.auth_manager._sessions[session_id] = {
+            with PortalRuntime.auth_manager._lock:
+                PortalRuntime.auth_manager._sessions[session_id] = {
                     "session_id": session_id,
                     "user": {"name": "admin", "open_id": "ou_admin"},
                     "role": "building",
@@ -5759,23 +6042,23 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 self.assertEqual(pressure.status_code, 200)
                 self.assertEqual(pressure.json()["data"]["accepted"], 1)
             finally:
-                PortalHandler.service = original_service
-                PortalHandler.state_store = original_state_store
-                PortalHandler.auth_manager._state_store = original_auth_state_store
-                with PortalHandler.auth_manager._lock:
-                    PortalHandler.auth_manager._sessions = original_sessions
+                PortalRuntime.service = original_service
+                PortalRuntime.state_store = original_state_store
+                PortalRuntime.auth_manager._state_store = original_auth_state_store
+                with PortalRuntime.auth_manager._lock:
+                    PortalRuntime.auth_manager._sessions = original_sessions
 
     def test_compacted_failed_job_remains_visible_to_owner_only(self):
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)
-        original_service = PortalHandler.service
-        original_state_store = PortalHandler.state_store
-        original_auth_state_store = PortalHandler.auth_manager._state_store
-        original_sessions = dict(PortalHandler.auth_manager._sessions)
+        original_service = PortalRuntime.service
+        original_state_store = PortalRuntime.state_store
+        original_auth_state_store = PortalRuntime.auth_manager._state_store
+        original_sessions = dict(PortalRuntime.auth_manager._sessions)
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
-            PortalHandler.service = service
-            PortalHandler.state_store = service._state_store
-            PortalHandler.auth_manager._state_store = service._state_store
+            PortalRuntime.service = service
+            PortalRuntime.state_store = service._state_store
+            PortalRuntime.auth_manager._state_store = service._state_store
             job_id, should_start = service.create_action_job(
                 {
                     "action": "start",
@@ -5794,15 +6077,15 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 prepared={"text": "y" * 5000},
                 error="网络连接失败",
             )
-            with PortalHandler.auth_manager._lock:
-                PortalHandler.auth_manager._sessions["owner-session"] = {
+            with PortalRuntime.auth_manager._lock:
+                PortalRuntime.auth_manager._sessions["owner-session"] = {
                     "session_id": "owner-session",
                     "user": {"name": "owner", "open_id": "ou_owner"},
                     "role": "building",
                     "allowed_scopes": ["A"],
                     "expires_at": time.time() + 3600,
                 }
-                PortalHandler.auth_manager._sessions["other-session"] = {
+                PortalRuntime.auth_manager._sessions["other-session"] = {
                     "session_id": "other-session",
                     "user": {"name": "other", "open_id": "ou_other"},
                     "role": "building",
@@ -5828,11 +6111,11 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 self.assertEqual(owner.json()["data"].get("prepared"), {})
                 self.assertEqual(other.status_code, 403)
             finally:
-                PortalHandler.service = original_service
-                PortalHandler.state_store = original_state_store
-                PortalHandler.auth_manager._state_store = original_auth_state_store
-                with PortalHandler.auth_manager._lock:
-                    PortalHandler.auth_manager._sessions = original_sessions
+                PortalRuntime.service = original_service
+                PortalRuntime.state_store = original_state_store
+                PortalRuntime.auth_manager._state_store = original_auth_state_store
+                with PortalRuntime.auth_manager._lock:
+                    PortalRuntime.auth_manager._sessions = original_sessions
 
     def test_external_write_guard_mock_and_confirm_modes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -6089,14 +6372,14 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
     def test_fastapi_qt_event_ack_fails_job_after_retries(self):
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)
-        original_service = PortalHandler.service
+        original_service = PortalRuntime.service
         original_controller_state_store = controller._state_store
-        original_portal_state_store = PortalHandler.state_store
+        original_portal_state_store = PortalRuntime.state_store
         temp_dir = tempfile.TemporaryDirectory()
         store = LanPortalStateStore(Path(temp_dir.name) / "state.sqlite3")
         controller._state_store = store
-        PortalHandler.state_store = store
-        PortalHandler.service = _NativeFastAPIRouteService()
+        PortalRuntime.state_store = store
+        PortalRuntime.service = _NativeFastAPIRouteService()
         client = TestClient(controller._build_app())
         try:
             event_id = store.enqueue_outbox_event(
@@ -6112,17 +6395,17 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 self.assertEqual(response.json()["data"]["attempts"], attempt)
             self.assertEqual(response.json()["data"]["status"], "failed")
             self.assertEqual(
-                PortalHandler.service.last_marked_job_patch["phase"],
+                PortalRuntime.service.last_marked_job_patch["phase"],
                 "failed",
             )
             self.assertIn(
                 "Qt callback down",
-                PortalHandler.service.last_marked_job_patch["error"],
+                PortalRuntime.service.last_marked_job_patch["error"],
             )
         finally:
-            PortalHandler.service = original_service
+            PortalRuntime.service = original_service
             controller._state_store = original_controller_state_store
-            PortalHandler.state_store = original_portal_state_store
+            PortalRuntime.state_store = original_portal_state_store
             temp_dir.cleanup()
 
     def test_fastapi_auth_redirect_routes_are_native(self):
@@ -6130,7 +6413,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         client = TestClient(controller._build_app())
         with patch.object(controller, "_proxy_request", side_effect=AssertionError("proxy used")):
             with patch.object(
-                PortalHandler.auth_manager,
+                PortalRuntime.auth_manager,
                 "start_login",
                 return_value="https://login.example.test/oauth",
             ) as start_login:
@@ -6140,7 +6423,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(start_login.call_args.kwargs["next_path"], "/x")
 
             with patch.object(
-                PortalHandler.auth_manager,
+                PortalRuntime.auth_manager,
                 "complete_login",
                 return_value=("session123", "/after"),
             ) as complete_login:
@@ -6154,7 +6437,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(complete_login.call_args.kwargs["code"], "c")
 
             with patch.object(
-                PortalHandler.auth_manager,
+                PortalRuntime.auth_manager,
                 "complete_login",
                 return_value=("session456", "/root-after"),
             ):
@@ -6167,17 +6450,17 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
     def test_fastapi_native_read_routes_do_not_use_legacy_proxy(self):
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)
-        original_service = PortalHandler.service
-        original_state_store = PortalHandler.state_store
-        original_sessions = dict(PortalHandler.auth_manager._sessions)
-        PortalHandler.service = _NativeFastAPIRouteService()
+        original_service = PortalRuntime.service
+        original_state_store = PortalRuntime.state_store
+        original_sessions = dict(PortalRuntime.auth_manager._sessions)
+        PortalRuntime.service = _NativeFastAPIRouteService()
         temp_dir = tempfile.TemporaryDirectory()
-        PortalHandler.state_store = LanPortalStateStore(
+        PortalRuntime.state_store = LanPortalStateStore(
             Path(temp_dir.name) / "state.sqlite3"
         )
         session_id = "native-route-session"
-        with PortalHandler.auth_manager._lock:
-            PortalHandler.auth_manager._sessions[session_id] = {
+        with PortalRuntime.auth_manager._lock:
+            PortalRuntime.auth_manager._sessions[session_id] = {
                 "session_id": session_id,
                 "user": {"name": "测试用户", "open_id": ""},
                 "role": "admin",
@@ -6220,7 +6503,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     headers=headers,
                     json={"scope": "ALL", "work_type": "change", "action": "start"},
                 )
-                PortalHandler.state_store.put_backend_runtime(
+                PortalRuntime.state_store.put_backend_runtime(
                     "qt_bridge",
                     {
                         "heartbeat_at": time.time(),
@@ -6288,7 +6571,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertTrue(action.json().get("ok"))
             self.assertEqual(action.json()["data"]["job_id"], "job-native")
             self.assertEqual(
-                PortalHandler.service.last_action_payload["_auth_user_name"],
+                PortalRuntime.service.last_action_payload["_auth_user_name"],
                 "测试用户",
             )
             self.assertEqual(delete.status_code, 200)
@@ -6346,7 +6629,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertTrue(repair_refresh.json()["data"]["repair_source_refreshed"])
 
             notices = []
-            PortalHandler.notice_callback = lambda payload: notices.append(payload)
+            PortalRuntime.notice_callback = lambda payload: notices.append(payload)
             try:
                 with patch.object(controller, "_proxy_request", side_effect=AssertionError("proxy used")):
                     sent = client.post(
@@ -6358,31 +6641,31 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                         },
                     )
             finally:
-                PortalHandler.notice_callback = None
+                PortalRuntime.notice_callback = None
             self.assertEqual(sent.status_code, 200)
             self.assertTrue(sent.json().get("ok"))
             self.assertEqual(sent.json()["data"]["items"][0]["record_id"], "m1")
             self.assertEqual(len(notices), 1)
         finally:
-            PortalHandler.service = original_service
-            PortalHandler.state_store = original_state_store
+            PortalRuntime.service = original_service
+            PortalRuntime.state_store = original_state_store
             temp_dir.cleanup()
-            with PortalHandler.auth_manager._lock:
-                PortalHandler.auth_manager._sessions = original_sessions
+            with PortalRuntime.auth_manager._lock:
+                PortalRuntime.auth_manager._sessions = original_sessions
 
     def test_fastapi_ongoing_delete_runs_backend_delete_before_qt_projection(self):
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)
-        original_service = PortalHandler.service
-        original_state_store = PortalHandler.state_store
-        original_auth_state_store = PortalHandler.auth_manager._state_store
-        original_sessions = dict(PortalHandler.auth_manager._sessions)
-        PortalHandler.service = _NativeFastAPIRouteService()
+        original_service = PortalRuntime.service
+        original_state_store = PortalRuntime.state_store
+        original_auth_state_store = PortalRuntime.auth_manager._state_store
+        original_sessions = dict(PortalRuntime.auth_manager._sessions)
+        PortalRuntime.service = _NativeFastAPIRouteService()
         temp_dir = tempfile.TemporaryDirectory()
-        PortalHandler.state_store = LanPortalStateStore(
+        PortalRuntime.state_store = LanPortalStateStore(
             Path(temp_dir.name) / "state.sqlite3"
         )
-        PortalHandler.auth_manager._state_store = PortalHandler.state_store
-        PortalHandler.auth_manager.upsert_permission_user(
+        PortalRuntime.auth_manager._state_store = PortalRuntime.state_store
+        PortalRuntime.auth_manager.upsert_permission_user(
             open_id="ou_delete",
             name="测试用户",
             role="admin",
@@ -6391,8 +6674,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             updated_by="test",
         )
         session_id = "delete-route-session"
-        with PortalHandler.auth_manager._lock:
-            PortalHandler.auth_manager._sessions[session_id] = {
+        with PortalRuntime.auth_manager._lock:
+            PortalRuntime.auth_manager._sessions[session_id] = {
                 "session_id": session_id,
                 "user": {"name": "测试用户", "open_id": "ou_delete"},
                 "role": "admin",
@@ -6434,23 +6717,23 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "active-del",
             )
         finally:
-            PortalHandler.service = original_service
-            PortalHandler.state_store = original_state_store
-            PortalHandler.auth_manager._state_store = original_auth_state_store
+            PortalRuntime.service = original_service
+            PortalRuntime.state_store = original_state_store
+            PortalRuntime.auth_manager._state_store = original_auth_state_store
             temp_dir.cleanup()
-            with PortalHandler.auth_manager._lock:
-                PortalHandler.auth_manager._sessions = original_sessions
+            with PortalRuntime.auth_manager._lock:
+                PortalRuntime.auth_manager._sessions = original_sessions
 
     def test_fastapi_qt_command_delete_clears_active_item_and_read_cache(self):
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)
-        original_service = PortalHandler.service
-        original_state_store = PortalHandler.state_store
-        PortalHandler.service = _NativeFastAPIRouteService()
+        original_service = PortalRuntime.service
+        original_state_store = PortalRuntime.state_store
+        PortalRuntime.service = _NativeFastAPIRouteService()
         temp_dir = tempfile.TemporaryDirectory()
-        PortalHandler.state_store = LanPortalStateStore(
+        PortalRuntime.state_store = LanPortalStateStore(
             Path(temp_dir.name) / "state.sqlite3"
         )
-        PortalHandler.state_store.upsert_qt_active_item(
+        PortalRuntime.state_store.upsert_qt_active_item(
             {
                 "active_item_id": "active-qt-delete",
                 "record_id": "rec-qt-delete",
@@ -6489,29 +6772,29 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertTrue(response.json().get("ok"))
             delete_record.assert_called_once_with("rec-qt-delete", "维保通告")
-            self.assertEqual(PortalHandler.state_store.list_qt_active_items(), [])
+            self.assertEqual(PortalRuntime.state_store.list_qt_active_items(), [])
             self.assertEqual(controller._read_cache_stats()["entries"], 0)
-            leased = PortalHandler.state_store.lease_outbox_events(
+            leased = PortalRuntime.state_store.lease_outbox_events(
                 "qt_action", limit=1, lease_seconds=5
             )
             self.assertEqual(leased[0]["payload"]["kind"], "active_delete")
         finally:
-            PortalHandler.service = original_service
-            PortalHandler.state_store = original_state_store
+            PortalRuntime.service = original_service
+            PortalRuntime.state_store = original_state_store
             temp_dir.cleanup()
 
     def test_fastapi_permission_request_routes_are_native(self):
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)
-        original_state_store = PortalHandler.auth_manager._state_store
-        original_sessions = dict(PortalHandler.auth_manager._sessions)
+        original_state_store = PortalRuntime.auth_manager._state_store
+        original_sessions = dict(PortalRuntime.auth_manager._sessions)
         code_holder: dict[str, str] = {}
         with tempfile.TemporaryDirectory() as tmp:
-            PortalHandler.auth_manager._state_store = LanPortalStateStore(
+            PortalRuntime.auth_manager._state_store = LanPortalStateStore(
                 Path(tmp) / "state.sqlite3"
             )
             session_id = "permission-route-session"
-            with PortalHandler.auth_manager._lock:
-                PortalHandler.auth_manager._sessions[session_id] = {
+            with PortalRuntime.auth_manager._lock:
+                PortalRuntime.auth_manager._sessions[session_id] = {
                     "session_id": session_id,
                     "user": {"name": "申请人", "open_id": "ou_requester"},
                     "role": "building",
@@ -6569,9 +6852,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 self.assertTrue(confirmed.json()["data"]["approved"])
                 self.assertIn("A", confirmed.json()["data"]["auth"]["allowed_scopes"])
             finally:
-                PortalHandler.auth_manager._state_store = original_state_store
-                with PortalHandler.auth_manager._lock:
-                    PortalHandler.auth_manager._sessions = original_sessions
+                PortalRuntime.auth_manager._state_store = original_state_store
+                with PortalRuntime.auth_manager._lock:
+                    PortalRuntime.auth_manager._sessions = original_sessions
 
     def test_backend_process_controller_prefers_portable_python(self):
         with tempfile.TemporaryDirectory() as tmp:

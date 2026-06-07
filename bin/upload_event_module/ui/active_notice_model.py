@@ -7,6 +7,10 @@ from typing import Any
 
 from PyQt6.QtCore import QAbstractListModel, QModelIndex, QSize, Qt, pyqtSignal
 
+from lan_bitable_template_portal.identity_utils import (
+    canonical_source_record_id,
+    canonical_target_record_id,
+)
 from ..core.parser import extract_event_info
 from .display_state import build_notice_display_snapshot
 
@@ -43,10 +47,13 @@ class ActiveNoticeModel(QAbstractListModel):
     def identity_for_record(record: dict[str, Any] | None) -> str:
         if not isinstance(record, dict):
             return ""
-        for key in ("active_item_id", "record_id"):
+        for key in ("active_item_id", "target_record_id", "source_record_id"):
             value = str(record.get(key) or "").strip()
             if value:
                 return f"{key}:{value}"
+        target_id = canonical_target_record_id(record)
+        if target_id:
+            return f"target_record_id:{target_id}"
         seed = "|".join(
             str(record.get(key) or "").strip()
             for key in ("notice_type", "match_key", "match_title", "text")
@@ -109,9 +116,7 @@ class ActiveNoticeModel(QAbstractListModel):
         if not isinstance(record, dict):
             return False
         notice_type = str(record.get("notice_type") or "").strip()
-        record_id = str(
-            record.get("target_record_id") or record.get("record_id") or ""
-        ).strip()
+        record_id = canonical_target_record_id(record)
         return (
             notice_type in ("设备变更", "变更通告")
             and bool(record_id)
@@ -164,7 +169,7 @@ class ActiveNoticeModel(QAbstractListModel):
         if role == self.ActiveItemIdRole:
             return str(record.get("active_item_id") or "")
         if role == self.RecordIdRole:
-            return str(record.get("record_id") or "")
+            return canonical_target_record_id(record) or str(record.get("record_id") or "")
         if role == self.NoticeTypeRole:
             return str(record.get("notice_type") or "")
         if role == self.OriginRole:
@@ -220,7 +225,21 @@ class ActiveNoticeModel(QAbstractListModel):
         if not record_id:
             return -1
         for row, record in enumerate(self._records):
-            if str(record.get("record_id") or "").strip() == record_id:
+            target_id = canonical_target_record_id(record)
+            if target_id:
+                matched = target_id == record_id
+            else:
+                matched = str(record.get("record_id") or "").strip() == record_id
+            if matched:
+                return row
+        return -1
+
+    def row_for_source_record_id(self, source_record_id: str) -> int:
+        source_record_id = str(source_record_id or "").strip()
+        if not source_record_id:
+            return -1
+        for row, record in enumerate(self._records):
+            if canonical_source_record_id(record) == source_record_id:
                 return row
         return -1
 
@@ -235,6 +254,10 @@ class ActiveNoticeModel(QAbstractListModel):
 
     def record_by_record_id(self, record_id: str) -> dict[str, Any] | None:
         row = self.row_for_record_id(record_id)
+        return self.record_at(row) if row >= 0 else None
+
+    def record_by_source_record_id(self, source_record_id: str) -> dict[str, Any] | None:
+        row = self.row_for_source_record_id(source_record_id)
         return self.record_at(row) if row >= 0 else None
 
     def record_by_active_item_id(self, active_item_id: str) -> dict[str, Any] | None:
@@ -315,7 +338,7 @@ class ActiveNoticeListRoute:
     The production path renders active notices with QListView + model/delegate.
     Older helpers still pass around a "list" identity to decide whether a notice
     belongs to the event or non-event tab. This route keeps that identity without
-    allocating a hidden QListWidget in the hot path.
+    allocating a hidden item container in the hot path.
     """
 
     def __init__(self, name: str):
@@ -334,24 +357,6 @@ class ActiveNoticeListRoute:
         if isinstance(item, ActiveNoticeModelItem) and item.listWidget() is self:
             return item.row()
         return -1
-
-    def itemWidget(self, _item):  # noqa: N802
-        return None
-
-    def removeItemWidget(self, _item):  # noqa: N802
-        return None
-
-    def setItemWidget(self, _item, _widget):  # noqa: N802
-        return None
-
-    def takeItem(self, _row: int):  # noqa: N802
-        return None
-
-    def insertItem(self, _row: int, _item):  # noqa: N802
-        return None
-
-    def addItem(self, _item):  # noqa: N802
-        return None
 
     def __repr__(self) -> str:
         return f"<ActiveNoticeListRoute {self.name or '-'}>"

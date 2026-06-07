@@ -528,11 +528,19 @@
                     <span class="job-line" :class="jobClass(ongoingLineKey(item))">
                       {{ jobText(ongoingLineKey(item)) }}
                     </span>
-                    <button class="btn blue" :disabled="isLineBusy(ongoingLineKey(item))" @click="sendOngoing(item, 'update')">更新</button>
-                    <button class="btn green" :disabled="isLineBusy(ongoingLineKey(item))" @click="sendOngoing(item, 'end')">结束</button>
-                    <button class="btn danger" :disabled="isLineBusy(ongoingLineKey(item))" @click="deleteOngoing(item)">删除</button>
-                    <button v-if="item.undo_available" class="btn ghost" :disabled="isLineBusy(undoLineKey(item))" @click="applyUndo(item)">回退</button>
-                  </div>
+                <button class="btn blue" :disabled="isLineBusy(ongoingLineKey(item))" @click="sendOngoing(item, 'update')">更新</button>
+                <button class="btn green" :disabled="isLineBusy(ongoingLineKey(item))" @click="sendOngoing(item, 'end')">结束</button>
+                <button class="btn danger" :disabled="isLineBusy(ongoingLineKey(item))" @click="deleteOngoing(item)">删除</button>
+                <button
+                  v-if="ongoingNeedsBinding(item)"
+                  class="btn ghost"
+                  :disabled="isLineBusy(ongoingLineKey(item))"
+                  @click="bindOngoingTarget(item)"
+                >
+                  关联目标记录
+                </button>
+                <button v-if="item.undo_available" class="btn ghost" :disabled="isLineBusy(undoLineKey(item))" @click="applyUndo(item)">回退</button>
+              </div>
                   <div v-if="item.undo_available" class="undo-line">
                     {{ item.undo_label || "可回退上一步" }}
                     <span :class="jobClass(undoLineKey(item))">{{ jobText(undoLineKey(item)) }}</span>
@@ -572,6 +580,54 @@
         </aside>
       </section>
     </section>
+
+    <div v-if="ongoingBindSelection" class="modal-backdrop" @click.self="cancelOngoingBindSelection">
+      <section class="candidate-modal" role="dialog" aria-modal="true" aria-label="选择目标记录">
+        <div class="candidate-modal-head">
+          <div>
+            <strong>选择{{ ongoingBindSelection.label || "通告" }}目标记录</strong>
+            <p>{{ ongoingBindSelection.title || "找到多条同名目标记录，请选择要关联的一条。" }}</p>
+          </div>
+          <button class="btn ghost" @click="cancelOngoingBindSelection">关闭</button>
+        </div>
+        <div class="target-choice-layout modal-choice-layout">
+          <div class="target-choice-list modal-choice-list">
+            <button
+              v-for="item in ongoingBindCandidates"
+              :key="changeTargetCandidateId(item)"
+              class="target-choice"
+              :class="{ active: selectedOngoingBindId === changeTargetCandidateId(item) }"
+              @mouseenter="previewOngoingBindCandidate(item)"
+              @focus="previewOngoingBindCandidate(item)"
+              @click="selectOngoingBindCandidate(item)"
+            >
+              <strong>{{ item.title || "未命名通告" }}</strong>
+              <span>{{ item.building || "-" }} · {{ item.status || "未标记状态" }} · {{ item.start_time || "-" }} 至 {{ item.end_time || "-" }}</span>
+              <small>{{ item.date_matched ? "时间匹配" : "按名称匹配" }}</small>
+            </button>
+          </div>
+          <aside v-if="activeOngoingBindCandidate" class="target-detail-popover modal-detail-popover">
+            <div class="target-detail-head">
+              <strong>{{ activeOngoingBindCandidate.title || "目标记录" }}</strong>
+              <span>{{ activeOngoingBindCandidate.building || "-" }} · {{ activeOngoingBindCandidate.status || "未标记状态" }}</span>
+            </div>
+            <dl class="target-detail-grid">
+              <template v-for="row in changeTargetDetailRows(activeOngoingBindCandidate)" :key="row.label">
+                <dt>{{ row.label }}</dt>
+                <dd>{{ row.value }}</dd>
+              </template>
+            </dl>
+          </aside>
+        </div>
+        <div class="candidate-modal-actions">
+          <span class="job-line">
+            只关联当前通告；确认后会把目标记录字段回填到空白项中。
+          </span>
+          <button class="btn ghost" @click="cancelOngoingBindSelection">取消</button>
+          <button class="btn blue" :disabled="!selectedOngoingBindId" @click="confirmOngoingBindSelection">确认关联</button>
+        </div>
+      </section>
+    </div>
   </main>
 </template>
 
@@ -634,6 +690,9 @@ const selectedChangeTargetId = ref("");
 const hoveredChangeTargetId = ref("");
 const selectedChangeSourceId = ref("");
 const changeTargetConfirming = ref(false);
+const ongoingBindSelection = ref<Dict | null>(null);
+const selectedOngoingBindId = ref("");
+const hoveredOngoingBindId = ref("");
 const memoryImportText = ref("");
 const memoryImportBusy = ref(false);
 const memoryImportLine = ref("粘贴历史通告后导入。");
@@ -682,6 +741,7 @@ let activeItemsReconnectTimer: number | null = null;
 let lastActiveItemsSignature = "";
 let activeItemsStreamScope = "";
 let appDisposed = false;
+let resolveOngoingBindSelection: ((candidate: Dict | null) => void) | null = null;
 
 const visibleScopeOptions = computed(() => auth.scopeOptions.length ? auth.scopeOptions : requestableScopes);
 const isAdmin = computed(() => String(auth.user?.role || "").toLowerCase() === "admin");
@@ -1034,15 +1094,15 @@ function recordStatusTone(record: Dict): string {
 
 function targetRecordIdForRecord(record: Dict): string {
   const summary = record?.work_summary || {};
-  return String(summary.target_record_id || summary.feishu_record_id || summary.record_id || record?.target_record_id || "").trim();
+  return String(summary.target_record_id || summary.feishu_record_id || summary.raw_record_id || record?.target_record_id || record?.feishu_record_id || record?.raw_record_id || "").trim();
 }
 
 function targetRecordIdForOngoing(item: Dict): string {
-  return String(item.target_record_id || item.feishu_record_id || item.raw_record_id || item.record_id || "").trim();
+  return String(item.target_record_id || item.feishu_record_id || item.raw_record_id || "").trim();
 }
 
 function ongoingLineKey(item: Dict): string {
-  return String(item.active_item_id || item.record_id || item.target_record_id || item.feishu_record_id || item.raw_record_id || "").trim();
+  return String(item.active_item_id || item.target_record_id || item.feishu_record_id || item.raw_record_id || item.source_record_id || item.record_id || "").trim();
 }
 
 function isOngoingExpanded(item: Dict): boolean {
@@ -1071,9 +1131,15 @@ function undoLineKey(item: Dict): string {
 
 function sourceRecordIdForOngoing(item: Dict, targetRecordId = ""): string {
   const source = String(item.source_record_id || "").trim();
-  if (source) return source;
-  const recordId = String(item.record_id || "").trim();
-  return recordId && recordId !== targetRecordId ? recordId : "";
+  if (source && source !== targetRecordId) return source;
+  return "";
+}
+
+function ongoingNeedsBinding(item: Dict): boolean {
+  const edit = ongoingEdits.get(ongoingLineKey(item));
+  const editedTarget = String(edit?.target_record_id || "").trim();
+  if (editedTarget) return false;
+  return String(item?.binding_status || "") === "needs_binding" || !targetRecordIdForOngoing(item);
 }
 
 function ongoingTimeRange(item: Dict): { start: string; end: string } {
@@ -1190,7 +1256,7 @@ function manualRecordFromDraft(key: string, draft: Dict): Dict {
       "柜号": draft.cabinet || "",
       "数量": draft.quantity || "",
     },
-    target_record_id: draft.target_record_id || draft.record_id || "",
+    target_record_id: draft.target_record_id || draft.feishu_record_id || draft.raw_record_id || "",
     building_codes: buildingCodes,
   };
 }
@@ -1754,6 +1820,18 @@ const selectedChangeSourceCandidate = computed(() => {
   return changeSourceCandidates.value.find((item: Dict) => changeSourceCandidateId(item) === id) || null;
 });
 
+const ongoingBindCandidates = computed(() => {
+  const pending = ongoingBindSelection.value;
+  return Array.isArray(pending?.candidates) ? pending.candidates : [];
+});
+
+const activeOngoingBindCandidate = computed(() => {
+  const candidates = ongoingBindCandidates.value;
+  if (!candidates.length) return null;
+  const detailId = hoveredOngoingBindId.value || selectedOngoingBindId.value;
+  return candidates.find((item: Dict) => changeTargetCandidateId(item) === detailId) || candidates[0];
+});
+
 function changeTargetDetailRows(item: Dict | null): Array<{ label: string; value: string }> {
   if (!item) return [];
   const source = Array.isArray(item.field_items)
@@ -1783,6 +1861,36 @@ function selectChangeTarget(item: Dict): void {
   const id = changeTargetCandidateId(item);
   selectedChangeTargetId.value = id;
   hoveredChangeTargetId.value = id;
+}
+
+function previewOngoingBindCandidate(item: Dict): void {
+  hoveredOngoingBindId.value = changeTargetCandidateId(item);
+}
+
+function selectOngoingBindCandidate(item: Dict): void {
+  const id = changeTargetCandidateId(item);
+  selectedOngoingBindId.value = id;
+  hoveredOngoingBindId.value = id;
+}
+
+function closeOngoingBindSelection(candidate: Dict | null): void {
+  const resolver = resolveOngoingBindSelection;
+  resolveOngoingBindSelection = null;
+  ongoingBindSelection.value = null;
+  selectedOngoingBindId.value = "";
+  hoveredOngoingBindId.value = "";
+  if (resolver) resolver(candidate);
+}
+
+function cancelOngoingBindSelection(): void {
+  closeOngoingBindSelection(null);
+}
+
+function confirmOngoingBindSelection(): void {
+  const selected =
+    ongoingBindCandidates.value.find((item: Dict) => changeTargetCandidateId(item) === selectedOngoingBindId.value) ||
+    activeOngoingBindCandidate.value;
+  closeOngoingBindSelection(selected || null);
 }
 
 function firstCandidateField(fields: Dict, names: string[]): string {
@@ -2083,7 +2191,7 @@ function buildStartPayload(key: string): Dict | null {
   if (!record || !draft) return null;
   const type = record.work_type || "maintenance";
   const action = record.manual ? draftActionForRecord(record, draft) : sourceActionForRecord(record);
-  const targetRecordId = record.manual ? String(draft.target_record_id || draft.record_id || "").trim() : targetRecordIdForRecord(record);
+  const targetRecordId = record.manual ? String(draft.target_record_id || draft.feishu_record_id || draft.raw_record_id || "").trim() : targetRecordIdForRecord(record);
   return {
     action,
     scope: currentScope.value || "ALL",
@@ -2177,6 +2285,8 @@ function ongoingDraft(item: Dict): Dict {
       device: item.device || "",
       cabinet: item.cabinet || "",
       quantity: item.quantity || "",
+      target_record_id: targetRecordIdForOngoing(item),
+      source_record_id: sourceRecordIdForOngoing(item, targetRecordIdForOngoing(item)),
     });
   }
   return ongoingEdits.get(id) || {};
@@ -2196,8 +2306,8 @@ function draftValue(edit: Dict, key: string, fallback = ""): string {
 
 function buildOngoingPayload(item: Dict, action: string): Dict {
   const edit = ongoingDraft(item);
-  const targetRecordId = targetRecordIdForOngoing(item);
-  const sourceRecordId = sourceRecordIdForOngoing(item, targetRecordId);
+  const targetRecordId = draftValue(edit, "target_record_id", targetRecordIdForOngoing(item));
+  const sourceRecordId = draftValue(edit, "source_record_id", sourceRecordIdForOngoing(item, targetRecordId));
   const workType = item.work_type || "maintenance";
   const startTime = draftValue(edit, "start_time", ongoingTimeRange(item).start);
   const endTime = draftValue(edit, "end_time", ongoingTimeRange(item).end);
@@ -2206,7 +2316,7 @@ function buildOngoingPayload(item: Dict, action: string): Dict {
     scope: currentScope.value || "ALL",
     work_type: workType,
     notice_type: item.notice_type || "",
-    record_id: sourceRecordId || targetRecordId,
+    record_id: targetRecordId,
     target_record_id: targetRecordId,
     active_item_id: item.active_item_id || "",
     source_record_id: sourceRecordId,
@@ -2239,8 +2349,91 @@ function buildOngoingPayload(item: Dict, action: string): Dict {
     quantity: workType === "power" ? draftValue(edit, "quantity", item.quantity || "") : "",
     fault_time: workType === "repair" ? endTime : "",
     expected_time: workType === "repair" ? startTime : "",
-    operation_id: opId(`${item.active_item_id || item.record_id}:${action}`),
+    operation_id: opId(`${item.active_item_id || targetRecordId || sourceRecordId}:${action}`),
   };
+}
+
+function chooseCandidateInModal(candidates: Dict[], label: string, title: string): Promise<Dict | null> {
+  if (!candidates.length) return Promise.resolve(null);
+  if (candidates.length === 1) return Promise.resolve(candidates[0]);
+  if (resolveOngoingBindSelection) closeOngoingBindSelection(null);
+  const visibleCandidates = candidates.slice(0, 50);
+  const firstId = changeTargetCandidateId(visibleCandidates[0]);
+  ongoingBindSelection.value = {
+    label,
+    title,
+    candidates: visibleCandidates,
+  };
+  selectedOngoingBindId.value = firstId;
+  hoveredOngoingBindId.value = firstId;
+  return new Promise((resolve) => {
+    resolveOngoingBindSelection = resolve;
+  });
+}
+
+async function bindOngoingTarget(item: Dict): Promise<void> {
+  const lineKey = ongoingLineKey(item);
+  const edit = ongoingDraft(item);
+  const workType = String(item.work_type || "maintenance");
+  const title = draftValue(edit, "title", item.title || item.content || "");
+  if (!title) {
+    rememberJob(lineKey, { text: "缺少标题，无法查找目标记录", status: "failed", phase: "failed" });
+    return;
+  }
+  rememberJob(lineKey, { text: "正在查找目标记录", status: "busy", phase: "binding" });
+  try {
+    const data = await api(workType === "change" ? "/api/change-target-candidates" : "/api/notice-target-candidates", {
+      method: "POST",
+      body: JSON.stringify({
+        work_type: workType,
+        scope: currentScope.value || "ALL",
+        title,
+        start_time: draftValue(edit, "start_time", ongoingTimeRange(item).start),
+        end_time: draftValue(edit, "end_time", ongoingTimeRange(item).end),
+        action: "update",
+      }),
+    });
+    const candidates = Array.isArray(data.candidates) ? data.candidates : [];
+    const sourceCandidates = Array.isArray(data.source_candidates) ? data.source_candidates : [];
+    const selected = await chooseCandidateInModal(
+      candidates,
+      workTypeLabel(workType),
+      `找到 ${candidates.length} 条同名目标记录，请选择要关联到当前进行中通告的一条。`,
+    );
+    if (!selected) {
+      rememberJob(lineKey, {
+        text: candidates.length ? "已取消目标记录关联" : "未找到同名目标记录",
+        status: candidates.length ? "" : "failed",
+        phase: candidates.length ? "" : "failed",
+      });
+      return;
+    }
+    let candidate = selected;
+    if (workType === "change") {
+      const confirmed = await api("/api/change-target-candidates/confirm", {
+        method: "POST",
+        body: JSON.stringify({
+          scope: currentScope.value || "ALL",
+          title,
+          start_time: draftValue(edit, "start_time", ongoingTimeRange(item).start),
+          end_time: draftValue(edit, "end_time", ongoingTimeRange(item).end),
+          action: "update",
+          record_id: changeTargetCandidateId(selected),
+        }),
+      });
+      candidate = confirmed.candidate || selected;
+    }
+    const source = sourceCandidates[0] || {};
+    const next = applyChangeTargetCandidateDefaults({ ...edit }, candidate);
+    next.target_record_id = candidate.record_id || candidate.target_record_id || "";
+    if (source.source_record_id || source.record_id) {
+      next.source_record_id = source.source_record_id || source.record_id;
+    }
+    ongoingEdits.set(lineKey, next);
+    rememberJob(lineKey, { text: "已关联目标记录，可继续更新或结束", status: "success", phase: "bound" });
+  } catch (error: any) {
+    rememberJob(lineKey, { text: error?.message || "关联目标记录失败", status: "failed", phase: "failed" });
+  }
 }
 
 async function sendOngoing(item: Dict, action: string): Promise<void> {
@@ -2503,7 +2696,7 @@ async function deleteOngoing(item: Dict): Promise<void> {
         work_type: item.work_type || "maintenance",
         notice_type: item.notice_type || "",
         active_item_id: item.active_item_id || "",
-        record_id: targetRecordId || sourceRecordId,
+        record_id: targetRecordId,
         target_record_id: targetRecordId,
         source_record_id: sourceRecordId,
         title: item.title || item.content || "",
@@ -2562,7 +2755,8 @@ function ongoingTitle(item: Dict): string {
 }
 
 function ongoingMeta(item: Dict): string {
-  return [item.building, item.specialty, item.maintenance_cycle, item.time_str || item.start_time].filter(Boolean).join(" · ");
+  const boundText = item.binding_status === "needs_binding" ? "待自动关联目标记录" : "";
+  return [item.building, item.specialty, item.maintenance_cycle, item.time_str || item.start_time, boundText].filter(Boolean).join(" · ");
 }
 
 function ongoingCompactSummary(item: Dict): string {
@@ -3397,6 +3591,60 @@ textarea {
   gap: 8px;
 }
 
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(15, 23, 42, 0.28);
+}
+
+.candidate-modal {
+  display: grid;
+  width: min(980px, 100%);
+  max-height: min(760px, calc(100vh - 48px));
+  overflow: hidden;
+  border: 1px solid #dbe3ee;
+  border-radius: 10px;
+  background: #ffffff;
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.18);
+}
+
+.candidate-modal-head,
+.candidate-modal-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.candidate-modal-actions {
+  border-top: 1px solid #e2e8f0;
+  border-bottom: 0;
+}
+
+.candidate-modal-head p {
+  margin: 4px 0 0;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.modal-choice-layout {
+  min-height: 360px;
+  max-height: 560px;
+  overflow: hidden;
+  padding: 12px;
+}
+
+.modal-choice-list,
+.modal-detail-popover {
+  overflow: auto;
+}
+
 @media (max-width: 1120px) {
   .workspace {
     grid-template-columns: 1fr;
@@ -3416,6 +3664,21 @@ textarea {
   .summary-strip,
   .form-grid {
     grid-template-columns: 1fr;
+  }
+
+  .modal-backdrop {
+    padding: 10px;
+  }
+
+  .candidate-modal-head,
+  .candidate-modal-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .modal-choice-layout {
+    grid-template-columns: 1fr;
+    max-height: 68vh;
   }
 }
 </style>

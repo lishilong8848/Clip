@@ -62,7 +62,7 @@ from lan_bitable_template_portal.server import (
     DEFAULT_HOST,
     DEFAULT_PORT,
     MAX_JSON_BODY_BYTES,
-    PortalHandler,
+    PortalRuntime,
     find_available_port,
     portal_asset_file,
     portal_frontend_dist_enabled,
@@ -71,6 +71,7 @@ from lan_bitable_template_portal.server import (
     portal_static_roots,
 )
 from lan_bitable_template_portal.portal_auth import AUTH_COOKIE_NAME
+from lan_bitable_template_portal.identity_utils import normalize_notice_identity_payload
 from lan_bitable_template_portal.portal_service import (
     CHANGE_SOURCE_APP_TOKEN,
     CHANGE_SOURCE_TABLE_ID,
@@ -94,6 +95,7 @@ from lan_bitable_template_portal.state_store import LanPortalStateStore
 from upload_event_module.config import config, get_field_config
 from upload_event_module.core.parser import extract_event_info
 from upload_event_module.services.feishu_service import check_token_status
+from upload_event_module.services.service_registry import query_record_by_id
 from upload_event_module.logger import log_error, log_info, log_warning
 from upload_event_module.services.robot_webhook import send_text_to_open_ids
 
@@ -153,35 +155,35 @@ def _send_text_to_open_ids_guarded(text: str, recipients: list[str]) -> tuple[bo
 def _queue_stats() -> dict:
     qt_outbox_counts: dict[str, int] = {}
     try:
-        qt_outbox_counts = PortalHandler.state_store.count_outbox_events("qt_action")
+        qt_outbox_counts = PortalRuntime.state_store.count_outbox_events("qt_action")
     except Exception:
         qt_outbox_counts = {}
-    with PortalHandler.message_queue_lock:
-        message_queue_size = len(PortalHandler.message_queue)
+    with PortalRuntime.message_queue_lock:
+        message_queue_size = len(PortalRuntime.message_queue)
         message_workers = sum(
-            1 for worker in PortalHandler.message_worker_threads if worker.is_alive()
+            1 for worker in PortalRuntime.message_worker_threads if worker.is_alive()
         )
-    with PortalHandler.action_queue_lock:
-        qt_queue_size = len(PortalHandler.action_queue)
+    with PortalRuntime.action_queue_lock:
+        qt_queue_size = len(PortalRuntime.action_queue)
         qt_worker_alive = bool(
-            PortalHandler.action_worker_thread
-            and PortalHandler.action_worker_thread.is_alive()
+            PortalRuntime.action_worker_thread
+            and PortalRuntime.action_worker_thread.is_alive()
         )
-    with PortalHandler.upload_wait_lock:
-        upload_wait_size = len(PortalHandler.upload_wait_jobs)
+    with PortalRuntime.upload_wait_lock:
+        upload_wait_size = len(PortalRuntime.upload_wait_jobs)
         upload_wait_alive = bool(
-            PortalHandler.upload_wait_thread
-            and PortalHandler.upload_wait_thread.is_alive()
+            PortalRuntime.upload_wait_thread
+            and PortalRuntime.upload_wait_thread.is_alive()
         )
-    with PortalHandler.source_refresh_lock:
-        source_refresh_inflight = bool(PortalHandler.source_refresh_inflight)
-    with PortalHandler.repair_refresh_lock:
-        repair_refresh_inflight = bool(PortalHandler.repair_refresh_inflight)
-    with PortalHandler.change_refresh_lock:
-        change_refresh_inflight = bool(PortalHandler.change_refresh_inflight)
+    with PortalRuntime.source_refresh_lock:
+        source_refresh_inflight = bool(PortalRuntime.source_refresh_inflight)
+    with PortalRuntime.repair_refresh_lock:
+        repair_refresh_inflight = bool(PortalRuntime.repair_refresh_inflight)
+    with PortalRuntime.change_refresh_lock:
+        change_refresh_inflight = bool(PortalRuntime.change_refresh_inflight)
     return {
         "message_queue_size": message_queue_size,
-        "message_worker_count": int(PortalHandler.message_worker_count or 0),
+        "message_worker_count": int(PortalRuntime.message_worker_count or 0),
         "message_workers_alive": message_workers,
         "qt_queue_size": qt_queue_size,
         "qt_worker_alive": qt_worker_alive,
@@ -191,18 +193,18 @@ def _queue_stats() -> dict:
         "upload_wait_size": upload_wait_size,
         "upload_wait_alive": upload_wait_alive,
         "source_refresh_alive": bool(
-            PortalHandler.source_refresh_thread
-            and PortalHandler.source_refresh_thread.is_alive()
+            PortalRuntime.source_refresh_thread
+            and PortalRuntime.source_refresh_thread.is_alive()
         ),
         "source_refresh_inflight": source_refresh_inflight,
         "repair_refresh_inflight": repair_refresh_inflight,
         "change_refresh_inflight": change_refresh_inflight,
-        "payload_cache_entries": len(PortalHandler.payload_cache),
-        "runtime_limits": PortalHandler.runtime_limits(),
-        "runtime_pressure": PortalHandler.runtime_pressure(),
-        "sqlite_write_worker": PortalHandler.state_store.get_write_worker_stats(),
-        "runtime_queue_counts": PortalHandler.state_store.runtime_queue_counts(),
-        "runtime_queue_details": PortalHandler.state_store.runtime_queue_details(),
+        "payload_cache_entries": len(PortalRuntime.payload_cache),
+        "runtime_limits": PortalRuntime.runtime_limits(),
+        "runtime_pressure": PortalRuntime.runtime_pressure(),
+        "sqlite_write_worker": PortalRuntime.state_store.get_write_worker_stats(),
+        "runtime_queue_counts": PortalRuntime.state_store.runtime_queue_counts(),
+        "runtime_queue_details": PortalRuntime.state_store.runtime_queue_details(),
     }
 
 
@@ -567,7 +569,7 @@ class FastAPIPortalController:
             next_path = str(request.query_params.get("next") or "/")
             redirect_uri = f"{self._request_base_url(request)}/api/auth/feishu/callback"
             try:
-                login_url = PortalHandler.auth_manager.start_login(
+                login_url = PortalRuntime.auth_manager.start_login(
                     redirect_uri=redirect_uri,
                     next_path=next_path,
                 )
@@ -584,7 +586,7 @@ class FastAPIPortalController:
             state = str(request.query_params.get("state") or "")
             redirect_uri = f"{self._request_base_url(request)}/api/auth/feishu/callback"
             try:
-                session_id, next_path = PortalHandler.auth_manager.complete_login(
+                session_id, next_path = PortalRuntime.auth_manager.complete_login(
                     code=code,
                     state=state,
                     redirect_uri=redirect_uri,
@@ -596,13 +598,13 @@ class FastAPIPortalController:
                 status_code=302,
                 headers={
                     "Location": next_path,
-                    "Set-Cookie": PortalHandler.auth_manager.cookie_header(session_id),
+                    "Set-Cookie": PortalRuntime.auth_manager.cookie_header(session_id),
                 },
             )
 
         @app.get("/api/auth/logout")
         async def auth_logout_get(request: Request):
-            PortalHandler.auth_manager.clear_session(
+            PortalRuntime.auth_manager.clear_session(
                 str(request.cookies.get(AUTH_COOKIE_NAME) or "")
             )
             self._clear_read_cache(("auth_status",))
@@ -610,19 +612,19 @@ class FastAPIPortalController:
                 status_code=302,
                 headers={
                     "Location": "/",
-                    "Set-Cookie": PortalHandler.auth_manager.clear_cookie_header(),
+                    "Set-Cookie": PortalRuntime.auth_manager.clear_cookie_header(),
                 },
             )
 
         @app.post("/api/auth/logout")
         async def auth_logout_post(request: Request):
-            PortalHandler.auth_manager.clear_session(
+            PortalRuntime.auth_manager.clear_session(
                 str(request.cookies.get(AUTH_COOKIE_NAME) or "")
             )
             self._clear_read_cache(("auth_status",))
             return JSONResponse(
                 {"ok": True, "data": {}},
-                headers={"Set-Cookie": PortalHandler.auth_manager.clear_cookie_header()},
+                headers={"Set-Cookie": PortalRuntime.auth_manager.clear_cookie_header()},
             )
 
         @app.get("/api/health")
@@ -645,7 +647,7 @@ class FastAPIPortalController:
                         "vue_enabled": portal_frontend_dist_enabled(),
                     },
                     "time": time.time(),
-                    "runtime": PortalHandler.state_store.get_backend_runtime("backend") or {},
+                    "runtime": PortalRuntime.state_store.get_backend_runtime("backend") or {},
                 },
             }
             self._read_cache_put(("health",), payload, ttl=1.5, stale_ttl=5.0)
@@ -656,12 +658,12 @@ class FastAPIPortalController:
             session = self._current_session(request)
             if session is None:
                 return self._auth_required_response()
-            if not PortalHandler.auth_manager.is_admin(session):
+            if not PortalRuntime.auth_manager.is_admin(session):
                 return JSONResponse(
                     {"ok": False, "error": "只有管理员可以查看后端状态。"},
                     status_code=403,
                 )
-            service = PortalHandler.service
+            service = PortalRuntime.service
             last_loaded_at = ""
             last_loaded_ts = 0.0
             warnings: list[str] = []
@@ -671,7 +673,7 @@ class FastAPIPortalController:
             job_phase_counts: dict[str, int] = {}
             failed_retryable_count = 0
             failed_non_retryable_count = 0
-            qt_bridge = PortalHandler.state_store.get_backend_runtime("qt_bridge") or {}
+            qt_bridge = PortalRuntime.state_store.get_backend_runtime("qt_bridge") or {}
             qt_bridge_payload = dict(qt_bridge) if isinstance(qt_bridge, dict) else {}
             qt_bridge_heartbeat_at = float(qt_bridge_payload.get("heartbeat_at") or 0)
             qt_bridge_age_seconds = (
@@ -679,21 +681,21 @@ class FastAPIPortalController:
                 if qt_bridge_heartbeat_at
                 else 0.0
             )
-            job_cleanup = PortalHandler.state_store.get_backend_runtime("job_cleanup") or {}
-            preflight = PortalHandler.state_store.get_backend_runtime("preflight") or {}
-            token_status = PortalHandler.state_store.get_backend_runtime("token_status") or {}
+            job_cleanup = PortalRuntime.state_store.get_backend_runtime("job_cleanup") or {}
+            preflight = PortalRuntime.state_store.get_backend_runtime("preflight") or {}
+            token_status = PortalRuntime.state_store.get_backend_runtime("token_status") or {}
             sqlite_stats: dict = {}
             source_snapshot_stats: dict = {}
             schema_status: dict = {}
             runtime_health: dict = {}
             with suppress(Exception):
-                sqlite_stats = PortalHandler.state_store.get_database_stats()
+                sqlite_stats = PortalRuntime.state_store.get_database_stats()
             with suppress(Exception):
-                source_snapshot_stats = PortalHandler.state_store.source_snapshot_stats()
+                source_snapshot_stats = PortalRuntime.state_store.source_snapshot_stats()
             with suppress(Exception):
-                schema_status = PortalHandler.state_store.schema_health()
+                schema_status = PortalRuntime.state_store.schema_health()
             with suppress(Exception):
-                runtime_health = PortalHandler.state_store.runtime_health_report()
+                runtime_health = PortalRuntime.state_store.runtime_health_report()
             with suppress(Exception):
                 last_loaded_at = str(getattr(service, "_last_loaded_at", "") or "")
                 last_loaded_ts = float(getattr(service, "_last_loaded_ts", 0.0) or 0.0)
@@ -793,8 +795,8 @@ class FastAPIPortalController:
                     "read_cache": self._read_cache_stats(),
                     "static_cache": self._static_cache_stats(),
                     "singleflight": {
-                        "payload_cache_inflight": len(PortalHandler.payload_cache_inflight),
-                        "payload_cache_entries": len(PortalHandler.payload_cache),
+                        "payload_cache_inflight": len(PortalRuntime.payload_cache_inflight),
+                        "payload_cache_entries": len(PortalRuntime.payload_cache),
                     },
                     "sse_connections": self._sse_stats(),
                     "recent_failed_jobs": recent_failed_jobs,
@@ -807,7 +809,7 @@ class FastAPIPortalController:
             admin_response, _session = self._require_admin_response(request)
             if admin_response is not None:
                 return admin_response
-            service = PortalHandler.service
+            service = PortalRuntime.service
             job_phase_counts: dict[str, int] = {}
             with suppress(Exception):
                 with service._jobs_lock:
@@ -821,9 +823,9 @@ class FastAPIPortalController:
                 "data": {
                     **_queue_stats(),
                     "job_phase_counts": job_phase_counts,
-                    "schema": PortalHandler.state_store.schema_health(),
-                    "source_snapshot": PortalHandler.state_store.source_snapshot_stats(),
-                    "qt_active_items": PortalHandler.state_store.qt_active_items_stats(),
+                    "schema": PortalRuntime.state_store.schema_health(),
+                    "source_snapshot": PortalRuntime.state_store.source_snapshot_stats(),
+                    "qt_active_items": PortalRuntime.state_store.qt_active_items_stats(),
                     "time": time.time(),
                 },
             }
@@ -833,22 +835,22 @@ class FastAPIPortalController:
             admin_response, _session = self._require_admin_response(request)
             if admin_response is not None:
                 return admin_response
-            qt_bridge = PortalHandler.state_store.get_backend_runtime("qt_bridge") or {}
+            qt_bridge = PortalRuntime.state_store.get_backend_runtime("qt_bridge") or {}
             qt_bridge_payload = dict(qt_bridge) if isinstance(qt_bridge, dict) else {}
             return {
                 "ok": True,
                 "data": {
                     "queues": _queue_stats(),
-                    "sqlite": PortalHandler.state_store.get_database_stats(),
-                    "qt_active_items": PortalHandler.state_store.qt_active_items_stats(),
+                    "sqlite": PortalRuntime.state_store.get_database_stats(),
+                    "qt_active_items": PortalRuntime.state_store.qt_active_items_stats(),
                     "qt_bridge": qt_bridge_payload,
                     "endpoint_metrics": self._perf_snapshot(),
                     "read_cache": self._read_cache_stats(),
                     "static_cache": self._static_cache_stats(),
                     "sse_connections": self._sse_stats(),
                     "singleflight": {
-                        "payload_cache_inflight": len(PortalHandler.payload_cache_inflight),
-                        "payload_cache_entries": len(PortalHandler.payload_cache),
+                        "payload_cache_inflight": len(PortalRuntime.payload_cache_inflight),
+                        "payload_cache_entries": len(PortalRuntime.payload_cache),
                     },
                     "slow_thresholds": {
                         "qt_ui_mutation_ms": 120,
@@ -867,9 +869,9 @@ class FastAPIPortalController:
                 return admin_response
             try:
                 report = await asyncio.to_thread(
-                    _build_backend_preflight_report, PortalHandler.service
+                    _build_backend_preflight_report, PortalRuntime.service
                 )
-                PortalHandler.state_store.put_backend_runtime("preflight", report)
+                PortalRuntime.state_store.put_backend_runtime("preflight", report)
                 return {"ok": True, "data": report}
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=500)
@@ -881,7 +883,7 @@ class FastAPIPortalController:
                 return admin_response
             try:
                 data = await asyncio.to_thread(
-                    PortalHandler.state_store.checkpoint_database, truncate=True
+                    PortalRuntime.state_store.checkpoint_database, truncate=True
                 )
                 return {"ok": True, "data": data}
             except Exception as exc:
@@ -893,9 +895,9 @@ class FastAPIPortalController:
             if admin_response is not None:
                 return admin_response
             try:
-                result = await asyncio.to_thread(PortalHandler.service.cleanup_action_jobs)
+                result = await asyncio.to_thread(PortalRuntime.service.cleanup_action_jobs)
                 result["cleaned_at"] = time.time()
-                PortalHandler.state_store.put_backend_runtime("job_cleanup", result)
+                PortalRuntime.state_store.put_backend_runtime("job_cleanup", result)
                 return {"ok": True, "data": result}
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=500)
@@ -993,7 +995,7 @@ class FastAPIPortalController:
             request.state.cache_miss = True
             payload = {
                 "ok": True,
-                "data": PortalHandler.auth_manager.public_status(
+                "data": PortalRuntime.auth_manager.public_status(
                     session,
                     next_path=next_path,
                     redirect_uri=f"{self._request_base_url(request)}/api/auth/feishu/callback",
@@ -1012,13 +1014,13 @@ class FastAPIPortalController:
             session = self._current_session(request)
             if session is None:
                 return self._auth_required_response()
-            if not PortalHandler.auth_manager.is_admin(session):
+            if not PortalRuntime.auth_manager.is_admin(session):
                 return JSONResponse(
                     {"ok": False, "error": "只有管理员可以查看最近任务。"},
                     status_code=403,
                 )
             jobs = []
-            service = PortalHandler.service
+            service = PortalRuntime.service
             lock = getattr(service, "_jobs_lock", threading.RLock())
             phase_filter = str(phase or "").strip()
             retryable_filter = str(retryable or "").strip().lower()
@@ -1077,7 +1079,7 @@ class FastAPIPortalController:
             if admin_response is not None:
                 return admin_response
             normalized_job_id = str(job_id or "").strip()
-            job = PortalHandler.service.get_job(normalized_job_id)
+            job = PortalRuntime.service.get_job(normalized_job_id)
             if not job:
                 return JSONResponse(
                     {"ok": False, "error": "任务不存在或已清理。"},
@@ -1088,7 +1090,7 @@ class FastAPIPortalController:
                     {"ok": False, "error": "只能清理失败任务。"},
                     status_code=400,
                 )
-            PortalHandler.service.delete_action_job(normalized_job_id)
+            PortalRuntime.service.delete_action_job(normalized_job_id)
             return {"ok": True, "data": {"job_id": normalized_job_id, "cleared": True}}
 
         @app.post("/api/jobs/{job_id}/retry")
@@ -1098,10 +1100,10 @@ class FastAPIPortalController:
                 return admin_response
             normalized_job_id = str(job_id or "").strip()
             try:
-                job = PortalHandler.service.retry_action_job(normalized_job_id)
-                PortalHandler.clear_payload_cache()
+                job = PortalRuntime.service.retry_action_job(normalized_job_id)
+                PortalRuntime.clear_payload_cache()
                 self._clear_read_cache()
-                PortalHandler.enqueue_initial_message_or_upload_job(normalized_job_id)
+                PortalRuntime.enqueue_initial_message_or_upload_job(normalized_job_id)
                 return {
                     "ok": True,
                     "data": {
@@ -1126,7 +1128,7 @@ class FastAPIPortalController:
             session = self._current_session(request)
             if session is None:
                 return self._auth_required_response()
-            job = PortalHandler.service.get_job(str(job_id or "").strip())
+            job = PortalRuntime.service.get_job(str(job_id or "").strip())
             if not job:
                 return JSONResponse(
                     {"ok": False, "error": "任务状态已丢失，请核对多维后重试。"},
@@ -1160,9 +1162,9 @@ class FastAPIPortalController:
                         "bootstrap",
                         open_id,
                         scope,
-                        PortalHandler._ongoing_items_marker(ongoing),
+                        PortalRuntime._ongoing_items_marker(ongoing),
                     ),
-                    lambda: PortalHandler.service.get_bootstrap(
+                    lambda: PortalRuntime.service.get_bootstrap(
                         scope=scope, ongoing_items=ongoing
                     ),
                 )
@@ -1179,7 +1181,7 @@ class FastAPIPortalController:
                 self._ensure_source_snapshot_background()
                 ongoing = self._get_ongoing("ALL")
                 self._reconcile_orphan_started_items("ALL", ongoing)
-                allowed_options = PortalHandler.auth_manager.filter_scope_options(
+                allowed_options = PortalRuntime.auth_manager.filter_scope_options(
                     SCOPE_OPTIONS, session
                 )
                 allowed_scopes = [
@@ -1194,15 +1196,15 @@ class FastAPIPortalController:
                         "scope-overview",
                         open_id,
                         tuple(sorted(allowed_scopes)),
-                        PortalHandler._ongoing_items_marker(ongoing),
+                        PortalRuntime._ongoing_items_marker(ongoing),
                     ),
-                    lambda: PortalHandler.service.get_scope_overview(
+                    lambda: PortalRuntime.service.get_scope_overview(
                         ongoing_items=ongoing,
                         scopes=allowed_scopes,
                         include_prepared=False,
                     ),
                 )
-                data = PortalHandler.auth_manager.filter_scope_overview(data, session)
+                data = PortalRuntime.auth_manager.filter_scope_overview(data, session)
                 return self._json_ok(request, session, data)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=500)
@@ -1232,9 +1234,9 @@ class FastAPIPortalController:
                         scope,
                         month,
                         specialty,
-                        PortalHandler._ongoing_items_marker(ongoing),
+                        PortalRuntime._ongoing_items_marker(ongoing),
                     ),
-                    lambda: PortalHandler.service.query_records(
+                    lambda: PortalRuntime.service.query_records(
                         month=month,
                         specialty=specialty,
                         scope=scope,
@@ -1255,7 +1257,7 @@ class FastAPIPortalController:
                     session, request.query_params.get("scope") or "ALL"
                 )
                 payload = await asyncio.to_thread(
-                    PortalHandler.service.get_history_summary,
+                    PortalRuntime.service.get_history_summary,
                     scope=scope,
                     month=str(request.query_params.get("month") or ""),
                     work_type=str(request.query_params.get("work_type") or "all"),
@@ -1282,14 +1284,14 @@ class FastAPIPortalController:
                 )
                 user = session.get("user") if isinstance(session.get("user"), dict) else {}
                 result = await asyncio.to_thread(
-                    PortalHandler.service.import_historical_notice_memory,
+                    PortalRuntime.service.import_historical_notice_memory,
                     text=str(payload.get("text") or ""),
                     scope=scope,
-                    allowed_scopes=PortalHandler.auth_manager.session_scopes(session),
-                    is_admin=PortalHandler.auth_manager.is_admin(session),
+                    allowed_scopes=PortalRuntime.auth_manager.session_scopes(session),
+                    is_admin=PortalRuntime.auth_manager.is_admin(session),
                     imported_by=str(user.get("open_id") or ""),
                 )
-                PortalHandler.clear_payload_cache()
+                PortalRuntime.clear_payload_cache()
                 self._clear_read_cache()
                 return self._json_ok(request, session, result)
             except Exception as exc:
@@ -1309,7 +1311,7 @@ class FastAPIPortalController:
                     )
                 ).to_payload()
                 result = await asyncio.to_thread(
-                    PortalHandler.service.scan_historical_notice_memory_candidates,
+                    PortalRuntime.service.scan_historical_notice_memory_candidates,
                     work_types=payload.get("work_types"),
                     months=int(payload.get("months") or 3),
                 )
@@ -1332,11 +1334,11 @@ class FastAPIPortalController:
                 ).to_payload()
                 user = session.get("user") if isinstance(session.get("user"), dict) else {}
                 result = await asyncio.to_thread(
-                    PortalHandler.service.save_historical_notice_memory_matches,
+                    PortalRuntime.service.save_historical_notice_memory_matches,
                     matches=payload.get("matches") or [],
                     imported_by=str(user.get("open_id") or ""),
                 )
-                PortalHandler.clear_payload_cache()
+                PortalRuntime.clear_payload_cache()
                 self._clear_read_cache()
                 return self._json_ok(request, session, result)
             except Exception as exc:
@@ -1351,13 +1353,13 @@ class FastAPIPortalController:
                 scope = self._authorized_scope_or_error(
                     session, request.query_params.get("scope") or "ALL"
                 )
-                refresh_result = PortalHandler.request_source_refresh(force=True)
+                refresh_result = PortalRuntime.request_source_refresh(force=True)
                 self._clear_read_cache()
                 refreshed = bool(refresh_result.get("refreshed", False))
                 ongoing = self._get_ongoing(scope)
                 self._reconcile_orphan_started_items(scope, ongoing, force=True)
                 data = await asyncio.to_thread(
-                    PortalHandler.service.get_bootstrap,
+                    PortalRuntime.service.get_bootstrap,
                     scope=scope,
                     ongoing_items=ongoing,
                 )
@@ -1376,12 +1378,12 @@ class FastAPIPortalController:
                 scope = self._authorized_scope_or_error(
                     session, request.query_params.get("scope") or "ALL"
                 )
-                refresh_result = PortalHandler.request_repair_source_refresh()
+                refresh_result = PortalRuntime.request_repair_source_refresh()
                 self._clear_read_cache()
                 ongoing = self._get_ongoing(scope)
                 self._reconcile_orphan_started_items(scope, ongoing)
                 data = await asyncio.to_thread(
-                    PortalHandler.service.get_bootstrap,
+                    PortalRuntime.service.get_bootstrap,
                     scope=scope,
                     ongoing_items=ongoing,
                 )
@@ -1401,13 +1403,13 @@ class FastAPIPortalController:
                     session, request.query_params.get("scope") or "ALL"
                 )
                 refresh_result = await asyncio.to_thread(
-                    PortalHandler.request_change_source_refresh
+                    PortalRuntime.request_change_source_refresh
                 )
                 self._clear_read_cache()
                 ongoing = self._get_ongoing(scope)
                 self._reconcile_orphan_started_items(scope, ongoing)
                 data = await asyncio.to_thread(
-                    PortalHandler.service.get_bootstrap,
+                    PortalRuntime.service.get_bootstrap,
                     scope=scope,
                     ongoing_items=ongoing,
                 )
@@ -1423,8 +1425,8 @@ class FastAPIPortalController:
             if session is None:
                 return self._auth_required_response()
             try:
-                data = PortalHandler.auth_manager.filter_handover_links(
-                    PortalHandler.service.get_handover_links(), session
+                data = PortalRuntime.auth_manager.filter_handover_links(
+                    PortalRuntime.service.get_handover_links(), session
                 )
                 return self._json_ok(request, session, data)
             except Exception as exc:
@@ -1436,7 +1438,7 @@ class FastAPIPortalController:
             if admin_response is not None:
                 return admin_response
             try:
-                data = PortalHandler.auth_manager.get_permissions_payload()
+                data = PortalRuntime.auth_manager.get_permissions_payload()
                 return self._json_ok(request, session, data)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=500)
@@ -1447,7 +1449,7 @@ class FastAPIPortalController:
             if session is None:
                 return self._auth_required_response()
             user = session.get("user") if isinstance(session.get("user"), dict) else {}
-            permission_request = PortalHandler.auth_manager.get_current_permission_request(
+            permission_request = PortalRuntime.auth_manager.get_current_permission_request(
                 str(user.get("open_id") or "")
             )
             return self._json_ok(request, session, {"request": permission_request or None})
@@ -1462,6 +1464,7 @@ class FastAPIPortalController:
                 payload = (
                     await self._read_model_request(request, WorkbenchActionRequest)
                 ).to_payload()
+                payload = normalize_notice_identity_payload(payload)
                 scope = self._authorized_scope_or_error(
                     session, payload.get("scope") or "ALL"
                 )
@@ -1471,12 +1474,12 @@ class FastAPIPortalController:
                 payload["_auth_user_name"] = str(
                     user.get("name") or user.get("en_name") or ""
                 )
-                job_id, should_start = PortalHandler.service.create_action_job(payload)
+                job_id, should_start = PortalRuntime.service.create_action_job(payload)
                 if should_start:
-                    PortalHandler.clear_payload_cache()
+                    PortalRuntime.clear_payload_cache()
                     self._clear_read_cache()
-                    PortalHandler.enqueue_initial_message_or_upload_job(job_id)
-                job = PortalHandler.service.get_job(job_id) or {}
+                    PortalRuntime.enqueue_initial_message_or_upload_job(job_id)
+                job = PortalRuntime.service.get_job(job_id) or {}
                 return JSONResponse(
                     {
                         "ok": True,
@@ -1500,6 +1503,7 @@ class FastAPIPortalController:
                 payload = (
                     await self._read_model_request(request, OngoingDeleteRequest)
                 ).to_payload()
+                payload = normalize_notice_identity_payload(payload)
                 scope = self._authorized_scope_or_error(
                     session, payload.get("scope") or "ALL"
                 )
@@ -1509,9 +1513,9 @@ class FastAPIPortalController:
                 payload["_auth_user_name"] = str(
                     user.get("name") or user.get("en_name") or ""
                 )
-                PortalHandler.service.validate_ongoing_delete_item(payload, scope=scope)
+                PortalRuntime.service.validate_ongoing_delete_item(payload, scope=scope)
                 delete_result = await asyncio.to_thread(
-                    PortalHandler.execute_local_delete_active_item,
+                    PortalRuntime.execute_local_delete_active_item,
                     {"data_dict": payload},
                 )
                 if not bool((delete_result or {}).get("ok")):
@@ -1522,27 +1526,27 @@ class FastAPIPortalController:
                         },
                         status_code=500,
                     )
-                data = PortalHandler.service.hide_ongoing_item(
+                data = PortalRuntime.service.hide_ongoing_item(
                     payload,
                     scope=scope,
                     deleted_by=payload["_auth_open_id"],
                 )
                 data.update(
-                    PortalHandler.service.discard_deleted_ongoing_state(
+                    PortalRuntime.service.discard_deleted_ongoing_state(
                         payload, scope=scope
                     )
                 )
-                PortalHandler.clear_payload_cache()
+                PortalRuntime.clear_payload_cache()
                 self._clear_read_cache()
-                event_id = PortalHandler.state_store.enqueue_outbox_event(
+                event_id = PortalRuntime.state_store.enqueue_outbox_event(
                     "qt_action",
                     {
                         "kind": "active_delete",
                         "payload": {
                             "active_item_id": str(payload.get("active_item_id") or ""),
                             "record_id": str(
-                                payload.get("target_record_id")
-                                or payload.get("record_id")
+                                (delete_result or {}).get("record_id")
+                                or payload.get("target_record_id")
                                 or ""
                             ),
                             "source_record_id": str(payload.get("source_record_id") or ""),
@@ -1568,7 +1572,7 @@ class FastAPIPortalController:
                     session, request.query_params.get("scope") or "ALL"
                 )
                 items = await asyncio.to_thread(
-                    PortalHandler.service.list_available_notice_undos,
+                    PortalRuntime.service.list_available_notice_undos,
                     scope=scope,
                     action_type=str(request.query_params.get("action_type") or ""),
                     since_seconds=float(request.query_params.get("since_seconds") or 0),
@@ -1590,7 +1594,7 @@ class FastAPIPortalController:
                     session, payload.get("scope") or "ALL"
                 )
                 user = session.get("user") if isinstance(session.get("user"), dict) else {}
-                job_id = PortalHandler.service.create_notice_undo_job(
+                job_id = PortalRuntime.service.create_notice_undo_job(
                     str(undo_id or ""),
                     scope=scope,
                     auth_open_id=str(user.get("open_id") or ""),
@@ -1602,7 +1606,7 @@ class FastAPIPortalController:
                     name=f"NoticeUndo-{job_id[:8]}",
                     daemon=True,
                 ).start()
-                job = PortalHandler.service.get_job(job_id) or {}
+                job = PortalRuntime.service.get_job(job_id) or {}
                 return JSONResponse(
                     {
                         "ok": True,
@@ -1630,12 +1634,17 @@ class FastAPIPortalController:
                     session, payload.get("scope") or "ALL"
                 )
                 result = await asyncio.to_thread(
-                    PortalHandler.service.lookup_change_target_candidates,
+                    PortalRuntime.service.lookup_change_target_candidates,
                     scope=scope,
                     title=payload.get("title") or "",
                     start_time=payload.get("start_time") or "",
                     end_time=payload.get("end_time") or "",
                     action=payload.get("action") or "update",
+                    content=payload.get("content") or "",
+                    reason=payload.get("reason") or "",
+                    impact=payload.get("impact") or "",
+                    progress=payload.get("progress") or "",
+                    text=payload.get("text") or "",
                 )
                 return self._json_ok(request, session, result)
             except Exception as exc:
@@ -1654,13 +1663,18 @@ class FastAPIPortalController:
                     session, payload.get("scope") or "ALL"
                 )
                 result = await asyncio.to_thread(
-                    PortalHandler.service.lookup_notice_target_candidates,
+                    PortalRuntime.service.lookup_notice_target_candidates,
                     work_type=payload.get("work_type") or "maintenance",
                     scope=scope,
                     title=payload.get("title") or "",
                     start_time=payload.get("start_time") or "",
                     end_time=payload.get("end_time") or "",
                     action=payload.get("action") or "update",
+                    content=payload.get("content") or "",
+                    reason=payload.get("reason") or "",
+                    impact=payload.get("impact") or "",
+                    progress=payload.get("progress") or "",
+                    text=payload.get("text") or "",
                 )
                 return self._json_ok(request, session, result)
             except Exception as exc:
@@ -1679,7 +1693,7 @@ class FastAPIPortalController:
                     session, payload.get("scope") or "ALL"
                 )
                 result = await asyncio.to_thread(
-                    PortalHandler.confirm_change_target_candidate,
+                    PortalRuntime.confirm_change_target_candidate,
                     scope=scope,
                     title=payload.get("title") or "",
                     start_time=payload.get("start_time") or "",
@@ -1700,12 +1714,12 @@ class FastAPIPortalController:
                 payload = (
                     await self._read_model_request(request, HandoverLinksSaveRequest)
                 ).to_payload()
-                data = PortalHandler.service.save_handover_links(
+                data = PortalRuntime.service.save_handover_links(
                     payload.get("links") or {},
                     password=str(payload.get("password") or ""),
                 )
                 self._clear_read_cache()
-                data = PortalHandler.auth_manager.filter_handover_links(data, session)
+                data = PortalRuntime.auth_manager.filter_handover_links(data, session)
                 return self._json_ok(request, session, data)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
@@ -1719,7 +1733,7 @@ class FastAPIPortalController:
                 payload = (
                     await self._read_model_request(request, HandoverLinksAuthRequest)
                 ).to_payload()
-                ok = PortalHandler.service.verify_handover_settings_password(
+                ok = PortalRuntime.service.verify_handover_settings_password(
                     str(payload.get("password") or "")
                 )
                 if not ok:
@@ -1737,7 +1751,7 @@ class FastAPIPortalController:
             if admin_response is not None:
                 return admin_response
             try:
-                data = PortalHandler.service.request_handover_password_reset()
+                data = PortalRuntime.service.request_handover_password_reset()
                 return {"ok": True, "data": data}
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
@@ -1753,7 +1767,7 @@ class FastAPIPortalController:
                         request, HandoverPasswordResetConfirmRequest
                     )
                 ).to_payload()
-                data = PortalHandler.service.reset_handover_password_with_code(
+                data = PortalRuntime.service.reset_handover_password_with_code(
                     reset_id=str(payload.get("reset_id") or ""),
                     code=str(payload.get("code") or ""),
                     new_password=str(payload.get("new_password") or ""),
@@ -1772,14 +1786,14 @@ class FastAPIPortalController:
                     await self._read_model_request(request, PermissionRequestCreate)
                 ).to_payload()
                 user = session.get("user") if isinstance(session.get("user"), dict) else {}
-                data = PortalHandler.auth_manager.create_permission_request(
+                data = PortalRuntime.auth_manager.create_permission_request(
                     open_id=str(user.get("open_id") or ""),
                     name=str(user.get("name") or user.get("en_name") or "飞书用户"),
                     scopes=payload.get("scopes") or [],
                     reason=str(payload.get("reason") or ""),
                 )
                 code = str(data.pop("code") or "")
-                recipients = PortalHandler.auth_manager.admin_open_ids()
+                recipients = PortalRuntime.auth_manager.admin_open_ids()
                 labels = "、".join(data.get("requested_scope_labels") or [])
                 reason = str(data.get("reason") or "").strip() or "未填写"
                 text = (
@@ -1795,15 +1809,15 @@ class FastAPIPortalController:
                 )
                 ok, message, _ = _send_text_to_open_ids_guarded(text, recipients)
                 if not ok:
-                    PortalHandler.auth_manager.mark_permission_request_notify_failed(
+                    PortalRuntime.auth_manager.mark_permission_request_notify_failed(
                         str(data.get("request_id") or "")
                     )
                     raise PortalError(f"通知管理员失败: {message}")
-                activated = PortalHandler.auth_manager.activate_permission_request(
+                activated = PortalRuntime.auth_manager.activate_permission_request(
                     str(data.get("request_id") or "")
                 )
                 data.update(activated)
-                PortalHandler.auth_manager.supersede_other_permission_requests(
+                PortalRuntime.auth_manager.supersede_other_permission_requests(
                     open_id=str(data.get("open_id") or ""),
                     keep_request_id=str(data.get("request_id") or ""),
                 )
@@ -1827,7 +1841,7 @@ class FastAPIPortalController:
                     await self._read_model_request(request, PermissionRequestConfirm)
                 ).to_payload()
                 user = session.get("user") if isinstance(session.get("user"), dict) else {}
-                permissions = PortalHandler.auth_manager.confirm_permission_request(
+                permissions = PortalRuntime.auth_manager.confirm_permission_request(
                     open_id=str(user.get("open_id") or ""),
                     request_id=str(payload.get("request_id") or ""),
                     code=str(payload.get("code") or ""),
@@ -1853,7 +1867,7 @@ class FastAPIPortalController:
                     await self._read_model_request(request, AuthPermissionsSaveRequest)
                 ).to_payload()
                 actor = session.get("user") if isinstance(session.get("user"), dict) else {}
-                data, changed_open_ids = PortalHandler.auth_manager.save_permissions_payload(
+                data, changed_open_ids = PortalRuntime.auth_manager.save_permissions_payload(
                     payload.get("users") or [],
                     updated_by=str(actor.get("open_id") or ""),
                 )
@@ -1896,17 +1910,17 @@ class FastAPIPortalController:
                 scope = self._authorized_scope_or_error(
                     session,
                     payload.get("scope")
-                    or PortalHandler.auth_manager.default_scope(session)
+                    or PortalRuntime.auth_manager.default_scope(session)
                     or "ALL",
                 )
                 drafts = payload.get("drafts") or []
                 await asyncio.to_thread(
-                    PortalHandler.service.assert_generated_drafts_allowed,
+                    PortalRuntime.service.assert_generated_drafts_allowed,
                     drafts,
                     scope=scope,
                 )
                 generated = await asyncio.to_thread(
-                    PortalHandler.service.generate_templates,
+                    PortalRuntime.service.generate_templates,
                     drafts,
                 )
                 return {"ok": True, "data": {"items": generated}}
@@ -1925,18 +1939,18 @@ class FastAPIPortalController:
                 scope = self._authorized_scope_or_error(
                     session,
                     payload.get("scope")
-                    or PortalHandler.auth_manager.default_scope(session)
+                    or PortalRuntime.auth_manager.default_scope(session)
                     or "ALL",
                 )
                 items = payload.get("items") or []
                 await asyncio.to_thread(
-                    PortalHandler.service.assert_generated_items_allowed,
+                    PortalRuntime.service.assert_generated_items_allowed,
                     items,
                     scope=scope,
                 )
-                notice_callback = PortalHandler.notice_callback or self._enqueue_notice_outbox
+                notice_callback = PortalRuntime.notice_callback or self._enqueue_notice_outbox
                 results = await asyncio.to_thread(
-                    PortalHandler.service.send_generated_templates,
+                    PortalRuntime.service.send_generated_templates,
                     items,
                     notice_callback=notice_callback,
                 )
@@ -1958,22 +1972,22 @@ class FastAPIPortalController:
             if deny is not None:
                 return deny
             active_items = []
-            for row in PortalHandler.state_store.list_qt_active_items():
+            for row in PortalRuntime.state_store.list_qt_active_items():
                 payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
                 info = extract_event_info(str(payload.get("text") or "")) or {}
                 payload_status = str(payload.get("status") or "").strip()
                 if payload_status == "结束" or str(info.get("status") or "").strip() == "结束":
-                    PortalHandler.state_store.delete_qt_active_item(
+                    PortalRuntime.state_store.delete_qt_active_item(
                         active_item_id=str(row.get("active_item_id") or ""),
                         record_id=str(row.get("record_id") or ""),
                     )
                     continue
                 active_items.append(row)
-            clipboard_candidates = PortalHandler.state_store.list_clipboard_candidates(
+            clipboard_candidates = PortalRuntime.state_store.list_clipboard_candidates(
                 status="pending",
                 limit=100,
             )
-            dialog_sessions = PortalHandler.state_store.list_dialog_sessions(
+            dialog_sessions = PortalRuntime.state_store.list_dialog_sessions(
                 status="pending",
                 limit=50,
             )
@@ -1984,10 +1998,10 @@ class FastAPIPortalController:
                     "history_items": [],
                     "clipboard_candidates": clipboard_candidates,
                     "dialog_sessions": dialog_sessions,
-                    "runtime_limits": PortalHandler.runtime_limits(),
-                    "runtime_pressure": PortalHandler.runtime_pressure(),
-                    "qt_active_items": PortalHandler.state_store.qt_active_items_stats(),
-                    "qt_bridge": PortalHandler.state_store.get_backend_runtime("qt_bridge") or {},
+                    "runtime_limits": PortalRuntime.runtime_limits(),
+                    "runtime_pressure": PortalRuntime.runtime_pressure(),
+                    "qt_active_items": PortalRuntime.state_store.qt_active_items_stats(),
+                    "qt_bridge": PortalRuntime.state_store.get_backend_runtime("qt_bridge") or {},
                 },
             }
 
@@ -2010,17 +2024,19 @@ class FastAPIPortalController:
                     }
                     command_payload = dict(payload.get("payload") or {})
                     command_payload["action_type"] = action_map[command]
+                    command_payload = normalize_notice_identity_payload(command_payload)
                     data = await asyncio.to_thread(
-                        PortalHandler.execute_local_notice_upload,
+                        PortalRuntime.execute_local_notice_upload,
                         command_payload,
                     )
-                    PortalHandler.clear_payload_cache()
+                    PortalRuntime.clear_payload_cache()
                     self._clear_read_cache()
                     return {"ok": True, "data": data}
                 if command == "delete_active_item":
                     command_payload = dict(payload.get("payload") or {})
+                    command_payload = normalize_notice_identity_payload(command_payload)
                     data = await asyncio.to_thread(
-                        PortalHandler.execute_local_delete_active_item,
+                        PortalRuntime.execute_local_delete_active_item,
                         command_payload,
                     )
                     if not bool((data or {}).get("ok")):
@@ -2033,23 +2049,23 @@ class FastAPIPortalController:
                     scope = str(delete_payload.get("scope") or "ALL").strip() or "ALL"
                     try:
                         data.update(
-                            PortalHandler.service.hide_ongoing_item(
+                            PortalRuntime.service.hide_ongoing_item(
                                 delete_payload,
                                 scope=scope,
                                 deleted_by=str(delete_payload.get("_auth_open_id") or "qt"),
                             )
                         )
                         data.update(
-                            PortalHandler.service.discard_deleted_ongoing_state(
+                            PortalRuntime.service.discard_deleted_ongoing_state(
                                 delete_payload,
                                 scope=scope,
                             )
                         )
                     except Exception as cleanup_exc:
                         data["cleanup_warning"] = str(cleanup_exc)
-                    PortalHandler.clear_payload_cache()
+                    PortalRuntime.clear_payload_cache()
                     self._clear_read_cache()
-                    PortalHandler.state_store.enqueue_outbox_event(
+                    PortalRuntime.state_store.enqueue_outbox_event(
                         "qt_action",
                         {
                             "kind": "active_delete",
@@ -2062,7 +2078,6 @@ class FastAPIPortalController:
                                 "record_id": str(
                                     data.get("record_id")
                                     or delete_payload.get("target_record_id")
-                                    or delete_payload.get("record_id")
                                     or ""
                                 ),
                                 "source_record_id": str(
@@ -2083,7 +2098,7 @@ class FastAPIPortalController:
                             status_code=400,
                         )
                     job_id = await asyncio.to_thread(
-                        PortalHandler.service.create_notice_undo_job,
+                        PortalRuntime.service.create_notice_undo_job,
                         undo_id,
                         scope=str(command_payload.get("scope") or "ALL"),
                         auth_open_id=str(command_payload.get("auth_open_id") or "qt"),
@@ -2095,7 +2110,7 @@ class FastAPIPortalController:
                         name=f"ClipFlowUndoJob-{job_id[:8]}",
                         daemon=True,
                     ).start()
-                    job = PortalHandler.service.get_job(job_id) or {}
+                    job = PortalRuntime.service.get_job(job_id) or {}
                     return {
                         "ok": True,
                         "data": {
@@ -2107,7 +2122,7 @@ class FastAPIPortalController:
                 if command == "list_notice_undos":
                     command_payload = dict(payload.get("payload") or {})
                     items = await asyncio.to_thread(
-                        PortalHandler.service.list_available_notice_undos,
+                        PortalRuntime.service.list_available_notice_undos,
                         scope=str(command_payload.get("scope") or "ALL").strip() or "ALL",
                         action_type=str(command_payload.get("action_type") or ""),
                         since_seconds=float(command_payload.get("since_seconds") or 0),
@@ -2116,12 +2131,65 @@ class FastAPIPortalController:
                 if command == "set_today_in_progress":
                     command_payload = dict(payload.get("payload") or {})
                     data = await asyncio.to_thread(
-                        PortalHandler.execute_local_today_progress_update,
+                        PortalRuntime.execute_local_today_progress_update,
                         command_payload,
                     )
-                    PortalHandler.clear_payload_cache()
+                    PortalRuntime.clear_payload_cache()
                     self._clear_read_cache()
                     return {"ok": True, "data": data}
+                if command == "validate_record_id":
+                    command_payload = dict(payload.get("payload") or {})
+                    record_id = str(command_payload.get("record_id") or "").strip()
+                    notice_type = str(command_payload.get("notice_type") or "").strip()
+                    if not record_id:
+                        return {
+                            "ok": True,
+                            "data": {"ok": False, "message": "缺少 record_id。"},
+                        }
+                    if not notice_type:
+                        return {
+                            "ok": True,
+                            "data": {"ok": False, "message": "缺少通告类型。"},
+                        }
+                    ok, result = await asyncio.to_thread(
+                        query_record_by_id,
+                        record_id,
+                        notice_type,
+                    )
+                    return {
+                        "ok": True,
+                        "data": {
+                            "ok": bool(ok),
+                            "message": "" if ok else str(result or "未找到对应记录。"),
+                        },
+                    }
+                if command == "query_record_by_id":
+                    command_payload = dict(payload.get("payload") or {})
+                    record_id = str(command_payload.get("record_id") or "").strip()
+                    notice_type = str(command_payload.get("notice_type") or "").strip()
+                    if not record_id:
+                        return {
+                            "ok": True,
+                            "data": {"ok": False, "message": "缺少 record_id。"},
+                        }
+                    if not notice_type:
+                        return {
+                            "ok": True,
+                            "data": {"ok": False, "message": "缺少通告类型。"},
+                        }
+                    ok, result = await asyncio.to_thread(
+                        query_record_by_id,
+                        record_id,
+                        notice_type,
+                    )
+                    return {
+                        "ok": True,
+                        "data": {
+                            "ok": bool(ok),
+                            "record": result if ok and isinstance(result, dict) else {},
+                            "message": "" if ok else str(result or "查询记录失败。"),
+                        },
+                    }
                 return JSONResponse(
                     {"ok": False, "error": f"不支持的 Qt command: {command or '-'}"},
                     status_code=400,
@@ -2140,7 +2208,7 @@ class FastAPIPortalController:
             session_id = str(payload.get("session_id") or "").strip()
             if not session_id:
                 return JSONResponse({"ok": False, "error": "缺少 session_id"}, status_code=400)
-            updated = PortalHandler.state_store.mark_dialog_session(
+            updated = PortalRuntime.state_store.mark_dialog_session(
                 session_id,
                 str(payload.get("status") or "completed"),
                 payload={"result": payload.get("result")},
@@ -2169,7 +2237,7 @@ class FastAPIPortalController:
                 "created_at": time.time(),
                 "payload": payload.get("payload") if isinstance(payload.get("payload"), dict) else {},
             }
-            PortalHandler.state_store.upsert_dialog_session(
+            PortalRuntime.state_store.upsert_dialog_session(
                 session_id,
                 session_type=dialog_type,
                 payload=stored_payload,
@@ -2187,7 +2255,7 @@ class FastAPIPortalController:
             ).to_payload()
             ok = bool(payload.get("ok", True))
             status = "done" if ok else str(payload.get("status") or "failed")
-            updated = PortalHandler.state_store.mark_clipboard_candidate(
+            updated = PortalRuntime.state_store.mark_clipboard_candidate(
                 candidate_id,
                 status,
                 payload={"ack": payload},
@@ -2201,7 +2269,7 @@ class FastAPIPortalController:
             deny = self._local_only_response(request)
             if deny is not None:
                 return deny
-            items = PortalHandler.state_store.lease_outbox_events(
+            items = PortalRuntime.state_store.lease_outbox_events(
                 "qt_action",
                 limit=max(1, min(int(limit or 1), 5)),
                 lease_seconds=30,
@@ -2229,7 +2297,7 @@ class FastAPIPortalController:
             ).to_payload()
             ok = bool((payload or {}).get("ok", True))
             error = str((payload or {}).get("error") or "")
-            event = PortalHandler.state_store.mark_outbox_event(
+            event = PortalRuntime.state_store.mark_outbox_event(
                 event_id,
                 "done" if ok else "pending",
                 error=error,
@@ -2242,14 +2310,14 @@ class FastAPIPortalController:
             job_id = str(event_payload.get("job_id") or "").strip()
             if job_id:
                 if event_status == "failed":
-                    PortalHandler.service.mark_job(
+                    PortalRuntime.service.mark_job(
                         job_id,
                         phase="failed",
                         error=error or "Qt 事件连续执行失败。",
                         qt_event_attempts=int((event or {}).get("attempts") or 0),
                     )
                 elif not ok:
-                    PortalHandler.service.mark_job(
+                    PortalRuntime.service.mark_job(
                         job_id,
                         phase="qt_queued",
                         qt_phase="outbox_retry",
@@ -2261,19 +2329,19 @@ class FastAPIPortalController:
                 delete_payload = delete_payload if isinstance(delete_payload, dict) else {}
                 try:
                     scope = str(delete_payload.get("scope") or "ALL")
-                    data = PortalHandler.service.hide_ongoing_item(
+                    data = PortalRuntime.service.hide_ongoing_item(
                         delete_payload,
                         scope=scope,
                         deleted_by=str(delete_payload.get("_auth_open_id") or ""),
                     )
                     data.update(
-                        PortalHandler.service.discard_deleted_ongoing_state(
+                        PortalRuntime.service.discard_deleted_ongoing_state(
                             delete_payload, scope=scope
                         )
                     )
-                    PortalHandler.clear_payload_cache()
+                    PortalRuntime.clear_payload_cache()
                 except Exception as exc:
-                    PortalHandler.state_store.mark_outbox_event(
+                    PortalRuntime.state_store.mark_outbox_event(
                         event_id,
                         "pending",
                         error=f"Qt 已处理删除，但本地状态清理失败: {exc}",
@@ -2285,7 +2353,7 @@ class FastAPIPortalController:
                 candidate_id = str(candidate_payload.get("candidate_id") or "").strip()
                 if candidate_id:
                     try:
-                        PortalHandler.state_store.mark_clipboard_candidate(
+                        PortalRuntime.state_store.mark_clipboard_candidate(
                             candidate_id,
                             "done" if ok and event_status == "done" else "pending",
                             payload={
@@ -2303,7 +2371,7 @@ class FastAPIPortalController:
                 session_id = str(dialog_payload.get("session_id") or "").strip()
                 if session_id and ok and event_status == "done":
                     try:
-                        PortalHandler.state_store.mark_dialog_session(
+                        PortalRuntime.state_store.mark_dialog_session(
                             session_id,
                             "delivered",
                             payload={"event_id": event_id},
@@ -2328,10 +2396,10 @@ class FastAPIPortalController:
                 await self._read_model_request(request, QtOngoingSnapshotRequest)
             ).to_payload()
             items = payload.get("items") if isinstance(payload, dict) else []
-            result = PortalHandler.state_store.replace_ongoing_items(
+            result = PortalRuntime.state_store.replace_ongoing_items(
                 items if isinstance(items, list) else []
             )
-            PortalHandler.clear_payload_cache()
+            PortalRuntime.clear_payload_cache()
             return {"ok": True, "data": result}
 
         @app.post("/api/qt/active-items/delta")
@@ -2360,7 +2428,7 @@ class FastAPIPortalController:
                     sort_order = int(entry.get("sort_order") or 0)
                 except Exception:
                     sort_order = 0
-                if PortalHandler.state_store.upsert_qt_active_item(
+                if PortalRuntime.state_store.upsert_qt_active_item(
                     data,
                     section=section,
                     sort_order=sort_order,
@@ -2374,20 +2442,20 @@ class FastAPIPortalController:
                 else:
                     active_item_id = str(entry or "").strip()
                     record_id = ""
-                if PortalHandler.state_store.delete_qt_active_item(
+                if PortalRuntime.state_store.delete_qt_active_item(
                     active_item_id=active_item_id,
                     record_id=record_id,
                 ):
                     deleted += 1
             if upserted or deleted:
-                PortalHandler.clear_payload_cache()
+                PortalRuntime.clear_payload_cache()
                 self._clear_read_cache()
             return {
                 "ok": True,
                 "data": {
                     "upserted": upserted,
                     "deleted": deleted,
-                    "qt_active_items": PortalHandler.state_store.qt_active_items_stats(),
+                    "qt_active_items": PortalRuntime.state_store.qt_active_items_stats(),
                 },
             }
 
@@ -2400,7 +2468,7 @@ class FastAPIPortalController:
                 await self._read_model_request(request, QtLocalHeartbeatRequest)
             ).to_payload()
             payload["heartbeat_at"] = time.time()
-            PortalHandler.state_store.put_backend_runtime("qt_bridge", payload)
+            PortalRuntime.state_store.put_backend_runtime("qt_bridge", payload)
             return {"ok": True, "data": {"heartbeat_at": payload["heartbeat_at"]}}
 
         @app.post("/api/qt/local/heartbeat")
@@ -2412,7 +2480,7 @@ class FastAPIPortalController:
                 await self._read_model_request(request, QtLocalHeartbeatRequest)
             ).to_payload()
             payload["heartbeat_at"] = time.time()
-            PortalHandler.state_store.put_backend_runtime("qt_local_shell", payload)
+            PortalRuntime.state_store.put_backend_runtime("qt_local_shell", payload)
             return {"ok": True, "data": {"heartbeat_at": payload["heartbeat_at"]}}
 
         @app.post("/api/qt/local/clipboard-event")
@@ -2432,7 +2500,7 @@ class FastAPIPortalController:
                 "source": str(payload.get("source") or "clipboard"),
                 "target_record_id": str(payload.get("target_record_id") or "").strip(),
             }
-            event_id = PortalHandler.state_store.append_event(
+            event_id = PortalRuntime.state_store.append_event(
                 "clipboard",
                 event_payload,
             )
@@ -2452,7 +2520,7 @@ class FastAPIPortalController:
                 }
             candidate_id = str(entry.get("entry_id") or "").strip()
             entry["target_record_id"] = event_payload["target_record_id"]
-            PortalHandler.state_store.upsert_clipboard_candidate(
+            PortalRuntime.state_store.upsert_clipboard_candidate(
                 candidate_id,
                 content=content,
                 payload={**event_payload, "entry": entry},
@@ -2462,19 +2530,19 @@ class FastAPIPortalController:
             try:
                 projection = self._project_clipboard_entry_to_active(entry)
             except Exception as exc:
-                PortalHandler.state_store.mark_clipboard_candidate(
+                PortalRuntime.state_store.mark_clipboard_candidate(
                     candidate_id,
                     "pending",
                     payload={"error": str(exc), "entry": entry},
                 )
                 raise
-            PortalHandler.state_store.mark_clipboard_candidate(
+            PortalRuntime.state_store.mark_clipboard_candidate(
                 candidate_id,
                 "done" if projection.get("ok") else "pending",
                 payload={"projection": projection, "entry": entry},
             )
             if projection.get("ok") and not projection.get("ignored"):
-                PortalHandler.clear_payload_cache()
+                PortalRuntime.clear_payload_cache()
                 self._clear_read_cache()
             return {
                 "ok": True,
@@ -2490,7 +2558,7 @@ class FastAPIPortalController:
             deny = self._local_only_response(request)
             if deny is not None:
                 return deny
-            job = PortalHandler.service.get_job(job_id)
+            job = PortalRuntime.service.get_job(job_id)
             if not job:
                 return JSONResponse({"ok": False, "error": "任务不存在"}, status_code=404)
             return {"ok": True, "data": job}
@@ -2538,10 +2606,10 @@ class FastAPIPortalController:
             ).to_payload()
             try:
                 data = await asyncio.to_thread(
-                    PortalHandler.execute_local_notice_upload,
+                    PortalRuntime.execute_local_notice_upload,
                     payload,
                 )
-                PortalHandler.clear_payload_cache()
+                PortalRuntime.clear_payload_cache()
                 self._clear_read_cache()
                 return {"ok": True, "data": data}
             except Exception as exc:
@@ -2568,48 +2636,48 @@ class FastAPIPortalController:
         return app
 
     def _initialize_portal_handler_state(self) -> None:
-        PortalHandler.service = MaintenancePortalService(
+        PortalRuntime.service = MaintenancePortalService(
             app_token=self.app_token,
             table_id=self.table_id,
         )
         try:
-            PortalHandler.service.ensure_snapshot_loaded()
+            PortalRuntime.service.ensure_snapshot_loaded()
         except Exception:
             pass
-        PortalHandler.auth_manager = PortalAuthManager()
-        PortalHandler.state_store = LanPortalStateStore()
-        PortalHandler.apply_runtime_settings()
-        self._state_store = PortalHandler.state_store
+        PortalRuntime.auth_manager = PortalAuthManager()
+        PortalRuntime.state_store = LanPortalStateStore()
+        PortalRuntime.apply_runtime_settings()
+        self._state_store = PortalRuntime.state_store
         try:
-            PortalHandler.state_store.reset_runtime_queue_incomplete()
+            PortalRuntime.state_store.reset_runtime_queue_incomplete()
         except Exception as exc:
             log_warning(f"运行队列状态重置失败: {exc}")
-        PortalHandler.notice_callback = self.notice_callback
-        PortalHandler.ongoing_callback = self.ongoing_callback
-        PortalHandler.ongoing_delete_callback = self.ongoing_delete_callback
-        PortalHandler.maintenance_action_callback = self.maintenance_action_callback
-        with PortalHandler.source_refresh_lock:
-            PortalHandler.source_refresh_inflight = False
-            PortalHandler.source_refresh_last_result = {}
-            PortalHandler.source_refresh_last_finished = 0.0
-        with PortalHandler.repair_refresh_lock:
-            PortalHandler.repair_refresh_inflight = False
-            PortalHandler.repair_refresh_event = threading.Event()
-            PortalHandler.repair_refresh_last_result = {}
-            PortalHandler.repair_refresh_last_error = ""
-            PortalHandler.repair_refresh_last_finished = 0.0
-        with PortalHandler.action_queue_lock:
-            PortalHandler.action_queue.clear()
-            PortalHandler.action_worker_stop = False
-            PortalHandler.action_queue_event.clear()
-        with PortalHandler.upload_wait_lock:
-            PortalHandler.upload_wait_jobs.clear()
-            PortalHandler.upload_wait_stop = False
-            PortalHandler.upload_wait_event.clear()
-        with PortalHandler.message_queue_lock:
-            PortalHandler.message_queue.clear()
-            PortalHandler.message_worker_stop = False
-            PortalHandler.message_queue_event.clear()
+        PortalRuntime.notice_callback = self.notice_callback
+        PortalRuntime.ongoing_callback = self.ongoing_callback
+        PortalRuntime.ongoing_delete_callback = self.ongoing_delete_callback
+        PortalRuntime.maintenance_action_callback = self.maintenance_action_callback
+        with PortalRuntime.source_refresh_lock:
+            PortalRuntime.source_refresh_inflight = False
+            PortalRuntime.source_refresh_last_result = {}
+            PortalRuntime.source_refresh_last_finished = 0.0
+        with PortalRuntime.repair_refresh_lock:
+            PortalRuntime.repair_refresh_inflight = False
+            PortalRuntime.repair_refresh_event = threading.Event()
+            PortalRuntime.repair_refresh_last_result = {}
+            PortalRuntime.repair_refresh_last_error = ""
+            PortalRuntime.repair_refresh_last_finished = 0.0
+        with PortalRuntime.action_queue_lock:
+            PortalRuntime.action_queue.clear()
+            PortalRuntime.action_worker_stop = False
+            PortalRuntime.action_queue_event.clear()
+        with PortalRuntime.upload_wait_lock:
+            PortalRuntime.upload_wait_jobs.clear()
+            PortalRuntime.upload_wait_stop = False
+            PortalRuntime.upload_wait_event.clear()
+        with PortalRuntime.message_queue_lock:
+            PortalRuntime.message_queue.clear()
+            PortalRuntime.message_worker_stop = False
+            PortalRuntime.message_queue_event.clear()
 
     @staticmethod
     def _qt_bridge_callback_ready(callback_key: str) -> bool:
@@ -2617,7 +2685,7 @@ class FastAPIPortalController:
         if not callback_key:
             return False
         try:
-            payload = PortalHandler.state_store.get_backend_runtime("qt_bridge") or {}
+            payload = PortalRuntime.state_store.get_backend_runtime("qt_bridge") or {}
             payload = payload if isinstance(payload, dict) else {}
             heartbeat_at = float(payload.get("heartbeat_at") or 0.0)
             if not heartbeat_at or time.time() - heartbeat_at > 20.0:
@@ -2630,13 +2698,13 @@ class FastAPIPortalController:
 
     @staticmethod
     def _scoped_ongoing_signature(scope: str, items: list[dict]) -> tuple[str, int]:
-        normalized_scope = PortalHandler.service._normalize_scope(scope)
+        normalized_scope = PortalRuntime.service._normalize_scope(scope)
         compact: list[dict[str, str]] = []
         for item in items or []:
             if not isinstance(item, dict):
                 continue
             try:
-                if not PortalHandler.service._scope_matches_item(normalized_scope, item):
+                if not PortalRuntime.service._scope_matches_item(normalized_scope, item):
                     continue
             except Exception:
                 continue
@@ -2692,7 +2760,7 @@ class FastAPIPortalController:
         )
 
     def _current_session(self, request: Request) -> dict | None:
-        return PortalHandler.auth_manager.get_session(
+        return PortalRuntime.auth_manager.get_session(
             str(request.cookies.get(AUTH_COOKIE_NAME) or "")
         )
 
@@ -3080,7 +3148,7 @@ class FastAPIPortalController:
             return Response(status_code=302, headers={"Location": sanitized})
         redirect_uri = f"{self._request_base_url(request)}/api/auth/feishu/callback"
         try:
-            session_id, next_path = PortalHandler.auth_manager.complete_login(
+            session_id, next_path = PortalRuntime.auth_manager.complete_login(
                 code=code,
                 state=state,
                 redirect_uri=redirect_uri,
@@ -3092,7 +3160,7 @@ class FastAPIPortalController:
             status_code=302,
             headers={
                 "Location": next_path or sanitized,
-                "Set-Cookie": PortalHandler.auth_manager.cookie_header(session_id),
+                "Set-Cookie": PortalRuntime.auth_manager.cookie_header(session_id),
             },
         )
 
@@ -3100,7 +3168,7 @@ class FastAPIPortalController:
         session = self._current_session(request)
         if session is None:
             return self._auth_required_response(), {}
-        if not PortalHandler.auth_manager.is_admin(session):
+        if not PortalRuntime.auth_manager.is_admin(session):
             return (
                 JSONResponse(
                     {"ok": False, "error": "只有管理员可以执行该操作。"},
@@ -3111,11 +3179,11 @@ class FastAPIPortalController:
         return None, session
 
     def _request_base_url(self, request: Request) -> str:
-        host = PortalHandler._safe_host_value(
+        host = PortalRuntime._safe_host_value(
             str(request.headers.get("host") or ""),
             self.get_url().replace("http://", "", 1),
         )
-        proto = PortalHandler._safe_proto_value(
+        proto = PortalRuntime._safe_proto_value(
             str(request.headers.get("x-forwarded-proto") or request.url.scheme or "http")
         )
         return f"{proto}://{host}"
@@ -3132,20 +3200,20 @@ class FastAPIPortalController:
         if not isinstance(payload, dict):
             return payload
         result = dict(payload)
-        result["auth"] = PortalHandler.auth_manager.public_status(
+        result["auth"] = PortalRuntime.auth_manager.public_status(
             session,
             next_path=self._request_target(request),
             redirect_uri=f"{self._request_base_url(request)}/api/auth/feishu/callback",
         )
         scope_options = result.get("scope_options")
         if isinstance(scope_options, list):
-            result["scope_options"] = PortalHandler.auth_manager.filter_scope_options(
+            result["scope_options"] = PortalRuntime.auth_manager.filter_scope_options(
                 scope_options, session
             )
         return result
 
     def _json_ok(self, request: Request, session: dict, payload: dict):
-        data = PortalHandler._with_runtime_warnings(payload if isinstance(payload, dict) else {})
+        data = PortalRuntime._with_runtime_warnings(payload if isinstance(payload, dict) else {})
         return {
             "ok": True,
             "data": self._with_auth_context(data, session, request),
@@ -3188,10 +3256,10 @@ class FastAPIPortalController:
 
     @staticmethod
     def _authorized_scope_or_error(session: dict, scope: str) -> str:
-        normalized = PortalHandler.auth_manager.normalize_scope(scope)
-        if not PortalHandler.auth_manager.scope_allowed(session, normalized):
+        normalized = PortalRuntime.auth_manager.normalize_scope(scope)
+        if not PortalRuntime.auth_manager.scope_allowed(session, normalized):
             raise PortalError(
-                f"当前飞书账号无权访问 {PortalHandler.auth_manager.scope_label(normalized)}。"
+                f"当前飞书账号无权访问 {PortalRuntime.auth_manager.scope_label(normalized)}。"
             )
         return normalized
 
@@ -3200,9 +3268,9 @@ class FastAPIPortalController:
         class _CacheAdapter:
             @property
             def service(self):
-                return PortalHandler.service
+                return PortalRuntime.service
 
-        return PortalHandler._cached_service_payload(_CacheAdapter(), key_parts, builder)
+        return PortalRuntime._cached_service_payload(_CacheAdapter(), key_parts, builder)
 
     @staticmethod
     def _get_ongoing(scope: str) -> list[dict]:
@@ -3216,7 +3284,7 @@ class FastAPIPortalController:
             return "|".join(
                 [
                     str(item.get("active_item_id") or "").strip(),
-                    str(item.get("target_record_id") or item.get("record_id") or "").strip(),
+                    str(item.get("target_record_id") or "").strip(),
                     str(item.get("source_record_id") or "").strip(),
                     str(item.get("title") or "").strip(),
                 ]
@@ -3226,8 +3294,6 @@ class FastAPIPortalController:
             active_item_id = str(item.get("active_item_id") or "").strip()
             record_id = str(
                 item.get("target_record_id")
-                or item.get("record_id")
-                or item.get("raw_record_id")
                 or ""
             ).strip()
             return bool(
@@ -3252,7 +3318,7 @@ class FastAPIPortalController:
                 return
             if _item_deleted_in_qt_store(item):
                 return
-            if not PortalHandler.service._scope_matches_item(scope, item):
+            if not PortalRuntime.service._scope_matches_item(scope, item):
                 return
             key = _key(item)
             if key in seen:
@@ -3261,7 +3327,7 @@ class FastAPIPortalController:
             merged.append(dict(item))
 
         try:
-            active_rows = PortalHandler.state_store.list_qt_active_items(
+            active_rows = PortalRuntime.state_store.list_qt_active_items(
                 include_deleted=True
             )
             for active_item in active_rows:
@@ -3277,21 +3343,21 @@ class FastAPIPortalController:
                     deleted_record_ids.add(record_id)
         except Exception as exc:
             warning = f"SQLite Qt 活动删除状态读取失败: {exc}"
-            if not PortalHandler.last_ongoing_error:
-                PortalHandler.last_ongoing_error = warning
+            if not PortalRuntime.last_ongoing_error:
+                PortalRuntime.last_ongoing_error = warning
             log_warning(warning)
 
         try:
-            snapshot = PortalHandler.state_store.get_ongoing_snapshot()
+            snapshot = PortalRuntime.state_store.get_ongoing_snapshot()
             if snapshot.get("exists"):
-                PortalHandler.last_ongoing_error = ""
+                PortalRuntime.last_ongoing_error = ""
                 for item in snapshot.get("items", []):
                     _append(item)
         except Exception as exc:
-            PortalHandler.last_ongoing_error = f"SQLite 进行中状态读取失败: {exc}"
-            log_warning(PortalHandler.last_ongoing_error)
+            PortalRuntime.last_ongoing_error = f"SQLite 进行中状态读取失败: {exc}"
+            log_warning(PortalRuntime.last_ongoing_error)
         try:
-            for active_item in active_rows or PortalHandler.state_store.list_qt_active_items():
+            for active_item in active_rows or PortalRuntime.state_store.list_qt_active_items():
                 if active_item.get("deleted_at") is not None:
                     continue
                 payload = (
@@ -3308,8 +3374,9 @@ class FastAPIPortalController:
                     continue
                 item = dict(payload)
                 item.setdefault("active_item_id", active_item.get("active_item_id"))
-                item.setdefault("record_id", active_item.get("record_id"))
                 item.setdefault("target_record_id", active_item.get("record_id"))
+                if not str(item.get("record_id") or "").strip():
+                    item["record_id"] = str(active_item.get("record_id") or "")
                 item.setdefault("notice_type", active_item.get("notice_type"))
                 item.setdefault("origin", active_item.get("origin"))
                 if not item.get("title") and info.get("title"):
@@ -3322,6 +3389,30 @@ class FastAPIPortalController:
                         item["work_type"] = "change"
                     elif notice_type == "设备检修":
                         item["work_type"] = "repair"
+                try:
+                    identity = PortalRuntime.state_store.resolve_notice_identity(
+                        work_type=str(item.get("work_type") or ""),
+                        active_item_id=str(item.get("active_item_id") or ""),
+                        source_record_id=str(item.get("source_record_id") or ""),
+                        target_record_id=str(item.get("target_record_id") or ""),
+                    )
+                except Exception:
+                    identity = None
+                if isinstance(identity, dict):
+                    target_record_id = str(identity.get("target_record_id") or "").strip()
+                    source_record_id = str(identity.get("source_record_id") or "").strip()
+                    if target_record_id:
+                        item["target_record_id"] = target_record_id
+                        item["feishu_record_id"] = target_record_id
+                        if not str(item.get("record_id") or "").strip():
+                            item["record_id"] = target_record_id
+                    if source_record_id and not str(item.get("source_record_id") or "").strip():
+                        item["source_record_id"] = source_record_id
+                    item["binding_status"] = "bound" if target_record_id else "needs_binding"
+                elif str(item.get("target_record_id") or "").strip():
+                    item["binding_status"] = "bound"
+                else:
+                    item["binding_status"] = "needs_binding"
                 if not isinstance(item.get("building_codes"), list):
                     building_text = " ".join(
                         str(value or "")
@@ -3333,13 +3424,13 @@ class FastAPIPortalController:
                         )
                     )
                     item["building_codes"] = (
-                        PortalHandler.service._building_codes_from_value(building_text)
+                        PortalRuntime.service._building_codes_from_value(building_text)
                     )
                 _append(item)
         except Exception as exc:
             warning = f"SQLite Qt 活动条目合并失败: {exc}"
-            if not PortalHandler.last_ongoing_error:
-                PortalHandler.last_ongoing_error = warning
+            if not PortalRuntime.last_ongoing_error:
+                PortalRuntime.last_ongoing_error = warning
             log_warning(warning)
         return merged
 
@@ -3347,34 +3438,34 @@ class FastAPIPortalController:
     def _reconcile_orphan_started_items(
         scope: str, ongoing: list[dict] | None, *, force: bool = False
     ) -> None:
-        scope = PortalHandler.auth_manager.normalize_scope(scope)
+        scope = PortalRuntime.auth_manager.normalize_scope(scope)
         now = time.monotonic()
-        with PortalHandler.orphan_reconcile_lock:
-            if scope in PortalHandler.orphan_reconcile_pending:
+        with PortalRuntime.orphan_reconcile_lock:
+            if scope in PortalRuntime.orphan_reconcile_pending:
                 return
-            last = float(PortalHandler.orphan_reconcile_last.get(scope) or 0)
-            if not force and now - last < PortalHandler.orphan_reconcile_interval_s:
+            last = float(PortalRuntime.orphan_reconcile_last.get(scope) or 0)
+            if not force and now - last < PortalRuntime.orphan_reconcile_interval_s:
                 return
-            PortalHandler.orphan_reconcile_pending.add(scope)
-            PortalHandler.orphan_reconcile_last[scope] = now
+            PortalRuntime.orphan_reconcile_pending.add(scope)
+            PortalRuntime.orphan_reconcile_last[scope] = now
         ongoing_copy = [
             dict(item) for item in (ongoing or []) if isinstance(item, dict)
         ]
 
         def _worker() -> None:
             try:
-                result = PortalHandler.service.reconcile_orphan_started_items(
+                result = PortalRuntime.service.reconcile_orphan_started_items(
                     scope=scope, ongoing_items=ongoing_copy
                 )
                 if int((result or {}).get("removed") or 0) > 0:
-                    PortalHandler.clear_payload_cache()
+                    PortalRuntime.clear_payload_cache()
             except Exception as exc:
                 warning = f"本地已开始状态清理失败: {exc}"
-                if warning not in PortalHandler.service._load_warnings:
-                    PortalHandler.service._load_warnings.append(warning)
+                if warning not in PortalRuntime.service._load_warnings:
+                    PortalRuntime.service._load_warnings.append(warning)
             finally:
-                with PortalHandler.orphan_reconcile_lock:
-                    PortalHandler.orphan_reconcile_pending.discard(scope)
+                with PortalRuntime.orphan_reconcile_lock:
+                    PortalRuntime.orphan_reconcile_pending.discard(scope)
 
         try:
             threading.Thread(
@@ -3383,15 +3474,15 @@ class FastAPIPortalController:
                 daemon=True,
             ).start()
         except Exception as exc:
-            with PortalHandler.orphan_reconcile_lock:
-                PortalHandler.orphan_reconcile_pending.discard(scope)
+            with PortalRuntime.orphan_reconcile_lock:
+                PortalRuntime.orphan_reconcile_pending.discard(scope)
             warning = f"本地已开始状态清理启动失败: {exc}"
-            if warning not in PortalHandler.service._load_warnings:
-                PortalHandler.service._load_warnings.append(warning)
+            if warning not in PortalRuntime.service._load_warnings:
+                PortalRuntime.service._load_warnings.append(warning)
 
     @staticmethod
     def _job_visible_to_session(job: dict, session: dict) -> bool:
-        if PortalHandler.auth_manager.is_admin(session):
+        if PortalRuntime.auth_manager.is_admin(session):
             return True
         open_id = str((session.get("user") or {}).get("open_id") or "")
         request_payload = job.get("request") if isinstance(job.get("request"), dict) else {}
@@ -3399,7 +3490,7 @@ class FastAPIPortalController:
 
     def _write_runtime_heartbeat(self) -> None:
         try:
-            if not PortalHandler.state_store.put_backend_runtime_async(
+            if not PortalRuntime.state_store.put_backend_runtime_async(
                 "backend",
                 {
                     "backend": "fastapi",
@@ -3408,7 +3499,7 @@ class FastAPIPortalController:
                     "heartbeat_at": time.time(),
                 },
             ):
-                PortalHandler.state_store.put_backend_runtime(
+                PortalRuntime.state_store.put_backend_runtime(
                     "backend",
                     {
                         "backend": "fastapi",
@@ -3422,7 +3513,7 @@ class FastAPIPortalController:
 
     @staticmethod
     def _enqueue_notice_outbox(payload: dict) -> dict:
-        event_id = PortalHandler.state_store.enqueue_outbox_event(
+        event_id = PortalRuntime.state_store.enqueue_outbox_event(
             "qt_action",
             {
                 "kind": "notice",
@@ -3471,7 +3562,7 @@ class FastAPIPortalController:
         target_record_id = str(entry.get("target_record_id") or "").strip()
         if not notice_type or not (unique_key or title):
             return None
-        for item in PortalHandler.state_store.list_qt_active_items():
+        for item in PortalRuntime.state_store.list_qt_active_items():
             payload = item.get("payload") if isinstance(item, dict) else {}
             payload = payload if isinstance(payload, dict) else {}
             if str(payload.get("notice_type") or item.get("notice_type") or "").strip() != notice_type:
@@ -3517,7 +3608,7 @@ class FastAPIPortalController:
             is_placeholder = not bool(str(data.get("record_id") or "").strip())
         building_codes = data.get("building_codes")
         if not isinstance(building_codes, list):
-            building_codes = PortalHandler.service._building_codes_from_value(
+            building_codes = PortalRuntime.service._building_codes_from_value(
                 " ".join(
                     str(value or "")
                     for value in (
@@ -3567,13 +3658,13 @@ class FastAPIPortalController:
             "origin": "clipboard",
             "payload": data,
         }
-        PortalHandler.state_store.upsert_qt_active_item(
+        PortalRuntime.state_store.upsert_qt_active_item(
             data,
             section=section,
             sort_order=0,
             origin="clipboard",
         )
-        event_id = PortalHandler.state_store.enqueue_outbox_event(
+        event_id = PortalRuntime.state_store.enqueue_outbox_event(
             "qt_action",
             {
                 "kind": "active_upsert",
@@ -3594,7 +3685,7 @@ class FastAPIPortalController:
     def _ensure_source_snapshot_background(self) -> None:
         """Kick off one background source refresh when the local SQLite snapshot is empty."""
         try:
-            result = PortalHandler.ensure_source_snapshot_refresh_started()
+            result = PortalRuntime.ensure_source_snapshot_refresh_started()
         except Exception as exc:
             log_warning(f"源表快照缺失，后台刷新触发失败: {exc}")
             return
@@ -3604,14 +3695,14 @@ class FastAPIPortalController:
     def _run_scheduled_source_refresh(self) -> None:
         if _mock_external_enabled():
             return
-        has_snapshot = PortalHandler.source_snapshot_ready("ALL")
-        result = PortalHandler.refresh_sources_once(
+        has_snapshot = PortalRuntime.source_snapshot_ready("ALL")
+        result = PortalRuntime.refresh_sources_once(
             force=not has_snapshot,
             min_interval_seconds=30 * 60,
             defer_if_busy=has_snapshot,
         )
         if result.get("source_refresh_deferred"):
-            if not PortalHandler.state_store.put_backend_runtime_async(
+            if not PortalRuntime.state_store.put_backend_runtime_async(
                 "source_refresh_deferred",
                 {
                     "deferred_at": time.time(),
@@ -3619,7 +3710,7 @@ class FastAPIPortalController:
                     "runtime_pressure": result.get("runtime_pressure") or {},
                 },
             ):
-                PortalHandler.state_store.put_backend_runtime(
+                PortalRuntime.state_store.put_backend_runtime(
                     "source_refresh_deferred",
                     {
                         "deferred_at": time.time(),
@@ -3635,22 +3726,22 @@ class FastAPIPortalController:
 
     def _run_scheduled_job_cleanup(self) -> None:
         try:
-            cleanup = PortalHandler.service.cleanup_action_jobs()
-            queue_removed = PortalHandler.state_store.cleanup_runtime_queue_items(
+            cleanup = PortalRuntime.service.cleanup_action_jobs()
+            queue_removed = PortalRuntime.state_store.cleanup_runtime_queue_items(
                 retention_seconds=3 * 24 * 3600,
                 max_delete=500,
             )
-            outbox_removed = PortalHandler.state_store.cleanup_outbox_events(
+            outbox_removed = PortalRuntime.state_store.cleanup_outbox_events(
                 done_retention_seconds=24 * 3600,
                 failed_retention_seconds=7 * 24 * 3600,
                 max_delete=1000,
             )
-            append_events_removed = PortalHandler.state_store.cleanup_append_events(
+            append_events_removed = PortalRuntime.state_store.cleanup_append_events(
                 retention_seconds=3 * 24 * 3600,
                 keep_latest=5000,
                 max_delete=2000,
             )
-            undo_removed = PortalHandler.state_store.cleanup_notice_undo_actions(
+            undo_removed = PortalRuntime.state_store.cleanup_notice_undo_actions(
                 retain_days=7,
             )
             payload = {
@@ -3661,11 +3752,11 @@ class FastAPIPortalController:
                 "undo_removed": undo_removed,
                 "cleaned_at": time.time(),
             }
-            if not PortalHandler.state_store.put_backend_runtime_async(
+            if not PortalRuntime.state_store.put_backend_runtime_async(
                 "job_cleanup",
                 payload,
             ):
-                PortalHandler.state_store.put_backend_runtime("job_cleanup", payload)
+                PortalRuntime.state_store.put_backend_runtime("job_cleanup", payload)
         except Exception as exc:
             log_warning(f"后台任务状态清理失败: {exc}")
 
@@ -3678,31 +3769,31 @@ class FastAPIPortalController:
             "has_token": bool(token),
             "token_expire_time": int(getattr(config, "token_expire_time", 0) or 0),
         }
-        if not PortalHandler.state_store.put_backend_runtime_async(
+        if not PortalRuntime.state_store.put_backend_runtime_async(
             "token_status",
             payload,
         ):
-            PortalHandler.state_store.put_backend_runtime("token_status", payload)
+            PortalRuntime.state_store.put_backend_runtime("token_status", payload)
 
     def _run_scheduled_sqlite_maintenance(self) -> None:
         try:
-            pressure = PortalHandler.runtime_pressure()
+            pressure = PortalRuntime.runtime_pressure()
             if pressure.get("busy"):
                 payload = {
                     "skipped_at": time.time(),
                     "reason": "runtime_busy",
                     "runtime_pressure": pressure,
                 }
-                if not PortalHandler.state_store.put_backend_runtime_async(
+                if not PortalRuntime.state_store.put_backend_runtime_async(
                     "sqlite_maintenance",
                     payload,
                 ):
-                    PortalHandler.state_store.put_backend_runtime(
+                    PortalRuntime.state_store.put_backend_runtime(
                         "sqlite_maintenance",
                         payload,
                     )
                 return
-            stats = PortalHandler.state_store.get_database_stats()
+            stats = PortalRuntime.state_store.get_database_stats()
             wal_threshold = int(
                 _env_float(
                     "CLIPFLOW_SQLITE_WAL_CHECKPOINT_BYTES",
@@ -3728,16 +3819,16 @@ class FastAPIPortalController:
                     "wal_bytes": wal_bytes,
                     "freelist_count": freelist_count,
                 }
-                if not PortalHandler.state_store.put_backend_runtime_async(
+                if not PortalRuntime.state_store.put_backend_runtime_async(
                     "sqlite_maintenance",
                     payload,
                 ):
-                    PortalHandler.state_store.put_backend_runtime(
+                    PortalRuntime.state_store.put_backend_runtime(
                         "sqlite_maintenance",
                         payload,
                     )
                 return
-            result = PortalHandler.state_store.checkpoint_database(truncate=True)
+            result = PortalRuntime.state_store.checkpoint_database(truncate=True)
             payload = {
                 "checked_at": time.time(),
                 "checkpointed": True,
@@ -3745,11 +3836,11 @@ class FastAPIPortalController:
                 "freelist_count": freelist_count,
                 "result": result,
             }
-            if not PortalHandler.state_store.put_backend_runtime_async(
+            if not PortalRuntime.state_store.put_backend_runtime_async(
                 "sqlite_maintenance",
                 payload,
             ):
-                PortalHandler.state_store.put_backend_runtime(
+                PortalRuntime.state_store.put_backend_runtime(
                     "sqlite_maintenance",
                     payload,
                 )
@@ -3760,22 +3851,22 @@ class FastAPIPortalController:
         job_id = str(job_id or "").strip()
         if not job_id:
             return
-        job = PortalHandler.service.get_job(job_id) or {}
+        job = PortalRuntime.service.get_job(job_id) or {}
         request = job.get("request") if isinstance(job.get("request"), dict) else {}
         undo_id = str(request.get("undo_id") or "").strip()
         requested_by = str(request.get("_auth_open_id") or "").strip()
         try:
-            PortalHandler.service.mark_job(
+            PortalRuntime.service.mark_job(
                 job_id,
                 phase="undoing_remote",
                 upload_message="正在回退多维记录",
             )
-            result = PortalHandler.execute_notice_undo(
+            result = PortalRuntime.execute_notice_undo(
                 undo_id,
                 job_id=job_id,
                 requested_by=requested_by,
             )
-            PortalHandler.service.mark_job(
+            PortalRuntime.service.mark_job(
                 job_id,
                 phase="success",
                 record_id=str((result or {}).get("record_id") or ""),
@@ -3783,16 +3874,16 @@ class FastAPIPortalController:
                 error="",
                 error_retryable=False,
             )
-            PortalHandler.clear_payload_cache()
+            PortalRuntime.clear_payload_cache()
             self._clear_read_cache()
         except Exception as exc:
             if undo_id:
-                PortalHandler.state_store.mark_notice_undo_action(
+                PortalRuntime.state_store.mark_notice_undo_action(
                     undo_id,
                     "available",
                     error=str(exc),
                 )
-            PortalHandler.service.mark_job(
+            PortalRuntime.service.mark_job(
                 job_id,
                 phase="failed",
                 error=str(exc),
@@ -3882,7 +3973,7 @@ class FastAPIPortalController:
             )
             yield f"event: error\ndata: {payload}\n\n".encode("utf-8")
             return
-        if not job_id and not PortalHandler.auth_manager.is_admin(session):
+        if not job_id and not PortalRuntime.auth_manager.is_admin(session):
             payload = json.dumps(
                 {"ok": False, "error": "只有管理员可以查看任务队列状态。"},
                 ensure_ascii=False,
@@ -3901,7 +3992,7 @@ class FastAPIPortalController:
             while self._sse_active(sse_key, sse_id) and not await request.is_disconnected():
                 payload: dict
                 if job_id:
-                    job = PortalHandler.service.get_job(job_id) or {}
+                    job = PortalRuntime.service.get_job(job_id) or {}
                     if not job:
                         payload = {
                             "job_id": job_id,
@@ -3975,7 +4066,7 @@ class FastAPIPortalController:
         try:
             while self._sse_active(sse_key, sse_id) and not await request.is_disconnected():
                 items = await asyncio.to_thread(
-                    PortalHandler.state_store.lease_outbox_events,
+                    PortalRuntime.state_store.lease_outbox_events,
                     "qt_action",
                     limit=1,
                     lease_seconds=30,
@@ -4038,13 +4129,13 @@ class FastAPIPortalController:
         sse_key, sse_id = self._register_sse(request, "qt_active_items", scope)
         try:
             while self._sse_active(sse_key, sse_id) and not await request.is_disconnected():
-                snapshot = PortalHandler.state_store.get_ongoing_snapshot()
+                snapshot = PortalRuntime.state_store.get_ongoing_snapshot()
                 scoped_signature, scoped_count = self._scoped_ongoing_signature(
                     scope, list(snapshot.get("items") or [])
                 )
-                qt_active_items = dict(PortalHandler.state_store.qt_active_items_stats())
+                qt_active_items = dict(PortalRuntime.state_store.qt_active_items_stats())
                 qt_active_items.pop("checked_at", None)
-                source_snapshot_stats = PortalHandler.state_store.source_snapshot_stats()
+                source_snapshot_stats = PortalRuntime.state_store.source_snapshot_stats()
                 source_active = (
                     source_snapshot_stats.get("active")
                     if isinstance(source_snapshot_stats, dict)
@@ -4104,11 +4195,11 @@ class FastAPIPortalController:
             raise RuntimeError(f"Uvicorn 不可用: {exc}") from exc
 
         self._initialize_portal_handler_state()
-        PortalHandler.ensure_message_workers()
-        PortalHandler.ensure_action_worker()
-        PortalHandler.ensure_source_refresh_worker()
-        for job_id in PortalHandler.service.recoverable_action_job_ids():
-            PortalHandler.enqueue_initial_message_or_upload_job(job_id)
+        PortalRuntime.ensure_message_workers()
+        PortalRuntime.ensure_action_worker()
+        PortalRuntime.ensure_source_refresh_worker()
+        for job_id in PortalRuntime.service.recoverable_action_job_ids():
+            PortalRuntime.enqueue_initial_message_or_upload_job(job_id)
 
         bound_port = find_available_port(self.host, self.preferred_port)
         self.bound_port = bound_port
@@ -4144,7 +4235,7 @@ class FastAPIPortalController:
     def stop(self) -> None:
         self._stop_scheduler()
         try:
-            PortalHandler.stop_source_refresh_worker()
+            PortalRuntime.stop_source_refresh_worker()
         except Exception:
             pass
         server = self._server
@@ -4158,15 +4249,15 @@ class FastAPIPortalController:
             thread.join(timeout=1)
         self._thread = None
         self._server = None
-        PortalHandler.stop_message_workers()
-        PortalHandler.stop_action_worker()
-        PortalHandler.stop_upload_wait_worker()
-        PortalHandler.notice_callback = None
-        PortalHandler.ongoing_callback = None
-        PortalHandler.ongoing_delete_callback = None
-        PortalHandler.maintenance_action_callback = None
+        PortalRuntime.stop_message_workers()
+        PortalRuntime.stop_action_worker()
+        PortalRuntime.stop_upload_wait_worker()
+        PortalRuntime.notice_callback = None
+        PortalRuntime.ongoing_callback = None
+        PortalRuntime.ongoing_delete_callback = None
+        PortalRuntime.maintenance_action_callback = None
         try:
-            PortalHandler.state_store.shutdown_write_worker(timeout=2.0)
+            PortalRuntime.state_store.shutdown_write_worker(timeout=2.0)
         except Exception as exc:
             log_warning(f"SQLite写入队列停止失败: {exc}")
         self.bound_port = None
@@ -4182,36 +4273,36 @@ class FastAPIPortalController:
 
     def set_notice_callback(self, callback) -> None:
         self.notice_callback = callback
-        PortalHandler.notice_callback = callback
+        PortalRuntime.notice_callback = callback
 
     def set_ongoing_callback(self, callback) -> None:
         self.ongoing_callback = callback
-        PortalHandler.ongoing_callback = callback
+        PortalRuntime.ongoing_callback = callback
 
     def set_ongoing_delete_callback(self, callback) -> None:
         self.ongoing_delete_callback = callback
-        PortalHandler.ongoing_delete_callback = callback
+        PortalRuntime.ongoing_delete_callback = callback
 
     def set_maintenance_action_callback(self, callback) -> None:
         self.maintenance_action_callback = callback
-        PortalHandler.maintenance_action_callback = callback
+        PortalRuntime.maintenance_action_callback = callback
 
     def mark_job_upload_result(self, job_id: str, **kwargs) -> None:
-        PortalHandler.service.mark_action_upload_result(job_id, **kwargs)
+        PortalRuntime.service.mark_action_upload_result(job_id, **kwargs)
 
     def mark_job_progress(self, job_id: str, **patch) -> None:
         if not job_id:
             return
-        PortalHandler.service.mark_job(job_id, **patch)
+        PortalRuntime.service.mark_job(job_id, **patch)
         phase = str((patch or {}).get("phase") or "").strip()
         if phase == "uploading":
-            PortalHandler.track_upload_wait_job(job_id)
+            PortalRuntime.track_upload_wait_job(job_id)
         elif phase in {"success", "failed"}:
-            with PortalHandler.upload_wait_lock:
-                PortalHandler.upload_wait_jobs.pop(job_id, None)
+            with PortalRuntime.upload_wait_lock:
+                PortalRuntime.upload_wait_jobs.pop(job_id, None)
 
     def get_job(self, job_id: str) -> dict | None:
-        return PortalHandler.service.get_job(job_id)
+        return PortalRuntime.service.get_job(job_id)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

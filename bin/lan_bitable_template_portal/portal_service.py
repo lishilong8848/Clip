@@ -28,6 +28,7 @@ from upload_event_module.services.robot_webhook import send_text_to_open_ids
 from upload_event_module.utils import get_data_file_path
 
 from .state_store import LanPortalStateStore
+from .identity_utils import normalize_notice_identity_payload, canonical_target_record_id
 
 
 DEFAULT_APP_TOKEN = "HU38bc1vnamMK9sCeOgclUvXnFc"
@@ -2738,6 +2739,23 @@ class MaintenancePortalService:
                     )
                 except Exception:
                     pass
+        try:
+            identity_payload = dict(prepared)
+            if active_item_id:
+                identity_payload["active_item_id"] = active_item_id
+            if feishu_record_id:
+                identity_payload["target_record_id"] = feishu_record_id
+                identity_payload["feishu_record_id"] = feishu_record_id
+                identity_payload["record_id"] = (
+                    source_record_id if source_record_id else feishu_record_id
+                )
+            identity_payload["status"] = "已结束" if action == "end" else "进行中"
+            self._state_store.upsert_notice_identity(
+                identity_payload,
+                origin=str(prepared.get("origin") or "action_success"),
+            )
+        except Exception:
+            pass
         self._schedule_repair_link_task_after_success(
             prepared,
             action=action,
@@ -3404,12 +3422,13 @@ class MaintenancePortalService:
     def _work_status_identity_keys(self, item: dict[str, Any]) -> set[str]:
         if not isinstance(item, dict):
             return set()
+        item = normalize_notice_identity_payload(item)
         work_type = str(item.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
         keys: set[str] = set()
         for kind, field_names in {
             "active": ("active_item_id",),
             "source": ("source_record_id",),
-            "target": ("target_record_id", "feishu_record_id", "record_id", "raw_record_id"),
+            "target": ("target_record_id", "feishu_record_id", "raw_record_id"),
             "key": ("key", "fallback_key", "work_fallback_key"),
         }.items():
             for field_name in field_names:
@@ -3431,12 +3450,7 @@ class MaintenancePortalService:
     ) -> bool | None:
         notice_type = str(item.get("notice_type") or NOTICE_TYPE_MAINTENANCE).strip()
         work_type = str(item.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
-        target_record_id = str(
-            item.get("target_record_id")
-            or item.get("feishu_record_id")
-            or item.get("record_id")
-            or ""
-        ).strip()
+        target_record_id = canonical_target_record_id(item)
         if not target_record_id:
             return None
         table_id = str(config.get_table_id(notice_type) or "").strip()
@@ -4988,23 +5002,15 @@ class MaintenancePortalService:
     def _undo_identity_from_context(
         self, context: dict[str, Any], *, action_type: str = ""
     ) -> dict[str, Any]:
-        context = context if isinstance(context, dict) else {}
+        context = normalize_notice_identity_payload(
+            context if isinstance(context, dict) else {},
+            action=action_type,
+        )
         work_type = str(context.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
         notice_type = str(context.get("notice_type") or NOTICE_TYPE_MAINTENANCE).strip()
         active_item_id = str(context.get("active_item_id") or "").strip()
         source_record_id = str(context.get("source_record_id") or "").strip()
-        target_record_id = str(
-            context.get("target_record_id")
-            or context.get("feishu_record_id")
-            or context.get("raw_record_id")
-            or ""
-        ).strip()
-        if not target_record_id:
-            candidate = str(context.get("record_id") or "").strip()
-            if action_type == "delete" or str(context.get("_record_id_kind") or "") == "target":
-                target_record_id = candidate
-            elif not source_record_id:
-                source_record_id = candidate
+        target_record_id = canonical_target_record_id(context)
         if not source_record_id:
             source_record_id = str(context.get("source_id") or "").strip()
         title = str(context.get("title") or context.get("name") or "").strip()
@@ -5131,13 +5137,15 @@ class MaintenancePortalService:
     def _enrich_ongoing_identity_item(
         self, item: dict[str, Any], *, scope: str = "ALL"
     ) -> dict[str, Any]:
-        enriched = copy.deepcopy(item) if isinstance(item, dict) else {}
+        enriched = normalize_notice_identity_payload(
+            copy.deepcopy(item) if isinstance(item, dict) else {}
+        )
         enriched.setdefault("work_type", WORK_TYPE_MAINTENANCE)
         enriched.setdefault("notice_type", NOTICE_TYPE_MAINTENANCE)
         work_type = str(enriched.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
         identity = self._undo_identity_from_context(enriched, action_type="delete")
         qt_snapshot = self._find_qt_active_snapshot(identity)
-        qt_payload = (
+        qt_payload = normalize_notice_identity_payload(
             qt_snapshot.get("payload")
             if isinstance(qt_snapshot, dict) and isinstance(qt_snapshot.get("payload"), dict)
             else {}
@@ -5155,11 +5163,8 @@ class MaintenancePortalService:
         set_text_if_missing("source_record_id", qt_payload.get("source_record_id"))
         set_text_if_missing(
             "target_record_id",
-            qt_payload.get("target_record_id"),
-            qt_payload.get("feishu_record_id"),
-            qt_payload.get("raw_record_id"),
+            canonical_target_record_id(qt_payload),
             (qt_snapshot or {}).get("record_id"),
-            qt_payload.get("record_id"),
         )
         qt_sections = self._parse_notice_sections(str(qt_payload.get("text") or ""))
         set_text_if_missing(
@@ -5196,13 +5201,16 @@ class MaintenancePortalService:
             if not str(enriched.get("building") or "").strip():
                 enriched["building"] = self._building_label_from_codes(building_codes)
 
-        target_record_id = self._first_text_value(
-            enriched.get("target_record_id"),
-            enriched.get("feishu_record_id"),
-            enriched.get("raw_record_id"),
-        )
+        target_record_id = canonical_target_record_id(enriched)
         source_record_id = str(enriched.get("source_record_id") or "").strip()
         current_record_id = str(enriched.get("record_id") or "").strip()
+        if not target_record_id:
+            target_record_id = self._target_record_id_from_identity_map(
+                work_type=work_type,
+                active_item_id=str(enriched.get("active_item_id") or "").strip(),
+                source_record_id=source_record_id,
+                target_record_id="",
+            )
         if target_record_id:
             enriched["target_record_id"] = target_record_id
             enriched["record_id"] = target_record_id
@@ -5804,6 +5812,11 @@ class MaintenancePortalService:
         start_time: str = "",
         end_time: str = "",
         action: str = "update",
+        content: str = "",
+        reason: str = "",
+        impact: str = "",
+        progress: str = "",
+        text: str = "",
         limit: int = 30,
     ) -> dict[str, Any]:
         scope = self._normalize_scope(scope)
@@ -5821,6 +5834,9 @@ class MaintenancePortalService:
             for field_name in self._target_match_date_fields(WORK_TYPE_CHANGE, field_config)
             if field_name
         ]
+        lookup_text_values = [content, reason, impact, progress]
+        if not any(str(value or "").strip() for value in lookup_text_values):
+            lookup_text_values.append(text)
         try:
             target_records = self._target_records_for_notice_type(
                 NOTICE_TYPE_CHANGE,
@@ -5833,7 +5849,22 @@ class MaintenancePortalService:
         for target in target_records:
             fields = target.get("display_fields") or {}
             target_title = str(fields.get(title_field) or "").strip()
-            if not self._source_candidate_title_matches(title, target_title, WORK_TYPE_CHANGE):
+            title_matched = self._source_candidate_title_matches(title, target_title, WORK_TYPE_CHANGE)
+            business_match_count = self._target_business_match_count(
+                fields,
+                lookup_text_values,
+            ) + self._target_named_business_match_count(
+                fields,
+                {
+                    "title": title,
+                    "content": content,
+                    "reason": reason,
+                    "impact": impact,
+                    "progress": progress,
+                },
+                field_config,
+            )
+            if not title_matched and business_match_count <= 0:
                 continue
             target_dates = self._date_keys_from_values(
                 *[fields.get(field_name) for field_name in date_fields],
@@ -5841,7 +5872,7 @@ class MaintenancePortalService:
                 fields.get("计划时间"),
             )
             building_codes = self._target_record_building_codes(fields, field_config)
-            if not self._scope_matches_buildings(scope, building_codes):
+            if building_codes and not self._scope_matches_buildings(scope, building_codes):
                 continue
             record_id = str(target.get("record_id") or "").strip()
             if not record_id:
@@ -5862,6 +5893,9 @@ class MaintenancePortalService:
                     "start_time": target_start,
                     "end_time": target_end,
                     "date_matched": date_matched,
+                    "title_matched": title_matched,
+                    "business_text_matched": business_match_count > 0,
+                    "business_match_count": business_match_count,
                     "fields": detail_fields,
                     "field_items": [
                         {"label": key, "value": value}
@@ -5903,6 +5937,11 @@ class MaintenancePortalService:
         start_time: str = "",
         end_time: str = "",
         action: str = "update",
+        content: str = "",
+        reason: str = "",
+        impact: str = "",
+        progress: str = "",
+        text: str = "",
         limit: int = 30,
     ) -> dict[str, Any]:
         work_type = str(work_type or WORK_TYPE_MAINTENANCE).strip()
@@ -5935,6 +5974,11 @@ class MaintenancePortalService:
                 start_time=start_time,
                 end_time=end_time,
                 action=action,
+                content=content,
+                reason=reason,
+                impact=impact,
+                progress=progress,
+                text=text,
                 limit=limit,
             )
         notice_type = (
@@ -5966,6 +6010,9 @@ class MaintenancePortalService:
             for field_name in self._target_match_date_fields(work_type, field_config)
             if field_name
         ]
+        lookup_text_values = [content, reason, impact, progress]
+        if not any(str(value or "").strip() for value in lookup_text_values):
+            lookup_text_values.append(text)
         try:
             target_records = self._target_records_for_notice_type(
                 notice_type,
@@ -5978,10 +6025,25 @@ class MaintenancePortalService:
         for target in target_records:
             fields = target.get("display_fields") or {}
             target_title = str(fields.get(title_field) or fields.get("名称") or "").strip()
-            if not self._source_candidate_title_matches(title, target_title, work_type):
+            title_matched = self._source_candidate_title_matches(title, target_title, work_type)
+            business_match_count = self._target_business_match_count(
+                fields,
+                lookup_text_values,
+            ) + self._target_named_business_match_count(
+                fields,
+                {
+                    "title": title,
+                    "content": content,
+                    "reason": reason,
+                    "impact": impact,
+                    "progress": progress,
+                },
+                field_config,
+            )
+            if not title_matched and business_match_count <= 0:
                 continue
             building_codes = self._target_record_building_codes(fields, field_config)
-            if not self._scope_matches_buildings(scope, building_codes):
+            if building_codes and not self._scope_matches_buildings(scope, building_codes):
                 continue
             record_id = str(target.get("record_id") or "").strip()
             if not record_id:
@@ -6020,6 +6082,9 @@ class MaintenancePortalService:
                     "start_time": target_start,
                     "end_time": target_end,
                     "date_matched": bool(query_dates and target_dates and (query_dates & target_dates)),
+                    "title_matched": title_matched,
+                    "business_text_matched": business_match_count > 0,
+                    "business_match_count": business_match_count,
                     "fields": detail_fields,
                     "field_items": [
                         {"label": key, "value": value}
@@ -6054,6 +6119,74 @@ class MaintenancePortalService:
                 limit=limit,
             ),
         }
+
+    def _target_business_match_count(
+        self,
+        fields: dict[str, Any],
+        lookup_values: list[Any],
+    ) -> int:
+        if not isinstance(fields, dict):
+            return 0
+        blob = self._match_text(
+            " ".join(self._clean_source_text(value) for value in fields.values())
+        )
+        if not blob:
+            return 0
+        matched = 0
+        seen: set[str] = set()
+        for value in lookup_values or []:
+            key = self._match_text(value)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            if len(key) < 4:
+                continue
+            if key in blob or (len(key) >= 12 and blob in key):
+                matched += 1
+        return matched
+
+    def _target_named_business_match_count(
+        self,
+        fields: dict[str, Any],
+        lookup_values: dict[str, Any],
+        field_config: dict[str, Any],
+    ) -> int:
+        if not isinstance(fields, dict) or not isinstance(lookup_values, dict):
+            return 0
+        aliases = {
+            "title": [
+                field_config.get("title"),
+                field_config.get("name"),
+                "名称",
+                "名称（标题）",
+                "标题",
+            ],
+            "content": [field_config.get("content"), "内容", "工作内容"],
+            "reason": [field_config.get("reason"), "原因", "故障原因"],
+            "impact": [field_config.get("impact"), "影响", "影响范围"],
+            "progress": [field_config.get("progress"), "进度", "完成情况"],
+        }
+        matched = 0
+        for key, names in aliases.items():
+            source_value = str(lookup_values.get(key) or "").strip()
+            if not source_value:
+                continue
+            source_key = self._match_text(source_value)
+            if len(source_key) < 4:
+                continue
+            target_values = []
+            for name in names:
+                name = str(name or "").strip()
+                if name and name in fields:
+                    target_values.append(fields.get(name))
+            for target_value in target_values:
+                target_key = self._match_text(self._clean_source_text(target_value))
+                if not target_key:
+                    continue
+                if source_key in target_key or target_key in source_key:
+                    matched += 1
+                    break
+        return matched
 
     def _target_candidate_detail_fields(self, fields: dict[str, Any]) -> dict[str, str]:
         if not isinstance(fields, dict):
@@ -6278,12 +6411,7 @@ class MaintenancePortalService:
                 continue
             if active_item_id and str(item.get("active_item_id") or "").strip() != active_item_id:
                 continue
-            target_record_id = str(
-                item.get("target_record_id")
-                or item.get("feishu_record_id")
-                or item.get("record_id")
-                or ""
-            ).strip()
+            target_record_id = canonical_target_record_id(item)
             if not target_record_id:
                 continue
             if not fallback:
@@ -6291,6 +6419,72 @@ class MaintenancePortalService:
             if not self._is_completed_work_status_item(item):
                 return target_record_id
         return fallback
+
+    def _target_record_id_from_identity_map(
+        self,
+        *,
+        work_type: str,
+        active_item_id: str = "",
+        source_record_id: str = "",
+        target_record_id: str = "",
+    ) -> str:
+        try:
+            identity = self._state_store.resolve_notice_identity(
+                work_type=work_type,
+                active_item_id=active_item_id,
+                source_record_id=source_record_id,
+                target_record_id=target_record_id,
+            )
+        except Exception:
+            return ""
+        if not isinstance(identity, dict):
+            return ""
+        return str(identity.get("target_record_id") or "").strip()
+
+    def _target_record_id_from_request_payload(
+        self, request_payload: dict[str, Any], *, source_record_id: str = ""
+    ) -> str:
+        payload = dict(request_payload or {})
+        if source_record_id and not str(payload.get("source_record_id") or "").strip():
+            payload["source_record_id"] = source_record_id
+        return canonical_target_record_id(payload)
+
+    def _target_record_id_from_unique_candidate(
+        self,
+        *,
+        work_type: str,
+        scope: str,
+        title: str,
+        start_time: str = "",
+        end_time: str = "",
+        action: str = "update",
+    ) -> str:
+        title = str(title or "").strip()
+        if not title:
+            return ""
+        try:
+            result = self.lookup_notice_target_candidates(
+                work_type=work_type,
+                scope=scope,
+                title=title,
+                start_time=start_time,
+                end_time=end_time,
+                action=action,
+                limit=10,
+            )
+        except Exception:
+            return ""
+        candidates = [
+            item
+            for item in (result.get("candidates") or [])
+            if isinstance(item, dict)
+            and str(item.get("target_record_id") or item.get("record_id") or "").strip()
+        ]
+        if len(candidates) != 1:
+            return ""
+        return str(
+            candidates[0].get("target_record_id") or candidates[0].get("record_id") or ""
+        ).strip()
 
     def _resolve_target_record_id_for_source_update(
         self,
@@ -6302,6 +6496,12 @@ class MaintenancePortalService:
         if not isinstance(source_record, dict):
             return ""
         source_record_id = str(source_record.get("record_id") or "").strip()
+        target_record_id = self._target_record_id_from_identity_map(
+            work_type=work_type,
+            source_record_id=source_record_id,
+        )
+        if target_record_id:
+            return target_record_id
         target_record_id = self._target_record_id_from_work_status(
             work_type=work_type, source_record_id=source_record_id
         )
@@ -6786,6 +6986,7 @@ class MaintenancePortalService:
 
     @staticmethod
     def _action_target_key(request_payload: dict[str, Any]) -> str:
+        request_payload = normalize_notice_identity_payload(request_payload)
         action = str((request_payload or {}).get("action") or "").strip().lower()
         work_type = str(
             (request_payload or {}).get("work_type") or WORK_TYPE_MAINTENANCE
@@ -6797,6 +6998,9 @@ class MaintenancePortalService:
                 return f"{work_type}:manual-start:{manual_id}"
             return f"{work_type}:start:{record_id}" if record_id else ""
         if action in {"update", "end"}:
+            target_record_id = canonical_target_record_id(request_payload)
+            if target_record_id:
+                return f"{work_type}:target:{target_record_id}"
             active_item_id = str(
                 (request_payload or {}).get("active_item_id") or ""
             ).strip()
@@ -6886,6 +7090,7 @@ class MaintenancePortalService:
     def create_action_job(self, request_payload: dict[str, Any]) -> tuple[str, bool]:
         if not isinstance(request_payload, dict):
             raise PortalError("请求体格式错误。")
+        request_payload = normalize_notice_identity_payload(request_payload)
         action = str(request_payload.get("action") or "").strip().lower()
         if action not in {"start", "update", "end"}:
             raise PortalError("动作必须是 start/update/end。")
@@ -7447,6 +7652,7 @@ class MaintenancePortalService:
     def prepare_simple_manual_notice_action(
         self, request_payload: dict[str, Any], *, job_id: str
     ) -> dict[str, Any]:
+        request_payload = normalize_notice_identity_payload(request_payload)
         action = str(request_payload.get("action") or "").strip().lower()
         status_map = {"start": "开始", "update": "更新", "end": "结束"}
         status = status_map.get(action)
@@ -7466,13 +7672,9 @@ class MaintenancePortalService:
             or request_payload.get("manual_id")
             or ""
         ).strip()
-        target_record_id = str(request_payload.get("target_record_id") or "").strip()
+        target_record_id = self._target_record_id_from_request_payload(request_payload)
         if action == "start" and not record_id:
             raise PortalError("开始通告缺少手填记录ID。")
-        if action != "start" and not target_record_id:
-            request_record_id = str(request_payload.get("record_id") or "").strip()
-            if request_record_id and request_record_id != str(request_payload.get("manual_id") or "").strip():
-                target_record_id = request_record_id
         if action != "start" and not target_record_id:
             raise PortalError(f"{self._history_work_type_label(work_type)}通告缺少目标多维 record_id，不能更新/结束。")
         title = str(request_payload.get("title") or request_payload.get("content") or "").strip()
@@ -7560,6 +7762,7 @@ class MaintenancePortalService:
     def prepare_maintenance_action(
         self, request_payload: dict[str, Any], *, job_id: str
     ) -> dict[str, Any]:
+        request_payload = normalize_notice_identity_payload(request_payload)
         action = str(request_payload.get("action") or "").strip().lower()
         status_map = {"start": "开始", "update": "更新", "end": "结束"}
         status = status_map.get(action)
@@ -7578,7 +7781,10 @@ class MaintenancePortalService:
             or ""
         ).strip()
         source_record_id = str(request_payload.get("source_record_id") or "").strip()
-        target_record_id = str(request_payload.get("target_record_id") or "").strip()
+        target_record_id = self._target_record_id_from_request_payload(
+            request_payload,
+            source_record_id=source_record_id,
+        )
         active_item_id = str(request_payload.get("active_item_id") or "").strip()
         plan_month = ""
         maintenance_total = ""
@@ -7645,6 +7851,16 @@ class MaintenancePortalService:
             title = str(request_payload.get("title") or "").strip()
             if not title:
                 raise PortalError("更新/结束通告缺少名称。")
+            if not target_record_id:
+                target_record_id = self._target_record_id_from_identity_map(
+                    work_type=WORK_TYPE_MAINTENANCE,
+                    active_item_id=active_item_id,
+                    source_record_id=source_record_id,
+                    target_record_id=self._target_record_id_from_request_payload(
+                        request_payload,
+                        source_record_id=source_record_id,
+                    ),
+                )
             if not target_record_id and active_item_id:
                 target_record_id = self._target_record_id_from_work_status(
                     work_type=WORK_TYPE_MAINTENANCE,
@@ -7655,10 +7871,20 @@ class MaintenancePortalService:
                     work_type=WORK_TYPE_MAINTENANCE,
                     source_record_id=source_record_id,
                 )
-            if not target_record_id and (
-                not source_record_id or str(record_id or "").strip() != source_record_id
-            ):
-                target_record_id = record_id
+            if not target_record_id:
+                target_record_id = self._target_record_id_from_unique_candidate(
+                    work_type=WORK_TYPE_MAINTENANCE,
+                    scope=scope,
+                    title=title,
+                    start_time=self._format_input_datetime(request_payload.get("start_time")),
+                    end_time=self._format_input_datetime(request_payload.get("end_time")),
+                    action=action,
+                )
+            if not target_record_id:
+                target_record_id = self._target_record_id_from_request_payload(
+                    request_payload,
+                    source_record_id=source_record_id,
+                )
             record_id = source_record_id or record_id
             if action != "start" and not target_record_id:
                 raise PortalError(
@@ -7719,8 +7945,10 @@ class MaintenancePortalService:
             "job_id": job_id,
             "work_type": WORK_TYPE_MAINTENANCE,
             "notice_type": NOTICE_TYPE_MAINTENANCE,
-            "source_app_token": self.app_token if record_id else "",
-            "source_table_id": self.table_id if record_id else "",
+            "source_app_token": self.app_token if (record_id and not manual) else "",
+            "source_table_id": self.table_id if (record_id and not manual) else "",
+            "target_app_token": str(config.app_token or "").strip(),
+            "target_table_id": str(config.get_table_id(NOTICE_TYPE_MAINTENANCE) or "").strip(),
             "manual": manual,
             "action": action,
             "status": status,
@@ -7793,6 +8021,7 @@ class MaintenancePortalService:
     def prepare_change_action(
         self, request_payload: dict[str, Any], *, job_id: str
     ) -> dict[str, Any]:
+        request_payload = normalize_notice_identity_payload(request_payload)
         action = str(request_payload.get("action") or "").strip().lower()
         status_map = {"start": "开始", "update": "更新", "end": "结束"}
         status = status_map.get(action)
@@ -7907,10 +8136,20 @@ class MaintenancePortalService:
             default_start = ""
             default_end = ""
             record_id = source_record_id
-            target_record_id = str(
-                request_payload.get("target_record_id")
-                or ""
-            ).strip()
+            target_record_id = self._target_record_id_from_request_payload(
+                request_payload,
+                source_record_id=source_record_id,
+            )
+            if not target_record_id:
+                target_record_id = self._target_record_id_from_identity_map(
+                    work_type=WORK_TYPE_CHANGE,
+                    active_item_id=active_item_id,
+                    source_record_id=source_record_id,
+                    target_record_id=self._target_record_id_from_request_payload(
+                        request_payload,
+                        source_record_id=source_record_id,
+                    ),
+                )
             if not target_record_id and source_record is not None:
                 target_record_id = self._resolve_target_record_id_for_source_update(
                     work_type=WORK_TYPE_CHANGE,
@@ -7922,11 +8161,20 @@ class MaintenancePortalService:
                     work_type=WORK_TYPE_CHANGE,
                     active_item_id=active_item_id,
                 )
-            request_record_id = str(request_payload.get("record_id") or "").strip()
-            if not target_record_id and (
-                not source_record_id or request_record_id != source_record_id
-            ):
-                target_record_id = request_record_id
+            if not target_record_id:
+                target_record_id = self._target_record_id_from_unique_candidate(
+                    work_type=WORK_TYPE_CHANGE,
+                    scope=scope,
+                    title=title,
+                    start_time=self._format_input_datetime(request_payload.get("start_time")),
+                    end_time=self._format_input_datetime(request_payload.get("end_time")),
+                    action=action,
+                )
+            if not target_record_id:
+                target_record_id = self._target_record_id_from_request_payload(
+                    request_payload,
+                    source_record_id=source_record_id,
+                )
 
         if not self._scope_matches_buildings(scope, building_codes):
             raise PortalError(f"当前入口与通告楼栋不匹配: {building or '-'}")
@@ -8007,8 +8255,10 @@ class MaintenancePortalService:
             "job_id": job_id,
             "work_type": WORK_TYPE_CHANGE,
             "notice_type": NOTICE_TYPE_CHANGE,
-            "source_app_token": CHANGE_SOURCE_APP_TOKEN if record_id else "",
-            "source_table_id": CHANGE_SOURCE_TABLE_ID if record_id else "",
+            "source_app_token": CHANGE_SOURCE_APP_TOKEN if (record_id and not manual) else "",
+            "source_table_id": CHANGE_SOURCE_TABLE_ID if (record_id and not manual) else "",
+            "target_app_token": str(config.app_token or "").strip(),
+            "target_table_id": str(config.get_table_id(NOTICE_TYPE_CHANGE) or "").strip(),
             "manual": manual,
             "action": action,
             "status": status,
@@ -8099,6 +8349,7 @@ class MaintenancePortalService:
     def prepare_repair_action(
         self, request_payload: dict[str, Any], *, job_id: str
     ) -> dict[str, Any]:
+        request_payload = normalize_notice_identity_payload(request_payload)
         action = str(request_payload.get("action") or "").strip().lower()
         status_map = {"start": "开始", "update": "更新", "end": "结束"}
         status = status_map.get(action)
@@ -8246,10 +8497,20 @@ class MaintenancePortalService:
             default_start = ""
             default_end = ""
             record_id = source_record_id
-            target_record_id = str(
-                request_payload.get("target_record_id")
-                or ""
-            ).strip()
+            target_record_id = self._target_record_id_from_request_payload(
+                request_payload,
+                source_record_id=source_record_id,
+            )
+            if not target_record_id:
+                target_record_id = self._target_record_id_from_identity_map(
+                    work_type=WORK_TYPE_REPAIR,
+                    active_item_id=active_item_id,
+                    source_record_id=source_record_id,
+                    target_record_id=self._target_record_id_from_request_payload(
+                        request_payload,
+                        source_record_id=source_record_id,
+                    ),
+                )
             if not target_record_id and source_record is not None:
                 target_record_id = self._resolve_target_record_id_for_source_update(
                     work_type=WORK_TYPE_REPAIR,
@@ -8261,11 +8522,26 @@ class MaintenancePortalService:
                     work_type=WORK_TYPE_REPAIR,
                     active_item_id=active_item_id,
                 )
-            request_record_id = str(request_payload.get("record_id") or "").strip()
-            if not target_record_id and (
-                not source_record_id or request_record_id != source_record_id
-            ):
-                target_record_id = request_record_id
+            if not target_record_id:
+                target_record_id = self._target_record_id_from_unique_candidate(
+                    work_type=WORK_TYPE_REPAIR,
+                    scope=scope,
+                    title=title,
+                    start_time=(
+                        self._format_input_datetime(request_payload.get("expected_time"))
+                        or self._format_input_datetime(request_payload.get("start_time"))
+                    ),
+                    end_time=(
+                        self._format_input_datetime(request_payload.get("fault_time"))
+                        or self._format_input_datetime(request_payload.get("end_time"))
+                    ),
+                    action=action,
+                )
+            if not target_record_id:
+                target_record_id = self._target_record_id_from_request_payload(
+                    request_payload,
+                    source_record_id=source_record_id,
+                )
             repair_device = request_text("repair_device")
             if not repair_device and source_record is not None:
                 repair_device = self._repair_device_text(fields)
@@ -8384,8 +8660,10 @@ class MaintenancePortalService:
             "job_id": job_id,
             "work_type": WORK_TYPE_REPAIR,
             "notice_type": NOTICE_TYPE_REPAIR,
-            "source_app_token": REPAIR_SOURCE_APP_TOKEN if record_id else "",
-            "source_table_id": REPAIR_SOURCE_TABLE_ID if record_id else "",
+            "source_app_token": REPAIR_SOURCE_APP_TOKEN if (record_id and not manual) else "",
+            "source_table_id": REPAIR_SOURCE_TABLE_ID if (record_id and not manual) else "",
+            "target_app_token": str(config.app_token or "").strip(),
+            "target_table_id": str(config.get_table_id(NOTICE_TYPE_REPAIR) or "").strip(),
             "manual": manual,
             "action": action,
             "status": status,

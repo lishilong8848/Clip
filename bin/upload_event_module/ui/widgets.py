@@ -377,7 +377,6 @@ class TimerWidget(QWidget):
 
     def _check_and_alert(self, remaining_seconds: int):
         from ..logger import log_info
-        from ..services.robot_webhook import send_event_prompt_message
 
         one_min_key = f"one_min_{self.stage}_{self.target_minutes}"
         if 45 <= remaining_seconds <= 75 and one_min_key not in self.alerted_milestones:
@@ -385,13 +384,6 @@ class TimerWidget(QWidget):
                 f"触发1分钟提醒: stage={self.stage}, 目标={self.target_minutes}分钟"
             )
             self._play_alert("同志！该更新通告了！")
-            import threading
-
-            threading.Thread(
-                target=send_event_prompt_message,
-                args=(self.building_text, self.notice_text),
-                daemon=True,
-            ).start()
             self.alerted_milestones.add(one_min_key)
 
     def _play_alert(self, message="同志！该发通告了！"):

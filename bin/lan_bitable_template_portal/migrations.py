@@ -20,6 +20,7 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
     (11, "source_scope_snapshots"),
     (12, "source_snapshot_manifest"),
     (13, "notice_undo_actions"),
+    (14, "notice_identity_map"),
 )
 
 

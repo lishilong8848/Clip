@@ -6,6 +6,7 @@ import time
 
 from PyQt6.QtCore import Qt, QTimer
 
+from lan_bitable_template_portal.identity_utils import canonical_target_record_id
 from ..core.parser import extract_event_info
 from ..utils import ACTIVE_CACHE_FILE
 from .display_state import normalize_active_item_data
@@ -189,8 +190,9 @@ class ActiveCacheMixin:
         if not store or not hasattr(store, "delete_record"):
             return False
         try:
+            target_record_id = canonical_target_record_id(data_dict)
             if store.delete_record(
-                record_id=str(data_dict.get("record_id") or ""),
+                record_id=str(target_record_id or data_dict.get("record_id") or ""),
                 active_item_id=str(data_dict.get("active_item_id") or ""),
             ):
                 self._active_cache_last_save_at = time.time()
@@ -200,7 +202,7 @@ class ActiveCacheMixin:
                 self._post_qt_active_items_delta(
                     deletes=[
                         {
-                            "record_id": str(data_dict.get("record_id") or ""),
+                            "record_id": str(target_record_id or data_dict.get("record_id") or ""),
                             "active_item_id": str(data_dict.get("active_item_id") or ""),
                         }
                     ]
@@ -227,7 +229,11 @@ class ActiveCacheMixin:
                     records.append(dict(data))
         for data in records:
             source_data = dict(data)
-            record_id = str(source_data.get("record_id") or "").strip()
+            record_id = str(
+                canonical_target_record_id(source_data)
+                or source_data.get("record_id")
+                or ""
+            ).strip()
             if record_id:
                 cache_fields = locked_level_map.get(record_id) or {}
                 if bool(cache_fields.get("level_locked")):

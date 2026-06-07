@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from clipflow_backend.main import FastAPIPortalController  # noqa: E402
 from lan_bitable_template_portal.portal_auth import AUTH_COOKIE_NAME, PortalAuthManager  # noqa: E402
 from lan_bitable_template_portal.portal_service import MaintenancePortalService  # noqa: E402
-from lan_bitable_template_portal.server import PortalHandler  # noqa: E402
+from lan_bitable_template_portal.server import PortalRuntime  # noqa: E402
 from lan_bitable_template_portal.state_store import LanPortalStateStore  # noqa: E402
 
 
@@ -96,17 +96,17 @@ def run_pressure(
     scenario: str = "accepted",
 ) -> dict:
     controller = FastAPIPortalController(host="127.0.0.1", port=18766)
-    original_service = PortalHandler.service
-    original_auth = PortalHandler.auth_manager
-    original_store = PortalHandler.state_store
+    original_service = PortalRuntime.service
+    original_auth = PortalRuntime.auth_manager
+    original_store = PortalRuntime.state_store
     temp_dir = tempfile.TemporaryDirectory()
     session_id = "mock-pressure-session"
     try:
-        PortalHandler.service = MockPortalService(scenario=scenario)
-        PortalHandler.state_store = LanPortalStateStore(Path(temp_dir.name) / "state.sqlite3")
-        PortalHandler.auth_manager = PortalAuthManager()
-        PortalHandler.auth_manager._state_store = PortalHandler.state_store
-        PortalHandler.auth_manager.upsert_permission_user(
+        PortalRuntime.service = MockPortalService(scenario=scenario)
+        PortalRuntime.state_store = LanPortalStateStore(Path(temp_dir.name) / "state.sqlite3")
+        PortalRuntime.auth_manager = PortalAuthManager()
+        PortalRuntime.auth_manager._state_store = PortalRuntime.state_store
+        PortalRuntime.auth_manager.upsert_permission_user(
             open_id="ou_mock_admin",
             name="mock-admin",
             role="admin",
@@ -114,8 +114,8 @@ def run_pressure(
             enabled=True,
             updated_by="mock-pressure",
         )
-        with PortalHandler.auth_manager._lock:
-            PortalHandler.auth_manager._sessions[session_id] = {
+        with PortalRuntime.auth_manager._lock:
+            PortalRuntime.auth_manager._sessions[session_id] = {
                 "session_id": session_id,
                 "user": {"name": "mock-admin", "open_id": "ou_mock_admin"},
                 "role": "admin",
@@ -252,9 +252,9 @@ def run_pressure(
             },
         }
     finally:
-        PortalHandler.service = original_service
-        PortalHandler.auth_manager = original_auth
-        PortalHandler.state_store = original_store
+        PortalRuntime.service = original_service
+        PortalRuntime.auth_manager = original_auth
+        PortalRuntime.state_store = original_store
         temp_dir.cleanup()
 
 

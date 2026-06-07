@@ -9,7 +9,6 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QLabel,
     QListView,
-    QListWidget,
     QStackedWidget,
     QSystemTrayIcon,
     QStyle,
@@ -37,10 +36,16 @@ from ..utils import HISTORY_FILE, ICON_FILE
 from ..core.parser import extract_event_info
 from ..core.speech import speech_manager
 from lan_bitable_template_portal.state_store import LanPortalStateStore
+from lan_bitable_template_portal.identity_utils import (
+    canonical_source_record_id,
+    canonical_target_record_id,
+)
 from .styles import get_stylesheet
 from .dialogs import AddDialog
 from .active_notice_delegate import ActiveNoticeDelegate
 from .active_notice_model import ActiveNoticeListRoute
+from .deleted_notice_delegate import DeletedNoticeDelegate
+from .deleted_notice_model import DeletedNoticeModel
 from .display_state import normalize_active_item_data
 from .common import show_toast_message
 
@@ -195,8 +200,21 @@ class MainWindowUiMixin:
 
         deleted_history_layout.addLayout(deleted_history_head)
 
-        self.deleted_history_list = QListWidget()
+        self.deleted_history_model = DeletedNoticeModel(self)
+        self.deleted_history_list = QListView()
+        self.deleted_history_list.setModel(self.deleted_history_model)
+        self.deleted_history_list.setItemDelegate(DeletedNoticeDelegate(self.deleted_history_list))
+        self.deleted_history_list.setMouseTracking(True)
         self.deleted_history_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.deleted_history_list.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.deleted_history_list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.deleted_history_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.deleted_history_list.setSpacing(2)
+        self.deleted_history_list.setObjectName("DeletedNoticeView")
+        self.deleted_history_list.setStyleSheet(
+            "QListView#DeletedNoticeView { background: transparent; border: none; outline: 0; }"
+        )
+        self.deleted_history_model.undoRequested.connect(self._handle_deleted_history_undo_request)
         deleted_history_layout.addWidget(self.deleted_history_list, 1)
 
         self.stack.addWidget(self.active_container)
@@ -357,12 +375,16 @@ class MainWindowUiMixin:
         if not isinstance(data_dict, dict):
             return None
         active_item_id = str(data_dict.get("active_item_id") or "").strip()
-        record_id = str(data_dict.get("record_id") or "").strip()
+        target_record_id = canonical_target_record_id(data_dict)
+        source_record_id = canonical_source_record_id(data_dict)
         candidates = []
         if active_item_id:
             candidates.append(self._find_active_item_by_active_item_id(active_item_id))
-        if record_id:
-            candidates.append(self._find_active_item_by_record_id(record_id))
+        if target_record_id:
+            candidates.append(self._find_active_item_by_record_id(target_record_id))
+        if source_record_id:
+            for list_widget, item, _data in self._active_notice_store().candidates_by_source_record_id(source_record_id):
+                candidates.append((list_widget, item))
         for list_widget, item in candidates:
             if list_widget is backing_list and item and self._is_valid_list_item(item):
                 return item

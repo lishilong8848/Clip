@@ -22,10 +22,20 @@ except ModuleNotFoundError as exc:
 
 try:
     from .migrations import run_schema_migrations, schema_health
+    from .identity_utils import (
+        canonical_source_record_id,
+        canonical_target_record_id,
+        normalize_notice_identity_payload,
+    )
 except ImportError:
     from lan_bitable_template_portal.migrations import (
         run_schema_migrations,
         schema_health,
+    )
+    from lan_bitable_template_portal.identity_utils import (
+        canonical_source_record_id,
+        canonical_target_record_id,
+        normalize_notice_identity_payload,
     )
 
 
@@ -39,7 +49,7 @@ class LanPortalStateStore:
     are migration inputs only and are never deleted or overwritten here.
     """
 
-    SCHEMA_VERSION = 13
+    SCHEMA_VERSION = 14
     SOURCE_SCOPE_TABLES = {
         "110": "source_records_110",
         "A": "source_records_a",
@@ -75,6 +85,7 @@ class LanPortalStateStore:
         "source_snapshot_manifest",
         "source_snapshot_records",
         "notice_undo_actions",
+        "notice_identity_map",
         "schema_migrations",
     ]
     REQUIRED_INDEXES = [
@@ -83,6 +94,9 @@ class LanPortalStateStore:
         "idx_source_snapshot_manifest_status_time",
         "idx_source_snapshot_records_scope_order",
         "idx_notice_undo_status_scope",
+        "idx_notice_identity_active",
+        "idx_notice_identity_source",
+        "idx_notice_identity_target",
         "idx_permission_requests_open_status",
     ]
 
@@ -634,6 +648,51 @@ class LanPortalStateStore:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS notice_identity_map (
+                identity_id TEXT PRIMARY KEY,
+                work_type TEXT,
+                notice_type TEXT,
+                active_item_id TEXT,
+                source_app_token TEXT,
+                source_table_id TEXT,
+                source_record_id TEXT,
+                target_app_token TEXT,
+                target_table_id TEXT,
+                target_record_id TEXT,
+                title TEXT,
+                reason TEXT,
+                building_codes_json TEXT NOT NULL DEFAULT '[]',
+                start_time TEXT,
+                end_time TEXT,
+                status TEXT,
+                origin TEXT,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                deleted_at REAL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_notice_identity_active
+            ON notice_identity_map(active_item_id, work_type, deleted_at)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_notice_identity_source
+            ON notice_identity_map(source_record_id, work_type, deleted_at)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_notice_identity_target
+            ON notice_identity_map(target_record_id, work_type, deleted_at)
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS source_scope_snapshots (
                 scope TEXT PRIMARY KEY,
                 payload_json TEXT NOT NULL,
@@ -743,6 +802,7 @@ class LanPortalStateStore:
         )
         run_schema_migrations(conn, target_version=self.SCHEMA_VERSION)
         self._migrate_legacy_source_snapshot_locked(conn)
+        self._repair_notice_identity_map_locked(conn)
         conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
             (str(self.SCHEMA_VERSION),),
@@ -885,6 +945,132 @@ class LanPortalStateStore:
         conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES('active_source_snapshot_at', ?)",
             (str(now),),
+        )
+
+    def _notice_identity_candidate_payloads(self, payload: Any) -> list[dict[str, Any]]:
+        if not isinstance(payload, dict):
+            return []
+        candidates: list[dict[str, Any]] = [payload]
+        for key in (
+            "request_payload",
+            "prepared",
+            "prepared_payload",
+            "payload",
+            "data",
+            "data_dict",
+            "result",
+            "remote_result",
+        ):
+            value = payload.get(key)
+            if isinstance(value, dict):
+                candidates.append(value)
+        return candidates
+
+    def _repair_notice_identity_map_locked(self, conn: sqlite3.Connection) -> None:
+        marker = conn.execute(
+            "SELECT value FROM meta WHERE key = 'notice_identity_repair_v1_done'"
+        ).fetchone()
+        if marker:
+            return
+        repaired = 0
+
+        def upsert_candidate(payload: dict[str, Any], *, origin: str) -> None:
+            nonlocal repaired
+            normalized = normalize_notice_identity_payload(payload)
+            if not normalized:
+                return
+            identity = self._upsert_notice_identity_locked(conn, normalized, origin=origin)
+            if identity:
+                repaired += 1
+
+        try:
+            rows = conn.execute(
+                """
+                SELECT active_item_id, record_id, origin, payload_json
+                FROM qt_active_items
+                ORDER BY updated_at DESC
+                LIMIT 500
+                """
+            ).fetchall()
+            for row in rows:
+                payload = self._loads(str(row["payload_json"] or ""), {})
+                if not isinstance(payload, dict):
+                    continue
+                payload.setdefault("active_item_id", str(row["active_item_id"] or ""))
+                if row["record_id"] and not payload.get("target_record_id"):
+                    payload["target_record_id"] = str(row["record_id"] or "")
+                upsert_candidate(payload, origin=str(row["origin"] or "qt_active_repair"))
+        except Exception:
+            pass
+
+        try:
+            rows = conn.execute(
+                """
+                SELECT active_item_id, record_id, raw_record_id, source_record_id,
+                       work_type, notice_type, payload_json
+                FROM ongoing_items
+                ORDER BY updated_at DESC
+                LIMIT 500
+                """
+            ).fetchall()
+            for row in rows:
+                payload = self._loads(str(row["payload_json"] or ""), {})
+                if not isinstance(payload, dict):
+                    payload = {}
+                payload.setdefault("active_item_id", str(row["active_item_id"] or ""))
+                payload.setdefault("work_type", str(row["work_type"] or ""))
+                payload.setdefault("notice_type", str(row["notice_type"] or ""))
+                if row["source_record_id"] and not payload.get("source_record_id"):
+                    payload["source_record_id"] = str(row["source_record_id"] or "")
+                target_record_id = str(row["record_id"] or row["raw_record_id"] or "")
+                if target_record_id and not payload.get("target_record_id"):
+                    payload["target_record_id"] = target_record_id
+                upsert_candidate(payload, origin="ongoing_repair")
+        except Exception:
+            pass
+
+        try:
+            rows = conn.execute(
+                """
+                SELECT payload_json
+                FROM notice_actions
+                ORDER BY updated_at DESC
+                LIMIT 500
+                """
+            ).fetchall()
+            for row in rows:
+                job = self._loads(str(row["payload_json"] or ""), {})
+                for candidate in self._notice_identity_candidate_payloads(job):
+                    upsert_candidate(candidate, origin="action_job_repair")
+        except Exception:
+            pass
+
+        try:
+            rows = conn.execute(
+                """
+                SELECT payload_json
+                FROM work_status
+                ORDER BY updated_at DESC
+                LIMIT 500
+                """
+            ).fetchall()
+            for row in rows:
+                payload = self._loads(str(row["payload_json"] or ""), {})
+                if isinstance(payload, list):
+                    items = payload
+                elif isinstance(payload, dict) and isinstance(payload.get("items"), list):
+                    items = payload.get("items") or []
+                else:
+                    items = []
+                for item in items:
+                    if isinstance(item, dict):
+                        upsert_candidate(item, origin="work_status_repair")
+        except Exception:
+            pass
+
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES('notice_identity_repair_v1_done', ?)",
+            (self._json({"repaired": repaired, "at": time.time()}),),
         )
 
     @staticmethod
@@ -1060,14 +1246,15 @@ class LanPortalStateStore:
         return documents
 
     def _identity_for_item(self, item: dict[str, Any]) -> str:
+        item = normalize_notice_identity_payload(item)
         active_item_id = self._text(item.get("active_item_id"))
         if active_item_id:
             return f"active:{active_item_id}"
-        record_id = self._text(item.get("record_id") or item.get("raw_record_id"))
-        if record_id:
-            return f"record:{record_id}"
-        source_record_id = self._text(item.get("source_record_id"))
         work_type = self._text(item.get("work_type")) or "maintenance"
+        target_record_id = canonical_target_record_id(item)
+        if target_record_id:
+            return f"{work_type}:target:{target_record_id}"
+        source_record_id = canonical_source_record_id(item)
         if source_record_id:
             return f"{work_type}:source:{source_record_id}"
         seed = self._json(
@@ -1124,9 +1311,11 @@ class LanPortalStateStore:
                 conn.execute("BEGIN IMMEDIATE")
                 conn.execute("DELETE FROM ongoing_items")
                 for item in normalized:
+                    normalized_item = normalize_notice_identity_payload(item)
                     building_codes = item.get("building_codes")
                     if not isinstance(building_codes, list):
                         building_codes = []
+                    normalized_item["building_codes"] = building_codes
                     conn.execute(
                         """
                         INSERT OR REPLACE INTO ongoing_items(
@@ -1148,9 +1337,9 @@ class LanPortalStateStore:
                         (
                             self._identity_for_item(item),
                             self._text(item.get("active_item_id")),
-                            self._text(item.get("record_id")),
+                            canonical_target_record_id(normalized_item),
                             self._text(item.get("raw_record_id")),
-                            self._text(item.get("source_record_id")),
+                            canonical_source_record_id(normalized_item),
                             self._text(item.get("work_type")),
                             self._text(item.get("notice_type")),
                             self._text(item.get("title")),
@@ -1160,6 +1349,11 @@ class LanPortalStateStore:
                             now,
                             snapshot_id,
                         ),
+                    )
+                    self._upsert_notice_identity_locked(
+                        conn,
+                        normalized_item,
+                        origin=self._text(item.get("origin")) or "qt_snapshot",
                     )
                 conn.execute(
                     "INSERT OR REPLACE INTO meta(key, value) VALUES('ongoing_snapshot_at', ?)",
@@ -2280,12 +2474,12 @@ class LanPortalStateStore:
     ) -> bool:
         if not isinstance(payload, dict):
             return False
-        normalized = dict(payload or {})
+        normalized = normalize_notice_identity_payload(payload or {})
         active_item_id = self._qt_active_item_key(normalized)
         if not active_item_id:
             return False
         normalized.setdefault("active_item_id", active_item_id)
-        record_id = self._text(normalized.get("record_id"))
+        record_id = canonical_target_record_id(normalized)
         notice_type = self._text(normalized.get("notice_type"))
         section = self._normalize_qt_active_section(
             section or ("event" if notice_type == "事件通告" else "other")
@@ -2325,6 +2519,7 @@ class LanPortalStateStore:
                         now,
                     ),
                 )
+                self._upsert_notice_identity_locked(conn, normalized, origin=origin)
                 conn.commit()
         return True
 
@@ -2359,6 +2554,278 @@ class LanPortalStateStore:
                     )
                 conn.commit()
                 return bool(cursor.rowcount)
+
+    def _notice_identity_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        payload = self._loads(str(row["payload_json"] or ""), {})
+        payload = payload if isinstance(payload, dict) else {}
+        building_codes = self._loads(str(row["building_codes_json"] or "[]"), [])
+        if not isinstance(building_codes, list):
+            building_codes = []
+        return {
+            "identity_id": str(row["identity_id"] or ""),
+            "work_type": str(row["work_type"] or ""),
+            "notice_type": str(row["notice_type"] or ""),
+            "active_item_id": str(row["active_item_id"] or ""),
+            "source_app_token": str(row["source_app_token"] or ""),
+            "source_table_id": str(row["source_table_id"] or ""),
+            "source_record_id": str(row["source_record_id"] or ""),
+            "target_app_token": str(row["target_app_token"] or ""),
+            "target_table_id": str(row["target_table_id"] or ""),
+            "target_record_id": str(row["target_record_id"] or ""),
+            "title": str(row["title"] or ""),
+            "reason": str(row["reason"] or ""),
+            "building_codes": building_codes,
+            "start_time": str(row["start_time"] or ""),
+            "end_time": str(row["end_time"] or ""),
+            "status": str(row["status"] or ""),
+            "origin": str(row["origin"] or ""),
+            "payload": payload,
+            "created_at": float(row["created_at"] or 0),
+            "updated_at": float(row["updated_at"] or 0),
+            "deleted_at": (
+                float(row["deleted_at"] or 0)
+                if row["deleted_at"] is not None
+                else None
+            ),
+        }
+
+    def _notice_identity_lookup_locked(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        work_type: str = "",
+        active_item_id: str = "",
+        source_record_id: str = "",
+        target_record_id: str = "",
+    ) -> sqlite3.Row | None:
+        work_type = self._text(work_type)
+        lookups = (
+            ("target_record_id", self._text(target_record_id)),
+            ("source_record_id", self._text(source_record_id)),
+            ("active_item_id", self._text(active_item_id)),
+        )
+        for column, value in lookups:
+            if not value:
+                continue
+            clauses = [f"{column} = ?", "deleted_at IS NULL"]
+            params: list[Any] = [value]
+            if work_type:
+                clauses.append("(work_type = ? OR work_type = '')")
+                params.append(work_type)
+            row = conn.execute(
+                f"""
+                SELECT *
+                FROM notice_identity_map
+                WHERE {' AND '.join(clauses)}
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                tuple(params),
+            ).fetchone()
+            if row:
+                return row
+        return None
+
+    def _notice_identity_id_for_payload(
+        self,
+        *,
+        work_type: str,
+        active_item_id: str,
+        source_record_id: str,
+        target_record_id: str,
+        title: str,
+    ) -> str:
+        work_type = self._text(work_type) or "maintenance"
+        if target_record_id:
+            return f"{work_type}:target:{target_record_id}"
+        if source_record_id:
+            return f"{work_type}:source:{source_record_id}"
+        if active_item_id:
+            return f"{work_type}:active:{active_item_id}"
+        seed = self._json([work_type, self._text(title)])
+        return f"{work_type}:generated:{uuid.uuid5(uuid.NAMESPACE_URL, seed).hex}"
+
+    def _upsert_notice_identity_locked(
+        self,
+        conn: sqlite3.Connection,
+        payload: dict[str, Any] | None,
+        *,
+        origin: str = "",
+    ) -> dict[str, Any] | None:
+        if not isinstance(payload, dict):
+            return None
+        payload = normalize_notice_identity_payload(payload)
+        notice_type = self._text(payload.get("notice_type"))
+        if notice_type == "事件通告":
+            return None
+        work_type = self._text(payload.get("work_type")) or "maintenance"
+        active_item_id = self._text(payload.get("active_item_id"))
+        source_record_id = canonical_source_record_id(payload)
+        target_record_id = canonical_target_record_id(payload)
+        record_id = self._text(payload.get("record_id"))
+        if not (active_item_id or source_record_id or target_record_id):
+            return None
+
+        building_codes = payload.get("building_codes")
+        if not isinstance(building_codes, list):
+            building_codes = []
+        title = self._text(payload.get("title") or payload.get("content"))
+        reason = self._text(payload.get("reason"))
+        source_app_token = self._text(payload.get("source_app_token"))
+        source_table_id = self._text(payload.get("source_table_id"))
+        target_app_token = self._text(payload.get("target_app_token"))
+        target_table_id = self._text(payload.get("target_table_id"))
+        start_time = self._text(payload.get("start_time") or payload.get("expected_time"))
+        end_time = self._text(payload.get("end_time") or payload.get("fault_time"))
+        status = self._text(payload.get("status"))
+        origin = self._text(origin) or self._text(payload.get("origin"))
+        existing_row = self._notice_identity_lookup_locked(
+            conn,
+            work_type=work_type,
+            active_item_id=active_item_id,
+            source_record_id=source_record_id,
+            target_record_id=target_record_id,
+        )
+        existing = self._notice_identity_from_row(existing_row) if existing_row else {}
+        identity_id = self._text(existing.get("identity_id")) or self._notice_identity_id_for_payload(
+            work_type=work_type,
+            active_item_id=active_item_id,
+            source_record_id=source_record_id,
+            target_record_id=target_record_id,
+            title=title,
+        )
+        now = time.time()
+        created_at = float(existing.get("created_at") or now)
+        old_payload = existing.get("payload") if isinstance(existing.get("payload"), dict) else {}
+        merged_payload = dict(old_payload)
+        merged_payload.update(dict(payload))
+        values = {
+            "work_type": work_type or existing.get("work_type", ""),
+            "notice_type": notice_type or existing.get("notice_type", ""),
+            "active_item_id": active_item_id or existing.get("active_item_id", ""),
+            "source_app_token": source_app_token or existing.get("source_app_token", ""),
+            "source_table_id": source_table_id or existing.get("source_table_id", ""),
+            "source_record_id": source_record_id or existing.get("source_record_id", ""),
+            "target_app_token": target_app_token or existing.get("target_app_token", ""),
+            "target_table_id": target_table_id or existing.get("target_table_id", ""),
+            "target_record_id": target_record_id or existing.get("target_record_id", ""),
+            "title": title or existing.get("title", ""),
+            "reason": reason or existing.get("reason", ""),
+            "building_codes": building_codes or existing.get("building_codes", []),
+            "start_time": start_time or existing.get("start_time", ""),
+            "end_time": end_time or existing.get("end_time", ""),
+            "status": status or existing.get("status", ""),
+            "origin": origin or existing.get("origin", ""),
+        }
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO notice_identity_map(
+                identity_id, work_type, notice_type, active_item_id,
+                source_app_token, source_table_id, source_record_id,
+                target_app_token, target_table_id, target_record_id,
+                title, reason, building_codes_json, start_time, end_time,
+                status, origin, payload_json, created_at, updated_at, deleted_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            """,
+            (
+                identity_id,
+                values["work_type"],
+                values["notice_type"],
+                values["active_item_id"],
+                values["source_app_token"],
+                values["source_table_id"],
+                values["source_record_id"],
+                values["target_app_token"],
+                values["target_table_id"],
+                values["target_record_id"],
+                values["title"],
+                values["reason"],
+                self._json(values["building_codes"]),
+                values["start_time"],
+                values["end_time"],
+                values["status"],
+                values["origin"],
+                self._json(merged_payload),
+                created_at,
+                now,
+            ),
+        )
+        row = conn.execute(
+            "SELECT * FROM notice_identity_map WHERE identity_id = ?",
+            (identity_id,),
+        ).fetchone()
+        return self._notice_identity_from_row(row) if row else None
+
+    def upsert_notice_identity(
+        self, payload: dict[str, Any] | None, *, origin: str = ""
+    ) -> dict[str, Any] | None:
+        if not isinstance(payload, dict):
+            return None
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                identity = self._upsert_notice_identity_locked(
+                    conn,
+                    payload,
+                    origin=origin,
+                )
+                conn.commit()
+                return identity
+
+    def resolve_notice_identity(
+        self,
+        *,
+        work_type: str = "",
+        active_item_id: str = "",
+        source_record_id: str = "",
+        target_record_id: str = "",
+    ) -> dict[str, Any] | None:
+        if not self.db_path.exists():
+            return None
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = self._notice_identity_lookup_locked(
+                    conn,
+                    work_type=work_type,
+                    active_item_id=active_item_id,
+                    source_record_id=source_record_id,
+                    target_record_id=target_record_id,
+                )
+        return self._notice_identity_from_row(row) if row else None
+
+    def mark_notice_identity_deleted(
+        self,
+        *,
+        work_type: str = "",
+        active_item_id: str = "",
+        source_record_id: str = "",
+        target_record_id: str = "",
+    ) -> bool:
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = self._notice_identity_lookup_locked(
+                    conn,
+                    work_type=work_type,
+                    active_item_id=active_item_id,
+                    source_record_id=source_record_id,
+                    target_record_id=target_record_id,
+                )
+                if not row:
+                    return False
+                now = time.time()
+                conn.execute(
+                    """
+                    UPDATE notice_identity_map
+                    SET deleted_at = ?, updated_at = ?
+                    WHERE identity_id = ?
+                    """,
+                    (now, now, str(row["identity_id"] or "")),
+                )
+                conn.commit()
+                return True
 
     def create_notice_undo_action(self, payload: dict[str, Any]) -> str:
         if not isinstance(payload, dict):
@@ -2587,6 +3054,7 @@ class LanPortalStateStore:
         payload = payload if isinstance(payload, dict) else {}
         sections = ("event", "other")
         rows: list[tuple[str, str, str, str, int, str, str, float]] = []
+        identity_payloads: list[tuple[dict[str, Any], str]] = []
         seen: set[str] = set()
         now = time.time()
         for section in sections:
@@ -2599,7 +3067,7 @@ class LanPortalStateStore:
                 data = entry.get("data")
                 if not isinstance(data, dict):
                     continue
-                normalized = dict(data)
+                normalized = normalize_notice_identity_payload(data)
                 active_item_id = self._qt_active_item_key(normalized)
                 if not active_item_id:
                     continue
@@ -2609,10 +3077,11 @@ class LanPortalStateStore:
                 origin = self._text(normalized.get("origin"))
                 if not origin and bool(normalized.get("lan_created_from_portal")):
                     origin = "portal"
+                identity_payloads.append((dict(normalized), origin))
                 rows.append(
                     (
                         active_item_id,
-                        self._text(normalized.get("record_id")),
+                        canonical_target_record_id(normalized),
                         notice_type,
                         self._normalize_qt_active_section(section),
                         int(sort_order),
@@ -2643,6 +3112,12 @@ class LanPortalStateStore:
                             deleted_at = NULL
                         """,
                         row,
+                    )
+                for identity_payload, origin in identity_payloads:
+                    self._upsert_notice_identity_locked(
+                        conn,
+                        identity_payload,
+                        origin=origin,
                     )
                 if seen:
                     placeholders = ",".join("?" for _ in seen)

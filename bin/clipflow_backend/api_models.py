@@ -29,7 +29,14 @@ class WorkbenchActionRequest(APIModel):
     work_type: str = "maintenance"
     notice_type: str = ""
     record_id: str = ""
+    source_record_id: str = ""
+    target_record_id: str = ""
+    feishu_record_id: str = ""
+    raw_record_id: str = ""
+    lan_source_record_id: str = ""
     active_item_id: str = ""
+    manual_id: str = ""
+    manual_key: str = ""
     operation_id: str = ""
 
 
@@ -101,6 +108,11 @@ class ChangeTargetLookupRequest(APIModel):
     start_time: str = ""
     end_time: str = ""
     action: str = "update"
+    content: str = ""
+    reason: str = ""
+    impact: str = ""
+    progress: str = ""
+    text: str = ""
 
 
 class NoticeTargetLookupRequest(ChangeTargetLookupRequest):
@@ -142,6 +154,8 @@ class QtDialogSessionRequest(APIModel):
     dialog_type: str = ""
     action_type: str = ""
     record_id: str = ""
+    source_record_id: str = ""
+    target_record_id: str = ""
     active_item_id: str = ""
     payload: dict[str, Any] = Field(default_factory=dict)
 
@@ -193,6 +207,8 @@ class QtJobResultRequest(APIModel):
     success: bool = False
     message: str = ""
     record_id: str = ""
+    target_record_id: str = ""
+    source_record_id: str = ""
     active_item_id: str = ""
 
 

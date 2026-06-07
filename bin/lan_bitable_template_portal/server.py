@@ -14,7 +14,6 @@ import socket
 import threading
 import time
 from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -28,6 +27,7 @@ from .portal_service import (
     SOURCE_CACHE_TTL_SECONDS,
     external_real_write_guard,
 )
+from .identity_utils import normalize_notice_identity_payload, canonical_target_record_id
 from .state_store import LanPortalStateStore
 from upload_event_module.config import get_field_config
 from upload_event_module.services.handlers import NoticePayload
@@ -41,7 +41,7 @@ from upload_event_module.services.service_registry import (
 )
 from upload_event_module.services.feishu_service import delete_bitable_record
 from upload_event_module.services.robot_webhook import send_text_to_open_ids
-from upload_event_module.core.parser import extract_event_info
+from upload_event_module.core.parser import extract_event_info, extract_notice_info
 
 
 FRONTEND_DIST_DIR = Path(__file__).resolve().parent / "frontend" / "dist"
@@ -101,7 +101,14 @@ def _send_text_to_open_ids_guarded(text: str, recipients: list[str]) -> tuple[bo
     return send_text_to_open_ids(text, clean_recipients)
 
 
-class PortalHandler(BaseHTTPRequestHandler):
+class PortalRuntime:
+    """Shared portal runtime used by the FastAPI backend.
+
+    The old built-in HTTP server entry has been removed from the production
+    path. This class is now a shared runtime container for the FastAPI router
+    and Qt bridge while the service layer is being split further.
+    """
+
     service = MaintenancePortalService()
     auth_manager = PortalAuthManager()
     state_store = LanPortalStateStore()
@@ -415,7 +422,7 @@ class PortalHandler(BaseHTTPRequestHandler):
         return ""
 
     def _current_session(self) -> dict | None:
-        return PortalHandler.auth_manager.get_session(
+        return PortalRuntime.auth_manager.get_session(
             self._cookie_value(AUTH_COOKIE_NAME)
         )
 
@@ -496,7 +503,7 @@ class PortalHandler(BaseHTTPRequestHandler):
             return True
         redirect_uri = f"{self._request_base_url()}/api/auth/feishu/callback"
         try:
-            session_id, next_path = PortalHandler.auth_manager.complete_login(
+            session_id, next_path = PortalRuntime.auth_manager.complete_login(
                 code=code,
                 state=state,
                 redirect_uri=redirect_uri,
@@ -506,7 +513,7 @@ class PortalHandler(BaseHTTPRequestHandler):
             return True
         self._send_redirect(
             next_path or sanitized,
-            set_cookie=PortalHandler.auth_manager.cookie_header(session_id),
+            set_cookie=PortalRuntime.auth_manager.cookie_header(session_id),
         )
         return True
 
@@ -544,16 +551,16 @@ class PortalHandler(BaseHTTPRequestHandler):
         return None
 
     def _require_admin_json(self, session: dict) -> bool:
-        if PortalHandler.auth_manager.is_admin(session):
+        if PortalRuntime.auth_manager.is_admin(session):
             return True
         self._send_json(403, {"ok": False, "error": "只有管理员可以执行该操作。"})
         return False
 
     def _authorized_scope_or_error(self, session: dict, scope: str) -> str:
-        normalized = PortalHandler.auth_manager.normalize_scope(scope)
-        if not PortalHandler.auth_manager.scope_allowed(session, normalized):
+        normalized = PortalRuntime.auth_manager.normalize_scope(scope)
+        if not PortalRuntime.auth_manager.scope_allowed(session, normalized):
             raise PortalError(
-                f"当前飞书账号无权访问 {PortalHandler.auth_manager.scope_label(normalized)}。"
+                f"当前飞书账号无权访问 {PortalRuntime.auth_manager.scope_label(normalized)}。"
             )
         return normalized
 
@@ -561,20 +568,20 @@ class PortalHandler(BaseHTTPRequestHandler):
         if not isinstance(payload, dict):
             return payload
         result = dict(payload)
-        result["auth"] = PortalHandler.auth_manager.public_status(
+        result["auth"] = PortalRuntime.auth_manager.public_status(
             session,
             next_path=self._request_target(),
             redirect_uri=f"{self._request_base_url()}/api/auth/feishu/callback",
         )
         scope_options = result.get("scope_options")
         if isinstance(scope_options, list):
-            result["scope_options"] = PortalHandler.auth_manager.filter_scope_options(
+            result["scope_options"] = PortalRuntime.auth_manager.filter_scope_options(
                 scope_options, session
             )
         return result
 
     def _job_visible_to_session(self, job: dict, session: dict) -> bool:
-        if PortalHandler.auth_manager.is_admin(session):
+        if PortalRuntime.auth_manager.is_admin(session):
             return True
         open_id = str((session.get("user") or {}).get("open_id") or "")
         request = job.get("request") if isinstance(job.get("request"), dict) else {}
@@ -664,46 +671,46 @@ class PortalHandler(BaseHTTPRequestHandler):
         except Exception:
             pass
         key = (
-            PortalHandler.payload_cache_generation,
+            PortalRuntime.payload_cache_generation,
             service_version,
             str(getattr(self.service, "_last_loaded_at", "") or ""),
             *key_parts,
         )
         now = time.monotonic()
-        with PortalHandler.payload_cache_lock:
-            PortalHandler._prune_payload_cache_locked(now)
-            cached = PortalHandler.payload_cache.get(key)
+        with PortalRuntime.payload_cache_lock:
+            PortalRuntime._prune_payload_cache_locked(now)
+            cached = PortalRuntime.payload_cache.get(key)
             if cached and cached[0] > now:
                 return copy.deepcopy(cached[1])
-            inflight = PortalHandler.payload_cache_inflight.get(key)
+            inflight = PortalRuntime.payload_cache_inflight.get(key)
             if inflight is None:
                 inflight = threading.Event()
-                PortalHandler.payload_cache_inflight[key] = inflight
-                PortalHandler.payload_cache_inflight_started[key] = now
+                PortalRuntime.payload_cache_inflight[key] = inflight
+                PortalRuntime.payload_cache_inflight_started[key] = now
                 owner = True
             else:
                 owner = False
         if not owner:
             inflight.wait(timeout=5)
-            with PortalHandler.payload_cache_lock:
-                cached = PortalHandler.payload_cache.get(key)
+            with PortalRuntime.payload_cache_lock:
+                cached = PortalRuntime.payload_cache.get(key)
                 if cached and cached[0] > time.monotonic():
                     return copy.deepcopy(cached[1])
         try:
             payload = builder()
         except Exception:
             if owner:
-                with PortalHandler.payload_cache_lock:
-                    event = PortalHandler.payload_cache_inflight.pop(key, None)
-                    PortalHandler.payload_cache_inflight_started.pop(key, None)
+                with PortalRuntime.payload_cache_lock:
+                    event = PortalRuntime.payload_cache_inflight.pop(key, None)
+                    PortalRuntime.payload_cache_inflight_started.pop(key, None)
                     if event is not None:
                         event.set()
             raise
         if not isinstance(payload, dict):
             if owner:
-                with PortalHandler.payload_cache_lock:
-                    event = PortalHandler.payload_cache_inflight.pop(key, None)
-                    PortalHandler.payload_cache_inflight_started.pop(key, None)
+                with PortalRuntime.payload_cache_lock:
+                    event = PortalRuntime.payload_cache_inflight.pop(key, None)
+                    PortalRuntime.payload_cache_inflight_started.pop(key, None)
                     if event is not None:
                         event.set()
             return payload
@@ -720,24 +727,24 @@ class PortalHandler(BaseHTTPRequestHandler):
             payload_size = 0
         if (
             payload_size
-            and payload_size > int(PortalHandler.payload_cache_max_payload_bytes)
+            and payload_size > int(PortalRuntime.payload_cache_max_payload_bytes)
         ):
             if owner:
-                with PortalHandler.payload_cache_lock:
-                    event = PortalHandler.payload_cache_inflight.pop(key, None)
-                    PortalHandler.payload_cache_inflight_started.pop(key, None)
+                with PortalRuntime.payload_cache_lock:
+                    event = PortalRuntime.payload_cache_inflight.pop(key, None)
+                    PortalRuntime.payload_cache_inflight_started.pop(key, None)
                     if event is not None:
                         event.set()
             return payload
-        with PortalHandler.payload_cache_lock:
-            PortalHandler.payload_cache[key] = (
-                now + float(PortalHandler.payload_cache_ttl_s),
+        with PortalRuntime.payload_cache_lock:
+            PortalRuntime.payload_cache[key] = (
+                now + float(PortalRuntime.payload_cache_ttl_s),
                 copy.deepcopy(payload),
             )
-            PortalHandler._prune_payload_cache_locked(now)
+            PortalRuntime._prune_payload_cache_locked(now)
             if owner:
-                event = PortalHandler.payload_cache_inflight.pop(key, None)
-                PortalHandler.payload_cache_inflight_started.pop(key, None)
+                event = PortalRuntime.payload_cache_inflight.pop(key, None)
+                PortalRuntime.payload_cache_inflight_started.pop(key, None)
                 if event is not None:
                     event.set()
         return payload
@@ -951,16 +958,16 @@ class PortalHandler(BaseHTTPRequestHandler):
     def _reconcile_orphan_started_items(
         self, scope: str, ongoing: list[dict] | None, *, force: bool = False
     ) -> None:
-        scope = PortalHandler.auth_manager.normalize_scope(scope)
+        scope = PortalRuntime.auth_manager.normalize_scope(scope)
         now = time.monotonic()
-        with PortalHandler.orphan_reconcile_lock:
-            if scope in PortalHandler.orphan_reconcile_pending:
+        with PortalRuntime.orphan_reconcile_lock:
+            if scope in PortalRuntime.orphan_reconcile_pending:
                 return
-            last = float(PortalHandler.orphan_reconcile_last.get(scope) or 0)
-            if not force and now - last < PortalHandler.orphan_reconcile_interval_s:
+            last = float(PortalRuntime.orphan_reconcile_last.get(scope) or 0)
+            if not force and now - last < PortalRuntime.orphan_reconcile_interval_s:
                 return
-            PortalHandler.orphan_reconcile_pending.add(scope)
-            PortalHandler.orphan_reconcile_last[scope] = now
+            PortalRuntime.orphan_reconcile_pending.add(scope)
+            PortalRuntime.orphan_reconcile_last[scope] = now
         ongoing_copy = [
             dict(item) for item in (ongoing or []) if isinstance(item, dict)
         ]
@@ -971,14 +978,14 @@ class PortalHandler(BaseHTTPRequestHandler):
                     scope=scope, ongoing_items=ongoing_copy
                 )
                 if int((result or {}).get("removed") or 0) > 0:
-                    PortalHandler.clear_payload_cache()
+                    PortalRuntime.clear_payload_cache()
             except Exception as exc:
                 warning = f"本地已开始状态清理失败: {exc}"
                 if warning not in self.service._load_warnings:
                     self.service._load_warnings.append(warning)
             finally:
-                with PortalHandler.orphan_reconcile_lock:
-                    PortalHandler.orphan_reconcile_pending.discard(scope)
+                with PortalRuntime.orphan_reconcile_lock:
+                    PortalRuntime.orphan_reconcile_pending.discard(scope)
 
         try:
             threading.Thread(
@@ -987,8 +994,8 @@ class PortalHandler(BaseHTTPRequestHandler):
                 daemon=True,
             ).start()
         except Exception as exc:
-            with PortalHandler.orphan_reconcile_lock:
-                PortalHandler.orphan_reconcile_pending.discard(scope)
+            with PortalRuntime.orphan_reconcile_lock:
+                PortalRuntime.orphan_reconcile_pending.discard(scope)
             warning = f"本地已开始状态清理启动失败: {exc}"
             if warning not in self.service._load_warnings:
                 self.service._load_warnings.append(warning)
@@ -1005,7 +1012,7 @@ class PortalHandler(BaseHTTPRequestHandler):
             return self._send_static_file(portal_asset_file(relative))
         if parsed.path == "/api/auth/status":
             session = self._current_session()
-            data = PortalHandler.auth_manager.public_status(
+            data = PortalRuntime.auth_manager.public_status(
                 session,
                 next_path=(parse_qs(parsed.query).get("next") or [self._request_target()])[0],
                 redirect_uri=f"{self._request_base_url()}/api/auth/feishu/callback",
@@ -1016,7 +1023,7 @@ class PortalHandler(BaseHTTPRequestHandler):
             next_path = (qs.get("next") or ["/"])[0]
             redirect_uri = f"{self._request_base_url()}/api/auth/feishu/callback"
             try:
-                login_url = PortalHandler.auth_manager.start_login(
+                login_url = PortalRuntime.auth_manager.start_login(
                     redirect_uri=redirect_uri,
                     next_path=next_path,
                 )
@@ -1029,7 +1036,7 @@ class PortalHandler(BaseHTTPRequestHandler):
             state = (qs.get("state") or [""])[0]
             redirect_uri = f"{self._request_base_url()}/api/auth/feishu/callback"
             try:
-                session_id, next_path = PortalHandler.auth_manager.complete_login(
+                session_id, next_path = PortalRuntime.auth_manager.complete_login(
                     code=code,
                     state=state,
                     redirect_uri=redirect_uri,
@@ -1038,15 +1045,15 @@ class PortalHandler(BaseHTTPRequestHandler):
                 return self._send_html_message(400, "飞书登录失败", str(exc))
             return self._send_redirect(
                 next_path,
-                set_cookie=PortalHandler.auth_manager.cookie_header(session_id),
+                set_cookie=PortalRuntime.auth_manager.cookie_header(session_id),
             )
         if parsed.path == "/api/auth/logout":
-            PortalHandler.auth_manager.clear_session(
+            PortalRuntime.auth_manager.clear_session(
                 self._cookie_value(AUTH_COOKIE_NAME)
             )
             return self._send_redirect(
                 "/",
-                set_cookie=PortalHandler.auth_manager.clear_cookie_header(),
+                set_cookie=PortalRuntime.auth_manager.clear_cookie_header(),
             )
         session = self._require_auth_json()
         if session is None:
@@ -1085,7 +1092,7 @@ class PortalHandler(BaseHTTPRequestHandler):
             try:
                 ongoing = self._get_ongoing("ALL")
                 self._reconcile_orphan_started_items("ALL", ongoing)
-                allowed_options = PortalHandler.auth_manager.filter_scope_options(
+                allowed_options = PortalRuntime.auth_manager.filter_scope_options(
                     SCOPE_OPTIONS, session
                 )
                 allowed_scopes = [
@@ -1107,7 +1114,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                         include_prepared=False,
                     ),
                 )
-                data = PortalHandler.auth_manager.filter_scope_overview(data, session)
+                data = PortalRuntime.auth_manager.filter_scope_overview(data, session)
                 return self._send_json(
                     200,
                     {
@@ -1143,7 +1150,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                 return self._send_json(403, {"ok": False, "error": str(exc)})
         if parsed.path == "/api/handover-links":
             try:
-                data = PortalHandler.auth_manager.filter_handover_links(
+                data = PortalRuntime.auth_manager.filter_handover_links(
                     self.service.get_handover_links(), session
                 )
                 return self._send_json(
@@ -1155,14 +1162,14 @@ class PortalHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/auth/permissions":
             if not self._require_admin_json(session):
                 return
-            data = PortalHandler.auth_manager.get_permissions_payload()
+            data = PortalRuntime.auth_manager.get_permissions_payload()
             return self._send_json(
                 200,
                 {"ok": True, "data": self._with_auth_context(data, session)},
             )
         if parsed.path == "/api/auth/permission-requests/current":
             user = session.get("user") if isinstance(session.get("user"), dict) else {}
-            request = PortalHandler.auth_manager.get_current_permission_request(
+            request = PortalRuntime.auth_manager.get_current_permission_request(
                 str(user.get("open_id") or "")
             )
             data = {"request": request or None}
@@ -1254,7 +1261,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                 scope = self._authorized_scope_or_error(
                     session, (qs.get("scope") or ["ALL"])[0]
                 )
-                refresh_result = PortalHandler.request_source_refresh(force=True)
+                refresh_result = PortalRuntime.request_source_refresh(force=True)
                 refreshed = bool(refresh_result.get("refreshed", False))
                 ongoing = self._get_ongoing(scope)
                 self._reconcile_orphan_started_items(scope, ongoing, force=True)
@@ -1280,7 +1287,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                 scope = self._authorized_scope_or_error(
                     session, (qs.get("scope") or ["ALL"])[0]
                 )
-                refresh_result = PortalHandler.request_repair_source_refresh()
+                refresh_result = PortalRuntime.request_repair_source_refresh()
                 ongoing = self._get_ongoing(scope)
                 self._reconcile_orphan_started_items(scope, ongoing)
                 data = self.service.get_bootstrap(
@@ -1305,7 +1312,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                 scope = self._authorized_scope_or_error(
                     session, (qs.get("scope") or ["ALL"])[0]
                 )
-                refresh_result = PortalHandler.request_change_source_refresh()
+                refresh_result = PortalRuntime.request_change_source_refresh()
                 ongoing = self._get_ongoing(scope)
                 self._reconcile_orphan_started_items(scope, ongoing)
                 data = self.service.get_bootstrap(
@@ -1337,7 +1344,7 @@ class PortalHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         if parsed.path == "/api/auth/logout":
-            PortalHandler.auth_manager.clear_session(
+            PortalRuntime.auth_manager.clear_session(
                 self._cookie_value(AUTH_COOKIE_NAME)
             )
             body = json.dumps({"ok": True, "data": {}}, ensure_ascii=False).encode(
@@ -1347,7 +1354,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                 200,
                 {
                     "Content-Type": "application/json; charset=utf-8",
-                    "Set-Cookie": PortalHandler.auth_manager.clear_cookie_header(),
+                    "Set-Cookie": PortalRuntime.auth_manager.clear_cookie_header(),
                 },
                 body,
             )
@@ -1369,8 +1376,8 @@ class PortalHandler(BaseHTTPRequestHandler):
                 )
                 job_id, should_start = self.service.create_action_job(payload)
                 if should_start:
-                    PortalHandler.clear_payload_cache()
-                    PortalHandler.enqueue_initial_message_or_upload_job(job_id)
+                    PortalRuntime.clear_payload_cache()
+                    PortalRuntime.enqueue_initial_message_or_upload_job(job_id)
                 job = self.service.get_job(job_id) or {}
                 return self._send_json(
                     202,
@@ -1398,6 +1405,11 @@ class PortalHandler(BaseHTTPRequestHandler):
                         start_time=payload.get("start_time") or "",
                         end_time=payload.get("end_time") or "",
                         action=payload.get("action") or "update",
+                        content=payload.get("content") or "",
+                        reason=payload.get("reason") or "",
+                        impact=payload.get("impact") or "",
+                        progress=payload.get("progress") or "",
+                        text=payload.get("text") or "",
                     )
                 else:
                     data = self.service.lookup_notice_target_candidates(
@@ -1407,6 +1419,11 @@ class PortalHandler(BaseHTTPRequestHandler):
                         start_time=payload.get("start_time") or "",
                         end_time=payload.get("end_time") or "",
                         action=payload.get("action") or "update",
+                        content=payload.get("content") or "",
+                        reason=payload.get("reason") or "",
+                        impact=payload.get("impact") or "",
+                        progress=payload.get("progress") or "",
+                        text=payload.get("text") or "",
                     )
                 return self._send_json(200, {"ok": True, "data": data})
             except (PortalError, ValueError, json.JSONDecodeError) as exc:
@@ -1425,7 +1442,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                     or ""
                 )
                 self.service.validate_ongoing_delete_item(payload, scope=scope)
-                callback = PortalHandler.ongoing_delete_callback
+                callback = PortalRuntime.ongoing_delete_callback
                 if callback is None:
                     return self._send_json(
                         503,
@@ -1454,7 +1471,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                 data.update(
                     self.service.discard_deleted_ongoing_state(payload, scope=scope)
                 )
-                PortalHandler.clear_payload_cache()
+                PortalRuntime.clear_payload_cache()
                 data["qt_deleted"] = True
                 data["remote_deleted"] = bool(
                     accepted.get("remote_deleted")
@@ -1473,7 +1490,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                     payload.get("links") or {},
                     password=str(payload.get("password") or ""),
                 )
-                data = PortalHandler.auth_manager.filter_handover_links(data, session)
+                data = PortalRuntime.auth_manager.filter_handover_links(data, session)
                 return self._send_json(
                     200, {"ok": True, "data": self._with_auth_context(data, session)}
                 )
@@ -1517,14 +1534,14 @@ class PortalHandler(BaseHTTPRequestHandler):
             try:
                 payload = self._read_json_body()
                 user = session.get("user") if isinstance(session.get("user"), dict) else {}
-                data = PortalHandler.auth_manager.create_permission_request(
+                data = PortalRuntime.auth_manager.create_permission_request(
                     open_id=str(user.get("open_id") or ""),
                     name=str(user.get("name") or user.get("en_name") or "飞书用户"),
                     scopes=payload.get("scopes") or [],
                     reason=str(payload.get("reason") or ""),
                 )
                 code = str(data.pop("code") or "")
-                recipients = PortalHandler.auth_manager.admin_open_ids()
+                recipients = PortalRuntime.auth_manager.admin_open_ids()
                 labels = "、".join(data.get("requested_scope_labels") or [])
                 reason = str(data.get("reason") or "").strip() or "未填写"
                 text = (
@@ -1540,15 +1557,15 @@ class PortalHandler(BaseHTTPRequestHandler):
                 )
                 ok, message, _ = _send_text_to_open_ids_guarded(text, recipients)
                 if not ok:
-                    PortalHandler.auth_manager.mark_permission_request_notify_failed(
+                    PortalRuntime.auth_manager.mark_permission_request_notify_failed(
                         str(data.get("request_id") or "")
                     )
                     raise PortalError(f"通知管理员失败: {message}")
-                activated = PortalHandler.auth_manager.activate_permission_request(
+                activated = PortalRuntime.auth_manager.activate_permission_request(
                     str(data.get("request_id") or "")
                 )
                 data.update(activated)
-                PortalHandler.auth_manager.supersede_other_permission_requests(
+                PortalRuntime.auth_manager.supersede_other_permission_requests(
                     open_id=str(data.get("open_id") or ""),
                     keep_request_id=str(data.get("request_id") or ""),
                 )
@@ -1567,7 +1584,7 @@ class PortalHandler(BaseHTTPRequestHandler):
             try:
                 payload = self._read_json_body()
                 user = session.get("user") if isinstance(session.get("user"), dict) else {}
-                permissions = PortalHandler.auth_manager.confirm_permission_request(
+                permissions = PortalRuntime.auth_manager.confirm_permission_request(
                     open_id=str(user.get("open_id") or ""),
                     request_id=str(payload.get("request_id") or ""),
                     code=str(payload.get("code") or ""),
@@ -1593,7 +1610,7 @@ class PortalHandler(BaseHTTPRequestHandler):
             try:
                 payload = self._read_json_body()
                 actor = session.get("user") if isinstance(session.get("user"), dict) else {}
-                data, changed_open_ids = PortalHandler.auth_manager.save_permissions_payload(
+                data, changed_open_ids = PortalRuntime.auth_manager.save_permissions_payload(
                     payload.get("users") or [],
                     updated_by=str(actor.get("open_id") or ""),
                 )
@@ -1629,7 +1646,7 @@ class PortalHandler(BaseHTTPRequestHandler):
             try:
                 payload = self._read_json_body()
                 scope = self._authorized_scope_or_error(
-                    session, payload.get("scope") or PortalHandler.auth_manager.default_scope(session) or "ALL"
+                    session, payload.get("scope") or PortalRuntime.auth_manager.default_scope(session) or "ALL"
                 )
                 drafts = payload.get("drafts") or []
                 self.service.assert_generated_drafts_allowed(drafts, scope=scope)
@@ -1638,7 +1655,7 @@ class PortalHandler(BaseHTTPRequestHandler):
             except (PortalError, ValueError, json.JSONDecodeError) as exc:
                 return self._send_json(403, {"ok": False, "error": str(exc)})
         if parsed.path == "/api/send-generated":
-            if PortalHandler.notice_callback is None:
+            if PortalRuntime.notice_callback is None:
                 return self._send_json(
                     503,
                     {
@@ -1649,12 +1666,12 @@ class PortalHandler(BaseHTTPRequestHandler):
             try:
                 payload = self._read_json_body()
                 scope = self._authorized_scope_or_error(
-                    session, payload.get("scope") or PortalHandler.auth_manager.default_scope(session) or "ALL"
+                    session, payload.get("scope") or PortalRuntime.auth_manager.default_scope(session) or "ALL"
                 )
                 items = payload.get("items") or []
                 self.service.assert_generated_items_allowed(items, scope=scope)
                 results = self.service.send_generated_templates(
-                    items, notice_callback=PortalHandler.notice_callback
+                    items, notice_callback=PortalRuntime.notice_callback
                 )
                 return self._send_json(200, {"ok": True, "data": {"items": results}})
             except (PortalError, ValueError, json.JSONDecodeError) as exc:
@@ -1673,9 +1690,9 @@ class PortalHandler(BaseHTTPRequestHandler):
             return str(info.get("status") or "").strip() == "结束"
 
         try:
-            snapshot = PortalHandler.state_store.get_ongoing_snapshot()
+            snapshot = PortalRuntime.state_store.get_ongoing_snapshot()
             if snapshot.get("exists"):
-                PortalHandler.last_ongoing_error = ""
+                PortalRuntime.last_ongoing_error = ""
                 return [
                     dict(item)
                     for item in snapshot.get("items", [])
@@ -1685,24 +1702,24 @@ class PortalHandler(BaseHTTPRequestHandler):
                 ]
         except Exception as exc:
             warning = f"SQLite 进行中状态读取失败: {exc}"
-            PortalHandler.last_ongoing_error = warning
+            PortalRuntime.last_ongoing_error = warning
             logging.warning(warning)
-        callback = PortalHandler.ongoing_callback
+        callback = PortalRuntime.ongoing_callback
         if callback is None:
-            if not PortalHandler.last_ongoing_error:
-                PortalHandler.last_ongoing_error = ""
+            if not PortalRuntime.last_ongoing_error:
+                PortalRuntime.last_ongoing_error = ""
             return []
         try:
             result = callback("ALL")
             if isinstance(result, list):
                 try:
-                    PortalHandler.state_store.replace_ongoing_items(result)
+                    PortalRuntime.state_store.replace_ongoing_items(result)
                 except Exception as store_exc:
                     logging.warning(f"SQLite 进行中状态写入失败: {store_exc}")
-            PortalHandler.last_ongoing_error = ""
+            PortalRuntime.last_ongoing_error = ""
         except Exception as exc:
             warning = f"主界面进行中状态读取失败: {exc}"
-            PortalHandler.last_ongoing_error = warning
+            PortalRuntime.last_ongoing_error = warning
             logging.warning(warning)
             return []
         if not isinstance(result, list):
@@ -2619,6 +2636,255 @@ class PortalHandler(BaseHTTPRequestHandler):
         )
 
     @staticmethod
+    def _remote_record_not_found(message: object) -> bool:
+        text = str(message or "")
+        return any(
+            token in text
+            for token in (
+                "1254043",
+                "RecordidNotFound",
+                "RecordIdNotFound",
+                "record not found",
+                "记录不存在",
+            )
+        )
+
+    @staticmethod
+    def _candidate_target_record_id(candidate: dict) -> str:
+        if not isinstance(candidate, dict):
+            return ""
+        return str(
+            candidate.get("target_record_id")
+            or candidate.get("record_id")
+            or ""
+        ).strip()
+
+    @staticmethod
+    def _notice_work_type_from_notice_type(notice_type: str) -> str:
+        notice_type = str(notice_type or "").strip()
+        return {
+            "维保通告": "maintenance",
+            "设备变更": "change",
+            "变更通告": "change",
+            "设备检修": "repair",
+        }.get(notice_type, "")
+
+    @staticmethod
+    def _target_candidate_score(prepared: dict, candidate: dict) -> int:
+        prepared = prepared if isinstance(prepared, dict) else {}
+        candidate = candidate if isinstance(candidate, dict) else {}
+        score = 0
+        if candidate.get("date_matched"):
+            score += 30
+        if candidate.get("title_matched"):
+            score += 35
+        score += int(candidate.get("business_match_count") or 0) * 18
+        source_codes = {
+            str(item or "").strip().upper()
+            for item in (prepared.get("building_codes") or [])
+            if str(item or "").strip()
+        }
+        candidate_codes = {
+            str(item or "").strip().upper()
+            for item in (candidate.get("building_codes") or [])
+            if str(item or "").strip()
+        }
+        if source_codes and candidate_codes and source_codes & candidate_codes:
+            score += 20
+        if str(candidate.get("status") or "").strip() not in {"结束", "已结束"}:
+            score += 10
+        if str(prepared.get("level") or "").strip() and str(prepared.get("level") or "").strip() in str(candidate.get("fields") or ""):
+            score += 5
+        if str(prepared.get("specialty") or "").strip() and str(prepared.get("specialty") or "").strip() in str(candidate.get("fields") or ""):
+            score += 5
+        return score
+
+    @classmethod
+    def _enrich_prepared_notice_lookup_fields(cls, prepared: dict) -> dict:
+        prepared = normalize_notice_identity_payload(dict(prepared or {}))
+        text = str(prepared.get("text") or prepared.get("content") or "").strip()
+        if not text:
+            return prepared
+        sections = {}
+        try:
+            sections = cls.service._parse_notice_sections(text)
+        except Exception:
+            sections = {}
+        parsed = extract_notice_info(text) or {}
+
+        def section_value(*names: str) -> str:
+            for name in names:
+                value = str(sections.get(name) or "").strip()
+                if value:
+                    return value
+            return ""
+
+        if not str(prepared.get("title") or "").strip():
+            prepared["title"] = (
+                str(parsed.get("title") or "").strip()
+                or section_value("名称", "标题", "事件描述", "通告名称")
+            )
+        if not str(prepared.get("start_time") or "").strip() and not str(
+            prepared.get("end_time") or ""
+        ).strip():
+            time_text = str(parsed.get("time_str") or "").strip() or section_value("时间")
+            if time_text:
+                prepared["start_time"] = time_text
+        if not str(prepared.get("content") or "").strip():
+            prepared["content"] = section_value("内容") or text
+        if not str(prepared.get("reason") or "").strip():
+            prepared["reason"] = (
+                str(parsed.get("reason") or "").strip()
+                or section_value("原因", "故障原因")
+            )
+        if not str(prepared.get("impact") or "").strip():
+            prepared["impact"] = section_value("影响", "影响范围")
+        if not str(prepared.get("progress") or "").strip():
+            prepared["progress"] = section_value("进度", "完成情况", "解决方案")
+        return prepared
+
+    @classmethod
+    def _target_selection_response(
+        cls,
+        prepared: dict,
+        *,
+        stale_record_id: str,
+        message: str,
+        action_name: str,
+    ) -> dict:
+        prepared = cls._enrich_prepared_notice_lookup_fields(prepared)
+        work_type = str(prepared.get("work_type") or "").strip()
+        if not work_type:
+            work_type = cls._notice_work_type_from_notice_type(
+                str(prepared.get("notice_type") or "")
+            )
+        title = str(prepared.get("title") or "").strip()
+        candidates: list[dict] = []
+        lookup_error = ""
+        if title:
+            try:
+                result = cls.service.lookup_notice_target_candidates(
+                    work_type=work_type,
+                    scope=str(prepared.get("scope") or "ALL").strip() or "ALL",
+                    title=title,
+                    start_time=str(prepared.get("start_time") or ""),
+                    end_time=str(prepared.get("end_time") or ""),
+                    action=str(prepared.get("action") or "update"),
+                    content=str(prepared.get("content") or ""),
+                    reason=str(prepared.get("reason") or ""),
+                    impact=str(prepared.get("impact") or ""),
+                    progress=str(prepared.get("progress") or ""),
+                    text=str(prepared.get("text") or ""),
+                    limit=20,
+                )
+                for item in result.get("candidates") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    target_record_id = cls._candidate_target_record_id(item)
+                    if not target_record_id or target_record_id == stale_record_id:
+                        continue
+                    copied = dict(item)
+                    copied["target_record_id"] = target_record_id
+                    copied["record_id"] = target_record_id
+                    copied["match_score"] = cls._target_candidate_score(prepared, copied)
+                    candidates.append(copied)
+            except Exception as exc:
+                lookup_error = str(exc)
+        candidates.sort(
+            key=lambda item: (
+                -int(item.get("match_score") or 0),
+                0 if item.get("date_matched") else 1,
+                str(item.get("start_time") or ""),
+            )
+        )
+        detail = str(message or "目标多维记录不存在。")
+        if lookup_error:
+            detail = f"{detail} 候选查询失败：{lookup_error}"
+        elif candidates:
+            detail = f"{detail} 已找到 {len(candidates)} 条可能相关记录，请选择后重试。"
+        else:
+            detail = f"{detail} 未找到可选择的相关记录。"
+        return {
+            "ok": False,
+            "name": action_name,
+            "message": detail,
+            "record_id": stale_record_id,
+            "real_record_id": "",
+            "needs_target_selection": bool(candidates),
+            "target_record_missing": True,
+            "target_candidates": candidates,
+        }
+
+    @classmethod
+    def _rebind_missing_target_record(
+        cls,
+        prepared: dict,
+        *,
+        stale_record_id: str,
+    ) -> tuple[str, str]:
+        prepared = normalize_notice_identity_payload(dict(prepared or {}))
+        stale_record_id = str(stale_record_id or "").strip()
+        title = str(prepared.get("title") or "").strip()
+        if not title:
+            prepared = cls._enrich_prepared_notice_lookup_fields(prepared)
+            title = str(prepared.get("title") or "").strip()
+        if not title:
+            return "", "目标多维记录不存在，且通告缺少标题，无法自动重新关联。"
+        work_type = str(prepared.get("work_type") or "").strip()
+        if not work_type:
+            notice_type = str(prepared.get("notice_type") or "").strip()
+            work_type = cls._notice_work_type_from_notice_type(notice_type)
+        scope = str(prepared.get("scope") or "ALL").strip() or "ALL"
+        try:
+            result = cls.service.lookup_notice_target_candidates(
+                work_type=work_type,
+                scope=scope,
+                title=title,
+                start_time=str(prepared.get("start_time") or ""),
+                end_time=str(prepared.get("end_time") or ""),
+                action=str(prepared.get("action") or "update"),
+                content=str(prepared.get("content") or ""),
+                reason=str(prepared.get("reason") or ""),
+                impact=str(prepared.get("impact") or ""),
+                progress=str(prepared.get("progress") or ""),
+                text=str(prepared.get("text") or ""),
+                limit=20,
+            )
+        except Exception as exc:
+            return "", f"目标多维记录不存在，自动查询候选失败：{exc}"
+        candidates = [
+            item
+            for item in (result.get("candidates") or [])
+            if isinstance(item, dict)
+            and cls._candidate_target_record_id(item)
+            and cls._candidate_target_record_id(item) != stale_record_id
+        ]
+        date_matched = [item for item in candidates if item.get("date_matched")]
+        if len(date_matched) == 1:
+            candidates = date_matched
+        if len(candidates) != 1:
+            return (
+                "",
+                "目标多维记录不存在，且无法自动唯一匹配；请在前端选择正确的目标记录后再更新。"
+                if candidates
+                else "目标多维记录不存在，且未找到可重新关联的目标记录。",
+            )
+        record_id = cls._candidate_target_record_id(candidates[0])
+        try:
+            cls.state_store.upsert_notice_identity(
+                {
+                    **prepared,
+                    "target_record_id": record_id,
+                    "record_id": record_id,
+                    "_record_id_kind": "target",
+                },
+                origin="auto_rebind_target",
+            )
+        except Exception:
+            pass
+        return record_id, ""
+
+    @staticmethod
     def _undo_restore_fields(notice_type: str, fields: dict) -> dict:
         fields = fields if isinstance(fields, dict) else {}
         writable_names = {
@@ -2803,6 +3069,22 @@ class PortalHandler(BaseHTTPRequestHandler):
         if not record_id:
             return False, "缺少目标多维 record_id。", ""
         ok_query, query_result = query_record_by_id(record_id, notice_type)
+        if not ok_query and cls._remote_record_not_found(query_result):
+            rebound_record_id, rebound_error = cls._rebind_missing_target_record(
+                prepared,
+                stale_record_id=record_id,
+            )
+            if rebound_record_id:
+                record_id = rebound_record_id
+                prepared = {
+                    **prepared,
+                    "target_record_id": record_id,
+                    "record_id": record_id,
+                    "_record_id_kind": "target",
+                }
+                ok_query, query_result = query_record_by_id(record_id, notice_type)
+            elif rebound_error:
+                return False, rebound_error, record_id
         if not ok_query:
             return False, f"查询失败: {query_result}", record_id
         fields = query_result.get("fields", {}) if isinstance(query_result, dict) else {}
@@ -2925,12 +3207,13 @@ class PortalHandler(BaseHTTPRequestHandler):
     def _prepared_to_qt_ui_payload(
         cls, prepared: dict, *, remote_record_id: str = ""
     ) -> dict:
-        prepared = dict(prepared or {})
-        source_record_id = str(prepared.get("record_id") or "").strip()
+        prepared = normalize_notice_identity_payload(dict(prepared or {}))
+        source_record_id = str(
+            prepared.get("source_record_id") or prepared.get("record_id") or ""
+        ).strip()
         target_record_id = (
             str(remote_record_id or "").strip()
             or str(prepared.get("target_record_id") or "").strip()
-            or source_record_id
         )
         prepared["ui_only"] = True
         prepared["source_record_id"] = source_record_id
@@ -2942,11 +3225,10 @@ class PortalHandler(BaseHTTPRequestHandler):
     def _enqueue_active_delete_for_ended_notice(
         cls, prepared: dict, *, remote_record_id: str = "", job_id: str = ""
     ) -> str:
-        prepared = dict(prepared or {})
+        prepared = normalize_notice_identity_payload(dict(prepared or {}))
         target_record_id = (
             str(remote_record_id or "").strip()
             or str(prepared.get("target_record_id") or "").strip()
-            or str(prepared.get("record_id") or "").strip()
         )
         active_item_id = str(prepared.get("active_item_id") or "").strip()
         try:
@@ -2967,7 +3249,6 @@ class PortalHandler(BaseHTTPRequestHandler):
                     "target_record_id": target_record_id,
                     "source_record_id": str(
                         prepared.get("source_record_id")
-                        or prepared.get("lan_source_record_id")
                         or (
                             prepared.get("record_id")
                             if str(prepared.get("record_id") or "").strip()
@@ -3001,12 +3282,52 @@ class PortalHandler(BaseHTTPRequestHandler):
         action_type = str(payload.get("action_type") or "").strip().lower()
         if action_type not in {"upload", "update", "end", "upload_replace"}:
             raise PortalError("Qt 上传请求 action_type 不支持。")
+        data = normalize_notice_identity_payload(data, action=action_type)
         notice_type = str(data.get("notice_type") or "").strip()
         if not notice_type:
             raise PortalError("Qt 上传请求缺少 notice_type。")
         record_id = str(data.get("record_id") or "").strip()
         if not record_id:
             raise PortalError("Qt 上传请求缺少 record_id。")
+        source_record_id = str(data.get("source_record_id") or "").strip()
+        target_record_id = canonical_target_record_id(data)
+        if action_type in {"update", "end"} and not target_record_id:
+            identity = cls.state_store.resolve_notice_identity(
+                work_type=str(data.get("work_type") or "").strip(),
+                active_item_id=str(data.get("active_item_id") or "").strip(),
+                source_record_id=source_record_id,
+                target_record_id="",
+            )
+            if isinstance(identity, dict):
+                target_record_id = str(identity.get("target_record_id") or "").strip()
+        if action_type in {"update", "end"} and not target_record_id:
+            raise PortalError("Qt 更新/结束缺少目标多维 target_record_id。")
+
+        prequery_result: dict | None = None
+        if not bool(data.get("_is_placeholder_record")) and action_type in {
+            "update",
+            "end",
+            "upload_replace",
+        }:
+            query_record_id = target_record_id or record_id
+            ok_query, query_result = query_record_by_id(query_record_id, notice_type)
+            if not ok_query:
+                action_name = "结束" if action_type == "end" else "更新" if action_type == "update" else "归档"
+                if cls._remote_record_not_found(query_result):
+                    return cls._target_selection_response(
+                        data,
+                        stale_record_id=query_record_id,
+                        message=f"查询失败: {query_result}",
+                        action_name=action_name,
+                    )
+                return {
+                    "ok": False,
+                    "name": action_name,
+                    "message": f"查询失败: {query_result}",
+                    "record_id": query_record_id,
+                    "real_record_id": "",
+                }
+            prequery_result = query_result if isinstance(query_result, dict) else {}
 
         screenshot_bytes = b""
         screenshot_b64 = str(payload.get("screenshot_bytes_b64") or "").strip()
@@ -3070,26 +3391,36 @@ class PortalHandler(BaseHTTPRequestHandler):
         existing_tokens: list[str] = []
         existing_extra_tokens: list[str] = []
         existing_response_time = ""
-        target_record_id = record_id
         checkpoint_id = ""
         if not bool(data.get("_is_placeholder_record")):
-            ok_query, query_result = query_record_by_id(record_id, notice_type)
-            if not ok_query:
-                action_name = "结束" if action_type == "end" else "更新" if action_type == "update" else "归档"
-                return {
-                    "ok": False,
-                    "name": action_name,
-                    "message": f"查询失败: {query_result}",
-                    "record_id": record_id,
-                    "real_record_id": "",
-                }
+            query_record_id = target_record_id or record_id
+            if prequery_result is None:
+                ok_query, query_result = query_record_by_id(query_record_id, notice_type)
+                if not ok_query:
+                    action_name = "结束" if action_type == "end" else "更新" if action_type == "update" else "归档"
+                    if cls._remote_record_not_found(query_result):
+                        return cls._target_selection_response(
+                            data,
+                            stale_record_id=query_record_id,
+                            message=f"查询失败: {query_result}",
+                            action_name=action_name,
+                        )
+                    return {
+                        "ok": False,
+                        "name": action_name,
+                        "message": f"查询失败: {query_result}",
+                        "record_id": query_record_id,
+                        "real_record_id": "",
+                    }
+            else:
+                query_result = prequery_result
             fields = query_result.get("fields", {}) if isinstance(query_result, dict) else {}
             if action_type in {"update", "end"}:
                 checkpoint_id = cls._create_backend_undo_checkpoint(
                     "end" if action_type == "end" else "update",
                     {
                         **data,
-                        "target_record_id": record_id,
+                        "target_record_id": query_record_id,
                         "_record_id_kind": "target",
                     },
                     remote_fields=fields,
@@ -3133,14 +3464,14 @@ class PortalHandler(BaseHTTPRequestHandler):
         if success and action_type == "end":
             cls._enqueue_active_delete_for_ended_notice(
                 data,
-                remote_record_id=target_record_id,
+            remote_record_id=target_record_id,
                 job_id=str(payload.get("job_id") or ""),
             )
         return {
             "ok": bool(success),
             "name": action_name,
             "message": str(result or ""),
-            "record_id": record_id,
+            "record_id": target_record_id or record_id,
             "real_record_id": target_record_id if success else "",
         }
 
@@ -3152,18 +3483,27 @@ class PortalHandler(BaseHTTPRequestHandler):
             payload = dict(nested)
         elif isinstance(payload.get("data"), dict):
             payload = dict(payload.get("data") or {})
-        target_record_id = str(
-            payload.get("target_record_id")
-            or payload.get("feishu_record_id")
-            or payload.get("raw_record_id")
-            or ""
-        ).strip()
-        record_id = target_record_id or str(payload.get("record_id") or "").strip()
+        payload = normalize_notice_identity_payload(payload)
+        target_record_id = canonical_target_record_id(payload)
+        record_id = target_record_id
         source_record_id = str(payload.get("source_record_id") or "").strip()
-        if source_record_id and record_id == source_record_id and not target_record_id:
-            record_id = ""
-            payload["_source_only_delete"] = True
         active_item_id = str(payload.get("active_item_id") or "").strip()
+        work_type = str(payload.get("work_type") or "").strip()
+        if not target_record_id:
+            try:
+                identity = cls.state_store.resolve_notice_identity(
+                    work_type=work_type,
+                    active_item_id=active_item_id,
+                    source_record_id=source_record_id,
+                    target_record_id=record_id,
+                )
+            except Exception:
+                identity = None
+            if isinstance(identity, dict):
+                resolved_target = str(identity.get("target_record_id") or "").strip()
+                if resolved_target:
+                    target_record_id = resolved_target
+                    record_id = resolved_target
         notice_type = str(payload.get("notice_type") or "").strip()
         is_placeholder = bool(payload.get("_is_placeholder_record"))
         remote_deleted = False
@@ -3213,6 +3553,15 @@ class PortalHandler(BaseHTTPRequestHandler):
             cls.state_store.delete_qt_active_item(
                 active_item_id=active_item_id,
                 record_id=record_id,
+            )
+        except Exception:
+            pass
+        try:
+            cls.state_store.mark_notice_identity_deleted(
+                work_type=work_type,
+                active_item_id=active_item_id,
+                source_record_id=source_record_id,
+                target_record_id=record_id,
             )
         except Exception:
             pass
@@ -3407,7 +3756,7 @@ class PortalServerController:
         self.app_token = str(app_token or DEFAULT_APP_TOKEN).strip()
         self.table_id = str(table_id or DEFAULT_TABLE_ID).strip()
         self.start_source_refresh_worker = bool(start_source_refresh_worker)
-        self.server: ThreadingHTTPServer | None = None
+        self.server = None
         self.thread: threading.Thread | None = None
         self.bound_port: int | None = None
         self.notice_callback = None
@@ -3416,62 +3765,10 @@ class PortalServerController:
         self.maintenance_action_callback = None
 
     def start(self) -> str:
-        if self.server and self.thread and self.thread.is_alive():
-            return self.get_url()
-        bound_port = find_available_port(self.host, self.preferred_port)
-        PortalHandler.service = MaintenancePortalService(
-            app_token=self.app_token,
-            table_id=self.table_id,
+        raise RuntimeError(
+            "旧 ThreadingHTTPServer 门户入口已移除，请通过 "
+            "clipflow_backend.process_controller 启动 FastAPI 后端。"
         )
-        try:
-            PortalHandler.service.ensure_snapshot_loaded()
-        except Exception:
-            pass
-        PortalHandler.auth_manager = PortalAuthManager()
-        PortalHandler.state_store = LanPortalStateStore()
-        PortalHandler.apply_runtime_settings()
-        PortalHandler.notice_callback = self.notice_callback
-        PortalHandler.ongoing_callback = self.ongoing_callback
-        PortalHandler.ongoing_delete_callback = self.ongoing_delete_callback
-        PortalHandler.maintenance_action_callback = self.maintenance_action_callback
-        with PortalHandler.source_refresh_lock:
-            PortalHandler.source_refresh_inflight = False
-            PortalHandler.source_refresh_last_result = {}
-            PortalHandler.source_refresh_last_finished = 0.0
-        with PortalHandler.repair_refresh_lock:
-            PortalHandler.repair_refresh_inflight = False
-            PortalHandler.repair_refresh_event = threading.Event()
-            PortalHandler.repair_refresh_last_result = {}
-            PortalHandler.repair_refresh_last_error = ""
-            PortalHandler.repair_refresh_last_finished = 0.0
-        with PortalHandler.action_queue_lock:
-            PortalHandler.action_queue.clear()
-            PortalHandler.action_worker_stop = False
-            PortalHandler.action_queue_event.clear()
-        with PortalHandler.upload_wait_lock:
-            PortalHandler.upload_wait_jobs.clear()
-            PortalHandler.upload_wait_stop = False
-            PortalHandler.upload_wait_event.clear()
-        with PortalHandler.message_queue_lock:
-            PortalHandler.message_queue.clear()
-            PortalHandler.message_scope_inflight.clear()
-            PortalHandler.message_worker_stop = False
-            PortalHandler.message_queue_event.clear()
-        self.server = ThreadingHTTPServer((self.host, bound_port), PortalHandler)
-        self.thread = threading.Thread(
-            target=self.server.serve_forever,
-            name="LANBitableTemplatePortal",
-            daemon=True,
-        )
-        self.thread.start()
-        PortalHandler.ensure_message_workers()
-        PortalHandler.ensure_action_worker()
-        for job_id in PortalHandler.service.recoverable_action_job_ids():
-            PortalHandler.enqueue_initial_message_or_upload_job(job_id)
-        if self.start_source_refresh_worker:
-            PortalHandler.ensure_source_refresh_worker()
-        self.bound_port = bound_port
-        return self.get_url()
 
     def get_url(self) -> str:
         port = self.bound_port or self.preferred_port
@@ -3480,19 +3777,19 @@ class PortalServerController:
 
     def set_notice_callback(self, callback) -> None:
         self.notice_callback = callback
-        PortalHandler.notice_callback = callback
+        PortalRuntime.notice_callback = callback
 
     def set_ongoing_callback(self, callback) -> None:
         self.ongoing_callback = callback
-        PortalHandler.ongoing_callback = callback
+        PortalRuntime.ongoing_callback = callback
 
     def set_ongoing_delete_callback(self, callback) -> None:
         self.ongoing_delete_callback = callback
-        PortalHandler.ongoing_delete_callback = callback
+        PortalRuntime.ongoing_delete_callback = callback
 
     def set_maintenance_action_callback(self, callback) -> None:
         self.maintenance_action_callback = callback
-        PortalHandler.maintenance_action_callback = callback
+        PortalRuntime.maintenance_action_callback = callback
 
     def mark_job_upload_result(
         self,
@@ -3505,7 +3802,7 @@ class PortalServerController:
     ) -> None:
         if not job_id:
             return
-        PortalHandler.service.mark_action_upload_result(
+        PortalRuntime.service.mark_action_upload_result(
             job_id,
             success=success,
             message=message,
@@ -3516,45 +3813,30 @@ class PortalServerController:
     def mark_job_progress(self, job_id: str, **patch) -> None:
         if not job_id:
             return
-        PortalHandler.service.mark_job(job_id, **patch)
+        PortalRuntime.service.mark_job(job_id, **patch)
         phase = str((patch or {}).get("phase") or "").strip()
         if phase == "uploading":
-            PortalHandler.track_upload_wait_job(job_id)
+            PortalRuntime.track_upload_wait_job(job_id)
         elif phase in {"success", "failed"}:
-            with PortalHandler.upload_wait_lock:
-                PortalHandler.upload_wait_jobs.pop(job_id, None)
+            with PortalRuntime.upload_wait_lock:
+                PortalRuntime.upload_wait_jobs.pop(job_id, None)
 
     def get_job(self, job_id: str) -> dict | None:
-        return PortalHandler.service.get_job(job_id)
+        return PortalRuntime.service.get_job(job_id)
 
     def stop(self) -> None:
-        if not self.server:
-            return
-        try:
-            self.server.shutdown()
-        except Exception:
-            pass
-        try:
-            self.server.server_close()
-        except Exception:
-            pass
-        if self.thread and self.thread.is_alive():
-            try:
-                self.thread.join(timeout=2)
-            except Exception:
-                pass
         self.server = None
         self.thread = None
         self.bound_port = None
-        PortalHandler.stop_message_workers()
-        PortalHandler.stop_action_worker()
-        PortalHandler.stop_upload_wait_worker()
+        PortalRuntime.stop_message_workers()
+        PortalRuntime.stop_action_worker()
+        PortalRuntime.stop_upload_wait_worker()
         if self.start_source_refresh_worker:
-            PortalHandler.stop_source_refresh_worker()
-        PortalHandler.notice_callback = None
-        PortalHandler.ongoing_callback = None
-        PortalHandler.ongoing_delete_callback = None
-        PortalHandler.maintenance_action_callback = None
+            PortalRuntime.stop_source_refresh_worker()
+        PortalRuntime.notice_callback = None
+        PortalRuntime.ongoing_callback = None
+        PortalRuntime.ongoing_delete_callback = None
+        PortalRuntime.maintenance_action_callback = None
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -3580,25 +3862,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    parser = build_arg_parser()
-    args = parser.parse_args()
-    if args.allow_real_external:
-        os.environ["CLIPFLOW_REQUIRE_REAL_EXTERNAL_CONFIRM"] = "1"
-        os.environ["CLIPFLOW_REAL_EXTERNAL_CONFIRMED"] = "1"
-    controller = PortalServerController(
-        host=str(args.host or DEFAULT_HOST).strip() or DEFAULT_HOST,
-        port=int(args.port or DEFAULT_PORT),
-        app_token=str(args.app_token or "").strip(),
-        table_id=str(args.table_id or "").strip(),
+    build_arg_parser().parse_args()
+    raise SystemExit(
+        "旧局域网门户命令行入口已移除。请启动 clipflow_backend.main "
+        "或通过 Qt 主程序自动拉起 FastAPI 后端。"
     )
-    url = controller.start()
-    print(f"局域网模板门户已启动: {url}")
-    print("如需局域网访问，请将 127.0.0.1 替换为本机局域网 IP。")
-    try:
-        assert controller.thread is not None
-        controller.thread.join()
-    except KeyboardInterrupt:
-        controller.stop()
 
 
 if __name__ == "__main__":
