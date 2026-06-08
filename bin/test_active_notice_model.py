@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -280,6 +281,82 @@ class ActiveNoticeModelTests(unittest.TestCase):
         self.assertIs(list_widget, harness.list_active_other)
         self.assertTrue(harness._is_valid_list_item(found))
         self.assertEqual(found.data(Qt.ItemDataRole.UserRole)["active_item_id"], "aid-test")
+
+    def test_restore_button_state_matches_upload_aliases(self):
+        harness = _AddItemHarness(model_view_visible=True)
+        harness._closing = False
+        harness.pending_action_record_ids = {"placeholder-1"}
+        harness.pending_action_types = {"placeholder-1": "update"}
+        harness.pending_upload_rollback_by_record_id = {}
+        harness.current_screenshot_record_id = "target-1"
+        harness.current_screenshot_action_type = "update"
+        harness._payload_alias = {"placeholder-1": "target-1", "target-1": "target-1"}
+        harness._upload_key_alias = {"target-1": "placeholder-1"}
+        harness.save_active_cache = lambda: None
+        harness._set_last_ui_op = lambda *args, **kwargs: None
+        harness._maybe_update_detail_dialog = lambda *args, **kwargs: None
+
+        item, _widget = harness.add_active_item(
+            {
+                "active_item_id": "aid-upload",
+                "record_id": "target-1",
+                "target_record_id": "target-1",
+                "notice_type": "维保通告",
+                "text": "【维保通告】状态：更新\n\n【标题】A楼维保\n\n【时间】2026-01-01",
+                "_is_placeholder_record": False,
+                "_has_unuploaded_changes": False,
+                "_upload_in_progress": True,
+                "_pending_upload_hash": "hash-1",
+            },
+            skip_cache=True,
+        )
+
+        harness.restore_button_state(True, "更新", "placeholder-1")
+
+        updated = item.data(Qt.ItemDataRole.UserRole)
+        self.assertFalse(updated.get("_upload_in_progress"))
+        self.assertIsNone(updated.get("_pending_upload_hash"))
+        self.assertNotIn("placeholder-1", harness.pending_action_record_ids)
+        self.assertNotIn("placeholder-1", harness.pending_action_types)
+        self.assertIsNone(harness.current_screenshot_record_id)
+        self.assertIsNone(harness.current_screenshot_action_type)
+
+    def test_recover_stale_upload_state_without_pending_queue(self):
+        harness = _AddItemHarness(model_view_visible=True)
+        harness.pending_action_record_ids = set()
+        harness.pending_action_types = {}
+        harness.pending_upload_rollback_by_record_id = {}
+        harness.pending_new_by_record_id = {}
+        harness.pending_update_after_upload = {}
+        harness.current_screenshot_record_id = ""
+        harness._payload_alias = {}
+        harness._upload_key_alias = {}
+        harness.save_active_cache = lambda: None
+        harness.schedule_active_cache_save = lambda *_args, **_kwargs: None
+
+        item, _widget = harness.add_active_item(
+            {
+                "active_item_id": "aid-stale-upload",
+                "record_id": "target-stale",
+                "target_record_id": "target-stale",
+                "notice_type": "维保通告",
+                "text": "【维保通告】状态：更新\n\n【标题】A楼维保\n\n【时间】2026-01-01",
+                "_is_placeholder_record": False,
+                "_has_unuploaded_changes": False,
+                "_upload_in_progress": True,
+                "_pending_upload_hash": "hash-stale",
+                "_upload_started_monotonic": time.monotonic() - 30.0,
+            },
+            skip_cache=True,
+        )
+
+        result = harness._recover_stale_upload_states()
+
+        updated = item.data(Qt.ItemDataRole.UserRole)
+        self.assertEqual(result["stale_upload_recovered"], 1)
+        self.assertFalse(updated.get("_upload_in_progress"))
+        self.assertIsNone(updated.get("_pending_upload_hash"))
+        self.assertNotIn("_upload_started_monotonic", updated)
 
     def test_today_progress_toggle_updates_model_and_uses_target_record_id(self):
         harness = _TodayProgressHarness()

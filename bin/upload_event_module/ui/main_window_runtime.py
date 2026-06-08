@@ -2267,14 +2267,44 @@ class MainWindowRuntimeMixin:
             self._ui_update_in_progress = False
 
     def _post_request_finished(self, name, success, msg, record_id):
+        item = (name, bool(success), msg, record_id)
         try:
-            self._ui_signal_queue.put_nowait((name, bool(success), msg, record_id))
+            self._ui_signal_queue.put_nowait(item)
+            return
         except queue.Full:
             self._ui_signal_drop_count = (
                 int(getattr(self, "_ui_signal_drop_count", 0) or 0) + 1
             )
-        except Exception:
-            pass
+            try:
+                if QThread.currentThread() == self.thread():
+                    self.request_finished.emit(*item)
+                    return
+            except Exception:
+                pass
+            try:
+                self._ui_signal_queue.put(item, timeout=0.25)
+                return
+            except queue.Full:
+                pass
+            except Exception:
+                pass
+            try:
+                self.request_finished.emit(*item)
+                log_warning(
+                    "UI完成信号队列已满，已直接投递完成信号: "
+                    f"name={name}, record_id={record_id}"
+                )
+                return
+            except Exception as exc:
+                log_error(
+                    "UI完成信号投递失败，上传状态可能延迟恢复: "
+                    f"name={name}, record_id={record_id}, error={exc}"
+                )
+        except Exception as exc:
+            log_error(
+                "UI完成信号入队失败，上传状态可能延迟恢复: "
+                f"name={name}, record_id={record_id}, error={exc}"
+            )
 
     def _drain_ui_signal_queue(self):
         if self._closing or self._ui_update_in_progress:

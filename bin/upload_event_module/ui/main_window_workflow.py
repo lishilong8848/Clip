@@ -1879,6 +1879,7 @@ class MainWindowWorkflowMixin:
         data_dict["_pending_upload_hash"] = pending_hash
         data_dict["_has_unuploaded_changes"] = False
         data_dict["_upload_in_progress"] = True
+        data_dict["_upload_started_monotonic"] = time.monotonic()
         list_widget, item = self._find_active_item_by_record_id(record_id)
         if item and not self._is_valid_list_item(item):
             item = None
@@ -2007,15 +2008,20 @@ class MainWindowWorkflowMixin:
                 try:
                     if task is None:
                         return
+                    task_record_id = key
+                    task_fn = task
+                    if isinstance(task, (list, tuple)) and len(task) >= 2:
+                        task_record_id = str(task[0] or key)
+                        task_fn = task[1]
                     self._mark_qt_upload_runtime_queue(key, "processing")
                     try:
                         semaphore = getattr(self, "_upload_worker_semaphore", None)
                         self._sleep_until_timestamp(self._reserve_qt_upload_start())
                         if semaphore is None:
-                            task()
+                            task_fn()
                         else:
                             with semaphore:
-                                task()
+                                task_fn()
                     except Exception as exc:
                         self._mark_qt_upload_runtime_queue(
                             key,
@@ -2024,7 +2030,7 @@ class MainWindowWorkflowMixin:
                         )
                         log_error(f"上传任务异常: {exc}")
                         self._post_request_finished(
-                            "上传", False, f"上传异常: {exc}", None
+                            "上传", False, f"上传异常: {exc}", task_record_id
                         )
                     else:
                         self._mark_qt_upload_runtime_queue(key, "done")
@@ -2053,7 +2059,7 @@ class MainWindowWorkflowMixin:
                 "queued_at": time.time(),
             },
         )
-        task_queue.put(task)
+        task_queue.put((record_id, task))
 
     def _mark_upload_queued(self, record_id):
         if not record_id:
@@ -2070,6 +2076,7 @@ class MainWindowWorkflowMixin:
             data["_pending_upload_hash"] = pending_hash
             data["_has_unuploaded_changes"] = False
             data["_upload_in_progress"] = True
+            data["_upload_started_monotonic"] = time.monotonic()
             item.setData(Qt.ItemDataRole.UserRole, data)
             self._rebuild_active_item_widget(
                 list_widget,
@@ -2135,6 +2142,9 @@ class MainWindowWorkflowMixin:
             new_data["_upload_in_progress"] = bool(old_data.get("_upload_in_progress"))
             if record_id and self._has_pending_upload(record_id):
                 new_data["_upload_in_progress"] = True
+                new_data["_upload_started_monotonic"] = (
+                    old_data.get("_upload_started_monotonic") or time.monotonic()
+                )
             item.setData(Qt.ItemDataRole.UserRole, new_data)
             self.save_active_cache()
             if self._should_defer_ui_refresh():
@@ -2238,6 +2248,7 @@ class MainWindowWorkflowMixin:
         record_id = data_dict.get("record_id")
         if record_id:
             data_dict["_upload_in_progress"] = True
+            data_dict["_upload_started_monotonic"] = time.monotonic()
             list_widget, item = self._find_active_item_by_record_id(record_id)
             if item and not self._is_valid_list_item(item):
                 item = None
@@ -2245,6 +2256,7 @@ class MainWindowWorkflowMixin:
             if list_widget is not None and item is not None:
                 data = item.data(Qt.ItemDataRole.UserRole) or {}
                 data["_upload_in_progress"] = True
+                data["_upload_started_monotonic"] = time.monotonic()
                 item.setData(Qt.ItemDataRole.UserRole, data)
                 self._rebuild_active_item_widget(
                     list_widget,

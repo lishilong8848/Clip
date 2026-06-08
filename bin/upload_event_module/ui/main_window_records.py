@@ -54,6 +54,11 @@ class MainWindowRecordsMixin:
             self._run_runtime_maintenance
         )
         self.runtime_maintenance_timer.start(10 * 60 * 1000)
+        self.upload_state_watchdog_timer = QTimer(self)
+        self.upload_state_watchdog_timer.timeout.connect(
+            self._recover_stale_upload_states
+        )
+        self.upload_state_watchdog_timer.start(15 * 1000)
 
     def _collect_live_runtime_record_ids(self) -> set[str]:
         record_ids = set()
@@ -91,6 +96,89 @@ class MainWindowRecordsMixin:
                     if str(key or "").strip()
                 )
         return busy
+
+    def _upload_state_is_busy(self, data: dict) -> bool:
+        if not isinstance(data, dict):
+            return False
+        record_ids = set()
+        for key in ("record_id", "target_record_id", "feishu_record_id", "raw_record_id"):
+            value = str(data.get(key) or "").strip()
+            if value:
+                record_ids.update(self._upload_completion_record_id_candidates(value))
+        record_ids = {value for value in record_ids if value}
+        if not record_ids:
+            return False
+        current_screenshot_record_id = str(
+            getattr(self, "current_screenshot_record_id", "") or ""
+        ).strip()
+        if current_screenshot_record_id in record_ids:
+            return True
+        for mapping_name in (
+            "pending_action_types",
+            "pending_upload_rollback_by_record_id",
+            "pending_new_by_record_id",
+            "pending_update_after_upload",
+        ):
+            mapping = getattr(self, mapping_name, {})
+            if isinstance(mapping, dict) and any(
+                record_id in mapping for record_id in record_ids
+            ):
+                return True
+        pending_action_ids = getattr(self, "pending_action_record_ids", set())
+        if isinstance(pending_action_ids, set) and record_ids & pending_action_ids:
+            return True
+        has_pending_upload = getattr(self, "_has_pending_upload", None)
+        if callable(has_pending_upload):
+            for record_id in record_ids:
+                try:
+                    if has_pending_upload(record_id):
+                        return True
+                except Exception:
+                    continue
+        return False
+
+    def _recover_stale_upload_states(self) -> dict[str, int]:
+        recovered = 0
+        now = time.monotonic()
+        try:
+            entries = list(self._active_notice_store().entries())
+        except Exception:
+            entries = []
+        for list_widget, item, data in entries:
+            if not self._is_valid_list_item(item) or not isinstance(data, dict):
+                continue
+            if not bool(data.get("_upload_in_progress")):
+                continue
+            if self._upload_state_is_busy(data):
+                continue
+            started_at = float(data.get("_upload_started_monotonic") or 0.0)
+            if started_at and now - started_at < 5.0:
+                continue
+            data = dict(data)
+            data["_upload_in_progress"] = False
+            data["_pending_upload_hash"] = None
+            data.pop("_upload_started_monotonic", None)
+            item.setData(Qt.ItemDataRole.UserRole, data)
+            self._rebuild_active_item_widget(
+                list_widget,
+                item,
+                data,
+                force_status=None,
+                upload_in_progress=False,
+                pending_upload_hash=None,
+                has_unuploaded_changes=data.get("_has_unuploaded_changes"),
+            )
+            recovered += 1
+        if recovered:
+            log_warning(f"上传状态自愈: 已恢复 {recovered} 条无队列上传中条目")
+            try:
+                if hasattr(self, "schedule_active_cache_save"):
+                    self.schedule_active_cache_save(800)
+                else:
+                    self.save_active_cache()
+            except Exception:
+                pass
+        return {"stale_upload_recovered": recovered}
 
     def _trim_runtime_state_sets(self) -> dict[str, int]:
         active_record_ids = self._collect_live_runtime_record_ids()
@@ -192,6 +280,10 @@ class MainWindowRecordsMixin:
             stats.update(self._cleanup_finished_upload_workers())
         except Exception as exc:
             log_warning(f"运行态维护: upload worker清理失败 error={exc}")
+        try:
+            stats.update(self._recover_stale_upload_states())
+        except Exception as exc:
+            log_warning(f"运行态维护: 上传状态自愈失败 error={exc}")
         try:
             stats.update(self._perform_clipboard_health_maintenance())
         except Exception as exc:
@@ -2505,6 +2597,59 @@ class MainWindowRecordsMixin:
     def _find_active_item_by_active_item_id(self, active_item_id):
         return self._active_notice_store().find_by_active_item_id(active_item_id)
 
+    def _upload_completion_record_id_candidates(self, record_id) -> list[str]:
+        seed = str(record_id or "").strip()
+        if not seed:
+            return []
+        candidates: list[str] = []
+
+        def add(value):
+            text = str(value or "").strip()
+            if text and text not in candidates:
+                candidates.append(text)
+
+        add(seed)
+        for mapping_name in ("_payload_alias", "_upload_key_alias"):
+            mapping = getattr(self, mapping_name, None)
+            if not isinstance(mapping, dict):
+                continue
+            add(mapping.get(seed))
+            for key, value in list(mapping.items()):
+                if key == seed or value == seed:
+                    add(key)
+                    add(value)
+        return candidates
+
+    def _find_active_item_by_upload_completion_id(self, record_id):
+        candidate_ids = self._upload_completion_record_id_candidates(record_id)
+        for candidate_id in candidate_ids:
+            list_widget, item = self._find_active_item_by_record_id(candidate_id)
+            if item and self._is_valid_list_item(item):
+                return list_widget, item, candidate_id
+        candidate_set = set(candidate_ids)
+        if not candidate_set:
+            return None, None, ""
+        for list_widget, item, data in self._active_notice_store().entries():
+            if not self._is_valid_list_item(item) or not isinstance(data, dict):
+                continue
+            values = {
+                str(data.get("record_id") or "").strip(),
+                str(data.get("target_record_id") or "").strip(),
+                str(data.get("feishu_record_id") or "").strip(),
+                str(data.get("raw_record_id") or "").strip(),
+            }
+            matched = values & candidate_set
+            if matched:
+                return list_widget, item, next(iter(matched))
+            try:
+                if self._get_upload_key(data.get("record_id")) == self._get_upload_key(
+                    record_id
+                ):
+                    return list_widget, item, str(data.get("record_id") or "")
+            except Exception:
+                pass
+        return None, None, ""
+
     def _update_active_item_data(self, record_id, data_dict):
         list_widget, item = self._find_active_item_by_record_id(record_id)
         if item:
@@ -3197,26 +3342,36 @@ class MainWindowRecordsMixin:
         if self._closing:
             return
         if record_id:
-            if record_id in self.pending_action_record_ids:
-                self.pending_action_record_ids.remove(record_id)
-            self.pending_action_types.pop(record_id, None)
+            candidate_ids = self._upload_completion_record_id_candidates(record_id)
+            for candidate_id in candidate_ids:
+                if candidate_id in self.pending_action_record_ids:
+                    self.pending_action_record_ids.remove(candidate_id)
+                self.pending_action_types.pop(candidate_id, None)
             if success:
-                self.pending_upload_rollback_by_record_id.pop(record_id, None)
-            list_widget, item = self._find_active_item_by_record_id(record_id)
+                for candidate_id in candidate_ids:
+                    self.pending_upload_rollback_by_record_id.pop(candidate_id, None)
+            list_widget, item, matched_record_id = self._find_active_item_by_upload_completion_id(
+                record_id
+            )
             if item and not self._is_valid_list_item(item):
                 item = None
                 list_widget = None
             if list_widget is not None and item is not None:
                 data = item.data(Qt.ItemDataRole.UserRole) or {}
                 if not success:
-                    rollback = self.pending_upload_rollback_by_record_id.pop(
-                        record_id, None
-                    )
+                    rollback = None
+                    for candidate_id in candidate_ids:
+                        rollback = self.pending_upload_rollback_by_record_id.pop(
+                            candidate_id, None
+                        )
+                        if rollback:
+                            break
                     if rollback and rollback.get("old_data"):
                         data = rollback.get("old_data") or data
                         data["_pending_upload_hash"] = None
                         data["_has_unuploaded_changes"] = True
                         data["_upload_in_progress"] = False
+                        data.pop("_upload_started_monotonic", None)
                         item.setData(Qt.ItemDataRole.UserRole, data)
                         self._rebuild_active_item_widget(
                             list_widget,
@@ -3233,6 +3388,7 @@ class MainWindowRecordsMixin:
 
                 data["_pending_upload_hash"] = None
                 data["_upload_in_progress"] = False
+                data.pop("_upload_started_monotonic", None)
                 item.setData(Qt.ItemDataRole.UserRole, data)
                 self._rebuild_active_item_widget(
                     list_widget,
@@ -3244,7 +3400,7 @@ class MainWindowRecordsMixin:
                     has_unuploaded_changes=has_unuploaded_changes,
                 )
 
-            if self.current_screenshot_record_id == record_id:
+            if self.current_screenshot_record_id in {record_id, matched_record_id}:
                 self.current_screenshot_record_id = None
                 self.current_screenshot_action_type = None
             self.save_active_cache()

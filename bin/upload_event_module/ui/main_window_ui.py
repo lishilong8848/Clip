@@ -925,6 +925,7 @@ class MainWindowUiMixin:
                 data_dict["_pending_upload_hash"] = pending_hash
             data_dict["_has_unuploaded_changes"] = False
             data_dict["_upload_in_progress"] = True
+            data_dict["_upload_started_monotonic"] = time.monotonic()
             item.setData(Qt.ItemDataRole.UserRole, data_dict)
             self._rebuild_active_item_widget(
                 list_widget,
