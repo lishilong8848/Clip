@@ -29,6 +29,17 @@ class NoticeIdentityTests(unittest.TestCase):
         )
         self.assertEqual(canonical_target_record_id(payload), "tar-1")
 
+    def test_explicit_target_marker_wins_even_for_upload_action(self):
+        payload = normalize_notice_identity_payload(
+            {
+                "action": "upload",
+                "record_id": "tar-upload-1",
+                "_record_id_kind": "target",
+                "_is_placeholder_record": False,
+            }
+        )
+        self.assertEqual(canonical_target_record_id(payload), "tar-upload-1")
+
     def test_source_marker_blocks_record_id_as_target(self):
         payload = normalize_notice_identity_payload(
             {

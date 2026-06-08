@@ -27,7 +27,11 @@ from .portal_service import (
     SOURCE_CACHE_TTL_SECONDS,
     external_real_write_guard,
 )
-from .identity_utils import normalize_notice_identity_payload, canonical_target_record_id
+from .identity_utils import (
+    canonical_target_record_id,
+    is_local_record_id,
+    normalize_notice_identity_payload,
+)
 from .state_store import LanPortalStateStore
 from upload_event_module.config import get_field_config
 from upload_event_module.services.handlers import NoticePayload
@@ -3290,7 +3294,29 @@ class PortalRuntime:
         if not record_id:
             raise PortalError("Qt 上传请求缺少 record_id。")
         source_record_id = str(data.get("source_record_id") or "").strip()
-        target_record_id = canonical_target_record_id(data)
+        target_record_id = str(data.get("target_record_id") or "").strip()
+        if action_type == "upload" and target_record_id:
+            action_type = "update"
+            data["action_type"] = action_type
+            data["record_id"] = target_record_id
+            data["target_record_id"] = target_record_id
+            data["_record_id_kind"] = "target"
+            data["_is_placeholder_record"] = False
+            record_id = target_record_id
+        elif (
+            action_type == "upload"
+            and not bool(data.get("_is_placeholder_record", True))
+            and record_id
+            and not is_local_record_id(record_id)
+            and record_id != source_record_id
+            and str(data.get("_record_id_kind") or "").strip().lower() != "source"
+            and not bool(data.get("source_only"))
+        ):
+            action_type = "update"
+            data["action_type"] = action_type
+            data["target_record_id"] = record_id
+            data["_record_id_kind"] = "target"
+            target_record_id = record_id
         if action_type in {"update", "end"} and not target_record_id:
             identity = cls.state_store.resolve_notice_identity(
                 work_type=str(data.get("work_type") or "").strip(),

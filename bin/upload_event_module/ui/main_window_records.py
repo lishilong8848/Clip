@@ -2617,14 +2617,15 @@ class MainWindowRecordsMixin:
         if not normalized_text:
             return []
         matched = []
-        for char in re.findall(r"([A-E])\s*[栋楼]", normalized_text):
+        for char in re.findall(r"([A-EH])\s*[栋楼]", normalized_text):
             building = normalize_building_name(f"{char}楼")
             if building not in matched:
                 matched.append(building)
         if "110" in normalized_text:
             for token in ("110机房", "110"):
-                if token in normalized_text and token not in matched:
-                    matched.append(token)
+                building = normalize_building_name(token)
+                if token in normalized_text and building and building not in matched:
+                    matched.append(building)
                     break
         return matched
 
@@ -2780,7 +2781,12 @@ class MainWindowRecordsMixin:
             return data_dict
         record_id = self._get_cache_identity(data_dict)
         if not record_id:
-            data_dict["buildings"] = []
+            existing_buildings = self._normalize_buildings_value(
+                data_dict.get("buildings")
+            )
+            data_dict["buildings"] = existing_buildings or self._infer_buildings_from_notice_text(
+                data_dict.get("text", "")
+            )
             data_dict.pop("specialty", None)
             return data_dict
         cache_fields = self.cache_store.get_record_fields(
@@ -2803,12 +2809,15 @@ class MainWindowRecordsMixin:
                 "transfer_to_overhaul",
             ],
         )
+        existing_buildings = self._normalize_buildings_value(data_dict.get("buildings"))
         if "buildings" in cache_fields:
             data_dict["buildings"] = self._normalize_buildings_value(
                 cache_fields.get("buildings")
             )
         else:
-            data_dict["buildings"] = []
+            data_dict["buildings"] = existing_buildings or self._infer_buildings_from_notice_text(
+                data_dict.get("text", "")
+            )
         if "specialty" in cache_fields:
             specialty = str(cache_fields.get("specialty") or "").strip()
             if specialty:

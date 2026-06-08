@@ -13,6 +13,7 @@ def is_local_record_id(record_id: str) -> bool:
     return (
         not record_id
         or record_id.startswith("local_")
+        or record_id.startswith("placeholder-")
         or record_id.startswith("manual:")
         or record_id.startswith("draft:")
     )
@@ -60,6 +61,13 @@ def normalize_notice_identity_payload(
         or bool(normalized.get("_record_id_is_target"))
     )
     can_infer_record_id_as_target = action not in {"start", "upload", "create"}
+    if (
+        not target_record_id
+        and record_id
+        and not is_local_record_id(record_id)
+        and record_id_is_target
+    ):
+        target_record_id = record_id
     if (
         not target_record_id
         and record_id

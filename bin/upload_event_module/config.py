@@ -828,6 +828,11 @@ BUILDING_PARK = "园区（ABCDE楼）"
 
 BUILDING_DETECT_110_KEYWORDS = ["110站", "110KV"]
 BUILDING_DETECT_ALIASES = [
+    ("110", BUILDING_110),
+    ("110站", BUILDING_110),
+    ("110KV", BUILDING_110),
+    ("110楼", BUILDING_110),
+    ("110机房", BUILDING_110),
     (BUILDING_A, BUILDING_A),
     ("A栋", BUILDING_A),
     ("A-", BUILDING_A),
@@ -843,6 +848,9 @@ BUILDING_DETECT_ALIASES = [
     (BUILDING_E, BUILDING_E),
     ("E栋", BUILDING_E),
     ("E-", BUILDING_E),
+    (BUILDING_H, BUILDING_H),
+    ("H栋", BUILDING_H),
+    ("H-", BUILDING_H),
 ]
 
 # ========== Hot Reload / Package Excludes (keep consistent with package_portable.py) ==========

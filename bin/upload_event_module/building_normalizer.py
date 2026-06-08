@@ -22,7 +22,7 @@ def normalize_building_name(value: Any) -> str:
         return ""
 
     # X楼/X栋统一成X楼，避免同义值并存。
-    match = re.fullmatch(r"([A-E])(?:楼|栋)", normalized)
+    match = re.fullmatch(r"([A-EH])(?:楼|栋)", normalized)
     if match:
         return f"{match.group(1)}楼"
 

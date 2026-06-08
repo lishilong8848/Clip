@@ -782,6 +782,52 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(result["record_id"], "placeholder-1")
         self.assertEqual(result["real_record_id"], "rec-backend-1")
 
+    def test_local_qt_notice_upload_with_target_record_updates_instead_of_creating(self):
+        request_payload = {
+            "action_type": "upload",
+            "data_dict": {
+                "record_id": "rec-existing-event",
+                "target_record_id": "rec-existing-event",
+                "_record_id_kind": "target",
+                "_is_placeholder_record": False,
+                "notice_type": "事件通告",
+                "text": (
+                    "【事件通告】状态：更新\n"
+                    "【标题】测试测试测试事件\n"
+                    "【时间】2026-05-24 09:30~2026-05-24 18:30\n"
+                    "【进展】测试测试测试"
+                ),
+                "time_str": "2026-05-24 09:30~2026-05-24 18:30",
+                "level": "I3",
+            },
+            "response_time": "2026-05-24 09:30",
+            "recover_selected": False,
+            "robot_group_choice": "auto",
+        }
+        with patch.object(
+            portal_server_module,
+            "query_record_by_id",
+            return_value=(True, {"fields": {}}),
+        ) as query_record, patch.object(
+            portal_server_module,
+            "create_bitable_record_by_payload",
+            return_value=(True, "rec-duplicate"),
+        ) as create_record, patch.object(
+            portal_server_module,
+            "update_bitable_record_by_payload",
+            return_value=(True, "rec-existing-event"),
+        ) as update_record:
+            result = PortalRuntime.execute_local_notice_upload(request_payload)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["name"], "更新")
+        self.assertEqual(result["record_id"], "rec-existing-event")
+        self.assertEqual(result["real_record_id"], "rec-existing-event")
+        query_record.assert_called_once_with("rec-existing-event", "事件通告")
+        update_record.assert_called_once()
+        self.assertEqual(update_record.call_args.args[0], "rec-existing-event")
+        create_record.assert_not_called()
+
     def test_workflow_delegate_qt_notice_upload_uses_backend_result(self):
         class _Controller:
             def execute_qt_notice_upload(self, payload):

@@ -43,6 +43,33 @@ class MainWindowWorkflowMixin:
         ).strip()
 
     @staticmethod
+    def _coerce_upload_action_for_existing_target(
+        data_dict: dict | None,
+        action_type: str,
+    ) -> str:
+        action = str(action_type or "").strip()
+        if action != "upload" or not isinstance(data_dict, dict):
+            return action
+        target_record_id = str(
+            data_dict.get("target_record_id")
+            or data_dict.get("feishu_record_id")
+            or data_dict.get("raw_record_id")
+            or ""
+        ).strip()
+        record_id = str(data_dict.get("record_id") or "").strip()
+        record_id_kind = str(data_dict.get("_record_id_kind") or "").strip().lower()
+        if not target_record_id and record_id_kind == "target":
+            target_record_id = record_id
+        if target_record_id and not bool(data_dict.get("_is_placeholder_record", True)):
+            data_dict["record_id"] = target_record_id
+            data_dict["target_record_id"] = target_record_id
+            data_dict["feishu_record_id"] = target_record_id
+            data_dict["raw_record_id"] = target_record_id
+            data_dict["_record_id_kind"] = "target"
+            return "update"
+        return action
+
+    @staticmethod
     def _candidate_summary(candidate: dict, index: int) -> str:
         candidate = candidate if isinstance(candidate, dict) else {}
         title = str(candidate.get("title") or "未命名通告").strip()
@@ -365,6 +392,12 @@ class MainWindowWorkflowMixin:
         allow_target_selection: bool = True,
     ) -> bool:
         controller = getattr(self, "lan_template_portal_controller", None)
+        if isinstance(data_snapshot, dict):
+            data_snapshot = dict(data_snapshot)
+            action_type = self._coerce_upload_action_for_existing_target(
+                data_snapshot,
+                action_type,
+            )
         if controller is None or not hasattr(controller, "execute_qt_notice_upload"):
             self._post_request_finished(
                 self._backend_upload_action_name(action_type),
@@ -1827,11 +1860,18 @@ class MainWindowWorkflowMixin:
         if self._is_routing_conflicted(data_dict):
             self.show_message(self._routing_error_text(data_dict))
             return
+        action_type = self._coerce_upload_action_for_existing_target(
+            data_dict,
+            action_type,
+        )
         record_id = data_dict["record_id"]
-        if record_id in self.pending_action_record_ids:
-            if not self._is_placeholder_record(data_dict):
-                self.show_message("该项目正在处理中，请稍候...")
-                return
+        if (
+            record_id in self.pending_action_record_ids
+            or bool(data_dict.get("_upload_in_progress"))
+            or self._has_pending_upload(record_id)
+        ):
+            self.show_message("该项目正在处理中，请稍候...")
+            return
 
         self.pending_action_record_ids.add(record_id)
         self.pending_action_types[record_id] = action_type

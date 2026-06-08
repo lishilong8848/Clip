@@ -3638,12 +3638,25 @@ class ScreenshotConfirmDialog(QDialog):
                 cache_state.get("buildings")
 
             )
+            saved_buildings = self._normalize_buildings_value(
+                (self.data_dict or {}).get("buildings")
+            )
+            detected_building = self._detect_building_from_title(
+                (self.data_dict or {}).get("text", "")
+            )
+            detected_buildings = self._normalize_buildings_value(
+                [detected_building] if detected_building else []
+            )
 
             selected_buildings = []
 
             if cached_buildings:
 
                 selected_buildings = cached_buildings
+            elif saved_buildings:
+                selected_buildings = saved_buildings
+            elif detected_buildings:
+                selected_buildings = detected_buildings
 
             if selected_buildings:
 
