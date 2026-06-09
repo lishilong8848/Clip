@@ -2550,6 +2550,12 @@ async function pollJob(jobId: string, lineKey: string): Promise<void> {
       }
       await new Promise((resolve) => setTimeout(resolve, 2000));
     }
+    rememberJob(lineKey, {
+      phase: "failed",
+      status: "failed",
+      text: "任务状态长时间未返回，请刷新核对后重试",
+    });
+    scheduleWorkbenchReload(0);
   } finally {
     pollingJobs.delete(pollKey);
   }

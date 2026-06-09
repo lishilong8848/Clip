@@ -798,6 +798,23 @@ class MainWindowRuntimeMixin:
             return len(codes) >= 2
         return len(codes) == 1 and codes[0] == scope_code
 
+    @staticmethod
+    def _lan_work_type_for_notice_type(notice_type: str) -> str:
+        text = str(notice_type or "").strip()
+        mapping = {
+            "维保通告": "maintenance",
+            "设备变更": "change",
+            "变更通告": "change",
+            "设备检修": "repair",
+            "上下电通告": "power",
+            "上电通告": "power",
+            "下电通告": "power",
+            "设备轮巡": "polling",
+            "设备轮询": "polling",
+            "设备调整": "adjust",
+        }
+        return mapping.get(text, "")
+
     def _lan_notice_sections(self, text: str) -> dict:
         return {
             "title": self._extract_section_text(text, ("名称", "标题", "事件描述", "维修名称")),
@@ -826,6 +843,9 @@ class MainWindowRuntimeMixin:
             "solution": self._extract_section_text(text, ("解决方案",)),
             "fault_time": self._extract_section_text(text, ("发现故障时间", "故障发生时间")),
             "expected_time": self._extract_section_text(text, ("期望完成时间",)),
+            "device": self._extract_section_text(text, ("设备", "设备名称", "巡检设备")),
+            "cabinet": self._extract_section_text(text, ("机柜", "柜号")),
+            "quantity": self._extract_section_text(text, ("数量",)),
         }
 
     @staticmethod
@@ -1179,6 +1199,10 @@ class MainWindowRuntimeMixin:
     def _execute_lan_ongoing_delete(self, payload: dict):
         if self._is_screenshot_dialog_active():
             return {"ok": False, "error": "截图上传进行中，暂时不能删除条目。"}
+        try:
+            self._recover_stale_upload_states()
+        except Exception:
+            pass
         list_widget, item = self._find_lan_ongoing_item_for_payload(payload or {})
         if not item or not self._is_valid_list_item(item):
             return {"ok": False, "error": "主界面未找到对应进行中条目。"}
@@ -1243,6 +1267,10 @@ class MainWindowRuntimeMixin:
     def _collect_lan_maintenance_ongoing_notices(self, scope: str = "ALL") -> list[dict]:
         items: list[dict] = []
         try:
+            self._recover_stale_upload_states()
+        except Exception:
+            pass
+        try:
             active_entries = self._active_notice_store().entries()
         except Exception:
             active_entries = []
@@ -1250,7 +1278,8 @@ class MainWindowRuntimeMixin:
             if not isinstance(data, dict):
                 continue
             notice_type = str(data.get("notice_type") or "").strip()
-            if notice_type not in {"维保通告", "设备变更", "变更通告", "设备检修"}:
+            work_type = self._lan_work_type_for_notice_type(notice_type)
+            if not work_type:
                 continue
             text = str(data.get("text") or "").strip()
             info = extract_event_info(text) or {}
@@ -1310,13 +1339,7 @@ class MainWindowRuntimeMixin:
                     "zhihang_progress": str(data.get("lan_zhihang_progress") or ""),
                     "origin": "frontend" if data.get("lan_created_from_portal") else "qt",
                     "origin_label": origin_label,
-                    "work_type": (
-                        "change"
-                        if notice_type in {"设备变更", "变更通告"}
-                        else "repair"
-                        if notice_type == "设备检修"
-                        else "maintenance"
-                    ),
+                    "work_type": work_type,
                     "notice_type": notice_type,
                     "title": sections["title"] or info.get("title") or "",
                     "status": info.get("status") or "",
@@ -1341,6 +1364,9 @@ class MainWindowRuntimeMixin:
                     "solution": sections.get("solution", ""),
                     "fault_time": fault_time,
                     "expected_time": expected_time,
+                    "device": str(data.get("device") or sections.get("device") or ""),
+                    "cabinet": str(data.get("cabinet") or sections.get("cabinet") or ""),
+                    "quantity": str(data.get("quantity") or sections.get("quantity") or ""),
                     "can_update": not blocked,
                     "can_end": not blocked,
                     "block_reason": block_reason,
@@ -1702,6 +1728,9 @@ class MainWindowRuntimeMixin:
             "lan_zhihang_record_id": str(payload.get("zhihang_record_id") or ""),
             "lan_zhihang_title": str(payload.get("zhihang_title") or ""),
             "lan_zhihang_progress": str(payload.get("zhihang_progress") or ""),
+            "device": str(payload.get("device") or ""),
+            "cabinet": str(payload.get("cabinet") or ""),
+            "quantity": str(payload.get("quantity") or ""),
         }
         self._ensure_payload_for_data(base_data)
         active_item_id = str(payload.get("active_item_id") or "").strip()
@@ -1767,15 +1796,9 @@ class MainWindowRuntimeMixin:
             raise RuntimeError("通告文本为空。")
         info = extract_event_info(text) or {}
         notice_type = str(info.get("notice_type") or "").strip()
-        if notice_type not in {"维保通告", "设备变更", "变更通告", "设备检修"}:
-            raise RuntimeError("只能处理维保、变更或检修通告。")
-        work_type = (
-            "change"
-            if notice_type in {"设备变更", "变更通告"}
-            else "repair"
-            if notice_type == "设备检修"
-            else "maintenance"
-        )
+        work_type = self._lan_work_type_for_notice_type(notice_type)
+        if not work_type:
+            raise RuntimeError("只能处理非事件类通告。")
         response_time = str(payload.get("response_time") or "").strip()
         building = str(payload.get("building") or "").strip()
         specialty = str(payload.get("specialty") or "").strip()
@@ -1843,6 +1866,9 @@ class MainWindowRuntimeMixin:
                 "lan_zhihang_record_id": str(payload.get("zhihang_record_id") or ""),
                 "lan_zhihang_title": str(payload.get("zhihang_title") or ""),
                 "lan_zhihang_progress": str(payload.get("zhihang_progress") or ""),
+                "device": str(payload.get("device") or ""),
+                "cabinet": str(payload.get("cabinet") or ""),
+                "quantity": str(payload.get("quantity") or ""),
             }
             self._ensure_payload_for_data(data)
             active_item_id = ""
@@ -1872,7 +1898,7 @@ class MainWindowRuntimeMixin:
         list_widget, item = self._find_active_item_by_active_item_id(active_item_id)
         if (
             (not item or not self._is_valid_list_item(item))
-            and work_type in {"maintenance", "change", "repair"}
+            and work_type in {"maintenance", "change", "repair", "power", "polling", "adjust"}
             and str(payload.get("target_record_id") or payload.get("record_id") or "").strip()
         ):
             target_record_id = str(
@@ -1887,7 +1913,7 @@ class MainWindowRuntimeMixin:
                 list_widget = None
         if (
             (not item or not self._is_valid_list_item(item))
-            and work_type in {"maintenance", "change", "repair"}
+            and work_type in {"maintenance", "change", "repair", "power", "polling", "adjust"}
             and str(payload.get("target_record_id") or payload.get("record_id") or "").strip()
         ):
             target_record_id = str(
@@ -1913,6 +1939,9 @@ class MainWindowRuntimeMixin:
                 "lan_zhihang_record_id": str(payload.get("zhihang_record_id") or ""),
                 "lan_zhihang_title": str(payload.get("zhihang_title") or ""),
                 "lan_zhihang_progress": str(payload.get("zhihang_progress") or ""),
+                "device": str(payload.get("device") or ""),
+                "cabinet": str(payload.get("cabinet") or ""),
+                "quantity": str(payload.get("quantity") or ""),
             }
             self._ensure_payload_for_data(data)
             item, _ = self.add_active_item(data)
@@ -1986,6 +2015,12 @@ class MainWindowRuntimeMixin:
             data["lan_zhihang_title"] = str(payload.get("zhihang_title") or "")
         if payload.get("zhihang_progress"):
             data["lan_zhihang_progress"] = str(payload.get("zhihang_progress") or "")
+        if "device" in payload:
+            data["device"] = str(payload.get("device") or "")
+        if "cabinet" in payload:
+            data["cabinet"] = str(payload.get("cabinet") or "")
+        if "quantity" in payload:
+            data["quantity"] = str(payload.get("quantity") or "")
         data["_has_unuploaded_changes"] = False
         data["_pending_upload_hash"] = None
         data["_upload_in_progress"] = False

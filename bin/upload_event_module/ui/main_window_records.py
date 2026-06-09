@@ -3400,7 +3400,10 @@ class MainWindowRecordsMixin:
                     has_unuploaded_changes=has_unuploaded_changes,
                 )
 
-            if self.current_screenshot_record_id in {record_id, matched_record_id}:
+            screenshot_candidates = set(candidate_ids)
+            if matched_record_id:
+                screenshot_candidates.add(matched_record_id)
+            if self.current_screenshot_record_id in screenshot_candidates:
                 self.current_screenshot_record_id = None
                 self.current_screenshot_action_type = None
             self.save_active_cache()

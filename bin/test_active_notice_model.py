@@ -16,6 +16,7 @@ sys.path.append(current_dir)
 from upload_event_module.ui.active_notice_model import ActiveNoticeListRoute, ActiveNoticeModel
 from upload_event_module.ui.active_notice_delegate import ActiveNoticeDelegate
 from upload_event_module.ui.main_window_records import MainWindowRecordsMixin
+from upload_event_module.ui.main_window_runtime import MainWindowRuntimeMixin
 
 
 class _RecordsFlagHarness(MainWindowRecordsMixin):
@@ -91,6 +92,58 @@ class _TodayProgressHarness(_AddItemHarness):
 
     def show_message(self, message):
         self.messages.append(str(message))
+
+
+class _RuntimeOngoingStore:
+    def __init__(self, records):
+        self._records = records
+
+    def entries(self):
+        return [(None, None, record) for record in self._records]
+
+
+class _RuntimeOngoingHarness(MainWindowRuntimeMixin):
+    def __init__(self, records):
+        self._records = records
+
+    def _active_notice_store(self):
+        return _RuntimeOngoingStore(self._records)
+
+    @staticmethod
+    def _extract_section_text(text, labels):
+        return MainWindowRecordsMixin._extract_section_text(text, labels)
+
+    @staticmethod
+    def _normalize_buildings_value(value):
+        return MainWindowRecordsMixin._normalize_buildings_value(value)
+
+    @classmethod
+    def _infer_buildings_from_notice_text(cls, text):
+        return MainWindowRecordsMixin._infer_buildings_from_notice_text(text)
+
+    @staticmethod
+    def _is_placeholder_record(_data):
+        return False
+
+    @staticmethod
+    def _has_pending_upload(_record_id):
+        return False
+
+    @staticmethod
+    def _is_record_binding_conflicted(_data):
+        return False
+
+    @staticmethod
+    def _is_routing_conflicted(_data):
+        return False
+
+    @staticmethod
+    def _record_binding_error_text(_data):
+        return ""
+
+    @staticmethod
+    def _routing_error_text(_data):
+        return ""
 
 
 class ActiveNoticeModelTests(unittest.TestCase):
@@ -211,6 +264,47 @@ class ActiveNoticeModelTests(unittest.TestCase):
         }
 
         self.assertTrue(ActiveNoticeModel.supports_today_progress(change))
+
+    def test_runtime_collects_all_non_event_notice_types_for_portal(self):
+        records = [
+            {
+                "active_item_id": "aid-power",
+                "record_id": "rid-power",
+                "notice_type": "上下电通告",
+                "buildings": ["A楼"],
+                "text": "【上下电通告】状态：开始\n\n【名称】A楼上电\n\n【机柜】A-101\n\n【数量】1",
+            },
+            {
+                "active_item_id": "aid-polling",
+                "record_id": "rid-polling",
+                "notice_type": "设备轮巡",
+                "buildings": ["B楼"],
+                "text": "【设备轮巡】状态：开始\n\n【名称】B楼轮巡\n\n【设备】冷机",
+            },
+            {
+                "active_item_id": "aid-adjust",
+                "record_id": "rid-adjust",
+                "notice_type": "设备调整",
+                "buildings": ["C楼"],
+                "text": "【设备调整】状态：开始\n\n【名称】C楼调整",
+            },
+            {
+                "active_item_id": "aid-event",
+                "record_id": "rid-event",
+                "notice_type": "事件通告",
+                "buildings": ["D楼"],
+                "text": "【事件通告】状态：开始\n\n【标题】D楼事件",
+            },
+        ]
+
+        ongoing = _RuntimeOngoingHarness(records)._collect_lan_maintenance_ongoing_notices("ALL")
+        by_title = {item["title"]: item for item in ongoing}
+
+        self.assertEqual({item["work_type"] for item in ongoing}, {"power", "polling", "adjust"})
+        self.assertEqual(by_title["A楼上电"]["cabinet"], "A-101")
+        self.assertEqual(by_title["A楼上电"]["quantity"], "1")
+        self.assertEqual(by_title["B楼轮巡"]["device"], "冷机")
+        self.assertNotIn("D楼事件", by_title)
 
     def test_model_view_mode_disables_widget_virtualization(self):
         self.assertFalse(_RecordsFlagHarness(True)._active_item_widgets_required())
