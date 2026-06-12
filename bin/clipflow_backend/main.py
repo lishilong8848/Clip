@@ -52,7 +52,6 @@ from clipflow_backend.api_models import (
     QtJobProgressRequest,
     QtJobResultRequest,
     QtLocalHeartbeatRequest,
-    QtNoticeUploadRequest,
     QtOngoingSnapshotRequest,
     SendGeneratedRequest,
     WorkbenchActionRequest,
@@ -1002,7 +1001,7 @@ class FastAPIPortalController:
                 ),
             }
             self._read_cache_put(cache_key, payload, ttl=2.0, stale_ttl=10.0)
-            return payload
+            return self._json_response(request, session, payload)
 
         @app.get("/api/jobs/recent")
         async def recent_jobs(
@@ -2596,28 +2595,6 @@ class FastAPIPortalController:
             )
             return {"ok": True, "data": {"job_id": job_id}}
 
-        @app.post("/api/qt/notice-upload")
-        async def qt_notice_upload(request: Request):
-            deny = self._local_only_response(request)
-            if deny is not None:
-                return deny
-            payload = (
-                await self._read_model_request(request, QtNoticeUploadRequest)
-            ).to_payload()
-            try:
-                data = await asyncio.to_thread(
-                    PortalRuntime.execute_local_notice_upload,
-                    payload,
-                )
-                PortalRuntime.clear_payload_cache()
-                self._clear_read_cache()
-                return {"ok": True, "data": data}
-            except Exception as exc:
-                return JSONResponse(
-                    {"ok": False, "error": str(exc)},
-                    status_code=400,
-                )
-
         @app.post("/api/backend/shutdown")
         async def backend_shutdown(request: Request):
             deny = self._local_only_response(request)
@@ -3212,12 +3189,38 @@ class FastAPIPortalController:
             )
         return result
 
+    def _auth_refresh_headers(self, request: Request, session: dict | None) -> dict[str, str]:
+        if not session:
+            return {}
+        session_id = self._request_session_id(request)
+        if not session_id:
+            return {}
+        return {"Set-Cookie": PortalRuntime.auth_manager.cookie_header(session_id)}
+
+    def _json_response(
+        self,
+        request: Request,
+        session: dict | None,
+        payload: dict,
+        *,
+        status_code: int = 200,
+    ) -> JSONResponse:
+        return JSONResponse(
+            payload,
+            status_code=status_code,
+            headers=self._auth_refresh_headers(request, session),
+        )
+
     def _json_ok(self, request: Request, session: dict, payload: dict):
         data = PortalRuntime._with_runtime_warnings(payload if isinstance(payload, dict) else {})
-        return {
-            "ok": True,
-            "data": self._with_auth_context(data, session, request),
-        }
+        return self._json_response(
+            request,
+            session,
+            {
+                "ok": True,
+                "data": self._with_auth_context(data, session, request),
+            },
+        )
 
     @staticmethod
     async def _read_json_request(

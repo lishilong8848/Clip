@@ -2028,9 +2028,9 @@ class MainWindowWorkflowMixin:
                             "failed",
                             error=str(exc),
                         )
-                        log_error(f"上传任务异常: {exc}")
+                        log_error(f"Qt后端命令任务异常: {exc}")
                         self._post_request_finished(
-                            "上传", False, f"上传异常: {exc}", task_record_id
+                            "上传", False, f"后端命令异常: {exc}", task_record_id
                         )
                     else:
                         self._mark_qt_upload_runtime_queue(key, "done")
@@ -2042,6 +2042,8 @@ class MainWindowWorkflowMixin:
         thread.start()
 
     def _enqueue_upload(self, record_id, task):
+        # This queue only throttles Qt UI submissions to the local backend.
+        # Feishu/Bitable business execution happens in the backend process.
         key = self._get_upload_key(record_id)
         with self._upload_lock:
             task_queue = self._upload_queues.get(key)

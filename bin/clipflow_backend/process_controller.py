@@ -663,19 +663,17 @@ class BackendProcessPortalController:
 
     def execute_qt_notice_upload(self, payload: dict[str, Any]) -> dict:
         payload = dict(payload or {})
+        action_type = str(payload.get("action_type") or "").strip()
+        command = {
+            "upload": "notice_upload",
+            "update": "notice_update",
+            "end": "notice_end",
+            "upload_replace": "notice_archive",
+        }.get(action_type, "notice_upload")
         try:
-            result = self._request_json(
-                "POST",
-                "/api/qt/notice-upload",
-                payload=payload,
-                timeout=120.0,
-            )
+            return self.submit_qt_command(command, payload)
         except Exception as exc:
             raise RuntimeError(f"本机后端执行 Qt 上传失败: {exc}") from exc
-        if not bool(result.get("ok")):
-            raise RuntimeError(str(result.get("error") or "本机后端执行 Qt 上传失败。"))
-        data = result.get("data")
-        return data if isinstance(data, dict) else {}
 
     def submit_qt_command(self, command: str, payload: dict[str, Any] | None = None) -> dict:
         request_payload = {

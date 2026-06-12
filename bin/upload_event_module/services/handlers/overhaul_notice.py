@@ -88,6 +88,10 @@ class OverhaulNoticeHandler(BaseNoticeHandler):
         if solution:
             fields[OVERHAUL_NOTICE_FIELDS["solution"]] = solution
 
+        spare_parts = self._extract_section(payload.text, "备件更换情况")
+        if spare_parts and OVERHAUL_NOTICE_FIELDS.get("spare_parts"):
+            fields[OVERHAUL_NOTICE_FIELDS["spare_parts"]] = spare_parts
+
         progress = self._extract_section(payload.text, "完成情况")
         if progress:
             fields[OVERHAUL_NOTICE_FIELDS["progress"]] = progress
@@ -195,6 +199,10 @@ class OverhaulNoticeHandler(BaseNoticeHandler):
         solution = self._extract_section(payload.text, "解决方案")
         if solution:
             fields[OVERHAUL_NOTICE_FIELDS["solution"]] = solution
+
+        spare_parts = self._extract_section(payload.text, "备件更换情况")
+        if spare_parts and OVERHAUL_NOTICE_FIELDS.get("spare_parts"):
+            fields[OVERHAUL_NOTICE_FIELDS["spare_parts"]] = spare_parts
 
         progress = self._extract_section(payload.text, "完成情况")
         if progress:

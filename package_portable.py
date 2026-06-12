@@ -925,22 +925,23 @@ def _get_venv_hash(venv_python: Path) -> str:
 
 
 def _missing_runtime_modules(venv_python: Path) -> list[str]:
-
-    missing: list[str] = []
-
-    for module_name in RUNTIME_MODULE_TO_PACKAGE.keys():
-
-        if not _run_cmd(
-
-            [str(venv_python), "-c", f"import {module_name}"],
-
-            log_output_on_error=False,
-
-        ):
-
-            missing.append(module_name)
-
-    return missing
+    modules = list(RUNTIME_MODULE_TO_PACKAGE.keys())
+    script_lines = [
+        "import importlib",
+        "mods = " + repr(modules),
+        "missing = []",
+        "for name in mods:",
+        "    try:",
+        "        importlib.import_module(name)",
+        "    except Exception:",
+        "        missing.append(name)",
+        "print('\\n'.join(missing))",
+    ]
+    ok, output = _run_cmd_capture([str(venv_python), "-c", "\n".join(script_lines)])
+    if not ok:
+        # Fall back to conservative install behavior if the probe itself fails.
+        return modules
+    return [line.strip() for line in output.splitlines() if line.strip()]
 
 
 
@@ -1460,28 +1461,40 @@ def _is_baseline_excluded(
 
 
 def _iter_project_files(root: Path, *, exclude_venv: bool = False) -> list[Path]:
-
     files: list[Path] = []
 
-    for path in root.rglob("*"):
+    root = root.resolve()
 
-        if path.is_dir():
+    for dirpath, dirnames, filenames in os.walk(root):
+        base = Path(dirpath)
+        rel_base = base.relative_to(root)
+        kept_dirnames: list[str] = []
+        for dirname in dirnames:
+            child = base / dirname
+            if rel_base == Path(".") and dirname in EXCLUDE_TOP_LEVEL:
+                continue
+            if dirname in EXCLUDE_DIR_NAMES:
+                continue
+            if exclude_venv and dirname == ".venv":
+                continue
+            if dirname == "build_output":
+                continue
+            if _is_runtime_data_path(child, root):
+                continue
+            if _is_under_bin_build_or_dist(child):
+                continue
+            kept_dirnames.append(dirname)
+        dirnames[:] = kept_dirnames
 
-            continue
-
-        if _is_excluded(path, exclude_venv=exclude_venv):
-
-            continue
-
-        if path.name in EXCLUDE_TOP_LEVEL and path.parent == root:
-
-            continue
-
-        if path.suffix.lower() == ".zip" and path.parent == root:
-
-            continue
-
-        files.append(path)
+        for filename in filenames:
+            path = base / filename
+            if filename in EXCLUDE_TOP_LEVEL and base == root:
+                continue
+            if path.suffix.lower() == ".zip" and base == root:
+                continue
+            if _is_excluded(path, exclude_venv=exclude_venv):
+                continue
+            files.append(path)
 
     return files
 
@@ -1719,7 +1732,12 @@ def _zip_patch_dir(patch_dir: Path) -> Path:
 
         log(f"已删除旧补丁压缩包: {removed}")
 
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+    with zipfile.ZipFile(
+        zip_path,
+        "w",
+        compression=zipfile.ZIP_DEFLATED,
+        compresslevel=1,
+    ) as zf:
 
         for src in patch_dir.rglob("*"):
 
@@ -2221,7 +2239,9 @@ def build_patch(
 
     forced_py = 0
 
-    for src in _iter_project_files(PROJECT_ROOT, exclude_venv=exclude_venv):
+    current_files = _iter_project_files(PROJECT_ROOT, exclude_venv=exclude_venv)
+
+    for src in current_files:
 
         rel = src.relative_to(PROJECT_ROOT)
 
@@ -2309,7 +2329,7 @@ def build_patch(
 
             p.relative_to(PROJECT_ROOT)
 
-            for p in _iter_project_files(PROJECT_ROOT, exclude_venv=exclude_venv)
+            for p in current_files
 
         }
 
@@ -2598,6 +2618,15 @@ def main() -> None:
         action="store_true",
 
         help="Skip mandatory packaging preflight checks. Only use for local debugging.",
+
+    )
+    parser.add_argument(
+
+        "--skip-gitee-upload",
+
+        action="store_true",
+
+        help="Build patch locally but skip cloning/pushing the Gitee update repository.",
 
     )
 
@@ -3027,7 +3056,7 @@ def main() -> None:
 
 
 
-    if AUTO_UPLOAD_GITEE:
+    if AUTO_UPLOAD_GITEE and not args.skip_gitee_upload:
         _upload_patch_to_gitee(
             patch_zip,
             latest_manifest_path,
@@ -3043,7 +3072,8 @@ def main() -> None:
         )
 
     else:
-        log("已跳过 Gitee 上传（AUTO_UPLOAD_GITEE=False）。")
+        reason = "--skip-gitee-upload" if args.skip_gitee_upload else "AUTO_UPLOAD_GITEE=False"
+        log(f"已跳过 Gitee 上传（{reason}）。")
 
     if _advance_local_patch_sequence(
         patch_sequence_key,

@@ -141,6 +141,9 @@ class PortalRuntime:
     message_batch_wait_seconds = 1.2
     message_batch_max_jobs = 20
     message_scope_inflight: set[str] = set()
+    local_upload_locks: dict[str, threading.RLock] = {}
+    local_upload_locks_lock = threading.RLock()
+    local_upload_created_targets: dict[str, str] = {}
     payload_cache_lock = threading.RLock()
     payload_cache: dict[tuple, tuple[float, dict]] = {}
     payload_cache_inflight: dict[tuple, threading.Event] = {}
@@ -2667,11 +2670,177 @@ class PortalRuntime:
     def _notice_work_type_from_notice_type(notice_type: str) -> str:
         notice_type = str(notice_type or "").strip()
         return {
+            "事件通告": "event",
             "维保通告": "maintenance",
             "设备变更": "change",
             "变更通告": "change",
             "设备检修": "repair",
         }.get(notice_type, "")
+
+    @classmethod
+    def _local_upload_lock_for_key(cls, key: str) -> threading.RLock:
+        key = str(key or "").strip()
+        with cls.local_upload_locks_lock:
+            lock = cls.local_upload_locks.get(key)
+            if lock is None:
+                lock = threading.RLock()
+                cls.local_upload_locks[key] = lock
+            return lock
+
+    @classmethod
+    def _release_local_upload_lock_for_key(cls, key: str, lock: threading.RLock) -> None:
+        # Keep the lock object around. Removing it immediately can let a third
+        # request create a new lock while a second request is still waiting on
+        # the old one, which would reopen the duplicate-create race.
+        return
+
+    @classmethod
+    def _local_upload_dedupe_key(cls, data: dict, notice_type: str) -> str:
+        data = data if isinstance(data, dict) else {}
+        notice_type = str(notice_type or data.get("notice_type") or "").strip()
+        active_item_id = str(data.get("active_item_id") or "").strip()
+        if active_item_id:
+            return f"{notice_type}:active:{active_item_id}"
+        record_id = str(data.get("record_id") or "").strip()
+        if record_id:
+            return f"{notice_type}:record:{record_id}"
+        info = extract_notice_info(str(data.get("text") or "")) or {}
+        unique_key = str(info.get("unique_key") or "").strip()
+        if unique_key:
+            return f"{notice_type}:unique:{hashlib.sha256(unique_key.encode('utf-8', errors='ignore')).hexdigest()}"
+        return ""
+
+    @classmethod
+    def _existing_target_for_local_upload(cls, data: dict, notice_type: str) -> str:
+        data = normalize_notice_identity_payload(dict(data or {}), action="upload")
+        work_type = str(data.get("work_type") or data.get("lan_work_type") or "").strip()
+        if not work_type:
+            work_type = cls._notice_work_type_from_notice_type(notice_type)
+        try:
+            identity = cls.state_store.resolve_notice_identity(
+                work_type=work_type,
+                active_item_id=str(data.get("active_item_id") or "").strip(),
+                source_record_id=str(data.get("source_record_id") or "").strip(),
+                target_record_id="",
+            )
+        except Exception:
+            identity = None
+        target_record_id = (
+            str((identity or {}).get("target_record_id") or "").strip()
+            if isinstance(identity, dict)
+            else ""
+        )
+        if not target_record_id:
+            return ""
+        guard = external_real_write_guard()
+        if guard.get("mock_external"):
+            return target_record_id
+        ok_query, query_result = query_record_by_id(target_record_id, notice_type)
+        if ok_query:
+            return target_record_id
+        if cls._remote_record_not_found(query_result):
+            return ""
+        return target_record_id
+
+    @classmethod
+    def _remember_local_upload_target(
+        cls,
+        data: dict,
+        *,
+        notice_type: str,
+        target_record_id: str,
+    ) -> None:
+        target_record_id = str(target_record_id or "").strip()
+        if not target_record_id:
+            return
+        payload = normalize_notice_identity_payload(
+            {
+                **dict(data or {}),
+                "record_id": target_record_id,
+                "target_record_id": target_record_id,
+                "feishu_record_id": target_record_id,
+                "raw_record_id": target_record_id,
+                "_record_id_kind": "target",
+                "_is_placeholder_record": False,
+            },
+            action="update",
+        )
+        if not str(payload.get("work_type") or "").strip():
+            payload["work_type"] = (
+                str(payload.get("lan_work_type") or "").strip()
+                or cls._notice_work_type_from_notice_type(notice_type)
+            )
+        section = "event" if notice_type == "事件通告" else "other"
+        try:
+            cls.state_store.upsert_notice_identity(payload, origin="qt_upload")
+        except Exception:
+            pass
+
+    @classmethod
+    def _source_record_id_from_prepared_start(cls, prepared: dict) -> str:
+        prepared = prepared if isinstance(prepared, dict) else {}
+        source_record_id = str(prepared.get("source_record_id") or "").strip()
+        if source_record_id:
+            return source_record_id
+        record_id = str(prepared.get("record_id") or "").strip()
+        if not record_id or is_local_record_id(record_id):
+            return ""
+        if str(prepared.get("source_app_token") or "").strip() or str(
+            prepared.get("source_table_id") or ""
+        ).strip():
+            return record_id
+        return ""
+
+    @classmethod
+    def _existing_target_for_prepared_start(cls, prepared: dict, notice_type: str) -> str:
+        prepared = normalize_notice_identity_payload(dict(prepared or {}), action="start")
+        work_type = str(prepared.get("work_type") or "").strip()
+        if not work_type:
+            work_type = cls._notice_work_type_from_notice_type(notice_type)
+        active_item_id = str(prepared.get("active_item_id") or "").strip()
+        source_record_id = cls._source_record_id_from_prepared_start(prepared)
+
+        target_record_id = ""
+        try:
+            identity = cls.state_store.resolve_notice_identity(
+                work_type=work_type,
+                active_item_id=active_item_id,
+                source_record_id=source_record_id,
+                target_record_id="",
+            )
+        except Exception:
+            identity = None
+        if isinstance(identity, dict):
+            target_record_id = str(identity.get("target_record_id") or "").strip()
+        if not target_record_id and (active_item_id or source_record_id):
+            try:
+                target_record_id = cls.service._target_record_id_from_work_status(
+                    work_type=work_type,
+                    active_item_id=active_item_id,
+                    source_record_id=source_record_id,
+                )
+            except Exception:
+                target_record_id = ""
+        if not target_record_id:
+            return ""
+        guard = external_real_write_guard()
+        if guard.get("mock_external"):
+            return target_record_id
+        ok_query, query_result = query_record_by_id(target_record_id, notice_type)
+        if ok_query:
+            return target_record_id
+        if cls._remote_record_not_found(query_result):
+            return ""
+        return target_record_id
+        try:
+            cls.state_store.upsert_qt_active_item(
+                payload,
+                section=section,
+                sort_order=0,
+                origin=str(payload.get("origin") or "qt_upload"),
+            )
+        except Exception:
+            pass
 
     @staticmethod
     def _target_candidate_score(prepared: dict, candidate: dict) -> int:
@@ -3060,6 +3229,12 @@ class PortalRuntime:
             return False, str(guard["reason"] or "真实外部写入未确认。"), ""
 
         if action == "start":
+            existing_target = cls._existing_target_for_prepared_start(
+                prepared,
+                notice_type,
+            )
+            if existing_target:
+                return True, existing_target, existing_target
             payload = cls._prepared_to_notice_payload(prepared)
             ok, result = create_bitable_record_by_payload(notice_type, payload)
             record_id = str(result or "").strip() if ok else ""
@@ -3404,15 +3579,63 @@ class PortalRuntime:
         notice_payload.occurrence_date = str(data.get("time_str") or "").strip() or None
 
         if action_type == "upload":
-            success, result = create_bitable_record_by_payload(notice_type, notice_payload)
-            real_record_id = str(result or "").strip() if success else ""
-            return {
-                "ok": bool(success),
-                "name": "上传",
-                "message": str(result or ""),
-                "record_id": record_id,
-                "real_record_id": real_record_id,
-            }
+            dedupe_key = cls._local_upload_dedupe_key(data, notice_type)
+            lock = cls._local_upload_lock_for_key(dedupe_key) if dedupe_key else None
+
+            def _run_create_once() -> dict:
+                if dedupe_key:
+                    cached_target = str(
+                        cls.local_upload_created_targets.get(dedupe_key) or ""
+                    ).strip()
+                    if cached_target:
+                        return {
+                            "ok": True,
+                            "name": "上传",
+                            "message": cached_target,
+                            "record_id": record_id,
+                            "real_record_id": cached_target,
+                            "deduped": True,
+                        }
+                existing_target = cls._existing_target_for_local_upload(data, notice_type)
+                if existing_target:
+                    if dedupe_key:
+                        cls.local_upload_created_targets[dedupe_key] = existing_target
+                    return {
+                        "ok": True,
+                        "name": "上传",
+                        "message": existing_target,
+                        "record_id": record_id,
+                        "real_record_id": existing_target,
+                        "deduped": True,
+                    }
+                success, result = create_bitable_record_by_payload(
+                    notice_type,
+                    notice_payload,
+                )
+                real_record_id = str(result or "").strip() if success else ""
+                if success:
+                    if dedupe_key:
+                        cls.local_upload_created_targets[dedupe_key] = real_record_id
+                    cls._remember_local_upload_target(
+                        data,
+                        notice_type=notice_type,
+                        target_record_id=real_record_id,
+                    )
+                return {
+                    "ok": bool(success),
+                    "name": "上传",
+                    "message": str(result or ""),
+                    "record_id": record_id,
+                    "real_record_id": real_record_id,
+                }
+
+            if lock is None:
+                return _run_create_once()
+            with lock:
+                try:
+                    return _run_create_once()
+                finally:
+                    cls._release_local_upload_lock_for_key(dedupe_key, lock)
 
         existing_tokens: list[str] = []
         existing_extra_tokens: list[str] = []

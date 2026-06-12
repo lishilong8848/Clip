@@ -3271,11 +3271,23 @@ class ScreenshotConfirmDialog(QDialog):
 
         self.enable_specialty_select = self.notice_type in (
 
+            "设备变更",
+
+            "变更通告",
+
+            "设备检修",
+
             "设备调整",
 
             "设备轮巡",
 
             "设备轮询",
+
+            "上下电通告",
+
+            "上电通告",
+
+            "下电通告",
 
             "事件通告",
 

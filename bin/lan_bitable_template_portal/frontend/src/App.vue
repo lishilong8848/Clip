@@ -19,19 +19,31 @@
             </option>
           </select>
         </label>
-        <button v-if="auth.loggedIn && isWorkbench" class="btn ghost" :disabled="loading" @click="loadWorkbench()">
-          {{ loading ? "刷新中" : "刷新本页" }}
+        <button v-if="auth.loggedIn && isWorkbench" class="btn ghost" :disabled="loading || refreshCooldown.workbench" @click="manualRefreshWorkbench">
+          {{ loading ? "刷新中" : refreshCooldown.workbench ? "稍后再刷" : "刷新本页" }}
         </button>
-        <button v-if="auth.loggedIn && isWorkbench" class="btn ghost" :disabled="repairRefreshing" @click="refreshRepair">
-          {{ repairRefreshing ? "检修刷新中" : "刷新检修" }}
+        <button v-if="auth.loggedIn && isWorkbench" class="btn ghost" :disabled="repairRefreshing || refreshCooldown.repair" @click="refreshRepair">
+          {{ repairRefreshing ? "检修刷新中" : refreshCooldown.repair ? "稍后再刷" : "刷新检修" }}
         </button>
-        <button v-if="auth.loggedIn && isWorkbench" class="btn ghost" :disabled="changeRefreshing" @click="refreshChange">
-          {{ changeRefreshing ? "变更刷新中" : "刷新变更" }}
+        <button v-if="auth.loggedIn && isWorkbench" class="btn ghost" :disabled="changeRefreshing || refreshCooldown.change" @click="refreshChange">
+          {{ changeRefreshing ? "变更刷新中" : refreshCooldown.change ? "稍后再刷" : "刷新变更" }}
         </button>
         <button v-if="isAdmin" class="btn ghost" @click="showAdminTools = true">管理/诊断</button>
         <button v-if="auth.loggedIn" class="btn danger-text" @click="logout">退出</button>
       </div>
     </header>
+
+    <div v-if="connectionNotice" class="status-banner" :class="connectionNotice.tone">
+      <span>{{ connectionNotice.text }}</span>
+      <button
+        v-if="connectionNotice.action"
+        class="btn ghost small"
+        type="button"
+        @click="connectionNotice.action"
+      >
+        {{ connectionNotice.actionLabel }}
+      </button>
+    </div>
 
     <AdminTools
       :open="showAdminTools"
@@ -104,9 +116,41 @@
           </button>
         </div>
         <input v-model="searchText" class="search" placeholder="搜索标题、楼栋、专业" />
-        <button class="btn ghost" @click="addManualDraft">纯手填</button>
+        <div class="manual-create">
+          <button class="btn ghost" @click="showManualTypePicker = !showManualTypePicker">纯手填</button>
+          <div v-if="showManualTypePicker" class="manual-type-popover">
+            <strong>选择纯手填通告类型</strong>
+            <p>先选类型再填写，避免在维保页误发成维保通告。</p>
+            <div v-if="manualRecentTypeOptions.length" class="manual-recent">
+              <span>最近使用</span>
+              <button
+                v-for="type in manualRecentTypeOptions"
+                :key="type.value"
+                type="button"
+                @click="addManualDraft(type.value)"
+              >
+                {{ type.label }}
+              </button>
+            </div>
+            <div class="manual-type-grid">
+              <button
+                v-for="type in workTypes"
+                :key="type.value"
+                type="button"
+                @click="addManualDraft(type.value)"
+              >
+                <span>{{ type.label }}</span>
+                <small v-if="manualPrefillWorkTypes.has(type.value)">带入上次内容</small>
+                <small v-else>空白模板</small>
+              </button>
+            </div>
+          </div>
+        </div>
         <button class="btn ghost" @click="showPasteParser = !showPasteParser">解析粘贴通告</button>
         <button v-if="isAdmin" class="btn ghost" @click="showMemoryImporter = !showMemoryImporter">导入历史记忆</button>
+        <span v-if="draftSaveText" class="draft-save-status" :class="{ failed: draftSaveFailed }">
+          {{ draftSaveText }}
+        </span>
       </div>
 
       <section v-if="showPasteParser" class="paste-panel">
@@ -233,12 +277,12 @@
               v-for="row in selectedDraftRows"
               :key="row.key"
               class="draft-card"
-              :class="{ active: row.key === activeDraftKey, collapsed: row.key !== activeDraftKey }"
+              :class="{ active: row.key === activeDraftKey, collapsed: row.key !== activeDraftKey, busy: isLineBusy(row.key) }"
               @click="activeDraftKey = row.key"
             >
               <div class="card-title">
                 <strong>{{ row.title }}</strong>
-                <span>{{ workTypeLabel(row.record.work_type) }}{{ row.key === activeDraftKey ? " · 正在编辑" : " · 点击编辑" }}</span>
+                <span>{{ draftCardMeta(row.record, row.draft, row.key === activeDraftKey) }}</span>
               </div>
               <div v-if="row.key !== activeDraftKey" class="draft-compact">
                 <p>{{ draftSummary(row.record, row.draft) || "已加入待发起通告，点击展开编辑。" }}</p>
@@ -249,12 +293,24 @@
                 </div>
               </div>
               <template v-else>
+                <p v-if="row.record.manual && row.draft.prefilled_from_last" class="draft-hint">
+                  已带入上次{{ workTypeLabel(row.record.work_type) }}手填内容，请核对时间和字段后再发送。
+                </p>
+                <p v-if="draftMissingText(row.record, row.draft)" class="draft-required-line">
+                  {{ draftMissingText(row.record, row.draft) }}
+                </p>
                 <div class="form-grid">
-                  <label>
+                  <label v-if="row.record.manual">
+                    通告类型
+                    <select v-model="row.draft.work_type" @change="onManualDraftTypeChange(row.draft)">
+                      <option v-for="type in workTypes" :key="type.value" :value="type.value">{{ type.label }}</option>
+                    </select>
+                  </label>
+                  <label :class="draftFieldClass(row.record, row.draft, 'title')">
                     {{ noticeFieldLabel(row.record.work_type, "title") }}
                     <input v-model="row.draft.title" placeholder="通告标题" @input="saveDrafts" />
                   </label>
-                  <label v-if="row.record.manual">
+                  <label v-if="row.record.manual" :class="draftFieldClass(row.record, row.draft, 'building')">
                     楼栋/范围
                     <select v-model="row.draft.building" @change="onDraftBuildingChange(row.draft)">
                       <option value="">请选择</option>
@@ -263,50 +319,39 @@
                       </option>
                     </select>
                   </label>
-                  <label>
+                  <label v-if="isNoticeMessageField(row.record.work_type, 'specialty')" :class="draftFieldClass(row.record, row.draft, 'specialty')">
                     {{ noticeFieldLabel(row.record.work_type, "specialty") }}
                     <input v-model="row.draft.specialty" placeholder="专业" @input="saveDrafts" />
                   </label>
-                  <label v-if="row.record.work_type === 'maintenance'">
-                    {{ row.record.manual ? "维护周期" : "维保周期" }}
-                    <select v-model="row.draft.maintenance_cycle" @change="saveDrafts">
-                      <option value="">请选择</option>
-                      <option v-for="item in maintenanceCycleOptions" :key="item" :value="item">{{ item }}</option>
-                    </select>
-                  </label>
-                  <label v-if="row.record.manual && row.record.work_type === 'maintenance'" class="checkbox-field span-2">
-                    <input v-model="row.draft.non_plan" type="checkbox" @change="saveDrafts" />
-                    <span>非计划，发送时标题末尾自动追加“（非计划性）”</span>
-                  </label>
-                  <label v-if="row.record.work_type !== 'maintenance'">
+                  <label v-if="isNoticeMessageField(row.record.work_type, 'level')" :class="draftFieldClass(row.record, row.draft, 'level')">
                     {{ noticeFieldLabel(row.record.work_type, "level") }}
                     <input v-model="row.draft.level" placeholder="等级" @input="saveDrafts" />
                   </label>
-                  <label>
+                  <label :class="draftFieldClass(row.record, row.draft, 'start_time')">
                     {{ noticeFieldLabel(row.record.work_type, "start_time") }}
                     <input v-model="row.draft.start_time" type="datetime-local" @input="saveDrafts" />
                   </label>
-                  <label>
+                  <label :class="draftFieldClass(row.record, row.draft, 'end_time')">
                     {{ noticeFieldLabel(row.record.work_type, "end_time") }}
                     <input v-model="row.draft.end_time" type="datetime-local" @input="saveDrafts" />
                   </label>
-                  <label class="span-2">
+                  <label v-if="isNoticeMessageField(row.record.work_type, 'location')" class="span-2" :class="draftFieldClass(row.record, row.draft, 'location')">
                     {{ noticeFieldLabel(row.record.work_type, "location") }}
                     <input v-model="row.draft.location" placeholder="地点" @input="saveDrafts" />
                   </label>
-                  <label class="span-2">
+                  <label v-if="isNoticeMessageField(row.record.work_type, 'content')" class="span-2" :class="draftFieldClass(row.record, row.draft, 'content')">
                     {{ noticeFieldLabel(row.record.work_type, "content") }}
                     <textarea v-model="row.draft.content" placeholder="内容" @input="saveDrafts"></textarea>
                   </label>
-                  <label>
+                  <label v-if="isNoticeMessageField(row.record.work_type, 'reason')" :class="draftFieldClass(row.record, row.draft, 'reason')">
                     {{ noticeFieldLabel(row.record.work_type, "reason") }}
                     <textarea v-model="row.draft.reason" placeholder="原因" @input="saveDrafts"></textarea>
                   </label>
-                  <label>
+                  <label v-if="isNoticeMessageField(row.record.work_type, 'impact')" :class="draftFieldClass(row.record, row.draft, 'impact')">
                     {{ noticeFieldLabel(row.record.work_type, "impact") }}
                     <textarea v-model="row.draft.impact" placeholder="影响" @input="saveDrafts"></textarea>
                   </label>
-                  <label class="span-2">
+                  <label v-if="isNoticeMessageField(row.record.work_type, 'progress')" class="span-2" :class="draftFieldClass(row.record, row.draft, 'progress')">
                     {{ noticeFieldLabel(row.record.work_type, "progress") }}
                     <textarea v-model="row.draft.progress" placeholder="进度" @input="saveDrafts"></textarea>
                   </label>
@@ -314,44 +359,82 @@
                 <section v-if="row.record.work_type === 'power'" class="repair-fields">
                   <h3>上电字段</h3>
                   <div class="form-grid">
-                    <label><span>柜号</span><input v-model="row.draft.cabinet" @input="saveDrafts" /></label>
-                    <label><span>数量</span><input v-model="row.draft.quantity" @input="saveDrafts" /></label>
+                    <label :class="draftFieldClass(row.record, row.draft, 'cabinet')"><span>柜号</span><input v-model="row.draft.cabinet" @input="saveDrafts" /></label>
+                    <label :class="draftFieldClass(row.record, row.draft, 'quantity')"><span>数量</span><input v-model="row.draft.quantity" @input="saveDrafts" /></label>
                   </div>
                 </section>
                 <section v-if="row.record.work_type === 'polling'" class="repair-fields">
                   <h3>轮巡字段</h3>
                   <div class="form-grid">
-                    <label class="span-2"><span>设备</span><input v-model="row.draft.device" @input="saveDrafts" /></label>
+                    <label class="span-2" :class="draftFieldClass(row.record, row.draft, 'device')"><span>设备</span><input v-model="row.draft.device" @input="saveDrafts" /></label>
                   </div>
                 </section>
                 <section v-if="row.record.work_type === 'repair'" class="repair-fields">
                   <h3>检修字段</h3>
+                  <h4>设备与故障</h4>
                   <div class="form-grid">
-                    <label><span>维修设备</span><input v-model="row.draft.repair_device" @input="saveDrafts" /></label>
-                    <label><span>维修故障</span><input v-model="row.draft.repair_fault" @input="saveDrafts" /></label>
+                    <label :class="draftFieldClass(row.record, row.draft, 'repair_device')"><span>维修设备</span><input v-model="row.draft.repair_device" @input="saveDrafts" /></label>
+                    <label :class="draftFieldClass(row.record, row.draft, 'repair_fault')"><span>维修故障</span><input v-model="row.draft.repair_fault" @input="saveDrafts" /></label>
                     <label><span>故障类型</span><input v-model="row.draft.fault_type" @input="saveDrafts" /></label>
                     <label><span>维修方式</span><input v-model="row.draft.repair_mode" @input="saveDrafts" /></label>
                     <label><span>故障发现方式</span><input v-model="row.draft.discovery" @input="saveDrafts" /></label>
                     <label><span>故障现象</span><input v-model="row.draft.symptom" @input="saveDrafts" /></label>
-                    <label class="span-2"><span>解决方案</span><textarea v-model="row.draft.solution" @input="saveDrafts"></textarea></label>
+                  </div>
+                  <h4>处理与结果</h4>
+                  <div class="form-grid">
+                    <label class="span-2" :class="draftFieldClass(row.record, row.draft, 'solution')"><span>解决方案</span><textarea v-model="row.draft.solution" @input="saveDrafts"></textarea></label>
+                    <label class="span-2"><span>备件更换情况</span><textarea v-model="row.draft.spare_parts" @input="saveDrafts"></textarea></label>
                   </div>
                 </section>
-                <div v-if="row.record.work_type === 'change'" class="zhihang-line">
-                  <label>
-                    <input v-model="row.draft.zhihang_involved" type="checkbox" @change="saveDrafts" />
-                    涉及智航
-                  </label>
-                  <select v-if="row.draft.zhihang_involved" v-model="row.draft.zhihang_record_id" @change="bindZhihang(row.draft)">
-                    <option value="">选择智航变更</option>
-                    <option v-for="item in zhihangRecords" :key="item.record_id" :value="item.record_id">
-                      {{ item.title || item.record_id }}
-                    </option>
-                  </select>
-                </div>
+                <details v-if="hasNoticeUploadFields(row.record.work_type)" class="upload-fields">
+                  <summary>多维上传字段</summary>
+                  <div class="form-grid">
+                    <label v-if="isNoticeUploadField(row.record.work_type, 'specialty')">
+                      专业
+                      <input v-model="row.draft.specialty" placeholder="用于目标多维字段" @input="saveDrafts" />
+                    </label>
+                    <label v-if="isNoticeUploadField(row.record.work_type, 'maintenance_cycle')" :class="draftFieldClass(row.record, row.draft, 'maintenance_cycle')">
+                      {{ row.record.manual ? "维护周期" : "维保周期" }}
+                      <select v-model="row.draft.maintenance_cycle" @change="saveDrafts">
+                        <option value="">请选择</option>
+                        <option v-for="item in maintenanceCycleOptions" :key="item" :value="item">{{ item }}</option>
+                      </select>
+                    </label>
+                    <label v-if="row.record.manual && isNoticeUploadField(row.record.work_type, 'non_plan')" class="checkbox-field span-2">
+                      <input v-model="row.draft.non_plan" type="checkbox" @change="saveDrafts" />
+                      <span>非计划，发送时标题末尾自动追加“（非计划性）”</span>
+                    </label>
+                    <div v-if="isNoticeUploadField(row.record.work_type, 'zhihang')" class="zhihang-line span-2">
+                      <label>
+                        <input v-model="row.draft.zhihang_involved" type="checkbox" @change="saveDrafts" />
+                        涉及智航
+                      </label>
+                      <select v-if="row.draft.zhihang_involved" v-model="row.draft.zhihang_record_id" @change="bindZhihang(row.draft)">
+                        <option value="">选择智航变更</option>
+                        <option v-for="item in zhihangRecords" :key="item.record_id" :value="item.record_id">
+                          {{ item.title || item.record_id }}
+                        </option>
+                      </select>
+                    </div>
+                  </div>
+                </details>
+                <details class="upload-fields upload-preview">
+                  <summary>多维上传预览</summary>
+                  <dl class="upload-preview-grid">
+                    <template v-for="item in draftUploadPreviewRows(row.record, row.draft)" :key="item.label">
+                      <dt>{{ item.label }}</dt>
+                      <dd>{{ item.value }}</dd>
+                    </template>
+                  </dl>
+                </details>
+                <pre v-if="previewDraftKey === row.key" class="notice-preview">{{ noticePreviewText(row.record, row.draft) }}</pre>
                 <div class="card-actions">
                   <span class="job-line" :class="jobClass(row.key)">{{ jobText(row.key) }}</span>
+                  <button class="btn ghost" :disabled="isLineBusy(row.key)" @click.stop="previewDraftKey = previewDraftKey === row.key ? '' : row.key">
+                    {{ previewDraftKey === row.key ? "收起预览" : "预览飞书文本" }}
+                  </button>
                   <button class="btn blue" :disabled="isLineBusy(row.key)" @click.stop="sendStart(row.key)">
-                    发送{{ draftActionLabel(row.record, row.draft) }}
+                    {{ sendDraftButtonLabel(row.record, row.draft) }}
                   </button>
                   <button class="btn ghost" :disabled="isLineBusy(row.key)" @click.stop="removeDraft(row.key)">移除</button>
                 </div>
@@ -371,7 +454,7 @@
               v-for="item in ongoing"
               :key="ongoingLineKey(item)"
               class="ongoing-card"
-              :class="{ active: isOngoingExpanded(item), collapsed: !isOngoingExpanded(item) }"
+              :class="{ active: isOngoingExpanded(item), collapsed: !isOngoingExpanded(item), busy: isLineBusy(ongoingLineKey(item)) }"
               @click="expandOngoingCard(item)"
             >
               <div class="card-title" @click.stop="toggleOngoingCard(item)">
@@ -396,7 +479,7 @@
                         @input="setOngoingEdit(item, 'title', ($event.target as HTMLInputElement).value)"
                       />
                     </label>
-                    <label>
+                    <label v-if="isNoticeMessageField(item.work_type || 'maintenance', 'specialty')">
                       {{ noticeFieldLabel(item.work_type || "maintenance", "specialty") }}
                       <input
                         :value="ongoingDraft(item).specialty"
@@ -404,17 +487,7 @@
                         @input="setOngoingEdit(item, 'specialty', ($event.target as HTMLInputElement).value)"
                       />
                     </label>
-                    <label v-if="(item.work_type || 'maintenance') === 'maintenance'">
-                      维保周期
-                      <select
-                        :value="ongoingDraft(item).maintenance_cycle"
-                        @change="setOngoingEdit(item, 'maintenance_cycle', ($event.target as HTMLSelectElement).value)"
-                      >
-                        <option value="">请选择</option>
-                        <option v-for="cycle in maintenanceCycleOptions" :key="cycle" :value="cycle">{{ cycle }}</option>
-                      </select>
-                    </label>
-                    <label v-if="(item.work_type || 'maintenance') !== 'maintenance'">
+                    <label v-if="isNoticeMessageField(item.work_type || 'maintenance', 'level')">
                       {{ noticeFieldLabel(item.work_type || "maintenance", "level") }}
                       <input
                         :value="ongoingDraft(item).level"
@@ -438,7 +511,7 @@
                         @input="setOngoingEdit(item, 'end_time', ($event.target as HTMLInputElement).value)"
                       />
                     </label>
-                    <label class="span-2">
+                    <label v-if="isNoticeMessageField(item.work_type || 'maintenance', 'location')" class="span-2">
                       {{ noticeFieldLabel(item.work_type || "maintenance", "location") }}
                       <input
                         :value="ongoingDraft(item).location"
@@ -446,7 +519,7 @@
                         @input="setOngoingEdit(item, 'location', ($event.target as HTMLInputElement).value)"
                       />
                     </label>
-                    <label class="span-2">
+                    <label v-if="isNoticeMessageField(item.work_type || 'maintenance', 'content')" class="span-2">
                       {{ noticeFieldLabel(item.work_type || "maintenance", "content") }}
                       <textarea
                         :value="ongoingDraft(item).content"
@@ -454,7 +527,7 @@
                         @input="setOngoingEdit(item, 'content', ($event.target as HTMLTextAreaElement).value)"
                       ></textarea>
                     </label>
-                    <label>
+                    <label v-if="isNoticeMessageField(item.work_type || 'maintenance', 'reason')">
                       {{ noticeFieldLabel(item.work_type || "maintenance", "reason") }}
                       <textarea
                         :value="ongoingDraft(item).reason"
@@ -462,7 +535,7 @@
                         @input="setOngoingEdit(item, 'reason', ($event.target as HTMLTextAreaElement).value)"
                       ></textarea>
                     </label>
-                    <label>
+                    <label v-if="isNoticeMessageField(item.work_type || 'maintenance', 'impact')">
                       {{ noticeFieldLabel(item.work_type || "maintenance", "impact") }}
                       <textarea
                         :value="ongoingDraft(item).impact"
@@ -470,7 +543,7 @@
                         @input="setOngoingEdit(item, 'impact', ($event.target as HTMLTextAreaElement).value)"
                       ></textarea>
                     </label>
-                    <label class="span-2">
+                    <label v-if="isNoticeMessageField(item.work_type || 'maintenance', 'progress')" class="span-2">
                       {{ noticeFieldLabel(item.work_type || "maintenance", "progress") }}
                       <textarea
                         :value="ongoingDraft(item).progress"
@@ -502,34 +575,58 @@
                       <label><span>故障发现方式</span><input :value="ongoingDraft(item).discovery" @input="setOngoingEdit(item, 'discovery', ($event.target as HTMLInputElement).value)" /></label>
                       <label><span>故障现象</span><input :value="ongoingDraft(item).symptom" @input="setOngoingEdit(item, 'symptom', ($event.target as HTMLInputElement).value)" /></label>
                       <label class="span-2"><span>解决方案</span><textarea :value="ongoingDraft(item).solution" @input="setOngoingEdit(item, 'solution', ($event.target as HTMLTextAreaElement).value)"></textarea></label>
+                      <label class="span-2"><span>备件更换情况</span><textarea :value="ongoingDraft(item).spare_parts" @input="setOngoingEdit(item, 'spare_parts', ($event.target as HTMLTextAreaElement).value)"></textarea></label>
                     </div>
                   </section>
-                  <div v-if="(item.work_type || 'maintenance') === 'change'" class="zhihang-line">
-                    <label>
-                      <input
-                        :checked="Boolean(ongoingDraft(item).zhihang_involved)"
-                        type="checkbox"
-                        @change="setOngoingEdit(item, 'zhihang_involved', ($event.target as HTMLInputElement).checked)"
-                      />
-                      涉及智航
-                    </label>
-                    <select
-                      v-if="ongoingDraft(item).zhihang_involved"
-                      :value="ongoingDraft(item).zhihang_record_id"
-                      @change="bindOngoingZhihang(item, ($event.target as HTMLSelectElement).value)"
-                    >
-                      <option value="">选择智航变更</option>
-                      <option v-for="change in zhihangRecords" :key="change.record_id" :value="change.record_id">
-                        {{ change.title || change.record_id }}
-                      </option>
-                    </select>
-                  </div>
+                  <details v-if="hasNoticeUploadFields(item.work_type || 'maintenance')" class="upload-fields">
+                    <summary>多维上传字段</summary>
+                    <div class="form-grid">
+                      <label v-if="isNoticeUploadField(item.work_type || 'maintenance', 'specialty')">
+                        专业
+                        <input
+                          :value="ongoingDraft(item).specialty"
+                          placeholder="用于目标多维字段"
+                          @input="setOngoingEdit(item, 'specialty', ($event.target as HTMLInputElement).value)"
+                        />
+                      </label>
+                      <label v-if="isNoticeUploadField(item.work_type || 'maintenance', 'maintenance_cycle')">
+                        维保周期
+                        <select
+                          :value="ongoingDraft(item).maintenance_cycle"
+                          @change="setOngoingEdit(item, 'maintenance_cycle', ($event.target as HTMLSelectElement).value)"
+                        >
+                          <option value="">请选择</option>
+                          <option v-for="cycle in maintenanceCycleOptions" :key="cycle" :value="cycle">{{ cycle }}</option>
+                        </select>
+                      </label>
+                      <div v-if="isNoticeUploadField(item.work_type || 'maintenance', 'zhihang')" class="zhihang-line span-2">
+                        <label>
+                          <input
+                            :checked="Boolean(ongoingDraft(item).zhihang_involved)"
+                            type="checkbox"
+                            @change="setOngoingEdit(item, 'zhihang_involved', ($event.target as HTMLInputElement).checked)"
+                          />
+                          涉及智航
+                        </label>
+                        <select
+                          v-if="ongoingDraft(item).zhihang_involved"
+                          :value="ongoingDraft(item).zhihang_record_id"
+                          @change="bindOngoingZhihang(item, ($event.target as HTMLSelectElement).value)"
+                        >
+                          <option value="">选择智航变更</option>
+                          <option v-for="change in zhihangRecords" :key="change.record_id" :value="change.record_id">
+                            {{ change.title || change.record_id }}
+                          </option>
+                        </select>
+                      </div>
+                    </div>
+                  </details>
                   <div class="card-actions">
                     <span class="job-line" :class="jobClass(ongoingLineKey(item))">
                       {{ jobText(ongoingLineKey(item)) }}
                     </span>
-                <button class="btn blue" :disabled="isLineBusy(ongoingLineKey(item))" @click="sendOngoing(item, 'update')">更新</button>
-                <button class="btn green" :disabled="isLineBusy(ongoingLineKey(item))" @click="sendOngoing(item, 'end')">结束</button>
+                <button class="btn blue" :disabled="isLineBusy(ongoingLineKey(item))" @click="sendOngoing(item, 'update')">发送{{ workTypeLabel(item.work_type || 'maintenance') }}更新</button>
+                <button class="btn green" :disabled="isLineBusy(ongoingLineKey(item))" @click="sendOngoing(item, 'end')">发送{{ workTypeLabel(item.work_type || 'maintenance') }}结束</button>
                 <button class="btn danger" :disabled="isLineBusy(ongoingLineKey(item))" @click="deleteOngoing(item)">删除</button>
                 <button
                   v-if="ongoingNeedsBinding(item)"
@@ -549,17 +646,33 @@
               </template>
             </article>
           </div>
-          <div v-if="deletedUndoItems.length" class="closed-today">
+          <div v-if="recentUndoItems.length" class="closed-today recent-undo-panel">
             <div class="panel-head compact">
-              <h3>最近删除可回退</h3>
-              <span>{{ deletedUndoItems.length }}</span>
+              <h3>近三天可回退</h3>
+              <span>{{ filteredRecentUndoItems.length }}/{{ recentUndoItems.length }}</span>
             </div>
-            <article v-for="item in deletedUndoItems" :key="undoLineKey(item)" class="closed-card">
+            <div class="undo-filter">
+              <button
+                v-for="item in undoFilterOptions"
+                :key="item.value"
+                type="button"
+                :class="{ active: undoFilter === item.value }"
+                @click="undoFilter = item.value"
+              >
+                {{ item.label }} {{ undoFilterCounts[item.value] || 0 }}
+              </button>
+            </div>
+            <article v-for="item in filteredRecentUndoItems" :key="undoLineKey(item)" class="closed-card undo-card">
               <div>
                 <strong>{{ item.title || "未命名通告" }}</strong>
-                <p>{{ workTypeLabel(item.work_type) }} · {{ item.building || "-" }} · {{ formatUndoTime(item.undo_created_at) }}</p>
+                <p>
+                  <span class="undo-action-chip">{{ undoActionLabel(item) }}</span>
+                  {{ workTypeLabel(item.work_type) }} · {{ item.building || "-" }} · {{ formatUndoTime(item.undo_created_at) }}
+                </p>
               </div>
-              <button class="btn ghost" :disabled="isLineBusy(undoLineKey(item))" @click="applyUndo(item)">回退删除</button>
+              <button class="btn ghost" :disabled="isLineBusy(undoLineKey(item))" @click="applyUndo(item)">
+                {{ undoButtonLabel(item) }}
+              </button>
               <span class="job-line" :class="jobClass(undoLineKey(item))">{{ jobText(undoLineKey(item)) }}</span>
             </article>
           </div>
@@ -641,6 +754,12 @@ import VirtualNoticeList, { type NoticeRow } from "./components/VirtualNoticeLis
 
 type Dict = Record<string, any>;
 type ScopeOption = { value: string; label: string };
+type NoticeTemplate = {
+  heading: string;
+  titleLabel: string;
+  messageFields: string[];
+  uploadFields: string[];
+};
 
 const workTypes = [
   { value: "maintenance", label: "维保" },
@@ -654,6 +773,10 @@ const brandLogoSrc = "/assets/vnet-logo.png";
 const buildingScopeCodes = ["110", "A", "B", "C", "D", "E", "H"];
 const maintenanceCycleOptions = ["每月", "每季", "每年", "半年", "每两年", "每三年", "每五年", "冬季保温每日", "/"];
 const nonPlanTitleSuffix = "（非计划性）";
+const authKeepaliveMs = 30 * 60 * 1000;
+const authKeepaliveRetryMs = 3 * 60 * 1000;
+const manualRefreshCooldownMs = 1500;
+const workbenchRetryDelaysMs = [3000, 8000, 20000];
 const requestableScopes: ScopeOption[] = [
   { value: "110", label: "110站" },
   { value: "A", label: "A楼" },
@@ -664,6 +787,72 @@ const requestableScopes: ScopeOption[] = [
   { value: "H", label: "H楼" },
   { value: "CAMPUS", label: "园区" },
 ];
+
+const noticeTemplates: Record<string, NoticeTemplate> = {
+  maintenance: {
+    heading: "维保通告",
+    titleLabel: "名称",
+    messageFields: ["title", "start_time", "end_time", "location", "content", "reason", "impact", "progress"],
+    uploadFields: ["specialty", "maintenance_cycle", "non_plan"],
+  },
+  change: {
+    heading: "设备变更",
+    titleLabel: "名称",
+    messageFields: ["title", "level", "start_time", "end_time", "location", "content", "reason", "impact", "progress"],
+    uploadFields: ["specialty", "zhihang"],
+  },
+  repair: {
+    heading: "设备检修",
+    titleLabel: "标题",
+    messageFields: [
+      "title",
+      "location",
+      "level",
+      "specialty",
+      "end_time",
+      "start_time",
+      "repair_device",
+      "repair_fault",
+      "fault_type",
+      "repair_mode",
+      "impact",
+      "discovery",
+      "symptom",
+      "reason",
+      "solution",
+      "spare_parts",
+      "progress",
+    ],
+    uploadFields: [],
+  },
+  power: {
+    heading: "上电通告",
+    titleLabel: "名称",
+    messageFields: ["title", "start_time", "end_time", "cabinet", "quantity", "progress"],
+    uploadFields: ["specialty"],
+  },
+  polling: {
+    heading: "设备轮巡",
+    titleLabel: "标题",
+    messageFields: ["title", "start_time", "end_time", "device", "content", "impact", "progress"],
+    uploadFields: ["specialty"],
+  },
+  adjust: {
+    heading: "设备调整",
+    titleLabel: "名称",
+    messageFields: ["title", "start_time", "end_time", "location", "content", "reason", "impact", "progress"],
+    uploadFields: ["specialty"],
+  },
+};
+
+const noticeTypeKeywordRules: Record<string, RegExp[]> = {
+  maintenance: [/维保|维护/],
+  change: [/变更/],
+  repair: [/检修|维修/],
+  power: [/上电|下电|上下电/],
+  polling: [/轮巡/],
+  adjust: [/调整/],
+};
 
 const authChecking = ref(true);
 const loading = ref(false);
@@ -679,8 +868,10 @@ const searchText = ref("");
 const activeDraftKey = ref("");
 const activeOngoingKey = ref("");
 const showPasteParser = ref(false);
+const showManualTypePicker = ref(false);
 const showMemoryImporter = ref(false);
 const showAdminTools = ref(false);
+const undoFilter = ref("all");
 const pasteText = ref("");
 const pasteParseBusy = ref(false);
 const pasteParseLine = ref("粘贴通告后解析。");
@@ -702,6 +893,10 @@ const sseConnected = ref(false);
 const activeItemsEventSource = ref<EventSource | null>(null);
 const activeItemsConnected = ref(false);
 const activeItemsUpdatePending = ref(false);
+const pageVisible = ref(typeof document === "undefined" ? true : !document.hidden);
+const pendingHiddenRefresh = ref(false);
+const draftSavedAt = ref(0);
+const draftSaveFailed = ref(false);
 
 const auth = reactive({
   loggedIn: false,
@@ -717,6 +912,16 @@ const permissionRequest = reactive({
   message: "",
 });
 const permissionBusy = ref(false);
+const refreshCooldown = reactive<Record<string, boolean>>({
+  workbench: false,
+  repair: false,
+  change: false,
+});
+const backendStatus = reactive({
+  offline: false,
+  message: "",
+  lastErrorAt: 0,
+});
 
 const records = ref<Dict[]>([]);
 const ongoing = ref<Dict[]>([]);
@@ -734,10 +939,19 @@ const localSummaryAdjustments = reactive({ started: 0, updated: 0, ended: 0, ong
 const draftStackRef = ref<HTMLElement | null>(null);
 const fallbackPollTimers = new Map<string, number>();
 const pollingJobs = new Set<string>();
+const manualPrefillWorkTypes = new Set(["repair", "power", "polling", "adjust"]);
+const recentUndoSeconds = 3 * 24 * 60 * 60;
+const manualRecentTypes = ref<string[]>([]);
+const previewDraftKey = ref("");
+const pendingFocusNotice = ref<Dict | null>(null);
 let workbenchLoadSeq = 0;
 let workbenchRefreshTimer: number | null = null;
 let sseReconnectTimer: number | null = null;
 let activeItemsReconnectTimer: number | null = null;
+let authKeepaliveTimer: number | null = null;
+let workbenchRetryTimer: number | null = null;
+let workbenchRetryAttempt = 0;
+const refreshCooldownTimers = new Map<string, number>();
 let lastActiveItemsSignature = "";
 let activeItemsStreamScope = "";
 let appDisposed = false;
@@ -745,12 +959,58 @@ let resolveOngoingBindSelection: ((candidate: Dict | null) => void) | null = nul
 
 const visibleScopeOptions = computed(() => auth.scopeOptions.length ? auth.scopeOptions : requestableScopes);
 const isAdmin = computed(() => String(auth.user?.role || "").toLowerCase() === "admin");
+const connectionNotice = computed(() => {
+  if (!auth.loggedIn) return null;
+  if (backendStatus.offline) {
+    return {
+      tone: "failed",
+      text: backendStatus.message || "后端连接异常，页面会保留当前数据。",
+      actionLabel: "重新连接",
+      action: retryFrontendConnections,
+    };
+  }
+  if (pendingHiddenRefresh.value) {
+    return {
+      tone: "info",
+      text: "后台有新数据，页面恢复可见后会自动刷新。",
+      actionLabel: "立即刷新",
+      action: flushPendingHiddenRefresh,
+    };
+  }
+  if (isWorkbench.value && (!sseConnected.value || !activeItemsConnected.value)) {
+    return {
+      tone: "warning",
+      text: "实时同步正在重连，任务状态会用轮询兜底。",
+      actionLabel: "重连",
+      action: retryFrontendConnections,
+    };
+  }
+  return null;
+});
 const dailyStats = computed(() => dailySummary.value?.stats || {});
 const closedSummaryItems = computed(() => {
   const items = Array.isArray(dailySummary.value?.items) ? dailySummary.value.items : [];
   return items.filter((item: Dict) => String(item?.status || "") === "已结束" || Boolean(item?.ended_at));
 });
-const deletedUndoItems = computed(() => availableUndoItems.value.filter((item: Dict) => String(item?.undo_action_type || item?.action_type || "").toLowerCase() === "delete"));
+const recentUndoItems = computed(() => [...availableUndoItems.value].sort((a, b) => Number(b.undo_created_at || 0) - Number(a.undo_created_at || 0)));
+const undoFilterOptions = [
+  { value: "all", label: "全部" },
+  { value: "delete", label: "删除" },
+  { value: "end", label: "结束" },
+  { value: "update", label: "更新" },
+];
+const undoFilterCounts = computed(() => {
+  const counts: Record<string, number> = { all: recentUndoItems.value.length, delete: 0, end: 0, update: 0 };
+  for (const item of recentUndoItems.value) {
+    const action = undoActionType(item);
+    if (action in counts) counts[action] += 1;
+  }
+  return counts;
+});
+const filteredRecentUndoItems = computed(() => {
+  if (undoFilter.value === "all") return recentUndoItems.value;
+  return recentUndoItems.value.filter((item) => undoActionType(item) === undoFilter.value);
+});
 const liveDailyStats = computed(() => ({
   ...dailyStats.value,
   started: Math.max(0, Number(dailyStats.value.started || 0) + localSummaryAdjustments.started),
@@ -759,6 +1019,16 @@ const liveDailyStats = computed(() => ({
 }));
 const liveOngoingCount = computed(() => Math.max(0, ongoing.value.length + localSummaryAdjustments.ongoing));
 const scopedRecords = computed(() => records.value.filter((record) => recordMatchesCurrentScope(record)));
+const manualRecentTypeOptions = computed(() => manualRecentTypes.value
+  .map((value) => workTypes.find((item) => item.value === value))
+  .filter(Boolean)
+  .slice(0, 2) as Array<{ value: string; label: string }>);
+const draftSaveText = computed(() => {
+  if (!selectedKeys.size && !drafts.size) return "";
+  if (draftSaveFailed.value) return "草稿保存失败";
+  if (!draftSavedAt.value) return "草稿自动保存";
+  return `草稿已保存 ${formatTimeOfDay(draftSavedAt.value)}`;
+});
 const recordTypeCounts = computed(() => {
   const counts: Record<string, number> = Object.fromEntries(workTypes.map((item) => [item.value, 0]));
   for (const record of scopedRecords.value) {
@@ -864,8 +1134,34 @@ function workTypeLabel(value: string): string {
   return workTypes.find((item) => item.value === value)?.label || "维保";
 }
 
+function noticeTemplate(type: string): NoticeTemplate {
+  return noticeTemplates[type || "maintenance"] || noticeTemplates.maintenance;
+}
+
+function isNoticeMessageField(type: string, field: string): boolean {
+  return noticeTemplate(type).messageFields.includes(field);
+}
+
+function isNoticeUploadField(type: string, field: string): boolean {
+  return noticeTemplate(type).uploadFields.includes(field);
+}
+
+function hasNoticeUploadFields(type: string): boolean {
+  return noticeTemplate(type).uploadFields.length > 0;
+}
+
 function noticeFieldLabel(type: string, field: string): string {
   const workType = type || "maintenance";
+  const commonLabels: Record<string, string> = {
+    building: "楼栋/范围",
+    maintenance_cycle: "维保周期",
+    cabinet: "柜号",
+    quantity: "数量",
+    device: "设备",
+    repair_device: "维修设备",
+    repair_fault: "维修故障",
+    solution: "解决方案",
+  };
   const labels: Record<string, Record<string, string>> = {
     maintenance: {
       title: "名称",
@@ -901,6 +1197,7 @@ function noticeFieldLabel(type: string, field: string): string {
       reason: "故障原因",
       impact: "影响范围",
       progress: "完成情况",
+      spare_parts: "备件更换情况",
     },
     power: {
       title: "名称",
@@ -936,7 +1233,7 @@ function noticeFieldLabel(type: string, field: string): string {
       progress: "进度",
     },
   };
-  return labels[workType]?.[field] || labels.maintenance[field] || field;
+  return labels[workType]?.[field] || commonLabels[field] || labels.maintenance[field] || field;
 }
 
 function fieldsOf(record: Dict | undefined): Dict {
@@ -1018,6 +1315,11 @@ function appendNonPlanTitleSuffix(title: string, enabled: boolean): string {
 function manualDraftTitle(draft: Dict, type: string): string {
   const title = String(draft.title || draft.content || "").trim();
   return type === "maintenance" ? appendNonPlanTitleSuffix(title, Boolean(draft.non_plan)) : title;
+}
+
+function inferManualNoticeWorkType(draft: Dict, fallback = "maintenance"): string {
+  const normalized = workTypes.some((item) => item.value === fallback) ? fallback : "maintenance";
+  return normalized;
 }
 
 function buildingForRecord(record: Dict): string {
@@ -1214,6 +1516,7 @@ function manualDraftDefaults(type: string): Dict {
     discovery: "",
     symptom: "",
     solution: "",
+    spare_parts: "",
     device: "",
     cabinet: "",
     quantity: "",
@@ -1221,7 +1524,8 @@ function manualDraftDefaults(type: string): Dict {
 }
 
 function manualRecordFromDraft(key: string, draft: Dict): Dict {
-  const type = draft.work_type || "maintenance";
+  const type = inferManualNoticeWorkType(draft, draft.work_type || "maintenance");
+  if (draft.work_type !== type) draft.work_type = type;
   const title = manualDraftTitle(draft, type);
   const noticeTypeMap: Record<string, string> = {
     maintenance: "维保通告",
@@ -1255,10 +1559,19 @@ function manualRecordFromDraft(key: string, draft: Dict): Dict {
       "设备": draft.device || "",
       "柜号": draft.cabinet || "",
       "数量": draft.quantity || "",
+      "备件更换情况": draft.spare_parts || "",
     },
     target_record_id: draft.target_record_id || draft.feishu_record_id || draft.raw_record_id || "",
     building_codes: buildingCodes,
   };
+}
+
+function onManualDraftTypeChange(draft: Dict): void {
+  const type = workTypes.some((item) => item.value === draft.work_type) ? draft.work_type : "maintenance";
+  draft.work_type = type;
+  if (type === "change" && !draft.level) draft.level = "I3";
+  if (type !== "maintenance") draft.non_plan = false;
+  saveDrafts();
 }
 
 function repairDraftDefaults(record: Dict): Dict {
@@ -1280,6 +1593,7 @@ function repairDraftDefaults(record: Dict): Dict {
     discovery: memory.discovery || firstRepairField(record, ["对应来源"]),
     symptom: memory.symptom || firstRepairField(record, ["故障发生现象描述", "故障现象"]),
     solution: memory.solution || firstRepairField(record, ["解决方案", "维修方案", "后续整改措施"]),
+    spare_parts: memory.spare_parts || firstRepairField(record, ["备件更换情况", "备件使用情况"]),
   };
 }
 
@@ -1347,7 +1661,97 @@ function legacyStorageKey(): string {
   return `clipflow-vue-workbench:${currentScope.value || "ALL"}`;
 }
 
+function manualRecentStorageKey(): string {
+  return `clipflow-manual-recent:${currentOpenId()}:${currentScope.value || "ALL"}`;
+}
+
+function manualTemplateMemoryKey(type: string): string {
+  return `clipflow-manual-template:${currentOpenId()}:${currentScope.value || "ALL"}:${type}`;
+}
+
+function loadManualRecentTypes(): void {
+  try {
+    const raw = localStorage.getItem(manualRecentStorageKey()) || "[]";
+    const values = JSON.parse(raw);
+    manualRecentTypes.value = Array.isArray(values)
+      ? values.filter((value) => workTypes.some((item) => item.value === value)).slice(0, 3)
+      : [];
+  } catch {
+    manualRecentTypes.value = [];
+  }
+}
+
+function saveManualRecentType(type: string): void {
+  if (!workTypes.some((item) => item.value === type)) return;
+  const next = [type, ...manualRecentTypes.value.filter((value) => value !== type)].slice(0, 3);
+  manualRecentTypes.value = next;
+  try {
+    localStorage.setItem(manualRecentStorageKey(), JSON.stringify(next));
+  } catch {
+    // 最近使用只是体验优化，失败不阻塞纯手填。
+  }
+}
+
+function manualTemplateSnapshot(draft: Dict): Dict {
+  const allowed = [
+    "title",
+    "building",
+    "building_codes",
+    "specialty",
+    "level",
+    "maintenance_cycle",
+    "start_time",
+    "end_time",
+    "location",
+    "content",
+    "reason",
+    "impact",
+    "progress",
+    "repair_device",
+    "repair_fault",
+    "fault_type",
+    "repair_mode",
+    "discovery",
+    "symptom",
+    "solution",
+    "spare_parts",
+    "device",
+    "cabinet",
+    "quantity",
+  ];
+  const snapshot: Dict = {};
+  for (const field of allowed) {
+    const value = draft[field];
+    if (Array.isArray(value)) snapshot[field] = [...value];
+    else if (value !== undefined) snapshot[field] = value;
+  }
+  return snapshot;
+}
+
+function loadManualTemplateMemory(type: string): Dict | null {
+  if (!manualPrefillWorkTypes.has(type)) return null;
+  try {
+    const raw = localStorage.getItem(manualTemplateMemoryKey(type));
+    if (!raw) return null;
+    const payload = JSON.parse(raw);
+    if (!payload || typeof payload !== "object") return null;
+    return manualTemplateSnapshot(payload as Dict);
+  } catch {
+    return null;
+  }
+}
+
+function saveManualTemplateMemory(type: string, draft: Dict): void {
+  if (!manualPrefillWorkTypes.has(type)) return;
+  try {
+    localStorage.setItem(manualTemplateMemoryKey(type), JSON.stringify(manualTemplateSnapshot(draft)));
+  } catch {
+    // 草稿保存失败已有提示；这里不阻塞发送。
+  }
+}
+
 function loadDrafts(): void {
+  loadManualRecentTypes();
   try {
     const raw = localStorage.getItem(storageKey()) || localStorage.getItem(legacyStorageKey()) || "{}";
     const payload = JSON.parse(raw);
@@ -1370,32 +1774,157 @@ function saveDrafts(): void {
   for (const [key, value] of drafts.entries()) payload.drafts[key] = value;
   try {
     localStorage.setItem(storageKey(), JSON.stringify(payload));
+    draftSaveFailed.value = false;
+    draftSavedAt.value = Date.now();
   } catch {
+    draftSaveFailed.value = true;
     syncText.value = "草稿保存失败，请减少待发起通告数量后重试";
   }
 }
 
+function formatTimeOfDay(timestamp: number): string {
+  if (!timestamp) return "";
+  const date = new Date(timestamp);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function startRefreshCooldown(key: keyof typeof refreshCooldown): void {
+  refreshCooldown[key] = true;
+  const existing = refreshCooldownTimers.get(key);
+  if (existing) window.clearTimeout(existing);
+  const timer = window.setTimeout(() => {
+    refreshCooldown[key] = false;
+    refreshCooldownTimers.delete(key);
+  }, manualRefreshCooldownMs);
+  refreshCooldownTimers.set(key, timer);
+}
+
+function clearWorkbenchRetry(): void {
+  if (workbenchRetryTimer !== null) {
+    window.clearTimeout(workbenchRetryTimer);
+    workbenchRetryTimer = null;
+  }
+  workbenchRetryAttempt = 0;
+}
+
+function scheduleWorkbenchRetry(reason = "加载失败"): void {
+  if (appDisposed || !auth.loggedIn || !isWorkbench.value || !currentScope.value) return;
+  if (workbenchRetryTimer !== null) return;
+  if (!pageVisible.value) {
+    pendingHiddenRefresh.value = true;
+    syncText.value = "加载失败，页面恢复可见后自动重试";
+    return;
+  }
+  const index = Math.min(workbenchRetryAttempt, workbenchRetryDelaysMs.length - 1);
+  const delay = workbenchRetryDelaysMs[index];
+  workbenchRetryAttempt += 1;
+  syncText.value = `${reason}，${Math.round(delay / 1000)}秒后重试`;
+  workbenchRetryTimer = window.setTimeout(() => {
+    workbenchRetryTimer = null;
+    if (appDisposed || !auth.loggedIn || !isWorkbench.value) return;
+    void loadWorkbench();
+  }, delay);
+}
+
+function clearAuthKeepalive(): void {
+  if (authKeepaliveTimer !== null) {
+    window.clearTimeout(authKeepaliveTimer);
+    authKeepaliveTimer = null;
+  }
+}
+
+function stopJobSse(): void {
+  if (eventSource.value) eventSource.value.close();
+  eventSource.value = null;
+  sseConnected.value = false;
+  if (sseReconnectTimer !== null) {
+    window.clearTimeout(sseReconnectTimer);
+    sseReconnectTimer = null;
+  }
+}
+
+function stopRealtimeConnections(): void {
+  stopJobSse();
+  stopActiveItemsSse();
+}
+
+function markAuthExpired(message = "登录已过期，请重新扫码登录。"): void {
+  auth.loggedIn = false;
+  auth.user = {};
+  auth.scopeOptions = [];
+  clearAuthKeepalive();
+  clearWorkbenchRetry();
+  stopRealtimeConnections();
+  syncText.value = message;
+}
+
 async function api(path: string, options: RequestInit = {}): Promise<Dict> {
-  const response = await fetch(path, {
-    credentials: "same-origin",
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
-    ...options,
-  });
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+      ...options,
+    });
+    backendStatus.offline = false;
+    backendStatus.message = "";
+  } catch (error: any) {
+    backendStatus.offline = true;
+    backendStatus.lastErrorAt = Date.now();
+    backendStatus.message = "后端连接中断，已保留当前页面数据。";
+    throw new Error(error?.message || "后端连接中断");
+  }
   const payload = await response.json().catch(() => ({}));
+  if (response.status === 401 || payload.auth_required) {
+    markAuthExpired(payload.error || "登录已过期，请重新扫码登录。");
+    throw new Error(payload.error || `HTTP ${response.status}`);
+  }
+  if (response.status >= 500) {
+    backendStatus.offline = true;
+    backendStatus.lastErrorAt = Date.now();
+    backendStatus.message = payload.error || "后端服务异常，稍后会自动重试。";
+  }
   if (!response.ok || payload.ok === false) throw new Error(payload.error || `HTTP ${response.status}`);
   return payload.data || payload;
 }
 
-async function loadAuthStatus(): Promise<void> {
-  authChecking.value = true;
+function scheduleAuthKeepalive(delayMs = authKeepaliveMs): void {
+  clearAuthKeepalive();
+  if (!auth.loggedIn || appDisposed) return;
+  authKeepaliveTimer = window.setTimeout(async () => {
+    authKeepaliveTimer = null;
+    if (appDisposed || !auth.loggedIn) return;
+    try {
+      await loadAuthStatus({ silent: true });
+    } catch {
+      if (!appDisposed && auth.loggedIn) {
+        authKeepaliveTimer = window.setTimeout(() => {
+          authKeepaliveTimer = null;
+          void loadAuthStatus({ silent: true }).catch(() => scheduleAuthKeepalive(authKeepaliveRetryMs));
+        }, authKeepaliveRetryMs);
+      }
+    }
+  }, delayMs);
+}
+
+async function loadAuthStatus(options: { silent?: boolean } = {}): Promise<void> {
+  if (!options.silent) authChecking.value = true;
   try {
     const data = await api(`/api/auth/status?next=${encodeURIComponent(window.location.pathname + window.location.search)}`);
     auth.loggedIn = Boolean(data.logged_in);
     auth.user = data.user || {};
     auth.scopeOptions = data.scope_options || [];
     auth.loginUrl = data.login_url || "/api/auth/login";
+    if (auth.loggedIn) scheduleAuthKeepalive();
+    else clearAuthKeepalive();
+  } catch (error: any) {
+    if (!options.silent) {
+      syncText.value = error?.message || "登录状态检查失败";
+    }
+    throw error;
   } finally {
-    authChecking.value = false;
+    if (!options.silent) authChecking.value = false;
   }
 }
 
@@ -1450,17 +1979,28 @@ async function loadWorkbench(): Promise<void> {
     if (!userSelectedWorkType.value) {
       workType.value = resolveInitialWorkType(data.default_work_type || workType.value);
     }
-    syncText.value = data.source_snapshot_ready === false ? "后台正在准备数据" : `数据 ${data.last_loaded_at || "已就绪"}`;
+    syncText.value = data.source_snapshot_ready === false ? "后台正在准备数据" : "数据已就绪";
+    clearWorkbenchRetry();
     await loadAvailableUndos(requestScope, requestSeq);
+    focusPendingNoticeResult();
     pruneSelection();
   } catch (error: any) {
     if (requestSeq !== workbenchLoadSeq || requestScope !== currentScope.value) return;
-    syncText.value = error?.message || "加载失败";
+    const message = error?.message || "加载失败";
+    syncText.value = message;
+    scheduleWorkbenchRetry(message);
   } finally {
     if (requestSeq === workbenchLoadSeq && requestScope === currentScope.value) {
       loading.value = false;
     }
   }
+}
+
+async function manualRefreshWorkbench(): Promise<void> {
+  if (loading.value || refreshCooldown.workbench) return;
+  startRefreshCooldown("workbench");
+  clearWorkbenchRetry();
+  await loadWorkbench();
 }
 
 async function loadAvailableUndos(scope = currentScope.value, requestSeq = workbenchLoadSeq): Promise<void> {
@@ -1469,7 +2009,7 @@ async function loadAvailableUndos(scope = currentScope.value, requestSeq = workb
     return;
   }
   try {
-    const data = await api(`/api/notice-undo/available?scope=${encodeURIComponent(scope)}`);
+    const data = await api(`/api/notice-undo/available?scope=${encodeURIComponent(scope)}&since_seconds=${recentUndoSeconds}`);
     if (requestSeq !== workbenchLoadSeq || scope !== currentScope.value) return;
     availableUndoItems.value = Array.isArray(data.items) ? data.items : [];
   } catch {
@@ -1489,6 +2029,29 @@ function resolveInitialWorkType(preferred: string): string {
 function selectWorkType(value: string): void {
   workType.value = value;
   userSelectedWorkType.value = true;
+}
+
+function focusPendingNoticeResult(): void {
+  const pending = pendingFocusNotice.value;
+  if (!pending) return;
+  const pendingTitle = normalizeDraftSignatureText(String(pending.title || ""));
+  const found = ongoing.value.find((item) => {
+    if (pending.work_type && (item.work_type || "maintenance") !== pending.work_type) return false;
+    const target = String(item.target_record_id || item.feishu_record_id || item.raw_record_id || item.record_id || "").trim();
+    const source = String(item.source_record_id || "").trim();
+    if (pending.target_record_id && target && target === pending.target_record_id) return true;
+    if (pending.source_record_id && source && source === pending.source_record_id) return true;
+    return Boolean(pendingTitle && normalizeDraftSignatureText(ongoingTitle(item)) === pendingTitle);
+  });
+  if (!found) return;
+  const key = ongoingLineKey(found);
+  if (!key) return;
+  activeOngoingKey.value = key;
+  pendingFocusNotice.value = null;
+  syncText.value = "已定位到右侧进行中通告";
+  nextTick(() => {
+    document.querySelector(".ongoing-card.active")?.scrollIntoView({ block: "center", behavior: "smooth" });
+  });
 }
 
 function pruneSelection(): void {
@@ -1544,7 +2107,7 @@ function activeLineKeys(): Set<string> {
   for (const item of closedSummaryItems.value) {
     if (item.undo_available) keys.add(undoLineKey(item));
   }
-  for (const item of deletedUndoItems.value) {
+  for (const item of recentUndoItems.value) {
     keys.add(undoLineKey(item));
   }
   return keys;
@@ -1562,6 +2125,11 @@ function scheduleWorkbenchReload(delay = 350): void {
   workbenchRefreshTimer = window.setTimeout(() => {
     workbenchRefreshTimer = null;
     if (appDisposed) return;
+    if (!pageVisible.value) {
+      pendingHiddenRefresh.value = true;
+      activeItemsUpdatePending.value = true;
+      return;
+    }
     if (isUserEditing()) {
       activeItemsUpdatePending.value = true;
       syncText.value = "后台有更新，完成输入后自动刷新";
@@ -1579,6 +2147,46 @@ function isUserEditing(): boolean {
   const tag = element.tagName.toLowerCase();
   if (["input", "textarea", "select"].includes(tag)) return true;
   return Boolean(element.isContentEditable);
+}
+
+function flushPendingHiddenRefresh(): void {
+  if (!isWorkbench.value || !currentScope.value) {
+    pendingHiddenRefresh.value = false;
+    activeItemsUpdatePending.value = false;
+    return;
+  }
+  pendingHiddenRefresh.value = false;
+  activeItemsUpdatePending.value = false;
+  void loadWorkbench();
+}
+
+function retryFrontendConnections(): void {
+  backendStatus.offline = false;
+  backendStatus.message = "";
+  clearWorkbenchRetry();
+  if (auth.loggedIn) {
+    scheduleAuthKeepalive(1000);
+    startJobSse();
+    if (isWorkbench.value) startActiveItemsSse();
+  }
+  if (isWorkbench.value && currentScope.value) {
+    void loadWorkbench();
+  } else {
+    void loadAuthStatus({ silent: true }).catch(() => null);
+  }
+}
+
+function handleVisibilityChange(): void {
+  pageVisible.value = !document.hidden;
+  if (!pageVisible.value) return;
+  if (auth.loggedIn) {
+    scheduleAuthKeepalive(1000);
+    if (!eventSource.value) startJobSse();
+    if (isWorkbench.value && !activeItemsEventSource.value) startActiveItemsSse();
+  }
+  if (pendingHiddenRefresh.value) {
+    flushPendingHiddenRefresh();
+  }
 }
 
 function pruneRuntimeState(): void {
@@ -1605,6 +2213,7 @@ function enterScope(scope: string): void {
 function returnToHome(): void {
   if (currentScope.value) saveDrafts();
   stopActiveItemsSse();
+  clearWorkbenchRetry();
   isWorkbench.value = false;
   currentScope.value = "";
   activeDraftKey.value = "";
@@ -1626,6 +2235,7 @@ function switchScope(scope: string): void {
   const nextScope = normalizeScopeValue(scope, "ALL");
   if (!nextScope) return;
   if (nextScope === currentScope.value && isWorkbench.value) return;
+  clearWorkbenchRetry();
   if (currentScope.value && nextScope !== currentScope.value) {
     saveDrafts();
   }
@@ -1669,6 +2279,177 @@ function draftSummary(record: Dict, draft: Dict): string {
   ].filter(Boolean).join(" · ");
 }
 
+function draftOriginLabel(record: Dict, draft: Dict): string {
+  if (!record.manual) return "源表事项";
+  if (draft.manual_origin === "paste") return "解析粘贴";
+  if (draft.prefilled_from_last) return "纯手填 · 已带入上次内容";
+  return "纯手填";
+}
+
+function draftCardMeta(record: Dict, draft: Dict, editing: boolean): string {
+  return [
+    workTypeLabel(record.work_type),
+    draftOriginLabel(record, draft),
+    editing ? "正在编辑" : "点击编辑",
+  ].filter(Boolean).join(" · ");
+}
+
+function requiredDraftFields(record: Dict, draft: Dict): string[] {
+  const type = inferManualNoticeWorkType(draft, record.work_type || draft.work_type || "maintenance");
+  const fields = new Set<string>(["title", "start_time", "end_time", "progress"]);
+  if (record.manual) fields.add("building");
+  if (type === "maintenance") {
+    ["location", "content", "reason", "impact"].forEach((field) => fields.add(field));
+    if (record.manual) fields.add("maintenance_cycle");
+  } else if (type === "change") {
+    ["level", "location", "content", "reason", "impact"].forEach((field) => fields.add(field));
+  } else if (type === "repair") {
+    ["location", "level", "specialty", "repair_device", "repair_fault", "impact", "reason", "solution"].forEach((field) => fields.add(field));
+  } else if (type === "power") {
+    ["cabinet", "quantity"].forEach((field) => fields.add(field));
+  } else if (type === "polling") {
+    ["device", "content", "impact"].forEach((field) => fields.add(field));
+  } else if (type === "adjust") {
+    ["location", "content", "reason", "impact"].forEach((field) => fields.add(field));
+  }
+  return Array.from(fields);
+}
+
+function draftFieldValue(record: Dict, draft: Dict, field: string): string {
+  if (field === "title") return manualDraftTitle(draft, record.work_type || draft.work_type || "maintenance");
+  return String(draft[field] ?? "").trim();
+}
+
+function draftMissingFields(record: Dict, draft: Dict): string[] {
+  return requiredDraftFields(record, draft).filter((field) => !draftFieldValue(record, draft, field));
+}
+
+function draftTypeConflict(record: Dict, draft: Dict): { expectedType: string; actualType: string; keyword: string } | null {
+  if (!record.manual) return null;
+  const expectedType = inferManualNoticeWorkType(draft, record.work_type || draft.work_type || "maintenance");
+  const title = manualDraftTitle(draft, expectedType) || recordCardTitle(record);
+  const normalizedTitle = String(title || "").replace(/\s+/g, "");
+  if (!normalizedTitle) return null;
+  for (const type of workTypes.map((item) => item.value)) {
+    if (type === expectedType) continue;
+    for (const pattern of noticeTypeKeywordRules[type] || []) {
+      const match = normalizedTitle.match(pattern);
+      if (match) {
+        return {
+          expectedType,
+          actualType: type,
+          keyword: match[0] || workTypeLabel(type),
+        };
+      }
+    }
+  }
+  return null;
+}
+
+function draftTypeConflictText(record: Dict, draft: Dict): string {
+  const conflict = draftTypeConflict(record, draft);
+  if (!conflict) return "";
+  return `当前选择的是${workTypeLabel(conflict.expectedType)}，但标题/名称包含“${conflict.keyword}”，像是${workTypeLabel(conflict.actualType)}通告。请改标题或重新选择通告类型。`;
+}
+
+function draftFieldInvalid(record: Dict, draft: Dict, field: string): boolean {
+  if (!draft.validation_touched) return false;
+  if (field === "title" && draftTypeConflict(record, draft)) return true;
+  return Boolean(requiredDraftFields(record, draft).includes(field) && !draftFieldValue(record, draft, field));
+}
+
+function draftFieldClass(record: Dict, draft: Dict, field: string): Dict {
+  return { "field-missing": draftFieldInvalid(record, draft, field) };
+}
+
+function draftMissingText(record: Dict, draft: Dict): string {
+  if (!draft.validation_touched) return "";
+  const conflict = draftTypeConflictText(record, draft);
+  if (conflict) return conflict;
+  const missing = draftMissingFields(record, draft).map((field) => noticeFieldLabel(record.work_type || draft.work_type || "maintenance", field));
+  return missing.length ? `请补充：${missing.join("、")}` : "";
+}
+
+function noticePreviewText(record: Dict, draft: Dict): string {
+  const type = inferManualNoticeWorkType(draft, record.work_type || draft.work_type || "maintenance");
+  const template = noticeTemplate(type);
+  const actionLabel = draftActionLabel(record, draft);
+  const lines = [`【${template.heading}】状态：${actionLabel}`];
+  const append = (field: string, value: string) => {
+    lines.push(`【${noticeFieldLabel(type, field)}】${String(value || "").trim()}`);
+  };
+  append("title", manualDraftTitle(draft, type));
+  if (type === "repair") {
+    for (const field of template.messageFields.filter((item) => item !== "title")) append(field, draft[field] || "");
+  } else {
+    if (type === "change") append("level", draft.level || "");
+    lines.push(`【时间】${draft.start_time || ""}~${draft.end_time || ""}`);
+    for (const field of template.messageFields.filter((item) => !["title", "level", "start_time", "end_time"].includes(item))) {
+      append(field, draft[field] || "");
+    }
+  }
+  return lines.join("\n");
+}
+
+function draftUploadPreviewRows(record: Dict, draft: Dict): Array<{ label: string; value: string }> {
+  const type = inferManualNoticeWorkType(draft, record.work_type || draft.work_type || "maintenance");
+  const rows: Array<{ label: string; value: string }> = [
+    { label: "通告类型", value: workTypeLabel(type) },
+    { label: "楼栋/范围", value: record.manual ? draft.building : buildingForRecord(record) },
+    { label: "专业", value: draft.specialty || specialtyForRecord(record) },
+  ];
+  if (type === "maintenance") {
+    rows.push({ label: "维保周期", value: draft.maintenance_cycle || fieldsOf(record)["维护周期"] || "" });
+    rows.push({ label: "非计划性", value: draft.non_plan ? "是" : "" });
+  }
+  if (type === "change") {
+    rows.push({ label: "变更等级", value: draft.level || levelForRecord(record) || "I3" });
+    rows.push({ label: "涉及智航", value: draft.zhihang_involved ? (draft.zhihang_title || "是") : "" });
+  }
+  if (type === "repair") {
+    rows.push({ label: "紧急程度", value: draft.level || "" });
+    rows.push({ label: "维修设备", value: draft.repair_device || "" });
+  }
+  if (type === "power") {
+    rows.push({ label: "柜号", value: draft.cabinet || "" });
+    rows.push({ label: "数量", value: draft.quantity || "" });
+  }
+  if (type === "polling") {
+    rows.push({ label: "设备", value: draft.device || "" });
+  }
+  return rows.filter((row) => String(row.value || "").trim());
+}
+
+function sendDraftButtonLabel(record: Dict, draft: Dict): string {
+  const type = inferManualNoticeWorkType(draft, record.work_type || draft.work_type || "maintenance");
+  return `发送${workTypeLabel(type)}${draftActionLabel(record, draft)}`;
+}
+
+function normalizeDraftSignatureText(value: string): string {
+  return String(value || "").replace(/\s+/g, "").replace(/[；;。,.，、：:（）()《》【】]/g, "").toLowerCase();
+}
+
+function draftSignature(record: Dict, draft: Dict): string {
+  const type = inferManualNoticeWorkType(draft, record.work_type || draft.work_type || "maintenance");
+  const title = normalizeDraftSignatureText(manualDraftTitle(draft, type) || recordCardTitle(record));
+  const start = String(draft.start_time || "").slice(0, 16);
+  const end = String(draft.end_time || "").slice(0, 16);
+  return [type, title, start, end].join("|");
+}
+
+function findDuplicateDraftKey(record: Dict, draft: Dict, excludeKey = ""): string {
+  const signature = draftSignature(record, draft);
+  if (!signature.split("|")[1]) return "";
+  for (const key of selectedKeys) {
+    if (key === excludeKey) continue;
+    const otherRecord = draftRecordForKey(key);
+    const otherDraft = drafts.get(key);
+    if (!otherRecord || !otherDraft) continue;
+    if (draftSignature(otherRecord, otherDraft) === signature) return key;
+  }
+  return "";
+}
+
 function toggleRecordSelection(row: NoticeRow | undefined): void {
   const key = row?.id || "";
   if (!key) return;
@@ -1683,11 +2464,29 @@ function toggleRecordSelection(row: NoticeRow | undefined): void {
   saveDrafts();
 }
 
-function addManualDraft(): void {
-  const key = `manual:${workType.value}:${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  drafts.set(key, manualDraftDefaults(workType.value));
+function addManualDraft(type = workType.value): void {
+  const normalizedType = workTypes.some((item) => item.value === type) ? type : "maintenance";
+  const key = `manual:${normalizedType}:${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const draft = manualDraftDefaults(normalizedType);
+  const memory = loadManualTemplateMemory(normalizedType);
+  if (memory) {
+    Object.assign(draft, memory, {
+      manual: true,
+      work_type: normalizedType,
+      prefilled_from_last: true,
+    });
+    if (!draft.building) draft.building = defaultBuildingForCurrentScope();
+    if (!Array.isArray(draft.building_codes) || !draft.building_codes.length) {
+      draft.building_codes = buildingCodesFromText(draft.building || "");
+    }
+  }
+  draft.manual_origin = "manual";
+  drafts.set(key, draft);
   selectedKeys.add(key);
   pinDraftInMiddlePanel(key);
+  showManualTypePicker.value = false;
+  workType.value = normalizedType;
+  saveManualRecentType(normalizedType);
   saveDrafts();
 }
 
@@ -1784,12 +2583,24 @@ function parsedActionLabel(action: string): string {
   return "开始";
 }
 
-function pastedNoticeWorkType(text: string): string {
-  if (/设备检修|检修通告/.test(text)) return "repair";
-  if (/设备变更|变更通告/.test(text)) return "change";
-  if (/上电通告|上下电通告|下电通告/.test(text)) return "power";
-  if (/设备轮巡|轮巡通告/.test(text)) return "polling";
-  if (/设备调整|调整通告/.test(text)) return "adjust";
+function pastedNoticeWorkType(text: string, sections: Dict = {}): string {
+  const titleText = [
+    sectionValue(sections, ["名称", "标题", "通告名称", "维修名称"]),
+    sectionValue(sections, ["内容"]),
+  ].filter(Boolean).join("\n");
+  const raw = String(text || "");
+  const headText = `${raw.match(/^【[^】]+】/)?.[0] || ""}\n${titleText}`;
+  const rawHead = raw.split(/\n/).slice(0, 5).join("\n");
+  if (/设备检修|检修通告/.test(headText)) return "repair";
+  if (/上电通告|上下电通告|下电通告/.test(headText)) return "power";
+  if (/设备轮巡|轮巡通告/.test(headText)) return "polling";
+  if (/设备调整|调整通告/.test(headText)) return "adjust";
+  if (/设备变更|变更通告/.test(headText)) return "change";
+  if (/设备检修|检修通告/.test(rawHead)) return "repair";
+  if (/上电通告|上下电通告|下电通告/.test(rawHead)) return "power";
+  if (/设备轮巡|轮巡通告/.test(rawHead)) return "polling";
+  if (/设备调整|调整通告/.test(rawHead)) return "adjust";
+  if (/设备变更|变更通告/.test(rawHead)) return "change";
   return "maintenance";
 }
 
@@ -1935,6 +2746,7 @@ function applyChangeTargetCandidateDefaults(draft: Dict, candidate: Dict): Dict 
   fillDraftBlank(next, "discovery", firstCandidateField(fields, ["故障发现方式（来源）", "故障发现方式"]));
   fillDraftBlank(next, "symptom", firstCandidateField(fields, ["故障现象"]));
   fillDraftBlank(next, "solution", firstCandidateField(fields, ["解决方案"]));
+  fillDraftBlank(next, "spare_parts", firstCandidateField(fields, ["备件更换情况", "备件使用情况"]));
   fillDraftBlank(next, "device", firstCandidateField(fields, ["设备", "维修设备"]));
   fillDraftBlank(next, "cabinet", firstCandidateField(fields, ["柜号"]));
   fillDraftBlank(next, "quantity", firstCandidateField(fields, ["数量（个）", "数量"]));
@@ -1943,7 +2755,15 @@ function applyChangeTargetCandidateDefaults(draft: Dict, candidate: Dict): Dict 
 
 function completeParsedNoticeDraft(type: string, draft: Dict, options: Dict = {}): void {
   const key = `manual:${type}:${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  Object.assign(draft, options);
+  Object.assign(draft, options, { manual_origin: "paste" });
+  const candidateRecord = manualRecordFromDraft(key, draft);
+  const duplicateKey = findDuplicateDraftKey(candidateRecord, draft, key);
+  if (duplicateKey) {
+    activeDraftKey.value = duplicateKey;
+    pasteParseLine.value = "待发起通告中已有相同类型、标题和时间的草稿。";
+    pasteParseStatus.value = "failed";
+    return;
+  }
   drafts.set(key, draft);
   selectedKeys.add(key);
   pinDraftInMiddlePanel(key);
@@ -1974,7 +2794,7 @@ async function parsePastedNotice(): Promise<void> {
     if (/事件通告/.test(text)) {
       throw new Error("前端暂不支持事件通告纯手填或解析，请在 Qt 主界面处理事件通告。");
     }
-    const type = pastedNoticeWorkType(text);
+    const type = pastedNoticeWorkType(text, sections);
     const draft = manualDraftDefaults(type);
     const status = pastedNoticeStatus(text);
     const action = parsedActionFromStatus(status);
@@ -2005,6 +2825,7 @@ async function parsePastedNotice(): Promise<void> {
     draft.discovery = sectionValue(sections, ["故障发现方式"]);
     draft.symptom = sectionValue(sections, ["故障现象"]);
     draft.solution = sectionValue(sections, ["解决方案"]);
+    draft.spare_parts = sectionValue(sections, ["备件更换情况", "备件使用情况"]);
     draft.device = sectionValue(sections, ["设备"]);
     draft.cabinet = sectionValue(sections, ["柜号"]);
     draft.quantity = sectionValue(sections, ["数量"]);
@@ -2185,11 +3006,19 @@ function opId(key: string): string {
   return `${key}:${Date.now()}`;
 }
 
+function payloadSendsPersonalMessage(payload: Dict): boolean {
+  const type = String(payload?.work_type || "maintenance");
+  if (type === "maintenance") return true;
+  if (["power", "polling", "adjust"].includes(type)) return true;
+  return Boolean(payload?.manual);
+}
+
 function buildStartPayload(key: string): Dict | null {
   const record = draftRecordForKey(key);
   const draft = drafts.get(key);
   if (!record || !draft) return null;
-  const type = record.work_type || "maintenance";
+  const type = record.manual ? inferManualNoticeWorkType(draft, record.work_type || draft.work_type || "maintenance") : (record.work_type || "maintenance");
+  if (record.manual && draft.work_type !== type) draft.work_type = type;
   const action = record.manual ? draftActionForRecord(record, draft) : sourceActionForRecord(record);
   const targetRecordId = record.manual ? String(draft.target_record_id || draft.feishu_record_id || draft.raw_record_id || "").trim() : targetRecordIdForRecord(record);
   return {
@@ -2209,7 +3038,7 @@ function buildStartPayload(key: string): Dict | null {
     source_progress: sourceProgressForRecord(record),
     building_codes: record.manual ? (draft.building_codes || []) : (record.building_codes || []),
     building: record.manual ? (draft.building || "") : buildingForRecord(record),
-    title: record.manual ? manualDraftTitle(draft, type) : (type === "repair" ? draft.content : titleForRecord(record)),
+    title: record.manual ? manualDraftTitle(draft, type) : (type === "repair" ? (draft.title || titleForRecord(record)) : titleForRecord(record)),
     non_plan: record.manual && type === "maintenance" ? Boolean(draft.non_plan) : false,
     level: record.manual ? (draft.level || (type === "change" ? "I3" : "")) : (type === "repair" ? (draft.level || "") : (type === "change" ? (levelForRecord(record) || "I3") : "")),
     start_time: draft.start_time,
@@ -2230,6 +3059,7 @@ function buildStartPayload(key: string): Dict | null {
     discovery: type === "repair" ? (draft.discovery || "") : "",
     symptom: type === "repair" ? (draft.symptom || "") : "",
     solution: type === "repair" ? (draft.solution || "") : "",
+    spare_parts: type === "repair" ? (draft.spare_parts || "") : "",
     device: type === "polling" ? (draft.device || "") : "",
     cabinet: type === "power" ? (draft.cabinet || "") : "",
     quantity: type === "power" ? (draft.quantity || "") : "",
@@ -2242,7 +3072,42 @@ function buildStartPayload(key: string): Dict | null {
 async function sendStart(key: string): Promise<void> {
   const payload = buildStartPayload(key);
   if (!payload) return;
+  const draft = drafts.get(key);
   const record = draftRecordForKey(key);
+  if (record && draft) {
+    draft.validation_touched = true;
+    const typeConflict = draftTypeConflictText(record, draft);
+    if (typeConflict) {
+      rememberJob(key, {
+        text: typeConflict,
+        status: "failed",
+        phase: "failed",
+      });
+      saveDrafts();
+      return;
+    }
+    const missing = draftMissingFields(record, draft);
+    if (missing.length) {
+      rememberJob(key, {
+        text: draftMissingText(record, draft) || "请补充必填字段",
+        status: "failed",
+        phase: "failed",
+      });
+      saveDrafts();
+      return;
+    }
+    const duplicateKey = findDuplicateDraftKey(record, draft, key);
+    if (duplicateKey) {
+      activeDraftKey.value = duplicateKey;
+      rememberJob(key, {
+        text: "待发起通告中已有相同类型、标题和时间的草稿，请核对后再发送",
+        status: "failed",
+        phase: "failed",
+      });
+      saveDrafts();
+      return;
+    }
+  }
   if (record && !recordMatchesCurrentScope(record)) {
     rememberJob(key, { text: "当前入口与通告楼栋不匹配，请切换到对应楼栋或园区后再发送", status: "failed", phase: "failed" });
     return;
@@ -2250,6 +3115,10 @@ async function sendStart(key: string): Promise<void> {
   if (payload.work_type === "maintenance" && payload.manual && !payload.maintenance_cycle) {
     rememberJob(key, { text: "纯手填维保必须选择维保周期", status: "failed", phase: "failed" });
     return;
+  }
+  if (payload.manual && draft?.manual_origin === "manual") {
+    saveManualTemplateMemory(String(payload.work_type || ""), draft);
+    saveManualRecentType(String(payload.work_type || ""));
   }
   await sendAction(payload, key);
   saveDrafts();
@@ -2282,6 +3151,7 @@ function ongoingDraft(item: Dict): Dict {
       discovery: item.discovery || "",
       symptom: item.symptom || "",
       solution: item.solution || "",
+      spare_parts: item.spare_parts || "",
       device: item.device || "",
       cabinet: item.cabinet || "",
       quantity: item.quantity || "",
@@ -2309,6 +3179,7 @@ function buildOngoingPayload(item: Dict, action: string): Dict {
   const targetRecordId = draftValue(edit, "target_record_id", targetRecordIdForOngoing(item));
   const sourceRecordId = draftValue(edit, "source_record_id", sourceRecordIdForOngoing(item, targetRecordId));
   const workType = item.work_type || "maintenance";
+  const simpleManual = ["power", "polling", "adjust"].includes(workType);
   const startTime = draftValue(edit, "start_time", ongoingTimeRange(item).start);
   const endTime = draftValue(edit, "end_time", ongoingTimeRange(item).end);
   return {
@@ -2316,6 +3187,8 @@ function buildOngoingPayload(item: Dict, action: string): Dict {
     scope: currentScope.value || "ALL",
     work_type: workType,
     notice_type: item.notice_type || "",
+    manual: simpleManual ? true : Boolean(item.manual),
+    manual_id: simpleManual ? String(item.manual_id || item.active_item_id || targetRecordId || sourceRecordId || ongoingLineKey(item)) : "",
     record_id: targetRecordId,
     target_record_id: targetRecordId,
     active_item_id: item.active_item_id || "",
@@ -2344,6 +3217,7 @@ function buildOngoingPayload(item: Dict, action: string): Dict {
     discovery: workType === "repair" ? draftValue(edit, "discovery", item.discovery || "") : "",
     symptom: workType === "repair" ? draftValue(edit, "symptom", item.symptom || "") : "",
     solution: workType === "repair" ? draftValue(edit, "solution", item.solution || "") : "",
+    spare_parts: workType === "repair" ? draftValue(edit, "spare_parts", item.spare_parts || "") : "",
     device: workType === "polling" ? draftValue(edit, "device", item.device || "") : "",
     cabinet: workType === "power" ? draftValue(edit, "cabinet", item.cabinet || "") : "",
     quantity: workType === "power" ? draftValue(edit, "quantity", item.quantity || "") : "",
@@ -2448,18 +3322,30 @@ async function sendAction(payload: Dict, lineKey: string): Promise<void> {
     rememberJob(lineKey, {
       job_id: data.job_id,
       payload,
-      text: payload.work_type === "maintenance" ? "已受理，正在发送个人消息" : "已受理，等待主界面显示",
+      text: payloadSendsPersonalMessage(payload) ? "已受理，正在发送飞书消息" : "已受理，等待主界面显示",
       status: "busy",
       phase: data.initial_phase || "accepted",
     });
     watchJob(data.job_id, lineKey);
   } catch (error: any) {
-    rememberJob(lineKey, { text: error?.message || "提交失败", status: "failed", phase: "failed" });
+    rememberJob(lineKey, { text: friendlyFailureText(error, "提交失败"), status: "failed", phase: "failed" });
   }
 }
 
 function rememberJob(key: string, patch: Dict): void {
   jobStates.set(key, { ...(jobStates.get(key) || {}), ...patch, updated_at: new Date().toISOString() });
+}
+
+function friendlyFailureText(error: any, fallback = "失败"): string {
+  const text = String(error?.message || error?.error || error || fallback || "").trim();
+  if (!text) return fallback;
+  if (/缺少|必填|请选择|不能为空/.test(text)) return `缺字段：${text}`;
+  if (/无权|权限|未登录|登录/.test(text)) return `无权限：${text}`;
+  if (/飞书|openid|机器人|群消息|消息/.test(text)) return `飞书失败：${text}`;
+  if (/多维|bitable|record|Record|1254|字段|表格|记录不存在/.test(text)) return `多维失败：${text}`;
+  if (/关联|绑定|找不到|未找到/.test(text)) return `记录绑定失败：${text}`;
+  if (/超时|timeout|网络|HTTP|SSL/.test(text)) return `网络异常：${text}`;
+  return text;
 }
 
 function applySuccessfulJobState(lineKey: string): void {
@@ -2476,8 +3362,22 @@ function applySuccessfulJobState(lineKey: string): void {
   if (action === "start") {
     bumpLocalSummary("started", 1);
     bumpLocalSummary("ongoing", 1);
+    pendingFocusNotice.value = {
+      action,
+      work_type: payload.work_type || "",
+      target_record_id: payload.target_record_id || payload.record_id || "",
+      source_record_id: payload.source_record_id || "",
+      title: payload.title || "",
+    };
   } else if (action === "update") {
     bumpLocalSummary("updated", 1);
+    pendingFocusNotice.value = {
+      action,
+      work_type: payload.work_type || "",
+      target_record_id: payload.target_record_id || payload.record_id || "",
+      source_record_id: payload.source_record_id || "",
+      title: payload.title || "",
+    };
   } else if (action === "end") {
     bumpLocalSummary("ended", 1);
     if (removeOngoingLine(lineKey)) {
@@ -2485,6 +3385,7 @@ function applySuccessfulJobState(lineKey: string): void {
     } else {
       bumpLocalSummary("ongoing", -1);
     }
+    syncText.value = "已结束，可在今日结束通告或近三天可回退中查看";
   }
   rememberJob(lineKey, { local_applied: true });
 }
@@ -2538,7 +3439,7 @@ async function pollJob(jobId: string, lineKey: string): Promise<void> {
         rememberJob(lineKey, {
           phase,
           status: phase === "success" ? "success" : phase === "failed" ? "failed" : "busy",
-          text: phase === "success" ? "成功" : phase === "failed" ? (data.error || text || "失败") : text,
+          text: phase === "success" ? "成功" : phase === "failed" ? friendlyFailureText(data.error || text, "失败") : text,
         });
         if (terminalPhase(phase)) {
           clearFallbackPoll(lineKey);
@@ -2585,7 +3486,7 @@ function startJobSse(): void {
           rememberJob(key, {
             phase,
             status: phase === "success" ? "success" : phase === "failed" ? "failed" : "busy",
-            text: phase === "success" ? "成功" : job.error || job.message || job.upload_message || phase,
+            text: phase === "success" ? "成功" : phase === "failed" ? friendlyFailureText(job.error || job.message || job.upload_message || phase, "失败") : job.error || job.message || job.upload_message || phase,
           });
           if (terminalPhase(phase)) {
             clearFallbackPoll(key);
@@ -2752,6 +3653,22 @@ function formatUndoTime(value: any): string {
   return date.toLocaleString("zh-CN", { hour12: false });
 }
 
+function undoActionType(item: Dict): string {
+  return String(item?.undo_action_type || item?.action_type || "").trim().toLowerCase();
+}
+
+function undoActionLabel(item: Dict): string {
+  const action = undoActionType(item);
+  if (action === "delete") return "删除";
+  if (action === "end") return "结束";
+  if (action === "update") return "更新";
+  return "上一步";
+}
+
+function undoButtonLabel(item: Dict): string {
+  return `回退${undoActionLabel(item)}`;
+}
+
 function ongoingTitle(item: Dict): string {
   if ((item.work_type || "maintenance") === "repair") {
     const source = records.value.find((record) => record.record_id === item.source_record_id);
@@ -2773,30 +3690,38 @@ function ongoingCompactSummary(item: Dict): string {
 }
 
 async function refreshRepair(): Promise<void> {
+  if (repairRefreshing.value || refreshCooldown.repair) return;
+  startRefreshCooldown("repair");
   repairRefreshing.value = true;
   try {
     await api(`/api/repair-refresh?scope=${encodeURIComponent(currentScope.value || "ALL")}`);
     await loadWorkbench();
   } catch (error: any) {
     syncText.value = error?.message || "刷新检修失败";
+    scheduleWorkbenchRetry(syncText.value);
   } finally {
     repairRefreshing.value = false;
   }
 }
 
 async function refreshChange(): Promise<void> {
+  if (changeRefreshing.value || refreshCooldown.change) return;
+  startRefreshCooldown("change");
   changeRefreshing.value = true;
   try {
     await api(`/api/change-refresh?scope=${encodeURIComponent(currentScope.value || "ALL")}`);
     await loadWorkbench();
   } catch (error: any) {
     syncText.value = error?.message || "刷新变更失败";
+    scheduleWorkbenchRetry(syncText.value);
   } finally {
     changeRefreshing.value = false;
   }
 }
 
 async function logout(): Promise<void> {
+  clearAuthKeepalive();
+  stopRealtimeConnections();
   await api("/api/auth/logout", { method: "POST", body: "{}" }).catch(() => null);
   window.location.href = "/";
 }
@@ -2848,6 +3773,8 @@ watch(workType, () => {
 
 onMounted(async () => {
   appDisposed = false;
+  pageVisible.value = !document.hidden;
+  document.addEventListener("visibilitychange", handleVisibilityChange);
   await loadAuthStatus();
   if (auth.loggedIn && !auth.scopeOptions.length) {
     await loadCurrentPermissionRequest();
@@ -2868,13 +3795,13 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   appDisposed = true;
-  if (eventSource.value) eventSource.value.close();
-  if (activeItemsEventSource.value) activeItemsEventSource.value.close();
-  sseConnected.value = false;
-  activeItemsConnected.value = false;
-  if (sseReconnectTimer !== null) window.clearTimeout(sseReconnectTimer);
-  if (activeItemsReconnectTimer !== null) window.clearTimeout(activeItemsReconnectTimer);
+  document.removeEventListener("visibilitychange", handleVisibilityChange);
+  clearAuthKeepalive();
+  clearWorkbenchRetry();
+  stopRealtimeConnections();
   if (workbenchRefreshTimer !== null) window.clearTimeout(workbenchRefreshTimer);
+  for (const timer of refreshCooldownTimers.values()) window.clearTimeout(timer);
+  refreshCooldownTimers.clear();
   for (const timer of fallbackPollTimers.values()) window.clearTimeout(timer);
   fallbackPollTimers.clear();
   pollingJobs.clear();
@@ -2985,6 +3912,11 @@ button:disabled {
   opacity: 0.58;
 }
 
+.btn.small {
+  padding: 6px 9px;
+  font-size: 12px;
+}
+
 .btn.blue {
   border-color: #2563eb;
   background: #2563eb;
@@ -3014,6 +3946,38 @@ button:disabled {
   background: #f8fafc;
   color: #334155;
   font-size: 13px;
+}
+
+.status-banner {
+  position: sticky;
+  top: 71px;
+  z-index: 9;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 38px;
+  padding: 8px 16px;
+  border-bottom: 1px solid #dbe3ee;
+  background: #ffffff;
+  color: #334155;
+  font-size: 13px;
+}
+
+.status-banner.info {
+  background: #f8fafc;
+}
+
+.status-banner.warning {
+  border-color: #fde68a;
+  background: #fffbeb;
+  color: #92400e;
+}
+
+.status-banner.failed {
+  border-color: #fecaca;
+  background: #fef2f2;
+  color: #991b1b;
 }
 
 .center-state {
@@ -3116,6 +4080,23 @@ button:disabled {
 .paste-panel {
   margin-bottom: 12px;
   padding: 10px;
+}
+
+.draft-save-status {
+  margin-left: auto;
+  padding: 6px 9px;
+  border: 1px solid #dbe3ee;
+  border-radius: 999px;
+  background: #f8fafc;
+  color: #64748b;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.draft-save-status.failed {
+  border-color: #fecaca;
+  background: #fef2f2;
+  color: #991b1b;
 }
 
 .target-choice-panel {
@@ -3289,6 +4270,174 @@ button:disabled {
   color: #ffffff;
 }
 
+.manual-create {
+  position: relative;
+  display: inline-flex;
+}
+
+.manual-type-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 30;
+  width: min(360px, calc(100vw - 32px));
+  padding: 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 14px 36px rgba(15, 23, 42, 0.14);
+  display: grid;
+  gap: 8px;
+}
+
+.manual-type-popover strong {
+  font-size: 14px;
+  color: #0f172a;
+}
+
+.manual-type-popover p {
+  margin: 0;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.manual-recent {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 8px;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  background: #eff6ff;
+}
+
+.manual-recent span {
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.manual-recent button {
+  min-height: 32px;
+  padding: 6px 9px;
+  border-color: #bfdbfe;
+  background: #ffffff;
+  color: #1d4ed8;
+  font-size: 13px;
+}
+
+.manual-type-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.manual-type-grid button {
+  min-height: 52px;
+  padding: 9px 10px;
+  display: grid;
+  gap: 4px;
+  justify-items: start;
+  text-align: left;
+  border-color: #dbe3ee;
+  background: #f8fafc;
+}
+
+.manual-type-grid button:hover {
+  border-color: #2563eb;
+  background: #eff6ff;
+}
+
+.manual-type-grid span {
+  font-weight: 700;
+}
+
+.manual-type-grid small {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.draft-hint {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid #bfdbfe;
+  border-radius: 7px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.draft-required-line {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid #fecaca;
+  border-radius: 7px;
+  background: #fef2f2;
+  color: #b91c1c;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.field-missing span,
+.field-missing {
+  color: #b91c1c;
+}
+
+.field-missing input,
+.field-missing textarea,
+.field-missing select {
+  border-color: #ef4444;
+  background: #fff7f7;
+}
+
+.notice-preview {
+  max-height: 260px;
+  margin: 0;
+  padding: 10px;
+  overflow: auto;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  background: #f8fbff;
+  color: #0f172a;
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+}
+
+.draft-card.busy .form-grid,
+.draft-card.busy .repair-fields,
+.draft-card.busy .upload-fields,
+.ongoing-card.busy .form-grid,
+.ongoing-card.busy .repair-fields,
+.ongoing-card.busy .upload-fields {
+  opacity: 0.72;
+  pointer-events: none;
+}
+
+.upload-preview-grid {
+  display: grid;
+  grid-template-columns: 112px minmax(0, 1fr);
+  gap: 6px 10px;
+  margin: 8px 0 0;
+}
+
+.upload-preview-grid dt {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.upload-preview-grid dd {
+  margin: 0;
+  color: #0f172a;
+  font-size: 13px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
 .search {
   flex: 1 1 260px;
   min-width: 180px;
@@ -3452,6 +4601,35 @@ button:disabled {
   gap: 8px;
 }
 
+.recent-undo-panel {
+  border: 1px solid #dbeafe;
+  border-radius: 10px;
+  padding: 10px;
+  background: #f8fbff;
+}
+
+.undo-filter {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.undo-filter button {
+  min-height: 30px;
+  padding: 6px 10px;
+  border-color: #dbeafe;
+  background: #ffffff;
+  color: #334155;
+  font-size: 12px;
+}
+
+.undo-filter button.active {
+  border-color: #2563eb;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-weight: 700;
+}
+
 .closed-card {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -3467,6 +4645,22 @@ button:disabled {
   margin: 3px 0 0;
   color: #64748b;
   font-size: 12px;
+}
+
+.undo-card {
+  background: #ffffff;
+}
+
+.undo-action-chip {
+  display: inline-flex;
+  align-items: center;
+  margin-right: 6px;
+  padding: 2px 6px;
+  border: 1px solid #bfdbfe;
+  border-radius: 999px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-weight: 700;
 }
 
 .draft-card.active {
@@ -3541,9 +4735,37 @@ textarea {
 }
 
 .repair-fields,
+.upload-fields,
 .zhihang-line,
 .card-actions {
   margin-top: 10px;
+}
+
+.repair-fields h3 {
+  margin: 0 0 8px;
+  color: #334155;
+  font-size: 13px;
+}
+
+.repair-fields h4 {
+  margin: 8px 0 6px;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.upload-fields {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 8px 10px 10px;
+  background: #f8fafc;
+}
+
+.upload-fields summary {
+  cursor: pointer;
+  color: #334155;
+  font-size: 13px;
+  font-weight: 600;
 }
 
 .zhihang-line {

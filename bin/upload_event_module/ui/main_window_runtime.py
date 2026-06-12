@@ -1286,7 +1286,50 @@ class MainWindowRuntimeMixin:
             if str(info.get("status") or "").strip() == "结束":
                 continue
             sections = self._lan_notice_sections(text)
-            buildings = self._normalize_buildings_value(data.get("buildings"))
+            cache_fields = {}
+            cache_store = getattr(self, "cache_store", None)
+            if cache_store is not None:
+                cache_record_id = (
+                    str(data.get("target_record_id") or "").strip()
+                    or str(data.get("feishu_record_id") or "").strip()
+                    or str(data.get("raw_record_id") or "").strip()
+                    or str(data.get("record_id") or "").strip()
+                )
+                if cache_record_id:
+                    try:
+                        cache_fields = cache_store.get_record_fields(
+                            record_id=cache_record_id,
+                            fields=[
+                                "buildings",
+                                "specialty",
+                                "maintenance_cycle",
+                                "level",
+                                "event_source",
+                                "device",
+                                "cabinet",
+                                "quantity",
+                            ],
+                        )
+                    except Exception:
+                        cache_fields = {}
+            payload_fields = {}
+            try:
+                payload = self._ensure_payload_for_data(data)
+            except Exception:
+                payload = None
+            if payload is not None:
+                payload_fields = {
+                    "buildings": getattr(payload, "buildings", None),
+                    "specialty": getattr(payload, "specialty", None),
+                    "maintenance_cycle": getattr(payload, "maintenance_cycle", None),
+                    "level": getattr(payload, "level", None),
+                    "event_source": getattr(payload, "event_source", None),
+                }
+            buildings = self._normalize_buildings_value(
+                data.get("buildings")
+                or cache_fields.get("buildings")
+                or payload_fields.get("buildings")
+            )
             if not buildings:
                 buildings = self._infer_buildings_from_notice_text(text)
             building = "、".join(buildings) if buildings else ""
@@ -1332,7 +1375,12 @@ class MainWindowRuntimeMixin:
                     "source_record_id": str(data.get("lan_source_record_id") or ""),
                     "source_app_token": str(data.get("lan_source_app_token") or ""),
                     "source_table_id": str(data.get("lan_source_table_id") or ""),
-                    "maintenance_cycle": str(data.get("maintenance_cycle") or ""),
+                    "maintenance_cycle": str(
+                        data.get("maintenance_cycle")
+                        or cache_fields.get("maintenance_cycle")
+                        or payload_fields.get("maintenance_cycle")
+                        or ""
+                    ),
                     "zhihang_involved": bool(data.get("lan_zhihang_record_id")),
                     "zhihang_record_id": str(data.get("lan_zhihang_record_id") or ""),
                     "zhihang_title": str(data.get("lan_zhihang_title") or ""),
@@ -1345,8 +1393,21 @@ class MainWindowRuntimeMixin:
                     "status": info.get("status") or "",
                     "building": building,
                     "building_codes": self._lan_building_codes(buildings or building),
-                    "specialty": str(data.get("specialty") or sections.get("specialty") or ""),
-                    "level": str(data.get("level") or sections.get("level") or info.get("level") or ""),
+                    "specialty": str(
+                        data.get("specialty")
+                        or cache_fields.get("specialty")
+                        or payload_fields.get("specialty")
+                        or sections.get("specialty")
+                        or ""
+                    ),
+                    "level": str(
+                        data.get("level")
+                        or cache_fields.get("level")
+                        or payload_fields.get("level")
+                        or sections.get("level")
+                        or info.get("level")
+                        or ""
+                    ),
                     "time": time_text,
                     "start_time": start_time,
                     "end_time": end_time,
@@ -1364,9 +1425,15 @@ class MainWindowRuntimeMixin:
                     "solution": sections.get("solution", ""),
                     "fault_time": fault_time,
                     "expected_time": expected_time,
-                    "device": str(data.get("device") or sections.get("device") or ""),
-                    "cabinet": str(data.get("cabinet") or sections.get("cabinet") or ""),
-                    "quantity": str(data.get("quantity") or sections.get("quantity") or ""),
+                    "event_source": str(
+                        data.get("event_source")
+                        or cache_fields.get("event_source")
+                        or payload_fields.get("event_source")
+                        or ""
+                    ),
+                    "device": str(data.get("device") or cache_fields.get("device") or sections.get("device") or ""),
+                    "cabinet": str(data.get("cabinet") or cache_fields.get("cabinet") or sections.get("cabinet") or ""),
+                    "quantity": str(data.get("quantity") or cache_fields.get("quantity") or sections.get("quantity") or ""),
                     "can_update": not blocked,
                     "can_end": not blocked,
                     "block_reason": block_reason,

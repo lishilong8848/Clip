@@ -2657,8 +2657,9 @@ class LanPortalStateStore:
         payload = normalize_notice_identity_payload(payload)
         notice_type = self._text(payload.get("notice_type"))
         if notice_type == "事件通告":
-            return None
-        work_type = self._text(payload.get("work_type")) or "maintenance"
+            work_type = "event"
+        else:
+            work_type = self._text(payload.get("work_type")) or "maintenance"
         active_item_id = self._text(payload.get("active_item_id"))
         source_record_id = canonical_source_record_id(payload)
         target_record_id = canonical_target_record_id(payload)

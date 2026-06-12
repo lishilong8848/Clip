@@ -64,6 +64,89 @@ NOTICE_TYPE_REPAIR = "设备检修"
 NOTICE_TYPE_POWER = "上下电通告"
 NOTICE_TYPE_POLLING = "设备轮巡"
 NOTICE_TYPE_ADJUST = "设备调整"
+NOTICE_TIME_SEPARATOR = "~"
+NOTICE_TEXT_TEMPLATES = {
+    WORK_TYPE_MAINTENANCE: {
+        "heading": NOTICE_TYPE_MAINTENANCE,
+        "fields": (
+            ("名称", "title"),
+            ("时间", "time_range"),
+            ("位置", "location"),
+            ("内容", "content"),
+            ("原因", "reason"),
+            ("影响", "impact"),
+            ("进度", "progress"),
+        ),
+    },
+    WORK_TYPE_CHANGE: {
+        "heading": NOTICE_TYPE_CHANGE,
+        "fields": (
+            ("名称", "title"),
+            ("等级", "level"),
+            ("时间", "time_range"),
+            ("位置", "location"),
+            ("内容", "content"),
+            ("原因", "reason"),
+            ("影响", "impact"),
+            ("进度", "progress"),
+        ),
+    },
+    WORK_TYPE_REPAIR: {
+        "heading": NOTICE_TYPE_REPAIR,
+        "fields": (
+            ("标题", "title"),
+            ("地点", "location"),
+            ("紧急程度", "level"),
+            ("专业", "specialty"),
+            ("发现故障时间", "fault_time"),
+            ("期望完成时间", "expected_time"),
+            ("维修设备", "repair_device"),
+            ("维修故障", "repair_fault"),
+            ("故障类型", "fault_type"),
+            ("维修方式", "repair_mode"),
+            ("影响范围", "impact"),
+            ("故障发现方式", "discovery"),
+            ("故障现象", "symptom"),
+            ("故障原因", "reason"),
+            ("解决方案", "solution"),
+            ("备件更换情况", "spare_parts"),
+            ("完成情况", "progress"),
+        ),
+    },
+    WORK_TYPE_POWER: {
+        "heading": "上电通告",
+        "fields": (
+            ("名称", "title"),
+            ("时间", "time_range"),
+            ("柜号", "cabinet"),
+            ("数量", "quantity"),
+            ("进度", "progress"),
+        ),
+    },
+    WORK_TYPE_POLLING: {
+        "heading": NOTICE_TYPE_POLLING,
+        "fields": (
+            ("标题", "title"),
+            ("时间", "time_range"),
+            ("设备", "device"),
+            ("内容", "content"),
+            ("影响", "impact"),
+            ("进度", "progress"),
+        ),
+    },
+    WORK_TYPE_ADJUST: {
+        "heading": NOTICE_TYPE_ADJUST,
+        "fields": (
+            ("名称", "title"),
+            ("时间", "time_range"),
+            ("位置", "location"),
+            ("内容", "content"),
+            ("原因", "reason"),
+            ("影响", "impact"),
+            ("进度", "progress"),
+        ),
+    },
+}
 CHANGE_PROGRESS_NOT_STARTED = "未开始"
 CHANGE_PROGRESS_ONGOING = "进行中"
 CHANGE_PROGRESS_ENDED = "已结束"
@@ -1299,6 +1382,34 @@ class MaintenancePortalService:
         if not building_open_id:
             return code, [], f"未配置 {cls._scope_label(code)} openid"
         return code, list(dict.fromkeys([building_open_id, LI_SHILONG_OPEN_ID])), ""
+
+    @classmethod
+    def _recipients_for_building_codes(
+        cls, building_codes: list[str], *, fallback_building: str = ""
+    ) -> tuple[str, list[str], str]:
+        codes = [
+            str(code or "").strip().upper()
+            for code in (building_codes or [])
+            if str(code or "").strip()
+        ]
+        codes = [code for code in BUILDING_SCOPE_CODES if code in dict.fromkeys(codes)]
+        if not codes and fallback_building:
+            codes = cls._building_codes_from_value(fallback_building)
+        if not codes:
+            return "", [], f"无法从楼栋字段识别 110/A-E/H: {fallback_building or '-'}"
+        recipients: list[str] = []
+        missing: list[str] = []
+        for code in codes:
+            open_id = BUILDING_OPEN_ID_MAP.get(code, "")
+            if open_id:
+                recipients.append(open_id)
+            else:
+                missing.append(cls._scope_label(code))
+        recipients.append(LI_SHILONG_OPEN_ID)
+        recipients = [item for item in dict.fromkeys(str(open_id or "").strip() for open_id in recipients) if item]
+        if missing:
+            return codes[0] if len(codes) == 1 else "CAMPUS", recipients, f"未配置 {','.join(missing)} openid"
+        return codes[0] if len(codes) == 1 else "CAMPUS", recipients, ""
 
     @staticmethod
     def _normalize_scope(scope: Any) -> str:
@@ -2743,6 +2854,8 @@ class MaintenancePortalService:
             identity_payload = dict(prepared)
             if active_item_id:
                 identity_payload["active_item_id"] = active_item_id
+            if source_record_id:
+                identity_payload["source_record_id"] = source_record_id
             if feishu_record_id:
                 identity_payload["target_record_id"] = feishu_record_id
                 identity_payload["feishu_record_id"] = feishu_record_id
@@ -3696,7 +3809,9 @@ class MaintenancePortalService:
         text = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
         if not text:
             return []
-        pattern = re.compile(r"(?=【(?:维保通告|设备变更|设备检修)】\s*状态[:：])")
+        pattern = re.compile(
+            r"(?=【(?:维保通告|设备变更|设备检修|上电通告|上下电通告|设备轮巡|设备调整)】\s*状态[:：])"
+        )
         parts = [part.strip() for part in pattern.split(text) if part.strip()]
         if len(parts) > 1:
             return parts
@@ -3741,6 +3856,16 @@ class MaintenancePortalService:
             sections, ["维修设备", "维修故障", "故障现象", "解决方案"]
         ):
             return WORK_TYPE_REPAIR
+        if "【上电通告】" in raw or "【上下电通告】" in raw or cls._notice_section_value(
+            sections, ["柜号", "数量"]
+        ):
+            return WORK_TYPE_POWER
+        if "【设备轮巡】" in raw or cls._notice_section_value(
+            sections, ["设备"]
+        ):
+            return WORK_TYPE_POLLING
+        if "【设备调整】" in raw:
+            return WORK_TYPE_ADJUST
         if "【设备变更】" in raw or cls._notice_section_value(
             sections, ["变更等级", "变更楼栋"]
         ):
@@ -3885,6 +4010,26 @@ class MaintenancePortalService:
                     "zhihang_progress": zhihang_progress,
                 },
             }, ""
+        if work_type in {WORK_TYPE_POWER, WORK_TYPE_POLLING, WORK_TYPE_ADJUST}:
+            memory_name = self._strip_notice_title_suffix(title, work_type) or title
+            if not memory_name:
+                return None, f"{self._history_work_type_label(work_type)}通告缺少标题"
+            return {
+                "work_type": work_type,
+                "building": building,
+                "memory_name": memory_name,
+                "location": location,
+                "content": content or memory_name,
+                "reason": reason,
+                "impact": impact,
+                "extra_fields": {
+                    "specialty": specialty,
+                    "device": self._notice_section_value(sections, ["设备"]),
+                    "cabinet": self._notice_section_value(sections, ["柜号"]),
+                    "quantity": self._notice_section_value(sections, ["数量"]),
+                    "progress": self._notice_section_value(sections, ["进度"]),
+                },
+            }, ""
         memory_name = self._notice_section_value(
             sections,
             ["检修通告名称", "维修名称"],
@@ -3910,6 +4055,9 @@ class MaintenancePortalService:
                 "discovery": self._notice_section_value(sections, ["故障发现方式"]),
                 "symptom": self._notice_section_value(sections, ["故障现象"]),
                 "solution": self._notice_section_value(sections, ["解决方案"]),
+                "spare_parts": self._notice_section_value(
+                    sections, ["备件更换情况", "备件使用情况"]
+                ),
             },
         }, ""
 
@@ -6894,6 +7042,31 @@ class MaintenancePortalService:
         return generated
 
     @staticmethod
+    def _format_notice_time_range(start_time: Any, end_time: Any) -> str:
+        start_text = MaintenancePortalService._format_input_datetime(start_time)
+        end_text = MaintenancePortalService._format_input_datetime(end_time)
+        if start_text and end_text:
+            return f"{start_text}{NOTICE_TIME_SEPARATOR}{end_text}"
+        return start_text or end_text
+
+    @staticmethod
+    def _render_notice_text(
+        *,
+        work_type: str,
+        status: str,
+        values: dict[str, Any],
+    ) -> str:
+        template = NOTICE_TEXT_TEMPLATES.get(
+            str(work_type or "").strip(),
+            NOTICE_TEXT_TEMPLATES[WORK_TYPE_MAINTENANCE],
+        )
+        lines = [f"【{template['heading']}】状态：{str(status or '').strip()}"]
+        for label, key in template["fields"]:
+            value = values.get(key, "")
+            lines.append(f"【{label}】{str(value or '').strip()}")
+        return "\n".join(lines)
+
+    @staticmethod
     def build_notice_text(
         *,
         status: str,
@@ -6906,16 +7079,20 @@ class MaintenancePortalService:
         impact: str,
         progress: str,
     ) -> str:
-        return (
-            f"【维保通告】状态：{str(status or '').strip()}\n"
-            f"【名称】{str(title or '').strip()}\n"
-            f"【时间】{MaintenancePortalService._format_input_datetime(start_time)}~"
-            f"{MaintenancePortalService._format_input_datetime(end_time)}\n"
-            f"【位置】{str(location or '').strip()}\n"
-            f"【内容】{str(content or '').strip()}\n"
-            f"【原因】{str(reason or '').strip()}\n"
-            f"【影响】{str(impact or '').strip() or DEFAULT_IMPACT_TEXT}\n"
-            f"【进度】{str(progress or '').strip() or DEFAULT_PROGRESS_TEXT}"
+        return MaintenancePortalService._render_notice_text(
+            work_type=WORK_TYPE_MAINTENANCE,
+            status=status,
+            values={
+                "title": title,
+                "time_range": MaintenancePortalService._format_notice_time_range(
+                    start_time, end_time
+                ),
+                "location": location,
+                "content": content,
+                "reason": reason,
+                "impact": str(impact or "").strip() or DEFAULT_IMPACT_TEXT,
+                "progress": str(progress or "").strip() or DEFAULT_PROGRESS_TEXT,
+            },
         )
 
     def _base_job(self, request_payload: dict[str, Any]) -> dict[str, Any]:
@@ -6984,13 +7161,48 @@ class MaintenancePortalService:
             return {"error_category": "qt_bridge", "error_retryable": True}
         return {"error_category": "unknown", "error_retryable": True}
 
-    @staticmethod
-    def _action_target_key(request_payload: dict[str, Any]) -> str:
+    @classmethod
+    def _manual_payload_notice_work_type(cls, request_payload: dict[str, Any], fallback: str) -> str:
+        work_type = str(fallback or WORK_TYPE_MAINTENANCE).strip() or WORK_TYPE_MAINTENANCE
+        valid_types = {
+            WORK_TYPE_MAINTENANCE,
+            WORK_TYPE_CHANGE,
+            WORK_TYPE_REPAIR,
+            WORK_TYPE_POWER,
+            WORK_TYPE_POLLING,
+            WORK_TYPE_ADJUST,
+        }
+        if work_type not in valid_types:
+            work_type = WORK_TYPE_MAINTENANCE
+        if not cls._truthy_flag((request_payload or {}).get("manual")):
+            return work_type
+        if work_type != WORK_TYPE_MAINTENANCE:
+            return work_type
+        head_text = "\n".join(
+            str((request_payload or {}).get(name) or "").strip()
+            for name in ("notice_type", "title", "content")
+            if str((request_payload or {}).get(name) or "").strip()
+        )
+        if re.search(r"设备检修|检修通告", head_text):
+            return WORK_TYPE_REPAIR
+        if re.search(r"上电通告|上下电通告|下电通告", head_text):
+            return WORK_TYPE_POWER
+        if re.search(r"设备轮巡|轮巡通告", head_text):
+            return WORK_TYPE_POLLING
+        if re.search(r"设备调整|调整通告", head_text):
+            return WORK_TYPE_ADJUST
+        if re.search(r"设备变更|变更通告", head_text):
+            return WORK_TYPE_CHANGE
+        return work_type
+
+    @classmethod
+    def _action_target_key(cls, request_payload: dict[str, Any]) -> str:
         request_payload = normalize_notice_identity_payload(request_payload)
         action = str((request_payload or {}).get("action") or "").strip().lower()
-        work_type = str(
-            (request_payload or {}).get("work_type") or WORK_TYPE_MAINTENANCE
-        ).strip()
+        work_type = cls._manual_payload_notice_work_type(
+            request_payload,
+            str((request_payload or {}).get("work_type") or WORK_TYPE_MAINTENANCE).strip(),
+        )
         if action == "start":
             record_id = str((request_payload or {}).get("record_id") or "").strip()
             manual_id = str((request_payload or {}).get("manual_id") or "").strip()
@@ -7562,9 +7774,13 @@ class MaintenancePortalService:
     def prepare_workbench_action(
         self, request_payload: dict[str, Any], *, job_id: str
     ) -> dict[str, Any]:
-        work_type = str(
-            request_payload.get("work_type") or WORK_TYPE_MAINTENANCE
-        ).strip()
+        request_payload = normalize_notice_identity_payload(request_payload)
+        work_type = self._manual_payload_notice_work_type(
+            request_payload,
+            str(request_payload.get("work_type") or WORK_TYPE_MAINTENANCE).strip(),
+        )
+        if work_type != str(request_payload.get("work_type") or "").strip():
+            request_payload = {**request_payload, "work_type": work_type}
         if work_type == WORK_TYPE_CHANGE:
             return self.prepare_change_action(request_payload, job_id=job_id)
         if work_type == WORK_TYPE_REPAIR:
@@ -7623,31 +7839,24 @@ class MaintenancePortalService:
         cabinet: str = "",
         quantity: str = "",
     ) -> str:
-        profile = MaintenancePortalService._simple_notice_profile(work_type)
-        sections: list[tuple[str, str]] = [
-            (profile["title_label"], title),
-            ("时间", f"{start_time}~{end_time}" if start_time or end_time else ""),
-            ("楼栋", building),
-            ("专业", specialty),
-        ]
-        if work_type == WORK_TYPE_POWER:
-            sections.extend([("柜号", cabinet), ("数量", quantity), ("进度", progress)])
-        elif work_type == WORK_TYPE_POLLING:
-            sections.extend([("设备", device), ("内容", content), ("进度", progress)])
-        elif work_type == WORK_TYPE_ADJUST:
-            sections.extend(
-                [
-                    ("位置", location),
-                    ("内容", content),
-                    ("原因", reason),
-                    ("影响", impact),
-                    ("进度", progress),
-                ]
-            )
-        lines = [f"【{profile['heading']}】状态：{str(status or '').strip()}"]
-        for label, value in sections:
-            lines.append(f"【{label}】{str(value or '').strip()}")
-        return "\n\n".join(lines)
+        return MaintenancePortalService._render_notice_text(
+            work_type=work_type,
+            status=status,
+            values={
+                "title": title,
+                "time_range": MaintenancePortalService._format_notice_time_range(
+                    start_time, end_time
+                ),
+                "location": location,
+                "content": content,
+                "reason": reason,
+                "impact": impact,
+                "progress": progress,
+                "device": device,
+                "cabinet": cabinet,
+                "quantity": quantity,
+            },
+        )
 
     def prepare_simple_manual_notice_action(
         self, request_payload: dict[str, Any], *, job_id: str
@@ -7665,14 +7874,19 @@ class MaintenancePortalService:
         notice_type = profile["notice_type"]
         scope = self._normalize_scope(request_payload.get("scope"))
         manual = self._truthy_flag(request_payload.get("manual"))
-        if not manual:
-            raise PortalError(f"{self._history_work_type_label(work_type)}通告目前仅支持前端纯手填或解析发送。")
         record_id = str(
             request_payload.get("record_id")
             or request_payload.get("manual_id")
+            or request_payload.get("active_item_id")
             or ""
         ).strip()
         target_record_id = self._target_record_id_from_request_payload(request_payload)
+        if not manual and action == "start":
+            raise PortalError(f"{self._history_work_type_label(work_type)}通告目前仅支持前端纯手填或解析发送。")
+        if not manual and action != "start" and not target_record_id:
+            raise PortalError(f"{self._history_work_type_label(work_type)}通告缺少目标多维 record_id，不能更新/结束。")
+        if action != "start" and target_record_id:
+            manual = True
         if action == "start" and not record_id:
             raise PortalError("开始通告缺少手填记录ID。")
         if action != "start" and not target_record_id:
@@ -7723,6 +7937,12 @@ class MaintenancePortalService:
             cabinet=cabinet,
             quantity=quantity,
         )
+        building_code, recipients, recipient_error = self._recipients_for_building_codes(
+            building_codes,
+            fallback_building=building,
+        )
+        if recipient_error:
+            raise PortalError(recipient_error)
         response_time = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
         return {
             "job_id": job_id,
@@ -7738,7 +7958,7 @@ class MaintenancePortalService:
             "active_item_id": str(request_payload.get("active_item_id") or "").strip(),
             "title": title,
             "building": building,
-            "building_code": building_codes[0] if len(building_codes) == 1 else "CAMPUS",
+            "building_code": building_code,
             "building_codes": building_codes,
             "target_building": self._building_label_from_codes(building_codes),
             "specialty": specialty,
@@ -7753,8 +7973,8 @@ class MaintenancePortalService:
             "cabinet": cabinet,
             "quantity": quantity,
             "text": text,
-            "recipients": [],
-            "skip_personal_message": True,
+            "recipients": recipients,
+            "skip_personal_message": False,
             "response_time": response_time,
             "operation_id": str(request_payload.get("operation_id") or "").strip() or job_id,
         }
@@ -8001,17 +8221,21 @@ class MaintenancePortalService:
         impact: str,
         progress: str,
     ) -> str:
-        return (
-            f"【设备变更】状态：{str(status or '').strip()}\n"
-            f"【名称】{str(title or '').strip()}\n"
-            f"【等级】{str(level or '').strip()}\n"
-            f"【时间】{MaintenancePortalService._format_input_datetime(start_time)}至"
-            f"{MaintenancePortalService._format_input_datetime(end_time)}\n"
-            f"【位置】{str(location or '').strip()}\n"
-            f"【内容】{str(content or '').strip()}\n"
-            f"【原因】{str(reason or '').strip()}\n"
-            f"【影响】{str(impact or '').strip() or DEFAULT_IMPACT_TEXT}\n"
-            f"【进度】{str(progress or '').strip() or DEFAULT_PROGRESS_TEXT}"
+        return MaintenancePortalService._render_notice_text(
+            work_type=WORK_TYPE_CHANGE,
+            status=status,
+            values={
+                "title": title,
+                "level": level,
+                "time_range": MaintenancePortalService._format_notice_time_range(
+                    start_time, end_time
+                ),
+                "location": location,
+                "content": content,
+                "reason": reason,
+                "impact": str(impact or "").strip() or DEFAULT_IMPACT_TEXT,
+                "progress": str(progress or "").strip() or DEFAULT_PROGRESS_TEXT,
+            },
         )
 
     @staticmethod
@@ -8250,6 +8474,16 @@ class MaintenancePortalService:
             impact=impact,
             progress=progress,
         )
+        recipients: list[str] = []
+        skip_personal_message = True
+        if manual:
+            _, recipients, recipient_error = self._recipients_for_building_codes(
+                building_codes,
+                fallback_building=building,
+            )
+            if recipient_error:
+                raise PortalError(recipient_error)
+            skip_personal_message = False
         response_time = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
         return {
             "job_id": job_id,
@@ -8289,8 +8523,8 @@ class MaintenancePortalService:
             "impact": impact,
             "progress": progress,
             "text": text,
-            "recipients": [],
-            "skip_personal_message": True,
+            "recipients": recipients,
+            "skip_personal_message": skip_personal_message,
             "response_time": response_time,
             "operation_id": str(request_payload.get("operation_id") or "").strip()
             or job_id,
@@ -8317,34 +8551,36 @@ class MaintenancePortalService:
         discovery: str,
         symptom: str,
         solution: str,
+        spare_parts: str,
         fault_time: str,
         expected_time: str,
     ) -> str:
         progress_text = str(progress or "").strip()
         reason_text = str(reason or "").strip()
         impact_text = str(impact or "").strip()
-        sections = [
-            ("标题", title),
-            ("地点", location),
-            ("紧急程度", level),
-            ("专业", specialty),
-            ("发现故障时间", fault_time),
-            ("期望完成时间", expected_time),
-            ("维修设备", repair_device),
-            ("维修故障", repair_fault),
-            ("故障类型", fault_type),
-            ("维修方式", repair_mode),
-            ("影响范围", impact_text),
-            ("故障发现方式", discovery),
-            ("故障现象", symptom),
-            ("故障原因", reason_text),
-            ("解决方案", solution),
-            ("完成情况", progress_text),
-        ]
-        lines = [f"【设备检修】状态：{str(status or '').strip()}"]
-        for label, value in sections:
-            lines.append(f"【{label}】{str(value or '').strip()}")
-        return "\n\n".join(lines)
+        return MaintenancePortalService._render_notice_text(
+            work_type=WORK_TYPE_REPAIR,
+            status=status,
+            values={
+                "title": title,
+                "location": location,
+                "level": level,
+                "specialty": specialty,
+                "fault_time": fault_time,
+                "expected_time": expected_time,
+                "repair_device": repair_device,
+                "repair_fault": repair_fault,
+                "fault_type": fault_type,
+                "repair_mode": repair_mode,
+                "impact": impact_text,
+                "discovery": discovery,
+                "symptom": symptom,
+                "reason": reason_text,
+                "solution": solution,
+                "spare_parts": spare_parts,
+                "progress": progress_text,
+            },
+        )
 
     def prepare_repair_action(
         self, request_payload: dict[str, Any], *, job_id: str
@@ -8409,6 +8645,7 @@ class MaintenancePortalService:
                 discovery = request_text("discovery")
                 symptom = request_text("symptom")
                 solution = request_text("solution")
+                spare_parts = request_text("spare_parts")
                 fault_time = request_text("fault_time")
                 target_record_id = ""
             else:
@@ -8452,6 +8689,10 @@ class MaintenancePortalService:
                 solution = request_text(
                     "solution",
                     self._repair_first_field(fields, "解决方案", "维修方案", "后续整改措施"),
+                )
+                spare_parts = request_text(
+                    "spare_parts",
+                    self._repair_first_field(fields, "备件更换情况", "备件使用情况"),
                 )
                 source_fault_time = self._repair_first_field(
                     fields, "故障发生时间", "发现故障时间"
@@ -8567,6 +8808,9 @@ class MaintenancePortalService:
             solution = request_text("solution")
             if not solution and source_record is not None:
                 solution = self._repair_first_field(fields, "解决方案", "维修方案", "后续整改措施")
+            spare_parts = request_text("spare_parts")
+            if not spare_parts and source_record is not None:
+                spare_parts = self._repair_first_field(fields, "备件更换情况", "备件使用情况")
             fault_time = request_text("fault_time")
             if not fault_time and source_record is not None:
                 fault_time = self._repair_first_field(fields, "故障发生时间", "发现故障时间")
@@ -8626,6 +8870,7 @@ class MaintenancePortalService:
                     "discovery": discovery,
                     "symptom": symptom,
                     "solution": solution,
+                    "spare_parts": spare_parts,
                 },
             )
         building_code = (
@@ -8652,9 +8897,20 @@ class MaintenancePortalService:
             discovery=discovery,
             symptom=symptom,
             solution=solution,
+            spare_parts=spare_parts,
             fault_time=fault_time,
             expected_time=expected_time,
         )
+        recipients: list[str] = []
+        skip_personal_message = True
+        if manual:
+            _, recipients, recipient_error = self._recipients_for_building_codes(
+                building_codes,
+                fallback_building=building,
+            )
+            if recipient_error:
+                raise PortalError(recipient_error)
+            skip_personal_message = False
         response_time = now_text
         return {
             "job_id": job_id,
@@ -8705,11 +8961,12 @@ class MaintenancePortalService:
             "discovery": discovery,
             "symptom": symptom,
             "solution": solution,
+            "spare_parts": spare_parts,
             "fault_time": fault_time,
             "expected_time": expected_time,
             "text": text,
-            "recipients": [],
-            "skip_personal_message": True,
+            "recipients": recipients,
+            "skip_personal_message": skip_personal_message,
             "response_time": response_time,
             "operation_id": str(request_payload.get("operation_id") or "").strip()
             or job_id,

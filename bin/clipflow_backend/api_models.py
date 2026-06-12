@@ -212,10 +212,6 @@ class QtJobResultRequest(APIModel):
     active_item_id: str = ""
 
 
-class QtNoticeUploadRequest(APIModel):
-    pass
-
-
 ModelT = TypeVar("ModelT", bound=APIModel)
 
 

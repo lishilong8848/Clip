@@ -102,9 +102,23 @@ class _RuntimeOngoingStore:
         return [(None, None, record) for record in self._records]
 
 
+class _RuntimeCacheStore:
+    def __init__(self, fields_by_record_id):
+        self._fields_by_record_id = fields_by_record_id
+
+    def get_record_fields(self, record_id="", fields=None):
+        values = dict(self._fields_by_record_id.get(record_id, {}) or {})
+        if not fields:
+            return values
+        return {key: values[key] for key in fields if key in values}
+
+
 class _RuntimeOngoingHarness(MainWindowRuntimeMixin):
-    def __init__(self, records):
+    def __init__(self, records, cache_fields=None):
         self._records = records
+        self.cache_store = _RuntimeCacheStore(cache_fields or {})
+        self._payload_store = {}
+        self._payload_alias = {}
 
     def _active_notice_store(self):
         return _RuntimeOngoingStore(self._records)
@@ -305,6 +319,30 @@ class ActiveNoticeModelTests(unittest.TestCase):
         self.assertEqual(by_title["A楼上电"]["quantity"], "1")
         self.assertEqual(by_title["B楼轮巡"]["device"], "冷机")
         self.assertNotIn("D楼事件", by_title)
+
+    def test_runtime_ongoing_projection_uses_cached_dialog_fields(self):
+        records = [
+            {
+                "active_item_id": "aid-maint",
+                "record_id": "rid-maint",
+                "notice_type": "维保通告",
+                "text": "【维保通告】状态：开始\n\n【名称】A楼维保",
+            }
+        ]
+        cache_fields = {
+            "rid-maint": {
+                "buildings": ["A楼"],
+                "specialty": "暖通",
+                "maintenance_cycle": "每月",
+            }
+        }
+
+        ongoing = _RuntimeOngoingHarness(records, cache_fields)._collect_lan_maintenance_ongoing_notices("A")
+
+        self.assertEqual(len(ongoing), 1)
+        self.assertEqual(ongoing[0]["specialty"], "暖通")
+        self.assertEqual(ongoing[0]["maintenance_cycle"], "每月")
+        self.assertEqual(ongoing[0]["building"], "A楼")
 
     def test_model_view_mode_disables_widget_virtualization(self):
         self.assertFalse(_RecordsFlagHarness(True)._active_item_widgets_required())
