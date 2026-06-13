@@ -18,15 +18,6 @@ class ActiveCacheMixin:
         active_items = payload.get("active_items") if isinstance(payload.get("active_items"), list) else []
         self._qt_shell_clipboard_candidates = []
         self._qt_shell_dialog_sessions = []
-        history_items = payload.get("history_items") if isinstance(payload.get("history_items"), list) else []
-        history_records = []
-        for item in history_items:
-            if not isinstance(item, dict):
-                continue
-            record = item.get("payload") if isinstance(item.get("payload"), dict) else item
-            if isinstance(record, dict):
-                history_records.append(dict(record))
-        self._history_override_records = history_records
         self._is_restoring_cache = True
         try:
             if getattr(self, "_active_model_view_visible", lambda: False)():
@@ -52,8 +43,6 @@ class ActiveCacheMixin:
             self._is_restoring_cache = False
         if hasattr(self, "_sync_all_active_notice_models"):
             self._sync_all_active_notice_models()
-        if hasattr(self, "reload_history_view"):
-            self.reload_history_view()
         if hasattr(self, "_consume_qt_shell_bootstrap_state"):
             self._consume_qt_shell_bootstrap_state(payload)
 
@@ -66,24 +55,6 @@ class ActiveCacheMixin:
         return bool(info and info.get("status") == "结束")
 
     def _history_contains_record(self, data):
-        if not isinstance(data, dict) or not hasattr(self, "load_all_history"):
-            return False
-        record_id = str(data.get("record_id") or "").strip()
-        text = str(data.get("text") or "").strip()
-        try:
-            history_data = self.load_all_history()
-        except Exception:
-            return False
-        if not isinstance(history_data, list):
-            return False
-        for item in history_data:
-            if not isinstance(item, dict):
-                continue
-            history_record_id = str(item.get("record_id") or "").strip()
-            if record_id and history_record_id and history_record_id == record_id:
-                return True
-            if not record_id and text and str(item.get("text") or "").strip() == text:
-                return True
         return False
 
     def _init_active_cache_timer(self):
@@ -91,6 +62,9 @@ class ActiveCacheMixin:
         self._active_cache_last_save_at = 0.0
         self._active_cache_save_deferred = False
         self._active_cache_dirty = True
+        self._active_cache_full_replace_enabled = str(
+            os.environ.get("CLIPFLOW_ACTIVE_CACHE_FULL_REPLACE_ENABLED", "") or ""
+        ).strip().lower() in {"1", "true", "yes", "on"}
         try:
             self._active_cache_periodic_full_scan_seconds = max(
                 300.0,
@@ -108,8 +82,9 @@ class ActiveCacheMixin:
         except Exception:
             self._active_cache_periodic_full_scan_seconds = 900.0
         self.active_cache_timer = QTimer(self)
-        self.active_cache_timer.timeout.connect(self._periodic_active_cache_save)
-        self.active_cache_timer.start(30000)
+        if bool(getattr(self, "_active_cache_full_replace_enabled", False)):
+            self.active_cache_timer.timeout.connect(self._periodic_active_cache_save)
+            self.active_cache_timer.start(30000)
         self._active_cache_delayed_save_timer = QTimer(self)
         self._active_cache_delayed_save_timer.setSingleShot(True)
         self._active_cache_delayed_save_timer.timeout.connect(self.save_active_cache)
@@ -131,6 +106,8 @@ class ActiveCacheMixin:
 
     def _periodic_active_cache_save(self):
         if self._is_restoring_cache:
+            return
+        if not bool(getattr(self, "_active_cache_full_replace_enabled", False)):
             return
         mutation_queue = getattr(self, "_ui_mutation_queue", None)
         signal_queue = getattr(self, "_ui_signal_queue", None)
@@ -324,6 +301,8 @@ class ActiveCacheMixin:
         if self._is_restoring_cache:
             return
         self._mark_active_cache_dirty()
+        if not bool(getattr(self, "_active_cache_full_replace_enabled", False)):
+            return
         if int(getattr(self, "_defer_active_cache_save_count", 0) or 0) > 0:
             self._active_cache_save_deferred = True
             return
@@ -332,6 +311,12 @@ class ActiveCacheMixin:
             QTimer.singleShot(max(0, int(delay_ms or 0)), self.save_active_cache)
             return
         timer.start(max(0, int(delay_ms or 0)))
+
+    def request_active_cache_save(self, delay_ms: int = 800, *, force: bool = False):
+        if force:
+            self.save_active_cache()
+            return
+        self.schedule_active_cache_save(delay_ms)
 
     def _begin_defer_active_cache_save(self):
         self._mark_active_cache_dirty()
@@ -362,13 +347,6 @@ class ActiveCacheMixin:
             return False
         data = normalize_active_item_data(data)
         if self._is_ended_active_cache_record(data):
-            if hasattr(self, "save_to_history_file") and not self._history_contains_record(
-                data
-            ):
-                try:
-                    self.save_to_history_file(data)
-                except Exception:
-                    pass
             return True
         if "_has_unuploaded_changes" not in data and "has_unuploaded_changes" in meta:
             data["_has_unuploaded_changes"] = bool(meta.get("has_unuploaded_changes"))

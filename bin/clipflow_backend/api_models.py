@@ -54,6 +54,13 @@ class NoticeUndoApplyRequest(APIModel):
     scope: str = "ALL"
 
 
+class NoticeWorkTypeOverrideRequest(APIModel):
+    scope: str = "ALL"
+    record_id: str = ""
+    source_work_type: str = "maintenance"
+    target_work_type: str = "change"
+
+
 class PermissionRequestCreate(APIModel):
     scopes: list[str] = Field(default_factory=list)
     reason: str = ""
@@ -134,6 +141,12 @@ class MockPressureRequest(APIModel):
     scopes: list[str] | str = Field(default_factory=list)
     per_scope: int = 0
     scenario: str = "accepted"
+    include_site_photos: bool = False
+    site_photo_count: int = 1
+    site_photo_kb: int = 32
+    max_submit_average_ms: float = 300.0
+    max_total_seconds: float = 20.0
+    max_failed: int = 0
 
 
 class QtCommandRequest(APIModel):
@@ -206,6 +219,10 @@ class QtJobProgressRequest(APIModel):
 class QtJobResultRequest(APIModel):
     success: bool = False
     message: str = ""
+
+
+class JobMarkStuckFailedRequest(APIModel):
+    reason: str = "管理员手动标记卡住任务，请核对后重试。"
     record_id: str = ""
     target_record_id: str = ""
     source_record_id: str = ""

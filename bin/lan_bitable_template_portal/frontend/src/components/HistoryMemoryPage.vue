@@ -260,6 +260,7 @@
 
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from "vue";
+import { requestJson } from "../api/client";
 
 type Dict = Record<string, any>;
 
@@ -437,16 +438,7 @@ watch(activeSourceId, () => {
   showExtraFields.value = false;
 });
 
-async function api(path: string, options: RequestInit = {}): Promise<Dict> {
-  const response = await fetch(path, {
-    credentials: "same-origin",
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
-    ...options,
-  });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok || payload.ok === false) throw new Error(payload.error || `HTTP ${response.status}`);
-  return payload.data || payload;
-}
+const api = requestJson;
 
 function workTypeLabel(value: string): string {
   return workTypes.find((item) => item.value === value)?.label || "维保";
@@ -1135,5 +1127,384 @@ textarea {
   .confirm-metrics article:last-child {
     border-bottom: 0;
   }
+}
+
+/* VNET history memory skin */
+.history-memory {
+  padding: 30px 36px;
+  background:
+    linear-gradient(180deg, #f4f9ff 0, #f8fbff 260px, #eef6ff 100%);
+}
+
+.page-head,
+.scan-bar,
+.filters,
+.summary-grid,
+.match-layout,
+.notice-box,
+.message,
+.warning-list {
+  border-color: #d8e7f8;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 16px 38px rgba(22, 78, 151, 0.1);
+}
+
+.page-head {
+  padding: 22px 24px;
+}
+
+.page-head strong {
+  color: #071634;
+  font-size: 24px;
+  font-weight: 900;
+}
+
+.scan-bar,
+.filters {
+  padding: 14px;
+}
+
+.summary-grid {
+  overflow: hidden;
+}
+
+.summary-grid article {
+  padding: 16px;
+}
+
+.summary-grid strong {
+  color: #0757d7;
+  font-size: 26px;
+}
+
+.match-layout {
+  border-radius: 16px;
+  grid-template-columns: minmax(260px, 0.85fr) minmax(520px, 1.55fr) minmax(240px, 0.85fr);
+}
+
+.panel-head {
+  background: linear-gradient(180deg, #ffffff, #f8fbff);
+}
+
+.panel-head h2 {
+  color: #09204a;
+  font-weight: 900;
+}
+
+.panel-head h2::before {
+  content: "";
+  display: inline-block;
+  width: 4px;
+  height: 17px;
+  margin-right: 8px;
+  border-radius: 999px;
+  vertical-align: -3px;
+  background: linear-gradient(180deg, #0757d7, #21c6e7);
+}
+
+.source-row,
+.candidate-row,
+.confirm-detail li {
+  border-color: #d8e7f8;
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow: 0 8px 18px rgba(22, 78, 151, 0.06);
+  transition: border-color 0.14s ease, background-color 0.14s ease, box-shadow 0.14s ease;
+}
+
+.source-row:hover,
+.candidate-row:hover,
+.confirm-detail li:hover {
+  border-color: #9cc7ff;
+  background: #f5faff;
+  box-shadow: 0 12px 26px rgba(22, 78, 151, 0.1);
+}
+
+.source-row.active,
+.candidate-row.active {
+  border-color: #1678ff;
+  background: #edf6ff;
+  box-shadow: inset 4px 0 0 #1678ff, 0 12px 26px rgba(22, 120, 255, 0.12);
+}
+
+.source-row.selected {
+  box-shadow: inset 4px 0 0 #22b66b, 0 8px 18px rgba(22, 78, 151, 0.06);
+}
+
+.match-note,
+.field-summary,
+.extra-field-section,
+.check {
+  border-color: #d8e7f8;
+  background: #f7fbff;
+}
+
+.field-toggle,
+.btn,
+.icon-btn {
+  min-height: 36px;
+  border-color: #c5d9f2;
+  border-radius: 9px;
+  color: #09204a;
+  font-weight: 750;
+  transition: transform 0.12s ease, box-shadow 0.12s ease, border-color 0.12s ease;
+}
+
+.btn:hover:not(:disabled),
+.icon-btn:hover:not(:disabled),
+.field-toggle:hover:not(:disabled) {
+  border-color: #8dbbfb;
+  box-shadow: 0 8px 20px rgba(27, 101, 213, 0.12);
+  transform: translateY(-1px);
+}
+
+.btn.blue {
+  border-color: transparent;
+  background: linear-gradient(135deg, #0757d7, #1678ff);
+  box-shadow: 0 12px 24px rgba(20, 103, 226, 0.24);
+}
+
+.btn.green {
+  border-color: transparent;
+  background: linear-gradient(135deg, #16a36d, #2fd083);
+}
+
+select,
+input,
+textarea {
+  border-color: #c8dcf3;
+  border-radius: 9px;
+  background: #fbfdff;
+}
+
+select:focus,
+input:focus,
+textarea:focus {
+  border-color: #1678ff;
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(22, 120, 255, 0.12);
+}
+
+.confirm-modal {
+  border-color: #d8e7f8;
+  border-radius: 16px;
+  box-shadow: 0 30px 90px rgba(4, 43, 116, 0.26);
+}
+
+.confirm-metrics strong {
+  color: #0757d7;
+}
+
+.field-scroll {
+  max-height: calc(100vh - 330px);
+}
+
+.form-grid.compact {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-content: start;
+}
+
+.form-grid.compact label.wide {
+  grid-column: auto;
+}
+
+.form-grid.compact textarea {
+  min-height: 44px;
+  max-height: 76px;
+  overflow: auto;
+  line-height: 1.45;
+}
+
+/* Softer rounded and text polish */
+.page-head,
+.scan-bar,
+.filters,
+.summary-grid,
+.match-layout,
+.notice-box,
+.message,
+.warning-list {
+  border-radius: 20px;
+}
+
+.panel,
+.source-row,
+.candidate-row,
+.confirm-detail li,
+.match-note,
+.field-summary,
+.extra-field-section,
+.check {
+  border-radius: 18px;
+}
+
+.confirm-modal {
+  border-radius: 24px;
+}
+
+.field-toggle,
+.btn,
+.icon-btn,
+select,
+input,
+textarea {
+  border-radius: 12px;
+}
+
+.page-head strong,
+.panel-head h2,
+.source-row strong,
+.candidate-row strong,
+.summary-grid strong {
+  font-weight: 820;
+  letter-spacing: 0;
+}
+
+.source-row span,
+.candidate-row span,
+.source-row small,
+.candidate-row small,
+.page-head p {
+  color: #5f7189;
+}
+
+@media (max-width: 1180px) {
+  .match-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .panel {
+    border-right: 0;
+    border-bottom: 1px solid #e2e8f0;
+  }
+
+  .panel:last-child {
+    border-bottom: 0;
+  }
+
+  .field-scroll {
+    max-height: none;
+  }
+
+.form-grid.compact label.wide {
+  grid-column: span 2;
+}
+}
+
+/* Panorama construction-management polish */
+.history-memory {
+  padding: 28px 34px 42px;
+  background:
+    linear-gradient(180deg, #f7faff 0, #f9fbfd 280px, #eef5fc 100%),
+    radial-gradient(circle at 10% 12%, rgba(48, 128, 255, 0.1), transparent 30%);
+}
+
+.page-head,
+.scan-bar,
+.filters,
+.summary-grid,
+.match-layout,
+.notice-box,
+.message,
+.warning-list {
+  border-color: rgba(207, 224, 255, 0.94);
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 14px 34px rgba(20, 70, 138, 0.08);
+}
+
+.panel,
+.source-row,
+.candidate-row,
+.confirm-detail li,
+.match-note,
+.field-summary,
+.extra-field-section,
+.check {
+  border-color: rgba(216, 231, 248, 0.95);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.96);
+}
+
+.source-row.active,
+.candidate-row.active {
+  border-color: #3080ff;
+  background: #eff6ff;
+  box-shadow: inset 4px 0 0 #3080ff, 0 12px 28px rgba(21, 93, 252, 0.12);
+}
+
+.btn.blue {
+  background: linear-gradient(135deg, #155dfc, #3080ff);
+  box-shadow: 0 12px 24px rgba(21, 93, 252, 0.22);
+}
+
+.btn,
+.icon-btn,
+.field-toggle,
+select,
+input,
+textarea {
+  border-radius: 14px;
+}
+
+/* Panorama construction-management history-memory skin */
+.history-memory {
+  background: linear-gradient(180deg, #eef4ff 0, #f8fbff 44%, #eef5ff 100%);
+}
+
+.page-head,
+.scan-bar,
+.filters,
+.summary-grid,
+.match-layout,
+.notice-box,
+.message,
+.warning-list,
+.panel,
+.source-row,
+.candidate-row,
+.confirm-detail li,
+.match-note,
+.field-summary,
+.extra-field-section,
+.check {
+  border-color: #d8e5f7;
+  background: rgba(255, 255, 255, 0.86);
+  box-shadow: 0 10px 24px rgba(0, 47, 135, 0.07);
+}
+
+.source-row.active,
+.candidate-row.active {
+  border-color: #005bff;
+  background: #eff6ff;
+  box-shadow: inset 4px 0 0 #005bff, 0 12px 24px rgba(0, 91, 255, 0.12);
+}
+
+.btn.blue {
+  background: linear-gradient(135deg, #1e63ff, #1554df);
+  box-shadow: 0 10px 22px rgba(30, 99, 255, 0.22);
+}
+
+.btn.blue:hover:not(:disabled) {
+  background: #1554df;
+}
+
+.btn.green {
+  background: #059669;
+}
+
+select,
+input,
+textarea {
+  border-color: #d8e5f7;
+  background: rgba(255, 255, 255, 0.9);
+}
+
+select:focus,
+input:focus,
+textarea:focus {
+  border-color: #005bff;
+  box-shadow: 0 0 0 3px rgba(0, 91, 255, 0.14);
 }
 </style>

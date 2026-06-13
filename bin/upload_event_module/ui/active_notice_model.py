@@ -42,6 +42,9 @@ class ActiveNoticeModel(QAbstractListModel):
         super().__init__(parent)
         self._records: list[dict[str, Any]] = []
         self._identity_to_row: dict[str, int] = {}
+        self._record_id_to_row: dict[str, int] = {}
+        self._source_record_id_to_row: dict[str, int] = {}
+        self._active_item_id_to_row: dict[str, int] = {}
 
     @staticmethod
     def identity_for_record(record: dict[str, Any] | None) -> str:
@@ -224,33 +227,19 @@ class ActiveNoticeModel(QAbstractListModel):
         record_id = str(record_id or "").strip()
         if not record_id:
             return -1
-        for row, record in enumerate(self._records):
-            target_id = canonical_target_record_id(record)
-            if target_id:
-                matched = target_id == record_id
-            else:
-                matched = str(record.get("record_id") or "").strip() == record_id
-            if matched:
-                return row
-        return -1
+        return int(self._record_id_to_row.get(record_id, -1))
 
     def row_for_source_record_id(self, source_record_id: str) -> int:
         source_record_id = str(source_record_id or "").strip()
         if not source_record_id:
             return -1
-        for row, record in enumerate(self._records):
-            if canonical_source_record_id(record) == source_record_id:
-                return row
-        return -1
+        return int(self._source_record_id_to_row.get(source_record_id, -1))
 
     def row_for_active_item_id(self, active_item_id: str) -> int:
         active_item_id = str(active_item_id or "").strip()
         if not active_item_id:
             return -1
-        for row, record in enumerate(self._records):
-            if str(record.get("active_item_id") or "").strip() == active_item_id:
-                return row
-        return -1
+        return int(self._active_item_id_to_row.get(active_item_id, -1))
 
     def record_by_record_id(self, record_id: str) -> dict[str, Any] | None:
         row = self.row_for_record_id(record_id)
@@ -285,6 +274,7 @@ class ActiveNoticeModel(QAbstractListModel):
         normalized = dict(record)
         if current_row is not None and 0 <= current_row < len(self._records):
             self._records[current_row] = normalized
+            self._rebuild_index()
             model_index = self.index(current_row, 0)
             self.dataChanged.emit(model_index, model_index, [])
             if row is not None and row != current_row:
@@ -326,10 +316,24 @@ class ActiveNoticeModel(QAbstractListModel):
 
     def _rebuild_index(self) -> None:
         self._identity_to_row = {}
+        self._record_id_to_row = {}
+        self._source_record_id_to_row = {}
+        self._active_item_id_to_row = {}
         for row, record in enumerate(self._records):
             identity = self.identity_for_record(record)
             if identity:
                 self._identity_to_row[identity] = row
+            target_id = canonical_target_record_id(record)
+            raw_record_id = str(record.get("record_id") or "").strip()
+            record_id = target_id or raw_record_id
+            if record_id:
+                self._record_id_to_row.setdefault(record_id, row)
+            source_record_id = canonical_source_record_id(record)
+            if source_record_id:
+                self._source_record_id_to_row.setdefault(source_record_id, row)
+            active_item_id = str(record.get("active_item_id") or "").strip()
+            if active_item_id:
+                self._active_item_id_to_row.setdefault(active_item_id, row)
 
 
 class ActiveNoticeListRoute:

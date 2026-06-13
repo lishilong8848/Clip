@@ -193,35 +193,11 @@ class ActiveCacheStore:
         with self._lock:
             return self._migrate_legacy_cache_file_unlocked()
 
-    def _payload_from_qt_items_unlocked(self) -> dict:
-        payload = self._default_payload()
-        try:
-            stored = self._state_store.get_document(
-                self._STATE_NAMESPACE, self._STATE_KEY
-            )
-        except Exception:
-            stored = None
-        if isinstance(stored, dict) and isinstance(stored.get("clipboard_queue"), list):
-            payload["clipboard_queue"] = list(stored.get("clipboard_queue") or [])
-        try:
-            qt_items = self._state_store.list_qt_active_items()
-        except Exception:
-            qt_items = []
-        for item in qt_items:
-            if not isinstance(item, dict):
-                continue
-            section = str(item.get("section") or "other").strip()
-            if section not in self._SECTIONS:
-                section = "other"
-            data = item.get("payload")
-            if isinstance(data, dict):
-                payload[section].append({"data": dict(data)})
-        return self._normalize_payload(payload)
-
     def _sync_legacy_document_from_qt_items_unlocked(self) -> None:
-        payload = self._payload_from_qt_items_unlocked()
-        payload["saved_at"] = int(time.time())
-        self._state_store.put_document(self._STATE_NAMESPACE, self._STATE_KEY, payload)
+        # Runtime state now lives in qt_active_items. Keep this method as a
+        # no-op for old call sites while avoiding a second active-cache state
+        # source and unnecessary SQLite document writes.
+        return None
 
     def load_payload(self) -> dict:
         with self._lock:
@@ -235,14 +211,7 @@ class ActiveCacheStore:
         except Exception as exc:
             log_warning(f"Qt active items 规范表写入失败: {exc}")
             return False
-        try:
-            self._state_store.put_document(
-                self._STATE_NAMESPACE, self._STATE_KEY, normalized
-            )
-            return True
-        except Exception as exc:
-            log_warning(f"Qt active cache 兼容文档写入失败: {exc}")
-            return False
+        return True
 
     def save_payload(self, payload: dict) -> bool:
         with self._lock:
@@ -390,8 +359,6 @@ class ActiveCacheStore:
                         sort_order=int(item.get("sort_order") or 0),
                         origin=str(item.get("origin") or ""),
                     )
-                    if saved:
-                        self._sync_legacy_document_from_qt_items_unlocked()
                     return saved
                 if len(matches) > 1:
                     return False
@@ -439,8 +406,6 @@ class ActiveCacheStore:
                     section=target_section,
                     origin="portal" if bool(normalized.get("lan_created_from_portal")) else "qt",
                 )
-                if saved:
-                    self._sync_legacy_document_from_qt_items_unlocked()
                 return saved
             except Exception:
                 return False
@@ -456,8 +421,6 @@ class ActiveCacheStore:
                     active_item_id=active_item_id,
                     record_id=record_id,
                 )
-                if deleted:
-                    self._sync_legacy_document_from_qt_items_unlocked()
                 return deleted
             except Exception:
                 return False
@@ -488,7 +451,6 @@ class ActiveCacheStore:
                     )
                     changed = True
                 if changed:
-                    self._sync_legacy_document_from_qt_items_unlocked()
                     return True
             except Exception:
                 pass

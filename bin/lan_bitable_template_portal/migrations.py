@@ -21,6 +21,8 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
     (12, "source_snapshot_manifest"),
     (13, "notice_undo_actions"),
     (14, "notice_identity_map"),
+    (15, "notice_work_type_overrides"),
+    (16, "notice_upload_attachments"),
 )
 
 

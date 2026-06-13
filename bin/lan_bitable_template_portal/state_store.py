@@ -49,7 +49,7 @@ class LanPortalStateStore:
     are migration inputs only and are never deleted or overwritten here.
     """
 
-    SCHEMA_VERSION = 14
+    SCHEMA_VERSION = 16
     SOURCE_SCOPE_TABLES = {
         "110": "source_records_110",
         "A": "source_records_a",
@@ -86,6 +86,8 @@ class LanPortalStateStore:
         "source_snapshot_records",
         "notice_undo_actions",
         "notice_identity_map",
+        "notice_work_type_overrides",
+        "notice_upload_attachments",
         "schema_migrations",
     ]
     REQUIRED_INDEXES = [
@@ -97,6 +99,9 @@ class LanPortalStateStore:
         "idx_notice_identity_active",
         "idx_notice_identity_source",
         "idx_notice_identity_target",
+        "idx_notice_work_type_overrides_lookup",
+        "idx_notice_upload_attachments_expiry",
+        "idx_notice_upload_attachments_open",
         "idx_permission_requests_open_status",
     ]
 
@@ -405,6 +410,34 @@ class LanPortalStateStore:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS notice_upload_attachments (
+                upload_id TEXT PRIMARY KEY,
+                open_id TEXT,
+                file_name TEXT,
+                mime_type TEXT,
+                size INTEGER NOT NULL,
+                content BLOB NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                expires_at REAL NOT NULL,
+                used_at REAL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_notice_upload_attachments_expiry
+            ON notice_upload_attachments(expires_at)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_notice_upload_attachments_open
+            ON notice_upload_attachments(open_id, created_at)
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS handover_links (
                 scope TEXT PRIMARY KEY,
                 url TEXT,
@@ -689,6 +722,28 @@ class LanPortalStateStore:
             """
             CREATE INDEX IF NOT EXISTS idx_notice_identity_target
             ON notice_identity_map(target_record_id, work_type, deleted_at)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS notice_work_type_overrides (
+                override_key TEXT PRIMARY KEY,
+                source_work_type TEXT NOT NULL,
+                target_work_type TEXT NOT NULL,
+                normalized_title TEXT NOT NULL,
+                title TEXT,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                updated_by TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_notice_work_type_overrides_lookup
+            ON notice_work_type_overrides(source_work_type, normalized_title, enabled)
             """
         )
         conn.execute(
@@ -1245,6 +1300,171 @@ class LanPortalStateStore:
             )
         return documents
 
+    def put_notice_upload_attachment(
+        self,
+        *,
+        open_id: str = "",
+        file_name: str = "",
+        mime_type: str = "",
+        content: bytes = b"",
+        ttl_seconds: int = 86400,
+        max_pending_bytes: int | None = None,
+    ) -> dict[str, Any]:
+        upload_id = uuid.uuid4().hex
+        now = time.time()
+        expires_at = now + max(60, int(ttl_seconds or 86400))
+        content_bytes = bytes(content or b"")
+        payload = {
+            "upload_id": upload_id,
+            "file_name": self._text(file_name) or "site_photo.png",
+            "mime_type": self._text(mime_type) or "application/octet-stream",
+            "size": len(content_bytes),
+            "created_at": now,
+            "expires_at": expires_at,
+        }
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                if max_pending_bytes is not None and int(max_pending_bytes or 0) > 0:
+                    row = conn.execute(
+                        """
+                        SELECT COALESCE(SUM(size), 0) AS pending_bytes
+                        FROM notice_upload_attachments
+                        WHERE expires_at >= ? AND used_at IS NULL
+                        """,
+                        (now,),
+                    ).fetchone()
+                    pending_bytes = int((row or {})["pending_bytes"] or 0)
+                    if pending_bytes + int(payload["size"]) > int(max_pending_bytes):
+                        raise ValueError("现场照片暂存空间已满，请稍后重试或联系管理员清理。")
+                conn.execute(
+                    """
+                    INSERT INTO notice_upload_attachments(
+                        upload_id, open_id, file_name, mime_type, size,
+                        content, payload_json, created_at, expires_at, used_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                    """,
+                    (
+                        upload_id,
+                        self._text(open_id),
+                        payload["file_name"],
+                        payload["mime_type"],
+                        int(payload["size"]),
+                        content_bytes,
+                        self._json(payload),
+                        now,
+                        expires_at,
+                    ),
+                )
+                conn.commit()
+        return payload
+
+    def get_notice_upload_attachment(self, upload_id: str) -> dict[str, Any] | None:
+        upload_id = self._text(upload_id)
+        if not upload_id:
+            return None
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    """
+                    SELECT upload_id, open_id, file_name, mime_type, size,
+                           content, payload_json, created_at, expires_at, used_at
+                    FROM notice_upload_attachments
+                    WHERE upload_id = ?
+                    """,
+                    (upload_id,),
+                ).fetchone()
+                if not row:
+                    return None
+                if float(row["expires_at"] or 0) < time.time():
+                    return None
+                payload = self._loads(str(row["payload_json"] or ""), {})
+                if not isinstance(payload, dict):
+                    payload = {}
+                payload.update(
+                    {
+                        "upload_id": str(row["upload_id"] or ""),
+                        "open_id": str(row["open_id"] or ""),
+                        "file_name": str(row["file_name"] or ""),
+                        "mime_type": str(row["mime_type"] or ""),
+                        "size": int(row["size"] or 0),
+                        "content": bytes(row["content"] or b""),
+                        "created_at": float(row["created_at"] or 0),
+                        "expires_at": float(row["expires_at"] or 0),
+                        "used_at": float(row["used_at"] or 0) if row["used_at"] else None,
+                    }
+                )
+                return payload
+
+    def mark_notice_upload_attachment_used(self, upload_id: str) -> bool:
+        upload_id = self._text(upload_id)
+        if not upload_id:
+            return False
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                cursor = conn.execute(
+                    "UPDATE notice_upload_attachments SET used_at = ? WHERE upload_id = ?",
+                    (time.time(), upload_id),
+                )
+                conn.commit()
+                return int(cursor.rowcount or 0) > 0
+
+    def cleanup_notice_upload_attachments(
+        self, *, now: float | None = None, used_grace_seconds: int = 3600
+    ) -> int:
+        cutoff = float(now if now is not None else time.time())
+        used_cutoff = cutoff - max(60, int(used_grace_seconds or 3600))
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                cursor = conn.execute(
+                    """
+                    DELETE FROM notice_upload_attachments
+                    WHERE expires_at < ?
+                       OR (used_at IS NOT NULL AND used_at < ?)
+                    """,
+                    (cutoff, used_cutoff),
+                )
+                deleted = int(cursor.rowcount or 0)
+                conn.commit()
+                return deleted
+
+    def notice_upload_attachment_stats(self) -> dict[str, Any]:
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    """
+                    SELECT COUNT(*) AS total,
+                           COALESCE(SUM(size), 0) AS total_bytes,
+                           SUM(CASE WHEN expires_at < ? THEN 1 ELSE 0 END) AS expired,
+                           SUM(CASE WHEN used_at IS NOT NULL THEN 1 ELSE 0 END) AS used,
+                           MIN(created_at) AS oldest_created_at,
+                           MAX(created_at) AS newest_created_at
+                    FROM notice_upload_attachments
+                    """,
+                    (now,),
+                ).fetchone()
+        total = int((row or {})["total"] or 0) if row else 0
+        used = int((row or {})["used"] or 0) if row else 0
+        expired = int((row or {})["expired"] or 0) if row else 0
+        return {
+            "total": total,
+            "pending": max(0, total - used - expired),
+            "used": used,
+            "expired": expired,
+            "total_bytes": int((row or {})["total_bytes"] or 0) if row else 0,
+            "oldest_created_at": float((row or {})["oldest_created_at"] or 0) if row else 0.0,
+            "newest_created_at": float((row or {})["newest_created_at"] or 0) if row else 0.0,
+            "checked_at": now,
+        }
+
     def _identity_for_item(self, item: dict[str, Any]) -> str:
         item = normalize_notice_identity_payload(item)
         active_item_id = self._text(item.get("active_item_id"))
@@ -1402,6 +1622,47 @@ class LanPortalStateStore:
             "snapshot_id": meta.get("ongoing_snapshot_id", ""),
             "count": len(items),
             "path": os.fspath(self.db_path),
+        }
+
+    def get_ongoing_snapshot_meta(self) -> dict[str, Any]:
+        if not self.db_path.exists():
+            return {
+                "exists": False,
+                "updated_at": 0.0,
+                "snapshot_id": "",
+                "count": 0,
+                "hash": "",
+            }
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                rows = conn.execute(
+                    """
+                    SELECT key, value
+                    FROM meta
+                    WHERE key IN (
+                        'ongoing_snapshot_at',
+                        'ongoing_snapshot_id',
+                        'ongoing_snapshot_count',
+                        'ongoing_snapshot_hash'
+                    )
+                    """
+                ).fetchall()
+        meta = {str(row["key"]): str(row["value"]) for row in rows}
+        try:
+            updated_at = float(meta.get("ongoing_snapshot_at") or 0)
+        except Exception:
+            updated_at = 0.0
+        try:
+            count = int(float(meta.get("ongoing_snapshot_count") or 0))
+        except Exception:
+            count = 0
+        return {
+            "exists": "ongoing_snapshot_at" in meta,
+            "updated_at": updated_at,
+            "snapshot_id": meta.get("ongoing_snapshot_id", ""),
+            "count": count,
+            "hash": meta.get("ongoing_snapshot_hash", ""),
         }
 
     def replace_source_scope_snapshot(
@@ -1915,6 +2176,81 @@ class LanPortalStateStore:
             "manifest_count": int(total["c"] or 0) if total else 0,
         }
 
+    def active_source_snapshot_meta(self) -> dict[str, Any]:
+        if not self.db_path.exists():
+            return {"snapshot_id": "", "updated_at": 0.0}
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                rows = conn.execute(
+                    """
+                    SELECT key, value
+                    FROM meta
+                    WHERE key IN (
+                        'active_source_snapshot_id',
+                        'active_source_snapshot_at'
+                    )
+                    """
+                ).fetchall()
+        meta = {str(row["key"]): str(row["value"]) for row in rows}
+        try:
+            updated_at = float(meta.get("active_source_snapshot_at") or 0)
+        except Exception:
+            updated_at = 0.0
+        return {
+            "snapshot_id": meta.get("active_source_snapshot_id", ""),
+            "updated_at": updated_at,
+        }
+
+    def source_snapshot_work_type_stats(self) -> dict[str, Any]:
+        if not self.db_path.exists():
+            return {}
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                active_row = conn.execute(
+                    "SELECT value FROM meta WHERE key = 'active_source_snapshot_id'"
+                ).fetchone()
+                active_snapshot_id = (
+                    str(active_row["value"] or "").strip() if active_row else ""
+                )
+                if not active_snapshot_id:
+                    return {}
+                rows = conn.execute(
+                    """
+                    SELECT scope, record_kind, COALESCE(NULLIF(work_type, ''), 'unknown') AS work_type,
+                           COUNT(*) AS count
+                    FROM source_snapshot_records
+                    WHERE snapshot_id = ?
+                    GROUP BY scope, record_kind, COALESCE(NULLIF(work_type, ''), 'unknown')
+                    ORDER BY scope, record_kind, work_type
+                    """,
+                    (active_snapshot_id,),
+                ).fetchall()
+        scopes: dict[str, dict[str, Any]] = {}
+        totals: dict[str, int] = {}
+        for row in rows:
+            scope = str(row["scope"] or "")
+            record_kind = str(row["record_kind"] or "")
+            work_type = str(row["work_type"] or "unknown")
+            count = int(row["count"] or 0)
+            scope_payload = scopes.setdefault(scope, {"records": {}, "zhihang_records": {}, "total": 0})
+            if record_kind == "zhihang":
+                bucket_name = "zhihang_records"
+            else:
+                bucket_name = "records"
+            bucket = scope_payload.setdefault(bucket_name, {})
+            bucket[work_type] = int(bucket.get(work_type) or 0) + count
+            scope_payload["total"] = int(scope_payload.get("total") or 0) + count
+            totals[work_type] = int(totals.get(work_type) or 0) + count
+        return {
+            "snapshot_id": active_snapshot_id,
+            "scopes": scopes,
+            "totals": totals,
+            "scope_count": len(scopes),
+            "checked_at": time.time(),
+        }
+
     def cleanup_source_snapshots(
         self, *, keep_success: int = 3, keep_failed: int = 5
     ) -> dict[str, int]:
@@ -2418,6 +2754,176 @@ class LanPortalStateStore:
             }
             for row in rows
         ]
+
+    def upsert_work_type_override(
+        self,
+        *,
+        source_work_type: str,
+        normalized_title: str,
+        target_work_type: str,
+        title: str = "",
+        payload: dict[str, Any] | None = None,
+        updated_by: str = "",
+    ) -> dict[str, Any]:
+        source_work_type = self._text(source_work_type) or "maintenance"
+        target_work_type = self._text(target_work_type) or source_work_type
+        normalized_title = self._text(normalized_title)
+        if not normalized_title:
+            raise ValueError("normalized_title is required")
+        override_key = f"{source_work_type}:{normalized_title}"
+        now = time.time()
+        normalized_payload = dict(payload or {})
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                existing = conn.execute(
+                    "SELECT created_at FROM notice_work_type_overrides WHERE override_key = ?",
+                    (override_key,),
+                ).fetchone()
+                created_at = float(existing["created_at"]) if existing else now
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO notice_work_type_overrides(
+                        override_key, source_work_type, target_work_type,
+                        normalized_title, title, payload_json, enabled,
+                        updated_by, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+                    """,
+                    (
+                        override_key,
+                        source_work_type,
+                        target_work_type,
+                        normalized_title,
+                        self._text(title),
+                        self._json(normalized_payload),
+                        self._text(updated_by),
+                        created_at,
+                        now,
+                    ),
+                )
+                conn.commit()
+        return {
+            "override_key": override_key,
+            "source_work_type": source_work_type,
+            "target_work_type": target_work_type,
+            "normalized_title": normalized_title,
+            "title": self._text(title),
+            "payload": normalized_payload,
+            "enabled": True,
+            "updated_by": self._text(updated_by),
+            "created_at": created_at,
+            "updated_at": now,
+        }
+
+    def disable_work_type_override(
+        self,
+        *,
+        source_work_type: str,
+        normalized_title: str,
+        updated_by: str = "",
+    ) -> bool:
+        source_work_type = self._text(source_work_type) or "maintenance"
+        normalized_title = self._text(normalized_title)
+        if not normalized_title:
+            return False
+        override_key = f"{source_work_type}:{normalized_title}"
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                cur = conn.execute(
+                    """
+                    UPDATE notice_work_type_overrides
+                    SET enabled = 0, updated_by = ?, updated_at = ?
+                    WHERE override_key = ? AND enabled = 1
+                    """,
+                    (self._text(updated_by), now, override_key),
+                )
+                conn.commit()
+                return bool(cur.rowcount)
+
+    def get_work_type_override(
+        self, *, source_work_type: str, normalized_title: str
+    ) -> dict[str, Any] | None:
+        source_work_type = self._text(source_work_type) or "maintenance"
+        normalized_title = self._text(normalized_title)
+        if not normalized_title or not self.db_path.exists():
+            return None
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    """
+                    SELECT *
+                    FROM notice_work_type_overrides
+                    WHERE source_work_type = ?
+                      AND normalized_title = ?
+                      AND enabled = 1
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                    """,
+                    (source_work_type, normalized_title),
+                ).fetchone()
+        if not row:
+            return None
+        payload = self._loads(str(row["payload_json"] or ""), {})
+        return {
+            "override_key": str(row["override_key"] or ""),
+            "source_work_type": str(row["source_work_type"] or ""),
+            "target_work_type": str(row["target_work_type"] or ""),
+            "normalized_title": str(row["normalized_title"] or ""),
+            "title": str(row["title"] or ""),
+            "payload": payload if isinstance(payload, dict) else {},
+            "enabled": bool(row["enabled"]),
+            "updated_by": str(row["updated_by"] or ""),
+            "created_at": float(row["created_at"] or 0),
+            "updated_at": float(row["updated_at"] or 0),
+        }
+
+    def list_work_type_overrides(
+        self, *, source_work_type: str = "", enabled_only: bool = True
+    ) -> list[dict[str, Any]]:
+        source_work_type = self._text(source_work_type)
+        if not self.db_path.exists():
+            return []
+        clauses = []
+        params: list[Any] = []
+        if source_work_type:
+            clauses.append("source_work_type = ?")
+            params.append(source_work_type)
+        if enabled_only:
+            clauses.append("enabled = 1")
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                rows = conn.execute(
+                    f"""
+                    SELECT *
+                    FROM notice_work_type_overrides
+                    {where}
+                    ORDER BY updated_at DESC
+                    """,
+                    params,
+                ).fetchall()
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            payload = self._loads(str(row["payload_json"] or ""), {})
+            items.append(
+                {
+                    "override_key": str(row["override_key"] or ""),
+                    "source_work_type": str(row["source_work_type"] or ""),
+                    "target_work_type": str(row["target_work_type"] or ""),
+                    "normalized_title": str(row["normalized_title"] or ""),
+                    "title": str(row["title"] or ""),
+                    "payload": payload if isinstance(payload, dict) else {},
+                    "enabled": bool(row["enabled"]),
+                    "updated_by": str(row["updated_by"] or ""),
+                    "created_at": float(row["created_at"] or 0),
+                    "updated_at": float(row["updated_at"] or 0),
+                }
+            )
+        return items
 
     def _qt_active_item_key(self, payload: dict[str, Any], fallback: str = "") -> str:
         return (
@@ -3072,7 +3578,18 @@ class LanPortalStateStore:
                 active_item_id = self._qt_active_item_key(normalized)
                 if not active_item_id:
                     continue
+                if active_item_id in seen:
+                    seed = f"{section}:{sort_order}:{active_item_id}"
+                    active_item_id = f"legacy-{uuid.uuid5(uuid.NAMESPACE_URL, seed).hex}"
+                    suffix = 1
+                    while active_item_id in seen:
+                        suffix += 1
+                        active_item_id = (
+                            f"legacy-{uuid.uuid5(uuid.NAMESPACE_URL, seed + ':' + str(suffix)).hex}"
+                        )
                 normalized.setdefault("active_item_id", active_item_id)
+                if self._text(normalized.get("active_item_id")) != active_item_id:
+                    normalized["active_item_id"] = active_item_id
                 seen.add(active_item_id)
                 notice_type = self._text(normalized.get("notice_type"))
                 origin = self._text(normalized.get("origin"))
@@ -3173,6 +3690,27 @@ class LanPortalStateStore:
                 for row in type_rows
             },
             "checked_at": time.time(),
+        }
+
+    def qt_active_items_meta(self) -> dict[str, Any]:
+        if not self.db_path.exists():
+            return {"active": 0, "deleted": 0, "updated_at": 0.0}
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    """
+                    SELECT
+                        SUM(CASE WHEN deleted_at IS NULL THEN 1 ELSE 0 END) AS active_count,
+                        SUM(CASE WHEN deleted_at IS NULL THEN 0 ELSE 1 END) AS deleted_count,
+                        MAX(updated_at) AS max_updated_at
+                    FROM qt_active_items
+                    """
+                ).fetchone()
+        return {
+            "active": int(row["active_count"] or 0) if row else 0,
+            "deleted": int(row["deleted_count"] or 0) if row else 0,
+            "updated_at": float(row["max_updated_at"] or 0) if row else 0.0,
         }
 
     def upsert_clipboard_candidate(
@@ -3302,6 +3840,57 @@ class LanPortalStateStore:
                 )
                 conn.commit()
                 return bool(cursor.rowcount)
+
+    def cleanup_clipboard_candidates(
+        self,
+        *,
+        done_retention_seconds: int = 3 * 24 * 3600,
+        pending_retention_seconds: int = 7 * 24 * 3600,
+        max_delete: int = 1000,
+    ) -> dict[str, int]:
+        done_retention_seconds = max(60, int(done_retention_seconds or 0))
+        pending_retention_seconds = max(60, int(pending_retention_seconds or 0))
+        max_delete = max(1, min(int(max_delete or 1000), 5000))
+        now = time.time()
+        removed_terminal = 0
+        removed_pending = 0
+        terminal_statuses = {"done", "failed", "cancelled", "ignored", "skipped"}
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                rows = conn.execute(
+                    """
+                    SELECT candidate_id, status, updated_at
+                    FROM clipboard_candidates
+                    ORDER BY updated_at ASC
+                    LIMIT ?
+                    """,
+                    (max_delete,),
+                ).fetchall()
+                for row in rows:
+                    status = self._text(row["status"])
+                    updated_at = float(row["updated_at"] or 0)
+                    retention = (
+                        done_retention_seconds
+                        if status in terminal_statuses
+                        else pending_retention_seconds
+                    )
+                    if updated_at and now - updated_at < retention:
+                        continue
+                    conn.execute(
+                        "DELETE FROM clipboard_candidates WHERE candidate_id = ?",
+                        (str(row["candidate_id"] or ""),),
+                    )
+                    if status in terminal_statuses:
+                        removed_terminal += 1
+                    else:
+                        removed_pending += 1
+                conn.commit()
+        return {
+            "removed_terminal": removed_terminal,
+            "removed_pending": removed_pending,
+            "removed_total": removed_terminal + removed_pending,
+        }
 
     def upsert_dialog_session(
         self,
@@ -3453,6 +4042,57 @@ class LanPortalStateStore:
                 )
                 conn.commit()
                 return bool(cursor.rowcount)
+
+    def cleanup_dialog_sessions(
+        self,
+        *,
+        done_retention_seconds: int = 3 * 24 * 3600,
+        pending_retention_seconds: int = 7 * 24 * 3600,
+        max_delete: int = 1000,
+    ) -> dict[str, int]:
+        done_retention_seconds = max(60, int(done_retention_seconds or 0))
+        pending_retention_seconds = max(60, int(pending_retention_seconds or 0))
+        max_delete = max(1, min(int(max_delete or 1000), 5000))
+        now = time.time()
+        removed_terminal = 0
+        removed_pending = 0
+        terminal_statuses = {"completed", "done", "failed", "cancelled", "expired"}
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                rows = conn.execute(
+                    """
+                    SELECT session_id, status, updated_at
+                    FROM dialog_sessions
+                    ORDER BY updated_at ASC
+                    LIMIT ?
+                    """,
+                    (max_delete,),
+                ).fetchall()
+                for row in rows:
+                    status = self._text(row["status"])
+                    updated_at = float(row["updated_at"] or 0)
+                    retention = (
+                        done_retention_seconds
+                        if status in terminal_statuses
+                        else pending_retention_seconds
+                    )
+                    if updated_at and now - updated_at < retention:
+                        continue
+                    conn.execute(
+                        "DELETE FROM dialog_sessions WHERE session_id = ?",
+                        (str(row["session_id"] or ""),),
+                    )
+                    if status in terminal_statuses:
+                        removed_terminal += 1
+                    else:
+                        removed_pending += 1
+                conn.commit()
+        return {
+            "removed_terminal": removed_terminal,
+            "removed_pending": removed_pending,
+            "removed_total": removed_terminal + removed_pending,
+        }
 
     def get_settings(self) -> dict[str, Any] | None:
         if not self.db_path.exists():
@@ -3946,6 +4586,7 @@ class LanPortalStateStore:
                     "source_records_all",
                     "source_snapshot_manifest",
                     "source_snapshot_records",
+                    "notice_upload_attachments",
                 ):
                     try:
                         row = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
@@ -4422,6 +5063,103 @@ class LanPortalStateStore:
                 }
             )
         return leased
+
+    def list_runtime_queue_items(
+        self,
+        queue_name: str,
+        *,
+        statuses: tuple[str, ...] | list[str] = ("queued",),
+        due_only: bool = False,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        queue_name = self._text(queue_name)
+        if not queue_name:
+            return []
+        normalized_statuses = [
+            self._text(status)
+            for status in (statuses or [])
+            if self._text(status)
+        ]
+        if not normalized_statuses:
+            return []
+        limit = max(1, min(int(limit or 100), 500))
+        placeholders = ", ".join("?" for _ in normalized_statuses)
+        params: list[Any] = [queue_name, *normalized_statuses]
+        due_clause = ""
+        if due_only:
+            due_clause = " AND available_at <= ?"
+            params.append(time.time())
+        params.append(limit)
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                rows = conn.execute(
+                    f"""
+                    SELECT queue_name, job_id, status, available_at, lease_until,
+                           attempts, last_error, payload_json, created_at, updated_at
+                    FROM runtime_task_queue
+                    WHERE queue_name = ?
+                      AND status IN ({placeholders})
+                      {due_clause}
+                    ORDER BY available_at ASC, updated_at ASC
+                    LIMIT ?
+                    """,
+                    tuple(params),
+                ).fetchall()
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            payload = self._loads(str(row["payload_json"] or ""), {})
+            items.append(
+                {
+                    "queue_name": str(row["queue_name"] or ""),
+                    "job_id": str(row["job_id"] or ""),
+                    "status": str(row["status"] or ""),
+                    "available_at": float(row["available_at"] or 0),
+                    "lease_until": float(row["lease_until"] or 0),
+                    "attempts": int(row["attempts"] or 0),
+                    "last_error": str(row["last_error"] or ""),
+                    "payload": payload if isinstance(payload, dict) else {},
+                    "created_at": float(row["created_at"] or 0),
+                    "updated_at": float(row["updated_at"] or 0),
+                }
+            )
+        return items
+
+    def lease_runtime_queue_item(
+        self,
+        queue_name: str,
+        job_id: str,
+        *,
+        lease_seconds: float = 30.0,
+    ) -> bool:
+        queue_name = self._text(queue_name)
+        job_id = self._text(job_id)
+        if not queue_name or not job_id:
+            return False
+        now = time.time()
+        lease_until = now + max(1.0, float(lease_seconds or 30.0))
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                cursor = conn.execute(
+                    """
+                    UPDATE runtime_task_queue
+                    SET status = 'processing',
+                        lease_until = ?,
+                        attempts = attempts + 1,
+                        updated_at = ?
+                    WHERE queue_name = ?
+                      AND job_id = ?
+                      AND (
+                        (status = 'queued' AND available_at <= ?)
+                        OR (status = 'processing' AND lease_until > 0 AND lease_until <= ?)
+                      )
+                    """,
+                    (lease_until, now, queue_name, job_id, now, now),
+                )
+                conn.commit()
+                return bool(cursor.rowcount)
 
     def requeue_runtime_queue_item(
         self,

@@ -207,6 +207,22 @@ class StreamLogger:
         self.level = level
         self.logger = logging.getLogger("Console")
 
+    @staticmethod
+    def _should_log_text(text: str) -> bool:
+        if not text:
+            return False
+        # unittest writes progress markers to stderr. Logging each marker as
+        # ERROR creates noisy logs and unnecessary disk IO without diagnostic value.
+        if text in {".", "E", "F", "s", "S", "x", "X"}:
+            return False
+        if text == "OK":
+            return False
+        if text.startswith("Ran ") and " test" in text and " in " in text:
+            return False
+        if set(text) <= {"-", "="} and len(text) >= 20:
+            return False
+        return True
+
     def write(self, message):
         if not message:
             return
@@ -217,7 +233,7 @@ class StreamLogger:
             except Exception:
                 pass
         text = message.strip()
-        if text:
+        if self._should_log_text(text):
             try:
                 self.logger.log(self.level, text)
             except Exception:

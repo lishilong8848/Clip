@@ -5,7 +5,7 @@
         <img class="brand-logo" :src="brandLogoSrc" alt="世纪互联官方标识" />
         <div>
           <h1>南通基地-运维灯塔工作台</h1>
-          <p>{{ isHistoryMemoryPage ? "历史记忆导入" : isWorkbench ? scopeLabel(currentScope) : "功能选择" }} · {{ syncText }}</p>
+          <p>{{ headerSubtitle }}</p>
         </div>
       </div>
       <div class="topbar-actions">
@@ -43,6 +43,9 @@
       >
         {{ connectionNotice.actionLabel }}
       </button>
+    </div>
+    <div v-if="pageStatusText" class="page-status">
+      {{ pageStatusText }}
     </div>
 
     <AdminTools
@@ -167,12 +170,22 @@
           <div>
             <strong>请选择要{{ pendingChangeTargetSelection.actionLabel }}的{{ workTypeLabel(pendingChangeTargetSelection.type) }}记录</strong>
             <p>原文状态为“{{ pendingChangeTargetSelection.actionLabel }}”。可同时选择目标多维记录和源表记录；如果缺少主界面条目，也能用这两类记录继续上传。</p>
+            <p v-if="pendingChangeTargetSelection.totalMatched" class="target-count-line">
+              当前显示 {{ pendingChangeTargetSelection.returnedCount }} 条，目标表共匹配 {{ pendingChangeTargetSelection.totalMatched }} 条{{ pendingChangeTargetSelection.limited ? "，请结合匹配原因选择" : "" }}。
+            </p>
           </div>
           <div class="target-choice-layout">
-            <div class="target-choice-list">
+            <div class="target-choice-column">
+              <label class="candidate-search">
+                <span>搜索目标记录</span>
+                <input v-model="changeTargetSearchText" type="search" placeholder="标题、楼栋、时间、匹配原因、字段内容" />
+              </label>
+              <p class="candidate-count">当前显示 {{ filteredChangeTargetCandidates.length }} / {{ pendingChangeTargetSelection.candidates.length }} 条</p>
+              <div class="target-choice-list">
               <p v-if="!pendingChangeTargetSelection.candidates.length" class="target-empty-line">未找到同名目标多维记录，可先选择源表记录继续尝试关联。</p>
+              <p v-else-if="!filteredChangeTargetCandidates.length" class="target-empty-line">没有匹配的目标记录，请调整搜索条件。</p>
               <button
-                v-for="item in pendingChangeTargetSelection.candidates"
+                v-for="item in filteredChangeTargetCandidates"
                 :key="changeTargetCandidateId(item)"
                 class="target-choice"
                 :class="{ active: selectedChangeTargetId === changeTargetCandidateId(item) }"
@@ -182,21 +195,23 @@
               >
                 <strong>{{ item.title || item.record_id }}</strong>
                 <span>{{ item.building || "-" }} · {{ item.status || "未标记状态" }} · {{ item.start_time || "-" }} 至 {{ item.end_time || "-" }}</span>
-                <small>{{ item.date_matched ? "时间匹配" : "按名称匹配" }}</small>
+                <small>{{ item.match_reason || (item.date_matched ? "时间匹配" : "按名称匹配") }}</small>
               </button>
+              </div>
             </div>
-            <aside v-if="activeChangeTargetCandidate" class="target-detail-popover">
+            <aside v-if="visibleActiveChangeTargetCandidate" class="target-detail-popover">
               <div class="target-detail-head">
-                <strong>{{ activeChangeTargetCandidate.title || `${workTypeLabel(pendingChangeTargetSelection.type)}记录` }}</strong>
-                <span>{{ activeChangeTargetCandidate.building || "-" }} · {{ activeChangeTargetCandidate.status || "未标记状态" }}</span>
+                <strong>{{ visibleActiveChangeTargetCandidate.title || `${workTypeLabel(pendingChangeTargetSelection.type)}记录` }}</strong>
+                <span>{{ visibleActiveChangeTargetCandidate.building || "-" }} · {{ visibleActiveChangeTargetCandidate.status || "未标记状态" }}</span>
+                <small>{{ visibleActiveChangeTargetCandidate.match_reason || "" }}</small>
               </div>
               <dl class="target-detail-grid">
-                <template v-for="row in changeTargetDetailRows(activeChangeTargetCandidate)" :key="row.label">
+                <template v-for="row in changeTargetDetailRows(visibleActiveChangeTargetCandidate)" :key="row.label">
                   <dt>{{ row.label }}</dt>
                   <dd>{{ row.value }}</dd>
                 </template>
               </dl>
-              <button class="btn blue target-confirm" :disabled="changeTargetConfirming || !selectedChangeTargetId" @click="confirmPastedChangeTarget">
+              <button class="btn blue target-confirm" :disabled="changeTargetConfirming || !selectedChangeTargetVisible" @click="confirmPastedChangeTarget">
                 {{ changeTargetConfirming ? "确认中" : "确认关联这条记录" }}
               </button>
             </aside>
@@ -206,9 +221,15 @@
               <strong>对应源表记录</strong>
               <p>选择源表记录后，后续状态、闭环和来源追踪会更准确；不选择也可用目标多维记录继续上传。</p>
             </div>
+            <label class="candidate-search">
+              <span>搜索源表记录</span>
+              <input v-model="changeSourceSearchText" type="search" placeholder="标题、楼栋、状态、时间、字段内容" />
+            </label>
+            <p class="candidate-count">当前显示 {{ filteredChangeSourceCandidates.length }} / {{ changeSourceCandidates.length }} 条</p>
             <div class="source-choice-list">
+              <p v-if="!filteredChangeSourceCandidates.length" class="target-empty-line">没有匹配的源表记录，请调整搜索条件。</p>
               <button
-                v-for="item in changeSourceCandidates"
+                v-for="item in filteredChangeSourceCandidates"
                 :key="changeSourceCandidateId(item)"
                 class="source-choice"
                 :class="{ active: selectedChangeSourceId === changeSourceCandidateId(item) }"
@@ -221,7 +242,7 @@
             <button
               v-if="!pendingChangeTargetSelection.candidates.length"
               class="btn blue target-confirm"
-              :disabled="changeTargetConfirming || !selectedChangeSourceId"
+              :disabled="changeTargetConfirming || !selectedChangeSourceVisible"
               @click="confirmPastedChangeTarget"
             >
               {{ changeTargetConfirming ? "确认中" : "确认关联源表记录" }}
@@ -273,173 +294,44 @@
             从左侧选择事项，或使用纯手填、解析粘贴通告。
           </div>
           <div v-else ref="draftStackRef" class="draft-stack">
-            <article
+            <DraftNoticeCard
               v-for="row in selectedDraftRows"
               :key="row.key"
-              class="draft-card"
-              :class="{ active: row.key === activeDraftKey, collapsed: row.key !== activeDraftKey, busy: isLineBusy(row.key) }"
-              @click="activeDraftKey = row.key"
-            >
-              <div class="card-title">
-                <strong>{{ row.title }}</strong>
-                <span>{{ draftCardMeta(row.record, row.draft, row.key === activeDraftKey) }}</span>
-              </div>
-              <div v-if="row.key !== activeDraftKey" class="draft-compact">
-                <p>{{ draftSummary(row.record, row.draft) || "已加入待发起通告，点击展开编辑。" }}</p>
-                <div class="card-actions compact-actions">
-                  <span class="job-line" :class="jobClass(row.key)">{{ jobText(row.key) }}</span>
-                  <button class="btn ghost" :disabled="isLineBusy(row.key)" @click.stop="pinDraftInMiddlePanel(row.key)">编辑</button>
-                  <button class="btn ghost" :disabled="isLineBusy(row.key)" @click.stop="removeDraft(row.key)">移除</button>
-                </div>
-              </div>
-              <template v-else>
-                <p v-if="row.record.manual && row.draft.prefilled_from_last" class="draft-hint">
-                  已带入上次{{ workTypeLabel(row.record.work_type) }}手填内容，请核对时间和字段后再发送。
-                </p>
-                <p v-if="draftMissingText(row.record, row.draft)" class="draft-required-line">
-                  {{ draftMissingText(row.record, row.draft) }}
-                </p>
-                <div class="form-grid">
-                  <label v-if="row.record.manual">
-                    通告类型
-                    <select v-model="row.draft.work_type" @change="onManualDraftTypeChange(row.draft)">
-                      <option v-for="type in workTypes" :key="type.value" :value="type.value">{{ type.label }}</option>
-                    </select>
-                  </label>
-                  <label :class="draftFieldClass(row.record, row.draft, 'title')">
-                    {{ noticeFieldLabel(row.record.work_type, "title") }}
-                    <input v-model="row.draft.title" placeholder="通告标题" @input="saveDrafts" />
-                  </label>
-                  <label v-if="row.record.manual" :class="draftFieldClass(row.record, row.draft, 'building')">
-                    楼栋/范围
-                    <select v-model="row.draft.building" @change="onDraftBuildingChange(row.draft)">
-                      <option value="">请选择</option>
-                      <option v-for="item in requestableScopes" :key="item.value" :value="item.label">
-                        {{ item.label }}
-                      </option>
-                    </select>
-                  </label>
-                  <label v-if="isNoticeMessageField(row.record.work_type, 'specialty')" :class="draftFieldClass(row.record, row.draft, 'specialty')">
-                    {{ noticeFieldLabel(row.record.work_type, "specialty") }}
-                    <input v-model="row.draft.specialty" placeholder="专业" @input="saveDrafts" />
-                  </label>
-                  <label v-if="isNoticeMessageField(row.record.work_type, 'level')" :class="draftFieldClass(row.record, row.draft, 'level')">
-                    {{ noticeFieldLabel(row.record.work_type, "level") }}
-                    <input v-model="row.draft.level" placeholder="等级" @input="saveDrafts" />
-                  </label>
-                  <label :class="draftFieldClass(row.record, row.draft, 'start_time')">
-                    {{ noticeFieldLabel(row.record.work_type, "start_time") }}
-                    <input v-model="row.draft.start_time" type="datetime-local" @input="saveDrafts" />
-                  </label>
-                  <label :class="draftFieldClass(row.record, row.draft, 'end_time')">
-                    {{ noticeFieldLabel(row.record.work_type, "end_time") }}
-                    <input v-model="row.draft.end_time" type="datetime-local" @input="saveDrafts" />
-                  </label>
-                  <label v-if="isNoticeMessageField(row.record.work_type, 'location')" class="span-2" :class="draftFieldClass(row.record, row.draft, 'location')">
-                    {{ noticeFieldLabel(row.record.work_type, "location") }}
-                    <input v-model="row.draft.location" placeholder="地点" @input="saveDrafts" />
-                  </label>
-                  <label v-if="isNoticeMessageField(row.record.work_type, 'content')" class="span-2" :class="draftFieldClass(row.record, row.draft, 'content')">
-                    {{ noticeFieldLabel(row.record.work_type, "content") }}
-                    <textarea v-model="row.draft.content" placeholder="内容" @input="saveDrafts"></textarea>
-                  </label>
-                  <label v-if="isNoticeMessageField(row.record.work_type, 'reason')" :class="draftFieldClass(row.record, row.draft, 'reason')">
-                    {{ noticeFieldLabel(row.record.work_type, "reason") }}
-                    <textarea v-model="row.draft.reason" placeholder="原因" @input="saveDrafts"></textarea>
-                  </label>
-                  <label v-if="isNoticeMessageField(row.record.work_type, 'impact')" :class="draftFieldClass(row.record, row.draft, 'impact')">
-                    {{ noticeFieldLabel(row.record.work_type, "impact") }}
-                    <textarea v-model="row.draft.impact" placeholder="影响" @input="saveDrafts"></textarea>
-                  </label>
-                  <label v-if="isNoticeMessageField(row.record.work_type, 'progress')" class="span-2" :class="draftFieldClass(row.record, row.draft, 'progress')">
-                    {{ noticeFieldLabel(row.record.work_type, "progress") }}
-                    <textarea v-model="row.draft.progress" placeholder="进度" @input="saveDrafts"></textarea>
-                  </label>
-                </div>
-                <section v-if="row.record.work_type === 'power'" class="repair-fields">
-                  <h3>上电字段</h3>
-                  <div class="form-grid">
-                    <label :class="draftFieldClass(row.record, row.draft, 'cabinet')"><span>柜号</span><input v-model="row.draft.cabinet" @input="saveDrafts" /></label>
-                    <label :class="draftFieldClass(row.record, row.draft, 'quantity')"><span>数量</span><input v-model="row.draft.quantity" @input="saveDrafts" /></label>
-                  </div>
-                </section>
-                <section v-if="row.record.work_type === 'polling'" class="repair-fields">
-                  <h3>轮巡字段</h3>
-                  <div class="form-grid">
-                    <label class="span-2" :class="draftFieldClass(row.record, row.draft, 'device')"><span>设备</span><input v-model="row.draft.device" @input="saveDrafts" /></label>
-                  </div>
-                </section>
-                <section v-if="row.record.work_type === 'repair'" class="repair-fields">
-                  <h3>检修字段</h3>
-                  <h4>设备与故障</h4>
-                  <div class="form-grid">
-                    <label :class="draftFieldClass(row.record, row.draft, 'repair_device')"><span>维修设备</span><input v-model="row.draft.repair_device" @input="saveDrafts" /></label>
-                    <label :class="draftFieldClass(row.record, row.draft, 'repair_fault')"><span>维修故障</span><input v-model="row.draft.repair_fault" @input="saveDrafts" /></label>
-                    <label><span>故障类型</span><input v-model="row.draft.fault_type" @input="saveDrafts" /></label>
-                    <label><span>维修方式</span><input v-model="row.draft.repair_mode" @input="saveDrafts" /></label>
-                    <label><span>故障发现方式</span><input v-model="row.draft.discovery" @input="saveDrafts" /></label>
-                    <label><span>故障现象</span><input v-model="row.draft.symptom" @input="saveDrafts" /></label>
-                  </div>
-                  <h4>处理与结果</h4>
-                  <div class="form-grid">
-                    <label class="span-2" :class="draftFieldClass(row.record, row.draft, 'solution')"><span>解决方案</span><textarea v-model="row.draft.solution" @input="saveDrafts"></textarea></label>
-                    <label class="span-2"><span>备件更换情况</span><textarea v-model="row.draft.spare_parts" @input="saveDrafts"></textarea></label>
-                  </div>
-                </section>
-                <details v-if="hasNoticeUploadFields(row.record.work_type)" class="upload-fields">
-                  <summary>多维上传字段</summary>
-                  <div class="form-grid">
-                    <label v-if="isNoticeUploadField(row.record.work_type, 'specialty')">
-                      专业
-                      <input v-model="row.draft.specialty" placeholder="用于目标多维字段" @input="saveDrafts" />
-                    </label>
-                    <label v-if="isNoticeUploadField(row.record.work_type, 'maintenance_cycle')" :class="draftFieldClass(row.record, row.draft, 'maintenance_cycle')">
-                      {{ row.record.manual ? "维护周期" : "维保周期" }}
-                      <select v-model="row.draft.maintenance_cycle" @change="saveDrafts">
-                        <option value="">请选择</option>
-                        <option v-for="item in maintenanceCycleOptions" :key="item" :value="item">{{ item }}</option>
-                      </select>
-                    </label>
-                    <label v-if="row.record.manual && isNoticeUploadField(row.record.work_type, 'non_plan')" class="checkbox-field span-2">
-                      <input v-model="row.draft.non_plan" type="checkbox" @change="saveDrafts" />
-                      <span>非计划，发送时标题末尾自动追加“（非计划性）”</span>
-                    </label>
-                    <div v-if="isNoticeUploadField(row.record.work_type, 'zhihang')" class="zhihang-line span-2">
-                      <label>
-                        <input v-model="row.draft.zhihang_involved" type="checkbox" @change="saveDrafts" />
-                        涉及智航
-                      </label>
-                      <select v-if="row.draft.zhihang_involved" v-model="row.draft.zhihang_record_id" @change="bindZhihang(row.draft)">
-                        <option value="">选择智航变更</option>
-                        <option v-for="item in zhihangRecords" :key="item.record_id" :value="item.record_id">
-                          {{ item.title || item.record_id }}
-                        </option>
-                      </select>
-                    </div>
-                  </div>
-                </details>
-                <details class="upload-fields upload-preview">
-                  <summary>多维上传预览</summary>
-                  <dl class="upload-preview-grid">
-                    <template v-for="item in draftUploadPreviewRows(row.record, row.draft)" :key="item.label">
-                      <dt>{{ item.label }}</dt>
-                      <dd>{{ item.value }}</dd>
-                    </template>
-                  </dl>
-                </details>
-                <pre v-if="previewDraftKey === row.key" class="notice-preview">{{ noticePreviewText(row.record, row.draft) }}</pre>
-                <div class="card-actions">
-                  <span class="job-line" :class="jobClass(row.key)">{{ jobText(row.key) }}</span>
-                  <button class="btn ghost" :disabled="isLineBusy(row.key)" @click.stop="previewDraftKey = previewDraftKey === row.key ? '' : row.key">
-                    {{ previewDraftKey === row.key ? "收起预览" : "预览飞书文本" }}
-                  </button>
-                  <button class="btn blue" :disabled="isLineBusy(row.key)" @click.stop="sendStart(row.key)">
-                    {{ sendDraftButtonLabel(row.record, row.draft) }}
-                  </button>
-                  <button class="btn ghost" :disabled="isLineBusy(row.key)" @click.stop="removeDraft(row.key)">移除</button>
-                </div>
-              </template>
-            </article>
+              :row-key="row.key"
+              :record="row.record"
+              :draft="row.draft"
+              :title="row.title"
+              :active="row.key === activeDraftKey"
+              :busy="isLineBusy(row.key)"
+              :meta="draftCardMeta(row.record, row.draft, row.key === activeDraftKey)"
+              :summary="draftSummary(row.record, row.draft)"
+              :warning-text="row.record.manual && !row.draft.validation_touched ? draftTypeConflictText(row.record, row.draft) : ''"
+              :missing-text="draftMissingText(row.record, row.draft)"
+              :work-type="draftWorkType(row.record, row.draft)"
+              :requestable-scopes="requestableScopes"
+              :maintenance-cycle-options="maintenanceCycleOptions"
+              :zhihang-records="zhihangRecords"
+              :upload-preview-rows="draftUploadPreviewRows(row.record, row.draft)"
+              :notice-preview-text="noticePreviewText(row.record, row.draft)"
+              :preview-visible="previewDraftKey === row.key"
+              :type-override-visible="canToggleWorkTypeOverride(row.record)"
+              :type-override-busy="typeOverrideBusyKey === row.key"
+              :type-override-label="workTypeOverrideButtonLabel(row.record)"
+              :send-label="sendDraftButtonLabel(row.record, row.draft)"
+              :field-class="(field) => draftFieldClass(row.record, row.draft, field)"
+              :job-text="jobText"
+              :job-class="jobClass"
+              @activate="activeDraftKey = row.key"
+              @pin="pinDraftInMiddlePanel(row.key)"
+              @remove="removeDraft(row.key)"
+              @set-draft="(field, value) => setDraftField(row.draft, field, value)"
+              @manual-type-change="onManualDraftTypeChange(row.draft)"
+              @building-change="onDraftBuildingChange(row.draft)"
+              @bind-zhihang="bindZhihang(row.draft)"
+              @toggle-preview="previewDraftKey = previewDraftKey === row.key ? '' : row.key"
+              @send="sendStart(row.key)"
+              @toggle-work-type-override="toggleWorkTypeOverride(row.record)"
+            />
           </div>
         </section>
 
@@ -450,232 +342,45 @@
           </div>
           <div v-if="ongoing.length === 0" class="empty-block">当前没有进行中通告</div>
           <div v-else class="ongoing-list">
-            <article
+            <OngoingNoticeCard
               v-for="item in ongoing"
               :key="ongoingLineKey(item)"
-              class="ongoing-card"
-              :class="{ active: isOngoingExpanded(item), collapsed: !isOngoingExpanded(item), busy: isLineBusy(ongoingLineKey(item)) }"
-              @click="expandOngoingCard(item)"
-            >
-              <div class="card-title" @click.stop="toggleOngoingCard(item)">
-                <strong>{{ ongoingTitle(item) }}</strong>
-                <span>{{ workTypeLabel(item.work_type) }}{{ isOngoingExpanded(item) ? " · 正在编辑" : " · 点击展开编辑" }}</span>
-              </div>
-              <p>{{ ongoingMeta(item) }}</p>
-              <div v-if="!isOngoingExpanded(item)" class="ongoing-compact">
-                <p>{{ ongoingCompactSummary(item) || "已开始未结束，点击展开后可更新、结束或删除。" }}</p>
-                <div class="card-actions compact-actions">
-                  <span class="job-line" :class="jobClass(ongoingLineKey(item))">{{ jobText(ongoingLineKey(item)) }}</span>
-                </div>
-              </div>
-              <template v-else>
-                <div class="ongoing-expanded" @click.stop>
-                  <div class="form-grid">
-                    <label>
-                      {{ noticeFieldLabel(item.work_type || "maintenance", "title") }}
-                      <input
-                        :value="ongoingDraft(item).title"
-                        placeholder="通告标题"
-                        @input="setOngoingEdit(item, 'title', ($event.target as HTMLInputElement).value)"
-                      />
-                    </label>
-                    <label v-if="isNoticeMessageField(item.work_type || 'maintenance', 'specialty')">
-                      {{ noticeFieldLabel(item.work_type || "maintenance", "specialty") }}
-                      <input
-                        :value="ongoingDraft(item).specialty"
-                        placeholder="专业"
-                        @input="setOngoingEdit(item, 'specialty', ($event.target as HTMLInputElement).value)"
-                      />
-                    </label>
-                    <label v-if="isNoticeMessageField(item.work_type || 'maintenance', 'level')">
-                      {{ noticeFieldLabel(item.work_type || "maintenance", "level") }}
-                      <input
-                        :value="ongoingDraft(item).level"
-                        placeholder="等级"
-                        @input="setOngoingEdit(item, 'level', ($event.target as HTMLInputElement).value)"
-                      />
-                    </label>
-                    <label>
-                      {{ noticeFieldLabel(item.work_type || "maintenance", "start_time") }}
-                      <input
-                        :value="ongoingDraft(item).start_time"
-                        type="datetime-local"
-                        @input="setOngoingEdit(item, 'start_time', ($event.target as HTMLInputElement).value)"
-                      />
-                    </label>
-                    <label>
-                      {{ noticeFieldLabel(item.work_type || "maintenance", "end_time") }}
-                      <input
-                        :value="ongoingDraft(item).end_time"
-                        type="datetime-local"
-                        @input="setOngoingEdit(item, 'end_time', ($event.target as HTMLInputElement).value)"
-                      />
-                    </label>
-                    <label v-if="isNoticeMessageField(item.work_type || 'maintenance', 'location')" class="span-2">
-                      {{ noticeFieldLabel(item.work_type || "maintenance", "location") }}
-                      <input
-                        :value="ongoingDraft(item).location"
-                        placeholder="地点"
-                        @input="setOngoingEdit(item, 'location', ($event.target as HTMLInputElement).value)"
-                      />
-                    </label>
-                    <label v-if="isNoticeMessageField(item.work_type || 'maintenance', 'content')" class="span-2">
-                      {{ noticeFieldLabel(item.work_type || "maintenance", "content") }}
-                      <textarea
-                        :value="ongoingDraft(item).content"
-                        placeholder="内容"
-                        @input="setOngoingEdit(item, 'content', ($event.target as HTMLTextAreaElement).value)"
-                      ></textarea>
-                    </label>
-                    <label v-if="isNoticeMessageField(item.work_type || 'maintenance', 'reason')">
-                      {{ noticeFieldLabel(item.work_type || "maintenance", "reason") }}
-                      <textarea
-                        :value="ongoingDraft(item).reason"
-                        placeholder="原因"
-                        @input="setOngoingEdit(item, 'reason', ($event.target as HTMLTextAreaElement).value)"
-                      ></textarea>
-                    </label>
-                    <label v-if="isNoticeMessageField(item.work_type || 'maintenance', 'impact')">
-                      {{ noticeFieldLabel(item.work_type || "maintenance", "impact") }}
-                      <textarea
-                        :value="ongoingDraft(item).impact"
-                        placeholder="影响"
-                        @input="setOngoingEdit(item, 'impact', ($event.target as HTMLTextAreaElement).value)"
-                      ></textarea>
-                    </label>
-                    <label v-if="isNoticeMessageField(item.work_type || 'maintenance', 'progress')" class="span-2">
-                      {{ noticeFieldLabel(item.work_type || "maintenance", "progress") }}
-                      <textarea
-                        :value="ongoingDraft(item).progress"
-                        placeholder="进度"
-                        @input="setOngoingEdit(item, 'progress', ($event.target as HTMLTextAreaElement).value)"
-                      ></textarea>
-                    </label>
-                  </div>
-                  <section v-if="(item.work_type || 'maintenance') === 'power'" class="repair-fields">
-                    <h3>上电字段</h3>
-                    <div class="form-grid">
-                      <label><span>柜号</span><input :value="ongoingDraft(item).cabinet" @input="setOngoingEdit(item, 'cabinet', ($event.target as HTMLInputElement).value)" /></label>
-                      <label><span>数量</span><input :value="ongoingDraft(item).quantity" @input="setOngoingEdit(item, 'quantity', ($event.target as HTMLInputElement).value)" /></label>
-                    </div>
-                  </section>
-                  <section v-if="(item.work_type || 'maintenance') === 'polling'" class="repair-fields">
-                    <h3>轮巡字段</h3>
-                    <div class="form-grid">
-                      <label class="span-2"><span>设备</span><input :value="ongoingDraft(item).device" @input="setOngoingEdit(item, 'device', ($event.target as HTMLInputElement).value)" /></label>
-                    </div>
-                  </section>
-                  <section v-if="(item.work_type || 'maintenance') === 'repair'" class="repair-fields">
-                    <h3>检修字段</h3>
-                    <div class="form-grid">
-                      <label><span>维修设备</span><input :value="ongoingDraft(item).repair_device" @input="setOngoingEdit(item, 'repair_device', ($event.target as HTMLInputElement).value)" /></label>
-                      <label><span>维修故障</span><input :value="ongoingDraft(item).repair_fault" @input="setOngoingEdit(item, 'repair_fault', ($event.target as HTMLInputElement).value)" /></label>
-                      <label><span>故障类型</span><input :value="ongoingDraft(item).fault_type" @input="setOngoingEdit(item, 'fault_type', ($event.target as HTMLInputElement).value)" /></label>
-                      <label><span>维修方式</span><input :value="ongoingDraft(item).repair_mode" @input="setOngoingEdit(item, 'repair_mode', ($event.target as HTMLInputElement).value)" /></label>
-                      <label><span>故障发现方式</span><input :value="ongoingDraft(item).discovery" @input="setOngoingEdit(item, 'discovery', ($event.target as HTMLInputElement).value)" /></label>
-                      <label><span>故障现象</span><input :value="ongoingDraft(item).symptom" @input="setOngoingEdit(item, 'symptom', ($event.target as HTMLInputElement).value)" /></label>
-                      <label class="span-2"><span>解决方案</span><textarea :value="ongoingDraft(item).solution" @input="setOngoingEdit(item, 'solution', ($event.target as HTMLTextAreaElement).value)"></textarea></label>
-                      <label class="span-2"><span>备件更换情况</span><textarea :value="ongoingDraft(item).spare_parts" @input="setOngoingEdit(item, 'spare_parts', ($event.target as HTMLTextAreaElement).value)"></textarea></label>
-                    </div>
-                  </section>
-                  <details v-if="hasNoticeUploadFields(item.work_type || 'maintenance')" class="upload-fields">
-                    <summary>多维上传字段</summary>
-                    <div class="form-grid">
-                      <label v-if="isNoticeUploadField(item.work_type || 'maintenance', 'specialty')">
-                        专业
-                        <input
-                          :value="ongoingDraft(item).specialty"
-                          placeholder="用于目标多维字段"
-                          @input="setOngoingEdit(item, 'specialty', ($event.target as HTMLInputElement).value)"
-                        />
-                      </label>
-                      <label v-if="isNoticeUploadField(item.work_type || 'maintenance', 'maintenance_cycle')">
-                        维保周期
-                        <select
-                          :value="ongoingDraft(item).maintenance_cycle"
-                          @change="setOngoingEdit(item, 'maintenance_cycle', ($event.target as HTMLSelectElement).value)"
-                        >
-                          <option value="">请选择</option>
-                          <option v-for="cycle in maintenanceCycleOptions" :key="cycle" :value="cycle">{{ cycle }}</option>
-                        </select>
-                      </label>
-                      <div v-if="isNoticeUploadField(item.work_type || 'maintenance', 'zhihang')" class="zhihang-line span-2">
-                        <label>
-                          <input
-                            :checked="Boolean(ongoingDraft(item).zhihang_involved)"
-                            type="checkbox"
-                            @change="setOngoingEdit(item, 'zhihang_involved', ($event.target as HTMLInputElement).checked)"
-                          />
-                          涉及智航
-                        </label>
-                        <select
-                          v-if="ongoingDraft(item).zhihang_involved"
-                          :value="ongoingDraft(item).zhihang_record_id"
-                          @change="bindOngoingZhihang(item, ($event.target as HTMLSelectElement).value)"
-                        >
-                          <option value="">选择智航变更</option>
-                          <option v-for="change in zhihangRecords" :key="change.record_id" :value="change.record_id">
-                            {{ change.title || change.record_id }}
-                          </option>
-                        </select>
-                      </div>
-                    </div>
-                  </details>
-                  <div class="card-actions">
-                    <span class="job-line" :class="jobClass(ongoingLineKey(item))">
-                      {{ jobText(ongoingLineKey(item)) }}
-                    </span>
-                <button class="btn blue" :disabled="isLineBusy(ongoingLineKey(item))" @click="sendOngoing(item, 'update')">发送{{ workTypeLabel(item.work_type || 'maintenance') }}更新</button>
-                <button class="btn green" :disabled="isLineBusy(ongoingLineKey(item))" @click="sendOngoing(item, 'end')">发送{{ workTypeLabel(item.work_type || 'maintenance') }}结束</button>
-                <button class="btn danger" :disabled="isLineBusy(ongoingLineKey(item))" @click="deleteOngoing(item)">删除</button>
-                <button
-                  v-if="ongoingNeedsBinding(item)"
-                  class="btn ghost"
-                  :disabled="isLineBusy(ongoingLineKey(item))"
-                  @click="bindOngoingTarget(item)"
-                >
-                  关联目标记录
-                </button>
-                <button v-if="item.undo_available" class="btn ghost" :disabled="isLineBusy(undoLineKey(item))" @click="applyUndo(item)">回退</button>
-              </div>
-                  <div v-if="item.undo_available" class="undo-line">
-                    {{ item.undo_label || "可回退上一步" }}
-                    <span :class="jobClass(undoLineKey(item))">{{ jobText(undoLineKey(item)) }}</span>
-                  </div>
-                </div>
-              </template>
-            </article>
+              :item="item"
+              :draft="ongoingDraft(item)"
+              :title="ongoingTitle(item)"
+              :meta="ongoingMeta(item)"
+              :compact-summary="ongoingCompactSummary(item)"
+              :line-key="ongoingLineKey(item)"
+              :undo-line-key="undoLineKey(item)"
+              :expanded="isOngoingExpanded(item)"
+              :busy="isLineBusy(ongoingLineKey(item))"
+              :undo-busy="isLineBusy(undoLineKey(item))"
+              :needs-binding="ongoingNeedsBinding(item)"
+              :photo-count="ongoingPhotoCount(item)"
+              :maintenance-cycle-options="maintenanceCycleOptions"
+              :zhihang-records="zhihangRecords"
+              :job-text="jobText"
+              :job-class="jobClass"
+              @expand="expandOngoingCard(item)"
+              @toggle="toggleOngoingCard(item)"
+              @set-edit="(key, value) => setOngoingEdit(item, key, value)"
+              @bind-zhihang="(recordId) => bindOngoingZhihang(item, recordId)"
+              @photo-input="(event) => handleOngoingPhotoInput(item, event)"
+              @remove-photo="(index) => removeOngoingPhoto(item, index)"
+              @send="(action) => sendOngoing(item, action)"
+              @delete="deleteOngoing(item)"
+              @bind-target="bindOngoingTarget(item)"
+              @apply-undo="applyUndo(item)"
+            />
           </div>
-          <div v-if="recentUndoItems.length" class="closed-today recent-undo-panel">
-            <div class="panel-head compact">
-              <h3>近三天可回退</h3>
-              <span>{{ filteredRecentUndoItems.length }}/{{ recentUndoItems.length }}</span>
-            </div>
-            <div class="undo-filter">
-              <button
-                v-for="item in undoFilterOptions"
-                :key="item.value"
-                type="button"
-                :class="{ active: undoFilter === item.value }"
-                @click="undoFilter = item.value"
-              >
-                {{ item.label }} {{ undoFilterCounts[item.value] || 0 }}
-              </button>
-            </div>
-            <article v-for="item in filteredRecentUndoItems" :key="undoLineKey(item)" class="closed-card undo-card">
-              <div>
-                <strong>{{ item.title || "未命名通告" }}</strong>
-                <p>
-                  <span class="undo-action-chip">{{ undoActionLabel(item) }}</span>
-                  {{ workTypeLabel(item.work_type) }} · {{ item.building || "-" }} · {{ formatUndoTime(item.undo_created_at) }}
-                </p>
-              </div>
-              <button class="btn ghost" :disabled="isLineBusy(undoLineKey(item))" @click="applyUndo(item)">
-                {{ undoButtonLabel(item) }}
-              </button>
-              <span class="job-line" :class="jobClass(undoLineKey(item))">{{ jobText(undoLineKey(item)) }}</span>
-            </article>
-          </div>
+          <RecentUndoPanel
+            v-model="undoFilter"
+            :items="recentUndoItems"
+            :job-text="jobText"
+            :job-class="jobClass"
+            :is-line-busy="isLineBusy"
+            @apply="applyUndo"
+          />
           <div v-if="closedSummaryItems.length" class="closed-today">
             <div class="panel-head compact">
               <h3>今日结束通告</h3>
@@ -694,53 +399,18 @@
       </section>
     </section>
 
-    <div v-if="ongoingBindSelection" class="modal-backdrop" @click.self="cancelOngoingBindSelection">
-      <section class="candidate-modal" role="dialog" aria-modal="true" aria-label="选择目标记录">
-        <div class="candidate-modal-head">
-          <div>
-            <strong>选择{{ ongoingBindSelection.label || "通告" }}目标记录</strong>
-            <p>{{ ongoingBindSelection.title || "找到多条同名目标记录，请选择要关联的一条。" }}</p>
-          </div>
-          <button class="btn ghost" @click="cancelOngoingBindSelection">关闭</button>
-        </div>
-        <div class="target-choice-layout modal-choice-layout">
-          <div class="target-choice-list modal-choice-list">
-            <button
-              v-for="item in ongoingBindCandidates"
-              :key="changeTargetCandidateId(item)"
-              class="target-choice"
-              :class="{ active: selectedOngoingBindId === changeTargetCandidateId(item) }"
-              @mouseenter="previewOngoingBindCandidate(item)"
-              @focus="previewOngoingBindCandidate(item)"
-              @click="selectOngoingBindCandidate(item)"
-            >
-              <strong>{{ item.title || "未命名通告" }}</strong>
-              <span>{{ item.building || "-" }} · {{ item.status || "未标记状态" }} · {{ item.start_time || "-" }} 至 {{ item.end_time || "-" }}</span>
-              <small>{{ item.date_matched ? "时间匹配" : "按名称匹配" }}</small>
-            </button>
-          </div>
-          <aside v-if="activeOngoingBindCandidate" class="target-detail-popover modal-detail-popover">
-            <div class="target-detail-head">
-              <strong>{{ activeOngoingBindCandidate.title || "目标记录" }}</strong>
-              <span>{{ activeOngoingBindCandidate.building || "-" }} · {{ activeOngoingBindCandidate.status || "未标记状态" }}</span>
-            </div>
-            <dl class="target-detail-grid">
-              <template v-for="row in changeTargetDetailRows(activeOngoingBindCandidate)" :key="row.label">
-                <dt>{{ row.label }}</dt>
-                <dd>{{ row.value }}</dd>
-              </template>
-            </dl>
-          </aside>
-        </div>
-        <div class="candidate-modal-actions">
-          <span class="job-line">
-            只关联当前通告；确认后会把目标记录字段回填到空白项中。
-          </span>
-          <button class="btn ghost" @click="cancelOngoingBindSelection">取消</button>
-          <button class="btn blue" :disabled="!selectedOngoingBindId" @click="confirmOngoingBindSelection">确认关联</button>
-        </div>
-      </section>
-    </div>
+    <TargetRecordSelectionModal
+      :selection="ongoingBindSelection"
+      :candidates="ongoingBindCandidates"
+      :selected-id="selectedOngoingBindId"
+      :active-candidate="activeOngoingBindCandidate"
+      :candidate-id="changeTargetCandidateId"
+      :detail-rows-for="changeTargetDetailRows"
+      @cancel="cancelOngoingBindSelection"
+      @confirm="confirmOngoingBindSelection"
+      @preview="previewOngoingBindCandidate"
+      @select="selectOngoingBindCandidate"
+    />
   </main>
 </template>
 
@@ -748,35 +418,60 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import AdminTools from "./components/AdminTools.vue";
 import AuthPanels from "./components/AuthPanels.vue";
+import DraftNoticeCard from "./components/DraftNoticeCard.vue";
 import HistoryMemoryPage from "./components/HistoryMemoryPage.vue";
+import OngoingNoticeCard from "./components/OngoingNoticeCard.vue";
+import RecentUndoPanel from "./components/RecentUndoPanel.vue";
 import ScopeHome from "./components/ScopeHome.vue";
+import TargetRecordSelectionModal from "./components/TargetRecordSelectionModal.vue";
 import VirtualNoticeList, { type NoticeRow } from "./components/VirtualNoticeList.vue";
+import { AUTH_EXPIRED_EVENT, requestBinaryJson, requestJson } from "./api/client";
+import { filterCandidatesBySearch } from "./candidateSearch";
+import {
+  loadDraftStorage,
+  loadManualRecentTypesFromStorage,
+  loadManualTemplateMemoryFromStorage,
+  saveDraftStorage,
+  saveManualRecentTypeToStorage,
+  saveManualTemplateMemoryToStorage,
+} from "./draftStorage";
+import { backendJobStatusPatch, friendlyFailureText, terminalPhase } from "./jobStatus";
+import {
+  isKnownWorkType,
+  manualPrefillWorkTypes,
+  normalizeWorkType,
+  noticeDurationError,
+  noticeFieldLabel,
+  noticeTemplate,
+  noticeTypeKeywordRules,
+  workTypeLabel,
+  workTypes,
+} from "./noticeTemplates";
+import {
+  inferBuildingText,
+  parseSections,
+  parsedActionFromStatus,
+  parsedActionLabel,
+  pastedNoticeStatus,
+  pastedNoticeWorkType,
+  sectionValue,
+  splitNoticeTimeRange,
+  toDatetimeLocal,
+} from "./noticeParsing";
+import { createCrossTabStreamCoordinator, type CrossTabStreamCoordinator } from "./streamCoordinator";
 
 type Dict = Record<string, any>;
 type ScopeOption = { value: string; label: string };
-type NoticeTemplate = {
-  heading: string;
-  titleLabel: string;
-  messageFields: string[];
-  uploadFields: string[];
-};
-
-const workTypes = [
-  { value: "maintenance", label: "维保" },
-  { value: "change", label: "变更" },
-  { value: "repair", label: "检修" },
-  { value: "power", label: "上电" },
-  { value: "polling", label: "轮巡" },
-  { value: "adjust", label: "调整" },
-];
 const brandLogoSrc = "/assets/vnet-logo.png";
 const buildingScopeCodes = ["110", "A", "B", "C", "D", "E", "H"];
-const maintenanceCycleOptions = ["每月", "每季", "每年", "半年", "每两年", "每三年", "每五年", "冬季保温每日", "/"];
+const maintenanceCycleOptions = ["/", "每月", "每季", "每年", "半年", "每两年", "每三年", "每五年", "冬季保温每日"];
 const nonPlanTitleSuffix = "（非计划性）";
 const authKeepaliveMs = 30 * 60 * 1000;
 const authKeepaliveRetryMs = 3 * 60 * 1000;
 const manualRefreshCooldownMs = 1500;
 const workbenchRetryDelaysMs = [3000, 8000, 20000];
+const streamLeaderHeartbeatMs = 5000;
+const streamLeaderTtlMs = 15000;
 const requestableScopes: ScopeOption[] = [
   { value: "110", label: "110站" },
   { value: "A", label: "A楼" },
@@ -788,70 +483,12 @@ const requestableScopes: ScopeOption[] = [
   { value: "CAMPUS", label: "园区" },
 ];
 
-const noticeTemplates: Record<string, NoticeTemplate> = {
-  maintenance: {
-    heading: "维保通告",
-    titleLabel: "名称",
-    messageFields: ["title", "start_time", "end_time", "location", "content", "reason", "impact", "progress"],
-    uploadFields: ["specialty", "maintenance_cycle", "non_plan"],
-  },
-  change: {
-    heading: "设备变更",
-    titleLabel: "名称",
-    messageFields: ["title", "level", "start_time", "end_time", "location", "content", "reason", "impact", "progress"],
-    uploadFields: ["specialty", "zhihang"],
-  },
-  repair: {
-    heading: "设备检修",
-    titleLabel: "标题",
-    messageFields: [
-      "title",
-      "location",
-      "level",
-      "specialty",
-      "end_time",
-      "start_time",
-      "repair_device",
-      "repair_fault",
-      "fault_type",
-      "repair_mode",
-      "impact",
-      "discovery",
-      "symptom",
-      "reason",
-      "solution",
-      "spare_parts",
-      "progress",
-    ],
-    uploadFields: [],
-  },
-  power: {
-    heading: "上电通告",
-    titleLabel: "名称",
-    messageFields: ["title", "start_time", "end_time", "cabinet", "quantity", "progress"],
-    uploadFields: ["specialty"],
-  },
-  polling: {
-    heading: "设备轮巡",
-    titleLabel: "标题",
-    messageFields: ["title", "start_time", "end_time", "device", "content", "impact", "progress"],
-    uploadFields: ["specialty"],
-  },
-  adjust: {
-    heading: "设备调整",
-    titleLabel: "名称",
-    messageFields: ["title", "start_time", "end_time", "location", "content", "reason", "impact", "progress"],
-    uploadFields: ["specialty"],
-  },
-};
-
-const noticeTypeKeywordRules: Record<string, RegExp[]> = {
-  maintenance: [/维保|维护/],
-  change: [/变更/],
-  repair: [/检修|维修/],
-  power: [/上电|下电|上下电/],
-  polling: [/轮巡/],
-  adjust: [/调整/],
+const placeholderFieldValues = new Set(["", "-", "--", "—", "——", "/", "无", "暂无"]);
+const repairSpecialtyOptionFallback: Record<string, string> = {
+  optAssNaw3: "电气",
+  opt3jdJJb7: "暖通",
+  opt509Mxgr: "弱电",
+  optyLRPdQS: "消防",
 };
 
 const authChecking = ref(true);
@@ -880,18 +517,23 @@ const pendingChangeTargetSelection = ref<Dict | null>(null);
 const selectedChangeTargetId = ref("");
 const hoveredChangeTargetId = ref("");
 const selectedChangeSourceId = ref("");
+const changeTargetSearchText = ref("");
+const changeSourceSearchText = ref("");
 const changeTargetConfirming = ref(false);
 const ongoingBindSelection = ref<Dict | null>(null);
 const selectedOngoingBindId = ref("");
 const hoveredOngoingBindId = ref("");
+const typeOverrideBusyKey = ref("");
 const memoryImportText = ref("");
 const memoryImportBusy = ref(false);
 const memoryImportLine = ref("粘贴历史通告后导入。");
 const memoryImportLineType = ref("");
 const eventSource = ref<EventSource | null>(null);
 const sseConnected = ref(false);
+const sharedJobStreamAvailable = ref(false);
 const activeItemsEventSource = ref<EventSource | null>(null);
 const activeItemsConnected = ref(false);
+const sharedActiveItemsStreamAvailable = ref(false);
 const activeItemsUpdatePending = ref(false);
 const pageVisible = ref(typeof document === "undefined" ? true : !document.hidden);
 const pendingHiddenRefresh = ref(false);
@@ -938,9 +580,13 @@ const defaults = reactive({ impact: "无", progress: "" });
 const localSummaryAdjustments = reactive({ started: 0, updated: 0, ended: 0, ongoing: 0 });
 const draftStackRef = ref<HTMLElement | null>(null);
 const fallbackPollTimers = new Map<string, number>();
-const pollingJobs = new Set<string>();
-const manualPrefillWorkTypes = new Set(["repair", "power", "polling", "adjust"]);
+const pollingJobs = new Map<string, string>();
+let batchPollTimer: number | null = null;
+let batchPollActive = false;
+const MAX_SITE_PHOTO_COUNT = 6;
+const MAX_SITE_PHOTO_BYTES = 8 * 1024 * 1024;
 const recentUndoSeconds = 3 * 24 * 60 * 60;
+const staleSourceSnapshotSeconds = 2 * 60 * 60;
 const manualRecentTypes = ref<string[]>([]);
 const previewDraftKey = ref("");
 const pendingFocusNotice = ref<Dict | null>(null);
@@ -956,9 +602,25 @@ let lastActiveItemsSignature = "";
 let activeItemsStreamScope = "";
 let appDisposed = false;
 let resolveOngoingBindSelection: ((candidate: Dict | null) => void) | null = null;
+let jobStreamCoordinator: CrossTabStreamCoordinator<Dict> | null = null;
+let activeItemsStreamCoordinator: CrossTabStreamCoordinator<Dict> | null = null;
 
 const visibleScopeOptions = computed(() => auth.scopeOptions.length ? auth.scopeOptions : requestableScopes);
 const isAdmin = computed(() => String(auth.user?.role || "").toLowerCase() === "admin");
+const headerSubtitle = computed(() => {
+  if (isHistoryMemoryPage.value) return "管理工具 · 历史通告记忆导入";
+  if (authChecking.value) return "功能选择 · 正在检查登录";
+  if (!auth.loggedIn) return "功能选择 · 请先登录";
+  if (!auth.scopeOptions.length) return "功能选择 · 申请访问权限";
+  if (isWorkbench.value) return `${scopeLabel(currentScope.value)} · 通告工作台`;
+  return "功能选择 · 请选择功能";
+});
+const pageStatusText = computed(() => {
+  const text = String(syncText.value || "").trim();
+  if (!text || ["准备中", "请选择功能", "切换中"].includes(text)) return "";
+  if (/^HTTP\s+\d+/i.test(text)) return "后端服务暂未就绪，页面会在连接恢复后自动刷新。";
+  return text;
+});
 const connectionNotice = computed(() => {
   if (!auth.loggedIn) return null;
   if (backendStatus.offline) {
@@ -977,7 +639,11 @@ const connectionNotice = computed(() => {
       action: flushPendingHiddenRefresh,
     };
   }
-  if (isWorkbench.value && (!sseConnected.value || !activeItemsConnected.value)) {
+  if (
+    isWorkbench.value
+    && (!(sseConnected.value || sharedJobStreamAvailable.value)
+      || !(activeItemsConnected.value || sharedActiveItemsStreamAvailable.value))
+  ) {
     return {
       tone: "warning",
       text: "实时同步正在重连，任务状态会用轮询兜底。",
@@ -993,24 +659,6 @@ const closedSummaryItems = computed(() => {
   return items.filter((item: Dict) => String(item?.status || "") === "已结束" || Boolean(item?.ended_at));
 });
 const recentUndoItems = computed(() => [...availableUndoItems.value].sort((a, b) => Number(b.undo_created_at || 0) - Number(a.undo_created_at || 0)));
-const undoFilterOptions = [
-  { value: "all", label: "全部" },
-  { value: "delete", label: "删除" },
-  { value: "end", label: "结束" },
-  { value: "update", label: "更新" },
-];
-const undoFilterCounts = computed(() => {
-  const counts: Record<string, number> = { all: recentUndoItems.value.length, delete: 0, end: 0, update: 0 };
-  for (const item of recentUndoItems.value) {
-    const action = undoActionType(item);
-    if (action in counts) counts[action] += 1;
-  }
-  return counts;
-});
-const filteredRecentUndoItems = computed(() => {
-  if (undoFilter.value === "all") return recentUndoItems.value;
-  return recentUndoItems.value.filter((item) => undoActionType(item) === undoFilter.value);
-});
 const liveDailyStats = computed(() => ({
   ...dailyStats.value,
   started: Math.max(0, Number(dailyStats.value.started || 0) + localSummaryAdjustments.started),
@@ -1130,114 +778,23 @@ function onDraftBuildingChange(draft: Dict): void {
   saveDrafts();
 }
 
-function workTypeLabel(value: string): string {
-  return workTypes.find((item) => item.value === value)?.label || "维保";
-}
-
-function noticeTemplate(type: string): NoticeTemplate {
-  return noticeTemplates[type || "maintenance"] || noticeTemplates.maintenance;
-}
-
-function isNoticeMessageField(type: string, field: string): boolean {
-  return noticeTemplate(type).messageFields.includes(field);
-}
-
-function isNoticeUploadField(type: string, field: string): boolean {
-  return noticeTemplate(type).uploadFields.includes(field);
-}
-
-function hasNoticeUploadFields(type: string): boolean {
-  return noticeTemplate(type).uploadFields.length > 0;
-}
-
-function noticeFieldLabel(type: string, field: string): string {
-  const workType = type || "maintenance";
-  const commonLabels: Record<string, string> = {
-    building: "楼栋/范围",
-    maintenance_cycle: "维保周期",
-    cabinet: "柜号",
-    quantity: "数量",
-    device: "设备",
-    repair_device: "维修设备",
-    repair_fault: "维修故障",
-    solution: "解决方案",
-  };
-  const labels: Record<string, Record<string, string>> = {
-    maintenance: {
-      title: "名称",
-      specialty: "专业",
-      start_time: "计划开始时间",
-      end_time: "计划结束时间",
-      location: "位置",
-      content: "内容",
-      reason: "原因",
-      impact: "影响",
-      progress: "进度",
-    },
-    change: {
-      title: "名称",
-      specialty: "专业",
-      level: "变更等级",
-      start_time: "计划开始时间",
-      end_time: "计划结束时间",
-      location: "位置",
-      content: "内容",
-      reason: "原因",
-      impact: "影响",
-      progress: "进度",
-    },
-    repair: {
-      title: "标题",
-      specialty: "专业",
-      level: "紧急程度",
-      start_time: "期望完成时间",
-      end_time: "发现故障时间",
-      location: "地点",
-      content: "标题/补充内容",
-      reason: "故障原因",
-      impact: "影响范围",
-      progress: "完成情况",
-      spare_parts: "备件更换情况",
-    },
-    power: {
-      title: "名称",
-      specialty: "专业",
-      start_time: "计划开始时间",
-      end_time: "计划结束时间",
-      location: "位置",
-      content: "内容",
-      reason: "原因",
-      impact: "影响",
-      progress: "进度",
-    },
-    polling: {
-      title: "标题",
-      specialty: "专业",
-      start_time: "计划开始时间",
-      end_time: "计划结束时间",
-      location: "位置",
-      content: "内容",
-      reason: "原因",
-      impact: "影响",
-      progress: "进度",
-    },
-    adjust: {
-      title: "名称",
-      specialty: "专业",
-      start_time: "计划开始时间",
-      end_time: "计划结束时间",
-      location: "位置",
-      content: "内容",
-      reason: "原因",
-      impact: "影响",
-      progress: "进度",
-    },
-  };
-  return labels[workType]?.[field] || commonLabels[field] || labels.maintenance[field] || field;
-}
-
 function fieldsOf(record: Dict | undefined): Dict {
   return record?.display_fields || {};
+}
+
+function cleanDisplayText(value: any): string {
+  const text = String(value ?? "").trim();
+  if (placeholderFieldValues.has(text)) return "";
+  if (/^opt[A-Za-z0-9]{6,}$/.test(text)) return "";
+  return text;
+}
+
+function repairSpecialtyForRecord(record: Dict): string {
+  const fields = fieldsOf(record);
+  const direct = cleanDisplayText(fields["所属专业"]);
+  if (direct) return direct;
+  const pushedRaw = String(fields["专业（推送消息用）"] ?? "").trim();
+  return repairSpecialtyOptionFallback[pushedRaw] || cleanDisplayText(pushedRaw);
 }
 
 function todayInput(hour: number, minute: number): string {
@@ -1247,18 +804,11 @@ function todayInput(hour: number, minute: number): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-function toDatetimeLocal(value: string): string {
-  const text = String(value || "").trim();
-  const m = text.match(/(\d{4})[年/-](\d{1,2})[月/-](\d{1,2})日?\D+(\d{1,2})[：:点](\d{1,2})?/);
-  if (!m) return text.includes("T") ? text.slice(0, 16) : "";
-  return `${m[1]}-${m[2].padStart(2, "0")}-${m[3].padStart(2, "0")}T${m[4].padStart(2, "0")}:${(m[5] || "00").padStart(2, "0")}`;
-}
-
 function firstRepairField(record: Dict, names: string[]): string {
   const fields = fieldsOf(record);
   for (const name of names) {
-    const value = String(fields[name] || "").trim();
-    if (value && !["-", "--", "—", "——", "/", "无", "暂无"].includes(value)) return value;
+    const value = cleanDisplayText(fields[name]);
+    if (value) return value;
   }
   return "";
 }
@@ -1295,11 +845,11 @@ function recordCardTitle(record: Dict): string {
 
 function specialtyForRecord(record: Dict): string {
   const f = fieldsOf(record);
-  if (record.manual) return f["专业类别"] || f["专业"] || f["所属专业"] || "";
+  if (record.manual) return cleanDisplayText(f["专业类别"]) || cleanDisplayText(f["专业"]) || cleanDisplayText(f["所属专业"]) || "";
   const type = record.work_type || "maintenance";
-  if (type === "change") return f["专业"] || "";
-  if (type === "repair") return f["所属专业"] || f["专业（推送消息用）"] || "";
-  return f["专业类别"] || "";
+  if (type === "change") return cleanDisplayText(f["专业"]);
+  if (type === "repair") return repairSpecialtyForRecord(record);
+  return cleanDisplayText(f["专业类别"]);
 }
 
 function stripNonPlanTitleSuffix(title: string): string {
@@ -1313,13 +863,40 @@ function appendNonPlanTitleSuffix(title: string, enabled: boolean): string {
 }
 
 function manualDraftTitle(draft: Dict, type: string): string {
-  const title = String(draft.title || draft.content || "").trim();
+  const baseTitle = String(draft.title || "").trim();
+  const supplement = String(draft.content || "").trim();
+  const title = type === "repair"
+    ? combineTitleSupplement(baseTitle, supplement)
+    : (baseTitle || supplement);
   return type === "maintenance" ? appendNonPlanTitleSuffix(title, Boolean(draft.non_plan)) : title;
 }
 
+function combineTitleSupplement(title: string, supplement: string): string {
+  const base = String(title || "").trim();
+  const extra = String(supplement || "").trim();
+  if (!base) return extra;
+  if (!extra || base.includes(extra)) return base;
+  return `${base}${extra}`;
+}
+
+function payloadTitleForDraft(record: Dict, draft: Dict, type: string): string {
+  if (type === "repair") {
+    const baseTitle = String(draft.title || "").trim();
+    if (baseTitle) return baseTitle;
+    if (!record.manual) return titleForRecord(record);
+    return String(draft.content || "").trim();
+  }
+  return record.manual ? manualDraftTitle(draft, type) : titleForRecord(record);
+}
+
 function inferManualNoticeWorkType(draft: Dict, fallback = "maintenance"): string {
-  const normalized = workTypes.some((item) => item.value === fallback) ? fallback : "maintenance";
-  return normalized;
+  return normalizeWorkType(fallback);
+}
+
+function draftWorkType(record: Dict, draft: Dict): string {
+  return record.manual
+    ? inferManualNoticeWorkType(draft, draft.work_type || record.work_type || "maintenance")
+    : String(record.work_type || "maintenance");
 }
 
 function buildingForRecord(record: Dict): string {
@@ -1375,7 +952,7 @@ function recordStatusLabel(record: Dict): string {
   if (job?.phase === "failed") return "提交失败";
   if (job?.phase === "success") return "已提交";
   if (selectedKeys.has(key)) return "已加入待发起";
-  if (isRecordOngoing(record)) return "已在进行中 · 右侧处理";
+  if (isRecordOngoing(record)) return "进行中可更新 · 右侧处理";
   const progress = sourceProgressForRecord(record);
   if (!progress || progress === "未开始") return "待发起";
   return `${progress} · 可更新`;
@@ -1392,6 +969,27 @@ function recordStatusTone(record: Dict): string {
   const progress = sourceProgressForRecord(record);
   if (!progress || progress === "未开始") return "pending";
   return "update";
+}
+
+function sourceWorkTypeForRecord(record: Dict): string {
+  return String(record.source_work_type || record.converted_from_work_type || record.original_work_type || record.work_type || "maintenance").trim();
+}
+
+function canToggleWorkTypeOverride(record: Dict): boolean {
+  if (!record || record.manual) return false;
+  const sourceType = sourceWorkTypeForRecord(record);
+  const displayType = String(record.work_type || "maintenance");
+  return sourceType === "maintenance" && (displayType === "maintenance" || displayType === "change");
+}
+
+function targetOverrideWorkType(record: Dict): string {
+  return String(record.work_type || "maintenance") === "change" && sourceWorkTypeForRecord(record) === "maintenance"
+    ? "maintenance"
+    : "change";
+}
+
+function workTypeOverrideButtonLabel(record: Dict): string {
+  return targetOverrideWorkType(record) === "change" ? "转为变更" : "转为维保";
 }
 
 function targetRecordIdForRecord(record: Dict): string {
@@ -1460,12 +1058,25 @@ function ongoingTimeRange(item: Dict): { start: string; end: string } {
 }
 
 function isRecordOngoing(record: Dict): boolean {
-  const title = titleForRecord(record).replace(/\s+/g, "");
+  const titleCandidates = [
+    titleForRecord(record),
+    recordCardTitle(record),
+  ].map((value) => normalizeDraftSignatureText(value)).filter(Boolean);
   const sourceId = record.source_record_id || record.record_id;
+  const targetId = targetRecordIdForRecord(record);
   return ongoing.value.some((item) => {
     if ((item.work_type || "maintenance") !== (record.work_type || "maintenance")) return false;
-    if (sourceId && item.source_record_id && item.source_record_id === sourceId) return true;
-    return String(item.title || "").replace(/\s+/g, "") === title;
+    const itemSource = String(item.source_record_id || "").trim();
+    const itemTarget = targetRecordIdForOngoing(item);
+    const itemRecordId = String(item.record_id || "").trim();
+    if (sourceId && (itemSource === sourceId || itemRecordId === sourceId)) return true;
+    if (targetId && (itemTarget === targetId || itemRecordId === targetId)) return true;
+    const ongoingTitles = [
+      ongoingTitle(item),
+      item.title || "",
+      item.content || "",
+    ].map((value) => normalizeDraftSignatureText(value)).filter(Boolean);
+    return titleCandidates.some((title) => ongoingTitles.includes(title));
   });
 }
 
@@ -1487,7 +1098,7 @@ function draftRecordForKey(key: string): Dict | null {
 
 function manualDraftDefaults(type: string): Dict {
   const building = defaultBuildingForCurrentScope();
-  const normalizedType = workTypes.some((item) => item.value === type) ? type : "maintenance";
+  const normalizedType = normalizeWorkType(type);
   return {
     manual: true,
     work_type: normalizedType,
@@ -1567,7 +1178,7 @@ function manualRecordFromDraft(key: string, draft: Dict): Dict {
 }
 
 function onManualDraftTypeChange(draft: Dict): void {
-  const type = workTypes.some((item) => item.value === draft.work_type) ? draft.work_type : "maintenance";
+  const type = normalizeWorkType(draft.work_type);
   draft.work_type = type;
   if (type === "change" && !draft.level) draft.level = "I3";
   if (type !== "maintenance") draft.non_plan = false;
@@ -1579,10 +1190,11 @@ function repairDraftDefaults(record: Dict): Dict {
   return {
     start_time: todayInput(23, 50),
     end_time: toDatetimeLocal(firstRepairField(record, ["故障发生时间", "发现故障时间"])) || "",
+    title: memory.title || titleForRecord(record),
     location: memory.location || "",
-    content: memory.content || titleForRecord(record),
+    content: memory.content || firstRepairField(record, ["标题/补充内容", "标题补充内容"]),
     level: memory.level || levelForRecord(record),
-    specialty: memory.specialty || specialtyForRecord(record),
+    specialty: cleanDisplayText(memory.specialty) || specialtyForRecord(record),
     reason: memory.reason || firstRepairField(record, ["故障原因", "故障维修原因"]),
     impact: memory.impact || "",
     progress: memory.progress || "",
@@ -1590,7 +1202,7 @@ function repairDraftDefaults(record: Dict): Dict {
     repair_fault: memory.repair_fault || firstRepairField(record, ["维修故障", "故障维修原因"]),
     fault_type: memory.fault_type || firstRepairField(record, ["故障类型"]) || "设备故障",
     repair_mode: memory.repair_mode || firstRepairField(record, ["维修方式", "维修方", "供应商名称"]),
-    discovery: memory.discovery || firstRepairField(record, ["对应来源"]),
+    discovery: cleanDisplayText(memory.discovery) || firstRepairField(record, ["对应来源"]),
     symptom: memory.symptom || firstRepairField(record, ["故障发生现象描述", "故障现象"]),
     solution: memory.solution || firstRepairField(record, ["解决方案", "维修方案", "后续整改措施"]),
     spare_parts: memory.spare_parts || firstRepairField(record, ["备件更换情况", "备件使用情况"]),
@@ -1624,7 +1236,7 @@ function getDraft(record: Dict): Dict {
       const zhihangMemory = isChange ? rememberedZhihang(memory) : {};
       drafts.set(key, {
         title: titleForRecord(record),
-        specialty: memory.specialty || specialtyForRecord(record),
+        specialty: cleanDisplayText(memory.specialty) || specialtyForRecord(record),
         level: memory.level || levelForRecord(record) || (isChange ? "I3" : ""),
         maintenance_cycle: f["维护周期"] || "",
         start_time: isChange
@@ -1653,133 +1265,55 @@ function currentOpenId(): string {
   return String(auth.user?.open_id || auth.user?.openid || "anonymous").trim() || "anonymous";
 }
 
-function storageKey(): string {
-  return `clipflow-vue-workbench:${currentOpenId()}:${currentScope.value || "ALL"}`;
-}
-
-function legacyStorageKey(): string {
-  return `clipflow-vue-workbench:${currentScope.value || "ALL"}`;
-}
-
-function manualRecentStorageKey(): string {
-  return `clipflow-manual-recent:${currentOpenId()}:${currentScope.value || "ALL"}`;
-}
-
-function manualTemplateMemoryKey(type: string): string {
-  return `clipflow-manual-template:${currentOpenId()}:${currentScope.value || "ALL"}:${type}`;
+function currentDraftScope(): string {
+  return currentScope.value || "ALL";
 }
 
 function loadManualRecentTypes(): void {
-  try {
-    const raw = localStorage.getItem(manualRecentStorageKey()) || "[]";
-    const values = JSON.parse(raw);
-    manualRecentTypes.value = Array.isArray(values)
-      ? values.filter((value) => workTypes.some((item) => item.value === value)).slice(0, 3)
-      : [];
-  } catch {
-    manualRecentTypes.value = [];
-  }
+  manualRecentTypes.value = loadManualRecentTypesFromStorage(currentOpenId(), currentDraftScope());
 }
 
 function saveManualRecentType(type: string): void {
-  if (!workTypes.some((item) => item.value === type)) return;
-  const next = [type, ...manualRecentTypes.value.filter((value) => value !== type)].slice(0, 3);
-  manualRecentTypes.value = next;
-  try {
-    localStorage.setItem(manualRecentStorageKey(), JSON.stringify(next));
-  } catch {
-    // 最近使用只是体验优化，失败不阻塞纯手填。
-  }
-}
-
-function manualTemplateSnapshot(draft: Dict): Dict {
-  const allowed = [
-    "title",
-    "building",
-    "building_codes",
-    "specialty",
-    "level",
-    "maintenance_cycle",
-    "start_time",
-    "end_time",
-    "location",
-    "content",
-    "reason",
-    "impact",
-    "progress",
-    "repair_device",
-    "repair_fault",
-    "fault_type",
-    "repair_mode",
-    "discovery",
-    "symptom",
-    "solution",
-    "spare_parts",
-    "device",
-    "cabinet",
-    "quantity",
-  ];
-  const snapshot: Dict = {};
-  for (const field of allowed) {
-    const value = draft[field];
-    if (Array.isArray(value)) snapshot[field] = [...value];
-    else if (value !== undefined) snapshot[field] = value;
-  }
-  return snapshot;
+  manualRecentTypes.value = saveManualRecentTypeToStorage(
+    currentOpenId(),
+    currentDraftScope(),
+    type,
+    manualRecentTypes.value,
+  );
 }
 
 function loadManualTemplateMemory(type: string): Dict | null {
-  if (!manualPrefillWorkTypes.has(type)) return null;
-  try {
-    const raw = localStorage.getItem(manualTemplateMemoryKey(type));
-    if (!raw) return null;
-    const payload = JSON.parse(raw);
-    if (!payload || typeof payload !== "object") return null;
-    return manualTemplateSnapshot(payload as Dict);
-  } catch {
-    return null;
-  }
+  return loadManualTemplateMemoryFromStorage(currentOpenId(), currentDraftScope(), type);
 }
 
 function saveManualTemplateMemory(type: string, draft: Dict): void {
-  if (!manualPrefillWorkTypes.has(type)) return;
-  try {
-    localStorage.setItem(manualTemplateMemoryKey(type), JSON.stringify(manualTemplateSnapshot(draft)));
-  } catch {
-    // 草稿保存失败已有提示；这里不阻塞发送。
-  }
+  saveManualTemplateMemoryToStorage(currentOpenId(), currentDraftScope(), type, draft);
 }
 
 function loadDrafts(): void {
   loadManualRecentTypes();
-  try {
-    const raw = localStorage.getItem(storageKey()) || localStorage.getItem(legacyStorageKey()) || "{}";
-    const payload = JSON.parse(raw);
-    if (!payload || typeof payload !== "object") throw new Error("invalid draft payload");
-    selectedKeys.clear();
-    for (const key of Array.isArray(payload.selected) ? payload.selected : []) selectedKeys.add(String(key));
-    drafts.clear();
-    const draftPayload = payload.drafts && typeof payload.drafts === "object" ? payload.drafts : {};
-    for (const [key, value] of Object.entries(draftPayload)) {
-      if (value && typeof value === "object") drafts.set(key, value as Dict);
-    }
-  } catch {
-    selectedKeys.clear();
-    drafts.clear();
-  }
+  const payload = loadDraftStorage(currentOpenId(), currentDraftScope());
+  selectedKeys.clear();
+  for (const key of payload.selected) selectedKeys.add(key);
+  drafts.clear();
+  for (const [key, value] of Object.entries(payload.drafts)) drafts.set(key, value);
 }
 
 function saveDrafts(): void {
-  const payload: Dict = { selected: Array.from(selectedKeys), drafts: {} };
-  for (const [key, value] of drafts.entries()) payload.drafts[key] = value;
-  try {
-    localStorage.setItem(storageKey(), JSON.stringify(payload));
+  const payload: Record<string, Dict> = {};
+  for (const [key, value] of drafts.entries()) payload[key] = value;
+  if (saveDraftStorage(currentOpenId(), currentDraftScope(), Array.from(selectedKeys), payload)) {
     draftSaveFailed.value = false;
     draftSavedAt.value = Date.now();
-  } catch {
+  } else {
     draftSaveFailed.value = true;
     syncText.value = "草稿保存失败，请减少待发起通告数量后重试";
   }
+}
+
+function setDraftField(draft: Dict, field: string, value: unknown): void {
+  draft[field] = value;
+  saveDrafts();
 }
 
 function formatTimeOfDay(timestamp: number): string {
@@ -1834,19 +1368,47 @@ function clearAuthKeepalive(): void {
   }
 }
 
-function stopJobSse(): void {
+function closeDirectJobEventSource(): void {
   if (eventSource.value) eventSource.value.close();
   eventSource.value = null;
-  sseConnected.value = false;
   if (sseReconnectTimer !== null) {
     window.clearTimeout(sseReconnectTimer);
     sseReconnectTimer = null;
   }
 }
 
+function stopJobSse(): void {
+  if (jobStreamCoordinator) {
+    jobStreamCoordinator.stop();
+    jobStreamCoordinator = null;
+  }
+  closeDirectJobEventSource();
+  sseConnected.value = false;
+  sharedJobStreamAvailable.value = false;
+}
+
 function stopRealtimeConnections(): void {
   stopJobSse();
   stopActiveItemsSse();
+}
+
+function pauseJobStatusChecksForHiddenPage(): void {
+  for (const timer of fallbackPollTimers.values()) window.clearTimeout(timer);
+  fallbackPollTimers.clear();
+  if (batchPollTimer !== null) {
+    window.clearTimeout(batchPollTimer);
+    batchPollTimer = null;
+  }
+}
+
+function resumePendingJobStatusChecks(): void {
+  for (const [key, state] of jobStates.entries()) {
+    const jobId = String(state.job_id || "").trim();
+    if (jobId && !terminalPhase(state.phase)) {
+      watchJob(jobId, key);
+    }
+  }
+  if (pollingJobs.size > 0) scheduleBatchJobPoll(0);
 }
 
 function markAuthExpired(message = "登录已过期，请重新扫码登录。"): void {
@@ -1859,35 +1421,31 @@ function markAuthExpired(message = "登录已过期，请重新扫码登录。")
   syncText.value = message;
 }
 
-async function api(path: string, options: RequestInit = {}): Promise<Dict> {
-  let response: Response;
-  try {
-    response = await fetch(path, {
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json", ...(options.headers || {}) },
-      ...options,
-    });
-    backendStatus.offline = false;
-    backendStatus.message = "";
-  } catch (error: any) {
-    backendStatus.offline = true;
-    backendStatus.lastErrorAt = Date.now();
-    backendStatus.message = "后端连接中断，已保留当前页面数据。";
-    throw new Error(error?.message || "后端连接中断");
-  }
-  const payload = await response.json().catch(() => ({}));
-  if (response.status === 401 || payload.auth_required) {
-    markAuthExpired(payload.error || "登录已过期，请重新扫码登录。");
-    throw new Error(payload.error || `HTTP ${response.status}`);
-  }
-  if (response.status >= 500) {
-    backendStatus.offline = true;
-    backendStatus.lastErrorAt = Date.now();
-    backendStatus.message = payload.error || "后端服务异常，稍后会自动重试。";
-  }
-  if (!response.ok || payload.ok === false) throw new Error(payload.error || `HTTP ${response.status}`);
-  return payload.data || payload;
+function handleGlobalAuthExpired(event: Event): void {
+  const detail = (event as CustomEvent<{ message?: string }>).detail || {};
+  markAuthExpired(detail.message || "登录已过期，请重新扫码登录。");
 }
+
+const api = (path: string, options: RequestInit = {}): Promise<Dict> =>
+  requestJson(path, options, {
+    onOnline: () => {
+      backendStatus.offline = false;
+      backendStatus.message = "";
+    },
+    onOffline: (message) => {
+      backendStatus.offline = true;
+      backendStatus.lastErrorAt = Date.now();
+      backendStatus.message = message;
+    },
+    onAuthExpired: (message) => {
+      markAuthExpired(message);
+    },
+    onServerError: (message) => {
+      backendStatus.offline = true;
+      backendStatus.lastErrorAt = Date.now();
+      backendStatus.message = message;
+    },
+  });
 
 function scheduleAuthKeepalive(delayMs = authKeepaliveMs): void {
   clearAuthKeepalive();
@@ -1979,7 +1537,7 @@ async function loadWorkbench(): Promise<void> {
     if (!userSelectedWorkType.value) {
       workType.value = resolveInitialWorkType(data.default_work_type || workType.value);
     }
-    syncText.value = data.source_snapshot_ready === false ? "后台正在准备数据" : "数据已就绪";
+    syncText.value = workbenchSyncText(data);
     clearWorkbenchRetry();
     await loadAvailableUndos(requestScope, requestSeq);
     focusPendingNoticeResult();
@@ -1994,6 +1552,19 @@ async function loadWorkbench(): Promise<void> {
       loading.value = false;
     }
   }
+}
+
+function workbenchSyncText(data: Dict): string {
+  if (data.source_snapshot_ready === false) return "后台正在准备数据";
+  const ts = Number(data.last_loaded_ts || 0);
+  if (ts > 0) {
+    const ageSeconds = Math.max(0, Date.now() / 1000 - ts);
+    if (ageSeconds >= staleSourceSnapshotSeconds) {
+      const loadedAt = String(data.last_loaded_at || "").trim();
+      return loadedAt ? `显示上次成功数据：${loadedAt}` : "显示上次成功数据";
+    }
+  }
+  return "数据已就绪";
 }
 
 async function manualRefreshWorkbench(): Promise<void> {
@@ -2020,7 +1591,7 @@ async function loadAvailableUndos(scope = currentScope.value, requestSeq = workb
 }
 
 function resolveInitialWorkType(preferred: string): string {
-  const preferredType = workTypes.some((item) => item.value === preferred) ? preferred : "maintenance";
+  const preferredType = normalizeWorkType(preferred);
   if (recordTypeCounts.value[preferredType] > 0) return preferredType;
   const fallback = workTypes.find((item) => recordTypeCounts.value[item.value] > 0);
   return fallback?.value || preferredType;
@@ -2029,6 +1600,48 @@ function resolveInitialWorkType(preferred: string): string {
 function selectWorkType(value: string): void {
   workType.value = value;
   userSelectedWorkType.value = true;
+}
+
+async function toggleWorkTypeOverride(record: Dict): Promise<void> {
+  if (!canToggleWorkTypeOverride(record)) return;
+  const oldKey = recordKey(record);
+  if (typeOverrideBusyKey.value) return;
+  const targetType = targetOverrideWorkType(record);
+  typeOverrideBusyKey.value = oldKey;
+  try {
+    await api("/api/notice-work-type-override", {
+      method: "POST",
+      body: JSON.stringify({
+        scope: currentScope.value || "ALL",
+        record_id: record.record_id || record.source_record_id || "",
+        source_work_type: sourceWorkTypeForRecord(record),
+        target_work_type: targetType,
+      }),
+    });
+    selectedKeys.delete(oldKey);
+    drafts.delete(oldKey);
+    activeDraftKey.value = "";
+    workType.value = targetType;
+    userSelectedWorkType.value = true;
+    syncText.value = targetType === "change" ? "已转为变更通告" : "已转回维保通告";
+    await loadWorkbench();
+    const nextRecord = records.value.find((item) => {
+      return String(item.record_id || "") === String(record.record_id || "")
+        && String(item.work_type || "maintenance") === targetType;
+    });
+    if (nextRecord) {
+      const nextKey = recordKey(nextRecord);
+      selectedKeys.add(nextKey);
+      activeDraftKey.value = nextKey;
+      nextTick(() => {
+        document.querySelector(".draft-card.active")?.scrollIntoView({ block: "center", behavior: "smooth" });
+      });
+    }
+  } catch (error: any) {
+    syncText.value = error?.message || "通告类型切换失败";
+  } finally {
+    if (typeOverrideBusyKey.value === oldKey) typeOverrideBusyKey.value = "";
+  }
 }
 
 function focusPendingNoticeResult(): void {
@@ -2094,10 +1707,6 @@ function pruneOngoingExpansion(): void {
   if (!exists) activeOngoingKey.value = "";
 }
 
-function terminalPhase(phase: string): boolean {
-  return ["success", "failed"].includes(String(phase || ""));
-}
-
 function activeLineKeys(): Set<string> {
   const keys = new Set<string>(Array.from(selectedKeys));
   for (const item of ongoing.value) {
@@ -2117,6 +1726,7 @@ function clearFallbackPoll(key: string): void {
   const timer = fallbackPollTimers.get(key);
   if (timer) window.clearTimeout(timer);
   fallbackPollTimers.delete(key);
+  pollingJobs.delete(key);
 }
 
 function scheduleWorkbenchReload(delay = 350): void {
@@ -2178,11 +1788,17 @@ function retryFrontendConnections(): void {
 
 function handleVisibilityChange(): void {
   pageVisible.value = !document.hidden;
-  if (!pageVisible.value) return;
+  if (!pageVisible.value) {
+    clearAuthKeepalive();
+    pauseJobStatusChecksForHiddenPage();
+    stopRealtimeConnections();
+    return;
+  }
   if (auth.loggedIn) {
     scheduleAuthKeepalive(1000);
-    if (!eventSource.value) startJobSse();
-    if (isWorkbench.value && !activeItemsEventSource.value) startActiveItemsSse();
+    if (!isJobStreamStarted()) startJobSse();
+    if (isWorkbench.value && !isActiveItemsStreamStarted()) startActiveItemsSse();
+    resumePendingJobStatusChecks();
   }
   if (pendingHiddenRefresh.value) {
     flushPendingHiddenRefresh();
@@ -2295,7 +1911,7 @@ function draftCardMeta(record: Dict, draft: Dict, editing: boolean): string {
 }
 
 function requiredDraftFields(record: Dict, draft: Dict): string[] {
-  const type = inferManualNoticeWorkType(draft, record.work_type || draft.work_type || "maintenance");
+  const type = draftWorkType(record, draft);
   const fields = new Set<string>(["title", "start_time", "end_time", "progress"]);
   if (record.manual) fields.add("building");
   if (type === "maintenance") {
@@ -2316,7 +1932,7 @@ function requiredDraftFields(record: Dict, draft: Dict): string[] {
 }
 
 function draftFieldValue(record: Dict, draft: Dict, field: string): string {
-  if (field === "title") return manualDraftTitle(draft, record.work_type || draft.work_type || "maintenance");
+  if (field === "title") return manualDraftTitle(draft, draftWorkType(record, draft));
   return String(draft[field] ?? "").trim();
 }
 
@@ -2326,7 +1942,15 @@ function draftMissingFields(record: Dict, draft: Dict): string[] {
 
 function draftTypeConflict(record: Dict, draft: Dict): { expectedType: string; actualType: string; keyword: string } | null {
   if (!record.manual) return null;
-  const expectedType = inferManualNoticeWorkType(draft, record.work_type || draft.work_type || "maintenance");
+  const expectedType = draftWorkType(record, draft);
+  const parsedType = String(draft.parsed_work_type || "").trim();
+  if (parsedType && isKnownWorkType(parsedType) && parsedType !== expectedType) {
+    return {
+      expectedType,
+      actualType: parsedType,
+      keyword: `原粘贴通告识别为${workTypeLabel(parsedType)}`,
+    };
+  }
   const title = manualDraftTitle(draft, expectedType) || recordCardTitle(record);
   const normalizedTitle = String(title || "").replace(/\s+/g, "");
   if (!normalizedTitle) return null;
@@ -2366,12 +1990,13 @@ function draftMissingText(record: Dict, draft: Dict): string {
   if (!draft.validation_touched) return "";
   const conflict = draftTypeConflictText(record, draft);
   if (conflict) return conflict;
-  const missing = draftMissingFields(record, draft).map((field) => noticeFieldLabel(record.work_type || draft.work_type || "maintenance", field));
+  const type = draftWorkType(record, draft);
+  const missing = draftMissingFields(record, draft).map((field) => noticeFieldLabel(type, field));
   return missing.length ? `请补充：${missing.join("、")}` : "";
 }
 
 function noticePreviewText(record: Dict, draft: Dict): string {
-  const type = inferManualNoticeWorkType(draft, record.work_type || draft.work_type || "maintenance");
+  const type = draftWorkType(record, draft);
   const template = noticeTemplate(type);
   const actionLabel = draftActionLabel(record, draft);
   const lines = [`【${template.heading}】状态：${actionLabel}`];
@@ -2392,7 +2017,7 @@ function noticePreviewText(record: Dict, draft: Dict): string {
 }
 
 function draftUploadPreviewRows(record: Dict, draft: Dict): Array<{ label: string; value: string }> {
-  const type = inferManualNoticeWorkType(draft, record.work_type || draft.work_type || "maintenance");
+  const type = draftWorkType(record, draft);
   const rows: Array<{ label: string; value: string }> = [
     { label: "通告类型", value: workTypeLabel(type) },
     { label: "楼栋/范围", value: record.manual ? draft.building : buildingForRecord(record) },
@@ -2421,8 +2046,32 @@ function draftUploadPreviewRows(record: Dict, draft: Dict): Array<{ label: strin
 }
 
 function sendDraftButtonLabel(record: Dict, draft: Dict): string {
-  const type = inferManualNoticeWorkType(draft, record.work_type || draft.work_type || "maintenance");
+  const type = draftWorkType(record, draft);
   return `发送${workTypeLabel(type)}${draftActionLabel(record, draft)}`;
+}
+
+function payloadDurationError(payload: Dict): string {
+  const workType = String(payload?.work_type || "maintenance");
+  if (workType === "repair") {
+    return noticeDurationError(
+      workType,
+      payload?.fault_time || payload?.end_time,
+      payload?.expected_time || payload?.start_time,
+    );
+  }
+  return noticeDurationError(workType, payload?.start_time, payload?.end_time);
+}
+
+function validatePayloadDuration(payload: Dict, lineKey: string): boolean {
+  const error = payloadDurationError(payload);
+  if (!error) return true;
+  rememberJob(lineKey, {
+    text: error,
+    status: "failed",
+    phase: "failed",
+  });
+  syncText.value = error;
+  return false;
 }
 
 function normalizeDraftSignatureText(value: string): string {
@@ -2430,7 +2079,7 @@ function normalizeDraftSignatureText(value: string): string {
 }
 
 function draftSignature(record: Dict, draft: Dict): string {
-  const type = inferManualNoticeWorkType(draft, record.work_type || draft.work_type || "maintenance");
+  const type = draftWorkType(record, draft);
   const title = normalizeDraftSignatureText(manualDraftTitle(draft, type) || recordCardTitle(record));
   const start = String(draft.start_time || "").slice(0, 16);
   const end = String(draft.end_time || "").slice(0, 16);
@@ -2465,7 +2114,7 @@ function toggleRecordSelection(row: NoticeRow | undefined): void {
 }
 
 function addManualDraft(type = workType.value): void {
-  const normalizedType = workTypes.some((item) => item.value === type) ? type : "maintenance";
+  const normalizedType = normalizeWorkType(type);
   const key = `manual:${normalizedType}:${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const draft = manualDraftDefaults(normalizedType);
   const memory = loadManualTemplateMemory(normalizedType);
@@ -2499,111 +2148,6 @@ function removeDraft(key: string): void {
   saveDrafts();
 }
 
-function normalizeNoticeLabel(label: string): string {
-  return String(label || "").replace(/\s+/g, "").replace(/[：:]/g, "");
-}
-
-function parseSections(text: string): Dict {
-  const sections: Dict = {};
-  const re = /【([^】]+)】([\s\S]*?)(?=(?:\n\s*)*【[^】]+】|$)/g;
-  let match: RegExpExecArray | null;
-  while ((match = re.exec(text))) sections[normalizeNoticeLabel(match[1])] = String(match[2] || "").trim();
-  return sections;
-}
-
-function sectionValue(sections: Dict, names: string[], fallback = ""): string {
-  for (const name of names) {
-    const value = sections[normalizeNoticeLabel(name)];
-    if (String(value || "").trim()) return String(value).trim();
-  }
-  return fallback;
-}
-
-function pastedNoticeStatus(text: string): string {
-  const match = String(text || "").match(/状态\s*[：:]\s*(开始|更新|结束)/);
-  return match?.[1] || "开始";
-}
-
-function inferBuildingText(...values: string[]): string {
-  const text = values.filter(Boolean).join("\n").toUpperCase();
-  const patterns: Array<[RegExp, string]> = [
-    [/110\s*(?:站|KV)?|110站/i, "110站"],
-    [/(?:A楼|A栋|\bA\b)/i, "A楼"],
-    [/(?:B楼|B栋|\bB\b)/i, "B楼"],
-    [/(?:C楼|C栋|\bC\b)/i, "C楼"],
-    [/(?:D楼|D栋|\bD\b)/i, "D楼"],
-    [/(?:E楼|E栋|\bE\b)/i, "E楼"],
-    [/(?:H楼|H栋|\bH\b)/i, "H楼"],
-    [/园区|ABC|A\/B\/C|A、B、C/i, "园区"],
-  ];
-  for (const [pattern, label] of patterns) if (pattern.test(text)) return label;
-  return "";
-}
-
-function splitNoticeTimeRange(value: string): { start: string; end: string } {
-  const text = String(value || "").trim();
-  if (!text) return { start: "", end: "" };
-  const sameDayRange = text.match(
-    /(\d{4}[年/-]\d{1,2}[月/-]\d{1,2}[日]?)\s*(\d{1,2}[：:点]\d{1,2})\s*(?:-|至|~|～|—|--)\s*(\d{1,2}[：:点]\d{1,2})/
-  );
-  if (sameDayRange) {
-    const datePrefix = sameDayRange[1];
-    return {
-      start: toDatetimeLocal(`${datePrefix} ${sameDayRange[2]}`),
-      end: toDatetimeLocal(`${datePrefix} ${sameDayRange[3]}`),
-    };
-  }
-  const parts = text.split(/\s*(?:至|~|～|—|--)\s*/).filter(Boolean);
-  if (parts.length >= 2) {
-    const startRaw = parts[0];
-    const endRaw = parts.slice(1).join(" ");
-    const start = toDatetimeLocal(startRaw);
-    let end = toDatetimeLocal(endRaw);
-    if (!end && start) {
-      const datePrefix = startRaw.match(/(\d{4}[年/-]\d{1,2}[月/-]\d{1,2}[日]?)/)?.[1] || "";
-      const endClock = endRaw.match(/(\d{1,2})[：:点](\d{1,2})?/)?.[0] || "";
-      if (datePrefix && endClock) end = toDatetimeLocal(`${datePrefix} ${endClock}`);
-    }
-    return { start, end };
-  }
-  const matches = [...text.matchAll(/(\d{4}[年/-]\d{1,2}[月/-]\d{1,2}[日]?\s*\d{1,2}[：:点]\d{0,2})/g)].map((item) => item[1]);
-  if (matches.length >= 2) return { start: toDatetimeLocal(matches[0]), end: toDatetimeLocal(matches[1]) };
-  return { start: toDatetimeLocal(text), end: "" };
-}
-
-function parsedActionFromStatus(status: string): string {
-  if (status === "更新") return "update";
-  if (status === "结束") return "end";
-  return "start";
-}
-
-function parsedActionLabel(action: string): string {
-  if (action === "update") return "更新";
-  if (action === "end") return "结束";
-  return "开始";
-}
-
-function pastedNoticeWorkType(text: string, sections: Dict = {}): string {
-  const titleText = [
-    sectionValue(sections, ["名称", "标题", "通告名称", "维修名称"]),
-    sectionValue(sections, ["内容"]),
-  ].filter(Boolean).join("\n");
-  const raw = String(text || "");
-  const headText = `${raw.match(/^【[^】]+】/)?.[0] || ""}\n${titleText}`;
-  const rawHead = raw.split(/\n/).slice(0, 5).join("\n");
-  if (/设备检修|检修通告/.test(headText)) return "repair";
-  if (/上电通告|上下电通告|下电通告/.test(headText)) return "power";
-  if (/设备轮巡|轮巡通告/.test(headText)) return "polling";
-  if (/设备调整|调整通告/.test(headText)) return "adjust";
-  if (/设备变更|变更通告/.test(headText)) return "change";
-  if (/设备检修|检修通告/.test(rawHead)) return "repair";
-  if (/上电通告|上下电通告|下电通告/.test(rawHead)) return "power";
-  if (/设备轮巡|轮巡通告/.test(rawHead)) return "polling";
-  if (/设备调整|调整通告/.test(rawHead)) return "adjust";
-  if (/设备变更|变更通告/.test(rawHead)) return "change";
-  return "maintenance";
-}
-
 function changeTargetCandidateId(item: Dict): string {
   return String(item?.record_id || item?.target_record_id || "").trim();
 }
@@ -2612,17 +2156,40 @@ function changeSourceCandidateId(item: Dict): string {
   return String(item?.source_record_id || item?.record_id || "").trim();
 }
 
-const activeChangeTargetCandidate = computed(() => {
+const filteredChangeTargetCandidates = computed(() => {
   const pending = pendingChangeTargetSelection.value;
   const candidates = Array.isArray(pending?.candidates) ? pending.candidates : [];
-  if (!candidates.length) return null;
+  return filterCandidatesBySearch(candidates, changeTargetSearchText.value);
+});
+
+const selectedChangeTargetVisible = computed(() => {
+  const selected = selectedChangeTargetId.value;
+  if (!selected) return false;
+  return filteredChangeTargetCandidates.value.some((item: Dict) => changeTargetCandidateId(item) === selected);
+});
+
+const visibleActiveChangeTargetCandidate = computed(() => {
   const detailId = hoveredChangeTargetId.value || selectedChangeTargetId.value;
-  return candidates.find((item: Dict) => changeTargetCandidateId(item) === detailId) || candidates[0];
+  if (detailId) {
+    const visible = filteredChangeTargetCandidates.value.find((item: Dict) => changeTargetCandidateId(item) === detailId);
+    if (visible) return visible;
+  }
+  return filteredChangeTargetCandidates.value[0] || null;
 });
 
 const changeSourceCandidates = computed(() => {
   const pending = pendingChangeTargetSelection.value;
   return Array.isArray(pending?.sourceCandidates) ? pending.sourceCandidates : [];
+});
+
+const filteredChangeSourceCandidates = computed(() => {
+  return filterCandidatesBySearch(changeSourceCandidates.value, changeSourceSearchText.value);
+});
+
+const selectedChangeSourceVisible = computed(() => {
+  const selected = selectedChangeSourceId.value;
+  if (!selected) return false;
+  return filteredChangeSourceCandidates.value.some((item: Dict) => changeSourceCandidateId(item) === selected);
 });
 
 const selectedChangeSourceCandidate = computed(() => {
@@ -2707,7 +2274,8 @@ function confirmOngoingBindSelection(): void {
 function firstCandidateField(fields: Dict, names: string[]): string {
   for (const name of names) {
     const value = fields?.[name];
-    if (String(value ?? "").trim()) return String(value).trim();
+    const text = cleanDisplayText(value);
+    if (text) return text;
   }
   return "";
 }
@@ -2773,6 +2341,8 @@ function completeParsedNoticeDraft(type: string, draft: Dict, options: Dict = {}
   selectedChangeTargetId.value = "";
   hoveredChangeTargetId.value = "";
   selectedChangeSourceId.value = "";
+  changeTargetSearchText.value = "";
+  changeSourceSearchText.value = "";
   showPasteParser.value = false;
   pasteParseLine.value = `已解析为${workTypeLabel(type)}${parsedActionLabel(draft.parsed_action || "start")}通告。`;
   pasteParseStatus.value = "success";
@@ -2789,6 +2359,8 @@ async function parsePastedNotice(): Promise<void> {
   selectedChangeTargetId.value = "";
   hoveredChangeTargetId.value = "";
   selectedChangeSourceId.value = "";
+  changeTargetSearchText.value = "";
+  changeSourceSearchText.value = "";
   try {
     const sections = parseSections(text);
     if (/事件通告/.test(text)) {
@@ -2796,6 +2368,7 @@ async function parsePastedNotice(): Promise<void> {
     }
     const type = pastedNoticeWorkType(text, sections);
     const draft = manualDraftDefaults(type);
+    draft.parsed_work_type = type;
     const status = pastedNoticeStatus(text);
     const action = parsedActionFromStatus(status);
     const timeRange = splitNoticeTimeRange(sectionValue(sections, ["时间"]));
@@ -2817,7 +2390,9 @@ async function parsePastedNotice(): Promise<void> {
       || inferBuildingText(draft.title, draft.location, text)
       || defaultBuildingForCurrentScope();
     draft.building_codes = buildingCodesFromText(draft.building);
-    draft.content = type === "repair" ? (sectionValue(sections, ["内容"], draft.title) || draft.title) : sectionValue(sections, ["内容"], draft.title);
+    draft.content = type === "repair"
+      ? sectionValue(sections, ["标题/补充内容", "标题补充内容", "补充内容", "内容"])
+      : sectionValue(sections, ["内容"], draft.title);
     draft.repair_device = sectionValue(sections, ["维修设备"]);
     draft.repair_fault = sectionValue(sections, ["维修故障"]);
     draft.fault_type = sectionValue(sections, ["故障类型"]);
@@ -2863,12 +2438,18 @@ async function parsePastedNotice(): Promise<void> {
           actionLabel: parsedActionLabel(action),
           candidates,
           sourceCandidates,
+          returnedCount: Number(data.returned_count ?? data.count ?? candidates.length),
+          totalMatched: Number(data.total_matched ?? candidates.length),
+          limit: Number(data.limit ?? candidates.length),
+          limited: Boolean(data.limited),
         };
+        changeTargetSearchText.value = "";
+        changeSourceSearchText.value = "";
         selectedChangeTargetId.value = changeTargetCandidateId(candidates[0]);
         hoveredChangeTargetId.value = selectedChangeTargetId.value;
         selectedChangeSourceId.value = sourceCandidates.length ? changeSourceCandidateId(sourceCandidates[0]) : "";
         pasteParseLine.value = candidates.length
-          ? `找到 ${candidates.length} 条同名${workTypeLabel(type)}目标记录，请确认要${parsedActionLabel(action)}的记录。`
+          ? `找到 ${Number(data.total_matched ?? candidates.length)} 条同名${workTypeLabel(type)}目标记录，当前显示 ${candidates.length} 条，请确认要${parsedActionLabel(action)}的记录。`
           : `未找到同名目标记录，但找到 ${sourceCandidates.length} 条源表记录；可先关联源表记录后继续提交。`;
         pasteParseStatus.value = "";
         return;
@@ -2907,11 +2488,11 @@ function choosePastedChangeTarget(candidate: Dict): void {
 async function confirmPastedChangeTarget(): Promise<void> {
   const pending = pendingChangeTargetSelection.value;
   if (!pending || changeTargetConfirming.value) return;
-  const candidates = Array.isArray(pending.candidates) ? pending.candidates : [];
+  const candidates = filteredChangeTargetCandidates.value;
   const candidate =
     candidates.find((item: Dict) => changeTargetCandidateId(item) === selectedChangeTargetId.value) ||
-    activeChangeTargetCandidate.value;
-  const sourceOnly = !candidate && selectedChangeSourceCandidate.value;
+    visibleActiveChangeTargetCandidate.value;
+  const sourceOnly = !candidate && selectedChangeSourceVisible.value && selectedChangeSourceCandidate.value;
   if (!candidate && !sourceOnly) {
     pasteParseLine.value = "请先选择一条目标多维记录或源表记录。";
     pasteParseStatus.value = "failed";
@@ -3017,7 +2598,7 @@ function buildStartPayload(key: string): Dict | null {
   const record = draftRecordForKey(key);
   const draft = drafts.get(key);
   if (!record || !draft) return null;
-  const type = record.manual ? inferManualNoticeWorkType(draft, record.work_type || draft.work_type || "maintenance") : (record.work_type || "maintenance");
+  const type = draftWorkType(record, draft);
   if (record.manual && draft.work_type !== type) draft.work_type = type;
   const action = record.manual ? draftActionForRecord(record, draft) : sourceActionForRecord(record);
   const targetRecordId = record.manual ? String(draft.target_record_id || draft.feishu_record_id || draft.raw_record_id || "").trim() : targetRecordIdForRecord(record);
@@ -3031,14 +2612,16 @@ function buildStartPayload(key: string): Dict | null {
     source_app_token: record.manual ? (draft.source_app_token || "") : (record.source_app_token || ""),
     source_table_id: record.manual ? (draft.source_table_id || "") : (record.source_table_id || ""),
     maintenance_cycle: record.manual ? (draft.maintenance_cycle || "") : (fieldsOf(record)["维护周期"] || ""),
-    specialty: draft.specialty || specialtyForRecord(record),
+    specialty: cleanDisplayText(draft.specialty) || specialtyForRecord(record),
     record_id: action === "start" ? record.record_id : targetRecordId,
     source_record_id: record.manual ? (draft.source_record_id || "") : record.record_id,
+    source_work_type: record.manual ? (draft.source_work_type || type) : sourceWorkTypeForRecord(record),
+    converted_from_work_type: record.manual ? (draft.converted_from_work_type || "") : (record.converted_from_work_type || ""),
     target_record_id: action !== "start" ? targetRecordId : "",
     source_progress: sourceProgressForRecord(record),
     building_codes: record.manual ? (draft.building_codes || []) : (record.building_codes || []),
     building: record.manual ? (draft.building || "") : buildingForRecord(record),
-    title: record.manual ? manualDraftTitle(draft, type) : (type === "repair" ? (draft.title || titleForRecord(record)) : titleForRecord(record)),
+    title: payloadTitleForDraft(record, draft, type),
     non_plan: record.manual && type === "maintenance" ? Boolean(draft.non_plan) : false,
     level: record.manual ? (draft.level || (type === "change" ? "I3" : "")) : (type === "repair" ? (draft.level || "") : (type === "change" ? (levelForRecord(record) || "I3") : "")),
     start_time: draft.start_time,
@@ -3116,6 +2699,10 @@ async function sendStart(key: string): Promise<void> {
     rememberJob(key, { text: "纯手填维保必须选择维保周期", status: "failed", phase: "failed" });
     return;
   }
+  if (!validatePayloadDuration(payload, key)) {
+    saveDrafts();
+    return;
+  }
   if (payload.manual && draft?.manual_origin === "manual") {
     saveManualTemplateMemory(String(payload.work_type || ""), draft);
     saveManualRecentType(String(payload.work_type || ""));
@@ -3128,15 +2715,21 @@ function ongoingDraft(item: Dict): Dict {
   const id = ongoingLineKey(item);
   if (!ongoingEdits.has(id)) {
     const timeRange = ongoingTimeRange(item);
+    const workType = item.work_type || "maintenance";
+    let title = item.title || item.content || "";
+    const content = workType === "repair" && item.content === title ? "" : item.content || "";
+    if (workType === "repair" && content && title.endsWith(content)) {
+      title = title.slice(0, -content.length).trim() || title;
+    }
     ongoingEdits.set(id, {
-      title: item.title || item.content || "",
-      specialty: item.specialty || "",
+      title,
+      specialty: cleanDisplayText(item.specialty),
       maintenance_cycle: item.maintenance_cycle || "",
       level: item.level || "",
       start_time: timeRange.start,
       end_time: timeRange.end,
       location: item.location || "",
-      content: item.content || "",
+      content,
       reason: item.reason || "",
       impact: item.impact || "",
       progress: item.progress || item.content || "",
@@ -3148,13 +2741,14 @@ function ongoingDraft(item: Dict): Dict {
       repair_fault: item.repair_fault || "",
       fault_type: item.fault_type || "",
       repair_mode: item.repair_mode || "",
-      discovery: item.discovery || "",
+      discovery: cleanDisplayText(item.discovery),
       symptom: item.symptom || "",
       solution: item.solution || "",
       spare_parts: item.spare_parts || "",
       device: item.device || "",
       cabinet: item.cabinet || "",
       quantity: item.quantity || "",
+      extra_images: Array.isArray(item.extra_images) ? [...item.extra_images] : [],
       target_record_id: targetRecordIdForOngoing(item),
       source_record_id: sourceRecordIdForOngoing(item, targetRecordIdForOngoing(item)),
     });
@@ -3172,6 +2766,100 @@ function setOngoingEdit(item: Dict, key: string, value: any): void {
 function draftValue(edit: Dict, key: string, fallback = ""): string {
   if (Object.prototype.hasOwnProperty.call(edit, key)) return String(edit[key] ?? "");
   return String(fallback ?? "");
+}
+
+function ongoingExtraImages(item: Dict): Dict[] {
+  const edit = ongoingDraft(item);
+  return Array.isArray(edit.extra_images) ? edit.extra_images : [];
+}
+
+function ongoingPhotoCount(item: Dict): number {
+  return ongoingExtraImages(item).filter((photo) => String(photo?.upload_id || photo?.bytes_b64 || photo?.file_token || "").trim()).length;
+}
+
+async function uploadSitePhotoFile(file: File): Promise<Dict> {
+  const fileName = file.name || `site_photo_${Date.now()}.png`;
+  try {
+    const data = await requestBinaryJson(
+      `/api/notice-attachments?file_name=${encodeURIComponent(fileName)}`,
+      file,
+      {
+        headers: { "Content-Type": file.type || "image/png" },
+      },
+      {
+        onOnline: () => {
+          backendStatus.offline = false;
+          backendStatus.message = "";
+        },
+        onOffline: (message) => {
+          backendStatus.offline = true;
+          backendStatus.lastErrorAt = Date.now();
+          backendStatus.message = message;
+        },
+        onAuthExpired: (message) => {
+          markAuthExpired(message);
+        },
+        onServerError: (message) => {
+          backendStatus.offline = true;
+          backendStatus.lastErrorAt = Date.now();
+          backendStatus.message = message;
+        },
+      },
+    );
+    return {
+      upload_id: data.upload_id,
+      file_name: data.file_name || fileName,
+      mime_type: data.mime_type || file.type || "image/png",
+      size: data.size || file.size || 0,
+      expires_at: data.expires_at || 0,
+    };
+  } catch (error: any) {
+    throw new Error(error?.message || "现场照片上传失败");
+  }
+}
+
+async function handleOngoingPhotoInput(item: Dict, event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement;
+  const files = Array.from(input.files || []);
+  input.value = "";
+  if (!files.length) return;
+  const key = ongoingLineKey(item);
+  const edit = ongoingDraft(item);
+  const existing = ongoingExtraImages(item);
+  const availableSlots = Math.max(0, MAX_SITE_PHOTO_COUNT - existing.length);
+  if (availableSlots <= 0) {
+    rememberJob(key, { text: `现场照片最多添加 ${MAX_SITE_PHOTO_COUNT} 张`, status: "failed", phase: "failed" });
+    return;
+  }
+  const validFiles = files
+    .filter((file) => {
+      if (!file.type.startsWith("image/")) return false;
+      if (file.size > MAX_SITE_PHOTO_BYTES) return false;
+      return true;
+    })
+    .slice(0, availableSlots);
+  if (!validFiles.length) {
+    rememberJob(key, { text: "请选择不超过 8MB 的图片文件", status: "failed", phase: "failed" });
+    return;
+  }
+  try {
+    rememberJob(key, { text: "正在上传现场照片", status: "busy", phase: "uploading_attachment" });
+    const photos = await Promise.all(validFiles.map(uploadSitePhotoFile));
+    edit.extra_images = [...existing, ...photos];
+    ongoingEdits.set(key, edit);
+    rememberJob(key, { text: `已添加现场照片 ${edit.extra_images.length} 张`, status: "", phase: "" });
+  } catch (error: any) {
+    rememberJob(key, { text: error?.message || "现场照片读取失败", status: "failed", phase: "failed" });
+  }
+}
+
+function removeOngoingPhoto(item: Dict, index: number): void {
+  const key = ongoingLineKey(item);
+  const edit = ongoingDraft(item);
+  const images = ongoingExtraImages(item).slice();
+  images.splice(index, 1);
+  edit.extra_images = images;
+  ongoingEdits.set(key, edit);
 }
 
 function buildOngoingPayload(item: Dict, action: string): Dict {
@@ -3193,8 +2881,10 @@ function buildOngoingPayload(item: Dict, action: string): Dict {
     target_record_id: targetRecordId,
     active_item_id: item.active_item_id || "",
     source_record_id: sourceRecordId,
+    source_work_type: String(item.source_work_type || item.converted_from_work_type || workType),
+    converted_from_work_type: String(item.converted_from_work_type || ""),
     title: draftValue(edit, "title", item.title || item.content || ""),
-    specialty: draftValue(edit, "specialty", item.specialty || ""),
+    specialty: cleanDisplayText(draftValue(edit, "specialty", item.specialty || "")),
     building: item.building || "",
     building_codes: Array.isArray(item.building_codes) ? item.building_codes : [],
     maintenance_cycle: draftValue(edit, "maintenance_cycle", item.maintenance_cycle || ""),
@@ -3223,6 +2913,7 @@ function buildOngoingPayload(item: Dict, action: string): Dict {
     quantity: workType === "power" ? draftValue(edit, "quantity", item.quantity || "") : "",
     fault_time: workType === "repair" ? endTime : "",
     expected_time: workType === "repair" ? startTime : "",
+    extra_images: ongoingExtraImages(item),
     operation_id: opId(`${item.active_item_id || targetRecordId || sourceRecordId}:${action}`),
   };
 }
@@ -3272,7 +2963,7 @@ async function bindOngoingTarget(item: Dict): Promise<void> {
     const selected = await chooseCandidateInModal(
       candidates,
       workTypeLabel(workType),
-      `找到 ${candidates.length} 条同名目标记录，请选择要关联到当前进行中通告的一条。`,
+      `找到 ${Number(data.total_matched ?? candidates.length)} 条同名目标记录，当前显示 ${candidates.length} 条，请选择要关联到当前进行中通告的一条。`,
     );
     if (!selected) {
       rememberJob(lineKey, {
@@ -3312,7 +3003,13 @@ async function bindOngoingTarget(item: Dict): Promise<void> {
 
 async function sendOngoing(item: Dict, action: string): Promise<void> {
   const key = ongoingLineKey(item);
-  await sendAction(buildOngoingPayload(item, action), key);
+  const payload = buildOngoingPayload(item, action);
+  if (!validatePayloadDuration(payload, key)) return;
+  if (action === "end" && !ongoingPhotoCount(item)) {
+    rememberJob(key, { text: "结束通告前必须添加至少一张现场照片", status: "failed", phase: "failed" });
+    return;
+  }
+  await sendAction(payload, key);
 }
 
 async function sendAction(payload: Dict, lineKey: string): Promise<void> {
@@ -3334,18 +3031,6 @@ async function sendAction(payload: Dict, lineKey: string): Promise<void> {
 
 function rememberJob(key: string, patch: Dict): void {
   jobStates.set(key, { ...(jobStates.get(key) || {}), ...patch, updated_at: new Date().toISOString() });
-}
-
-function friendlyFailureText(error: any, fallback = "失败"): string {
-  const text = String(error?.message || error?.error || error || fallback || "").trim();
-  if (!text) return fallback;
-  if (/缺少|必填|请选择|不能为空/.test(text)) return `缺字段：${text}`;
-  if (/无权|权限|未登录|登录/.test(text)) return `无权限：${text}`;
-  if (/飞书|openid|机器人|群消息|消息/.test(text)) return `飞书失败：${text}`;
-  if (/多维|bitable|record|Record|1254|字段|表格|记录不存在/.test(text)) return `多维失败：${text}`;
-  if (/关联|绑定|找不到|未找到/.test(text)) return `记录绑定失败：${text}`;
-  if (/超时|timeout|网络|HTTP|SSL/.test(text)) return `网络异常：${text}`;
-  return text;
 }
 
 function applySuccessfulJobState(lineKey: string): void {
@@ -3410,65 +3095,110 @@ function isLineBusy(key: string): boolean {
   return Boolean(phase && !terminalPhase(phase));
 }
 
+function applyJobStatusToLine(lineKey: string, job: Dict): void {
+  const { phase, status, text } = backendJobStatusPatch(job);
+  rememberJob(lineKey, { phase, status, text });
+  if (terminalPhase(phase)) {
+    clearFallbackPoll(lineKey);
+    handleTerminalJob(lineKey, phase);
+  }
+}
+
+function isJobRealtimeAvailable(): boolean {
+  return sseConnected.value
+    || Boolean(eventSource.value && eventSource.value.readyState !== EventSource.CLOSED);
+}
+
+function isJobStreamStarted(): boolean {
+  return Boolean(jobStreamCoordinator || eventSource.value);
+}
+
+function isActiveItemsStreamStarted(): boolean {
+  return Boolean(activeItemsStreamCoordinator || activeItemsEventSource.value);
+}
+
 function watchJob(jobId: string, lineKey: string): void {
   clearFallbackPoll(lineKey);
-  if (eventSource.value && eventSource.value.readyState !== EventSource.CLOSED) {
+  if (isJobRealtimeAvailable()) {
     const delay = sseConnected.value ? 15000 : 6000;
     const timer = window.setTimeout(() => {
       fallbackPollTimers.delete(lineKey);
       if (!isLineBusy(lineKey)) return;
-      void pollJob(jobId, lineKey);
+      queueJobPoll(jobId, lineKey);
     }, delay);
     fallbackPollTimers.set(lineKey, timer);
     return;
   }
-  void pollJob(jobId, lineKey);
+  queueJobPoll(jobId, lineKey);
 }
 
-async function pollJob(jobId: string, lineKey: string): Promise<void> {
-  const pollKey = `${jobId}:${lineKey}`;
-  if (pollingJobs.has(pollKey)) return;
-  pollingJobs.add(pollKey);
+function queueJobPoll(jobId: string, lineKey: string): void {
+  if (!jobId || !lineKey || appDisposed) return;
+  pollingJobs.set(lineKey, jobId);
+  scheduleBatchJobPoll(0);
+}
+
+function scheduleBatchJobPoll(delayMs = 2000): void {
+  if (appDisposed || batchPollTimer !== null || pollingJobs.size === 0) return;
+  batchPollTimer = window.setTimeout(() => {
+    batchPollTimer = null;
+    void pollJobsBatch();
+  }, Math.max(0, delayMs));
+}
+
+async function pollJobsBatch(): Promise<void> {
+  if (batchPollActive || appDisposed || pollingJobs.size === 0) return;
+  batchPollActive = true;
   try {
-    for (let i = 0; i < 120; i += 1) {
-      if (appDisposed) return;
-      try {
-        const data = await api(`/api/jobs/${encodeURIComponent(jobId)}`);
-        const phase = data.phase || data.status || "";
-        const text = data.message || data.upload_message || phase || "处理中";
-        rememberJob(lineKey, {
-          phase,
-          status: phase === "success" ? "success" : phase === "failed" ? "failed" : "busy",
-          text: phase === "success" ? "成功" : phase === "failed" ? friendlyFailureText(data.error || text, "失败") : text,
-        });
-        if (terminalPhase(phase)) {
-          clearFallbackPoll(lineKey);
-          handleTerminalJob(lineKey, phase);
-          return;
-        }
-      } catch {
-        rememberJob(lineKey, { text: "后台处理中，等待状态同步", status: "busy" });
+    const entries = Array.from(pollingJobs.entries());
+    const ids = Array.from(new Set(entries.map(([, jobId]) => jobId).filter(Boolean))).slice(0, 100);
+    if (!ids.length) return;
+    try {
+      const data = await api(`/api/jobs/batch?ids=${encodeURIComponent(ids.join(","))}`);
+      const byId = new Map<string, Dict>();
+      for (const item of Array.isArray(data.items) ? data.items : []) {
+        if (item?.job_id) byId.set(String(item.job_id), item);
       }
-      await new Promise((resolve) => setTimeout(resolve, 2000));
+      const missing = new Set<string>(Array.isArray(data.missing) ? data.missing.map(String) : []);
+      const denied = new Set<string>(Array.isArray(data.denied) ? data.denied.map(String) : []);
+      for (const [lineKey, jobId] of entries) {
+        const job = byId.get(jobId);
+        if (job) {
+          applyJobStatusToLine(lineKey, job);
+          continue;
+        }
+        if (missing.has(jobId) || denied.has(jobId)) {
+          rememberJob(lineKey, {
+            phase: "failed",
+            status: "failed",
+            text: denied.has(jobId) ? "无权查看该任务状态" : "任务状态已丢失，请刷新核对后重试",
+          });
+          clearFallbackPoll(lineKey);
+        }
+      }
+    } catch {
+      for (const key of pollingJobs.keys()) {
+        rememberJob(key, { text: "后台处理中，等待状态同步", status: "busy" });
+      }
     }
-    rememberJob(lineKey, {
-      phase: "failed",
-      status: "failed",
-      text: "任务状态长时间未返回，请刷新核对后重试",
-    });
-    scheduleWorkbenchReload(0);
   } finally {
-    pollingJobs.delete(pollKey);
+    batchPollActive = false;
+    if (!appDisposed && pollingJobs.size > 0) scheduleBatchJobPoll(2000);
   }
 }
 
-function startJobSse(): void {
-  if (appDisposed) return;
-  if (eventSource.value) eventSource.value.close();
-  if (sseReconnectTimer !== null) {
-    window.clearTimeout(sseReconnectTimer);
-    sseReconnectTimer = null;
+function applyJobStreamPayload(job: Dict): void {
+  if (!job?.job_id) return;
+  for (const [key, value] of jobStates.entries()) {
+    if (value.job_id === job.job_id) {
+      applyJobStatusToLine(key, job);
+    }
   }
+}
+
+function openDirectJobEventSource(coordinator: CrossTabStreamCoordinator<Dict> | null): void {
+  closeDirectJobEventSource();
+  if (appDisposed) return;
   try {
     const source = new EventSource("/api/jobs/stream");
     const handleJobEvent = (event: MessageEvent) => {
@@ -3479,35 +3209,24 @@ function startJobSse(): void {
         return;
       }
       const job = payload.job || payload;
-      if (!job?.job_id) return;
-      for (const [key, value] of jobStates.entries()) {
-        if (value.job_id === job.job_id) {
-          const phase = job.phase || "";
-          rememberJob(key, {
-            phase,
-            status: phase === "success" ? "success" : phase === "failed" ? "failed" : "busy",
-            text: phase === "success" ? "成功" : phase === "failed" ? friendlyFailureText(job.error || job.message || job.upload_message || phase, "失败") : job.error || job.message || job.upload_message || phase,
-          });
-          if (terminalPhase(phase)) {
-            clearFallbackPoll(key);
-            handleTerminalJob(key, phase);
-          }
-        }
-      }
+      applyJobStreamPayload(job);
+      coordinator?.broadcast({ kind: "job", job });
     };
     source.onopen = () => {
       sseConnected.value = true;
+      coordinator?.broadcast({ kind: "status", connected: true });
     };
     source.onmessage = handleJobEvent;
     source.addEventListener("job", handleJobEvent);
     source.onerror = () => {
       sseConnected.value = false;
+      coordinator?.broadcast({ kind: "status", connected: false });
       if (eventSource.value === source && source.readyState === EventSource.CLOSED) {
         eventSource.value = null;
-        if (!appDisposed && sseReconnectTimer === null) {
+        if (!appDisposed && sseReconnectTimer === null && (!coordinator || coordinator.isLeader())) {
           sseReconnectTimer = window.setTimeout(() => {
             sseReconnectTimer = null;
-            startJobSse();
+            openDirectJobEventSource(coordinator);
           }, 5000);
         }
       }
@@ -3516,27 +3235,74 @@ function startJobSse(): void {
   } catch {
     eventSource.value = null;
     sseConnected.value = false;
+    coordinator?.broadcast({ kind: "status", connected: false });
   }
 }
 
-function startActiveItemsSse(): void {
-  if (appDisposed || !isWorkbench.value || !currentScope.value) return;
-  const previousSource = activeItemsEventSource.value;
+function startJobSse(): void {
+  if (appDisposed || jobStreamCoordinator) return;
+  const coordinator = createCrossTabStreamCoordinator<Dict>({
+    channelName: "clipflow-jobs-stream-v1",
+    leaderKey: "clipflow:jobs-stream-leader",
+    heartbeatMs: streamLeaderHeartbeatMs,
+    leaderTtlMs: streamLeaderTtlMs,
+  });
+  jobStreamCoordinator = coordinator;
+  coordinator.start(
+    (message) => {
+      if (message.kind === "job") {
+        applyJobStreamPayload(message.job || {});
+      } else if (message.kind === "status") {
+        sharedJobStreamAvailable.value = Boolean(message.connected);
+      }
+    },
+    (leader) => {
+      if (leader) {
+        sharedJobStreamAvailable.value = false;
+        openDirectJobEventSource(coordinator);
+      } else {
+        closeDirectJobEventSource();
+        sseConnected.value = false;
+        sharedJobStreamAvailable.value = coordinator.supported;
+      }
+    },
+  );
+}
+
+function closeDirectActiveItemsEventSource(): void {
+  if (activeItemsEventSource.value) activeItemsEventSource.value.close();
   activeItemsEventSource.value = null;
-  if (previousSource) previousSource.close();
   if (activeItemsReconnectTimer !== null) {
     window.clearTimeout(activeItemsReconnectTimer);
     activeItemsReconnectTimer = null;
   }
-  const scope = currentScope.value || "ALL";
-  if (activeItemsStreamScope !== scope) {
-    lastActiveItemsSignature = "";
-    activeItemsStreamScope = scope;
+}
+
+function applyActiveItemsStreamPayload(payload: Dict, scope: string): void {
+  if (String(payload.scope || "") !== scope) return;
+  const signature = String(payload.display_signature || payload.scope_signature || "");
+  if (!signature) return;
+  if (!lastActiveItemsSignature) {
+    lastActiveItemsSignature = signature;
+    return;
   }
+  if (signature !== lastActiveItemsSignature) {
+    lastActiveItemsSignature = signature;
+    scheduleWorkbenchReload(isUserEditing() ? 3000 : 250);
+  }
+}
+
+function openDirectActiveItemsEventSource(
+  scope: string,
+  coordinator: CrossTabStreamCoordinator<Dict> | null,
+): void {
+  closeDirectActiveItemsEventSource();
+  if (appDisposed || !isWorkbench.value || !scope) return;
   try {
     const source = new EventSource(`/api/qt-active-items/stream?scope=${encodeURIComponent(scope)}`);
     source.onopen = () => {
       activeItemsConnected.value = true;
+      coordinator?.broadcast({ kind: "status", connected: true, scope });
     };
     source.addEventListener("qt_active_items", (event: MessageEvent) => {
       let payload: Dict;
@@ -3545,26 +3311,23 @@ function startActiveItemsSse(): void {
       } catch {
         return;
       }
-      if (String(payload.scope || "") !== scope) return;
-      const signature = String(payload.display_signature || payload.scope_signature || "");
-      if (!signature) return;
-      if (!lastActiveItemsSignature) {
-        lastActiveItemsSignature = signature;
-        return;
-      }
-      if (signature !== lastActiveItemsSignature) {
-        lastActiveItemsSignature = signature;
-        scheduleWorkbenchReload(isUserEditing() ? 3000 : 250);
-      }
+      applyActiveItemsStreamPayload(payload, scope);
+      coordinator?.broadcast({ kind: "qt_active_items", payload, scope });
     });
     source.addEventListener("error", () => {
       activeItemsConnected.value = false;
+      coordinator?.broadcast({ kind: "status", connected: false, scope });
       if (activeItemsEventSource.value === source && source.readyState === EventSource.CLOSED) {
         activeItemsEventSource.value = null;
-        if (!appDisposed && isWorkbench.value && activeItemsReconnectTimer === null) {
+        if (
+          !appDisposed
+          && isWorkbench.value
+          && activeItemsReconnectTimer === null
+          && (!coordinator || coordinator.isLeader())
+        ) {
           activeItemsReconnectTimer = window.setTimeout(() => {
             activeItemsReconnectTimer = null;
-            startActiveItemsSse();
+            openDirectActiveItemsEventSource(scope, coordinator);
           }, 5000);
         }
       }
@@ -3573,20 +3336,57 @@ function startActiveItemsSse(): void {
   } catch {
     activeItemsEventSource.value = null;
     activeItemsConnected.value = false;
+    coordinator?.broadcast({ kind: "status", connected: false, scope });
   }
 }
 
+function startActiveItemsSse(): void {
+  if (appDisposed || !isWorkbench.value || !currentScope.value) return;
+  const scope = currentScope.value || "ALL";
+  if (activeItemsStreamCoordinator && activeItemsStreamScope === scope) return;
+  stopActiveItemsSse();
+  lastActiveItemsSignature = "";
+  activeItemsStreamScope = scope;
+  const coordinator = createCrossTabStreamCoordinator<Dict>({
+    channelName: `clipflow-active-items-stream-v1:${scope}`,
+    leaderKey: `clipflow:active-items-stream-leader:${scope}`,
+    heartbeatMs: streamLeaderHeartbeatMs,
+    leaderTtlMs: streamLeaderTtlMs,
+  });
+  activeItemsStreamCoordinator = coordinator;
+  coordinator.start(
+    (message) => {
+      if (String(message.scope || scope) !== scope) return;
+      if (message.kind === "qt_active_items") {
+        applyActiveItemsStreamPayload(message.payload || {}, scope);
+      } else if (message.kind === "status") {
+        sharedActiveItemsStreamAvailable.value = Boolean(message.connected);
+      }
+    },
+    (leader) => {
+      if (leader) {
+        sharedActiveItemsStreamAvailable.value = false;
+        openDirectActiveItemsEventSource(scope, coordinator);
+      } else {
+        closeDirectActiveItemsEventSource();
+        activeItemsConnected.value = false;
+        sharedActiveItemsStreamAvailable.value = coordinator.supported;
+      }
+    },
+  );
+}
+
 function stopActiveItemsSse(): void {
-  if (activeItemsEventSource.value) activeItemsEventSource.value.close();
-  activeItemsEventSource.value = null;
+  if (activeItemsStreamCoordinator) {
+    activeItemsStreamCoordinator.stop();
+    activeItemsStreamCoordinator = null;
+  }
+  closeDirectActiveItemsEventSource();
   activeItemsConnected.value = false;
+  sharedActiveItemsStreamAvailable.value = false;
   activeItemsUpdatePending.value = false;
   lastActiveItemsSignature = "";
   activeItemsStreamScope = "";
-  if (activeItemsReconnectTimer !== null) {
-    window.clearTimeout(activeItemsReconnectTimer);
-    activeItemsReconnectTimer = null;
-  }
 }
 
 async function deleteOngoing(item: Dict): Promise<void> {
@@ -3644,29 +3444,6 @@ async function applyUndo(item: Dict): Promise<void> {
   } catch (error: any) {
     rememberJob(key, { text: error?.message || "回退失败", status: "failed", phase: "failed" });
   }
-}
-
-function formatUndoTime(value: any): string {
-  const numeric = Number(value || 0);
-  const date = numeric > 0 ? new Date(numeric * 1000) : new Date(String(value || ""));
-  if (Number.isNaN(date.getTime())) return "-";
-  return date.toLocaleString("zh-CN", { hour12: false });
-}
-
-function undoActionType(item: Dict): string {
-  return String(item?.undo_action_type || item?.action_type || "").trim().toLowerCase();
-}
-
-function undoActionLabel(item: Dict): string {
-  const action = undoActionType(item);
-  if (action === "delete") return "删除";
-  if (action === "end") return "结束";
-  if (action === "update") return "更新";
-  return "上一步";
-}
-
-function undoButtonLabel(item: Dict): string {
-  return `回退${undoActionLabel(item)}`;
 }
 
 function ongoingTitle(item: Dict): string {
@@ -3758,7 +3535,7 @@ async function confirmPermissionRequest(): Promise<void> {
       await Promise.all([loadOverview(), loadHandoverLinks()]);
       isWorkbench.value = false;
       syncText.value = "请选择功能";
-      if (!eventSource.value) startJobSse();
+      if (!isJobStreamStarted()) startJobSse();
     }
   } catch (error: any) {
     permissionRequest.message = error?.message || "验证码错误";
@@ -3775,6 +3552,7 @@ onMounted(async () => {
   appDisposed = false;
   pageVisible.value = !document.hidden;
   document.addEventListener("visibilitychange", handleVisibilityChange);
+  window.addEventListener(AUTH_EXPIRED_EVENT, handleGlobalAuthExpired);
   await loadAuthStatus();
   if (auth.loggedIn && !auth.scopeOptions.length) {
     await loadCurrentPermissionRequest();
@@ -3796,6 +3574,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   appDisposed = true;
   document.removeEventListener("visibilitychange", handleVisibilityChange);
+  window.removeEventListener(AUTH_EXPIRED_EVENT, handleGlobalAuthExpired);
   clearAuthKeepalive();
   clearWorkbenchRetry();
   stopRealtimeConnections();
@@ -3804,6 +3583,10 @@ onBeforeUnmount(() => {
   refreshCooldownTimers.clear();
   for (const timer of fallbackPollTimers.values()) window.clearTimeout(timer);
   fallbackPollTimers.clear();
+  if (batchPollTimer !== null) {
+    window.clearTimeout(batchPollTimer);
+    batchPollTimer = null;
+  }
   pollingJobs.clear();
 });
 </script>
@@ -4115,11 +3898,52 @@ button:disabled {
   font-size: 13px;
 }
 
+.target-choice-panel .target-count-line {
+  color: #2563eb;
+  font-size: 12px;
+}
+
 .target-choice-layout {
   display: grid;
   grid-template-columns: minmax(220px, 0.9fr) minmax(280px, 1.1fr);
   gap: 10px;
   align-items: start;
+}
+
+.target-choice-column {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.candidate-search {
+  display: grid;
+  gap: 5px;
+  color: #475569;
+  font-size: 12px;
+}
+
+.candidate-search input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #dbe3ee;
+  border-radius: 7px;
+  padding: 8px 10px;
+  background: #ffffff;
+  color: #0f172a;
+  font-size: 13px;
+  outline: none;
+}
+
+.candidate-search input:focus {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.1);
+}
+
+.candidate-count {
+  margin: 0;
+  color: #64748b;
+  font-size: 12px;
 }
 
 .target-choice-list {
@@ -4179,6 +4003,11 @@ button:disabled {
 
 .target-detail-head span {
   color: #64748b;
+  font-size: 12px;
+}
+
+.target-detail-head small {
+  color: #2563eb;
   font-size: 12px;
 }
 
@@ -4359,85 +4188,6 @@ button:disabled {
   font-size: 12px;
 }
 
-.draft-hint {
-  margin: 0;
-  padding: 8px 10px;
-  border: 1px solid #bfdbfe;
-  border-radius: 7px;
-  background: #eff6ff;
-  color: #1d4ed8;
-  font-size: 13px;
-  line-height: 1.5;
-}
-
-.draft-required-line {
-  margin: 0;
-  padding: 8px 10px;
-  border: 1px solid #fecaca;
-  border-radius: 7px;
-  background: #fef2f2;
-  color: #b91c1c;
-  font-size: 13px;
-  line-height: 1.5;
-}
-
-.field-missing span,
-.field-missing {
-  color: #b91c1c;
-}
-
-.field-missing input,
-.field-missing textarea,
-.field-missing select {
-  border-color: #ef4444;
-  background: #fff7f7;
-}
-
-.notice-preview {
-  max-height: 260px;
-  margin: 0;
-  padding: 10px;
-  overflow: auto;
-  border: 1px solid #bfdbfe;
-  border-radius: 8px;
-  background: #f8fbff;
-  color: #0f172a;
-  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
-  font-size: 12px;
-  line-height: 1.65;
-  white-space: pre-wrap;
-}
-
-.draft-card.busy .form-grid,
-.draft-card.busy .repair-fields,
-.draft-card.busy .upload-fields,
-.ongoing-card.busy .form-grid,
-.ongoing-card.busy .repair-fields,
-.ongoing-card.busy .upload-fields {
-  opacity: 0.72;
-  pointer-events: none;
-}
-
-.upload-preview-grid {
-  display: grid;
-  grid-template-columns: 112px minmax(0, 1fr);
-  gap: 6px 10px;
-  margin: 8px 0 0;
-}
-
-.upload-preview-grid dt {
-  color: #64748b;
-  font-size: 12px;
-}
-
-.upload-preview-grid dd {
-  margin: 0;
-  color: #0f172a;
-  font-size: 13px;
-  line-height: 1.45;
-  word-break: break-word;
-}
-
 .search {
   flex: 1 1 260px;
   min-width: 180px;
@@ -4461,8 +4211,7 @@ button:disabled {
   gap: 10px;
 }
 
-.panel-head,
-.card-title {
+.panel-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -4495,8 +4244,7 @@ button:disabled {
   font-size: 14px;
 }
 
-.panel-head span,
-.card-title span {
+.panel-head span {
   flex: 0 0 auto;
   padding: 3px 8px;
   border-radius: 999px;
@@ -4514,120 +4262,9 @@ button:disabled {
   scroll-behavior: smooth;
 }
 
-.draft-card,
-.ongoing-card {
-  padding: 10px;
-  border: 1px solid #dbe3ee;
-  border-radius: 8px;
-  background: #ffffff;
-}
-
-.draft-card {
-  transition: border-color 0.14s ease, background-color 0.14s ease, box-shadow 0.14s ease;
-}
-
-.draft-card.collapsed {
-  padding: 9px 10px;
-  cursor: pointer;
-  background: #fbfdff;
-}
-
-.draft-card.collapsed:hover {
-  border-color: #bfdbfe;
-  background: #f8fbff;
-}
-
-.ongoing-card {
-  display: grid;
-  gap: 8px;
-  transition: border-color 0.14s ease, background-color 0.14s ease, box-shadow 0.14s ease;
-}
-
-.ongoing-card.collapsed {
-  padding: 9px 10px;
-  cursor: pointer;
-  background: #fbfdff;
-}
-
-.ongoing-card.collapsed:hover {
-  border-color: #bfdbfe;
-  background: #f8fbff;
-}
-
-.ongoing-card.active {
-  border-color: #2563eb;
-  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.12);
-}
-
-.ongoing-card p {
-  color: #334155;
-  font-size: 13px;
-  line-height: 1.45;
-}
-
-.ongoing-compact {
-  display: grid;
-  gap: 6px;
-}
-
-.ongoing-compact p {
-  display: -webkit-box;
-  margin: 0;
-  overflow: hidden;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  color: #475569;
-}
-
-.ongoing-expanded {
-  display: grid;
-  gap: 8px;
-}
-
-.ongoing-card textarea {
-  min-height: 54px;
-}
-
-.undo-line {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  color: #64748b;
-  font-size: 12px;
-}
-
 .closed-today {
   display: grid;
   gap: 8px;
-}
-
-.recent-undo-panel {
-  border: 1px solid #dbeafe;
-  border-radius: 10px;
-  padding: 10px;
-  background: #f8fbff;
-}
-
-.undo-filter {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.undo-filter button {
-  min-height: 30px;
-  padding: 6px 10px;
-  border-color: #dbeafe;
-  background: #ffffff;
-  color: #334155;
-  font-size: 12px;
-}
-
-.undo-filter button.active {
-  border-color: #2563eb;
-  background: #eff6ff;
-  color: #1d4ed8;
-  font-weight: 700;
 }
 
 .closed-card {
@@ -4647,70 +4284,11 @@ button:disabled {
   font-size: 12px;
 }
 
-.undo-card {
-  background: #ffffff;
-}
-
-.undo-action-chip {
-  display: inline-flex;
-  align-items: center;
-  margin-right: 6px;
-  padding: 2px 6px;
-  border: 1px solid #bfdbfe;
-  border-radius: 999px;
-  background: #eff6ff;
-  color: #1d4ed8;
-  font-weight: 700;
-}
-
-.draft-card.active {
-  border-color: #2563eb;
-  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.12);
-}
-
-.draft-compact {
-  display: grid;
-  gap: 6px;
-  margin-top: 6px;
-}
-
-.draft-compact p {
-  overflow: hidden;
-  margin: 0;
-  color: #64748b;
-  font-size: 13px;
-  line-height: 1.45;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.compact-actions {
-  margin-top: 0;
-}
-
-.form-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-  margin-top: 8px;
-}
-
 label {
   display: grid;
   gap: 5px;
   color: #475569;
   font-size: 13px;
-}
-
-.checkbox-field {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.checkbox-field input {
-  width: auto;
-  flex: 0 0 auto;
 }
 
 input,
@@ -4730,47 +4308,8 @@ textarea {
   resize: vertical;
 }
 
-.span-2 {
-  grid-column: 1 / -1;
-}
-
-.repair-fields,
-.upload-fields,
-.zhihang-line,
 .card-actions {
   margin-top: 10px;
-}
-
-.repair-fields h3 {
-  margin: 0 0 8px;
-  color: #334155;
-  font-size: 13px;
-}
-
-.repair-fields h4 {
-  margin: 8px 0 6px;
-  color: #64748b;
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.upload-fields {
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  padding: 8px 10px 10px;
-  background: #f8fafc;
-}
-
-.upload-fields summary {
-  cursor: pointer;
-  color: #334155;
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.zhihang-line {
-  display: grid;
-  gap: 8px;
 }
 
 .job-line {
@@ -4819,60 +4358,6 @@ textarea {
   gap: 8px;
 }
 
-.modal-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 80;
-  display: grid;
-  place-items: center;
-  padding: 24px;
-  background: rgba(15, 23, 42, 0.28);
-}
-
-.candidate-modal {
-  display: grid;
-  width: min(980px, 100%);
-  max-height: min(760px, calc(100vh - 48px));
-  overflow: hidden;
-  border: 1px solid #dbe3ee;
-  border-radius: 10px;
-  background: #ffffff;
-  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.18);
-}
-
-.candidate-modal-head,
-.candidate-modal-actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 14px 16px;
-  border-bottom: 1px solid #e2e8f0;
-}
-
-.candidate-modal-actions {
-  border-top: 1px solid #e2e8f0;
-  border-bottom: 0;
-}
-
-.candidate-modal-head p {
-  margin: 4px 0 0;
-  color: #64748b;
-  font-size: 13px;
-}
-
-.modal-choice-layout {
-  min-height: 360px;
-  max-height: 560px;
-  overflow: hidden;
-  padding: 12px;
-}
-
-.modal-choice-list,
-.modal-detail-popover {
-  overflow: auto;
-}
-
 @media (max-width: 1120px) {
   .workspace {
     grid-template-columns: 1fr;
@@ -4889,24 +4374,959 @@ textarea {
     flex-direction: column;
   }
 
-  .summary-strip,
-  .form-grid {
+  .summary-strip {
     grid-template-columns: 1fr;
   }
+}
 
-  .modal-backdrop {
-    padding: 10px;
+/* VNET blue-white production skin */
+.app-shell {
+  --brand-blue: #0757d7;
+  --brand-blue-2: #0d7df2;
+  --brand-blue-dark: #06349a;
+  --brand-cyan: #21c6e7;
+  --ink: #071634;
+  --muted: #64748b;
+  --line: #d8e7f8;
+  --panel: rgba(255, 255, 255, 0.95);
+  --panel-soft: #f7fbff;
+  --shadow: 0 18px 42px rgba(22, 78, 151, 0.12);
+  --shadow-strong: 0 24px 68px rgba(8, 52, 132, 0.18);
+  --radius-panel: 20px;
+  --radius-card: 18px;
+  --radius-control: 12px;
+  --radius-popover: 22px;
+  background:
+    linear-gradient(180deg, #f4f9ff 0, #f8fbff 260px, #eef6ff 100%),
+    radial-gradient(circle at 18% 18%, rgba(31, 129, 255, 0.12), transparent 28%);
+  color: var(--ink);
+}
+
+.topbar {
+  min-height: 128px;
+  padding: 22px 38px;
+  border-bottom: 0;
+  flex-wrap: wrap;
+  background:
+    linear-gradient(90deg, rgba(4, 46, 145, 0.98), rgba(10, 103, 224, 0.98) 46%, rgba(0, 116, 236, 0.96)),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.12), transparent);
+  box-shadow: 0 16px 42px rgba(3, 55, 140, 0.18);
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.topbar::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(90deg, transparent 0 18%, rgba(255, 255, 255, 0.18) 18.05% 18.14%, transparent 18.2%),
+    linear-gradient(135deg, transparent 0 58%, rgba(255, 255, 255, 0.18) 58.1% 58.25%, transparent 58.35%),
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.08) 0 1px, transparent 1px 56px),
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.06) 0 1px, transparent 1px 42px);
+  mask-image: linear-gradient(90deg, transparent, #000 22%, #000 86%, transparent);
+  opacity: 0.42;
+}
+
+.topbar::after {
+  content: "";
+  position: absolute;
+  left: 56%;
+  bottom: 8px;
+  width: 74px;
+  height: 96px;
+  pointer-events: none;
+  opacity: 0.34;
+  background:
+    linear-gradient(#fff, #fff) 34px 18px / 6px 56px no-repeat,
+    linear-gradient(#fff, #fff) 24px 74px / 26px 5px no-repeat,
+    linear-gradient(#fff, #fff) 20px 84px / 34px 5px no-repeat,
+    radial-gradient(circle at 37px 12px, transparent 13px, rgba(255, 255, 255, 0.95) 14px 15px, transparent 16px),
+    linear-gradient(135deg, transparent 36%, rgba(255, 255, 255, 0.95) 36.5% 41%, transparent 41.5%),
+    linear-gradient(45deg, transparent 36%, rgba(255, 255, 255, 0.95) 36.5% 41%, transparent 41.5%);
+}
+
+.brand {
+  position: relative;
+  z-index: 1;
+  flex: 0 0 auto;
+  gap: 26px;
+}
+
+.brand > div {
+  min-width: 0;
+}
+
+.brand-logo {
+  width: 146px;
+  height: 56px;
+  padding-right: 26px;
+  border-right: 1px solid rgba(255, 255, 255, 0.42);
+  filter: brightness(0) invert(1);
+}
+
+h1 {
+  color: #ffffff;
+  font-size: 28px;
+  font-weight: 800;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+.brand p,
+.hint {
+  margin-top: 8px;
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 15px;
+}
+
+.topbar-actions {
+  position: relative;
+  z-index: 1;
+  flex: 1 1 560px;
+  min-width: 360px;
+  margin-left: auto;
+  justify-content: flex-end;
+}
+
+.topbar .btn,
+.topbar button,
+.topbar a.btn,
+.topbar .user-chip,
+.scope-switch {
+  min-height: 44px;
+  border-color: rgba(255, 255, 255, 0.35);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.13);
+  color: #ffffff;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  backdrop-filter: blur(10px);
+}
+
+.topbar .btn:hover,
+.topbar button:hover,
+.topbar a.btn:hover {
+  background: rgba(255, 255, 255, 0.21);
+}
+
+.topbar .danger-text {
+  border-color: rgba(255, 255, 255, 0.88);
+  background: #ffffff;
+  color: #d03535;
+  font-weight: 700;
+}
+
+.scope-switch {
+  display: inline-flex;
+  padding: 4px 8px 4px 12px;
+}
+
+.scope-switch select {
+  border-color: rgba(255, 255, 255, 0.42);
+  background: rgba(255, 255, 255, 0.96);
+  color: var(--brand-blue-dark);
+  font-weight: 700;
+}
+
+.status-banner {
+  top: 128px;
+  border: 1px solid var(--line);
+  border-left: 0;
+  border-right: 0;
+  background:
+    linear-gradient(90deg, rgba(255, 255, 255, 0.96), rgba(247, 251, 255, 0.96)),
+    linear-gradient(90deg, rgba(7, 87, 215, 0.08), transparent 42%);
+  color: #24456f;
+  box-shadow: 0 8px 24px rgba(36, 86, 148, 0.08);
+}
+
+.status-banner.info {
+  background: #f5faff;
+}
+
+.status-banner.warning {
+  border-color: #d8e7f8;
+  background:
+    linear-gradient(90deg, rgba(255, 255, 255, 0.96), rgba(247, 251, 255, 0.96)),
+    linear-gradient(90deg, rgba(245, 158, 11, 0.14), transparent 42%);
+  color: #8a4b08;
+}
+
+.status-banner.failed {
+  border-color: #d8e7f8;
+  background:
+    linear-gradient(90deg, rgba(255, 255, 255, 0.96), rgba(247, 251, 255, 0.96)),
+    linear-gradient(90deg, rgba(220, 38, 38, 0.13), transparent 42%);
+  color: #9f1d1d;
+}
+
+.status-banner .btn {
+  min-height: 28px;
+  padding: 6px 12px;
+  border-color: #c5d9f2;
+  background: #ffffff;
+  color: #0757d7;
+  box-shadow: 0 6px 16px rgba(22, 78, 151, 0.1);
+}
+
+.page-status {
+  width: min(1180px, calc(100vw - 48px));
+  margin: 16px auto 0;
+  padding: 10px 14px;
+  border: 1px solid #d8e7f8;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.82);
+  color: #31577f;
+  font-size: 13px;
+  box-shadow: 0 10px 28px rgba(22, 78, 151, 0.08);
+}
+
+.center-state,
+.summary-strip article,
+.panel,
+.paste-panel,
+.target-detail-popover,
+.closed-card {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.center-state {
+  margin-top: 48px;
+  padding: 34px;
+}
+
+.workbench {
+  padding: 28px 34px 34px;
+}
+
+.summary-strip {
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.summary-strip article {
+  position: relative;
+  min-height: 94px;
+  padding: 18px 18px 16px 78px;
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.summary-strip article::before {
+  content: "";
+  position: absolute;
+  left: 18px;
+  top: 19px;
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, var(--brand-blue), var(--brand-blue-2));
+  box-shadow: 0 10px 22px rgba(25, 105, 224, 0.26);
+}
+
+.summary-strip article::after {
+  content: "";
+  position: absolute;
+  right: -38px;
+  bottom: -54px;
+  z-index: 0;
+  width: 140px;
+  height: 104px;
+  opacity: 0.44;
+  background:
+    repeating-linear-gradient(0deg, rgba(22, 120, 255, 0.12) 0 1px, transparent 1px 15px),
+    repeating-linear-gradient(90deg, rgba(22, 120, 255, 0.08) 0 1px, transparent 1px 15px);
+  transform: rotate(-14deg);
+}
+
+.summary-strip article > * {
+  position: relative;
+  z-index: 1;
+}
+
+.summary-strip article:nth-child(2)::before {
+  background: linear-gradient(135deg, #11a8c9, #36d0e5);
+}
+
+.summary-strip article:nth-child(3)::before {
+  background: linear-gradient(135deg, #22b66b, #3dd887);
+}
+
+.summary-strip article:nth-child(4)::before {
+  background: linear-gradient(135deg, #6b78ff, #2f75ff);
+}
+
+.summary-strip span {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.summary-strip strong {
+  color: var(--brand-blue-dark);
+  font-size: 26px;
+}
+
+.toolbar,
+.paste-panel {
+  margin-bottom: 16px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: 0 12px 32px rgba(22, 78, 151, 0.08);
+}
+
+.workspace {
+  gap: 18px;
+}
+
+.panel {
+  position: relative;
+  overflow: hidden;
+  padding: 14px;
+}
+
+.panel-head {
+  margin: -14px -14px 0;
+  padding: 14px 16px 10px;
+  border-bottom-color: #e7f0fb;
+  border-radius: 14px 14px 0 0;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 251, 255, 0.96));
+  box-shadow: 0 8px 20px rgba(22, 78, 151, 0.04);
+}
+
+.panel-head h2 {
+  color: #09204a;
+  font-size: 18px;
+  font-weight: 800;
+}
+
+.panel-head h2::before {
+  content: "";
+  display: inline-block;
+  width: 4px;
+  height: 17px;
+  margin-right: 8px;
+  border-radius: 999px;
+  vertical-align: -3px;
+  background: linear-gradient(180deg, var(--brand-blue), var(--brand-cyan));
+  box-shadow: 0 6px 14px rgba(22, 120, 255, 0.18);
+}
+
+.panel-head span,
+.card-title span {
+  background: #eaf3ff;
+  color: #0757d7;
+  font-weight: 700;
+}
+
+.btn,
+button,
+a.btn {
+  min-height: 36px;
+  border-color: #c5d9f2;
+  border-radius: 9px;
+  background: #ffffff;
+  color: #09204a;
+  font-weight: 650;
+  transition: transform 0.12s ease, box-shadow 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+}
+
+.btn:focus-visible,
+button:focus-visible,
+a.btn:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 3px solid rgba(22, 120, 255, 0.22);
+  outline-offset: 2px;
+}
+
+.btn:hover:not(:disabled),
+button:hover:not(:disabled),
+a.btn:hover {
+  border-color: #8dbbfb;
+  box-shadow: 0 8px 20px rgba(27, 101, 213, 0.13);
+  transform: translateY(-1px);
+}
+
+.btn.blue,
+.segmented button.active {
+  border-color: transparent;
+  background: linear-gradient(135deg, var(--brand-blue), #1678ff);
+  color: #ffffff;
+  box-shadow: 0 12px 24px rgba(20, 103, 226, 0.24);
+}
+
+.btn.green {
+  border-color: transparent;
+  background: linear-gradient(135deg, #16a36d, #2fd083);
+}
+
+.btn.danger {
+  border-color: transparent;
+  background: linear-gradient(135deg, #dc2626, #f05656);
+}
+
+.segmented {
+  padding: 5px;
+  border-color: #cde0f6;
+  border-radius: 12px;
+  background: #edf5ff;
+}
+
+.segmented button {
+  border-radius: 9px;
+}
+
+input,
+select,
+textarea {
+  border-color: #c8dcf3;
+  border-radius: 9px;
+  background: #fbfdff;
+  transition: border-color 0.14s ease, box-shadow 0.14s ease, background-color 0.14s ease;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: var(--brand-blue-2);
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(22, 120, 255, 0.12);
+}
+
+.empty-block,
+.virtual-list,
+.target-choice-panel,
+.manual-type-popover,
+.closed-card {
+  background: #f7fbff;
+}
+
+.draft-stack,
+.ongoing-list {
+  padding-right: 2px;
+  scrollbar-color: #9cc7ff #eef6ff;
+  scrollbar-width: thin;
+}
+
+.draft-stack::-webkit-scrollbar,
+.ongoing-list::-webkit-scrollbar {
+  width: 8px;
+}
+
+.draft-stack::-webkit-scrollbar-track,
+.ongoing-list::-webkit-scrollbar-track {
+  background: #eef6ff;
+  border-radius: 999px;
+}
+
+.draft-stack::-webkit-scrollbar-thumb,
+.ongoing-list::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, #9cc7ff, #1678ff);
+  border-radius: 999px;
+}
+
+.closed-card {
+  border-radius: 12px;
+  box-shadow: 0 8px 18px rgba(22, 78, 151, 0.06);
+  transition: border-color 0.14s ease, background-color 0.14s ease, box-shadow 0.14s ease;
+}
+
+.closed-card:hover {
+  border-color: #9cc7ff;
+  background: #f5faff;
+  box-shadow: 0 12px 26px rgba(22, 78, 151, 0.1);
+}
+
+.manual-type-popover,
+.target-choice-panel,
+.target-detail-popover {
+  border-color: var(--line);
+  border-radius: 14px;
+  box-shadow: var(--shadow-strong);
+}
+
+/* Rounded VNET polish pass */
+.center-state,
+.summary-strip article,
+.panel,
+.paste-panel,
+.toolbar,
+.page-status,
+.target-choice-panel,
+.manual-type-popover,
+.closed-card,
+.empty-block {
+  border-radius: var(--radius-panel);
+}
+
+.target-detail-popover {
+  border-radius: var(--radius-popover);
+}
+
+.panel-head {
+  border-radius: var(--radius-panel) var(--radius-panel) 0 0;
+}
+
+.topbar .btn,
+.topbar button,
+.topbar a.btn,
+.topbar .user-chip,
+.scope-switch,
+.scope-switch select,
+.btn,
+button,
+a.btn,
+input,
+select,
+textarea,
+.segmented button,
+.status-banner .btn {
+  border-radius: var(--radius-control);
+}
+
+.segmented {
+  border-radius: 16px;
+}
+
+.summary-strip article::before {
+  border-radius: 14px;
+}
+
+/* Softer text integration for graphic surfaces */
+.summary-strip span,
+.panel-head span,
+.card-title span,
+.status-banner,
+.page-status {
+  letter-spacing: 0;
+}
+
+.summary-strip span {
+  color: #5f7189;
+  font-weight: 650;
+}
+
+.summary-strip strong {
+  color: #0a4db8;
+  font-size: 25px;
+  font-weight: 820;
+  letter-spacing: 0;
+}
+
+.panel-head h2 {
+  font-weight: 820;
+  letter-spacing: 0;
+}
+
+.panel-head span,
+.card-title span {
+  border: 1px solid #d8e7f8;
+  background: rgba(234, 243, 255, 0.78);
+  color: #0b5ed8;
+  font-weight: 720;
+}
+
+.btn,
+button,
+a.btn {
+  font-weight: 720;
+}
+
+/* Panorama construction-management polish: lighter slate canvas, softer cards, rounder controls */
+.app-shell {
+  --line: #dbe6f5;
+  --panel: rgba(255, 255, 255, 0.97);
+  --panel-soft: #f8fbff;
+  --shadow: 0 14px 34px rgba(20, 70, 138, 0.09);
+  --shadow-strong: 0 22px 58px rgba(15, 58, 128, 0.15);
+  --radius-panel: 24px;
+  --radius-card: 20px;
+  --radius-control: 14px;
+  background:
+    linear-gradient(180deg, #f7faff 0, #f9fbfd 280px, #eef5fc 100%),
+    radial-gradient(circle at 14% 12%, rgba(48, 128, 255, 0.12), transparent 30%),
+    radial-gradient(circle at 86% 16%, rgba(0, 183, 215, 0.08), transparent 26%);
+}
+
+.topbar {
+  min-height: 116px;
+  padding: 20px 40px;
+  border-bottom: 1px solid rgba(191, 219, 254, 0.25);
+  box-shadow: 0 14px 34px rgba(3, 55, 140, 0.16);
+}
+
+.topbar::before {
+  opacity: 0.34;
+}
+
+.topbar::after {
+  bottom: 5px;
+  opacity: 0.28;
+}
+
+.brand {
+  gap: 24px;
+}
+
+.brand-logo {
+  width: 142px;
+  height: 54px;
+}
+
+h1 {
+  font-size: 29px;
+  font-weight: 820;
+}
+
+.brand p,
+.hint {
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 14px;
+}
+
+.topbar .btn,
+.topbar button,
+.topbar a.btn,
+.topbar .user-chip,
+.scope-switch {
+  min-height: 42px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.12);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.2),
+    0 10px 22px rgba(4, 46, 145, 0.08);
+}
+
+.topbar .danger-text {
+  border-radius: 16px;
+  box-shadow: 0 12px 24px rgba(4, 46, 145, 0.12);
+}
+
+.status-banner {
+  top: 116px;
+}
+
+.page-status {
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.9);
+}
+
+.workbench {
+  padding: 30px 40px 46px;
+}
+
+.summary-strip {
+  gap: 18px;
+  margin-bottom: 20px;
+}
+
+.summary-strip article {
+  min-height: 88px;
+  padding: 18px 18px 16px 74px;
+  border-color: rgba(207, 224, 255, 0.9);
+  box-shadow: var(--shadow);
+}
+
+.summary-strip article::before {
+  width: 40px;
+  height: 40px;
+  border-radius: 16px;
+}
+
+.summary-strip strong {
+  font-size: 24px;
+}
+
+.toolbar,
+.paste-panel {
+  border-color: rgba(207, 224, 255, 0.92);
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(10px);
+}
+
+.toolbar {
+  position: relative;
+  z-index: 20;
+}
+
+.panel {
+  border-color: rgba(207, 224, 255, 0.92);
+  box-shadow: var(--shadow);
+}
+
+.panel-head {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.99), rgba(248, 251, 255, 0.98)),
+    linear-gradient(90deg, rgba(48, 128, 255, 0.06), transparent 42%);
+}
+
+.panel-head h2 {
+  font-size: 17px;
+}
+
+.panel-head span,
+.card-title span {
+  border-color: #d8e7f8;
+  border-radius: 999px;
+  background: rgba(239, 246, 255, 0.9);
+  color: #155dfc;
+}
+
+.segmented {
+  border-color: #d8e7f8;
+  background: rgba(239, 246, 255, 0.86);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9);
+}
+
+.btn,
+button,
+a.btn,
+input,
+select,
+textarea {
+  border-radius: var(--radius-control);
+}
+
+.btn,
+button,
+a.btn {
+  box-shadow: 0 8px 18px rgba(15, 86, 228, 0.06);
+}
+
+.btn.blue,
+.segmented button.active {
+  background: linear-gradient(135deg, #155dfc, #3080ff);
+  box-shadow: 0 12px 24px rgba(21, 93, 252, 0.24);
+}
+
+input,
+select,
+textarea {
+  background: rgba(255, 255, 255, 0.96);
+}
+
+.empty-block,
+.virtual-list,
+.target-choice-panel,
+.manual-type-popover,
+.closed-card {
+  background: rgba(248, 251, 255, 0.94);
+}
+
+.closed-card {
+  border-radius: 18px;
+}
+
+.manual-type-popover {
+  z-index: 80;
+}
+
+/* Panorama construction-management command-center skin */
+.app-shell {
+  --brand-blue: #1e63ff;
+  --brand-blue-2: #005bff;
+  --brand-blue-dark: #012a7d;
+  --brand-cyan: #00b7d7;
+  --ink: #0f172a;
+  --muted: #64748b;
+  --line: #d8e5f7;
+  --panel: rgba(255, 255, 255, 0.86);
+  --panel-soft: rgba(255, 255, 255, 0.72);
+  --shadow: 0 14px 34px rgba(0, 47, 135, 0.1);
+  --shadow-strong: 0 24px 64px rgba(0, 47, 135, 0.18);
+  --radius-panel: 22px;
+  --radius-card: 18px;
+  --radius-control: 14px;
+  background: linear-gradient(180deg, #eef4ff 0, #f8fbff 44%, #eef5ff 100%);
+}
+
+.topbar {
+  min-height: 112px;
+  padding: 20px 40px;
+  background:
+    linear-gradient(115deg, #064fc5 0%, #00359b 52%, #012a7d 100%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.14), transparent);
+  box-shadow: 0 18px 42px rgba(0, 47, 135, 0.28);
+}
+
+.topbar::before {
+  background:
+    linear-gradient(90deg, transparent 0 18%, rgba(255, 255, 255, 0.16) 18.05% 18.14%, transparent 18.2%),
+    linear-gradient(135deg, transparent 0 58%, rgba(255, 255, 255, 0.14) 58.1% 58.25%, transparent 58.35%),
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.07) 0 1px, transparent 1px 62px),
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.05) 0 1px, transparent 1px 46px);
+}
+
+.topbar::after {
+  opacity: 0.24;
+}
+
+h1 {
+  font-size: 28px;
+  font-weight: 650;
+}
+
+.brand p,
+.hint {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.topbar .btn,
+.topbar button,
+.topbar a.btn,
+.topbar .user-chip,
+.scope-switch {
+  border-color: rgba(255, 255, 255, 0.32);
+  background: rgba(255, 255, 255, 0.14);
+  color: #ffffff;
+  backdrop-filter: blur(10px);
+}
+
+.topbar .btn:hover,
+.topbar button:hover,
+.topbar a.btn:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.topbar .danger-text {
+  background: #ffffff;
+  color: #d03535;
+}
+
+.status-banner {
+  top: 112px;
+  min-height: 34px;
+  background: rgba(255, 255, 255, 0.88);
+  backdrop-filter: blur(10px);
+}
+
+.workbench {
+  width: min(1800px, 100%);
+  margin: 0 auto;
+  padding: 28px 32px 42px;
+}
+
+.summary-strip article,
+.panel,
+.paste-panel,
+.toolbar,
+.target-choice-panel,
+.manual-type-popover,
+.closed-card,
+.page-status {
+  border-color: #d8e5f7;
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: 0 12px 30px rgba(0, 47, 135, 0.08);
+  backdrop-filter: blur(10px);
+}
+
+.summary-strip article {
+  min-height: 86px;
+}
+
+.summary-strip article::before {
+  background: linear-gradient(135deg, #1e63ff, #005bff);
+}
+
+.summary-strip article:nth-child(2)::before {
+  background: linear-gradient(135deg, #0ea5e9, #00b7d7);
+}
+
+.summary-strip article:nth-child(3)::before {
+  background: linear-gradient(135deg, #059669, #10b981);
+}
+
+.summary-strip article:nth-child(4)::before {
+  background: linear-gradient(135deg, #475569, #1e63ff);
+}
+
+.panel-head {
+  background: rgba(255, 255, 255, 0.86);
+}
+
+.panel-head h2 {
+  font-size: 16px;
+  font-weight: 650;
+}
+
+.panel-head h2::before {
+  background: linear-gradient(180deg, #1e63ff, #00b7d7);
+}
+
+.panel-head span,
+.card-title span,
+.draft-save-status {
+  border-color: #cfe0ff;
+  background: rgba(239, 246, 255, 0.86);
+  color: #005bff;
+}
+
+.segmented {
+  border-color: #d8e5f7;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.btn.blue,
+.segmented button.active {
+  background: linear-gradient(135deg, #1e63ff, #1554df);
+  box-shadow: 0 10px 22px rgba(30, 99, 255, 0.24);
+}
+
+.btn.blue:hover:not(:disabled),
+.segmented button.active:hover:not(:disabled) {
+  background: #1554df;
+}
+
+.btn.green {
+  background: #059669;
+}
+
+.btn.danger {
+  background: #e11d48;
+}
+
+input,
+select,
+textarea,
+.search {
+  border-color: #d8e5f7;
+  background: rgba(255, 255, 255, 0.86);
+}
+
+input:focus,
+select:focus,
+textarea:focus,
+.search:focus {
+  border-color: #005bff;
+  box-shadow: 0 0 0 3px rgba(0, 91, 255, 0.14);
+}
+
+@media (max-width: 920px) {
+  .topbar {
+    min-height: auto;
+    padding: 20px;
   }
 
-  .candidate-modal-head,
-  .candidate-modal-actions {
-    align-items: stretch;
-    flex-direction: column;
+  .brand-logo {
+    width: 118px;
+    height: 46px;
+    padding-right: 18px;
   }
 
-  .modal-choice-layout {
-    grid-template-columns: 1fr;
-    max-height: 68vh;
+  h1 {
+    font-size: 22px;
+  }
+
+  .status-banner {
+    top: 0;
   }
 }
 </style>

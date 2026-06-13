@@ -88,6 +88,7 @@ class _SmokePortalService:
 
     def get_handover_links(self) -> dict:
         return {
+            "scope_options": SCOPE_OPTIONS,
             "links": {
                 "A": "https://example.invalid/a",
                 "B": "https://example.invalid/b",
@@ -193,13 +194,29 @@ class _SmokePortalService:
         action_type: str = "",
         since_seconds: float = 0,
     ) -> list[dict]:
-        return []
+        return [
+            {
+                "undo_id": "undo-smoke-delete-a-001",
+                "undo_action_type": "delete",
+                "work_type": "change",
+                "notice_type": "设备变更",
+                "title": "A楼UPS旁路切换变更测试",
+                "building": "A楼",
+                "building_codes": ["A"],
+                "undo_created_at": time.time(),
+                "active_item_id": "active-change-a-001",
+                "target_record_id": "target-change-a-001",
+                "undo_label": "撤销删除",
+            }
+        ]
 
 
 def _build_playwright_script(url: str, session_id: str) -> str:
+    no_scope_session_id = f"{session_id}-no-scope"
     payload = {
         "url": url,
         "session_id": session_id,
+        "no_scope_session_id": no_scope_session_id,
         "cookie_name": AUTH_COOKIE_NAME,
     }
     return textwrap.dedent(
@@ -209,7 +226,185 @@ def _build_playwright_script(url: str, session_id: str) -> str:
 
         (async () => {{
           const browser = await chromium.launch({{ headless: true }});
+          const errors = [];
+          const failedResponses = [];
+
+          function attachDiagnostics(targetPage, label) {{
+            targetPage.on('console', msg => {{
+              if (msg.type() === 'error') errors.push(`${{label}}: ${{msg.text()}}`);
+            }});
+            targetPage.on('pageerror', err => errors.push(`${{label}}: ${{String(err)}}`));
+            targetPage.on('response', response => {{
+              if (response.status() >= 400) {{
+                failedResponses.push(`${{label}}: ${{response.status()}} ${{response.url()}}`);
+              }}
+            }});
+          }}
+
+          async function assertLayout(targetPage, stage) {{
+            const issues = await targetPage.evaluate(() => {{
+              const result = [];
+              const rectOf = selector => {{
+                const node = document.querySelector(selector);
+                if (!node) return null;
+                const rect = node.getBoundingClientRect();
+                return {{
+                  left: rect.left,
+                  right: rect.right,
+                  top: rect.top,
+                  bottom: rect.bottom,
+                  width: rect.width,
+                  height: rect.height,
+                }};
+              }};
+              const intersects = (a, b) => {{
+                if (!a || !b) return false;
+                return !(a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top);
+              }};
+              if (document.documentElement.scrollWidth > window.innerWidth + 4) {{
+                result.push(`horizontal overflow ${{document.documentElement.scrollWidth}}>${{window.innerWidth}}`);
+              }}
+              const titleRect = rectOf('.brand h1');
+              if (!titleRect || titleRect.width < 240) result.push('brand title missing or too narrow');
+              if (titleRect && titleRect.height > 46) result.push(`brand title wrapped: ${{Math.round(titleRect.height)}}px`);
+              const brandRect = rectOf('.brand');
+              const actionsRect = rectOf('.topbar-actions');
+              if (intersects(brandRect, actionsRect)) result.push('topbar brand overlaps actions');
+              const summaryCards = Array.from(document.querySelectorAll('.summary-strip article'));
+              if (summaryCards.length) {{
+                const narrow = summaryCards
+                  .map((node, index) => [index + 1, node.getBoundingClientRect().width])
+                  .filter(([, width]) => width < 190);
+                if (narrow.length) result.push(`summary cards too narrow: ${{JSON.stringify(narrow)}}`);
+              }}
+              const panels = Array.from(document.querySelectorAll('.workspace > .panel'));
+              if (panels.length) {{
+                if (panels.length < 3) result.push(`workspace panel count ${{panels.length}}`);
+                const narrow = panels
+                  .map((node, index) => [index + 1, node.getBoundingClientRect().width])
+                  .filter(([, width]) => width < 250);
+                if (narrow.length) result.push(`workspace panels too narrow: ${{JSON.stringify(narrow)}}`);
+              }}
+              return result;
+            }});
+            if (issues.length) throw new Error(`layout issues at ${{stage}}: ${{issues.join('; ')}}`);
+          }}
+          async function assertVnetSkin(targetPage, stage) {{
+            const issues = await targetPage.evaluate(() => {{
+              const result = [];
+              const styleText = (node, prop) => node ? String(getComputedStyle(node)[prop] || '') : '';
+              const backgroundText = (node) => {{
+                const image = styleText(node, 'backgroundImage');
+                if (image && image !== 'none') return image;
+                return styleText(node, 'backgroundColor');
+              }};
+              const topbar = document.querySelector('.topbar');
+              const logo = document.querySelector('.brand-logo');
+              const card = document.querySelector('.center-state, .feature-card, .panel, .permission-row, .match-layout');
+              const primaryButton = document.querySelector('.btn.blue, .primary, button.primary');
+              const topbarBackground = backgroundText(topbar);
+              const cardRadius = styleText(card, 'borderRadius');
+              const cardBackground = backgroundText(card);
+              const primaryBackground = backgroundText(primaryButton);
+              if (!logo) result.push('official logo missing');
+              if (!topbarBackground.includes('gradient')) result.push(`topbar is not gradient: ${{topbarBackground}}`);
+              if (!card) result.push('main white card missing');
+              const numericRadius = Number.parseFloat(cardRadius || '0');
+              if (card && (!Number.isFinite(numericRadius) || numericRadius < 12 || numericRadius > 28)) {{
+                result.push(`card radius not VNET-like: ${{cardRadius}}`);
+              }}
+              if (card && !/(255, 255, 255|#fff|white)/i.test(cardBackground)) {{
+                result.push(`card is not white/light: ${{cardBackground}}`);
+              }}
+              if (primaryButton && !primaryBackground.includes('gradient')) {{
+                result.push(`primary button is not gradient: ${{primaryBackground}}`);
+              }}
+              return result;
+            }});
+            if (issues.length) throw new Error(`VNET skin issues at ${{stage}}: ${{issues.join('; ')}}`);
+          }}
+          async function assertHeaderSubtitle(targetPage, expected, stage) {{
+            const headerText = await targetPage.locator('.brand').innerText({{ timeout: 10000 }});
+            if (!headerText.includes(expected)) {{
+              throw new Error(`header subtitle mismatch at ${{stage}}: expected "${{expected}}", got "${{headerText}}"`);
+            }}
+            if (/HTTP\\s+\\d+/i.test(headerText)) {{
+              throw new Error(`header exposes technical HTTP status at ${{stage}}: ${{headerText}}`);
+            }}
+          }}
+          async function eventSourceUrls(targetPage) {{
+            return await targetPage.evaluate(() => Array.from(window.__clipflowActiveEventSourceUrls || []));
+          }}
+
+          const unauthContext = await browser.newContext();
+          const unauthPage = await unauthContext.newPage();
+          attachDiagnostics(unauthPage, 'unauth');
+          const unauthResponse = await unauthPage.goto(cfg.url, {{
+            waitUntil: 'domcontentloaded',
+            timeout: 20000,
+          }});
+          if (!unauthResponse || !unauthResponse.ok()) {{
+            throw new Error(`unauth page load failed: ${{unauthResponse && unauthResponse.status()}}`);
+          }}
+          await unauthPage.waitForSelector('text=南通基地-运维灯塔工作台', {{ timeout: 10000 }});
+          await unauthPage.waitForSelector('text=飞书扫码登录', {{ timeout: 10000 }});
+          const unauthText = await unauthPage.locator('body').innerText({{ timeout: 10000 }});
+          if (!unauthText.includes('请先使用飞书登录')) throw new Error('missing unauth login prompt');
+          await assertHeaderSubtitle(unauthPage, '功能选择 · 请先登录', 'unauth');
+          await assertLayout(unauthPage, 'unauth');
+          await assertVnetSkin(unauthPage, 'unauth');
+          await unauthContext.close();
+
+          const noScopeContext = await browser.newContext();
+          await noScopeContext.addCookies([{{
+            name: cfg.cookie_name,
+            value: cfg.no_scope_session_id,
+            domain: '127.0.0.1',
+            path: '/',
+          }}]);
+          const noScopePage = await noScopeContext.newPage();
+          attachDiagnostics(noScopePage, 'no-scope');
+          const noScopeResponse = await noScopePage.goto(cfg.url, {{
+            waitUntil: 'domcontentloaded',
+            timeout: 20000,
+          }});
+          if (!noScopeResponse || !noScopeResponse.ok()) {{
+            throw new Error(`no-scope page load failed: ${{noScopeResponse && noScopeResponse.status()}}`);
+          }}
+          await noScopePage.waitForSelector('text=当前账号暂无门户权限', {{ timeout: 10000 }});
+          await noScopePage.waitForSelector('text=提交申请', {{ timeout: 10000 }});
+          await assertHeaderSubtitle(noScopePage, '功能选择 · 申请访问权限', 'no-scope');
+          const scopePillCount = await noScopePage.locator('.scope-pill').count();
+          if (scopePillCount < 8) throw new Error(`permission request scope pills too few: ${{scopePillCount}}`);
+          await noScopePage.locator('.scope-pill').filter({{ hasText: 'A楼' }}).click();
+          const selectedPillText = await noScopePage.locator('.scope-pill.selected').innerText({{ timeout: 10000 }});
+          if (!selectedPillText.includes('A楼')) throw new Error(`permission request pill selection failed: ${{selectedPillText}}`);
+          await assertLayout(noScopePage, 'no-scope');
+          await assertVnetSkin(noScopePage, 'no-scope');
+          await noScopeContext.close();
+
           const context = await browser.newContext();
+          await context.addInitScript(() => {{
+            const NativeEventSource = window.EventSource;
+            if (!NativeEventSource || window.__clipflowEventSourcePatched) return;
+            window.__clipflowEventSourceUrls = [];
+            window.__clipflowActiveEventSourceUrls = [];
+            window.EventSource = function(url, options) {{
+              const urlText = String(url);
+              window.__clipflowEventSourceUrls.push(urlText);
+              window.__clipflowActiveEventSourceUrls.push(urlText);
+              const source = new NativeEventSource(url, options);
+              const nativeClose = source.close.bind(source);
+              source.close = function() {{
+                const index = window.__clipflowActiveEventSourceUrls.indexOf(urlText);
+                if (index >= 0) window.__clipflowActiveEventSourceUrls.splice(index, 1);
+                return nativeClose();
+              }};
+              return source;
+            }};
+            window.EventSource.prototype = NativeEventSource.prototype;
+            window.__clipflowEventSourcePatched = true;
+          }});
           await context.addCookies([{{
             name: cfg.cookie_name,
             value: cfg.session_id,
@@ -217,17 +412,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             path: '/',
           }}]);
           const page = await context.newPage();
-          const errors = [];
-          const failedResponses = [];
-          page.on('console', msg => {{
-            if (msg.type() === 'error') errors.push(msg.text());
-          }});
-          page.on('pageerror', err => errors.push(String(err)));
-          page.on('response', response => {{
-            if (response.status() >= 400) {{
-              failedResponses.push(`${{response.status()}} ${{response.url()}}`);
-            }}
-          }});
+          attachDiagnostics(page, 'auth');
           const response = await page.goto(cfg.url, {{
             waitUntil: 'domcontentloaded',
             timeout: 20000,
@@ -237,6 +422,8 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           }}
           await page.waitForSelector('text=南通基地-运维灯塔工作台', {{ timeout: 10000 }});
           await page.waitForSelector('text=功能选择', {{ timeout: 10000 }});
+          await assertHeaderSubtitle(page, '功能选择 · 请选择功能', 'home');
+          await assertVnetSkin(page, 'home');
           const bodyText = await page.locator('body').innerText({{ timeout: 10000 }});
           const required = ['功能选择', '交接班审核页', '维保 / 变更 / 检修'];
           for (const marker of required) {{
@@ -246,6 +433,19 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           for (const marker of forbidden) {{
             if (bodyText.includes(marker)) throw new Error(`legacy marker visible: ${{marker}}`);
           }}
+          await assertLayout(page, 'home');
+          await page.getByRole('button', {{ name: '查看链接' }}).click();
+          await page.waitForSelector('text=选择楼栋打开审核页', {{ timeout: 10000 }});
+          const handoverScopeCard = page.locator('article.scope-card').filter({{ hasText: 'A楼' }}).first();
+          await handoverScopeCard.getByRole('link', {{ name: '打开审核页' }}).waitFor({{ timeout: 10000 }});
+          const handoverHref = await handoverScopeCard.getByRole('link', {{ name: '打开审核页' }}).getAttribute('href');
+          if (handoverHref !== 'https://example.invalid/a') {{
+            throw new Error(`handover link href mismatch: ${{handoverHref}}`);
+          }}
+          await assertLayout(page, 'handover-feature');
+          await page.getByRole('button', {{ name: '返回功能选择' }}).click();
+          await page.waitForSelector('text=维保 / 变更 / 检修', {{ timeout: 10000 }});
+          await assertHeaderSubtitle(page, '功能选择 · 请选择功能', 'home-after-handover');
           await page.getByRole('button', {{ name: '选择楼栋' }}).click();
           await page.waitForSelector('text=选择楼栋进入工作台', {{ timeout: 10000 }});
           const scopeCard = page.locator('article.scope-card').filter({{ hasText: 'A楼' }}).first();
@@ -254,20 +454,164 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await page.waitForSelector('text=冷机月度巡检', {{ timeout: 10000 }});
           await page.waitForSelector('text=已开始未结束', {{ timeout: 10000 }});
           await page.waitForSelector('text=A楼UPS旁路切换变更测试', {{ timeout: 10000 }});
+          await page.waitForSelector('text=刷新检修', {{ timeout: 10000 }});
+          await page.waitForSelector('text=刷新变更', {{ timeout: 10000 }});
+          await page.waitForSelector('text=纯手填', {{ timeout: 10000 }});
+          await page.waitForSelector('text=解析粘贴通告', {{ timeout: 10000 }});
+          await page.waitForSelector('text=近三天可回退', {{ timeout: 10000 }});
+          await page.waitForSelector('text=回退删除', {{ timeout: 10000 }});
+          await page.getByRole('button', {{ name: '纯手填' }}).click();
+          await page.waitForSelector('text=选择纯手填通告类型', {{ timeout: 10000 }});
+          const manualAdjustButton = page.locator('.manual-type-grid button').filter({{ hasText: '调整' }});
+          if (await manualAdjustButton.count() !== 1) throw new Error('manual adjust type button missing or ambiguous');
+          await manualAdjustButton.click();
+          await page.waitForSelector('text=待发起通告', {{ timeout: 10000 }});
+          await page.locator('.drafts-panel').getByRole('button', {{ name: '编辑' }}).click();
+          const draftPanelText = await page.locator('.drafts-panel').innerText({{ timeout: 10000 }});
+          if (!draftPanelText.includes('通告类型') || !draftPanelText.includes('调整')) {{
+            throw new Error(`manual adjust draft not visible: ${{draftPanelText}}`);
+          }}
+          await page.getByRole('button', {{ name: '解析粘贴通告' }}).click();
+          await page.waitForSelector('text=解析到待发起通告', {{ timeout: 10000 }});
+          const pastePanel = page.locator('.paste-panel');
+          const pasteTextarea = pastePanel.locator('textarea[placeholder*="粘贴完整"]');
+          await pasteTextarea.waitFor({{ timeout: 10000 }});
+          await pasteTextarea.fill(`【设备调整】状态：开始
+【名称】EA118机房A楼空调调整通告
+【时间】2026-06-12 09:30~2026-06-12 18:30
+【位置】A-101空调间
+【内容】测试测试测试
+【原因】测试测试测试
+【影响】测试测试测试
+【进度】测试测试测试`);
+          await pastePanel.getByRole('button', {{ name: '解析到待发起通告' }}).click();
+          await page.waitForSelector('text=EA118机房A楼空调调整通告', {{ timeout: 10000 }});
+          const parsedDraftPanelText = await page.locator('.drafts-panel').innerText({{ timeout: 10000 }});
+          if (!parsedDraftPanelText.includes('EA118机房A楼空调调整通告') || !parsedDraftPanelText.includes('调整')) {{
+            throw new Error(`parsed adjust draft not visible: ${{parsedDraftPanelText}}`);
+          }}
+          const maintenanceSegment = page.locator('.segmented button').filter({{ hasText: '维保' }});
+          if (await maintenanceSegment.count() !== 1) throw new Error('maintenance segment missing or ambiguous');
+          await maintenanceSegment.click();
+          await page.waitForSelector('text=冷机月度巡检', {{ timeout: 10000 }});
+          await assertHeaderSubtitle(page, 'A楼 · 通告工作台', 'workbench');
+          await assertLayout(page, 'workbench');
+          await assertVnetSkin(page, 'workbench');
+          await page.getByRole('button', {{ name: '功能选择' }}).click();
+          await page.waitForSelector('text=维保 / 变更 / 检修', {{ timeout: 10000 }});
+          await assertHeaderSubtitle(page, '功能选择 · 请选择功能', 'home-after-return-from-workbench');
+          await assertVnetSkin(page, 'home-after-return-from-workbench');
+          await page.getByRole('button', {{ name: '选择楼栋' }}).click();
+          await page.waitForSelector('text=选择楼栋进入工作台', {{ timeout: 10000 }});
+          const returnScopeCard = page.locator('article.scope-card').filter({{ hasText: 'A楼' }}).first();
+          await returnScopeCard.getByRole('button', {{ name: '进入工作台' }}).click();
+          await page.waitForSelector('text=待发起事项', {{ timeout: 10000 }});
+          await page.waitForSelector('text=A楼UPS旁路切换变更测试', {{ timeout: 10000 }});
+          await assertHeaderSubtitle(page, 'A楼 · 通告工作台', 'workbench-after-return');
+          const secondPage = await context.newPage();
+          attachDiagnostics(secondPage, 'auth-second-tab');
+          await secondPage.goto(new URL('/?scope=A', cfg.url).toString(), {{
+            waitUntil: 'domcontentloaded',
+            timeout: 20000,
+          }});
+          await secondPage.waitForSelector('text=待发起事项', {{ timeout: 10000 }});
+          await secondPage.waitForSelector('text=A楼UPS旁路切换变更测试', {{ timeout: 10000 }});
+          await assertLayout(secondPage, 'second-tab-workbench');
+          await page.waitForTimeout(1000);
+          const streamUrls = [...await eventSourceUrls(page), ...await eventSourceUrls(secondPage)];
+          const jobStreamCount = streamUrls.filter(url => url.includes('/api/jobs/stream')).length;
+          const activeItemsStreamCount = streamUrls.filter(url => url.includes('/api/qt-active-items/stream')).length;
+          if (jobStreamCount > 1 || activeItemsStreamCount > 1) {{
+            throw new Error(`cross-tab stream coordination failed: jobs=${{jobStreamCount}} active=${{activeItemsStreamCount}} urls=${{streamUrls.join(',')}}`);
+          }}
+          const secondTabText = await secondPage.locator('body').innerText({{ timeout: 10000 }});
+          if (secondTabText.includes('实时同步正在重连')) {{
+            throw new Error('second tab should not show realtime reconnect warning while shared stream is active');
+          }}
+          await secondPage.close();
           await page.locator('article.notice-row').filter({{ hasText: '冷机月度巡检' }}).first().click();
           await page.waitForSelector('text=待发起通告', {{ timeout: 10000 }});
-          await page.waitForSelector('text=发送开始', {{ timeout: 10000 }});
+          await page.getByRole('button', {{ name: /发送.*开始/ }}).waitFor({{ timeout: 10000 }});
           await page.locator('article.ongoing-card').filter({{ hasText: 'A楼UPS旁路切换变更测试' }}).first().click();
           await page.waitForSelector('text=更新', {{ timeout: 10000 }});
           await page.waitForSelector('text=结束', {{ timeout: 10000 }});
+          await page.getByRole('button', {{ name: '管理/诊断' }}).click();
+          await page.waitForSelector('text=管理员工具', {{ timeout: 10000 }});
+          await page.waitForSelector('text=查看原始诊断数据', {{ timeout: 10000 }});
+          const rawDiagnosticOpen = await page.evaluate(() => {{
+            const node = document.querySelector('.raw-diagnostic');
+            return Boolean(node && node.hasAttribute('open'));
+          }});
+          if (rawDiagnosticOpen) throw new Error('admin raw diagnostic should be collapsed by default');
+          await page.getByRole('button', {{ name: '权限' }}).click();
+          await page.waitForSelector('text=保存权限', {{ timeout: 10000 }});
+          await page.waitForSelector('text=添加用户', {{ timeout: 10000 }});
+          let permissionSkin = await page.evaluate(() => {{
+            const rows = Array.from(document.querySelectorAll('.permission-row'));
+            const scopePills = Array.from(document.querySelectorAll('.permission-row .scope-checks label'));
+            const activePills = scopePills.filter((node) => {{
+              const input = node.querySelector('input[type="checkbox"]');
+              return Boolean(input && input.checked);
+            }});
+            const firstRowStyle = rows[0] ? getComputedStyle(rows[0]) : null;
+            return {{
+              rowCount: rows.length,
+              scopePillCount: scopePills.length,
+              activePillCount: activePills.length,
+              rowRadius: firstRowStyle?.borderRadius || '',
+              rowBackground: firstRowStyle?.backgroundImage || firstRowStyle?.backgroundColor || '',
+            }};
+          }});
+          if (permissionSkin.rowCount < 1) {{
+            await page.getByRole('button', {{ name: '添加用户' }}).click();
+            await page.waitForSelector('.permission-row', {{ timeout: 10000 }});
+            permissionSkin = await page.evaluate(() => {{
+              const rows = Array.from(document.querySelectorAll('.permission-row'));
+              const scopePills = Array.from(document.querySelectorAll('.permission-row .scope-checks label'));
+              const activePills = scopePills.filter((node) => {{
+                const input = node.querySelector('input[type="checkbox"]');
+                return Boolean(input && input.checked);
+              }});
+              const firstRowStyle = rows[0] ? getComputedStyle(rows[0]) : null;
+              return {{
+                rowCount: rows.length,
+                scopePillCount: scopePills.length,
+                activePillCount: activePills.length,
+                rowRadius: firstRowStyle?.borderRadius || '',
+                rowBackground: firstRowStyle?.backgroundImage || firstRowStyle?.backgroundColor || '',
+              }};
+            }});
+          }}
+          if (permissionSkin.rowCount < 1 || permissionSkin.scopePillCount < 1) {{
+            throw new Error(`admin permission rows missing: ${{JSON.stringify(permissionSkin)}}`);
+          }}
+          const permissionRowRadius = Number.parseFloat(permissionSkin.rowRadius || '0');
+          if (!Number.isFinite(permissionRowRadius) || permissionRowRadius < 12 || permissionRowRadius > 28 || !permissionSkin.rowBackground.includes('gradient')) {{
+            throw new Error(`admin permission VNET skin missing: ${{JSON.stringify(permissionSkin)}}`);
+          }}
+          await page.getByRole('button', {{ name: '状态' }}).click();
+          await page.waitForSelector('text=查看原始诊断数据', {{ timeout: 10000 }});
+          await assertLayout(page, 'admin');
+          await assertVnetSkin(page, 'admin');
+          await page.goto(new URL('/admin/history-memory', cfg.url).toString(), {{
+            waitUntil: 'domcontentloaded',
+            timeout: 20000,
+          }});
+          await page.waitForSelector('text=历史通告记忆导入', {{ timeout: 10000 }});
+          await page.waitForSelector('text=扫描历史通告', {{ timeout: 10000 }});
+          await page.waitForSelector('text=当前月源表事项', {{ timeout: 10000 }});
+          await assertHeaderSubtitle(page, '管理工具 · 历史通告记忆导入', 'history-memory');
+          await assertLayout(page, 'history-memory');
+          await assertVnetSkin(page, 'history-memory');
           if (errors.length || failedResponses.length) {{
             throw new Error(`browser runtime errors: ${{errors.join(' | ')}} failedResponses=${{failedResponses.join(' | ')}}`);
           }}
+          const pageTitle = await page.title().catch(() => '');
           await browser.close();
           console.log(JSON.stringify({{
             ok: true,
-            title: await page.title().catch(() => ''),
-            markers: [...required, 'A楼工作台', '待发起事项', '已开始未结束'],
+            title: pageTitle,
+            markers: ['飞书扫码登录', ...required, 'A楼工作台', '待发起事项', '已开始未结束', '多标签SSE降噪', 'VNET蓝白皮肤', '管理员工具', '历史通告记忆导入'],
           }}));
         }})().catch(async err => {{
           console.error(String(err && err.stack || err));
@@ -316,6 +660,7 @@ def run_smoke(*, port: int = 18976, keep_server_seconds: float = 0.0) -> dict:
             updated_by="frontend-runtime-smoke",
         )
         session_id = "frontend-runtime-smoke-session"
+        no_scope_session_id = f"{session_id}-no-scope"
         with auth_manager._lock:
             auth_manager._sessions[session_id] = {
                 "session_id": session_id,
@@ -326,6 +671,17 @@ def run_smoke(*, port: int = 18976, keep_server_seconds: float = 0.0) -> dict:
                 "role": "admin",
                 "allowed_scopes": ["ALL"],
                 "scope_options": SCOPE_OPTIONS,
+                "expires_at": time.time() + 3600,
+            }
+            auth_manager._sessions[no_scope_session_id] = {
+                "session_id": no_scope_session_id,
+                "user": {
+                    "name": "frontend-smoke-no-scope",
+                    "open_id": "ou_frontend_smoke_no_scope",
+                },
+                "role": "building",
+                "allowed_scopes": [],
+                "scope_options": [],
                 "expires_at": time.time() + 3600,
             }
 

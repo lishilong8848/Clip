@@ -30,9 +30,12 @@ _recent_events: dict[str, float] = {}
 _rate_window: deque[float] = deque()
 _send_queue: "queue.Queue[dict[str, Any]]" = queue.Queue(maxsize=200)
 _worker_started = False
+_worker_thread: threading.Thread | None = None
 _fail_streak = 0
 _circuit_open_until = 0.0
 _legacy_alert_log_imported = False
+_STOP_SENTINEL = object()
+_state_store = None
 
 
 def _now() -> float:
@@ -61,18 +64,26 @@ def _get_display_version() -> str:
         return "unknown"
 
 
+def _get_state_store():
+    global _state_store
+    if _state_store is None:
+        from lan_bitable_template_portal.state_store import LanPortalStateStore
+
+        _state_store = LanPortalStateStore()
+    return _state_store
+
+
 def _append_local_record(record: dict[str, Any]) -> None:
     global _legacy_alert_log_imported
     try:
-        from lan_bitable_template_portal.state_store import LanPortalStateStore
-
-        store = LanPortalStateStore()
+        store = _get_state_store()
         if not _legacy_alert_log_imported:
             try:
                 store.import_jsonl_events_once("system_alerts", _ALERT_LOG_FILE)
             finally:
                 _legacy_alert_log_imported = True
-        store.append_event("system_alerts", record)
+        if not store.append_event_async("system_alerts", record):
+            store.append_event("system_alerts", record)
     except Exception:
         pass
 
@@ -147,20 +158,23 @@ def _send_http(webhook: str, format_name: str, text: str) -> tuple[bool, str]:
 
 
 def _ensure_worker() -> None:
-    global _worker_started
+    global _worker_started, _worker_thread
     with _lock:
-        if _worker_started:
+        if _worker_started and _worker_thread and _worker_thread.is_alive():
             return
-        thread = threading.Thread(target=_worker_loop, daemon=True)
+        thread = threading.Thread(target=_worker_loop, name="ClipFlowSystemAlertWorker", daemon=True)
         thread.start()
+        _worker_thread = thread
         _worker_started = True
 
 
 def _worker_loop() -> None:
-    global _fail_streak, _circuit_open_until
+    global _fail_streak, _circuit_open_until, _worker_started
     while True:
         item = _send_queue.get()
         try:
+            if item is _STOP_SENTINEL:
+                break
             if not isinstance(item, dict):
                 continue
             now_ts = _now()
@@ -211,6 +225,43 @@ def _worker_loop() -> None:
             )
         finally:
             _send_queue.task_done()
+    with _lock:
+        _worker_started = False
+
+
+def shutdown_system_alert_worker(timeout: float = 2.0) -> None:
+    global _worker_started, _worker_thread, _state_store
+    thread = _worker_thread
+    if not thread or not thread.is_alive():
+        with _lock:
+            _worker_started = False
+            _worker_thread = None
+        return
+    try:
+        _send_queue.put(_STOP_SENTINEL, timeout=0.2)  # type: ignore[arg-type]
+    except queue.Full:
+        try:
+            _send_queue.get_nowait()
+            _send_queue.task_done()
+        except Exception:
+            pass
+        try:
+            _send_queue.put_nowait(_STOP_SENTINEL)  # type: ignore[arg-type]
+        except Exception:
+            pass
+    except Exception:
+        pass
+    thread.join(timeout=max(0.1, float(timeout or 0)))
+    if not thread.is_alive():
+        with _lock:
+            _worker_started = False
+            _worker_thread = None
+    store = _state_store
+    if store is not None:
+        try:
+            store.shutdown_write_worker(timeout=timeout)
+        except Exception:
+            pass
 
 
 def send_system_alert(

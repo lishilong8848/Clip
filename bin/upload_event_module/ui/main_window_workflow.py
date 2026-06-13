@@ -1,21 +1,20 @@
 # -*- coding: utf-8 -*-
-import base64
 import copy
 import threading
-import queue
 import time
 import hashlib
 import uuid
-import os
 from PyQt6.QtCore import QTimer, Qt
+from PyQt6.QtGui import QStandardItem, QStandardItemModel
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QDialog,
     QDialogButtonBox,
     QFrame,
     QHBoxLayout,
     QLabel,
-    QListWidget,
-    QListWidgetItem,
+    QLineEdit,
+    QListView,
     QPushButton,
     QTextEdit,
     QVBoxLayout,
@@ -27,11 +26,33 @@ from ..core.parser import extract_event_info
 from .styles import get_stylesheet
 
 class MainWindowWorkflowMixin:
+    def request_active_cache_save(self, delay_ms: int = 800, *, force: bool = False):
+        save = getattr(self, "save_active_cache", None)
+        if force:
+            if callable(save):
+                save()
+            return
+        schedule = getattr(self, "schedule_active_cache_save", None)
+        if callable(schedule):
+            schedule(delay_ms)
+            return
+        if callable(save):
+            save()
+
     @staticmethod
-    def _encode_backend_upload_bytes(data: bytes | None) -> str:
-        if not data:
-            return ""
-        return base64.b64encode(bytes(data)).decode("utf-8")
+    def _upload_qt_notice_attachment(controller, image_bytes, file_name: str) -> dict:
+        if not image_bytes:
+            raise RuntimeError("图片内容为空。")
+        if not hasattr(controller, "upload_notice_attachment"):
+            raise RuntimeError("本机后端不支持图片附件暂存。")
+        result = controller.upload_notice_attachment(
+            bytes(image_bytes),
+            file_name=str(file_name or "notice_image.png"),
+            mime_type="image/png",
+        )
+        if not isinstance(result, dict) or not str(result.get("upload_id") or "").strip():
+            raise RuntimeError("本机后端未返回图片 upload_id。")
+        return result
 
     @staticmethod
     def _candidate_record_id(candidate: dict) -> str:
@@ -78,6 +99,7 @@ class MainWindowWorkflowMixin:
         start_time = str(candidate.get("start_time") or "").strip()
         end_time = str(candidate.get("end_time") or "").strip()
         score = str(candidate.get("match_score") or "").strip()
+        reason = str(candidate.get("match_reason") or "").strip()
         parts = [f"{index}. {title}"]
         meta = " / ".join(
             item
@@ -91,6 +113,8 @@ class MainWindowWorkflowMixin:
         )
         if meta:
             parts.append(meta)
+        if reason:
+            parts.append(reason)
         return "\n".join(parts)
 
     @staticmethod
@@ -102,6 +126,7 @@ class MainWindowWorkflowMixin:
             f"状态：{candidate.get('status') or '-'}",
             f"时间：{candidate.get('start_time') or '-'} ~ {candidate.get('end_time') or '-'}",
             f"匹配分：{candidate.get('match_score') or '-'}",
+            f"匹配原因：{candidate.get('match_reason') or '-'}",
         ]
         field_items = candidate.get("field_items")
         if isinstance(field_items, list) and field_items:
@@ -115,6 +140,26 @@ class MainWindowWorkflowMixin:
                 if label and value:
                     lines.append(f"{label}：{value}")
         return "\n".join(lines)
+
+    @staticmethod
+    def _candidate_search_text(candidate: dict) -> str:
+        candidate = candidate if isinstance(candidate, dict) else {}
+        parts = [
+            candidate.get("title"),
+            candidate.get("building"),
+            candidate.get("status"),
+            candidate.get("match_reason"),
+            candidate.get("start_time"),
+            candidate.get("end_time"),
+        ]
+        field_items = candidate.get("field_items")
+        if isinstance(field_items, list):
+            for item in field_items[:30]:
+                if not isinstance(item, dict):
+                    continue
+                parts.append(item.get("label"))
+                parts.append(item.get("value"))
+        return "\n".join(str(part or "").lower() for part in parts)
 
     @staticmethod
     def _backend_upload_action_name(action_type: str, result: dict | None = None) -> str:
@@ -140,13 +185,13 @@ class MainWindowWorkflowMixin:
                 color: #6C757D;
                 margin: 8px 0;
             }
-            QListWidget#TargetCandidateList {
+            QListView#TargetCandidateList {
                 background-color: #FAFAFA;
                 border: 1px solid #E0E0E0;
                 border-radius: 8px;
                 padding: 4px;
             }
-            QListWidget#TargetCandidateList::item {
+            QListView#TargetCandidateList::item {
                 min-height: 56px;
                 padding: 8px 10px;
                 margin: 4px;
@@ -157,19 +202,26 @@ class MainWindowWorkflowMixin:
                 border-radius: 8px;
                 color: #212529;
             }
+            QLineEdit#TargetCandidateSearch {
+                background-color: #FFFFFF;
+                border: 1px solid #D7DEE8;
+                border-radius: 8px;
+                color: #212529;
+                padding: 8px 10px;
+            }
             """
         return """
         QLabel#TargetCandidateHint {
             color: #9CA3AF;
             margin: 8px 0;
         }
-        QListWidget#TargetCandidateList {
+        QListView#TargetCandidateList {
             background-color: #2A2A3C;
             border: 1px solid #4F4F7A;
             border-radius: 8px;
             padding: 4px;
         }
-        QListWidget#TargetCandidateList::item {
+        QListView#TargetCandidateList::item {
             min-height: 56px;
             padding: 8px 10px;
             margin: 4px;
@@ -179,6 +231,13 @@ class MainWindowWorkflowMixin:
             border: 1px solid #4F4F7A;
             border-radius: 8px;
             color: #E5E7EB;
+        }
+        QLineEdit#TargetCandidateSearch {
+            background-color: #202033;
+            border: 1px solid #4F4F7A;
+            border-radius: 8px;
+            color: #E5E7EB;
+            padding: 8px 10px;
         }
         """
 
@@ -216,19 +275,24 @@ class MainWindowWorkflowMixin:
         top_bar.addStretch()
         top_bar.addWidget(close_btn)
 
-        hint = QLabel(str(result.get("message") or "请选择最匹配的一条记录后继续上传。"))
+        base_hint = str(result.get("message") or "请选择最匹配的一条记录后继续上传。")
+        hint = QLabel(base_hint)
         hint.setObjectName("TargetCandidateHint")
         hint.setWordWrap(True)
-        list_widget = QListWidget(dialog)
-        list_widget.setObjectName("TargetCandidateList")
+        search = QLineEdit(dialog)
+        search.setObjectName("TargetCandidateSearch")
+        search.setPlaceholderText("搜索标题、楼栋、时间、字段内容")
+        list_view = QListView(dialog)
+        list_view.setObjectName("TargetCandidateList")
+        list_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        list_view.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        list_view.setUniformItemSizes(True)
+        candidate_model = QStandardItemModel(list_view)
+        list_view.setModel(candidate_model)
         detail = QTextEdit(dialog)
         detail.setObjectName("TargetCandidateDetail")
         detail.setReadOnly(True)
         detail.setMinimumHeight(180)
-        for index, candidate in enumerate(candidates, start=1):
-            item = QListWidgetItem(self._candidate_summary(candidate, index))
-            item.setData(Qt.ItemDataRole.UserRole, candidate)
-            list_widget.addItem(item)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
             | QDialogButtonBox.StandardButton.Cancel,
@@ -243,21 +307,70 @@ class MainWindowWorkflowMixin:
             cancel_button.setText("取消")
             cancel_button.setObjectName("DiffCancelBtn")
 
+        max_visible_candidates = 80
+        candidate_search_index = [
+            (candidate, self._candidate_search_text(candidate))
+            for candidate in candidates
+        ]
+
+        def current_candidate() -> dict | None:
+            current = list_view.currentIndex()
+            if not current.isValid():
+                return None
+            item = candidate_model.itemFromIndex(current)
+            if item is None:
+                return None
+            candidate = item.data(Qt.ItemDataRole.UserRole)
+            return candidate if isinstance(candidate, dict) else None
+
         def update_detail():
-            current = list_widget.currentItem()
-            candidate = (
-                current.data(Qt.ItemDataRole.UserRole)
-                if current is not None
-                else candidates[0]
-            )
+            candidate = current_candidate()
+            if candidate is None:
+                detail.setPlainText("没有匹配的候选记录。请调整搜索条件。")
+                if ok_button:
+                    ok_button.setEnabled(False)
+                return
+            if ok_button:
+                ok_button.setEnabled(True)
             detail.setPlainText(self._candidate_detail_text(candidate))
 
-        list_widget.currentItemChanged.connect(lambda *_args: update_detail())
+        def populate_candidates(filter_text: str = ""):
+            query = str(filter_text or "").strip().lower()
+            if query:
+                matched = [
+                    candidate
+                    for candidate, search_text in candidate_search_index
+                    if query in search_text
+                ]
+            else:
+                matched = list(candidates)
+            candidate_model.clear()
+            visible = matched[:max_visible_candidates]
+            for index, candidate in enumerate(visible, start=1):
+                item = QStandardItem(self._candidate_summary(candidate, index))
+                item.setData(Qt.ItemDataRole.UserRole, candidate)
+                candidate_model.appendRow(item)
+            suffix = ""
+            if len(matched) > len(visible):
+                suffix = f" 当前仅显示前 {len(visible)} 条，请搜索缩小范围。"
+            hint.setText(
+                f"{base_hint}\n共找到 {len(candidates)} 条候选，当前匹配 {len(matched)} 条。{suffix}"
+            )
+            if visible:
+                first_index = candidate_model.index(0, 0)
+                list_view.setCurrentIndex(first_index)
+                update_detail()
+            else:
+                update_detail()
+
+        list_view.selectionModel().currentChanged.connect(lambda *_args: update_detail())
+        search.textChanged.connect(populate_candidates)
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         inner_layout.addLayout(top_bar)
         inner_layout.addWidget(hint)
-        inner_layout.addWidget(list_widget, 1)
+        inner_layout.addWidget(search)
+        inner_layout.addWidget(list_view, 1)
         inner_layout.addWidget(detail)
         inner_layout.addWidget(buttons)
         layout.addWidget(container)
@@ -265,15 +378,10 @@ class MainWindowWorkflowMixin:
             get_stylesheet(getattr(self, "current_theme", "dark"))
             + self._target_candidate_dialog_stylesheet()
         )
-        list_widget.setCurrentRow(0)
-        update_detail()
+        populate_candidates()
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
-        current = list_widget.currentItem()
-        if current is None:
-            return None
-        candidate = current.data(Qt.ItemDataRole.UserRole)
-        return candidate if isinstance(candidate, dict) else None
+        return current_candidate()
 
     def _continue_backend_upload_with_selected_target(
         self,
@@ -308,9 +416,48 @@ class MainWindowWorkflowMixin:
                 allow_target_selection=False,
             )
 
-        self._enqueue_upload(target_record_id, backend_task)
-        self._mark_upload_queued(target_record_id)
+        self._dispatch_backend_notice_upload(target_record_id, backend_task)
         self.show_message("已选择对应多维记录，正在后台继续处理。")
+
+    def _dispatch_backend_notice_upload(self, record_id: str, task) -> None:
+        """Submit a Qt-originated notice command to the backend without a Qt-side queue."""
+        record_id = str(record_id or "").strip()
+        if not callable(task):
+            return
+        if getattr(self, "_closing", False):
+            self._post_request_finished(
+                "上传",
+                False,
+                "程序正在关闭，本次上传命令未提交。",
+                record_id,
+            )
+            return
+
+        def worker() -> None:
+            try:
+                task()
+            except Exception as exc:
+                log_error(f"Qt后端命令任务异常: {exc}")
+                self._post_request_finished(
+                    "上传",
+                    False,
+                    f"后端命令异常: {exc}",
+                    record_id,
+                )
+
+        executor = getattr(self, "_qt_backend_command_executor", None)
+        if executor is None:
+            worker()
+            return
+        try:
+            executor.submit(worker)
+        except RuntimeError as exc:
+            self._post_request_finished(
+                "上传",
+                False,
+                f"后端命令提交失败: {exc}",
+                record_id,
+            )
 
     def _handle_backend_target_selection(
         self,
@@ -414,11 +561,32 @@ class MainWindowWorkflowMixin:
             "robot_group_choice": str(robot_group_choice or "auto").strip() or "auto",
         }
         if screenshot_bytes:
-            request_payload["screenshot_bytes_b64"] = self._encode_backend_upload_bytes(
-                screenshot_bytes
+            try:
+                screenshot_ref = self._upload_qt_notice_attachment(
+                    controller,
+                    screenshot_bytes,
+                    "notice_screenshot.png",
+                )
+            except Exception as exc:
+                self._post_request_finished(
+                    self._backend_upload_action_name(action_type),
+                    False,
+                    f"截图暂存失败：{exc}",
+                    str((data_snapshot or {}).get("record_id") or ""),
+                )
+                return True
+            request_payload["screenshot_upload_id"] = str(
+                screenshot_ref.get("upload_id") or ""
+            )
+            request_payload["screenshot_file_name"] = str(
+                screenshot_ref.get("file_name") or "notice_screenshot.png"
             )
         encoded_extra_images = []
         for index, item in enumerate(list(extra_images or []), start=1):
+            if isinstance(item, dict):
+                if item.get("upload_id") or item.get("file_token") or item.get("token"):
+                    encoded_extra_images.append(dict(item))
+                    continue
             if isinstance(item, (list, tuple)) and len(item) >= 2:
                 image_bytes = item[0]
                 file_name = item[1] or f"extra_{index}.png"
@@ -427,10 +595,28 @@ class MainWindowWorkflowMixin:
                 file_name = f"extra_{index}.png"
             if not image_bytes:
                 continue
+            try:
+                photo_ref = self._upload_qt_notice_attachment(
+                    controller,
+                    image_bytes,
+                    str(file_name or f"extra_{index}.png"),
+                )
+            except Exception as exc:
+                self._post_request_finished(
+                    self._backend_upload_action_name(action_type),
+                    False,
+                    f"现场照片暂存失败：{exc}",
+                    str((data_snapshot or {}).get("record_id") or ""),
+                )
+                return True
             encoded_extra_images.append(
                 {
-                    "file_name": str(file_name or f"extra_{index}.png"),
-                    "bytes_b64": self._encode_backend_upload_bytes(image_bytes),
+                    "upload_id": str(photo_ref.get("upload_id") or ""),
+                    "file_name": str(
+                        photo_ref.get("file_name") or file_name or f"extra_{index}.png"
+                    ),
+                    "mime_type": str(photo_ref.get("mime_type") or "image/png"),
+                    "size": int(photo_ref.get("size") or 0),
                 }
             )
         if encoded_extra_images:
@@ -470,7 +656,7 @@ class MainWindowWorkflowMixin:
                 result=result,
                 data_snapshot=data_snapshot,
                 screenshot_bytes=screenshot_bytes,
-                extra_images=extra_images,
+                extra_images=encoded_extra_images,
                 action_type=action_type,
                 response_time=response_time,
                 recover_selected=recover_selected,
@@ -624,11 +810,6 @@ class MainWindowWorkflowMixin:
                     add_from_data(value.get("new_data"))
                     add_from_data(value.get("old_data"))
 
-        for mapping in (self._upload_queues, self._upload_workers):
-            for key in mapping.keys():
-                key = str(key or "").strip()
-                if key:
-                    keys.add(key)
         return keys
 
     def _cleanup_runtime_payload_state(self) -> dict[str, int]:
@@ -668,48 +849,12 @@ class MainWindowWorkflowMixin:
             return
         try:
             self._cleanup_runtime_payload_state()
-            self._cleanup_finished_upload_workers()
         except Exception:
             pass
-
-    def _cleanup_finished_upload_workers(self) -> dict[str, int]:
-        live_keys = set(
-            str(key or "").strip() for key in getattr(self, "_upload_queues", {}).keys()
-        )
-        removed = 0
-        for key, worker in list(self._upload_workers.items()):
-            try:
-                alive = bool(worker and worker.is_alive())
-            except Exception:
-                alive = False
-            if alive or str(key or "").strip() in live_keys:
-                continue
-            self._upload_workers.pop(key, None)
-            removed += 1
-        return {"upload_workers_trimmed": removed} if removed else {}
 
     def _has_any_upload_in_progress(self) -> bool:
-        try:
-            self._cleanup_finished_upload_workers()
-        except Exception:
-            pass
-
         if getattr(self, "pending_action_record_ids", None):
             return True
-
-        for task_queue in getattr(self, "_upload_queues", {}).values():
-            try:
-                if task_queue and not task_queue.empty():
-                    return True
-            except Exception:
-                continue
-
-        for worker in getattr(self, "_upload_workers", {}).values():
-            try:
-                if worker and worker.is_alive():
-                    return True
-            except Exception:
-                continue
 
         try:
             active_snapshot = self._active_notice_store().data_snapshot()
@@ -992,12 +1137,13 @@ class MainWindowWorkflowMixin:
         if controller is None or not hasattr(controller, "submit_qt_command"):
             return False, "本机后端未连接，无法校验记录ID。"
         try:
-            result = controller.submit_qt_command(
+            result = self._submit_qt_command(
                 "validate_record_id",
                 {
                     "record_id": str(record_id or "").strip(),
                     "notice_type": str(notice_type or "").strip(),
                 },
+                timeout=15.0,
             )
         except Exception as exc:
             return False, f"后端校验记录ID失败：{exc}"
@@ -1053,7 +1199,7 @@ class MainWindowWorkflowMixin:
             )
             if self._is_event_notice(notice_type):
                 self._pin_item_to_top(list_widget, item)
-            self.save_active_cache()
+            self.request_active_cache_save()
         else:
             data["_has_unuploaded_changes"] = True
             data["_pending_upload_hash"] = None
@@ -1153,7 +1299,7 @@ class MainWindowWorkflowMixin:
                         return
                     if self._is_event_notice(notice_type):
                         self._pin_item_to_top(target_list, target_item)
-                    self.save_active_cache()
+                    self.request_active_cache_save()
                 widget = self._safe_item_widget(target_list, target_item)
                 self._maybe_flash(widget, target_list, target_item)
                 log_info("系统: 内容已存在，已高亮显示")
@@ -1400,7 +1546,7 @@ class MainWindowWorkflowMixin:
                     list_widget=existing_list,
                     item=existing_item,
                 )
-                self.save_active_cache()
+                self.request_active_cache_save()
                 if defer_ui:
                     self._mark_cache_refresh_needed()
                     return
@@ -1409,7 +1555,7 @@ class MainWindowWorkflowMixin:
                     (committed or routed_data).get("record_id"),
                     reason="new_event_existing",
                 )
-                self.save_active_cache()
+                self.request_active_cache_save()
                 return
             except Exception as exc:
                 log_error(
@@ -1534,22 +1680,13 @@ class MainWindowWorkflowMixin:
             list_widget=list_widget,
             item=item_ref,
         )
-        if bool(new_data.get("lan_created_from_portal")) and hasattr(
-            self, "schedule_active_cache_save"
-        ):
-            self.schedule_active_cache_save(800)
-        else:
-            self.save_active_cache()
+        self.request_active_cache_save()
         if defer_ui:
             self._mark_cache_refresh_needed()
             return
         force_status = None
         if current_data and current_data.get("_is_placeholder_record", True):
             action_type = self.pending_action_types.get(new_data.get("record_id"))
-            if not action_type:
-                alias = self._upload_key_alias.get(new_data.get("record_id"))
-                if alias:
-                    action_type = self.pending_action_types.get(alias)
             if action_type == "upload":
                 force_status = "update"
         self._rebuild_active_item_widget(
@@ -1563,7 +1700,7 @@ class MainWindowWorkflowMixin:
         )
         if not allow_placeholder_update:
             self.restore_button_state(record_id=new_data.get("record_id"))
-        self.save_active_cache()
+        self.request_active_cache_save()
 
     def move_to_history(self, data_dict):
         log_info(f"UI操作: 结束事件, Record ID: {data_dict['record_id']}")
@@ -1575,9 +1712,10 @@ class MainWindowWorkflowMixin:
         if controller is None or not hasattr(controller, "submit_qt_command"):
             return False, "本机后端未连接，Qt 不再直接执行多维删除。", {}
         try:
-            result = controller.submit_qt_command(
+            result = self._submit_qt_command(
                 "delete_active_item",
                 {"data_dict": dict(data_dict)},
+                timeout=30.0,
             )
         except Exception as exc:
             return False, f"本机后端删除失败：{exc}", {}
@@ -1593,7 +1731,7 @@ class MainWindowWorkflowMixin:
         if controller is None or not hasattr(controller, "submit_qt_command"):
             return False, "本机后端未连接，无法执行回退。", {}
         try:
-            result = controller.submit_qt_command(
+            result = self._submit_qt_command(
                 "apply_notice_undo",
                 {
                     "undo_id": undo_id,
@@ -1601,6 +1739,7 @@ class MainWindowWorkflowMixin:
                     "auth_open_id": "qt",
                     "auth_user_name": "Qt",
                 },
+                timeout=30.0,
             )
         except Exception as exc:
             return False, f"本机后端回退失败：{exc}", {}
@@ -1613,13 +1752,14 @@ class MainWindowWorkflowMixin:
         if controller is None or not hasattr(controller, "submit_qt_command"):
             return False, "本机后端未连接，无法读取历史删除。", []
         try:
-            result = controller.submit_qt_command(
+            result = self._submit_qt_command(
                 "list_notice_undos",
                 {
                     "scope": "ALL",
                     "action_type": "delete",
                     "since_seconds": max(1, int(days)) * 24 * 60 * 60,
                 },
+                timeout=15.0,
             )
         except Exception as exc:
             return False, f"读取历史删除失败：{exc}", []
@@ -1769,10 +1909,7 @@ class MainWindowWorkflowMixin:
             self._remove_active_item_widget_only(list_widget, item)
         if hasattr(self, "_delete_active_cache_record"):
             self._delete_active_cache_record(data_dict)
-        if hasattr(self, "schedule_active_cache_save"):
-            self.schedule_active_cache_save(800)
-        else:
-            self.save_active_cache()
+        self.request_active_cache_save()
         return True, ""
 
     def _delete_active_item(self, data_dict):
@@ -1825,10 +1962,7 @@ class MainWindowWorkflowMixin:
                 self._remove_active_item_widget_only(list_widget_now, item_now)
             if hasattr(self, "_delete_active_cache_record"):
                 self._delete_active_cache_record(data_dict)
-            if hasattr(self, "schedule_active_cache_save"):
-                self.schedule_active_cache_save(800)
-            else:
-                self.save_active_cache()
+            self.request_active_cache_save()
             self._remember_delete_undo(data_dict, result or {})
             log_info(f"UI操作: 删除事件(同步删除多维), Record ID: {record_id}")
 
@@ -1886,7 +2020,7 @@ class MainWindowWorkflowMixin:
             list_widget = None
         if list_widget is not None and item is not None:
             item.setData(Qt.ItemDataRole.UserRole, data_dict)
-            # 点击后立即显示“已上传”，避免中间蓝色状态
+            # 上传中是临时 UI 状态，不写入 active cache，避免重启后残留“上传中”。
             self._rebuild_active_item_widget(
                 list_widget,
                 item,
@@ -1896,216 +2030,17 @@ class MainWindowWorkflowMixin:
                 pending_upload_hash=pending_hash,
                 has_unuploaded_changes=False,
             )
-        if not (
-            hasattr(self, "_upsert_active_cache_record")
-            and self._upsert_active_cache_record(data_dict)
-        ):
-            self.save_active_cache()
         self._show_screenshot_dialog(data_dict, action_type)
 
-    def _get_upload_key(self, record_id):
-        if not record_id:
-            return "unknown"
-        alias = self._upload_key_alias.get(record_id)
-        return alias or record_id
-
-    def _alias_upload_key(self, old_id, new_id):
-        if not old_id or not new_id or old_id == new_id:
-            return
-        with self._upload_lock:
-            if old_id in self._upload_queues or old_id in self._upload_workers:
-                self._upload_key_alias[new_id] = old_id
-
     def _clear_upload_queue(self, record_id):
-        key = self._get_upload_key(record_id)
-        with self._upload_lock:
-            task_queue = self._upload_queues.pop(key, None)
-            worker = self._upload_workers.pop(key, None)
-            stale = [
-                alias_key
-                for alias_key, target in self._upload_key_alias.items()
-                if target == key or alias_key == record_id
-            ]
-            for alias_key in stale:
-                self._upload_key_alias.pop(alias_key, None)
-        if task_queue:
-            try:
-                while not task_queue.empty():
-                    task_queue.get_nowait()
-                    task_queue.task_done()
-            except queue.Empty:
-                pass
-            task_queue.put(None)
-        self._mark_qt_upload_runtime_queue(
-            key,
-            "cancelled",
-            error="上传队列已被清空。",
-        )
-        return worker
-
-    def _qt_upload_interval_seconds(self) -> float:
-        cached = getattr(self, "_qt_upload_interval_cached_s", None)
-        cached_at = float(getattr(self, "_qt_upload_interval_cached_at", 0.0) or 0.0)
-        if cached is not None and time.monotonic() - cached_at < 30.0:
-            return float(cached)
-        interval = 1.0 if os.environ.get("CLIPFLOW_LOW_PERFORMANCE_MODE") == "1" else 0.2
-        try:
-            from lan_bitable_template_portal.state_store import LanPortalStateStore
-
-            settings = LanPortalStateStore().get_settings() or {}
-            low_performance = (
-                str(settings.get("lan_low_performance_mode") or "").strip()
-                in {"1", "true", "是", "开启"}
-            )
-            default_interval = 1.0 if low_performance else interval
-            raw = settings.get("lan_qt_upload_seconds_per_record")
-            interval = float(raw if raw not in (None, "") else default_interval)
-        except Exception:
-            pass
-        interval = max(0.0, min(float(interval or 0.0), 10.0))
-        self._qt_upload_interval_cached_s = interval
-        self._qt_upload_interval_cached_at = time.monotonic()
-        return interval
-
-    def _reserve_qt_upload_start(self) -> float:
-        interval = self._qt_upload_interval_seconds()
-        if interval <= 0:
-            return time.time()
-        if not hasattr(self, "_qt_upload_rate_lock"):
-            self._qt_upload_rate_lock = threading.RLock()
-            self._qt_upload_next_release_at = 0.0
-        now = time.time()
-        with self._qt_upload_rate_lock:
-            release_at = max(now, float(getattr(self, "_qt_upload_next_release_at", 0.0) or 0.0))
-            self._qt_upload_next_release_at = release_at + interval
-        return release_at
-
-    @staticmethod
-    def _sleep_until_timestamp(release_at: float) -> None:
-        delay = max(0.0, float(release_at or 0.0) - time.time())
-        if delay:
-            time.sleep(delay)
-
-    def _start_upload_worker(self, key, task_queue):
-        def worker():
-            while True:
-                try:
-                    task = task_queue.get(timeout=2.0)
-                except queue.Empty:
-                    with self._upload_lock:
-                        if task_queue.empty():
-                            self._upload_queues.pop(key, None)
-                            self._upload_workers.pop(key, None)
-                            stale = [
-                                alias_key
-                                for alias_key, target in self._upload_key_alias.items()
-                                if target == key
-                            ]
-                            for alias_key in stale:
-                                self._upload_key_alias.pop(alias_key, None)
-                            return
-                    continue
-                try:
-                    if task is None:
-                        return
-                    task_record_id = key
-                    task_fn = task
-                    if isinstance(task, (list, tuple)) and len(task) >= 2:
-                        task_record_id = str(task[0] or key)
-                        task_fn = task[1]
-                    self._mark_qt_upload_runtime_queue(key, "processing")
-                    try:
-                        semaphore = getattr(self, "_upload_worker_semaphore", None)
-                        self._sleep_until_timestamp(self._reserve_qt_upload_start())
-                        if semaphore is None:
-                            task_fn()
-                        else:
-                            with semaphore:
-                                task_fn()
-                    except Exception as exc:
-                        self._mark_qt_upload_runtime_queue(
-                            key,
-                            "failed",
-                            error=str(exc),
-                        )
-                        log_error(f"Qt后端命令任务异常: {exc}")
-                        self._post_request_finished(
-                            "上传", False, f"后端命令异常: {exc}", task_record_id
-                        )
-                    else:
-                        self._mark_qt_upload_runtime_queue(key, "done")
-                finally:
-                    task_queue.task_done()
-
-        thread = threading.Thread(target=worker, daemon=True)
-        self._upload_workers[key] = thread
-        thread.start()
-
-    def _enqueue_upload(self, record_id, task):
-        # This queue only throttles Qt UI submissions to the local backend.
-        # Feishu/Bitable business execution happens in the backend process.
-        key = self._get_upload_key(record_id)
-        with self._upload_lock:
-            task_queue = self._upload_queues.get(key)
-            if not task_queue:
-                task_queue = queue.Queue()
-                self._upload_queues[key] = task_queue
-            if key not in self._upload_workers:
-                self._start_upload_worker(key, task_queue)
-        self._mark_qt_upload_runtime_queue(
-            key,
-            "queued",
-            payload={
-                "record_id": str(record_id or ""),
-                "upload_key": str(key or ""),
-                "queued_at": time.time(),
-            },
-        )
-        task_queue.put((record_id, task))
-
-    def _mark_upload_queued(self, record_id):
-        if not record_id:
-            return
-        if record_id in self.pending_action_record_ids:
-            self.pending_action_record_ids.remove(record_id)
-        list_widget, item = self._find_active_item_by_record_id(record_id)
-        if item and not self._is_valid_list_item(item):
-            item = None
-            list_widget = None
-        if list_widget is not None and item is not None:
-            data = item.data(Qt.ItemDataRole.UserRole) or {}
-            pending_hash = self._calc_text_hash(data.get("text", ""))
-            data["_pending_upload_hash"] = pending_hash
-            data["_has_unuploaded_changes"] = False
-            data["_upload_in_progress"] = True
-            data["_upload_started_monotonic"] = time.monotonic()
-            item.setData(Qt.ItemDataRole.UserRole, data)
-            self._rebuild_active_item_widget(
-                list_widget,
-                item,
-                data,
-                force_status=None,
-                upload_in_progress=True,
-                pending_upload_hash=pending_hash,
-                has_unuploaded_changes=False,
-            )
-            if bool(data.get("lan_created_from_portal")) and hasattr(
-                self, "schedule_active_cache_save"
-            ):
-                self.schedule_active_cache_save(800)
-            else:
-                self.save_active_cache()
+        return None
 
     def _has_pending_upload(self, record_id):
-        key = self._get_upload_key(record_id)
-        with self._upload_lock:
-            task_queue = self._upload_queues.get(key)
-            if not task_queue:
-                return False
-            if not task_queue.empty():
-                return True
-            worker = self._upload_workers.get(key)
-            return bool(worker and worker.is_alive())
+        # Qt no longer owns the upload queue. Upload/update/end commands are
+        # submitted to the backend and tracked by backend job state plus the
+        # per-record _upload_in_progress flag, so stale local queue objects must
+        # not block editing, deletion, or retry.
+        return False
 
     def _queue_pending_content(self, record_id, new_content, new_status):
         if not record_id:
@@ -2148,15 +2083,11 @@ class MainWindowWorkflowMixin:
                     old_data.get("_upload_started_monotonic") or time.monotonic()
                 )
             item.setData(Qt.ItemDataRole.UserRole, new_data)
-            self.save_active_cache()
+            self.request_active_cache_save()
             if self._should_defer_ui_refresh():
                 self._mark_cache_refresh_needed()
                 return
             action_type = self.pending_action_types.get(record_id)
-            if not action_type:
-                alias = self._upload_key_alias.get(record_id)
-                if alias:
-                    action_type = self.pending_action_types.get(alias)
             force_status = None
             if new_status == "结束":
                 force_status = "end"
@@ -2172,7 +2103,7 @@ class MainWindowWorkflowMixin:
                 has_unuploaded_changes=True,
             )
             self._maybe_update_detail_dialog(new_data, record_id)
-            self.save_active_cache()
+            self.request_active_cache_save()
 
     def do_feishu_upload(
         self,
@@ -2294,7 +2225,11 @@ class MainWindowWorkflowMixin:
             data_dict.pop("maintenance_cycle", None)
         if response_time:
             data_dict["last_response_time"] = response_time
-        self._update_active_item_data(data_dict.get("record_id"), data_dict)
+        self._update_active_item_data(
+            data_dict.get("record_id"),
+            data_dict,
+            persist_cache=False,
+        )
 
         if record_id and self._is_event_notice(notice_type):
             list_widget, item = self._find_active_item_by_record_id(record_id)
@@ -2306,11 +2241,6 @@ class MainWindowWorkflowMixin:
                         buildings=_buildings,
                         level=data_dict.get("level"),
                     )
-        if hasattr(self, "schedule_active_cache_save"):
-            self.schedule_active_cache_save(800)
-        else:
-            self.save_active_cache()
-
         payload = self._ensure_payload_for_data(data_dict)
         if payload:
             payload.text = data_dict.get("text", payload.text)
@@ -2347,8 +2277,7 @@ class MainWindowWorkflowMixin:
                 robot_group_choice=robot_group_choice,
             )
 
-        self._enqueue_upload(record_id, backend_task)
-        self._mark_upload_queued(record_id)
+        self._dispatch_backend_notice_upload(record_id, backend_task)
         if self.current_screenshot_record_id == record_id:
             self.current_screenshot_record_id = None
             self.current_screenshot_action_type = None
@@ -2390,12 +2319,11 @@ class MainWindowWorkflowMixin:
             if hasattr(self, "_remove_active_notice_model_record"):
                 self._remove_active_notice_model_record(data_dict)
             self._remove_active_item_from_source(list_widget, item)
-        self.save_to_history_file(data_dict)
         if not (
             hasattr(self, "_delete_active_cache_record")
             and self._delete_active_cache_record(data_dict)
         ):
-            self.save_active_cache()
+            self.request_active_cache_save()
 
     def _finish_apply_replace(self, record_id):
         pending = self.pending_replace_by_record_id.pop(record_id, None)
@@ -2473,7 +2401,7 @@ class MainWindowWorkflowMixin:
                 pending_upload_hash=None,
                 has_unuploaded_changes=True,
             )
-            self.save_active_cache()
+            self.request_active_cache_save()
         self.current_screenshot_record_id = None  # 当前正在进行截图操作的Record ID
 
     def _rollback_apply_replace(self, record_id):
@@ -2509,37 +2437,10 @@ class MainWindowWorkflowMixin:
             pending_upload_hash=None,
             has_unuploaded_changes=True,
         )
-        self.save_active_cache()
+        self.request_active_cache_save()
 
     def _remove_history_record(self, record_id):
-        if not record_id:
-            return
-        history_data = self.load_all_history() if hasattr(self, "load_all_history") else []
-        if not isinstance(history_data, list):
-            return
-        updated = False
-        new_history = []
-        removed = False
-        for item in history_data:
-            if (
-                not removed
-                and isinstance(item, dict)
-                and item.get("record_id") == record_id
-            ):
-                removed = True
-                updated = True
-                continue
-            new_history.append(item)
-        if not updated:
-            return
-        try:
-            self._save_history_payload(new_history)
-        except Exception:
-            return
-        try:
-            self.reload_history_view()
-        except Exception:
-            pass
+        return
 
     def _rollback_end(self, record_id):
         pending = self.pending_end_rollback_by_record_id.pop(record_id, None)
@@ -2572,7 +2473,7 @@ class MainWindowWorkflowMixin:
             )
         self.pending_action_record_ids.discard(record_id)
         self.pending_action_types.pop(record_id, None)
-        self.save_active_cache()
+        self.request_active_cache_save()
 
     def _replace_record_id_everywhere(
         self, old_record_id: str, new_record_id: str
@@ -2680,7 +2581,6 @@ class MainWindowWorkflowMixin:
                 pending_data["record_id"] = new_id
                 changed = True
 
-        self._alias_upload_key(old_id, new_id)
         self._alias_payload_key(old_id, new_id)
         if getattr(self, "cache_store", None):
             self.cache_store.rename_record_id(old_id, new_id)
@@ -2766,6 +2666,7 @@ class MainWindowWorkflowMixin:
         )
 
         def _apply_updates():
+            real_record_id = ""
             try:
                 if name == "结束" and not success and record_id:
                     self._rollback_end(record_id)
@@ -2779,7 +2680,6 @@ class MainWindowWorkflowMixin:
                 # 恢复按钮状态
                 self.restore_button_state(success, name, record_id)
 
-                real_record_id = None
                 if success:
                     if name in ["上传", "更新", "归档"]:
                         try:
@@ -2788,9 +2688,14 @@ class MainWindowWorkflowMixin:
                             self._clipboard_cooldown_until = 0.0
 
                     # 上传/归档成功后，统一回填真实 record_id（全链路迁移）
-                    real_record_id = None
                     if name in ["上传", "归档"] and record_id:
                         real_record_id = str(msg or "").strip()
+                        if real_record_id:
+                            clear_state = getattr(
+                                self, "clear_upload_runtime_state_for_ids", None
+                            )
+                            if callable(clear_state):
+                                clear_state(record_id, real_record_id)
                         if real_record_id:
                             changed = self._replace_record_id_everywhere(
                                 record_id, real_record_id
@@ -2799,7 +2704,7 @@ class MainWindowWorkflowMixin:
                                 log_info(
                                     f"UI更新: 已保存 record_id={real_record_id} (原={record_id})"
                                 )
-                                self.save_active_cache()
+                                self.request_active_cache_save()
                             if self.pending_update_after_upload:
                                 self._schedule_pending_update_after_upload()
 
@@ -2917,6 +2822,10 @@ class MainWindowWorkflowMixin:
                 self._try_process_deferred_events()
             except Exception as exc:
                 log_error(f"on_request_finished异常: {exc}")
+            finally:
+                clear_state = getattr(self, "clear_upload_runtime_state_for_ids", None)
+                if callable(clear_state):
+                    clear_state(record_id, real_record_id)
 
         self._enqueue_ui_mutation("request_finished", _apply_updates)
 
@@ -2940,4 +2849,3 @@ class MainWindowWorkflowMixin:
             self.show_message(str(result.get("error") or "通告提交后端失败。"))
             return
         self.show_message("通告已提交后端处理。")
-

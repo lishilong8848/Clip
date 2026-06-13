@@ -25,6 +25,19 @@ LAN_ONGOING_SNAPSHOT_REFRESH_MS = 5000
 LAN_ONGOING_SNAPSHOT_STALE_SECONDS = 3.0
 
 class MainWindowRuntimeMixin:
+    def request_active_cache_save(self, delay_ms: int = 800, *, force: bool = False):
+        save = getattr(self, "save_active_cache", None)
+        if force:
+            if callable(save):
+                save()
+            return
+        schedule = getattr(self, "schedule_active_cache_save", None)
+        if callable(schedule):
+            schedule(delay_ms)
+            return
+        if callable(save):
+            save()
+
     def _lan_portal_deferred_store(self) -> dict:
         store = getattr(self, "_lan_portal_deferred_start_jobs", None)
         if not isinstance(store, dict):
@@ -214,10 +227,7 @@ class MainWindowRuntimeMixin:
             pending_upload_hash=None,
             has_unuploaded_changes=False,
         )
-        if hasattr(self, "schedule_active_cache_save"):
-            self.schedule_active_cache_save(800)
-        else:
-            self.save_active_cache()
+        self.request_active_cache_save()
         return str(committed.get("active_item_id") or "")
 
     def _lan_qt_action_interval_ms(self) -> int:
@@ -1225,9 +1235,10 @@ class MainWindowRuntimeMixin:
         if controller is None or not hasattr(controller, "submit_qt_command"):
             return {"ok": False, "error": "本机后端未连接，Qt 不再直接执行多维删除。"}
         try:
-            result = controller.submit_qt_command(
+            result = self._submit_qt_command(
                 "delete_active_item",
                 {"data_dict": dict(data)},
+                timeout=30.0,
             )
         except Exception as exc:
             return {"ok": False, "error": f"本机后端删除失败：{exc}"}
@@ -1252,7 +1263,7 @@ class MainWindowRuntimeMixin:
             except Exception:
                 list_widget = None
         self._remove_active_item_widget_only(list_widget, item)
-        self.save_active_cache()
+        self.request_active_cache_save()
         log_info(
             "局域网页面删除进行中条目: "
             f"record_id={record_id or '-'} active_item_id={data.get('active_item_id') or '-'} "
@@ -1541,7 +1552,7 @@ class MainWindowRuntimeMixin:
             self._lan_action_batch_processing = False
         if cache_dirty and not hasattr(self, "_end_defer_active_cache_save"):
             try:
-                self.save_active_cache()
+                self.request_active_cache_save()
             except Exception:
                 pass
         if getattr(self, "_lan_action_batch", None):
@@ -1821,10 +1832,7 @@ class MainWindowRuntimeMixin:
                 if not item or not self._is_valid_list_item(item):
                     raise RuntimeError("Qt 主界面创建门户条目失败。")
                 committed = item.data(Qt.ItemDataRole.UserRole) or base_data
-            if hasattr(self, "schedule_active_cache_save"):
-                self.schedule_active_cache_save(800)
-            else:
-                self.save_active_cache()
+            self.request_active_cache_save()
             return {"active_item_id": str((committed or {}).get("active_item_id") or "")}
 
         if (
@@ -1847,10 +1855,8 @@ class MainWindowRuntimeMixin:
         ) or current
         if action == "end":
             self._do_move_to_history(item, committed, track_rollback=False)
-        elif hasattr(self, "schedule_active_cache_save"):
-            self.schedule_active_cache_save(800)
         else:
-            self.save_active_cache()
+            self.request_active_cache_save()
         return {"active_item_id": str((committed or {}).get("active_item_id") or active_item_id)}
 
     def _execute_lan_maintenance_action(self, payload: dict):
@@ -2098,10 +2104,7 @@ class MainWindowRuntimeMixin:
             list_widget=list_widget,
             item=item,
         ) or data
-        if hasattr(self, "schedule_active_cache_save"):
-            self.schedule_active_cache_save(800)
-        else:
-            self.save_active_cache()
+        self.request_active_cache_save()
         self._register_lan_portal_upload_job(job_id, record_id, active_item_id)
         self.do_feishu_upload(
             committed,
@@ -2429,4 +2432,3 @@ class MainWindowRuntimeMixin:
                     self._record_slow_ui_operation(f"ui_signal:{name}", elapsed_ms)
             except Exception:
                 pass
-

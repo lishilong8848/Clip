@@ -26,6 +26,13 @@ def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
     return max(int(minimum), min(int(maximum), value))
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = str(os.environ.get(name, "") or "").strip().lower()
+    if not raw:
+        return bool(default)
+    return raw in {"1", "true", "yes", "on"}
+
+
 def _display_host(host: str) -> str:
     text = str(host or DEFAULT_HOST).strip() or DEFAULT_HOST
     return "127.0.0.1" if text in {"0.0.0.0", "::"} else text
@@ -86,11 +93,15 @@ class BackendProcessPortalController:
             minimum=1,
             maximum=5,
         )
+        self._legacy_portal_callbacks_enabled = _env_flag(
+            "CLIPFLOW_ENABLE_QT_LEGACY_PORTAL_CALLBACKS",
+            False,
+        )
         self._snapshot_interval_s = _env_int(
             "CLIPFLOW_QT_SNAPSHOT_INTERVAL_SECONDS",
-            30,
-            minimum=8,
-            maximum=60,
+            300,
+            minimum=30,
+            maximum=3600,
         )
         self._startup_timeout_s = _env_int(
             "CLIPFLOW_BACKEND_STARTUP_TIMEOUT_SECONDS",
@@ -126,6 +137,33 @@ class BackendProcessPortalController:
             data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             headers["Content-Type"] = "application/json; charset=utf-8"
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read()
+        if not body:
+            return {}
+        result = json.loads(body.decode("utf-8"))
+        return result if isinstance(result, dict) else {}
+
+    def _request_binary_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        content: bytes,
+        content_type: str = "application/octet-stream",
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        url = f"{self._local_url()}{path}"
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": str(content_type or "application/octet-stream"),
+        }
+        request = urllib.request.Request(
+            url,
+            data=bytes(content or b""),
+            headers=headers,
+            method=method,
+        )
         with urllib.request.urlopen(request, timeout=timeout) as response:
             body = response.read()
         if not body:
@@ -262,12 +300,13 @@ class BackendProcessPortalController:
 
     def stop(self) -> None:
         self._stop_event.set()
+        self._flush_active_delta_once(timeout=3.0)
         if self._owns_process:
             try:
                 self._request_json("POST", "/api/backend/shutdown", payload={}, timeout=1.5)
             except Exception:
                 pass
-        for attr in ("_event_thread", "_snapshot_thread"):
+        for attr in ("_event_thread", "_snapshot_thread", "_active_delta_thread"):
             thread = getattr(self, attr, None)
             if thread and thread.is_alive():
                 try:
@@ -408,21 +447,29 @@ class BackendProcessPortalController:
         started = time.perf_counter()
         try:
             if kind == "maintenance_action":
-                callback_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
-                callback = self.maintenance_action_callback
-                if callback is None:
-                    raise RuntimeError("Qt 通告动作回调未连接。")
-                accepted = callback(callback_payload)
-                ok = bool(accepted.get("ok")) if isinstance(accepted, dict) else bool(accepted)
-                error = str(accepted.get("error") or "") if isinstance(accepted, dict) else ""
+                if not self._legacy_portal_callbacks_enabled:
+                    log_warning("已忽略旧门户 maintenance_action 事件；通告业务应由后端执行。")
+                    ok = True
+                else:
+                    callback_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+                    callback = self.maintenance_action_callback
+                    if callback is None:
+                        raise RuntimeError("Qt 通告动作回调未连接。")
+                    accepted = callback(callback_payload)
+                    ok = bool(accepted.get("ok")) if isinstance(accepted, dict) else bool(accepted)
+                    error = str(accepted.get("error") or "") if isinstance(accepted, dict) else ""
             elif kind == "ongoing_delete":
-                callback_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
-                callback = self.ongoing_delete_callback
-                if callback is None:
-                    raise RuntimeError("Qt 删除回调未连接。")
-                accepted = callback(callback_payload)
-                ok = bool(accepted.get("ok")) if isinstance(accepted, dict) else bool(accepted)
-                error = str(accepted.get("error") or "") if isinstance(accepted, dict) else ""
+                if not self._legacy_portal_callbacks_enabled:
+                    log_warning("已忽略旧门户 ongoing_delete 事件；删除业务应由后端执行。")
+                    ok = True
+                else:
+                    callback_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+                    callback = self.ongoing_delete_callback
+                    if callback is None:
+                        raise RuntimeError("Qt 删除回调未连接。")
+                    accepted = callback(callback_payload)
+                    ok = bool(accepted.get("ok")) if isinstance(accepted, dict) else bool(accepted)
+                    error = str(accepted.get("error") or "") if isinstance(accepted, dict) else ""
             elif kind == "notice":
                 callback_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
                 callback = self.notice_callback
@@ -606,11 +653,15 @@ class BackendProcessPortalController:
         self._ensure_bridge_threads()
 
     def set_ongoing_delete_callback(self, callback) -> None:
-        self.ongoing_delete_callback = callback
+        self.ongoing_delete_callback = (
+            callback if self._legacy_portal_callbacks_enabled else None
+        )
         self._ensure_bridge_threads()
 
     def set_maintenance_action_callback(self, callback) -> None:
-        self.maintenance_action_callback = callback
+        self.maintenance_action_callback = (
+            callback if self._legacy_portal_callbacks_enabled else None
+        )
         self._ensure_bridge_threads()
 
     def set_shell_event_callback(self, callback) -> None:
@@ -675,7 +726,35 @@ class BackendProcessPortalController:
         except Exception as exc:
             raise RuntimeError(f"本机后端执行 Qt 上传失败: {exc}") from exc
 
-    def submit_qt_command(self, command: str, payload: dict[str, Any] | None = None) -> dict:
+    def upload_notice_attachment(
+        self,
+        content: bytes,
+        *,
+        file_name: str = "notice_image.png",
+        mime_type: str = "image/png",
+    ) -> dict[str, Any]:
+        if not content:
+            raise RuntimeError("图片内容为空。")
+        quoted_name = urllib.parse.quote(str(file_name or "notice_image.png"))
+        result = self._request_binary_json(
+            "POST",
+            f"/api/qt/local/notice-attachments?file_name={quoted_name}",
+            content=bytes(content),
+            content_type=str(mime_type or "image/png"),
+            timeout=60.0,
+        )
+        if not bool(result.get("ok")):
+            raise RuntimeError(str(result.get("error") or "上传本机图片附件失败。"))
+        data = result.get("data")
+        return data if isinstance(data, dict) else {}
+
+    def submit_qt_command(
+        self,
+        command: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        timeout: float = 120.0,
+    ) -> dict:
         request_payload = {
             "command": str(command or "").strip(),
             "payload": dict(payload or {}),
@@ -684,7 +763,7 @@ class BackendProcessPortalController:
             "POST",
             "/api/qt/commands",
             payload=request_payload,
-            timeout=120.0,
+            timeout=max(1.0, float(timeout or 120.0)),
         )
         if not bool(result.get("ok")):
             raise RuntimeError(str(result.get("error") or "提交 Qt command 失败。"))
@@ -809,16 +888,34 @@ class BackendProcessPortalController:
                 self._active_delta_upserts = []
                 self._active_delta_deletes = []
             if upserts or deletes:
-                try:
-                    self._request_json(
-                        "POST",
-                        "/api/qt/active-items/delta",
-                        payload={"upserts": upserts, "deletes": deletes},
-                        timeout=3.0,
-                    )
-                except Exception as exc:
-                    log_warning(f"Qt active item 增量上报失败: {exc}")
+                self._post_active_delta(upserts, deletes, timeout=3.0)
             with self._active_delta_lock:
                 if not self._active_delta_upserts and not self._active_delta_deletes:
                     self._active_delta_thread = None
                     return
+
+    def _post_active_delta(
+        self,
+        upserts: list[dict[str, Any]],
+        deletes: list[dict[str, Any]],
+        *,
+        timeout: float,
+    ) -> None:
+        try:
+            self._request_json(
+                "POST",
+                "/api/qt/active-items/delta",
+                payload={"upserts": upserts, "deletes": deletes},
+                timeout=timeout,
+            )
+        except Exception as exc:
+            log_warning(f"Qt active item 增量上报失败: {exc}")
+
+    def _flush_active_delta_once(self, *, timeout: float = 3.0) -> None:
+        with self._active_delta_lock:
+            upserts = self._active_delta_upserts
+            deletes = self._active_delta_deletes
+            self._active_delta_upserts = []
+            self._active_delta_deletes = []
+        if upserts or deletes:
+            self._post_active_delta(upserts, deletes, timeout=timeout)

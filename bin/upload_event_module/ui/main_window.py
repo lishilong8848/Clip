@@ -1,6 +1,7 @@
 import os
 import queue
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from collections import deque
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
@@ -140,6 +141,16 @@ class ClipboardTool(
         self._clipboard_preview_auto_show_enabled = True
         self._lan_portal_jobs_by_record_id = {}
         self._lan_portal_jobs_by_active_item_id = {}
+        try:
+            qt_backend_command_workers = int(
+                os.environ.get("CLIPFLOW_QT_BACKEND_COMMAND_WORKERS", "2") or 2
+            )
+        except Exception:
+            qt_backend_command_workers = 2
+        self._qt_backend_command_executor = ThreadPoolExecutor(
+            max_workers=max(1, min(qt_backend_command_workers, 8)),
+            thread_name_prefix="ClipFlowQtBackendCommand",
+        )
 
         self.current_theme = "dark"
         self.notice_tab = "event"
@@ -313,11 +324,6 @@ class ClipboardTool(
         self._payload_store = {}
         self._payload_alias = {}
         # 已移除 item 缓存，重复判断统一按内容/标题动态查找
-        self._upload_queues = {}
-        self._upload_workers = {}
-        self._upload_lock = threading.Lock()
-        self._upload_worker_semaphore = threading.Semaphore(1)
-        self._upload_key_alias = {}
         self._lan_ongoing_snapshot_lock = threading.RLock()
         self._lan_ongoing_snapshot_all = []
         self._lan_ongoing_snapshot_at = 0.0

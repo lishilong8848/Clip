@@ -3267,7 +3267,7 @@ class ScreenshotConfirmDialog(QDialog):
 
             self.data_dict.pop("recover_selected", None)
 
-        self.enable_extra_upload = self.notice_type in ("维保通告", "设备检修")
+        self.enable_extra_upload = True
 
         self.enable_specialty_select = self.notice_type in (
 
@@ -5956,6 +5956,32 @@ class ScreenshotConfirmDialog(QDialog):
             self.extra_images_label.setStyleSheet("color: #EF4444; font-size: 11px;")
 
 
+    def _is_end_upload_action(self):
+        action = str(getattr(self, "action_type", "") or "").strip().lower()
+        if action == "end":
+            return True
+        text = str((self.data_dict or {}).get("text") or "")
+        head = text[:80]
+        return bool(
+            "状态：结束" in head
+            or "状态:结束" in head
+            or "状态： 结束" in head
+            or "状态: 结束" in head
+        )
+
+    def _validate_end_site_photo(self):
+        if not self.enable_extra_upload or not self._is_end_upload_action():
+            return True
+        if self.extra_images:
+            return True
+        message = "结束通告前必须添加至少一张现场照片。"
+        self.hint_label.setText(message)
+        try:
+            QMessageBox.warning(self, "需要现场照片", message)
+        except Exception:
+            pass
+        return False
+
 
     def _qimage_to_bytes(self, image: QImage):
 
@@ -8014,6 +8040,10 @@ class ScreenshotConfirmDialog(QDialog):
 
         self._suppress_ocr_cancel_on_hide = False
 
+        if not self._validate_end_site_photo():
+
+            return
+
         self.screenshot_bytes = None
 
         self._remember_current_state()
@@ -8087,6 +8117,10 @@ class ScreenshotConfirmDialog(QDialog):
     def confirm_upload(self):
 
         self._suppress_ocr_cancel_on_hide = False
+
+        if not self._validate_end_site_photo():
+
+            return
 
         self._remember_current_state()
 

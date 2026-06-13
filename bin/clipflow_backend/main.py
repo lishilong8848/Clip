@@ -8,22 +8,33 @@ import hashlib
 import json
 import mimetypes
 import os
-import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from collections import deque
 from pathlib import Path
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 from urllib.parse import urlencode
 
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+from clipflow_backend.preflight import (
+    build_backend_preflight_report as _build_backend_preflight_report,
+)
+from clipflow_backend.runtime_helpers import (
+    env_float as _env_float,
+    external_guard_status as _external_guard_status,
+    mock_external_enabled as _mock_external_enabled,
+    send_text_to_open_ids_guarded as _send_text_to_open_ids_guarded,
+    wait_until_listening as _wait_until_listening,
+)
 from clipflow_backend.api_models import (
     APIModel,
     AuthPermissionsSaveRequest,
@@ -33,12 +44,14 @@ from clipflow_backend.api_models import (
     HandoverLinksAuthRequest,
     HandoverLinksSaveRequest,
     HandoverPasswordResetConfirmRequest,
+    JobMarkStuckFailedRequest,
     MockPressureRequest,
     NoticeMemoryHistorySaveRequest,
     NoticeMemoryHistoryScanRequest,
     NoticeMemoryImportRequest,
     NoticeTargetLookupRequest,
     NoticeUndoApplyRequest,
+    NoticeWorkTypeOverrideRequest,
     OngoingDeleteRequest,
     PermissionRequestConfirm,
     PermissionRequestCreate,
@@ -86,17 +99,17 @@ from lan_bitable_template_portal.portal_service import (
     SCOPE_OPTIONS,
     ZHIHANG_CHANGE_APP_TOKEN,
     ZHIHANG_CHANGE_TABLE_ID,
-    external_real_write_guard,
 )
 from lan_bitable_template_portal.portal_service import MaintenancePortalService
 from lan_bitable_template_portal.portal_auth import PortalAuthManager
 from lan_bitable_template_portal.state_store import LanPortalStateStore
-from upload_event_module.config import config, get_field_config
+from upload_event_module.config import config
 from upload_event_module.core.parser import extract_event_info
 from upload_event_module.services.feishu_service import check_token_status
+
+INLINE_IMAGE_B64_FIELDS = {"bytes_b64", "screenshot_bytes_b64"}
 from upload_event_module.services.service_registry import query_record_by_id
 from upload_event_module.logger import log_error, log_info, log_warning
-from upload_event_module.services.robot_webhook import send_text_to_open_ids
 
 try:
     from apscheduler.schedulers.background import BackgroundScheduler
@@ -104,76 +117,60 @@ except Exception:
     BackgroundScheduler = None
 
 
-def _wait_until_listening(host: str, port: int, *, timeout_s: float = 3.0) -> bool:
-    probe_host = str(host or "127.0.0.1").strip()
-    if probe_host in {"0.0.0.0", "::"}:
-        probe_host = "127.0.0.1"
-    deadline = time.monotonic() + max(0.1, float(timeout_s or 0))
-    while time.monotonic() < deadline:
-        try:
-            with socket.create_connection((probe_host, int(port)), timeout=0.2):
-                return True
-        except OSError:
-            time.sleep(0.05)
-    return False
-
-
-def _mock_external_enabled() -> bool:
-    return os.environ.get("CLIPFLOW_BACKEND_MOCK_EXTERNAL") == "1"
-
-
-def _env_float(name: str, default: float, *, minimum: float, maximum: float) -> float:
-    try:
-        value = float(str(os.environ.get(name, "") or "").strip() or default)
-    except Exception:
-        value = float(default)
-    return max(float(minimum), min(float(maximum), value))
-
-
-def _external_guard_status() -> dict:
-    return external_real_write_guard()
-
-
-def _send_text_to_open_ids_guarded(text: str, recipients: list[str]) -> tuple[bool, str, list[dict]]:
-    clean_recipients = [
-        str(open_id or "").strip()
-        for open_id in (recipients or [])
-        if str(open_id or "").strip()
-    ]
-    guard = _external_guard_status()
-    if guard.get("mock_external"):
-        return True, "mock external send skipped", [
-            {"open_id": open_id, "ok": True, "message": "mock external send skipped"}
-            for open_id in clean_recipients
-        ]
-    if not guard.get("real_write_allowed"):
-        return False, str(guard.get("reason") or "真实外部写入未确认。"), []
-    return send_text_to_open_ids(text, clean_recipients)
+MAX_SITE_PHOTO_BYTES = 8 * 1024 * 1024
+MAX_NOTICE_ATTACHMENT_PENDING_BYTES = int(
+    _env_float(
+        "CLIPFLOW_NOTICE_ATTACHMENT_PENDING_MAX_BYTES",
+        300 * 1024 * 1024,
+        minimum=16 * 1024 * 1024,
+        maximum=2 * 1024 * 1024 * 1024,
+    )
+)
 
 
 def _queue_stats() -> dict:
     qt_outbox_counts: dict[str, int] = {}
+    runtime_queue_details: dict[str, dict] = {}
     try:
         qt_outbox_counts = PortalRuntime.state_store.count_outbox_events("qt_action")
     except Exception:
         qt_outbox_counts = {}
+    try:
+        runtime_queue_details = PortalRuntime.state_store.runtime_queue_details()
+    except Exception:
+        runtime_queue_details = {}
     with PortalRuntime.message_queue_lock:
-        message_queue_size = len(PortalRuntime.message_queue)
+        message_queue_size = 0
         message_workers = sum(
             1 for worker in PortalRuntime.message_worker_threads if worker.is_alive()
         )
     with PortalRuntime.action_queue_lock:
-        qt_queue_size = len(PortalRuntime.action_queue)
+        qt_queue_size = 0
         qt_worker_alive = bool(
             PortalRuntime.action_worker_thread
             and PortalRuntime.action_worker_thread.is_alive()
         )
+    message_details = runtime_queue_details.get("message")
+    if isinstance(message_details, dict):
+        message_queue_size = int(message_details.get("queued_due") or 0) + int(
+            message_details.get("queued_future") or 0
+        )
+    qt_details = runtime_queue_details.get("qt_action")
+    if isinstance(qt_details, dict):
+        qt_queue_size = int(qt_details.get("queued_due") or 0) + int(
+            qt_details.get("queued_future") or 0
+        )
     with PortalRuntime.upload_wait_lock:
-        upload_wait_size = len(PortalRuntime.upload_wait_jobs)
+        upload_wait_size = 0
         upload_wait_alive = bool(
             PortalRuntime.upload_wait_thread
             and PortalRuntime.upload_wait_thread.is_alive()
         )
+    upload_wait_details = runtime_queue_details.get("upload_wait")
+    if isinstance(upload_wait_details, dict):
+        upload_wait_size = int(upload_wait_details.get("queued_due") or 0) + int(
+            upload_wait_details.get("queued_future") or 0
+        ) + int(upload_wait_details.get("processing_active") or 0)
     with PortalRuntime.source_refresh_lock:
         source_refresh_inflight = bool(PortalRuntime.source_refresh_inflight)
     with PortalRuntime.repair_refresh_lock:
@@ -205,231 +202,6 @@ def _queue_stats() -> dict:
         "runtime_queue_counts": PortalRuntime.state_store.runtime_queue_counts(),
         "runtime_queue_details": PortalRuntime.state_store.runtime_queue_details(),
     }
-
-
-def _field_names(metas: list) -> set[str]:
-    names: set[str] = set()
-    for meta in metas or []:
-        field_name = str(getattr(meta, "field_name", "") or "").strip()
-        if field_name:
-            names.add(field_name)
-    return names
-
-
-def _missing_fields(
-    names: set[str],
-    fields: list[str] | None,
-    aliases: dict[str, list[str]] | None = None,
-) -> list[str]:
-    aliases = aliases or {}
-    missing: list[str] = []
-    for field_name in fields or []:
-        candidates = [str(field_name or "").strip()]
-        candidates.extend(str(item or "").strip() for item in aliases.get(field_name, []))
-        candidates = [item for item in candidates if item]
-        if not candidates:
-            continue
-        if not any(candidate in names for candidate in candidates):
-            missing.append(candidates[0])
-    return missing
-
-
-def _check_field_set(
-    service: MaintenancePortalService,
-    *,
-    label: str,
-    app_token: str,
-    table_id: str,
-    required: list[str],
-    optional: list[str] | None = None,
-    required_aliases: dict[str, list[str]] | None = None,
-    optional_aliases: dict[str, list[str]] | None = None,
-) -> dict:
-    app_token = str(app_token or "").strip()
-    table_id = str(table_id or "").strip()
-    if not app_token or not table_id:
-        return {
-            "label": label,
-            "status": "warning",
-            "message": "app_token 或 table_id 未配置，已跳过字段检查。",
-            "missing_required": list(required or []),
-            "missing_optional": [],
-            "field_count": 0,
-        }
-    if not hasattr(service, "_load_table_fields"):
-        return {
-            "label": label,
-            "status": "warning",
-            "message": "当前服务对象不支持字段预检。",
-            "missing_required": [],
-            "missing_optional": [],
-            "field_count": 0,
-        }
-    try:
-        metas, _ = service._load_table_fields(app_token=app_token, table_id=table_id)
-        names = _field_names(metas)
-        missing_required = _missing_fields(names, required, required_aliases)
-        missing_optional = _missing_fields(names, optional, optional_aliases)
-        status = "fail" if missing_required else "warning" if missing_optional else "ok"
-        message = (
-            "缺少必需字段。"
-            if missing_required
-            else "缺少可选字段，部分回填可能为空。"
-            if missing_optional
-            else "字段检查通过。"
-        )
-        return {
-            "label": label,
-            "status": status,
-            "message": message,
-            "missing_required": missing_required,
-            "missing_optional": missing_optional,
-            "field_count": len(names),
-        }
-    except Exception as exc:
-        return {
-            "label": label,
-            "status": "fail",
-            "message": str(exc),
-            "missing_required": [],
-            "missing_optional": [],
-            "field_count": 0,
-        }
-
-
-def _build_backend_preflight_report(service: MaintenancePortalService) -> dict:
-    started = time.perf_counter()
-    checks: list[dict] = []
-    config_checks = [
-        ("飞书 App ID", bool(str(config.app_id or "").strip())),
-        ("飞书 App Secret", bool(str(config.app_secret or "").strip())),
-        ("目标 app_token", bool(str(config.app_token or "").strip())),
-        ("维保目标表", bool(str(config.table_id_weibao or "").strip())),
-        ("变更目标表", bool(str(config.table_id_biangeng or "").strip())),
-        ("检修目标表", bool(str(config.table_id_overhaul or "").strip())),
-    ]
-    for label, ok in config_checks:
-        checks.append(
-            {
-                "label": label,
-                "status": "ok" if ok else "warning",
-                "message": "已配置。" if ok else "未配置，相关真实链路会失败。",
-            }
-        )
-    checks.extend(
-        [
-            _check_field_set(
-                service,
-                label="维保源表字段",
-                app_token=getattr(service, "app_token", "") or DEFAULT_APP_TOKEN,
-                table_id=getattr(service, "table_id", "") or DEFAULT_TABLE_ID,
-                required=[
-                    "楼栋",
-                    "维护总项",
-                    "维护实施状态",
-                    "计划维护月份",
-                    "专业类别",
-                    "维护周期",
-                ],
-                optional=["维护编号", "维护项目"],
-            ),
-            _check_field_set(
-                service,
-                label="变更源表字段",
-                app_token=CHANGE_SOURCE_APP_TOKEN,
-                table_id=CHANGE_SOURCE_TABLE_ID,
-                required=[
-                    "变更简述",
-                    "变更进度",
-                    "变更楼栋",
-                    "专业",
-                    "变更等级（阿里）",
-                ],
-                optional=[
-                    "变更开始日期（阿里）",
-                    "变更结束日期（阿里）",
-                ],
-            ),
-            _check_field_set(
-                service,
-                label="检修源表字段",
-                app_token=REPAIR_SOURCE_APP_TOKEN,
-                table_id=REPAIR_SOURCE_TABLE_ID,
-                required=["检修通告名称", "所属数据中心/楼栋-使用"],
-                optional=[
-                    "维修名称",
-                    "所属专业",
-                    "专业（推送消息用）",
-                    "故障发生时间",
-                    "维修开始时间",
-                    "期望完成时间",
-                    "事件描述",
-                    "对应事件等级",
-                    "对应来源",
-                    "设备检修关联",
-                ],
-            ),
-            _check_field_set(
-                service,
-                label="智航变更源表字段",
-                app_token=ZHIHANG_CHANGE_APP_TOKEN,
-                table_id=ZHIHANG_CHANGE_TABLE_ID,
-                required=["进展"],
-                optional=["标题"],
-                required_aliases={"进展": ["进度"]},
-                optional_aliases={
-                    "标题": [
-                        "名称",
-                        "变更名称",
-                        "变更标题",
-                        "变更简述",
-                        "工作内容",
-                    ]
-                },
-            ),
-            _check_field_set(
-                service,
-                label="检修同步表字段",
-                app_token=REPAIR_SOURCE_APP_TOKEN,
-                table_id=REPAIR_SYNC_TABLE_ID,
-                required=[],
-                optional=["名称（标题）", "名称"],
-            ),
-            _check_field_set(
-                service,
-                label="维保目标表字段",
-                app_token=config.app_token,
-                table_id=config.table_id_weibao,
-                required=list(get_field_config(NOTICE_TYPE_MAINTENANCE).values()),
-            ),
-            _check_field_set(
-                service,
-                label="变更目标表字段",
-                app_token=config.app_token,
-                table_id=config.table_id_biangeng,
-                required=list(get_field_config(NOTICE_TYPE_CHANGE).values()),
-            ),
-            _check_field_set(
-                service,
-                label="检修目标表字段",
-                app_token=config.app_token,
-                table_id=config.table_id_overhaul,
-                required=list(get_field_config(NOTICE_TYPE_REPAIR).values()),
-            ),
-        ]
-    )
-    failed = sum(1 for item in checks if item.get("status") == "fail")
-    warnings = sum(1 for item in checks if item.get("status") == "warning")
-    report = {
-        "checked_at": time.time(),
-        "duration_ms": round((time.perf_counter() - started) * 1000.0, 1),
-        "status": "fail" if failed else "warning" if warnings else "ok",
-        "failed": failed,
-        "warnings": warnings,
-        "checks": checks,
-        "external_guard": _external_guard_status(),
-    }
-    return report
 
 
 class FastAPIPortalController:
@@ -489,9 +261,58 @@ class FastAPIPortalController:
         self._perf_max_entries = int(
             _env_float("CLIPFLOW_PERF_MAX_ENDPOINTS", 200, minimum=20, maximum=1000)
         )
+        self._job_batch_lock = threading.RLock()
+        self._job_batch_stats = {
+            "requests": 0,
+            "requested_jobs": 0,
+            "returned_jobs": 0,
+            "missing_jobs": 0,
+            "denied_jobs": 0,
+            "max_request_size": 0,
+            "updated_at": 0.0,
+        }
         self._sse_lock = threading.RLock()
         self._sse_connections: dict[tuple, int] = {}
         self._sse_connection_seq = 0
+        self._background_executor = ThreadPoolExecutor(
+            max_workers=int(
+                _env_float("CLIPFLOW_BACKEND_BG_WORKERS", 6, minimum=2, maximum=24)
+            ),
+            thread_name_prefix="ClipFlowBackendBg",
+        )
+
+    def _submit_background(self, name: str, fn, *args) -> bool:
+        if self._shutdown_event.is_set():
+            return False
+
+        def _run() -> None:
+            try:
+                fn(*args)
+            except Exception as exc:
+                log_warning(f"后端后台任务异常: {name}: {exc}")
+
+        try:
+            self._background_executor.submit(_run)
+            return True
+        except RuntimeError as exc:
+            log_warning(f"后端后台任务提交失败: {name}: {exc}")
+            return False
+
+    def _submit_notice_undo_job(self, job_id: str, *, name: str = "") -> bool:
+        job_id = str(job_id or "").strip()
+        if not job_id:
+            return False
+        task_name = name or f"NoticeUndo-{job_id[:8]}"
+        submitted = self._submit_background(task_name, self._run_notice_undo_job, job_id)
+        if not submitted:
+            with suppress(Exception):
+                PortalRuntime.service.mark_job(
+                    job_id,
+                    phase="failed",
+                    error="后端正在关闭，回退任务未启动。",
+                    upload_message="后端正在关闭，回退任务未启动。",
+                )
+        return submitted
 
     def _build_app(self) -> FastAPI:
         app = FastAPI(title="ClipFlow LAN Backend")
@@ -683,18 +504,30 @@ class FastAPIPortalController:
             job_cleanup = PortalRuntime.state_store.get_backend_runtime("job_cleanup") or {}
             preflight = PortalRuntime.state_store.get_backend_runtime("preflight") or {}
             token_status = PortalRuntime.state_store.get_backend_runtime("token_status") or {}
+            sqlite_maintenance = (
+                PortalRuntime.state_store.get_backend_runtime("sqlite_maintenance")
+                or {}
+            )
             sqlite_stats: dict = {}
             source_snapshot_stats: dict = {}
+            source_type_stats: dict = {}
             schema_status: dict = {}
             runtime_health: dict = {}
+            upload_attachment_stats: dict = {}
+            slow_jobs: list[dict] = []
             with suppress(Exception):
                 sqlite_stats = PortalRuntime.state_store.get_database_stats()
             with suppress(Exception):
                 source_snapshot_stats = PortalRuntime.state_store.source_snapshot_stats()
             with suppress(Exception):
+                source_type_stats = PortalRuntime.state_store.source_snapshot_work_type_stats()
+            with suppress(Exception):
                 schema_status = PortalRuntime.state_store.schema_health()
             with suppress(Exception):
                 runtime_health = PortalRuntime.state_store.runtime_health_report()
+            with suppress(Exception):
+                upload_attachment_stats = PortalRuntime.state_store.notice_upload_attachment_stats()
+                upload_attachment_stats["max_pending_bytes"] = MAX_NOTICE_ATTACHMENT_PENDING_BYTES
             with suppress(Exception):
                 last_loaded_at = str(getattr(service, "_last_loaded_at", "") or "")
                 last_loaded_ts = float(getattr(service, "_last_loaded_ts", 0.0) or 0.0)
@@ -738,6 +571,7 @@ class FastAPIPortalController:
                     }
                     for item in failed_jobs[:10]
                 ]
+                slow_jobs = self._slow_jobs_snapshot(all_jobs)
             table_counts = (
                 sqlite_stats.get("table_counts")
                 if isinstance(sqlite_stats, dict)
@@ -787,10 +621,16 @@ class FastAPIPortalController:
                     "job_cleanup": job_cleanup if isinstance(job_cleanup, dict) else {},
                     "preflight": preflight if isinstance(preflight, dict) else {},
                     "token_status": token_status if isinstance(token_status, dict) else {},
+                    "sqlite_maintenance": sqlite_maintenance
+                    if isinstance(sqlite_maintenance, dict)
+                    else {},
                     "sqlite": sqlite_stats if isinstance(sqlite_stats, dict) else {},
                     "schema": schema_status if isinstance(schema_status, dict) else {},
                     "runtime_health": runtime_health if isinstance(runtime_health, dict) else {},
                     "source_snapshot": source_snapshot_stats if isinstance(source_snapshot_stats, dict) else {},
+                    "source_type_summary": source_type_stats if isinstance(source_type_stats, dict) else {},
+                    "upload_attachments": upload_attachment_stats if isinstance(upload_attachment_stats, dict) else {},
+                    "job_batch": self._job_batch_snapshot(),
                     "read_cache": self._read_cache_stats(),
                     "static_cache": self._static_cache_stats(),
                     "singleflight": {
@@ -799,6 +639,7 @@ class FastAPIPortalController:
                     },
                     "sse_connections": self._sse_stats(),
                     "recent_failed_jobs": recent_failed_jobs,
+                    "slow_jobs": slow_jobs,
                     "time": time.time(),
                 },
             }
@@ -844,6 +685,7 @@ class FastAPIPortalController:
                     "qt_active_items": PortalRuntime.state_store.qt_active_items_stats(),
                     "qt_bridge": qt_bridge_payload,
                     "endpoint_metrics": self._perf_snapshot(),
+                    "job_batch": self._job_batch_snapshot(),
                     "read_cache": self._read_cache_stats(),
                     "static_cache": self._static_cache_stats(),
                     "sse_connections": self._sse_stats(),
@@ -894,8 +736,7 @@ class FastAPIPortalController:
             if admin_response is not None:
                 return admin_response
             try:
-                result = await asyncio.to_thread(PortalRuntime.service.cleanup_action_jobs)
-                result["cleaned_at"] = time.time()
+                result = await asyncio.to_thread(self._collect_backend_cleanup_payload)
                 PortalRuntime.state_store.put_backend_runtime("job_cleanup", result)
                 return {"ok": True, "data": result}
             except Exception as exc:
@@ -909,7 +750,7 @@ class FastAPIPortalController:
             payload = (
                 await self._read_model_request(request, MockPressureRequest)
             ).to_payload()
-            count = max(1, min(int(payload.get("count") or 10), 50))
+            count = max(1, min(int(payload.get("count") or 10), 60))
             concurrency = max(1, min(int(payload.get("concurrency") or 5), 10))
             raw_scopes = payload.get("scopes")
             scopes: list[str] = []
@@ -921,6 +762,18 @@ class FastAPIPortalController:
             scenario = str(payload.get("scenario") or "accepted").strip()
             if scenario not in {"accepted", "failed-network", "failed-remote-missing", "mixed"}:
                 scenario = "accepted"
+            include_site_photos = bool(payload.get("include_site_photos"))
+            site_photo_count = max(1, min(int(payload.get("site_photo_count") or 1), 3))
+            site_photo_kb = max(1, min(int(payload.get("site_photo_kb") or 32), 512))
+            max_submit_average_ms = max(
+                1.0,
+                min(float(payload.get("max_submit_average_ms") or 300.0), 10000.0),
+            )
+            max_total_seconds = max(
+                1.0,
+                min(float(payload.get("max_total_seconds") or 20.0), 600.0),
+            )
+            max_failed = max(0, min(int(payload.get("max_failed") or 0), 60))
             tool_path = Path(__file__).resolve().parents[1] / "tools" / "mock_lan_portal_pressure.py"
             args = [
                 sys.executable,
@@ -932,6 +785,16 @@ class FastAPIPortalController:
                 "--scenario",
                 scenario,
             ]
+            if include_site_photos:
+                args.extend(
+                    [
+                        "--with-site-photos",
+                        "--site-photo-count",
+                        str(site_photo_count),
+                        "--site-photo-kb",
+                        str(site_photo_kb),
+                    ]
+                )
             if scopes and per_scope > 0:
                 args.extend(["--scopes", ",".join(scopes), "--per-scope", str(per_scope)])
             run_kwargs = {}
@@ -942,16 +805,31 @@ class FastAPIPortalController:
                 run_kwargs["startupinfo"] = startupinfo
                 run_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             try:
-                completed = await asyncio.to_thread(
-                    subprocess.run,
-                    args,
-                    cwd=os.fspath(Path(__file__).resolve().parents[1]),
-                    capture_output=True,
-                    text=True,
-                    timeout=60,
-                    check=False,
-                    **run_kwargs,
-                )
+                with tempfile.TemporaryDirectory(prefix="clipflow_mock_pressure_") as tmp_dir:
+                    stdout_path = Path(tmp_dir) / "stdout.txt"
+                    stderr_path = Path(tmp_dir) / "stderr.txt"
+
+                    def _run_mock_pressure_subprocess() -> subprocess.CompletedProcess:
+                        with stdout_path.open("w", encoding="utf-8", errors="ignore") as stdout_file, stderr_path.open(
+                            "w",
+                            encoding="utf-8",
+                            errors="ignore",
+                        ) as stderr_file:
+                            completed_process = subprocess.run(
+                                args,
+                                cwd=os.fspath(Path(__file__).resolve().parents[1]),
+                                stdout=stdout_file,
+                                stderr=stderr_file,
+                                text=True,
+                                timeout=60,
+                                check=False,
+                                **run_kwargs,
+                            )
+                        completed_process.stdout = stdout_path.read_text(encoding="utf-8", errors="ignore")
+                        completed_process.stderr = stderr_path.read_text(encoding="utf-8", errors="ignore")
+                        return completed_process
+
+                    completed = await asyncio.to_thread(_run_mock_pressure_subprocess)
             except subprocess.TimeoutExpired:
                 return JSONResponse(
                     {"ok": False, "error": "mock 压测超过 60 秒，已中止。"},
@@ -977,6 +855,13 @@ class FastAPIPortalController:
                     flattened["summary"] = summary
                     flattened["ok"] = bool(summary.get("ok", flattened.get("ok", True)))
                     data = flattened
+            if isinstance(data, dict):
+                data["assessment"] = self._assess_mock_pressure_result(
+                    data,
+                    max_submit_average_ms=max_submit_average_ms,
+                    max_total_seconds=max_total_seconds,
+                    max_failed=max_failed,
+                )
             return {"ok": True, "data": data}
 
         @app.get("/api/auth/status")
@@ -1067,6 +952,8 @@ class FastAPIPortalController:
                                 "can_retry": str(item.get("phase") or "") == "failed"
                                 and bool(item.get("error_retryable")),
                                 "can_clear": str(item.get("phase") or "") == "failed",
+                                "can_mark_stuck_failed": str(item.get("phase") or "")
+                                not in {"success", "failed", ""},
                             }
                         )
             jobs.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
@@ -1114,6 +1001,56 @@ class FastAPIPortalController:
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
 
+        @app.post("/api/jobs/{job_id}/mark-stuck-failed")
+        async def mark_stuck_job_failed(job_id: str, request: Request):
+            admin_response, _session = self._require_admin_response(request)
+            if admin_response is not None:
+                return admin_response
+            payload = await self._read_model_request(request, JobMarkStuckFailedRequest)
+            normalized_job_id = str(job_id or "").strip()
+            job = PortalRuntime.service.get_job(normalized_job_id)
+            if not job:
+                return JSONResponse(
+                    {"ok": False, "error": "任务不存在或已清理。"},
+                    status_code=404,
+                )
+            phase = str(job.get("phase") or "").strip()
+            if phase in {"success", "failed"}:
+                return JSONResponse(
+                    {"ok": False, "error": "只能标记未完成任务。"},
+                    status_code=400,
+                )
+            reason = str(payload.reason or "").strip() or "管理员手动标记卡住任务，请核对后重试。"
+            PortalRuntime.service.mark_job(
+                normalized_job_id,
+                phase="failed",
+                error=reason,
+                error_category="admin_stuck_reset",
+                error_retryable=True,
+            )
+            for queue_name in ("message", "qt_action", "upload_wait"):
+                try:
+                    PortalRuntime.state_store.mark_runtime_queue_item(
+                        queue_name,
+                        normalized_job_id,
+                        "failed",
+                        error=reason,
+                    )
+                except Exception:
+                    pass
+            PortalRuntime.clear_payload_cache()
+            self._clear_read_cache()
+            return {
+                "ok": True,
+                "data": {
+                    "job_id": normalized_job_id,
+                    "phase": "failed",
+                    "error": reason,
+                    "error_category": "admin_stuck_reset",
+                    "error_retryable": True,
+                },
+            }
+
         @app.get("/api/jobs/stream")
         async def jobs_stream(request: Request):
             return StreamingResponse(
@@ -1121,6 +1058,52 @@ class FastAPIPortalController:
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-store"},
             )
+
+        @app.get("/api/jobs/batch")
+        async def get_jobs_batch(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            raw_ids = str(request.query_params.get("ids") or "")
+            job_ids: list[str] = []
+            seen: set[str] = set()
+            for raw_id in raw_ids.split(","):
+                job_id = str(raw_id or "").strip()
+                if not job_id or job_id in seen:
+                    continue
+                seen.add(job_id)
+                job_ids.append(job_id)
+                if len(job_ids) >= 100:
+                    break
+            items: list[dict] = []
+            missing: list[str] = []
+            denied: list[str] = []
+            for job_id in job_ids:
+                job = PortalRuntime.service.get_job(job_id)
+                if not job:
+                    missing.append(job_id)
+                    continue
+                if not self._job_visible_to_session(job, session):
+                    denied.append(job_id)
+                    continue
+                payload = dict(job)
+                payload["job_id"] = str(payload.get("job_id") or job_id)
+                items.append(payload)
+            self._record_job_batch_stats(
+                requested=len(job_ids),
+                returned=len(items),
+                missing=len(missing),
+                denied=len(denied),
+            )
+            return {
+                "ok": True,
+                "data": {
+                    "items": items,
+                    "missing": missing,
+                    "denied": denied,
+                    "count": len(items),
+                },
+            }
 
         @app.get("/api/jobs/{job_id}")
         async def get_job(job_id: str, request: Request):
@@ -1262,6 +1245,37 @@ class FastAPIPortalController:
                     work_type=str(request.query_params.get("work_type") or "all"),
                 )
                 return self._json_ok(request, session, payload)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
+        @app.post("/api/notice-work-type-override")
+        async def notice_work_type_override(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                payload = (
+                    await self._read_model_request(
+                        request, NoticeWorkTypeOverrideRequest
+                    )
+                ).to_payload()
+                scope = self._authorized_scope_or_error(
+                    session, payload.get("scope") or "ALL"
+                )
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                result = await asyncio.to_thread(
+                    PortalRuntime.service.set_notice_work_type_override,
+                    record_id=str(payload.get("record_id") or ""),
+                    source_work_type=str(
+                        payload.get("source_work_type") or "maintenance"
+                    ),
+                    target_work_type=str(payload.get("target_work_type") or "change"),
+                    scope=scope,
+                    updated_by=str(user.get("open_id") or ""),
+                )
+                PortalRuntime.clear_payload_cache()
+                self._clear_read_cache()
+                return self._json_ok(request, session, result)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)
 
@@ -1461,7 +1475,11 @@ class FastAPIPortalController:
                 return self._auth_required_response()
             try:
                 payload = (
-                    await self._read_model_request(request, WorkbenchActionRequest)
+                    await self._read_model_request(
+                        request,
+                        WorkbenchActionRequest,
+                        reject_large_inline_images=True,
+                    )
                 ).to_payload()
                 payload = normalize_notice_identity_payload(payload)
                 scope = self._authorized_scope_or_error(
@@ -1492,6 +1510,118 @@ class FastAPIPortalController:
                 )
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)
+
+        @app.post("/api/notice-attachments")
+        async def notice_attachments(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                raw_length = request.headers.get("content-length", "0") or "0"
+                try:
+                    length = int(raw_length)
+                except ValueError as exc:
+                    raise PortalError("现场照片大小无效。") from exc
+                if length > MAX_SITE_PHOTO_BYTES:
+                    raise PortalError("现场照片不能超过 8MB。")
+                content_type = str(request.headers.get("content-type") or "").split(";", 1)[0].strip()
+                if not content_type.startswith("image/"):
+                    raise PortalError("只能上传图片作为现场照片。")
+                body = await request.body()
+                if not body:
+                    raise PortalError("现场照片内容为空。")
+                if len(body) > MAX_SITE_PHOTO_BYTES:
+                    raise PortalError("现场照片不能超过 8MB。")
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                file_name = str(
+                    request.query_params.get("file_name")
+                    or f"site_photo_{uuid.uuid4().hex[:8]}.png"
+                ).strip()
+                if len(file_name) > 120:
+                    file_name = file_name[:120]
+                await asyncio.to_thread(
+                    PortalRuntime.state_store.cleanup_notice_upload_attachments
+                )
+                try:
+                    attachment = await asyncio.to_thread(
+                        PortalRuntime.state_store.put_notice_upload_attachment,
+                        open_id=str(user.get("open_id") or ""),
+                        file_name=file_name,
+                        mime_type=content_type,
+                        content=body,
+                        ttl_seconds=24 * 60 * 60,
+                        max_pending_bytes=MAX_NOTICE_ATTACHMENT_PENDING_BYTES,
+                    )
+                except ValueError as exc:
+                    raise PortalError(str(exc)) from exc
+                return self._json_ok(
+                    request,
+                    session,
+                    {
+                        "upload_id": attachment.get("upload_id"),
+                        "file_name": attachment.get("file_name"),
+                        "mime_type": attachment.get("mime_type"),
+                        "size": attachment.get("size"),
+                        "expires_at": attachment.get("expires_at"),
+                    },
+                )
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.post("/api/qt/local/notice-attachments")
+        async def qt_local_notice_attachments(request: Request):
+            deny = self._local_only_response(request)
+            if deny is not None:
+                return deny
+            try:
+                raw_length = request.headers.get("content-length", "0") or "0"
+                try:
+                    length = int(raw_length)
+                except ValueError as exc:
+                    raise PortalError("图片大小无效。") from exc
+                if length > MAX_SITE_PHOTO_BYTES:
+                    raise PortalError("图片不能超过 8MB。")
+                content_type = str(request.headers.get("content-type") or "").split(";", 1)[0].strip()
+                if not content_type.startswith("image/"):
+                    raise PortalError("只能上传图片。")
+                body = await request.body()
+                if not body:
+                    raise PortalError("图片内容为空。")
+                if len(body) > MAX_SITE_PHOTO_BYTES:
+                    raise PortalError("图片不能超过 8MB。")
+                file_name = str(
+                    request.query_params.get("file_name")
+                    or f"qt_notice_image_{uuid.uuid4().hex[:8]}.png"
+                ).strip()
+                if len(file_name) > 120:
+                    file_name = file_name[:120]
+                await asyncio.to_thread(
+                    PortalRuntime.state_store.cleanup_notice_upload_attachments
+                )
+                try:
+                    attachment = await asyncio.to_thread(
+                        PortalRuntime.state_store.put_notice_upload_attachment,
+                        open_id="qt-local",
+                        file_name=file_name,
+                        mime_type=content_type,
+                        content=body,
+                        ttl_seconds=24 * 60 * 60,
+                        max_pending_bytes=MAX_NOTICE_ATTACHMENT_PENDING_BYTES,
+                    )
+                except ValueError as exc:
+                    raise PortalError(str(exc)) from exc
+                return {
+                    "ok": True,
+                    "data": {
+                        "upload_id": attachment.get("upload_id"),
+                        "file_name": attachment.get("file_name"),
+                        "mime_type": attachment.get("mime_type"),
+                        "size": attachment.get("size"),
+                        "expires_at": attachment.get("expires_at"),
+                    },
+                }
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
 
         @app.post("/api/ongoing-items/delete")
         async def ongoing_items_delete(request: Request):
@@ -1599,12 +1729,7 @@ class FastAPIPortalController:
                     auth_open_id=str(user.get("open_id") or ""),
                     auth_user_name=str(user.get("name") or user.get("en_name") or ""),
                 )
-                threading.Thread(
-                    target=self._run_notice_undo_job,
-                    args=(job_id,),
-                    name=f"NoticeUndo-{job_id[:8]}",
-                    daemon=True,
-                ).start()
+                self._submit_notice_undo_job(job_id, name=f"NoticeUndo-{job_id[:8]}")
                 job = PortalRuntime.service.get_job(job_id) or {}
                 return JSONResponse(
                     {
@@ -1878,12 +2003,12 @@ class FastAPIPortalController:
                         f"操作人：{actor_name}\n"
                         "请重新进入门户或刷新页面查看最新楼栋权限。"
                     )
-                    threading.Thread(
-                        target=_send_text_to_open_ids_guarded,
-                        args=(text, changed_open_ids),
-                        name="LANPortalPermissionNotify",
-                        daemon=True,
-                    ).start()
+                    self._submit_background(
+                        "LANPortalPermissionNotify",
+                        _send_text_to_open_ids_guarded,
+                        text,
+                        changed_open_ids,
+                    )
                     notify_message = "已加入飞书通知队列"
                 else:
                     notify_message = "无权限变更通知"
@@ -2010,7 +2135,11 @@ class FastAPIPortalController:
             if deny is not None:
                 return deny
             payload = (
-                await self._read_model_request(request, QtCommandRequest)
+                await self._read_model_request(
+                    request,
+                    QtCommandRequest,
+                    reject_large_inline_images=True,
+                )
             ).to_payload()
             command = str(payload.get("command") or "").strip().lower()
             try:
@@ -2103,12 +2232,10 @@ class FastAPIPortalController:
                         auth_open_id=str(command_payload.get("auth_open_id") or "qt"),
                         auth_user_name=str(command_payload.get("auth_user_name") or "Qt"),
                     )
-                    threading.Thread(
-                        target=self._run_notice_undo_job,
-                        args=(job_id,),
+                    self._submit_notice_undo_job(
+                        job_id,
                         name=f"ClipFlowUndoJob-{job_id[:8]}",
-                        daemon=True,
-                    ).start()
+                    )
                     job = PortalRuntime.service.get_job(job_id) or {}
                     return {
                         "ok": True,
@@ -2644,15 +2771,12 @@ class FastAPIPortalController:
             PortalRuntime.repair_refresh_last_error = ""
             PortalRuntime.repair_refresh_last_finished = 0.0
         with PortalRuntime.action_queue_lock:
-            PortalRuntime.action_queue.clear()
             PortalRuntime.action_worker_stop = False
             PortalRuntime.action_queue_event.clear()
         with PortalRuntime.upload_wait_lock:
-            PortalRuntime.upload_wait_jobs.clear()
             PortalRuntime.upload_wait_stop = False
             PortalRuntime.upload_wait_event.clear()
         with PortalRuntime.message_queue_lock:
-            PortalRuntime.message_queue.clear()
             PortalRuntime.message_worker_stop = False
             PortalRuntime.message_queue_event.clear()
 
@@ -2976,6 +3100,165 @@ class FastAPIPortalController:
                 }
             return result
 
+    def _record_job_batch_stats(
+        self,
+        *,
+        requested: int,
+        returned: int,
+        missing: int,
+        denied: int,
+    ) -> None:
+        with self._job_batch_lock:
+            stats = self._job_batch_stats
+            stats["requests"] = int(stats.get("requests") or 0) + 1
+            stats["requested_jobs"] = int(stats.get("requested_jobs") or 0) + max(
+                0, int(requested or 0)
+            )
+            stats["returned_jobs"] = int(stats.get("returned_jobs") or 0) + max(
+                0, int(returned or 0)
+            )
+            stats["missing_jobs"] = int(stats.get("missing_jobs") or 0) + max(
+                0, int(missing or 0)
+            )
+            stats["denied_jobs"] = int(stats.get("denied_jobs") or 0) + max(
+                0, int(denied or 0)
+            )
+            stats["max_request_size"] = max(
+                int(stats.get("max_request_size") or 0),
+                max(0, int(requested or 0)),
+            )
+            stats["updated_at"] = time.time()
+
+    def _job_batch_snapshot(self) -> dict:
+        with self._job_batch_lock:
+            stats = dict(self._job_batch_stats)
+        requests = max(1, int(stats.get("requests") or 0))
+        requested_jobs = int(stats.get("requested_jobs") or 0)
+        stats["avg_request_size"] = round(requested_jobs / requests, 2)
+        return stats
+
+    @staticmethod
+    def _assess_mock_pressure_result(
+        data: dict,
+        *,
+        max_submit_average_ms: float,
+        max_total_seconds: float,
+        max_failed: int,
+    ) -> dict:
+        failures: list[str] = []
+        count = int(data.get("count") or 0)
+        accepted = int(data.get("accepted") or 0)
+        failed = int(data.get("failed") or max(0, count - accepted))
+        submit_average_ms = float(data.get("submit_average_ms") or 0.0)
+        elapsed_seconds = float(data.get("elapsed_seconds") or 0.0)
+        if failed > max_failed:
+            failures.append(f"失败请求 {failed} 条，超过阈值 {max_failed} 条。")
+        if count and accepted + failed < count:
+            failures.append(
+                f"压测结果不完整：预期 {count} 条，仅统计到 {accepted + failed} 条。"
+            )
+        if submit_average_ms > max_submit_average_ms:
+            failures.append(
+                f"平均提交耗时 {submit_average_ms:.1f} ms，超过阈值 {max_submit_average_ms:.1f} ms。"
+            )
+        if elapsed_seconds > max_total_seconds:
+            failures.append(
+                f"总耗时 {elapsed_seconds:.1f} 秒，超过阈值 {max_total_seconds:.1f} 秒。"
+            )
+        site_photos = data.get("site_photos") if isinstance(data.get("site_photos"), dict) else {}
+        expected_uploads = int((site_photos or {}).get("expected_uploads") or 0)
+        expected_bytes = int((site_photos or {}).get("expected_bytes") or 0)
+        stats = data.get("stats") if isinstance(data.get("stats"), dict) else {}
+        upload_attachments = (
+            stats.get("upload_attachments")
+            if isinstance(stats.get("upload_attachments"), dict)
+            else {}
+        )
+        if expected_uploads:
+            pending = int((upload_attachments or {}).get("pending") or 0)
+            total_bytes = int((upload_attachments or {}).get("total_bytes") or 0)
+            if pending < expected_uploads:
+                failures.append(
+                    f"附件暂存 {pending} 个，少于预期 {expected_uploads} 个。"
+                )
+            if expected_bytes and total_bytes < expected_bytes:
+                failures.append(
+                    f"附件暂存大小 {total_bytes} 字节，少于预期 {expected_bytes} 字节。"
+                )
+        ok = not failures
+        return {
+            "ok": ok,
+            "summary": "达标" if ok else "未达标",
+            "failures": failures,
+            "thresholds": {
+                "max_failed": max_failed,
+                "max_submit_average_ms": max_submit_average_ms,
+                "max_total_seconds": max_total_seconds,
+            },
+            "observed": {
+                "count": count,
+                "accepted": accepted,
+                "failed": failed,
+                "submit_average_ms": submit_average_ms,
+                "elapsed_seconds": elapsed_seconds,
+                "expected_uploads": expected_uploads,
+            },
+        }
+
+    @staticmethod
+    def _slow_jobs_snapshot(jobs: list[dict], *, limit: int = 10) -> list[dict]:
+        now = time.time()
+        terminal_phases = {"success", "failed"}
+        rows: list[tuple[float, dict]] = []
+        for job in jobs:
+            if not isinstance(job, dict):
+                continue
+            request_payload = job.get("request") if isinstance(job.get("request"), dict) else {}
+            accepted_at = float(job.get("accepted_at") or 0.0)
+            if accepted_at <= 0:
+                continue
+            phase = str(job.get("phase") or "").strip() or "unknown"
+            finished_at = float(job.get("upload_finished_at") or 0.0)
+            if phase not in terminal_phases:
+                finished_at = now
+            elif finished_at <= 0:
+                finished_at = accepted_at
+            elapsed_seconds = max(0.0, finished_at - accepted_at)
+            rows.append(
+                (
+                    elapsed_seconds,
+                    {
+                        "job_id": str(job.get("job_id") or ""),
+                        "phase": phase,
+                        "elapsed_seconds": round(elapsed_seconds, 1),
+                        "work_type": str(request_payload.get("work_type") or ""),
+                        "action": str(request_payload.get("action") or ""),
+                        "title": str(request_payload.get("title") or "")[:80],
+                        "accepted_at": accepted_at,
+                        "message_seconds": FastAPIPortalController._duration_between(
+                            job.get("message_started_at"), job.get("message_finished_at")
+                        ),
+                        "upload_wait_seconds": FastAPIPortalController._duration_between(
+                            job.get("upload_queued_at"), job.get("upload_started_at")
+                        ),
+                        "upload_seconds": FastAPIPortalController._duration_between(
+                            job.get("upload_started_at"), job.get("upload_finished_at")
+                        ),
+                        "error_category": str(job.get("error_category") or ""),
+                    },
+                )
+            )
+        rows.sort(key=lambda pair: pair[0], reverse=True)
+        return [payload for _, payload in rows[: max(1, min(int(limit or 10), 50))]]
+
+    @staticmethod
+    def _duration_between(start: Any, end: Any) -> float:
+        start_ts = float(start or 0.0)
+        end_ts = float(end or 0.0)
+        if start_ts <= 0 or end_ts <= 0 or end_ts < start_ts:
+            return 0.0
+        return round(end_ts - start_ts, 1)
+
     def _register_sse(self, request: Request, stream_name: str, scope: str = "") -> tuple[tuple, int]:
         host = str(request.client.host if request.client else "unknown").strip() or "unknown"
         session_id = self._request_session_id(request)
@@ -3248,9 +3531,38 @@ class FastAPIPortalController:
         model_cls: type[APIModel],
         *,
         max_bytes: int | None = None,
+        reject_large_inline_images: bool = False,
     ) -> APIModel:
         payload = await cls._read_json_request(request, max_bytes=max_bytes)
+        if reject_large_inline_images:
+            cls._reject_large_inline_images(payload)
         return parse_api_model(model_cls, payload)
+
+    @staticmethod
+    def _reject_large_inline_images(payload: Any) -> None:
+        inline_paths: list[str] = []
+
+        def _walk(value: Any, path: str) -> None:
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    key_text = str(key or "")
+                    child_path = f"{path}.{key_text}" if path else key_text
+                    if key_text in INLINE_IMAGE_B64_FIELDS and isinstance(child, str):
+                        if child.strip():
+                            inline_paths.append(child_path)
+                            continue
+                    _walk(child, child_path)
+                return
+            if isinstance(value, list):
+                for index, child in enumerate(value):
+                    _walk(child, f"{path}[{index}]")
+
+        _walk(payload, "")
+        if inline_paths:
+            raise ValueError(
+                "图片不能以内联 base64 提交，请先上传图片生成 upload_id 后再提交。"
+                f" 位置: {', '.join(inline_paths[:3])}"
+            )
 
     @staticmethod
     def _portal_error_response(exc: Exception, *, default_status: int) -> JSONResponse:
@@ -3471,11 +3783,12 @@ class FastAPIPortalController:
                     PortalRuntime.orphan_reconcile_pending.discard(scope)
 
         try:
-            threading.Thread(
-                target=_worker,
-                name=f"LANOrphanReconcile-{scope}",
-                daemon=True,
-            ).start()
+            submitted = self._submit_background(
+                f"LANOrphanReconcile-{scope}",
+                _worker,
+            )
+            if not submitted:
+                raise RuntimeError("后端后台任务队列不可用")
         except Exception as exc:
             with PortalRuntime.orphan_reconcile_lock:
                 PortalRuntime.orphan_reconcile_pending.discard(scope)
@@ -3727,34 +4040,45 @@ class FastAPIPortalController:
         for warning in result.get("warnings") or []:
             log_warning(str(warning))
 
+    def _collect_backend_cleanup_payload(self) -> dict:
+        cleanup = PortalRuntime.service.cleanup_action_jobs()
+        queue_removed = PortalRuntime.state_store.cleanup_runtime_queue_items(
+            retention_seconds=3 * 24 * 3600,
+            max_delete=500,
+        )
+        outbox_removed = PortalRuntime.state_store.cleanup_outbox_events(
+            done_retention_seconds=24 * 3600,
+            failed_retention_seconds=7 * 24 * 3600,
+            max_delete=1000,
+        )
+        append_events_removed = PortalRuntime.state_store.cleanup_append_events(
+            retention_seconds=3 * 24 * 3600,
+            keep_latest=5000,
+            max_delete=2000,
+        )
+        undo_removed = PortalRuntime.state_store.cleanup_notice_undo_actions(
+            retain_days=7,
+        )
+        attachment_removed = (
+            PortalRuntime.state_store.cleanup_notice_upload_attachments()
+        )
+        clipboard_removed = PortalRuntime.state_store.cleanup_clipboard_candidates()
+        dialog_removed = PortalRuntime.state_store.cleanup_dialog_sessions()
+        return {
+            **cleanup,
+            "runtime_queue_removed": queue_removed,
+            "outbox_removed": outbox_removed,
+            "append_events_removed": append_events_removed,
+            "undo_removed": undo_removed,
+            "attachment_removed": attachment_removed,
+            "clipboard_removed": clipboard_removed,
+            "dialog_removed": dialog_removed,
+            "cleaned_at": time.time(),
+        }
+
     def _run_scheduled_job_cleanup(self) -> None:
         try:
-            cleanup = PortalRuntime.service.cleanup_action_jobs()
-            queue_removed = PortalRuntime.state_store.cleanup_runtime_queue_items(
-                retention_seconds=3 * 24 * 3600,
-                max_delete=500,
-            )
-            outbox_removed = PortalRuntime.state_store.cleanup_outbox_events(
-                done_retention_seconds=24 * 3600,
-                failed_retention_seconds=7 * 24 * 3600,
-                max_delete=1000,
-            )
-            append_events_removed = PortalRuntime.state_store.cleanup_append_events(
-                retention_seconds=3 * 24 * 3600,
-                keep_latest=5000,
-                max_delete=2000,
-            )
-            undo_removed = PortalRuntime.state_store.cleanup_notice_undo_actions(
-                retain_days=7,
-            )
-            payload = {
-                **cleanup,
-                "runtime_queue_removed": queue_removed,
-                "outbox_removed": outbox_removed,
-                "append_events_removed": append_events_removed,
-                "undo_removed": undo_removed,
-                "cleaned_at": time.time(),
-            }
+            payload = self._collect_backend_cleanup_payload()
             if not PortalRuntime.state_store.put_backend_runtime_async(
                 "job_cleanup",
                 payload,
@@ -4130,27 +4454,42 @@ class FastAPIPortalController:
             maximum=60.0,
         )
         sse_key, sse_id = self._register_sse(request, "qt_active_items", scope)
+        last_version_signature = ""
         try:
             while self._sse_active(sse_key, sse_id) and not await request.is_disconnected():
-                snapshot = PortalRuntime.state_store.get_ongoing_snapshot()
-                scoped_signature, scoped_count = self._scoped_ongoing_signature(
-                    scope, list(snapshot.get("items") or [])
-                )
-                qt_active_items = dict(PortalRuntime.state_store.qt_active_items_stats())
-                qt_active_items.pop("checked_at", None)
-                source_snapshot_stats = PortalRuntime.state_store.source_snapshot_stats()
-                source_active = (
-                    source_snapshot_stats.get("active")
-                    if isinstance(source_snapshot_stats, dict)
-                    else {}
-                )
-                source_active = source_active if isinstance(source_active, dict) else {}
+                ongoing_meta = PortalRuntime.state_store.get_ongoing_snapshot_meta()
+                source_active = PortalRuntime.state_store.active_source_snapshot_meta()
+                qt_active_meta = PortalRuntime.state_store.qt_active_items_meta()
                 source_signature = ":".join(
                     [
                         str(source_active.get("snapshot_id") or ""),
                         str(source_active.get("updated_at") or ""),
                     ]
                 )
+                version_signature = hashlib.sha1(
+                    "|".join(
+                        [
+                            str(scope),
+                            str(ongoing_meta.get("snapshot_id") or ""),
+                            str(ongoing_meta.get("updated_at") or ""),
+                            str(ongoing_meta.get("count") or 0),
+                            str(ongoing_meta.get("hash") or ""),
+                            source_signature,
+                            str(qt_active_meta.get("active") or 0),
+                            str(qt_active_meta.get("deleted") or 0),
+                            str(qt_active_meta.get("updated_at") or 0),
+                        ]
+                    ).encode("utf-8")
+                ).hexdigest()
+                if last_payload and version_signature == last_version_signature:
+                    await asyncio.sleep(idle_interval)
+                    continue
+                snapshot = PortalRuntime.state_store.get_ongoing_snapshot()
+                scoped_signature, scoped_count = self._scoped_ongoing_signature(
+                    scope, list(snapshot.get("items") or [])
+                )
+                qt_active_items = dict(PortalRuntime.state_store.qt_active_items_stats())
+                qt_active_items.pop("checked_at", None)
                 display_signature = hashlib.sha1(
                     f"{scoped_signature}|{source_signature}".encode("utf-8")
                 ).hexdigest()
@@ -4176,8 +4515,10 @@ class FastAPIPortalController:
                         f"id: {event_id}\nevent: qt_active_items\ndata: {payload}\n\n"
                     ).encode("utf-8")
                     last_payload = payload
+                    last_version_signature = version_signature
                     await asyncio.sleep(active_interval)
                 else:
+                    last_version_signature = version_signature
                     await asyncio.sleep(idle_interval)
         finally:
             self._unregister_sse(sse_key, sse_id)
@@ -4200,6 +4541,7 @@ class FastAPIPortalController:
         self._initialize_portal_handler_state()
         PortalRuntime.ensure_message_workers()
         PortalRuntime.ensure_action_worker()
+        PortalRuntime.ensure_upload_wait_worker()
         PortalRuntime.ensure_source_refresh_worker()
         for job_id in PortalRuntime.service.recoverable_action_job_ids():
             PortalRuntime.enqueue_initial_message_or_upload_job(job_id)
@@ -4259,6 +4601,8 @@ class FastAPIPortalController:
         PortalRuntime.ongoing_callback = None
         PortalRuntime.ongoing_delete_callback = None
         PortalRuntime.maintenance_action_callback = None
+        with suppress(Exception):
+            self._background_executor.shutdown(wait=False, cancel_futures=True)
         try:
             PortalRuntime.state_store.shutdown_write_worker(timeout=2.0)
         except Exception as exc:
@@ -4301,8 +4645,15 @@ class FastAPIPortalController:
         if phase == "uploading":
             PortalRuntime.track_upload_wait_job(job_id)
         elif phase in {"success", "failed"}:
-            with PortalRuntime.upload_wait_lock:
-                PortalRuntime.upload_wait_jobs.pop(job_id, None)
+            try:
+                PortalRuntime.state_store.mark_runtime_queue_item(
+                    "upload_wait",
+                    job_id,
+                    "done" if phase == "success" else "failed",
+                    error=str((patch or {}).get("error") or ""),
+                )
+            except Exception:
+                pass
 
     def get_job(self, job_id: str) -> dict | None:
         return PortalRuntime.service.get_job(job_id)

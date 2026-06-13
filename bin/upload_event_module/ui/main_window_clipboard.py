@@ -593,22 +593,11 @@ class MainWindowClipboardMixin:
         )
 
         if not self._is_clipboard_listener_disabled():
-            try:
-                poll_interval = max(
-                    300,
-                    min(
-                        int(
-                            os.environ.get("CLIPFLOW_CLIPBOARD_POLL_MS", "750")
-                            or 750
-                        ),
-                        5000,
-                    ),
-                )
-            except Exception:
-                poll_interval = 750
+            poll_interval = self._clipboard_file_poll_interval_ms()
             self.clipboard_file_timer.start(poll_interval)
             QTimer.singleShot(200, self._start_clipboard_listener)
-            QTimer.singleShot(0, self._replay_pending_clipboard_entries)
+            if self._should_replay_local_clipboard_entries_on_startup():
+                QTimer.singleShot(0, self._replay_pending_clipboard_entries)
         else:
             log_info("剪贴板监听: 启动时已禁用")
         self._clipboard_effective_running = bool(
@@ -616,6 +605,32 @@ class MainWindowClipboardMixin:
             and self._clipboard_process.state() == QProcess.ProcessState.Running
         )
         self._refresh_clipboard_toggle_ui()
+
+    def _clipboard_backend_direct_event_available(self) -> bool:
+        controller = getattr(self, "lan_template_portal_controller", None)
+        return bool(
+            controller is not None
+            and hasattr(controller, "post_local_clipboard_event")
+            and callable(getattr(controller, "_local_url", None))
+        )
+
+    def _clipboard_file_poll_interval_ms(self) -> int:
+        raw = os.environ.get("CLIPFLOW_CLIPBOARD_POLL_MS", "").strip()
+        if raw:
+            try:
+                return max(300, min(int(raw), 10000))
+            except Exception:
+                pass
+        default_interval = 5000 if self._clipboard_backend_direct_event_available() else 750
+        return max(300, min(default_interval, 10000))
+
+    def _should_replay_local_clipboard_entries_on_startup(self) -> bool:
+        raw = os.environ.get("CLIPFLOW_CLIPBOARD_REPLAY_LOCAL_PENDING", "").strip().lower()
+        if raw in {"1", "true", "yes", "on"}:
+            return True
+        if raw in {"0", "false", "no", "off"}:
+            return False
+        return not self._clipboard_backend_direct_event_available()
 
     def _start_clipboard_listener(self):
         if self._is_clipboard_listener_disabled() and not self._is_manual_clipboard_resume_in_progress():
@@ -1225,7 +1240,7 @@ class MainWindowClipboardMixin:
                 self._clipboard_pending_entries = self._clipboard_pending_entries[
                     -self._clipboard_retention :
                 ]
-        self.save_active_cache()
+        self.request_active_cache_save()
         return True
 
     def _remove_clipboard_pending_entry(self, entry_id: str):
@@ -1241,7 +1256,7 @@ class MainWindowClipboardMixin:
             ]
             removed = len(self._clipboard_pending_entries) != before
         if removed:
-            self.save_active_cache()
+            self.request_active_cache_save()
 
     def _get_clipboard_cache_payload(self):
         with self._clipboard_pending_lock:

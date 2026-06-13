@@ -4,7 +4,6 @@ from datetime import datetime
 from ...core.parser import extract_event_info
 from ...config import (
     POLLING_NOTICE_FIELDS,
-    POLLING_DEFAULT_SPECIALTY,
     STATUS_NEW,
     STATUS_START,
     STATUS_UPDATE,
@@ -35,9 +34,8 @@ class PollingNoticeHandler(BaseNoticeHandler):
                 payload.buildings
             )
         fields[POLLING_NOTICE_FIELDS["status"]] = status or STATUS_START
-        fields[POLLING_NOTICE_FIELDS["specialty"]] = (
-            payload.specialty or POLLING_DEFAULT_SPECIALTY
-        )  # TODO: 目前固定值，后续根据通告内容优化
+        if payload.specialty:
+            fields[POLLING_NOTICE_FIELDS["specialty"]] = payload.specialty
 
         device = self._extract_section(payload.text, "设备")
         if device:
@@ -88,9 +86,8 @@ class PollingNoticeHandler(BaseNoticeHandler):
             fields[POLLING_NOTICE_FIELDS["building"]] = self._normalize_buildings_multi(
                 payload.buildings
             )
-        fields[POLLING_NOTICE_FIELDS["specialty"]] = (
-            payload.specialty or POLLING_DEFAULT_SPECIALTY
-        )  # TODO: 目前固定值，后续根据通告内容优化
+        if payload.specialty:
+            fields[POLLING_NOTICE_FIELDS["specialty"]] = payload.specialty
 
         device = self._extract_section(payload.text, "设备")
         if device:

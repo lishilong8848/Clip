@@ -38,6 +38,19 @@ class MainWindowRecordsMixin:
         "_timer_last_update_response_time",
     )
 
+    def request_active_cache_save(self, delay_ms: int = 800, *, force: bool = False):
+        save = getattr(self, "save_active_cache", None)
+        if force:
+            if callable(save):
+                save()
+            return
+        schedule = getattr(self, "schedule_active_cache_save", None)
+        if callable(schedule):
+            schedule(delay_ms)
+            return
+        if callable(save):
+            save()
+
     @classmethod
     def _extract_event_timer_state_patch(cls, data_dict):
         if not isinstance(data_dict, dict):
@@ -86,8 +99,6 @@ class MainWindowRecordsMixin:
             getattr(self, "pending_new_by_record_id", {}),
             getattr(self, "pending_update_after_upload", {}),
             getattr(self, "pending_action_types", {}),
-            getattr(self, "_upload_queues", {}),
-            getattr(self, "_upload_workers", {}),
         ):
             if isinstance(mapping, dict):
                 busy.update(
@@ -137,6 +148,22 @@ class MainWindowRecordsMixin:
                     continue
         return False
 
+    @staticmethod
+    def _upload_state_hard_timeout_seconds() -> float:
+        try:
+            value = int(
+                str(
+                    os.environ.get(
+                        "CLIPFLOW_QT_UPLOAD_STATE_HARD_TIMEOUT_SECONDS",
+                        "300",
+                    )
+                    or "300"
+                ).strip()
+            )
+        except Exception:
+            value = 300
+        return float(max(60, min(value, 3600)))
+
     def _recover_stale_upload_states(self) -> dict[str, int]:
         recovered = 0
         now = time.monotonic()
@@ -144,13 +171,35 @@ class MainWindowRecordsMixin:
             entries = list(self._active_notice_store().entries())
         except Exception:
             entries = []
+        hard_timeout = self._upload_state_hard_timeout_seconds()
         for list_widget, item, data in entries:
             if not self._is_valid_list_item(item) or not isinstance(data, dict):
                 continue
             if not bool(data.get("_upload_in_progress")):
                 continue
             if self._upload_state_is_busy(data):
-                continue
+                started_at = float(data.get("_upload_started_monotonic") or 0.0)
+                dialog_active = False
+                is_dialog_active = getattr(self, "_is_screenshot_dialog_active", None)
+                if callable(is_dialog_active):
+                    try:
+                        dialog_active = bool(is_dialog_active())
+                    except Exception:
+                        dialog_active = False
+                if dialog_active:
+                    continue
+                if not started_at or now - started_at < hard_timeout:
+                    continue
+                clear_state = getattr(self, "clear_upload_runtime_state_for_ids", None)
+                if callable(clear_state):
+                    clear_state(
+                        data.get("record_id"),
+                        data.get("target_record_id"),
+                        data.get("feishu_record_id"),
+                        data.get("raw_record_id"),
+                    )
+                    recovered += 1
+                    continue
             started_at = float(data.get("_upload_started_monotonic") or 0.0)
             if started_at and now - started_at < 5.0:
                 continue
@@ -172,10 +221,7 @@ class MainWindowRecordsMixin:
         if recovered:
             log_warning(f"上传状态自愈: 已恢复 {recovered} 条无队列上传中条目")
             try:
-                if hasattr(self, "schedule_active_cache_save"):
-                    self.schedule_active_cache_save(800)
-                else:
-                    self.save_active_cache()
+                self.request_active_cache_save()
             except Exception:
                 pass
         return {"stale_upload_recovered": recovered}
@@ -252,7 +298,7 @@ class MainWindowRecordsMixin:
         except Exception:
             active_count = 0
         log_info(
-            "RuntimeHealth[%s]: active_items=%s validated=%s synced=%s payload_store=%s payload_alias=%s upload_workers=%s clipboard=%s app_log_bytes=%s"
+            "RuntimeHealth[%s]: active_items=%s validated=%s synced=%s payload_store=%s payload_alias=%s clipboard=%s app_log_bytes=%s"
             % (
                 reason,
                 active_count,
@@ -260,7 +306,6 @@ class MainWindowRecordsMixin:
                 len(getattr(self, "_today_in_progress_synced_record_ids", set())),
                 len(getattr(self, "_payload_store", {})),
                 len(getattr(self, "_payload_alias", {})),
-                len(getattr(self, "_upload_workers", {})),
                 clipboard_state,
                 log_size,
             )
@@ -276,10 +321,6 @@ class MainWindowRecordsMixin:
             stats.update(self._cleanup_runtime_payload_state())
         except Exception as exc:
             log_warning(f"运行态维护: payload清理失败 error={exc}")
-        try:
-            stats.update(self._cleanup_finished_upload_workers())
-        except Exception as exc:
-            log_warning(f"运行态维护: upload worker清理失败 error={exc}")
         try:
             stats.update(self._recover_stale_upload_states())
         except Exception as exc:
@@ -1342,12 +1383,13 @@ class MainWindowRecordsMixin:
         if controller is None or not hasattr(controller, "submit_qt_command"):
             return False, "本机后端未连接，无法查询多维记录。"
         try:
-            result = controller.submit_qt_command(
+            result = self._submit_qt_command(
                 "query_record_by_id",
                 {
                     "record_id": str(record_id or "").strip(),
                     "notice_type": str(notice_type or "").strip(),
                 },
+                timeout=15.0,
             )
         except Exception as exc:
             return False, str(exc)
@@ -1355,6 +1397,19 @@ class MainWindowRecordsMixin:
             record = result.get("record") if isinstance(result, dict) else {}
             return True, record if isinstance(record, dict) else {}
         return False, str((result or {}).get("message") or "查询记录失败。")
+
+    def _submit_qt_command(self, command: str, payload: dict | None = None, *, timeout: float = 120.0):
+        controller = getattr(self, "lan_template_portal_controller", None)
+        if controller is None or not hasattr(controller, "submit_qt_command"):
+            raise RuntimeError("本机后端未连接。")
+        submit = controller.submit_qt_command
+        try:
+            return submit(command, payload or {}, timeout=timeout)
+        except TypeError as exc:
+            message = str(exc)
+            if "timeout" not in message and "unexpected keyword" not in message:
+                raise
+            return submit(command, payload or {})
 
     def _run_record_binding_validation(self, local_data: dict | None):
         local_data = dict(local_data or {})
@@ -1465,6 +1520,8 @@ class MainWindowRecordsMixin:
         return self._active_notice_store().data_snapshot()
 
     def _validate_record_bindings_on_startup(self):
+        if os.environ.get("CLIPFLOW_QT_REMOTE_VALIDATION", "0") != "1":
+            return
         pending = [
             data
             for data in self._active_data_snapshot_for_startup_sync()
@@ -1568,7 +1625,7 @@ class MainWindowRecordsMixin:
                 self._record_binding_validation_pending_ids.discard(record_id)
                 self._record_binding_validated_ids.add(new_record_id)
                 self._set_record_binding_state(new_record_id, "bound", error="")
-                self.save_active_cache()
+                self.request_active_cache_save()
                 self._refresh_detail_from_cache()
 
             self._enqueue_ui_mutation("record_id_safe_bind", apply_result)
@@ -1710,7 +1767,7 @@ class MainWindowRecordsMixin:
             changed = True
 
         if changed:
-            self.save_active_cache()
+            self.request_active_cache_save()
             self._refresh_detail_from_cache()
         return changed
 
@@ -1899,6 +1956,8 @@ class MainWindowRecordsMixin:
                 self._persist_today_in_progress_state(record_id, normalized_state)
 
     def _schedule_today_in_progress_sync(self, data_dict: dict | None):
+        if os.environ.get("CLIPFLOW_QT_REMOTE_VALIDATION", "0") != "1":
+            return
         if bool(getattr(self, "_active_cache_restore_in_progress", False)):
             return
         if not self._supports_today_in_progress_toggle(data_dict):
@@ -1963,11 +2022,6 @@ class MainWindowRecordsMixin:
                     time.sleep(min(2.0, interval))
 
     def _run_today_in_progress_sync(self, data_dict: dict | None):
-        if os.environ.get("CLIPFLOW_QT_REMOTE_VALIDATION", "0") != "1":
-            record_id = self._today_in_progress_target_record_id(data_dict)
-            if record_id:
-                self._today_in_progress_pending_record_ids.discard(record_id)
-            return
         data_dict = dict(data_dict or {})
         record_id = self._today_in_progress_target_record_id(data_dict)
         notice_type = str(data_dict.get("notice_type") or "").strip()
@@ -2005,6 +2059,8 @@ class MainWindowRecordsMixin:
         self._enqueue_ui_mutation("today_in_progress_sync", apply_result)
 
     def _schedule_today_in_progress_sync_on_startup(self):
+        if os.environ.get("CLIPFLOW_QT_REMOTE_VALIDATION", "0") != "1":
+            return
         pending = [
             data
             for data in self._active_data_snapshot_for_startup_sync()
@@ -2095,7 +2151,7 @@ class MainWindowRecordsMixin:
 
         def worker():
             try:
-                result_payload = controller.submit_qt_command(
+                result_payload = self._submit_qt_command(
                     "set_today_in_progress",
                     {
                         "record_id": record_id,
@@ -2107,6 +2163,7 @@ class MainWindowRecordsMixin:
                         "field_name": field_name,
                         "field_value": field_value,
                     },
+                    timeout=30.0,
                 )
                 success = bool((result_payload or {}).get("ok"))
                 result = str((result_payload or {}).get("message") or "")
@@ -2591,10 +2648,53 @@ class MainWindowRecordsMixin:
     def _build_active_item_index(self):
         self._active_notice_store().rebuild()
 
+    def _active_model_item_for_row(self, list_widget, row: int):
+        model = self._active_notice_model_for_list(list_widget)
+        if model is None:
+            return None
+        try:
+            row = int(row)
+        except Exception:
+            return None
+        if row < 0:
+            return None
+        record = model.record_at(row)
+        if not isinstance(record, dict):
+            return None
+        return self._active_model_item(list_widget, record)
+
     def _find_active_item_by_record_id(self, record_id):
+        if self._active_model_view_visible():
+            record_id = str(record_id or "").strip()
+            if not record_id:
+                return None, None
+            for list_widget in (self.list_active_event, self.list_active_other):
+                model = self._active_notice_model_for_list(list_widget)
+                if model is None:
+                    continue
+                item = self._active_model_item_for_row(
+                    list_widget,
+                    model.row_for_record_id(record_id),
+                )
+                if item and self._is_valid_list_item(item):
+                    return list_widget, item
         return self._active_notice_store().find_by_record_id(record_id)
 
     def _find_active_item_by_active_item_id(self, active_item_id):
+        if self._active_model_view_visible():
+            active_item_id = str(active_item_id or "").strip()
+            if not active_item_id:
+                return None, None
+            for list_widget in (self.list_active_event, self.list_active_other):
+                model = self._active_notice_model_for_list(list_widget)
+                if model is None:
+                    continue
+                item = self._active_model_item_for_row(
+                    list_widget,
+                    model.row_for_active_item_id(active_item_id),
+                )
+                if item and self._is_valid_list_item(item):
+                    return list_widget, item
         return self._active_notice_store().find_by_active_item_id(active_item_id)
 
     def _upload_completion_record_id_candidates(self, record_id) -> list[str]:
@@ -2609,7 +2709,7 @@ class MainWindowRecordsMixin:
                 candidates.append(text)
 
         add(seed)
-        for mapping_name in ("_payload_alias", "_upload_key_alias"):
+        for mapping_name in ("_payload_alias",):
             mapping = getattr(self, mapping_name, None)
             if not isinstance(mapping, dict):
                 continue
@@ -2641,16 +2741,9 @@ class MainWindowRecordsMixin:
             matched = values & candidate_set
             if matched:
                 return list_widget, item, next(iter(matched))
-            try:
-                if self._get_upload_key(data.get("record_id")) == self._get_upload_key(
-                    record_id
-                ):
-                    return list_widget, item, str(data.get("record_id") or "")
-            except Exception:
-                pass
         return None, None, ""
 
-    def _update_active_item_data(self, record_id, data_dict):
+    def _update_active_item_data(self, record_id, data_dict, *, persist_cache=True):
         list_widget, item = self._find_active_item_by_record_id(record_id)
         if item:
             if not self._is_valid_list_item(item):
@@ -2662,13 +2755,19 @@ class MainWindowRecordsMixin:
                 list_widget=list_widget,
                 item=item,
             )
+            if not persist_cache:
+                if self._should_defer_ui_refresh():
+                    self._mark_cache_refresh_needed()
+                elif committed:
+                    self._apply_cache_to_item(list_widget, item, committed)
+                return
             cache_updated = bool(
                 committed
                 and hasattr(self, "_upsert_active_cache_record")
                 and self._upsert_active_cache_record(committed)
             )
             if not cache_updated:
-                self.save_active_cache()
+                self.request_active_cache_save()
             if self._should_defer_ui_refresh():
                 self._mark_cache_refresh_needed()
             elif committed:
@@ -3274,7 +3373,7 @@ class MainWindowRecordsMixin:
                     hasattr(self, "_upsert_active_cache_record")
                     and self._upsert_active_cache_record(data_dict)
                 ):
-                    self.save_active_cache()
+                    self.request_active_cache_save()
             return item, None
         log_warning("活动列表 model/delegate 未初始化，拒绝回退到旧 QWidget 列表。")
         self._schedule_pending_cache_refresh()
@@ -3286,7 +3385,7 @@ class MainWindowRecordsMixin:
         try:
             changed = self._replace_record_id_everywhere(old_record_id, new_record_id)
             if changed:
-                self.save_active_cache()
+                self.request_active_cache_save()
         except Exception:
             return
 
@@ -3328,7 +3427,7 @@ class MainWindowRecordsMixin:
                 list_widget=list_widget,
                 item=item_ref,
             )
-            self.save_active_cache()
+            self.request_active_cache_save()
         except Exception:
             return
 
@@ -3406,9 +3505,86 @@ class MainWindowRecordsMixin:
             if self.current_screenshot_record_id in screenshot_candidates:
                 self.current_screenshot_record_id = None
                 self.current_screenshot_action_type = None
-            self.save_active_cache()
+            self.request_active_cache_save()
         else:
             # 清除所有 pending 状态 (慎用，通常只在完全重置时)
             self._set_last_ui_op("restore_all_skipped")
             return
 
+    def clear_upload_runtime_state_for_ids(self, *record_ids):
+        """Clear Qt-local upload markers for all aliases of the given IDs.
+
+        The backend is the business owner now.  Qt may still temporarily mark a
+        card as uploading while it waits for a backend command result, but the
+        cleanup must cover both the old placeholder ID and the real target ID.
+        """
+        candidate_ids: list[str] = []
+        for record_id in record_ids:
+            text = str(record_id or "").strip()
+            if not text:
+                continue
+            try:
+                candidate_ids.extend(self._upload_completion_record_id_candidates(text))
+            except Exception:
+                candidate_ids.append(text)
+        seen: set[str] = set()
+        normalized_ids = []
+        for record_id in candidate_ids:
+            text = str(record_id or "").strip()
+            if text and text not in seen:
+                normalized_ids.append(text)
+                seen.add(text)
+        if not normalized_ids:
+            return
+
+        for record_id in normalized_ids:
+            try:
+                self.pending_action_record_ids.discard(record_id)
+            except Exception:
+                pass
+            try:
+                self.pending_action_types.pop(record_id, None)
+            except Exception:
+                pass
+            try:
+                self.pending_upload_rollback_by_record_id.pop(record_id, None)
+            except Exception:
+                pass
+
+        changed = False
+        for record_id in normalized_ids:
+            list_widget, item, _matched = self._find_active_item_by_upload_completion_id(
+                record_id
+            )
+            if item and not self._is_valid_list_item(item):
+                continue
+            if list_widget is None or item is None:
+                continue
+            data = item.data(Qt.ItemDataRole.UserRole) or {}
+            if not isinstance(data, dict):
+                continue
+            if (
+                data.get("_upload_in_progress")
+                or data.get("_pending_upload_hash") is not None
+                or data.get("_upload_started_monotonic") is not None
+            ):
+                data = dict(data)
+                data["_upload_in_progress"] = False
+                data["_pending_upload_hash"] = None
+                data.pop("_upload_started_monotonic", None)
+                item.setData(Qt.ItemDataRole.UserRole, data)
+                self._rebuild_active_item_widget(
+                    list_widget,
+                    item,
+                    data,
+                    force_status=None,
+                    upload_in_progress=False,
+                    pending_upload_hash=None,
+                    has_unuploaded_changes=data.get("_has_unuploaded_changes"),
+                )
+                changed = True
+        if changed:
+            try:
+                self.request_active_cache_save()
+            except Exception:
+                pass

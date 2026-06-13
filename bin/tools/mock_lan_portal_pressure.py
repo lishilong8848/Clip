@@ -94,6 +94,9 @@ def run_pressure(
     per_scope: int = 0,
     query_jobs: bool = True,
     scenario: str = "accepted",
+    with_site_photos: bool = False,
+    site_photo_count: int = 1,
+    site_photo_kb: int = 32,
 ) -> dict:
     controller = FastAPIPortalController(host="127.0.0.1", port=18766)
     original_service = PortalRuntime.service
@@ -140,7 +143,39 @@ def run_pressure(
                 scope_plan.append(("ALL", index))
         count = len(scope_plan)
 
+        site_photo_count = max(1, min(int(site_photo_count or 1), 3))
+        site_photo_kb = max(1, min(int(site_photo_kb or 32), 512))
+        site_photo_bytes = (
+            b"\x89PNG\r\n\x1a\n" + (b"mock-site-photo" * 4096)
+        )[: site_photo_kb * 1024]
+        if len(site_photo_bytes) < site_photo_kb * 1024:
+            site_photo_bytes = site_photo_bytes.ljust(site_photo_kb * 1024, b"0")
+
+        def upload_site_photos(scope: str, scope_index: int) -> list[dict]:
+            if not with_site_photos:
+                return []
+            uploads: list[dict] = []
+            for photo_index in range(1, site_photo_count + 1):
+                response = client.post(
+                    f"/api/notice-attachments?file_name=mock_{scope}_{scope_index}_{photo_index}.png",
+                    headers={**headers, "Content-Type": "image/png"},
+                    content=site_photo_bytes,
+                )
+                if response.status_code != 200:
+                    raise RuntimeError(response.text)
+                payload = response.json().get("data") or {}
+                uploads.append(
+                    {
+                        "upload_id": str(payload.get("upload_id") or ""),
+                        "file_name": str(payload.get("file_name") or ""),
+                        "mime_type": str(payload.get("mime_type") or "image/png"),
+                        "size": int(payload.get("size") or 0),
+                    }
+                )
+            return uploads
+
         def submit(index: int, scope: str, scope_index: int) -> tuple[int, str, int, int, str]:
+            extra_images = upload_site_photos(scope, scope_index)
             response = client.post(
                 "/api/workbench-actions",
                 headers=headers,
@@ -157,6 +192,7 @@ def run_pressure(
                     "impact": "测试测试测试",
                     "progress": "测试测试测试",
                     "maintenance_cycle": "/",
+                    "extra_images": extra_images,
                 },
             )
             job_id = ""
@@ -237,6 +273,15 @@ def run_pressure(
             "job_query_ok": job_query_ok,
             "job_query_seconds": round(job_query_elapsed, 3),
             "job_phase_counts": phase_counts,
+            "site_photos": {
+                "enabled": bool(with_site_photos),
+                "per_notice": site_photo_count if with_site_photos else 0,
+                "photo_kb": site_photo_kb if with_site_photos else 0,
+                "expected_uploads": count * site_photo_count if with_site_photos else 0,
+                "expected_bytes": count * site_photo_count * site_photo_kb * 1024
+                if with_site_photos
+                else 0,
+            },
             "stats_status": stats_response.status_code,
             "stats_seconds": round(stats_elapsed, 3),
             "stats": {
@@ -249,6 +294,7 @@ def run_pressure(
                 "upload_wait_size": stats_data.get("upload_wait_size"),
                 "source_refresh_inflight": stats_data.get("source_refresh_inflight"),
                 "repair_refresh_inflight": stats_data.get("repair_refresh_inflight"),
+                "upload_attachments": stats_data.get("upload_attachments"),
             },
         }
     finally:
@@ -298,6 +344,13 @@ def main() -> None:
         default="accepted",
         help="模拟外部链路结果，不触发真实飞书或多维。",
     )
+    parser.add_argument(
+        "--with-site-photos",
+        action="store_true",
+        help="每条 mock 通告先走附件接口上传现场照片，再提交 upload_id。",
+    )
+    parser.add_argument("--site-photo-count", type=int, default=1, help="每条通告照片数量，1-3。")
+    parser.add_argument("--site-photo-kb", type=int, default=32, help="每张 mock 照片大小 KB，1-512。")
     args = parser.parse_args()
     repeat = max(1, int(args.repeat or 1))
     runs = []
@@ -310,6 +363,9 @@ def main() -> None:
             per_scope=max(0, int(args.per_scope or 0)),
             query_jobs=not bool(args.no_job_query),
             scenario=args.scenario,
+            with_site_photos=bool(args.with_site_photos),
+            site_photo_count=max(1, int(args.site_photo_count or 1)),
+            site_photo_kb=max(1, int(args.site_photo_kb or 32)),
         )
         result["run"] = index + 1
         threshold_failures = []
@@ -338,6 +394,11 @@ def main() -> None:
         "scopes": runs[0].get("scopes") if runs else [],
         "per_scope": int(runs[0].get("per_scope") or 0) if runs else 0,
         "scenario": args.scenario,
+        "site_photos": {
+            "enabled": bool(args.with_site_photos),
+            "per_notice": max(1, int(args.site_photo_count or 1)) if args.with_site_photos else 0,
+            "photo_kb": max(1, int(args.site_photo_kb or 32)) if args.with_site_photos else 0,
+        },
         "runs": runs,
         "max_submit_average_ms": max(
             (float(item.get("submit_average_ms") or 0) for item in runs),

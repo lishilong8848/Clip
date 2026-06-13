@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import copy
 import hashlib
 import html
@@ -121,18 +120,15 @@ class PortalRuntime:
     ongoing_delete_callback = None
     maintenance_action_callback = None
     last_ongoing_error = ""
-    action_queue: list[str] = []
     action_queue_lock = threading.RLock()
     action_queue_event = threading.Event()
     action_worker_thread: threading.Thread | None = None
     action_worker_stop = False
     action_upload_timeout_s = 30 * 60
     upload_wait_thread: threading.Thread | None = None
-    upload_wait_jobs: dict[str, float] = {}
     upload_wait_lock = threading.RLock()
     upload_wait_event = threading.Event()
     upload_wait_stop = False
-    message_queue: list[str] = []
     message_queue_lock = threading.RLock()
     message_queue_event = threading.Event()
     message_worker_threads: list[threading.Thread] = []
@@ -277,12 +273,9 @@ class PortalRuntime:
 
     @classmethod
     def runtime_pressure(cls) -> dict:
-        with cls.message_queue_lock:
-            message_queue_size = len(cls.message_queue)
-        with cls.action_queue_lock:
-            qt_queue_size = len(cls.action_queue)
-        with cls.upload_wait_lock:
-            upload_wait_size = len(cls.upload_wait_jobs)
+        message_queue_size = 0
+        qt_queue_size = 0
+        upload_wait_size = 0
         runtime_counts = {}
         try:
             runtime_counts = cls.state_store.runtime_queue_details()
@@ -295,6 +288,21 @@ class PortalRuntime:
                 continue
             queued_due += int(details.get("queued_due") or 0)
             processing_active += int(details.get("processing_active") or 0)
+        message_details = (runtime_counts or {}).get("message")
+        if isinstance(message_details, dict):
+            message_queue_size = int(message_details.get("queued_due") or 0) + int(
+                message_details.get("queued_future") or 0
+            )
+        qt_details = (runtime_counts or {}).get("qt_action")
+        if isinstance(qt_details, dict):
+            qt_queue_size = int(qt_details.get("queued_due") or 0) + int(
+                qt_details.get("queued_future") or 0
+            )
+        upload_wait_details = (runtime_counts or {}).get("upload_wait")
+        if isinstance(upload_wait_details, dict):
+            upload_wait_size = int(upload_wait_details.get("queued_due") or 0) + int(
+                upload_wait_details.get("queued_future") or 0
+            ) + int(upload_wait_details.get("processing_active") or 0)
         active_jobs = 0
         try:
             with cls.service._jobs_lock:
@@ -2005,7 +2013,6 @@ class PortalRuntime:
     def stop_message_workers(cls) -> None:
         with cls.message_queue_lock:
             cls.message_worker_stop = True
-            cls.message_queue.clear()
             cls.message_scope_inflight.clear()
             cls.message_queue_event.set()
             workers = list(cls.message_worker_threads)
@@ -2038,16 +2045,26 @@ class PortalRuntime:
         except Exception:
             pass
         with cls.message_queue_lock:
-            if job_id not in cls.message_queue:
-                cls.message_queue.append(job_id)
             cls._update_message_queue_positions_locked()
         cls.ensure_message_workers()
         cls.message_queue_event.set()
 
     @classmethod
     def _update_message_queue_positions_locked(cls) -> None:
-        total = len(cls.message_queue)
-        for index, queued_job_id in enumerate(cls.message_queue, start=1):
+        try:
+            queued_items = cls.state_store.list_runtime_queue_items(
+                "message",
+                statuses=("queued",),
+                due_only=False,
+                limit=500,
+            )
+        except Exception:
+            queued_items = []
+        total = len(queued_items)
+        for index, item in enumerate(queued_items, start=1):
+            queued_job_id = str((item or {}).get("job_id") or "").strip()
+            if not queued_job_id:
+                continue
             cls.service.mark_job(
                 queued_job_id,
                 phase="accepted",
@@ -2095,29 +2112,37 @@ class PortalRuntime:
         batch = [primary_job_id]
         max_jobs = max(1, int(getattr(cls, "message_batch_max_jobs", 20) or 20))
         with cls.message_queue_lock:
-            if not cls.message_queue:
+            try:
+                queued_items = cls.state_store.list_runtime_queue_items(
+                    "message",
+                    statuses=("queued",),
+                    due_only=True,
+                    limit=max_jobs * 4,
+                )
+            except Exception:
+                queued_items = []
+            if not queued_items:
                 return batch
-            remaining: list[str] = []
-            for queued_job_id in cls.message_queue:
-                queued_job_id = str(queued_job_id or "").strip()
+            for item in queued_items:
+                queued_job_id = str((item or {}).get("job_id") or "").strip()
                 if not queued_job_id:
                     continue
-                if len(batch) < max_jobs and cls._message_job_scope(queued_job_id) == scope:
-                    batch.append(queued_job_id)
+                if len(batch) >= max_jobs:
+                    break
+                if cls._message_job_scope(queued_job_id) == scope:
+                    if not cls._runtime_queue_job_processable("message", queued_job_id):
+                        continue
                     try:
-                        cls.state_store.mark_runtime_queue_item(
+                        leased = cls.state_store.lease_runtime_queue_item(
                             "message",
                             queued_job_id,
-                            "processing",
+                            lease_seconds=30,
                         )
                     except Exception:
-                        pass
-                    continue
-                remaining.append(queued_job_id)
-            cls.message_queue = remaining
+                        leased = False
+                    if leased:
+                        batch.append(queued_job_id)
             cls._update_message_queue_positions_locked()
-            if not cls.message_queue:
-                cls.message_queue_event.clear()
         return batch
 
     @classmethod
@@ -2127,8 +2152,7 @@ class PortalRuntime:
             return
         with cls.message_queue_lock:
             cls.message_scope_inflight.discard(scope)
-            if cls.message_queue:
-                cls.message_queue_event.set()
+            cls.message_queue_event.set()
 
     @classmethod
     def _process_message_batch(cls, batched_prepared: list[tuple[str, dict]]) -> None:
@@ -2217,35 +2241,39 @@ class PortalRuntime:
         queue_name = str(queue_name or "").strip()
         if queue_name == "message":
             with cls.message_queue_lock:
-                if cls.message_queue:
-                    selected_index = -1
-                    selected_scope = ""
-                    for index, queued_job_id in enumerate(cls.message_queue):
-                        queued_job_id = str(queued_job_id or "").strip()
-                        if not queued_job_id:
-                            continue
-                        scope = cls._message_job_scope(queued_job_id)
-                        if scope and scope in cls.message_scope_inflight:
-                            continue
-                        selected_index = index
-                        selected_scope = scope
-                        break
-                    if selected_index >= 0:
-                        job_id = cls.message_queue.pop(selected_index)
-                        if selected_scope:
-                            cls.message_scope_inflight.add(selected_scope)
-                        cls._update_message_queue_positions_locked()
-                        return str(job_id or "").strip()
-                    cls.message_queue_event.clear()
-                    return ""
+                for _attempt in range(10):
+                    try:
+                        leased = cls.state_store.lease_runtime_queue_items(
+                            "message",
+                            limit=1,
+                            lease_seconds=30,
+                        )
+                    except Exception:
+                        leased = []
+                    if not leased:
+                        cls.message_queue_event.clear()
+                        return ""
+                    job_id = str((leased[0] or {}).get("job_id") or "").strip()
+                    if not cls._runtime_queue_job_processable("message", job_id):
+                        continue
+                    scope = cls._message_job_scope(job_id)
+                    if scope and scope in cls.message_scope_inflight:
+                        try:
+                            cls.state_store.requeue_runtime_queue_item(
+                                "message",
+                                job_id,
+                                available_at=time.time() + 0.5,
+                                error="waiting_for_same_scope_message_batch",
+                            )
+                        except Exception:
+                            pass
+                        continue
+                    if scope:
+                        cls.message_scope_inflight.add(scope)
+                    cls._update_message_queue_positions_locked()
+                    return job_id
                 cls.message_queue_event.clear()
-        elif queue_name == "qt_action":
-            with cls.action_queue_lock:
-                if cls.action_queue:
-                    job_id = cls.action_queue.pop(0)
-                    cls._update_queue_positions_locked()
-                    return str(job_id or "").strip()
-                cls.action_queue_event.clear()
+                return ""
         for _attempt in range(5):
             try:
                 leased = cls.state_store.lease_runtime_queue_items(
@@ -2256,6 +2284,8 @@ class PortalRuntime:
             except Exception:
                 leased = []
             if not leased:
+                if queue_name == "qt_action":
+                    cls.action_queue_event.clear()
                 return ""
             job_id = str((leased[0] or {}).get("job_id") or "").strip()
             if cls._runtime_queue_job_processable(queue_name, job_id):
@@ -2399,7 +2429,6 @@ class PortalRuntime:
     def stop_action_worker(cls) -> None:
         with cls.action_queue_lock:
             cls.action_worker_stop = True
-            cls.action_queue.clear()
             cls._update_queue_positions_locked()
             cls.action_queue_event.set()
             worker = cls.action_worker_thread
@@ -2419,16 +2448,26 @@ class PortalRuntime:
         except Exception:
             pass
         with cls.action_queue_lock:
-            if job_id not in cls.action_queue:
-                cls.action_queue.append(job_id)
             cls._update_queue_positions_locked()
         cls.ensure_action_worker()
         cls.action_queue_event.set()
 
     @classmethod
     def _update_queue_positions_locked(cls) -> None:
-        total = len(cls.action_queue)
-        for index, queued_job_id in enumerate(cls.action_queue, start=1):
+        try:
+            queued_items = cls.state_store.list_runtime_queue_items(
+                "qt_action",
+                statuses=("queued",),
+                due_only=False,
+                limit=500,
+            )
+        except Exception:
+            queued_items = []
+        total = len(queued_items)
+        for index, item in enumerate(queued_items, start=1):
+            queued_job_id = str((item or {}).get("job_id") or "").strip()
+            if not queued_job_id:
+                continue
             cls.service.mark_job(
                 queued_job_id,
                 phase="qt_queued",
@@ -2481,7 +2520,6 @@ class PortalRuntime:
     def stop_upload_wait_worker(cls) -> None:
         with cls.upload_wait_lock:
             cls.upload_wait_stop = True
-            cls.upload_wait_jobs.clear()
             cls.upload_wait_event.set()
             worker = cls.upload_wait_thread
         if worker and worker.is_alive():
@@ -2502,15 +2540,15 @@ class PortalRuntime:
         if str(job.get("phase") or "") != "uploading":
             return
         cls.ensure_upload_wait_worker()
+        deadline_at = time.time() + cls.action_upload_timeout_s
         with cls.upload_wait_lock:
-            deadline = time.monotonic() + cls.action_upload_timeout_s
-            cls.upload_wait_jobs[job_id] = deadline
             cls.upload_wait_event.set()
         try:
             cls.state_store.upsert_runtime_queue_item(
                 "upload_wait",
                 job_id,
-                payload={"deadline_monotonic": deadline},
+                payload={"deadline_at": deadline_at},
+                available_at=deadline_at,
             )
         except Exception:
             pass
@@ -2518,53 +2556,70 @@ class PortalRuntime:
     @classmethod
     def _upload_wait_worker_loop(cls) -> None:
         while True:
-            cls.upload_wait_event.wait(timeout=1.2)
+            cls.upload_wait_event.wait(timeout=5.0)
             if cls.upload_wait_stop or cls.action_worker_stop:
                 return
-            now = time.monotonic()
-            to_remove: list[str] = []
-            timed_out: list[str] = []
-            with cls.upload_wait_lock:
-                items = list(cls.upload_wait_jobs.items())
-            for job_id, deadline in items:
-                job = cls.service.get_job(job_id) or {}
-                phase = str(job.get("phase") or "")
-                if phase in {"success", "failed"} or phase != "uploading":
-                    to_remove.append(job_id)
-                    try:
-                        cls.state_store.mark_runtime_queue_item(
-                            "upload_wait",
-                            job_id,
-                            "done" if phase == "success" else "failed" if phase == "failed" else "cancelled",
-                        )
-                    except Exception:
-                        pass
-                    continue
-                if now >= deadline:
-                    to_remove.append(job_id)
-                    timed_out.append(job_id)
-            if to_remove:
+            pending_count = cls._scan_upload_wait_queue_once()
+            if pending_count == 0:
                 with cls.upload_wait_lock:
-                    for job_id in to_remove:
-                        cls.upload_wait_jobs.pop(job_id, None)
-            for job_id in timed_out:
-                cls.service.mark_job(
-                    job_id,
-                    phase="failed",
-                    error="上传多维超时，请在主界面确认实际结果后重试。",
-                )
+                    cls.upload_wait_event.clear()
+
+    @classmethod
+    def _scan_upload_wait_queue_once(cls) -> int:
+        now = time.time()
+        pending_count = 0
+        timed_out: list[str] = []
+        try:
+            items = cls.state_store.list_runtime_queue_items(
+                "upload_wait",
+                statuses=("queued", "processing"),
+                due_only=False,
+                limit=500,
+            )
+        except Exception:
+            items = []
+        for item in items:
+            job_id = str((item or {}).get("job_id") or "").strip()
+            if not job_id:
+                continue
+            job = cls.service.get_job(job_id) or {}
+            phase = str(job.get("phase") or "")
+            payload = (item or {}).get("payload") if isinstance(item, dict) else {}
+            payload = payload if isinstance(payload, dict) else {}
+            try:
+                deadline_at = float(payload.get("deadline_at") or item.get("available_at") or 0)
+            except Exception:
+                deadline_at = 0.0
+            if phase in {"success", "failed"} or phase != "uploading":
                 try:
                     cls.state_store.mark_runtime_queue_item(
                         "upload_wait",
                         job_id,
-                        "failed",
-                        error="上传多维超时，请在主界面确认实际结果后重试。",
+                        "done" if phase == "success" else "failed" if phase == "failed" else "cancelled",
                     )
                 except Exception:
                     pass
-            with cls.upload_wait_lock:
-                if not cls.upload_wait_jobs:
-                    cls.upload_wait_event.clear()
+                continue
+            if deadline_at and now >= deadline_at:
+                timed_out.append(job_id)
+                continue
+            pending_count += 1
+        for job_id in timed_out:
+            cls.service.mark_job(
+                job_id,
+                phase="failed",
+                error="上传多维超时，请在主界面确认实际结果后重试。",
+            )
+            try:
+                cls.state_store.mark_runtime_queue_item(
+                    "upload_wait",
+                    job_id,
+                    "failed",
+                    error="上传多维超时，请在主界面确认实际结果后重试。",
+                )
+            except Exception:
+                pass
+        return pending_count
 
     @staticmethod
     def _existing_tokens_for_notice_type(notice_type: str, fields: dict) -> tuple[list[str], list[str], str]:
@@ -2615,6 +2670,8 @@ class PortalRuntime:
     def _prepared_to_notice_payload(
         prepared: dict,
         *,
+        file_tokens: list[str] | None = None,
+        extra_file_tokens: list[str] | None = None,
         existing_file_tokens: list[str] | None = None,
         existing_extra_file_tokens: list[str] | None = None,
         existing_response_time: str | None = None,
@@ -2633,6 +2690,8 @@ class PortalRuntime:
             event_source=str(prepared.get("event_source") or "").strip() or None,
             response_time=str(prepared.get("response_time") or "").strip() or None,
             occurrence_date=str(prepared.get("time_str") or "").strip() or None,
+            file_tokens=list(file_tokens or []) or None,
+            extra_file_tokens=list(extra_file_tokens or []) or None,
             existing_file_tokens=list(existing_file_tokens or []) or None,
             existing_extra_file_tokens=list(existing_extra_file_tokens or []) or None,
             existing_response_time=existing_response_time or None,
@@ -2641,6 +2700,67 @@ class PortalRuntime:
             robot_group_choice="auto",
             maintenance_cycle=str(prepared.get("maintenance_cycle") or "").strip() or None,
         )
+
+    @staticmethod
+    def _notice_supports_site_image_field(notice_type: str) -> bool:
+        return str(notice_type or "").strip() in {"维保通告", "设备检修"}
+
+    @classmethod
+    def _has_extra_images_payload(cls, payload: dict) -> bool:
+        images = payload.get("extra_images") if isinstance(payload, dict) else []
+        if not isinstance(images, list):
+            return False
+        for item in images:
+            if isinstance(item, dict):
+                if str(
+                    item.get("upload_id")
+                    or item.get("file_token")
+                    or item.get("token")
+                    or ""
+                ).strip():
+                    return True
+        return False
+
+    @classmethod
+    def _upload_extra_images_for_notice(
+        cls,
+        payload: dict,
+        notice_type: str,
+    ) -> tuple[bool, str, list[str], list[str]]:
+        images = payload.get("extra_images") if isinstance(payload, dict) else []
+        if not isinstance(images, list):
+            return True, "", [], []
+        uploaded_tokens: list[str] = []
+        for index, entry in enumerate(images, start=1):
+            entry = entry if isinstance(entry, dict) else {}
+            existing_token = str(entry.get("file_token") or entry.get("token") or "").strip()
+            if existing_token:
+                uploaded_tokens.append(existing_token)
+                continue
+            upload_id = str(entry.get("upload_id") or "").strip()
+            if upload_id:
+                attachment = cls.state_store.get_notice_upload_attachment(upload_id)
+                if not attachment:
+                    return False, "现场照片已过期或不存在，请重新添加。", [], []
+                image_bytes = bytes(attachment.get("content") or b"")
+                file_name = str(
+                    entry.get("file_name")
+                    or attachment.get("file_name")
+                    or f"site_photo_{index}.png"
+                ).strip()
+                if not image_bytes:
+                    return False, "现场照片内容为空，请重新添加。", [], []
+                success, result = upload_media_to_feishu(image_bytes, file_name=file_name)
+                if not success:
+                    return False, str(result or "现场照片上传失败。"), [], []
+                cls.state_store.mark_notice_upload_attachment_used(upload_id)
+                uploaded_tokens.append(str(result or "").strip())
+                continue
+        if not uploaded_tokens:
+            return True, "", [], []
+        if cls._notice_supports_site_image_field(notice_type):
+            return True, "", [], uploaded_tokens
+        return True, "", uploaded_tokens, []
 
     @staticmethod
     def _remote_record_not_found(message: object) -> bool:
@@ -3217,6 +3337,8 @@ class PortalRuntime:
         action = str(prepared.get("action") or "").strip().lower()
         if not notice_type or action not in {"start", "update", "end"}:
             return False, "后端上传缺少必要字段。", ""
+        if action == "end" and not cls._has_extra_images_payload(prepared):
+            return False, "结束通告前必须添加至少一张现场照片。", ""
         guard = external_real_write_guard()
         if guard["mock_external"]:
             job_id = str(prepared.get("job_id") or "").strip() or "mock"
@@ -3227,6 +3349,11 @@ class PortalRuntime:
             return True, record_id, record_id
         if not guard["real_write_allowed"]:
             return False, str(guard["reason"] or "真实外部写入未确认。"), ""
+        images_ok, images_error, image_file_tokens, image_extra_file_tokens = (
+            cls._upload_extra_images_for_notice(prepared, notice_type)
+        )
+        if not images_ok:
+            return False, images_error or "现场照片上传失败。", ""
 
         if action == "start":
             existing_target = cls._existing_target_for_prepared_start(
@@ -3235,7 +3362,11 @@ class PortalRuntime:
             )
             if existing_target:
                 return True, existing_target, existing_target
-            payload = cls._prepared_to_notice_payload(prepared)
+            payload = cls._prepared_to_notice_payload(
+                prepared,
+                file_tokens=image_file_tokens,
+                extra_file_tokens=image_extra_file_tokens,
+            )
             ok, result = create_bitable_record_by_payload(notice_type, payload)
             record_id = str(result or "").strip() if ok else ""
             return bool(ok), str(result or ""), record_id
@@ -3283,6 +3414,8 @@ class PortalRuntime:
         )
         payload = cls._prepared_to_notice_payload(
             prepared,
+            file_tokens=image_file_tokens,
+            extra_file_tokens=image_extra_file_tokens,
             existing_file_tokens=existing_tokens,
             existing_extra_file_tokens=existing_extra_tokens,
             existing_response_time=existing_response_time if action == "update" else "",
@@ -3444,13 +3577,6 @@ class PortalRuntime:
             },
         )
 
-    @staticmethod
-    def _decode_local_notice_bytes(encoded: str) -> bytes:
-        text = str(encoded or "").strip()
-        if not text:
-            return b""
-        return base64.b64decode(text.encode("utf-8"))
-
     @classmethod
     def execute_local_notice_upload(cls, request_payload: dict) -> dict:
         payload = dict(request_payload or {})
@@ -3530,16 +3656,43 @@ class PortalRuntime:
                 }
             prequery_result = query_result if isinstance(query_result, dict) else {}
 
-        screenshot_bytes = b""
-        screenshot_b64 = str(payload.get("screenshot_bytes_b64") or "").strip()
-        if screenshot_b64:
-            screenshot_bytes = cls._decode_local_notice_bytes(screenshot_b64)
         extra_images = payload.get("extra_images") if isinstance(payload.get("extra_images"), list) else []
+        if action_type == "end" and not cls._has_extra_images_payload({"extra_images": extra_images}):
+            return {
+                "ok": False,
+                "name": "结束",
+                "message": "结束通告前必须添加至少一张现场照片。",
+                "record_id": target_record_id or record_id,
+                "real_record_id": "",
+            }
+
         extra_file_tokens: list[str] = []
         file_tokens: list[str] = []
 
+        screenshot_upload_id = str(payload.get("screenshot_upload_id") or "").strip()
+        screenshot_bytes = b""
+        screenshot_file_name = str(
+            payload.get("screenshot_file_name") or "notice_screenshot.png"
+        ).strip()
+        if screenshot_upload_id:
+            attachment = cls.state_store.get_notice_upload_attachment(screenshot_upload_id)
+            if not attachment:
+                return {
+                    "ok": False,
+                    "name": "截图上传",
+                    "message": "截图已过期或不存在，请重新选择。",
+                    "record_id": record_id,
+                    "real_record_id": "",
+                }
+            screenshot_bytes = bytes(attachment.get("content") or b"")
+            screenshot_file_name = str(
+                attachment.get("file_name") or screenshot_file_name
+            ).strip()
         if screenshot_bytes:
-            success, result = upload_media_to_feishu(screenshot_bytes)
+            success, result = upload_media_to_feishu(
+                screenshot_bytes,
+                file_name=screenshot_file_name,
+            )
             if not success:
                 return {
                     "ok": False,
@@ -3548,24 +3701,22 @@ class PortalRuntime:
                     "record_id": record_id,
                     "real_record_id": "",
                 }
+            if screenshot_upload_id:
+                cls.state_store.mark_notice_upload_attachment_used(screenshot_upload_id)
             file_tokens.append(str(result or "").strip())
-        for index, entry in enumerate(extra_images, start=1):
-            entry = entry if isinstance(entry, dict) else {}
-            image_b64 = str(entry.get("bytes_b64") or "").strip()
-            if not image_b64:
-                continue
-            file_name = str(entry.get("file_name") or f"extra_{index}.png").strip()
-            image_bytes = cls._decode_local_notice_bytes(image_b64)
-            success, result = upload_media_to_feishu(image_bytes, file_name=file_name)
-            if not success:
-                return {
-                    "ok": False,
-                    "name": "截图上传",
-                    "message": str(result or ""),
-                    "record_id": record_id,
-                    "real_record_id": "",
-                }
-            extra_file_tokens.append(str(result or "").strip())
+        images_ok, images_error, image_file_tokens, image_extra_file_tokens = (
+            cls._upload_extra_images_for_notice({"extra_images": extra_images}, notice_type)
+        )
+        if not images_ok:
+            return {
+                "ok": False,
+                "name": "截图上传",
+                "message": images_error or "现场照片上传失败。",
+                "record_id": record_id,
+                "real_record_id": "",
+            }
+        file_tokens.extend(image_file_tokens)
+        extra_file_tokens.extend(image_extra_file_tokens)
 
         notice_payload = cls._prepared_to_notice_payload(data)
         notice_payload.file_tokens = file_tokens or None
@@ -4067,8 +4218,15 @@ class PortalServerController:
         if phase == "uploading":
             PortalRuntime.track_upload_wait_job(job_id)
         elif phase in {"success", "failed"}:
-            with PortalRuntime.upload_wait_lock:
-                PortalRuntime.upload_wait_jobs.pop(job_id, None)
+            try:
+                PortalRuntime.state_store.mark_runtime_queue_item(
+                    "upload_wait",
+                    job_id,
+                    "done" if phase == "success" else "failed",
+                    error=str((patch or {}).get("error") or ""),
+                )
+            except Exception:
+                pass
 
     def get_job(self, job_id: str) -> dict | None:
         return PortalRuntime.service.get_job(job_id)
@@ -4086,6 +4244,10 @@ class PortalServerController:
         PortalRuntime.ongoing_callback = None
         PortalRuntime.ongoing_delete_callback = None
         PortalRuntime.maintenance_action_callback = None
+        try:
+            PortalRuntime.state_store.shutdown_write_worker(timeout=2.0)
+        except Exception as exc:
+            log_warning(f"SQLite写入队列停止失败: {exc}")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

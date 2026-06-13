@@ -14,6 +14,8 @@ import subprocess
 
 import sys
 
+import tempfile
+
 import time
 
 import zipfile
@@ -1266,7 +1268,9 @@ def _run_packaging_preflight_tests() -> None:
     py_targets = [
         PROJECT_ROOT / "bin" / "refactored_main.py",
         PROJECT_ROOT / "bin" / "clipflow_backend" / "main.py",
+        PROJECT_ROOT / "bin" / "clipflow_backend" / "preflight.py",
         PROJECT_ROOT / "bin" / "clipflow_backend" / "process_controller.py",
+        PROJECT_ROOT / "bin" / "clipflow_backend" / "runtime_helpers.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "portal_service.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "server.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "state_store.py",
@@ -1277,52 +1281,20 @@ def _run_packaging_preflight_tests() -> None:
     py_targets = [path for path in py_targets if path.exists()]
 
     if py_targets:
+        with tempfile.TemporaryDirectory(prefix="clipflow_pycompile_") as pycache_dir:
+            compile_env = os.environ.copy()
+            compile_env["PYTHONPYCACHEPREFIX"] = pycache_dir
 
-        subprocess.run(
-            [sys.executable, "-m", "py_compile", *[os.fspath(path) for path in py_targets]],
-            cwd=PROJECT_ROOT,
-            check=True,
-        )
+            subprocess.run(
+                [sys.executable, "-m", "py_compile", *[os.fspath(path) for path in py_targets]],
+                cwd=PROJECT_ROOT,
+                check=True,
+                env=compile_env,
+            )
 
         log(f"Python 语法检查通过: {len(py_targets)} 个文件。")
 
-    node_exe = shutil.which("node")
-
-    index_path = PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "static" / "index.html"
-
-    if node_exe and index_path.exists():
-
-        html_text = index_path.read_text(encoding="utf-8")
-
-        match = re.search(r"(?s)<script>\s*(.*?)\s*</script>", html_text)
-
-        if match:
-
-            tmp_js = BUILD_DIR / ".index.inline.preflight.js"
-
-            try:
-
-                BUILD_DIR.mkdir(parents=True, exist_ok=True)
-
-                tmp_js.write_text(match.group(1), encoding="utf-8")
-
-                subprocess.run([node_exe, "--check", os.fspath(tmp_js)], check=True)
-
-                log("前端内联脚本 node --check 通过。")
-
-            finally:
-
-                if tmp_js.exists():
-
-                    tmp_js.unlink()
-
-        else:
-
-            log("未找到前端内联脚本，跳过 node --check。")
-
-    else:
-
-        log("未找到 node 或前端文件，跳过 node --check。")
+    log("Vue 生产页 JS 检查由发布就绪检查负责。")
 
     readiness_script = PROJECT_ROOT / "bin" / "tools" / "release_readiness_check.py"
     if readiness_script.exists():

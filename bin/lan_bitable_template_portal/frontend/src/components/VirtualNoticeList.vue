@@ -232,4 +232,217 @@ function handleSelect(row: NoticeRow | undefined): void {
   background: #fef2f2;
   color: #b91c1c;
 }
+
+/* VNET list skin */
+.virtual-list {
+  border: 1px solid #d8e7f8;
+  border-radius: 14px;
+  background: #f7fbff;
+  scrollbar-color: #9cc7ff #eef6ff;
+  scrollbar-width: thin;
+}
+
+.virtual-list::-webkit-scrollbar {
+  width: 8px;
+}
+
+.virtual-list::-webkit-scrollbar-track {
+  background: #eef6ff;
+  border-radius: 999px;
+}
+
+.virtual-list::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, #9cc7ff, #1678ff);
+  border-radius: 999px;
+}
+
+.notice-row {
+  left: 8px;
+  right: 8px;
+  isolation: isolate;
+  border-color: #d8e7f8;
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow: 0 8px 18px rgba(22, 78, 151, 0.06);
+}
+
+.notice-row::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  z-index: 0;
+  width: 4px;
+  border-radius: 12px 0 0 12px;
+  background: linear-gradient(180deg, #cfe2f8, #eaf3ff);
+}
+
+.notice-row:hover {
+  border-color: #9cc7ff;
+  background: #f5faff;
+  box-shadow: 0 12px 26px rgba(22, 78, 151, 0.1);
+}
+
+.notice-row.queued {
+  border-color: #9cc7ff;
+  background: #f1f7ff;
+}
+
+.notice-row.selected {
+  border-color: #1678ff;
+  background: #edf6ff;
+  box-shadow: 0 12px 26px rgba(22, 120, 255, 0.12);
+}
+
+.notice-row.selected::before {
+  background: linear-gradient(180deg, #0757d7, #21c6e7);
+}
+
+.notice-row.disabled {
+  background: linear-gradient(180deg, #f8fbff, #f2f6fb);
+  color: #7b8ba0;
+  opacity: 0.7;
+}
+
+.notice-row.disabled .notice-row__type,
+.notice-row.disabled .notice-row__status {
+  border-color: #d7e2ee;
+  background: #f2f6fb;
+  color: #7b8ba0;
+}
+
+.notice-row__type,
+.notice-row__status {
+  position: relative;
+  z-index: 1;
+  border-color: #cfe2f8;
+  background: #eaf3ff;
+  color: #0757d7;
+  font-weight: 800;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+}
+
+.notice-row__main strong {
+  position: relative;
+  z-index: 1;
+  color: #09204a;
+  font-weight: 850;
+}
+
+.notice-row__main small {
+  position: relative;
+  z-index: 1;
+  color: #64748b;
+}
+
+/* Softer rounded VNET list polish */
+.virtual-list {
+  border-radius: 18px;
+}
+
+.notice-row {
+  border-radius: 16px;
+}
+
+.notice-row::before {
+  border-radius: 16px 0 0 16px;
+}
+
+.notice-row__main strong {
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.notice-row__main small {
+  color: #5f7189;
+}
+
+.notice-row__type,
+.notice-row__status {
+  background: rgba(234, 243, 255, 0.78);
+  color: #0b5ed8;
+  font-weight: 720;
+}
+
+/* Panorama construction-management polish */
+.virtual-list {
+  border-color: rgba(207, 224, 255, 0.94);
+  border-radius: 20px;
+  background: rgba(248, 251, 255, 0.94);
+}
+
+.notice-row {
+  border-color: rgba(216, 231, 248, 0.95);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.97);
+  box-shadow: 0 8px 20px rgba(20, 70, 138, 0.06);
+}
+
+.notice-row:hover {
+  background: #f8fbff;
+  box-shadow: 0 12px 28px rgba(20, 70, 138, 0.1);
+}
+
+.notice-row.selected {
+  border-color: #3080ff;
+  background: #eff6ff;
+  box-shadow: inset 4px 0 0 #3080ff, 0 12px 28px rgba(21, 93, 252, 0.12);
+}
+
+.notice-row::before {
+  border-radius: 18px 0 0 18px;
+}
+
+/* Panorama construction-management list skin */
+.virtual-list {
+  border-color: #d8e5f7;
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.82);
+}
+
+.notice-row {
+  border-color: #d8e5f7;
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 8px 18px rgba(0, 47, 135, 0.06);
+}
+
+.notice-row:hover {
+  border-color: #bdd2f4;
+  background: #ffffff;
+}
+
+.notice-row.selected {
+  border-color: #005bff;
+  background: #eff6ff;
+  box-shadow: inset 4px 0 0 #005bff, 0 12px 24px rgba(0, 91, 255, 0.12);
+}
+
+.notice-row.selected::before {
+  background: linear-gradient(180deg, #1e63ff, #005bff);
+}
+
+.notice-row__type,
+.notice-row__status {
+  border-color: #cfe0ff;
+  background: rgba(239, 246, 255, 0.86);
+  color: #005bff;
+}
+
+.notice-row__status--pending,
+.notice-row__status--ongoing {
+  border-color: #cfe0ff;
+  background: #eff6ff;
+  color: #005bff;
+}
+
+.notice-row__status--update {
+  border-color: #fde68a;
+  background: #fffbeb;
+  color: #92400e;
+}
+
+.notice-row__status--failed {
+  border-color: #fecaca;
+  background: #fef2f2;
+  color: #b91c1c;
+}
 </style>

@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 import os
-import json
 import time
 from PyQt6.QtWidgets import (
     QWidget,
@@ -32,8 +31,7 @@ from PyQt6 import sip
 
 from ..config import config
 from ..logger import log_info, log_error, log_warning
-from ..utils import HISTORY_FILE, ICON_FILE
-from ..core.parser import extract_event_info
+from ..utils import ICON_FILE
 from ..core.speech import speech_manager
 from lan_bitable_template_portal.state_store import LanPortalStateStore
 from lan_bitable_template_portal.identity_utils import (
@@ -49,12 +47,20 @@ from .deleted_notice_model import DeletedNoticeModel
 from .display_state import normalize_active_item_data
 from .common import show_toast_message
 
-HISTORY_RETENTION_DAYS = 7
-HISTORY_RETENTION_MS = HISTORY_RETENTION_DAYS * 24 * 60 * 60 * 1000
-HISTORY_STATE_NAMESPACE = "qt_notice_history"
-HISTORY_STATE_KEY = "history"
-
 class MainWindowUiMixin:
+    def request_active_cache_save(self, delay_ms: int = 800, *, force: bool = False):
+        save = getattr(self, "save_active_cache", None)
+        if force:
+            if callable(save):
+                save()
+            return
+        schedule = getattr(self, "schedule_active_cache_save", None)
+        if callable(schedule):
+            schedule(delay_ms)
+            return
+        if callable(save):
+            save()
+
     def init_ui(self):
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(5, 5, 5, 5)
@@ -377,6 +383,17 @@ class MainWindowUiMixin:
         active_item_id = str(data_dict.get("active_item_id") or "").strip()
         target_record_id = canonical_target_record_id(data_dict)
         source_record_id = canonical_source_record_id(data_dict)
+        if self._active_model_view_visible():
+            model = self._active_notice_model_for_list(backing_list)
+            if model is not None:
+                for row in (
+                    model.row_for_active_item_id(active_item_id),
+                    model.row_for_record_id(target_record_id),
+                    model.row_for_source_record_id(source_record_id),
+                ):
+                    item = self._active_model_item_for_row(backing_list, row)
+                    if item and self._is_valid_list_item(item):
+                        return item
         candidates = []
         if active_item_id:
             candidates.append(self._find_active_item_by_active_item_id(active_item_id))
@@ -1002,131 +1019,6 @@ class MainWindowUiMixin:
         self._try_process_pending_force_uploads()
         self._try_process_deferred_events()
 
-    def _get_history_state_store(self):
-        store = getattr(self, "_lan_portal_state_store", None)
-        if store is None:
-            store = LanPortalStateStore()
-            self._lan_portal_state_store = store
-        return store
-
-    def _load_history_payload(self):
-        try:
-            stored = self._get_history_state_store().get_document(
-                HISTORY_STATE_NAMESPACE, HISTORY_STATE_KEY
-            )
-        except Exception:
-            stored = None
-        if isinstance(stored, dict):
-            items = stored.get("items")
-            if isinstance(items, list):
-                return items
-        if not os.path.exists(HISTORY_FILE):
-            return []
-        try:
-            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-                history_data = json.load(f)
-        except Exception:
-            return []
-        if not isinstance(history_data, list):
-            return []
-        self._save_history_payload(history_data)
-        return history_data
-
-    def _save_history_payload(self, history_data):
-        payload = {
-            "version": 1,
-            "saved_at": int(time.time() * 1000),
-            "items": history_data if isinstance(history_data, list) else [],
-        }
-        self._history_override_records = list(payload["items"])
-        self._get_history_state_store().put_document(
-            HISTORY_STATE_NAMESPACE, HISTORY_STATE_KEY, payload
-        )
-        self.last_history_mtime = payload["saved_at"]
-
-    def _delete_history_payload(self):
-        self._history_override_records = []
-        self._get_history_state_store().delete_document(
-            HISTORY_STATE_NAMESPACE, HISTORY_STATE_KEY
-        )
-        self.last_history_mtime = int(time.time() * 1000)
-
-    def save_to_history_file(self, d):
-        h = self.load_all_history()
-        record = dict(d or {}) if isinstance(d, dict) else {}
-        if record:
-            record["history_saved_at"] = self._coerce_history_saved_at(
-                record.get("history_saved_at"), fallback_now=True
-            )
-        h.insert(0, record)
-        h = self._trim_history_by_age(h)
-        try:
-            self._save_history_payload(h)
-        except Exception:
-            pass
-
-    def _coerce_history_saved_at(self, value, fallback_now: bool = False):
-        try:
-            if value is None or value == "":
-                raise ValueError("empty history_saved_at")
-            numeric = int(value)
-            if numeric > 0:
-                return numeric
-        except Exception:
-            pass
-        return int(time.time() * 1000) if fallback_now else None
-
-    def _trim_history_by_age(self, history_data):
-        if not isinstance(history_data, list):
-            return []
-        now_ms = int(time.time() * 1000)
-        cutoff_ms = now_ms - HISTORY_RETENTION_MS
-        trimmed = []
-        for item in history_data:
-            if not isinstance(item, dict):
-                continue
-            history_saved_at = self._coerce_history_saved_at(
-                item.get("history_saved_at"), fallback_now=False
-            )
-            if history_saved_at is None or history_saved_at < cutoff_ms:
-                continue
-            trimmed.append(item)
-        return trimmed
-
-    def load_all_history(self):
-        override = getattr(self, "_history_override_records", None)
-        history_data = list(override) if isinstance(override, list) else self._load_history_payload()
-        updated = False
-        for item in history_data:
-            if not isinstance(item, dict):
-                continue
-            text = item.get("text", "")
-            info = extract_event_info(text)
-            if info and info.get("content") and info["content"] != text:
-                item["text"] = info["content"]
-                updated = True
-            history_saved_at = self._coerce_history_saved_at(
-                item.get("history_saved_at"), fallback_now=False
-            )
-            if history_saved_at is None:
-                history_saved_at = self._coerce_history_saved_at(
-                    item.get("ts"), fallback_now=True
-                )
-                item["history_saved_at"] = history_saved_at
-                updated = True
-        trimmed_history = self._trim_history_by_age(history_data)
-        if len(trimmed_history) != len(history_data):
-            history_data = trimmed_history
-            updated = True
-        else:
-            history_data = trimmed_history
-        if updated:
-            try:
-                self._save_history_payload(history_data)
-            except Exception:
-                pass
-        return history_data
-
     def _set_delete_interaction_enabled(self, enabled: bool):
         enabled = bool(enabled)
         self._delete_interaction_enabled = enabled
@@ -1225,6 +1117,16 @@ class MainWindowUiMixin:
         except Exception:
             return True
 
+    def _shutdown_qt_backend_command_executor(self) -> None:
+        executor = getattr(self, "_qt_backend_command_executor", None)
+        if executor is None:
+            return
+        self._qt_backend_command_executor = None
+        try:
+            executor.shutdown(wait=False, cancel_futures=True)
+        except Exception as exc:
+            log_warning(f"Qt后端命令线程池停止失败: {exc}")
+
     def quit_app(self):
         log_info("================ 应用程序退出 ================")
         self._closing = True
@@ -1238,11 +1140,18 @@ class MainWindowUiMixin:
             speech_manager.shutdown()
         except Exception:
             pass
+        try:
+            from ..services.system_alert_webhook import shutdown_system_alert_worker
+
+            shutdown_system_alert_worker(timeout=1.0)
+        except Exception:
+            pass
         self._stop_event_relay_bridge()
         if self.clipboard_preview_dialog:
             self.clipboard_preview_dialog.hide()
         self._shutdown_clipboard_ipc(wait_ms=1500)
-        self.save_active_cache()
+        self._shutdown_qt_backend_command_executor()
+        self.request_active_cache_save(force=True)
         QApplication.instance().quit()
 
     def closeEvent(self, event):
@@ -1259,6 +1168,12 @@ class MainWindowUiMixin:
             except Exception:
                 pass
             try:
+                from ..services.system_alert_webhook import shutdown_system_alert_worker
+
+                shutdown_system_alert_worker(timeout=1.0)
+            except Exception:
+                pass
+            try:
                 if self.clipboard_preview_dialog:
                     self.clipboard_preview_dialog.hide()
                 self._shutdown_clipboard_ipc(wait_ms=1500)
@@ -1270,6 +1185,7 @@ class MainWindowUiMixin:
             if hasattr(self, "hot_reload_manager"):
                 self.hot_reload_manager.stop()
             self._stop_event_relay_bridge()
+            self._shutdown_qt_backend_command_executor()
         except Exception as exc:
             log_error(f"关闭窗口清理失败: {exc}")
         super().closeEvent(event)

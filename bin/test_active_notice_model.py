@@ -15,6 +15,7 @@ sys.path.append(current_dir)
 
 from upload_event_module.ui.active_notice_model import ActiveNoticeListRoute, ActiveNoticeModel
 from upload_event_module.ui.active_notice_delegate import ActiveNoticeDelegate
+from upload_event_module.ui.main_window_cache import ActiveCacheMixin
 from upload_event_module.ui.main_window_records import MainWindowRecordsMixin
 from upload_event_module.ui.main_window_runtime import MainWindowRuntimeMixin
 
@@ -118,6 +119,7 @@ class _RuntimeOngoingHarness(MainWindowRuntimeMixin):
         self._records = records
         self.cache_store = _RuntimeCacheStore(cache_fields or {})
         self._payload_store = {}
+
         self._payload_alias = {}
 
     def _active_notice_store(self):
@@ -158,6 +160,18 @@ class _RuntimeOngoingHarness(MainWindowRuntimeMixin):
     @staticmethod
     def _routing_error_text(_data):
         return ""
+
+
+class _ActiveCacheScheduleHarness(ActiveCacheMixin):
+    def __init__(self):
+        self._is_restoring_cache = False
+        self._active_cache_dirty = False
+        self._active_cache_full_replace_enabled = False
+        self._defer_active_cache_save_count = 0
+        self.save_calls = 0
+
+    def save_active_cache(self):
+        self.save_calls += 1
 
 
 class ActiveNoticeModelTests(unittest.TestCase):
@@ -209,6 +223,42 @@ class ActiveNoticeModelTests(unittest.TestCase):
         self.assertEqual(model.row_for_record_id("target-real"), 0)
         self.assertEqual(model.row_for_record_id("src-old"), -1)
         self.assertEqual(model.row_for_source_record_id("src-old"), 0)
+
+    def test_lookup_indexes_update_after_target_and_source_change(self):
+        model = ActiveNoticeModel()
+        model.replace_records(
+            [
+                {
+                    "active_item_id": "aid-1",
+                    "source_record_id": "source-old",
+                    "target_record_id": "target-old",
+                    "record_id": "target-old",
+                    "notice_type": "设备变更",
+                    "text": "【设备变更】状态：更新\n\n【名称】A楼变更",
+                }
+            ]
+        )
+
+        self.assertEqual(model.row_for_active_item_id("aid-1"), 0)
+        self.assertEqual(model.row_for_source_record_id("source-old"), 0)
+        self.assertEqual(model.row_for_record_id("target-old"), 0)
+
+        model.upsert_record(
+            {
+                "active_item_id": "aid-1",
+                "source_record_id": "source-new",
+                "target_record_id": "target-new",
+                "record_id": "target-new",
+                "notice_type": "设备变更",
+                "text": "【设备变更】状态：更新\n\n【名称】A楼变更",
+            }
+        )
+
+        self.assertEqual(model.row_for_active_item_id("aid-1"), 0)
+        self.assertEqual(model.row_for_source_record_id("source-new"), 0)
+        self.assertEqual(model.row_for_record_id("target-new"), 0)
+        self.assertEqual(model.row_for_source_record_id("source-old"), -1)
+        self.assertEqual(model.row_for_record_id("target-old"), -1)
 
     def test_upsert_move_and_remove(self):
         model = ActiveNoticeModel()
@@ -278,6 +328,18 @@ class ActiveNoticeModelTests(unittest.TestCase):
         }
 
         self.assertTrue(ActiveNoticeModel.supports_today_progress(change))
+
+    def test_active_cache_schedule_does_not_full_scan_by_default(self):
+        harness = _ActiveCacheScheduleHarness()
+
+        harness.schedule_active_cache_save()
+
+        self.assertTrue(harness._active_cache_dirty)
+        self.assertEqual(harness.save_calls, 0)
+
+        harness.request_active_cache_save(force=True)
+
+        self.assertEqual(harness.save_calls, 1)
 
     def test_runtime_collects_all_non_event_notice_types_for_portal(self):
         records = [
@@ -453,6 +515,48 @@ class ActiveNoticeModelTests(unittest.TestCase):
         self.assertIsNone(harness.current_screenshot_record_id)
         self.assertIsNone(harness.current_screenshot_action_type)
 
+    def test_clear_upload_runtime_state_covers_old_and_real_record_ids(self):
+        harness = _AddItemHarness(model_view_visible=True)
+        harness.pending_action_record_ids = {"placeholder-2", "target-2"}
+        harness.pending_action_types = {
+            "placeholder-2": "upload",
+            "target-2": "update",
+        }
+        harness.pending_upload_rollback_by_record_id = {
+            "placeholder-2": {"old_data": {}},
+            "target-2": {"old_data": {}},
+        }
+        harness._payload_alias = {"placeholder-2": "target-2"}
+        harness._upload_key_alias = {"target-2": "placeholder-2"}
+        harness.save_active_cache = lambda: None
+        harness.schedule_active_cache_save = lambda *_args, **_kwargs: None
+
+        item, _widget = harness.add_active_item(
+            {
+                "active_item_id": "aid-upload-clear",
+                "record_id": "target-2",
+                "target_record_id": "target-2",
+                "notice_type": "维保通告",
+                "text": "【维保通告】状态：开始\n\n【标题】A楼维保\n\n【时间】2026-01-01",
+                "_is_placeholder_record": False,
+                "_has_unuploaded_changes": False,
+                "_upload_in_progress": True,
+                "_pending_upload_hash": "hash-2",
+                "_upload_started_monotonic": 123.0,
+            },
+            skip_cache=True,
+        )
+
+        harness.clear_upload_runtime_state_for_ids("placeholder-2", "target-2")
+
+        updated = item.data(Qt.ItemDataRole.UserRole)
+        self.assertFalse(updated.get("_upload_in_progress"))
+        self.assertIsNone(updated.get("_pending_upload_hash"))
+        self.assertNotIn("_upload_started_monotonic", updated)
+        self.assertFalse(harness.pending_action_record_ids)
+        self.assertFalse(harness.pending_action_types)
+        self.assertFalse(harness.pending_upload_rollback_by_record_id)
+
     def test_recover_stale_upload_state_without_pending_queue(self):
         harness = _AddItemHarness(model_view_visible=True)
         harness.pending_action_record_ids = set()
@@ -489,6 +593,45 @@ class ActiveNoticeModelTests(unittest.TestCase):
         self.assertFalse(updated.get("_upload_in_progress"))
         self.assertIsNone(updated.get("_pending_upload_hash"))
         self.assertNotIn("_upload_started_monotonic", updated)
+
+    def test_recover_stale_upload_state_clears_orphan_pending_after_hard_timeout(self):
+        harness = _AddItemHarness(model_view_visible=True)
+        harness.pending_action_record_ids = {"target-hard-timeout"}
+        harness.pending_action_types = {"target-hard-timeout": "update"}
+        harness.pending_upload_rollback_by_record_id = {
+            "target-hard-timeout": {"old_data": {}}
+        }
+        harness.pending_new_by_record_id = {}
+        harness.pending_update_after_upload = {}
+        harness.current_screenshot_record_id = ""
+        harness._payload_alias = {}
+        harness._upload_key_alias = {}
+        harness.save_active_cache = lambda: None
+        harness.schedule_active_cache_save = lambda *_args, **_kwargs: None
+
+        item, _widget = harness.add_active_item(
+            {
+                "active_item_id": "aid-stale-hard",
+                "record_id": "target-hard-timeout",
+                "target_record_id": "target-hard-timeout",
+                "notice_type": "维保通告",
+                "text": "【维保通告】状态：更新\n\n【标题】A楼维保\n\n【时间】2026-01-01",
+                "_is_placeholder_record": False,
+                "_has_unuploaded_changes": False,
+                "_upload_in_progress": True,
+                "_pending_upload_hash": "hash-hard",
+                "_upload_started_monotonic": time.monotonic() - 600.0,
+            },
+            skip_cache=True,
+        )
+
+        result = harness._recover_stale_upload_states()
+
+        updated = item.data(Qt.ItemDataRole.UserRole)
+        self.assertEqual(result["stale_upload_recovered"], 1)
+        self.assertFalse(updated.get("_upload_in_progress"))
+        self.assertFalse(harness.pending_action_record_ids)
+        self.assertFalse(harness.pending_action_types)
 
     def test_today_progress_toggle_updates_model_and_uses_target_record_id(self):
         harness = _TodayProgressHarness()

@@ -160,8 +160,16 @@ class EventRelayServer:
         self._thread: Optional[threading.Thread] = None
         self._server = None
         self._legacy_event_log_imported = False
+        self._state_store = None
         self._manager = ConnectionManager()
         self._app = self._build_app()
+
+    def _get_state_store(self):
+        if self._state_store is None:
+            from lan_bitable_template_portal.state_store import LanPortalStateStore
+
+            self._state_store = LanPortalStateStore()
+        return self._state_store
 
     def _ensure_legacy_event_log_imported(self, store) -> None:
         if self._legacy_event_log_imported:
@@ -175,11 +183,10 @@ class EventRelayServer:
 
     def _append_event_log(self, event: dict) -> None:
         try:
-            from lan_bitable_template_portal.state_store import LanPortalStateStore
-
-            store = LanPortalStateStore()
+            store = self._get_state_store()
             self._ensure_legacy_event_log_imported(store)
-            store.append_event("event_relay", event)
+            if not store.append_event_async("event_relay", event):
+                store.append_event("event_relay", event)
         except Exception as exc:
             log_warning(f"[EventRelay] write log failed: {exc}")
 
@@ -335,3 +342,13 @@ class EventRelayServer:
             thread.join(timeout=2)
         if thread and thread.is_alive() and server:
             server.force_exit = True
+            thread.join(timeout=1)
+        if not thread or not thread.is_alive():
+            self._thread = None
+            self._server = None
+        store = self._state_store
+        if store is not None:
+            try:
+                store.shutdown_write_worker(timeout=2.0)
+            except Exception as exc:
+                log_warning(f"[EventRelay] state store shutdown failed: {exc}")

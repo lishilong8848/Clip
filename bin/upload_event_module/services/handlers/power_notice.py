@@ -4,7 +4,6 @@ from datetime import datetime
 from ...core.parser import extract_event_info
 from ...config import (
     POWER_NOTICE_FIELDS,
-    POWER_DEFAULT_SPECIALTY,
     STATUS_NEW,
     STATUS_START,
     STATUS_UPDATE,
@@ -35,9 +34,8 @@ class PowerNoticeHandler(BaseNoticeHandler):
                 payload.buildings
             )
         fields[POWER_NOTICE_FIELDS["status"]] = status or STATUS_START
-        fields[POWER_NOTICE_FIELDS["specialty"]] = (
-            payload.specialty or POWER_DEFAULT_SPECIALTY
-        )
+        if payload.specialty:
+            fields[POWER_NOTICE_FIELDS["specialty"]] = payload.specialty
 
         cabinet = self._extract_section(payload.text, "柜号")
         if cabinet:
@@ -88,9 +86,8 @@ class PowerNoticeHandler(BaseNoticeHandler):
             fields[POWER_NOTICE_FIELDS["building"]] = self._normalize_buildings_multi(
                 payload.buildings
             )
-        fields[POWER_NOTICE_FIELDS["specialty"]] = (
-            payload.specialty or POWER_DEFAULT_SPECIALTY
-        )
+        if payload.specialty:
+            fields[POWER_NOTICE_FIELDS["specialty"]] = payload.specialty
 
         cabinet = self._extract_section(payload.text, "柜号")
         if cabinet:

@@ -1,4 +1,5 @@
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -9,6 +10,7 @@ if str(BIN_DIR) not in sys.path:
 
 from clipflow_backend.api_models import (  # noqa: E402
     OngoingDeleteRequest,
+    JobMarkStuckFailedRequest,
     PermissionRequestCreate,
     QtClipboardAckRequest,
     QtActiveItemsDeltaRequest,
@@ -16,10 +18,11 @@ from clipflow_backend.api_models import (  # noqa: E402
     QtDialogSessionRequest,
     QtEventAckRequest,
     QtJobProgressRequest,
-    QtNoticeUploadRequest,
     WorkbenchActionRequest,
     parse_api_model,
 )
+from clipflow_backend.main import FastAPIPortalController  # noqa: E402
+from lan_bitable_template_portal.state_store import LanPortalStateStore  # noqa: E402
 
 
 class BackendApiModelTests(unittest.TestCase):
@@ -47,6 +50,10 @@ class BackendApiModelTests(unittest.TestCase):
         self.assertEqual(payload["scope"], "ALL")
         self.assertEqual(payload["work_type"], "maintenance")
 
+    def test_job_mark_stuck_failed_default_reason_is_stable(self):
+        payload = parse_api_model(JobMarkStuckFailedRequest, {}).to_payload()
+        self.assertIn("卡住任务", payload["reason"])
+
     def test_qt_command_payload_must_be_object(self):
         with self.assertRaises(ValueError):
             parse_api_model(QtCommandRequest, {"command": "x", "payload": "bad"})
@@ -71,13 +78,56 @@ class BackendApiModelTests(unittest.TestCase):
         self.assertEqual(payload["phase"], "uploading")
         self.assertEqual(payload["custom"], "kept")
 
-    def test_qt_notice_upload_is_pass_through(self):
+    def test_qt_notice_upload_command_is_pass_through(self):
         payload = parse_api_model(
-            QtNoticeUploadRequest,
-            {"data_dict": {"record_id": "rid-1"}, "action_type": "upload"},
+            QtCommandRequest,
+            {
+                "command": "notice_upload",
+                "payload": {"data_dict": {"record_id": "rid-1"}, "action_type": "upload"},
+            },
         ).to_payload()
-        self.assertEqual(payload["data_dict"]["record_id"], "rid-1")
-        self.assertEqual(payload["action_type"], "upload")
+        self.assertEqual(payload["command"], "notice_upload")
+        self.assertEqual(payload["payload"]["data_dict"]["record_id"], "rid-1")
+        self.assertEqual(payload["payload"]["action_type"], "upload")
+
+    def test_inline_image_payload_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "upload_id"):
+            FastAPIPortalController._reject_large_inline_images(
+                {"extra_images": [{"bytes_b64": "a" * (260 * 1024)}]}
+            )
+        with self.assertRaisesRegex(ValueError, "base64"):
+            FastAPIPortalController._reject_large_inline_images(
+                {"extra_images": [{"upload_id": "up-1", "bytes_b64": "small"}]}
+            )
+        FastAPIPortalController._reject_large_inline_images({"extra_images": [{"upload_id": "up-1"}]})
+
+    def test_notice_upload_attachment_stats(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            store.put_notice_upload_attachment(
+                open_id="ou-test",
+                file_name="site.png",
+                mime_type="image/png",
+                content=b"12345",
+            )
+            stats = store.notice_upload_attachment_stats()
+            self.assertEqual(stats["total"], 1)
+            self.assertEqual(stats["pending"], 1)
+            self.assertEqual(stats["total_bytes"], 5)
+
+    def test_notice_upload_attachment_capacity_limit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            store.put_notice_upload_attachment(content=b"12345", max_pending_bytes=10)
+            with self.assertRaisesRegex(ValueError, "暂存空间已满"):
+                store.put_notice_upload_attachment(content=b"678901", max_pending_bytes=10)
+
+    def test_batch_job_visibility_uses_auth_open_id(self):
+        session = {"user": {"open_id": "ou-allowed"}, "role": "user", "is_admin": False}
+        visible_job = {"request": {"_auth_open_id": "ou-allowed"}}
+        denied_job = {"request": {"_auth_open_id": "ou-other"}}
+        self.assertTrue(FastAPIPortalController._job_visible_to_session(visible_job, session))
+        self.assertFalse(FastAPIPortalController._job_visible_to_session(denied_job, session))
 
 
 if __name__ == "__main__":
