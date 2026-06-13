@@ -5969,8 +5969,25 @@ class ScreenshotConfirmDialog(QDialog):
             or "状态: 结束" in head
         )
 
+    def _end_requires_site_photo(self):
+        notice_type = str(
+            getattr(self, "notice_type", "")
+            or (self.data_dict or {}).get("notice_type")
+            or ""
+        ).strip()
+        return notice_type in (
+            "维保通告",
+            "维护通告",
+            "设备变更",
+            "变更通告",
+            "设备检修",
+            "检修通告",
+        )
+
     def _validate_end_site_photo(self):
         if not self.enable_extra_upload or not self._is_end_upload_action():
+            return True
+        if not self._end_requires_site_photo():
             return True
         if self.extra_images:
             return True

@@ -97,6 +97,7 @@ from lan_bitable_template_portal.portal_service import (
     REPAIR_SOURCE_TABLE_ID,
     REPAIR_SYNC_TABLE_ID,
     SCOPE_OPTIONS,
+    WORK_TYPE_BY_NOTICE_TYPE,
     ZHIHANG_CHANGE_APP_TOKEN,
     ZHIHANG_CHANGE_TABLE_ID,
 )
@@ -3698,12 +3699,9 @@ class FastAPIPortalController:
                     item["title"] = info.get("title")
                 if not item.get("work_type"):
                     notice_type = str(item.get("notice_type") or "").strip()
-                    if notice_type == "维保通告":
-                        item["work_type"] = "maintenance"
-                    elif notice_type in {"设备变更", "变更通告"}:
-                        item["work_type"] = "change"
-                    elif notice_type == "设备检修":
-                        item["work_type"] = "repair"
+                    mapped_work_type = WORK_TYPE_BY_NOTICE_TYPE.get(notice_type)
+                    if mapped_work_type:
+                        item["work_type"] = mapped_work_type
                 try:
                     identity = PortalRuntime.state_store.resolve_notice_identity(
                         work_type=str(item.get("work_type") or ""),

@@ -119,6 +119,13 @@
           </button>
         </div>
         <input v-model="searchText" class="search" placeholder="搜索标题、楼栋、专业" />
+        <label class="specialty-filter">
+          <span>专业</span>
+          <select v-model="specialtyFilter">
+            <option value="">全部</option>
+            <option v-for="item in specialtyFilterOptions" :key="item" :value="item">{{ item }}</option>
+          </select>
+        </label>
         <div class="manual-create">
           <button class="btn ghost" @click="showManualTypePicker = !showManualTypePicker">纯手填</button>
           <div v-if="showManualTypePicker" class="manual-type-popover">
@@ -157,7 +164,7 @@
       </div>
 
       <section v-if="showPasteParser" class="paste-panel">
-        <textarea v-model="pasteText" placeholder="粘贴完整维保、变更或检修通告文本"></textarea>
+        <textarea v-model="pasteText" placeholder="粘贴完整维保、变更、检修、上电、轮巡或调整通告文本"></textarea>
         <div class="card-actions">
           <span class="job-line" :class="{ failed: pasteParseStatus === 'failed', success: pasteParseStatus === 'success' }">
             {{ pasteParseLine }}
@@ -291,7 +298,7 @@
             <span>{{ selectedDraftRows.length }}</span>
           </div>
           <div v-if="selectedDraftRows.length === 0" class="empty-block">
-            从左侧选择事项，或使用纯手填、解析粘贴通告。
+            {{ specialtyFilter ? "当前专业下没有待发起通告，可切换专业或选择全部。" : "从左侧选择事项，或使用纯手填、解析粘贴通告。" }}
           </div>
           <div v-else ref="draftStackRef" class="draft-stack">
             <DraftNoticeCard
@@ -338,12 +345,14 @@
         <aside class="panel ongoing-panel">
           <div class="panel-head">
             <h2>已开始未结束</h2>
-            <span>{{ liveOngoingCount }}</span>
+            <span>{{ filteredOngoing.length }}</span>
           </div>
-          <div v-if="ongoing.length === 0" class="empty-block">当前没有进行中通告</div>
+          <div v-if="filteredOngoing.length === 0" class="empty-block">
+            {{ specialtyFilter ? "当前专业下没有进行中通告" : "当前没有进行中通告" }}
+          </div>
           <div v-else class="ongoing-list">
             <OngoingNoticeCard
-              v-for="item in ongoing"
+              v-for="item in filteredOngoing"
               :key="ongoingLineKey(item)"
               :item="item"
               :draft="ongoingDraft(item)"
@@ -357,6 +366,7 @@
               :undo-busy="isLineBusy(undoLineKey(item))"
               :needs-binding="ongoingNeedsBinding(item)"
               :photo-count="ongoingPhotoCount(item)"
+              :site-photo-required="ongoingEndRequiresSitePhoto(item)"
               :maintenance-cycle-options="maintenanceCycleOptions"
               :zhihang-records="zhihangRecords"
               :job-text="jobText"
@@ -454,6 +464,7 @@ import {
   parsedActionLabel,
   pastedNoticeStatus,
   pastedNoticeWorkType,
+  rawSectionValue,
   sectionValue,
   splitNoticeTimeRange,
   toDatetimeLocal,
@@ -502,6 +513,7 @@ const syncText = ref("准备中");
 const workType = ref("maintenance");
 const userSelectedWorkType = ref(false);
 const searchText = ref("");
+const specialtyFilter = ref("");
 const activeDraftKey = ref("");
 const activeOngoingKey = ref("");
 const showPasteParser = ref(false);
@@ -689,6 +701,7 @@ const filteredRecords = computed(() => {
   const query = searchText.value.trim().toLowerCase();
   return scopedRecords.value.filter((record) => {
     if ((record.work_type || "maintenance") !== workType.value) return false;
+    if (!matchesSpecialtyFilter(specialtyForRecord(record))) return false;
     if (!query) return true;
     return [recordCardTitle(record), buildingForRecord(record), specialtyForRecord(record), sourceProgressForRecord(record)]
       .join(" ")
@@ -708,7 +721,7 @@ const filteredRows = computed<NoticeRow[]>(() => filteredRecords.value.map((reco
   disabledReason: "已在进行中，请在右侧更新、结束或删除",
   raw: record,
 })));
-const selectedDraftRows = computed(() => {
+const selectedDraftRowsAll = computed(() => {
   const keys = Array.from(selectedKeys);
   const pinned = activeDraftKey.value;
   if (pinned && keys.includes(pinned)) {
@@ -725,6 +738,24 @@ const selectedDraftRows = computed(() => {
       title: recordCardTitle(record),
     };
   }).filter(Boolean) as Array<{ key: string; record: Dict; draft: Dict; title: string }>;
+});
+const selectedDraftRows = computed(() => selectedDraftRowsAll.value.filter((row) => matchesSpecialtyFilter(draftSpecialtyForRow(row))));
+const filteredOngoing = computed(() => ongoing.value.filter((item) => matchesSpecialtyFilter(ongoingSpecialtyForItem(item))));
+const specialtyFilterOptions = computed(() => {
+  const values = new Set<string>();
+  for (const record of scopedRecords.value) {
+    const value = normalizeSpecialtyValue(specialtyForRecord(record));
+    if (value) values.add(value);
+  }
+  for (const row of selectedDraftRowsAll.value) {
+    const value = normalizeSpecialtyValue(draftSpecialtyForRow(row));
+    if (value) values.add(value);
+  }
+  for (const item of ongoing.value) {
+    const value = normalizeSpecialtyValue(ongoingSpecialtyForItem(item));
+    if (value) values.add(value);
+  }
+  return Array.from(values).sort((a, b) => a.localeCompare(b, "zh-CN"));
 });
 
 function normalizeScopeValue(value: string, fallback = "ALL"): string {
@@ -787,6 +818,25 @@ function cleanDisplayText(value: any): string {
   if (placeholderFieldValues.has(text)) return "";
   if (/^opt[A-Za-z0-9]{6,}$/.test(text)) return "";
   return text;
+}
+
+function normalizeSpecialtyValue(value: any): string {
+  return cleanDisplayText(value).replace(/\s+/g, "");
+}
+
+function matchesSpecialtyFilter(value: any): boolean {
+  const expected = normalizeSpecialtyValue(specialtyFilter.value);
+  if (!expected) return true;
+  return normalizeSpecialtyValue(value) === expected;
+}
+
+function draftSpecialtyForRow(row: { record: Dict; draft: Dict }): string {
+  return cleanDisplayText(row.draft?.specialty) || specialtyForRecord(row.record);
+}
+
+function ongoingSpecialtyForItem(item: Dict): string {
+  const edit = ongoingEdits.get(ongoingLineKey(item));
+  return cleanDisplayText(edit?.specialty) || cleanDisplayText(item.specialty);
 }
 
 function repairSpecialtyForRecord(record: Dict): string {
@@ -2377,13 +2427,13 @@ async function parsePastedNotice(): Promise<void> {
       ? sectionValue(sections, ["名称", "标题"])
       : sectionValue(sections, ["标题", "名称", "维修名称"]);
     draft.non_plan = /（非计划性）|（非计划）/.test(draft.title);
-    draft.location = sectionValue(sections, ["地点", "位置"]);
-    draft.specialty = sectionValue(sections, ["专业", "专业类别"]);
-    draft.reason = sectionValue(sections, ["原因", "故障原因"]);
-    draft.impact = sectionValue(sections, ["影响", "影响范围"]);
-    draft.progress = sectionValue(sections, ["进度", "完成情况"]);
-    draft.maintenance_cycle = sectionValue(sections, ["维保周期", "维护周期"]);
-    draft.level = sectionValue(sections, ["等级", "变更等级", "紧急程度"]) || (type === "change" ? "I3" : "");
+    draft.location = sectionValue(sections, ["地点", "位置"]) || rawSectionValue(text, ["地点", "位置"]);
+    draft.specialty = sectionValue(sections, ["专业", "专业类别"]) || rawSectionValue(text, ["专业", "专业类别"]);
+    draft.reason = sectionValue(sections, ["原因", "故障原因"]) || rawSectionValue(text, ["原因", "故障原因"]);
+    draft.impact = sectionValue(sections, ["影响", "影响范围"]) || rawSectionValue(text, ["影响", "影响范围"]);
+    draft.progress = sectionValue(sections, ["进度", "完成情况"]) || rawSectionValue(text, ["进度", "完成情况"]);
+    draft.maintenance_cycle = sectionValue(sections, ["维保周期", "维护周期"]) || rawSectionValue(text, ["维保周期", "维护周期"]);
+    draft.level = sectionValue(sections, ["等级", "变更等级", "紧急程度"]) || rawSectionValue(text, ["等级", "变更等级", "紧急程度"]) || (type === "change" ? "I3" : "");
     draft.start_time = timeRange.start || draft.start_time;
     draft.end_time = timeRange.end || draft.end_time;
     draft.building = sectionValue(sections, ["楼栋", "变更楼栋", "所属楼栋"])
@@ -2393,17 +2443,17 @@ async function parsePastedNotice(): Promise<void> {
     draft.content = type === "repair"
       ? sectionValue(sections, ["标题/补充内容", "标题补充内容", "补充内容", "内容"])
       : sectionValue(sections, ["内容"], draft.title);
-    draft.repair_device = sectionValue(sections, ["维修设备"]);
-    draft.repair_fault = sectionValue(sections, ["维修故障"]);
-    draft.fault_type = sectionValue(sections, ["故障类型"]);
-    draft.repair_mode = sectionValue(sections, ["维修方式"]);
-    draft.discovery = sectionValue(sections, ["故障发现方式"]);
-    draft.symptom = sectionValue(sections, ["故障现象"]);
-    draft.solution = sectionValue(sections, ["解决方案"]);
-    draft.spare_parts = sectionValue(sections, ["备件更换情况", "备件使用情况"]);
-    draft.device = sectionValue(sections, ["设备"]);
-    draft.cabinet = sectionValue(sections, ["柜号"]);
-    draft.quantity = sectionValue(sections, ["数量"]);
+    draft.repair_device = sectionValue(sections, ["维修设备"]) || rawSectionValue(text, ["维修设备"]);
+    draft.repair_fault = sectionValue(sections, ["维修故障"]) || rawSectionValue(text, ["维修故障"]);
+    draft.fault_type = sectionValue(sections, ["故障类型"]) || rawSectionValue(text, ["故障类型"]);
+    draft.repair_mode = sectionValue(sections, ["维修方式"]) || rawSectionValue(text, ["维修方式"]);
+    draft.discovery = sectionValue(sections, ["故障发现方式"]) || rawSectionValue(text, ["故障发现方式"]);
+    draft.symptom = sectionValue(sections, ["故障现象"]) || rawSectionValue(text, ["故障现象"]);
+    draft.solution = sectionValue(sections, ["解决方案"]) || rawSectionValue(text, ["解决方案"]);
+    draft.spare_parts = sectionValue(sections, ["备件更换情况", "备件使用情况"]) || rawSectionValue(text, ["备件更换情况", "备件使用情况"]);
+    draft.device = sectionValue(sections, ["设备"]) || rawSectionValue(text, ["设备"]);
+    draft.cabinet = sectionValue(sections, ["柜号"]) || rawSectionValue(text, ["柜号"]);
+    draft.quantity = sectionValue(sections, ["数量"]) || rawSectionValue(text, ["数量"]);
     if (type === "repair") {
       const expectedTime = sectionValue(sections, ["期望完成时间"]);
       const faultTime = sectionValue(sections, ["发现故障时间", "故障发生时间", "发生故障时间"]);
@@ -2777,6 +2827,10 @@ function ongoingPhotoCount(item: Dict): number {
   return ongoingExtraImages(item).filter((photo) => String(photo?.upload_id || photo?.bytes_b64 || photo?.file_token || "").trim()).length;
 }
 
+function ongoingEndRequiresSitePhoto(item: Dict): boolean {
+  return ["maintenance", "change", "repair"].includes(String(item?.work_type || "maintenance"));
+}
+
 async function uploadSitePhotoFile(file: File): Promise<Dict> {
   const fileName = file.name || `site_photo_${Date.now()}.png`;
   try {
@@ -3005,7 +3059,7 @@ async function sendOngoing(item: Dict, action: string): Promise<void> {
   const key = ongoingLineKey(item);
   const payload = buildOngoingPayload(item, action);
   if (!validatePayloadDuration(payload, key)) return;
-  if (action === "end" && !ongoingPhotoCount(item)) {
+  if (action === "end" && ongoingEndRequiresSitePhoto(item) && !ongoingPhotoCount(item)) {
     rememberJob(key, { text: "结束通告前必须添加至少一张现场照片", status: "failed", phase: "failed" });
     return;
   }
@@ -3671,6 +3725,33 @@ h1 {
   width: auto;
   min-width: 104px;
   max-width: 148px;
+  padding: 7px 30px 7px 10px;
+  font-size: 14px;
+}
+
+.specialty-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 38px;
+  padding: 4px 6px 4px 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #475569;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.specialty-filter span {
+  color: #64748b;
+  font-weight: 700;
+}
+
+.specialty-filter select {
+  width: auto;
+  min-width: 112px;
+  max-width: 168px;
   padding: 7px 30px 7px 10px;
   font-size: 14px;
 }
@@ -5301,12 +5382,34 @@ textarea,
   background: rgba(255, 255, 255, 0.86);
 }
 
+.specialty-filter {
+  border-color: #d8e5f7;
+  background: rgba(255, 255, 255, 0.78);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.82);
+}
+
+.specialty-filter span {
+  color: #64748b;
+}
+
+.specialty-filter select {
+  border-color: #d8e5f7;
+  background: rgba(255, 255, 255, 0.92);
+  color: #0f172a;
+}
+
 input:focus,
 select:focus,
 textarea:focus,
 .search:focus {
   border-color: #005bff;
   box-shadow: 0 0 0 3px rgba(0, 91, 255, 0.14);
+}
+
+.topbar,
+.status-banner {
+  position: relative;
+  top: auto;
 }
 
 @media (max-width: 920px) {

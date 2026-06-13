@@ -2703,7 +2703,15 @@ class PortalRuntime:
 
     @staticmethod
     def _notice_supports_site_image_field(notice_type: str) -> bool:
-        return str(notice_type or "").strip() in {"维保通告", "设备检修"}
+        return MaintenancePortalService._end_site_photo_required(
+            notice_type=notice_type,
+        )
+
+    @staticmethod
+    def _end_site_photo_required(notice_type: str) -> bool:
+        return MaintenancePortalService._end_site_photo_required(
+            notice_type=notice_type,
+        )
 
     @classmethod
     def _has_extra_images_payload(cls, payload: dict) -> bool:
@@ -2952,15 +2960,6 @@ class PortalRuntime:
         if cls._remote_record_not_found(query_result):
             return ""
         return target_record_id
-        try:
-            cls.state_store.upsert_qt_active_item(
-                payload,
-                section=section,
-                sort_order=0,
-                origin=str(payload.get("origin") or "qt_upload"),
-            )
-        except Exception:
-            pass
 
     @staticmethod
     def _target_candidate_score(prepared: dict, candidate: dict) -> int:
@@ -3337,7 +3336,11 @@ class PortalRuntime:
         action = str(prepared.get("action") or "").strip().lower()
         if not notice_type or action not in {"start", "update", "end"}:
             return False, "后端上传缺少必要字段。", ""
-        if action == "end" and not cls._has_extra_images_payload(prepared):
+        if (
+            action == "end"
+            and cls._end_site_photo_required(notice_type)
+            and not cls._has_extra_images_payload(prepared)
+        ):
             return False, "结束通告前必须添加至少一张现场照片。", ""
         guard = external_real_write_guard()
         if guard["mock_external"]:
@@ -3531,7 +3534,66 @@ class PortalRuntime:
         prepared["source_record_id"] = source_record_id
         prepared["record_id"] = target_record_id
         prepared["target_record_id"] = target_record_id
+        if target_record_id and not str(prepared.get("active_item_id") or "").strip():
+            prepared["active_item_id"] = target_record_id
+        prepared.setdefault("origin", "portal")
+        prepared["lan_created_from_portal"] = True
+        prepared["_is_placeholder_record"] = False
+        prepared["_record_id_kind"] = "target"
+        prepared["_upload_in_progress"] = False
+        prepared["_has_unuploaded_changes"] = False
         return prepared
+
+    @classmethod
+    def _upsert_backend_active_notice(
+        cls, prepared: dict, *, remote_record_id: str = "", job_id: str = ""
+    ) -> str:
+        event_payload = cls._prepared_to_qt_ui_payload(
+            prepared,
+            remote_record_id=remote_record_id,
+        )
+        notice_type = str(event_payload.get("notice_type") or "").strip()
+        section = "event" if notice_type == "事件通告" else "other"
+        try:
+            cls.state_store.upsert_qt_active_item(
+                event_payload,
+                section=section,
+                sort_order=0,
+                origin=str(event_payload.get("origin") or "portal"),
+            )
+        except Exception as exc:
+            log_warning(
+                f"后端 active item 投影失败: job_id={job_id}, error={exc}"
+            )
+            raise
+        try:
+            cls.clear_payload_cache()
+            if hasattr(cls.service, "_touch_state_cache_version"):
+                cls.service._touch_state_cache_version()
+        except Exception:
+            pass
+        active_item_id = str(event_payload.get("active_item_id") or "").strip()
+        target_record_id = str(event_payload.get("target_record_id") or "").strip()
+        projected_item = {
+            "active_item_id": active_item_id,
+            "record_id": target_record_id,
+            "notice_type": notice_type,
+            "section": section,
+            "sort_order": 0,
+            "origin": str(event_payload.get("origin") or "portal"),
+            "payload": event_payload,
+        }
+        return cls.state_store.enqueue_outbox_event(
+            "qt_action",
+            {
+                "kind": "active_upsert",
+                "job_id": str(job_id or event_payload.get("job_id") or ""),
+                "payload": {
+                    "item": projected_item,
+                    "source": "portal",
+                },
+            },
+        )
 
     @classmethod
     def _enqueue_active_delete_for_ended_notice(
@@ -3657,7 +3719,11 @@ class PortalRuntime:
             prequery_result = query_result if isinstance(query_result, dict) else {}
 
         extra_images = payload.get("extra_images") if isinstance(payload.get("extra_images"), list) else []
-        if action_type == "end" and not cls._has_extra_images_payload({"extra_images": extra_images}):
+        if (
+            action_type == "end"
+            and cls._end_site_photo_required(notice_type)
+            and not cls._has_extra_images_payload({"extra_images": extra_images})
+        ):
             return {
                 "ok": False,
                 "name": "结束",
@@ -4099,18 +4165,11 @@ class PortalRuntime:
                 except Exception:
                     pass
                 return
-            event_payload = cls._prepared_to_qt_ui_payload(
-                prepared,
-                remote_record_id=remote_record_id,
-            )
             try:
-                event_id = cls.state_store.enqueue_outbox_event(
-                    "qt_action",
-                    {
-                        "kind": "maintenance_action",
-                        "job_id": job_id,
-                        "payload": event_payload,
-                    },
+                event_id = cls._upsert_backend_active_notice(
+                    prepared,
+                    remote_record_id=remote_record_id,
+                    job_id=job_id,
                 )
                 cls.service.mark_job(
                     job_id,
@@ -4121,6 +4180,21 @@ class PortalRuntime:
                 )
             except Exception as exc:
                 log_warning(f"Qt UI 事件投递失败: job_id={job_id}, error={exc}")
+                cls.service.mark_job(
+                    job_id,
+                    qt_phase="sync_failed",
+                    error=f"通告已上传，但界面同步失败：{exc}",
+                )
+                try:
+                    cls.state_store.mark_runtime_queue_item(
+                        "qt_action",
+                        job_id,
+                        "failed",
+                        error=str(exc),
+                    )
+                except Exception:
+                    pass
+                return
             try:
                 cls.state_store.mark_runtime_queue_item("qt_action", job_id, "done")
             except Exception:

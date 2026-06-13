@@ -38,6 +38,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 import upload_event_module.config as config_module  # noqa: E402
 from upload_event_module.config import ConfigManager  # noqa: E402
 from upload_event_module.config import ADJUST_NOTICE_FIELDS  # noqa: E402
+from upload_event_module.config import CHANGE_NOTICE_FIELDS  # noqa: E402
 from upload_event_module.config import MAINTENANCE_NOTICE_FIELDS  # noqa: E402
 from upload_event_module.config import POLLING_NOTICE_FIELDS  # noqa: E402
 from upload_event_module.config import POWER_NOTICE_FIELDS  # noqa: E402
@@ -526,6 +527,88 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertNotIn("/apps//", captured["url"])
         self.assertNotIn("/tables//", captured["url"])
 
+    def test_end_site_photo_required_only_for_core_notice_types(self):
+        self.assertTrue(
+            MaintenancePortalService._end_site_photo_required(
+                notice_type="维保通告",
+            )
+        )
+        self.assertTrue(
+            MaintenancePortalService._end_site_photo_required(
+                notice_type="设备变更",
+            )
+        )
+        self.assertTrue(
+            MaintenancePortalService._end_site_photo_required(
+                notice_type="设备检修",
+            )
+        )
+        self.assertFalse(
+            MaintenancePortalService._end_site_photo_required(
+                notice_type="上下电通告",
+                work_type="power",
+            )
+        )
+        self.assertFalse(
+            MaintenancePortalService._end_site_photo_required(
+                notice_type="设备轮巡",
+                work_type="polling",
+            )
+        )
+        self.assertFalse(
+            MaintenancePortalService._end_site_photo_required(
+                notice_type="设备调整",
+                work_type="adjust",
+            )
+        )
+        MaintenancePortalService._require_end_site_photo(
+            {},
+            "end",
+            notice_type="上下电通告",
+            work_type="power",
+        )
+        with self.assertRaises(PortalError):
+            MaintenancePortalService._require_end_site_photo(
+                {},
+                "end",
+                notice_type="设备变更",
+                work_type="change",
+            )
+
+    def test_portal_runtime_routes_change_site_photos_to_site_field(self):
+        self.assertTrue(PortalRuntime._notice_supports_site_image_field("设备变更"))
+        self.assertTrue(PortalRuntime._notice_supports_site_image_field("变更通告"))
+        self.assertTrue(PortalRuntime._end_site_photo_required("维护通告"))
+        self.assertTrue(PortalRuntime._end_site_photo_required("检修通告"))
+        self.assertFalse(PortalRuntime._notice_supports_site_image_field("设备调整"))
+        self.assertTrue(PortalRuntime._end_site_photo_required("设备检修"))
+        self.assertFalse(PortalRuntime._end_site_photo_required("设备轮巡"))
+
+    def test_change_handler_maps_extra_tokens_to_site_images(self):
+        handler = ChangeNoticeHandler("设备变更")
+        payload = NoticePayload(
+            text=(
+                "【设备变更】状态：结束\n"
+                "【名称】测试变更\n"
+                "【等级】低风险\n"
+                "【时间】2026-06-12 09:30~2026-06-12 18:30\n"
+                "【进度】测试完成"
+            ),
+            existing_extra_file_tokens=["old_site_token"],
+            extra_file_tokens=["new_site_token"],
+            response_time="2026-06-12 18:35",
+        )
+
+        fields = handler.build_update_fields(payload)
+
+        self.assertEqual(
+            fields[CHANGE_NOTICE_FIELDS["site_images"]],
+            [
+                {"file_token": "old_site_token"},
+                {"file_token": "new_site_token"},
+            ],
+        )
+
     def test_feishu_http_client_returns_business_json_on_http_error(self):
         transport = httpx.MockTransport(
             lambda request: httpx.Response(
@@ -562,6 +645,66 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(captured["method"], "GET")
         self.assertIn("/fields", captured["url"])
         self.assertEqual(captured["kwargs"]["params"]["page_size"], 500)
+
+    def test_portal_service_retries_bitable_data_not_ready(self):
+        service = MaintenancePortalService()
+        calls = []
+
+        class _HttpClient:
+            def request_json(self, method, url, **kwargs):
+                calls.append((method, url, kwargs))
+                if len(calls) < 3:
+                    return {
+                        "code": 1254607,
+                        "msg": "Data not ready, please try again later",
+                    }
+                return {"code": 0, "data": {"items": []}}
+
+        service._http_client = _HttpClient()
+        service._auth_headers = lambda: {"Authorization": "Bearer test"}
+
+        with patch("lan_bitable_template_portal.portal_service.time.sleep") as sleep_mock:
+            payload = service._request_json("fields", params={"page_size": 500})
+
+        self.assertEqual(payload["code"], 0)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual([call.args[0] for call in sleep_mock.call_args_list], [1.0, 2.5])
+
+    def test_portal_service_data_not_ready_error_is_user_friendly(self):
+        service = MaintenancePortalService()
+
+        class _HttpClient:
+            def request_json(self, method, url, **kwargs):
+                return {
+                    "code": 1254607,
+                    "msg": "Data not ready, please try again later",
+                }
+
+        service._http_client = _HttpClient()
+        service._auth_headers = lambda: {"Authorization": "Bearer test"}
+
+        with patch("lan_bitable_template_portal.portal_service.time.sleep"):
+            with self.assertRaises(PortalError) as ctx:
+                service._request_json("records", params={"page_size": 500})
+
+        self.assertIn("飞书多维表正在计算", str(ctx.exception))
+        self.assertIn("已保留上次成功数据", service._source_sync_warning("检修源表", ctx.exception))
+
+    def test_repair_source_record_page_size_is_reduced(self):
+        service = MaintenancePortalService()
+        captured_params = []
+        service._repair_field_meta_by_name = {}
+
+        def fake_request(path, *, params=None, **kwargs):
+            captured_params.append(dict(params or {}))
+            return {"data": {"items": [], "has_more": False}}
+
+        service._request_json = fake_request
+
+        service._load_repair_records()
+
+        self.assertEqual(captured_params[0]["page_size"], 200)
+        self.assertEqual(captured_params[0]["view_id"], "vewn2xWBED")
 
     def test_lan_portal_state_store_replaces_ongoing_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1671,6 +1814,53 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 self.assertEqual(events[0]["payload"]["kind"], "active_upsert")
             finally:
                 PortalRuntime.state_store = previous_store
+
+    def test_backend_uploaded_notice_projects_to_active_upsert_event(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            previous_store = PortalRuntime.state_store
+            previous_service = PortalRuntime.service
+            PortalRuntime.state_store = LanPortalStateStore(
+                Path(tmp) / "lan_portal_state.sqlite3"
+            )
+            PortalRuntime.service = _TestMaintenancePortalService()
+            try:
+                prepared = {
+                    "job_id": "job-active-upsert",
+                    "work_type": "maintenance",
+                    "notice_type": "维保通告",
+                    "record_id": "src-maintenance-1",
+                    "source_record_id": "src-maintenance-1",
+                    "title": "测试测试A楼维保通告",
+                    "building": "A楼",
+                    "building_code": "A",
+                    "building_codes": ["A"],
+                    "status": "开始",
+                    "text": "【维保通告】状态：开始\n【名称】测试测试A楼维保通告",
+                }
+
+                event_id = PortalRuntime._upsert_backend_active_notice(
+                    prepared,
+                    remote_record_id="rec-target-1",
+                    job_id="job-active-upsert",
+                )
+                qt_items = PortalRuntime.state_store.list_qt_active_items()
+                events = PortalRuntime.state_store.lease_outbox_events(
+                    "qt_action", limit=1, lease_seconds=5
+                )
+
+                self.assertTrue(event_id)
+                self.assertEqual(len(qt_items), 1)
+                self.assertEqual(qt_items[0]["record_id"], "rec-target-1")
+                self.assertEqual(qt_items[0]["active_item_id"], "rec-target-1")
+                self.assertEqual(qt_items[0]["payload"]["source_record_id"], "src-maintenance-1")
+                self.assertEqual(events[0]["payload"]["kind"], "active_upsert")
+                self.assertEqual(
+                    events[0]["payload"]["payload"]["item"]["record_id"],
+                    "rec-target-1",
+                )
+            finally:
+                PortalRuntime.state_store = previous_store
+                PortalRuntime.service = previous_service
 
     def test_backend_clipboard_maintenance_same_title_different_reason_is_distinct(self):
         with tempfile.TemporaryDirectory() as tmp:

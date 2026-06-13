@@ -168,14 +168,14 @@
         <section class="site-photo-fields">
           <div class="site-photo-head">
             <h3>现场照片</h3>
-            <span :class="{ required: photoCount === 0 }">已添加 {{ photoCount }} 张</span>
+            <span :class="{ required: sitePhotoRequired && photoCount === 0 }">已添加 {{ photoCount }} 张</span>
           </div>
           <div class="site-photo-actions">
             <label class="btn ghost site-photo-picker">
               添加现场照片
               <input type="file" accept="image/*" multiple @change="emit('photo-input', $event)" />
             </label>
-            <small>结束通告前至少添加一张现场照片，支持一次选择多张。</small>
+            <small>{{ sitePhotoRequired ? "结束通告前至少添加一张现场照片，支持一次选择多张。" : "该通告类型结束不强制现场照片，可按需添加。" }}</small>
           </div>
           <div v-if="photoCount" class="site-photo-list">
             <button
@@ -231,6 +231,7 @@ const props = defineProps<{
   undoBusy: boolean;
   needsBinding: boolean;
   photoCount: number;
+  sitePhotoRequired: boolean;
   maintenanceCycleOptions: string[];
   zhihangRecords: Dict[];
   jobText: (key: string) => string;

@@ -970,6 +970,7 @@ CHANGE_NOTICE_FIELDS = {
     "progress": "进度",
     "building": "楼栋",
     "today_in_progress": "今日是否进行",
+    "site_images": "过程现场图片",
 }
 
 MAINTENANCE_NOTICE_FIELDS = {

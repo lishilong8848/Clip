@@ -110,6 +110,10 @@ class ChangeNoticeHandler(BaseNoticeHandler):
             fields[CHANGE_NOTICE_FIELDS["start_snapshot"]] = [
                 {"file_token": token} for token in payload.file_tokens
             ]
+        if payload.extra_file_tokens and CHANGE_NOTICE_FIELDS.get("site_images"):
+            fields[CHANGE_NOTICE_FIELDS["site_images"]] = [
+                {"file_token": token} for token in payload.extra_file_tokens
+            ]
 
         return fields
 
@@ -182,6 +186,13 @@ class ChangeNoticeHandler(BaseNoticeHandler):
                 fields[CHANGE_NOTICE_FIELDS["end_snapshot"]] = [
                     {"file_token": token} for token in payload.file_tokens
                 ]
+            extra_tokens = self.merge_tokens(
+                payload.existing_extra_file_tokens, payload.extra_file_tokens
+            )
+            if extra_tokens and CHANGE_NOTICE_FIELDS.get("site_images"):
+                fields[CHANGE_NOTICE_FIELDS["site_images"]] = [
+                    {"file_token": token} for token in extra_tokens
+                ]
             return fields
 
         response_dt = self._parse_response_datetime(payload.response_time, start_dt)
@@ -197,6 +208,14 @@ class ChangeNoticeHandler(BaseNoticeHandler):
         if merged_tokens:
             fields[CHANGE_NOTICE_FIELDS["update_snapshot"]] = [
                 {"file_token": token} for token in merged_tokens
+            ]
+
+        extra_tokens = self.merge_tokens(
+            payload.existing_extra_file_tokens, payload.extra_file_tokens
+        )
+        if extra_tokens and CHANGE_NOTICE_FIELDS.get("site_images"):
+            fields[CHANGE_NOTICE_FIELDS["site_images"]] = [
+                {"file_token": token} for token in extra_tokens
             ]
 
         return fields

@@ -47,6 +47,9 @@ REPAIR_LINK_RETRY_SECONDS = 10 * 60
 REPAIR_LINK_RETRY_SLOW_SECONDS = 20 * 60
 REPAIR_LINK_FAST_RETRY_ATTEMPTS = 6
 REPAIR_LINK_MAX_ATTEMPTS = 18
+BITABLE_DATA_NOT_READY_CODE = 1254607
+BITABLE_TRANSIENT_RETRY_DELAYS = (1.0, 2.5, 5.0)
+REPAIR_SOURCE_PAGE_SIZE = 200
 DEFAULT_IMPACT_TEXT = "对IT业务无影响，不会触发BA和BMS系统相关告警"
 DEFAULT_PROGRESS_TEXT = "准备工作已完成，人员已就位，可否开始操作？"
 DEFAULT_MAINTENANCE_STATUS = "未开始"
@@ -185,6 +188,16 @@ WORK_TYPE_BY_NOTICE_TYPE = {
     "轮巡通告": WORK_TYPE_POLLING,
     NOTICE_TYPE_ADJUST: WORK_TYPE_ADJUST,
     "调整通告": WORK_TYPE_ADJUST,
+}
+END_SITE_PHOTO_REQUIRED_WORK_TYPES = {
+    WORK_TYPE_MAINTENANCE,
+    WORK_TYPE_CHANGE,
+    WORK_TYPE_REPAIR,
+}
+END_SITE_PHOTO_REQUIRED_NOTICE_TYPES = {
+    NOTICE_TYPE_MAINTENANCE,
+    NOTICE_TYPE_CHANGE,
+    NOTICE_TYPE_REPAIR,
 }
 CHANGE_PROGRESS_NOT_STARTED = "未开始"
 CHANGE_PROGRESS_ONGOING = "进行中"
@@ -423,12 +436,27 @@ class MaintenancePortalService:
                 params=params or {},
             )
 
-        payload = do_get()
-        if int(payload.get("code") or 0) in TOKEN_ERROR_CODES:
-            refresh_feishu_token()
+        payload: dict[str, Any] = {}
+        code = 0
+        for attempt in range(len(BITABLE_TRANSIENT_RETRY_DELAYS) + 1):
             payload = do_get()
-        code = payload.get("code", 0)
+            code = int(payload.get("code") or 0)
+            if code in TOKEN_ERROR_CODES:
+                refresh_feishu_token()
+                payload = do_get()
+                code = int(payload.get("code") or 0)
+            if (
+                code == BITABLE_DATA_NOT_READY_CODE
+                and attempt < len(BITABLE_TRANSIENT_RETRY_DELAYS)
+            ):
+                time.sleep(BITABLE_TRANSIENT_RETRY_DELAYS[attempt])
+                continue
+            break
         if code != 0:
+            if code == BITABLE_DATA_NOT_READY_CODE:
+                raise PortalError(
+                    "飞书多维表正在计算，数据暂时未准备好，请稍后重试。"
+                )
             raise PortalError(
                 f"飞书接口失败: code={code}, msg={payload.get('msg') or 'unknown'}"
             )
@@ -669,7 +697,10 @@ class MaintenancePortalService:
         records: list[dict[str, Any]] = []
         page_token = ""
         while True:
-            params = {"page_size": 500, "view_id": REPAIR_SOURCE_VIEW_ID}
+            params = {
+                "page_size": REPAIR_SOURCE_PAGE_SIZE,
+                "view_id": REPAIR_SOURCE_VIEW_ID,
+            }
             if page_token:
                 params["page_token"] = page_token
             payload = self._request_json(
@@ -771,6 +802,24 @@ class MaintenancePortalService:
         text = str(value or "")
         normalized = text.replace("\\/", "/")
         return "/apps//tables//" in normalized or "apps//tables//" in normalized
+
+    @staticmethod
+    def _is_bitable_data_not_ready_error(value: Any) -> bool:
+        text = str(value or "")
+        return (
+            str(BITABLE_DATA_NOT_READY_CODE) in text
+            or "Data not ready" in text
+            or "数据暂时未准备好" in text
+            or "多维表正在计算" in text
+        )
+
+    def _source_sync_warning(self, label: str, exc: Any) -> str:
+        if self._is_bitable_data_not_ready_error(exc):
+            return (
+                f"{label}同步失败: 飞书多维表正在计算，已保留上次成功数据，"
+                "请稍后再试。"
+            )
+        return f"{label}同步失败: {exc}"
 
     def _clean_load_warnings(self, warnings: list[Any] | None = None) -> list[str]:
         source = self._load_warnings if warnings is None else warnings
@@ -949,7 +998,7 @@ class MaintenancePortalService:
                     self._change_field_meta_by_name = {}
                 if not self._change_records:
                     self._change_records = []
-                warnings.append(f"变更源表同步失败: {exc}")
+                warnings.append(self._source_sync_warning("变更源表", exc))
             try:
                 self._load_zhihang_change_fields()
                 self._load_zhihang_change_records()
@@ -960,7 +1009,7 @@ class MaintenancePortalService:
                     self._zhihang_change_field_meta_by_name = {}
                 if not self._zhihang_change_records:
                     self._zhihang_change_records = []
-                warnings.append(f"智航变更源表同步失败: {exc}")
+                warnings.append(self._source_sync_warning("智航变更源表", exc))
             try:
                 self._load_repair_fields()
                 self._load_repair_records()
@@ -971,7 +1020,7 @@ class MaintenancePortalService:
                     self._repair_field_meta_by_name = {}
                 if not self._repair_records:
                     self._repair_records = []
-                warnings.append(f"检修源表同步失败: {exc}")
+                warnings.append(self._source_sync_warning("检修源表", exc))
             now = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             self._last_loaded_at = now
             self._last_loaded_ts = time.time()
@@ -1004,7 +1053,7 @@ class MaintenancePortalService:
                 self._load_repair_fields()
                 self._load_repair_records()
             except Exception as exc:
-                warning = f"检修源表同步失败: {exc}"
+                warning = self._source_sync_warning("检修源表", exc)
                 if warning not in warnings:
                     warnings.append(warning)
                 self._load_warnings = warnings
@@ -1042,7 +1091,7 @@ class MaintenancePortalService:
                 self._load_change_fields()
                 self._load_change_records()
             except Exception as exc:
-                warning = f"变更源表同步失败: {exc}"
+                warning = self._source_sync_warning("变更源表", exc)
                 if warning not in warnings:
                     warnings.append(warning)
                 self._load_warnings = warnings
@@ -1051,7 +1100,7 @@ class MaintenancePortalService:
                 self._load_zhihang_change_fields()
                 self._load_zhihang_change_records()
             except Exception as exc:
-                warning = f"智航变更源表同步失败: {exc}"
+                warning = self._source_sync_warning("智航变更源表", exc)
                 if warning not in warnings:
                     warnings.append(warning)
                 self._load_warnings = warnings
@@ -1103,7 +1152,7 @@ class MaintenancePortalService:
                     self._load_change_records()
                 except Exception as exc:
                     self._change_loaded_once = True
-                    warnings.append(f"变更源表同步失败: {exc}")
+                    warnings.append(self._source_sync_warning("变更源表", exc))
             if not self._zhihang_change_loaded_once:
                 attempted_optional_load = True
                 try:
@@ -1111,7 +1160,7 @@ class MaintenancePortalService:
                     self._load_zhihang_change_records()
                 except Exception as exc:
                     self._zhihang_change_loaded_once = True
-                    warnings.append(f"智航变更源表同步失败: {exc}")
+                    warnings.append(self._source_sync_warning("智航变更源表", exc))
             if not self._repair_loaded_once:
                 attempted_optional_load = True
                 try:
@@ -1119,7 +1168,7 @@ class MaintenancePortalService:
                     self._load_repair_records()
                 except Exception as exc:
                     self._repair_loaded_once = True
-                    warnings.append(f"检修源表同步失败: {exc}")
+                    warnings.append(self._source_sync_warning("检修源表", exc))
             if attempted_optional_load:
                 self._load_warnings = warnings
 
@@ -1403,8 +1452,36 @@ class MaintenancePortalService:
         return False
 
     @classmethod
-    def _require_end_site_photo(cls, request_payload: dict[str, Any], action: str) -> None:
+    def _end_site_photo_required(
+        cls,
+        *,
+        notice_type: Any = "",
+        work_type: Any = "",
+    ) -> bool:
+        notice_text = str(notice_type or "").strip()
+        work_text = str(work_type or "").strip()
+        if notice_text in END_SITE_PHOTO_REQUIRED_NOTICE_TYPES:
+            return True
+        if work_text in END_SITE_PHOTO_REQUIRED_WORK_TYPES:
+            return True
+        mapped = WORK_TYPE_BY_NOTICE_TYPE.get(notice_text, "")
+        return mapped in END_SITE_PHOTO_REQUIRED_WORK_TYPES
+
+    @classmethod
+    def _require_end_site_photo(
+        cls,
+        request_payload: dict[str, Any],
+        action: str,
+        *,
+        notice_type: Any = "",
+        work_type: Any = "",
+    ) -> None:
         if str(action or "").strip().lower() != "end":
+            return
+        if not cls._end_site_photo_required(
+            notice_type=notice_type,
+            work_type=work_type,
+        ):
             return
         if cls._has_site_photo_payload(request_payload):
             return
@@ -3190,6 +3267,9 @@ class MaintenancePortalService:
             WORK_TYPE_MAINTENANCE: 0,
             WORK_TYPE_CHANGE: 0,
             WORK_TYPE_REPAIR: 0,
+            WORK_TYPE_POWER: 0,
+            WORK_TYPE_POLLING: 0,
+            WORK_TYPE_ADJUST: 0,
         }
         for item in items or []:
             work_type = str(item.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
@@ -8399,7 +8479,12 @@ class MaintenancePortalService:
         if not start_time or not end_time:
             raise PortalError("计划开始时间和计划结束时间不能为空。")
         self._validate_minimum_notice_duration(start_time, end_time)
-        self._require_end_site_photo(request_payload, action)
+        self._require_end_site_photo(
+            request_payload,
+            action,
+            notice_type=notice_type,
+            work_type=work_type,
+        )
         specialty = self._clean_source_text(request_payload.get("specialty"))
         location = str(request_payload.get("location") or "").strip()
         content = str(request_payload.get("content") or "").strip()
@@ -8609,7 +8694,12 @@ class MaintenancePortalService:
         if not start_time or not end_time:
             raise PortalError("开始时间和结束时间不能为空。")
         self._validate_minimum_notice_duration(start_time, end_time)
-        self._require_end_site_photo(request_payload, action)
+        self._require_end_site_photo(
+            request_payload,
+            action,
+            notice_type=NOTICE_TYPE_MAINTENANCE,
+            work_type=WORK_TYPE_MAINTENANCE,
+        )
         location = str(request_payload.get("location") or "").strip()
         content = str(request_payload.get("content") or "").strip()
         reason = str(request_payload.get("reason") or "").strip()
@@ -8994,7 +9084,12 @@ class MaintenancePortalService:
         if not start_time or not end_time:
             raise PortalError("开始时间和结束时间不能为空。")
         self._validate_minimum_notice_duration(start_time, end_time)
-        self._require_end_site_photo(request_payload, action)
+        self._require_end_site_photo(
+            request_payload,
+            action,
+            notice_type=NOTICE_TYPE_CHANGE,
+            work_type=WORK_TYPE_CHANGE,
+        )
         location = str(request_payload.get("location") or "").strip()
         content = str(request_payload.get("content") or "").strip() or title
         reason = str(request_payload.get("reason") or "").strip()
@@ -9433,7 +9528,12 @@ class MaintenancePortalService:
             start_label="发现故障时间",
             end_label="期望完成时间",
         )
-        self._require_end_site_photo(request_payload, action)
+        self._require_end_site_photo(
+            request_payload,
+            action,
+            notice_type=NOTICE_TYPE_REPAIR,
+            work_type=WORK_TYPE_REPAIR,
+        )
         location = request_text("location")
         default_content = self._repair_first_field(
             fields, "标题/补充内容", "标题补充内容"

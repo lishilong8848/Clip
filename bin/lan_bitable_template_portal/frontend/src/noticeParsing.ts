@@ -27,6 +27,17 @@ export function sectionValue(sections: NoticeSections, names: string[], fallback
   return fallback;
 }
 
+export function rawSectionValue(text: string, names: string[], fallback = ""): string {
+  const labels = names
+    .map((name) => normalizeNoticeLabel(name).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .filter(Boolean);
+  if (!labels.length) return fallback;
+  const pattern = new RegExp(`【\\s*(?:${labels.join("|")})\\s*】\\s*([\\s\\S]*?)(?=(?:\\n\\s*)*【[^】]+】|$)`);
+  const match = String(text || "").match(pattern);
+  const value = String(match?.[1] || "").trim();
+  return value || fallback;
+}
+
 export function pastedNoticeStatus(text: string): string {
   const match = String(text || "").match(/状态\s*[：:]\s*(开始|更新|结束)/);
   return match?.[1] || "开始";
