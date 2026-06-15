@@ -2652,6 +2652,9 @@ class PortalRuntime:
             for item in fields.get("过程更新钉钉截图", []) or []:
                 if "file_token" in item:
                     existing_tokens.append(item["file_token"])
+            for item in fields.get("过程现场图片", []) or []:
+                if "file_token" in item:
+                    existing_extra_tokens.append(item["file_token"])
         elif notice_type in ("上下电通告", "上电通告", "下电通告", "设备轮巡", "设备调整"):
             for item in fields.get("过程通告截图", []) or []:
                 if "file_token" in item:

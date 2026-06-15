@@ -47,7 +47,7 @@
         </label>
         <label v-if="isNoticeMessageField(workType, 'specialty')" :class="fieldClass('specialty')">
           {{ noticeFieldLabel(workType, "specialty") }}
-          <input :value="draft.specialty" placeholder="专业" @input="setDraft('specialty', ($event.target as HTMLInputElement).value)" />
+          <SpecialtyInput :list-id="`${rowKey}-message-specialty-options`" :model-value="draft.specialty || ''" @update:model-value="setDraft('specialty', $event)" />
         </label>
         <label v-if="isNoticeMessageField(workType, 'level')" :class="fieldClass('level')">
           {{ noticeFieldLabel(workType, "level") }}
@@ -116,12 +116,17 @@
         </div>
       </section>
 
-      <details v-if="hasNoticeUploadFields(workType)" class="upload-fields">
-        <summary>多维上传字段</summary>
+      <section v-if="hasNoticeUploadFields(workType)" class="upload-fields required-upload-fields">
+        <h3>多维上传字段（必填）</h3>
         <div class="form-grid">
-          <label v-if="isNoticeUploadField(workType, 'specialty')">
+          <label v-if="isNoticeUploadField(workType, 'specialty')" :class="fieldClass('specialty')">
             专业
-            <input :value="draft.specialty" placeholder="用于目标多维字段" @input="setDraft('specialty', ($event.target as HTMLInputElement).value)" />
+            <SpecialtyInput
+              :list-id="`${rowKey}-upload-specialty-options`"
+              :model-value="draft.specialty || ''"
+              placeholder="用于目标多维字段"
+              @update:model-value="setDraft('specialty', $event)"
+            />
           </label>
           <label v-if="isNoticeUploadField(workType, 'maintenance_cycle')" :class="fieldClass('maintenance_cycle')">
             {{ record.manual ? "维护周期" : "维保周期" }}
@@ -139,7 +144,7 @@
               <input :checked="Boolean(draft.zhihang_involved)" type="checkbox" @change="setDraft('zhihang_involved', ($event.target as HTMLInputElement).checked)" />
               涉及智航
             </label>
-            <select v-if="draft.zhihang_involved" :value="draft.zhihang_record_id" @change="changeZhihang(($event.target as HTMLSelectElement).value)">
+            <select v-if="draft.zhihang_involved" :class="fieldClass('zhihang_record_id')" :value="draft.zhihang_record_id" @change="changeZhihang(($event.target as HTMLSelectElement).value)">
               <option value="">选择智航变更</option>
               <option v-for="item in zhihangRecords" :key="item.record_id" :value="item.record_id">
                 {{ item.title || item.record_id }}
@@ -147,7 +152,7 @@
             </select>
           </div>
         </div>
-      </details>
+      </section>
 
       <details class="upload-fields upload-preview">
         <summary>多维上传预览</summary>
@@ -192,6 +197,7 @@ import {
   workTypeLabel,
   workTypes,
 } from "../noticeTemplates";
+import SpecialtyInput from "./SpecialtyInput.vue";
 
 type Dict = Record<string, any>;
 type ScopeOption = { value: string; label: string };
@@ -429,11 +435,17 @@ textarea {
   background: #f8fafc;
 }
 
+.upload-fields h3,
 .upload-fields summary {
+  margin: 0 0 8px;
   cursor: pointer;
   color: #334155;
   font-size: 13px;
   font-weight: 600;
+}
+
+.upload-fields h3 {
+  cursor: default;
 }
 
 .zhihang-line {

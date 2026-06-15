@@ -28,11 +28,7 @@
           </label>
           <label v-if="isNoticeMessageField(workType, 'specialty')">
             {{ noticeFieldLabel(workType, "specialty") }}
-            <input
-              :value="draft.specialty"
-              placeholder="专业"
-              @input="setEdit('specialty', ($event.target as HTMLInputElement).value)"
-            />
+            <SpecialtyInput :list-id="`${lineKey}-message-specialty-options`" :model-value="draft.specialty || ''" @update:model-value="setEdit('specialty', $event)" />
           </label>
           <label v-if="isNoticeMessageField(workType, 'level')">
             {{ noticeFieldLabel(workType, "level") }}
@@ -125,15 +121,16 @@
             <label class="span-2"><span>备件更换情况</span><textarea :value="draft.spare_parts" @input="setEdit('spare_parts', ($event.target as HTMLTextAreaElement).value)"></textarea></label>
           </div>
         </section>
-        <details v-if="hasNoticeUploadFields(workType)" class="upload-fields">
-          <summary>多维上传字段</summary>
+        <section v-if="hasNoticeUploadFields(workType)" class="upload-fields required-upload-fields">
+          <h3>多维上传字段（必填）</h3>
           <div class="form-grid">
             <label v-if="isNoticeUploadField(workType, 'specialty')">
               专业
-              <input
-                :value="draft.specialty"
+              <SpecialtyInput
+                :list-id="`${lineKey}-upload-specialty-options`"
+                :model-value="draft.specialty || ''"
                 placeholder="用于目标多维字段"
-                @input="setEdit('specialty', ($event.target as HTMLInputElement).value)"
+                @update:model-value="setEdit('specialty', $event)"
               />
             </label>
             <label v-if="isNoticeUploadField(workType, 'maintenance_cycle')">
@@ -164,8 +161,8 @@
               </select>
             </div>
           </div>
-        </details>
-        <section class="site-photo-fields">
+        </section>
+        <section class="site-photo-fields" tabindex="0" @paste.stop="emitPhotoPaste">
           <div class="site-photo-head">
             <h3>现场照片</h3>
             <span :class="{ required: sitePhotoRequired && photoCount === 0 }">已添加 {{ photoCount }} 张</span>
@@ -175,8 +172,15 @@
               添加现场照片
               <input type="file" accept="image/*" multiple @change="emit('photo-input', $event)" />
             </label>
-            <small>{{ sitePhotoRequired ? "结束通告前至少添加一张现场照片，支持一次选择多张。" : "该通告类型结束不强制现场照片，可按需添加。" }}</small>
+            <small>
+              {{
+                sitePhotoRequired
+                  ? "结束通告前至少添加一张现场照片，支持截图后 Ctrl+V 粘贴或一次选择多张。"
+                  : "该通告类型结束不强制现场照片，可按需粘贴或添加。"
+              }}
+            </small>
           </div>
+          <div class="site-photo-paste-hint">复制图片后点击此区域，按 Ctrl+V 粘贴现场照片</div>
           <div v-if="photoCount" class="site-photo-list">
             <button
               v-for="(photo, index) in draft.extra_images || []"
@@ -215,6 +219,7 @@ import {
   noticeFieldLabel,
   workTypeLabel,
 } from "../noticeTemplates";
+import SpecialtyInput from "./SpecialtyInput.vue";
 
 type Dict = Record<string, any>;
 
@@ -244,6 +249,7 @@ const emit = defineEmits<{
   "set-edit": [key: string, value: any];
   "bind-zhihang": [recordId: string];
   "photo-input": [event: Event];
+  "photo-paste": [event: ClipboardEvent];
   "remove-photo": [index: number];
   send: [action: string];
   delete: [];
@@ -255,6 +261,10 @@ const workType = computed(() => props.item.work_type || "maintenance");
 
 function setEdit(key: string, value: any): void {
   emit("set-edit", key, value);
+}
+
+function emitPhotoPaste(event: ClipboardEvent): void {
+  emit("photo-paste", event);
 }
 </script>
 
@@ -383,11 +393,17 @@ textarea {
   font-size: 13px;
 }
 
+.upload-fields h3,
 .upload-fields summary {
+  margin: 0 0 8px;
   cursor: pointer;
   color: #2563eb;
   font-weight: 700;
   font-size: 13px;
+}
+
+.upload-fields h3 {
+  cursor: default;
 }
 
 .zhihang-line {
@@ -412,6 +428,13 @@ textarea {
   border: 1px solid #dbeafe;
   border-radius: 8px;
   background: #f8fbff;
+  outline: none;
+}
+
+.site-photo-fields:focus-within,
+.site-photo-fields:focus {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
 }
 
 .site-photo-head,
@@ -444,6 +467,16 @@ textarea {
 .site-photo-actions small {
   color: #64748b;
   font-size: 12px;
+}
+
+.site-photo-paste-hint {
+  border: 1px dashed #bfdbfe;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #ffffff;
+  color: #2563eb;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .site-photo-picker {

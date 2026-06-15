@@ -2407,6 +2407,14 @@ class ScreenshotConfirmDialog(QDialog):
 
         self.btn_extra_upload.clicked.connect(self.select_extra_images)
 
+        self.btn_extra_paste = QPushButton("粘贴现场照片")
+
+        self.btn_extra_paste.setObjectName("TemplateBtn")
+
+        self.btn_extra_paste.setToolTip("复制图片后点击，或直接按 Ctrl+V 粘贴")
+
+        self.btn_extra_paste.clicked.connect(self.paste_extra_image_from_clipboard)
+
 
 
         self.extra_hint_label = QLabel("支持多张，点击截图 / Ctrl+V 粘贴")
@@ -2422,6 +2430,8 @@ class ScreenshotConfirmDialog(QDialog):
         extra_layout.addStretch()
 
         extra_layout.addWidget(self.btn_extra_upload)
+
+        extra_layout.addWidget(self.btn_extra_paste)
 
         extra_layout.addWidget(self.extra_hint_label)
 
@@ -6505,6 +6515,22 @@ class ScreenshotConfirmDialog(QDialog):
         self._update_extra_images_label()
 
         return True
+
+
+
+    def paste_extra_image_from_clipboard(self):
+
+        if not self.enable_extra_upload:
+
+            return
+
+        if self._try_paste_extra_image():
+
+            show_simple_message(self, "已从剪贴板添加现场照片。", self.theme)
+
+            return
+
+        show_simple_message(self, "剪贴板中没有可粘贴的图片，请先复制图片后再试。", self.theme)
 
 
 

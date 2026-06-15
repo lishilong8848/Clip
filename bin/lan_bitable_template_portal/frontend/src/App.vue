@@ -376,6 +376,7 @@
               @set-edit="(key, value) => setOngoingEdit(item, key, value)"
               @bind-zhihang="(recordId) => bindOngoingZhihang(item, recordId)"
               @photo-input="(event) => handleOngoingPhotoInput(item, event)"
+              @photo-paste="(event) => handleOngoingPhotoPaste(item, event)"
               @remove-photo="(index) => removeOngoingPhoto(item, index)"
               @send="(action) => sendOngoing(item, action)"
               @delete="deleteOngoing(item)"
@@ -1978,12 +1979,34 @@ function requiredDraftFields(record: Dict, draft: Dict): string[] {
   } else if (type === "adjust") {
     ["location", "content", "reason", "impact"].forEach((field) => fields.add(field));
   }
+  requiredUploadFields(type, draft).forEach((field) => fields.add(field));
   return Array.from(fields);
 }
 
 function draftFieldValue(record: Dict, draft: Dict, field: string): string {
   if (field === "title") return manualDraftTitle(draft, draftWorkType(record, draft));
   return String(draft[field] ?? "").trim();
+}
+
+function requiredUploadFields(type: string, values: Dict): string[] {
+  const result: string[] = [];
+  noticeTemplate(type).uploadFields.forEach((field) => {
+    if (field === "non_plan") return;
+    if (field === "zhihang") {
+      if (Boolean(values.zhihang_involved)) result.push("zhihang_record_id");
+      return;
+    }
+    result.push(field);
+  });
+  return result;
+}
+
+function missingUploadFields(type: string, values: Dict): string[] {
+  return requiredUploadFields(type, values).filter((field) => !String(values[field] ?? "").trim());
+}
+
+function uploadFieldsMissingText(type: string, missing: string[]): string {
+  return missing.length ? `请补充多维上传字段：${missing.map((field) => noticeFieldLabel(type, field)).join("、")}` : "";
 }
 
 function draftMissingFields(record: Dict, draft: Dict): string[] {
@@ -2872,10 +2895,30 @@ async function uploadSitePhotoFile(file: File): Promise<Dict> {
   }
 }
 
-async function handleOngoingPhotoInput(item: Dict, event: Event): Promise<void> {
-  const input = event.target as HTMLInputElement;
-  const files = Array.from(input.files || []);
-  input.value = "";
+function isValidSitePhotoFile(file: File): boolean {
+  const type = String(file.type || "");
+  if (type && !type.startsWith("image/")) return false;
+  if (file.size > MAX_SITE_PHOTO_BYTES) return false;
+  return true;
+}
+
+function pastedImageFiles(event: ClipboardEvent): File[] {
+  const clipboard = event.clipboardData;
+  if (!clipboard) return [];
+  const files: File[] = [];
+  Array.from(clipboard.items || []).forEach((item) => {
+    if (!item.type.startsWith("image/")) return;
+    const file = item.getAsFile();
+    if (file) files.push(file);
+  });
+  if (files.length) return files;
+  return Array.from(clipboard.files || []).filter((file) => {
+    const type = String(file.type || "");
+    return !type || type.startsWith("image/");
+  });
+}
+
+async function addOngoingPhotoFiles(item: Dict, files: File[], invalidMessage: string): Promise<void> {
   if (!files.length) return;
   const key = ongoingLineKey(item);
   const edit = ongoingDraft(item);
@@ -2886,14 +2929,10 @@ async function handleOngoingPhotoInput(item: Dict, event: Event): Promise<void> 
     return;
   }
   const validFiles = files
-    .filter((file) => {
-      if (!file.type.startsWith("image/")) return false;
-      if (file.size > MAX_SITE_PHOTO_BYTES) return false;
-      return true;
-    })
+    .filter(isValidSitePhotoFile)
     .slice(0, availableSlots);
   if (!validFiles.length) {
-    rememberJob(key, { text: "请选择不超过 8MB 的图片文件", status: "failed", phase: "failed" });
+    rememberJob(key, { text: invalidMessage, status: "failed", phase: "failed" });
     return;
   }
   try {
@@ -2905,6 +2944,23 @@ async function handleOngoingPhotoInput(item: Dict, event: Event): Promise<void> 
   } catch (error: any) {
     rememberJob(key, { text: error?.message || "现场照片读取失败", status: "failed", phase: "failed" });
   }
+}
+
+async function handleOngoingPhotoInput(item: Dict, event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement;
+  const files = Array.from(input.files || []);
+  input.value = "";
+  await addOngoingPhotoFiles(item, files, "请选择不超过 8MB 的图片文件");
+}
+
+async function handleOngoingPhotoPaste(item: Dict, event: ClipboardEvent): Promise<void> {
+  const files = pastedImageFiles(event);
+  if (!files.length) {
+    rememberJob(ongoingLineKey(item), { text: "剪贴板中没有图片，请先复制图片后再粘贴", status: "failed", phase: "failed" });
+    return;
+  }
+  event.preventDefault();
+  await addOngoingPhotoFiles(item, files, "剪贴板图片不是有效图片或超过 8MB");
 }
 
 function removeOngoingPhoto(item: Dict, index: number): void {
@@ -3058,6 +3114,11 @@ async function bindOngoingTarget(item: Dict): Promise<void> {
 async function sendOngoing(item: Dict, action: string): Promise<void> {
   const key = ongoingLineKey(item);
   const payload = buildOngoingPayload(item, action);
+  const missingUpload = missingUploadFields(String(payload.work_type || item.work_type || ""), payload);
+  if (missingUpload.length) {
+    rememberJob(key, { text: uploadFieldsMissingText(String(payload.work_type || item.work_type || ""), missingUpload), status: "failed", phase: "failed" });
+    return;
+  }
   if (!validatePayloadDuration(payload, key)) return;
   if (action === "end" && ongoingEndRequiresSitePhoto(item) && !ongoingPhotoCount(item)) {
     rememberJob(key, { text: "结束通告前必须添加至少一张现场照片", status: "failed", phase: "failed" });

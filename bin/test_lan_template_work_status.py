@@ -584,6 +584,17 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertTrue(PortalRuntime._end_site_photo_required("设备检修"))
         self.assertFalse(PortalRuntime._end_site_photo_required("设备轮巡"))
 
+    def test_portal_runtime_reads_existing_change_site_photos(self):
+        _, existing_extra_tokens, _ = PortalRuntime._existing_tokens_for_notice_type(
+            "设备变更",
+            {
+                "过程更新钉钉截图": [{"file_token": "notice_token"}],
+                "过程现场图片": [{"file_token": "site_token"}],
+            },
+        )
+
+        self.assertEqual(existing_extra_tokens, ["site_token"])
+
     def test_change_handler_maps_extra_tokens_to_site_images(self):
         handler = ChangeNoticeHandler("设备变更")
         payload = NoticePayload(

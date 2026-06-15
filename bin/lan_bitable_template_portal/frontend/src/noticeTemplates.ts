@@ -96,6 +96,7 @@ const commonLabels: Record<string, string> = {
   repair_device: "维修设备",
   repair_fault: "维修故障",
   solution: "解决方案",
+  zhihang_record_id: "智航变更记录",
 };
 
 const noticeFieldLabels: Record<string, Record<string, string>> = {
