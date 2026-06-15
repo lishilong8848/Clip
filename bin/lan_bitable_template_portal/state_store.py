@@ -1467,9 +1467,6 @@ class LanPortalStateStore:
 
     def _identity_for_item(self, item: dict[str, Any]) -> str:
         item = normalize_notice_identity_payload(item)
-        active_item_id = self._text(item.get("active_item_id"))
-        if active_item_id:
-            return f"active:{active_item_id}"
         work_type = self._text(item.get("work_type")) or "maintenance"
         target_record_id = canonical_target_record_id(item)
         if target_record_id:
@@ -1477,6 +1474,9 @@ class LanPortalStateStore:
         source_record_id = canonical_source_record_id(item)
         if source_record_id:
             return f"{work_type}:source:{source_record_id}"
+        active_item_id = self._text(item.get("active_item_id"))
+        if active_item_id:
+            return f"{work_type}:active:{active_item_id}"
         seed = self._json(
             [
                 work_type,
@@ -1488,10 +1488,106 @@ class LanPortalStateStore:
         )
         return f"generated:{uuid.uuid5(uuid.NAMESPACE_URL, seed).hex}"
 
+    def _identity_keys_for_item(self, item: dict[str, Any]) -> set[str]:
+        item = normalize_notice_identity_payload(item)
+        work_type = self._text(item.get("work_type")) or "maintenance"
+        keys: set[str] = set()
+        target_record_id = canonical_target_record_id(item)
+        source_record_id = canonical_source_record_id(item)
+        active_item_id = self._text(item.get("active_item_id"))
+        if target_record_id:
+            keys.add(f"{work_type}:target:{target_record_id}")
+        if source_record_id:
+            keys.add(f"{work_type}:source:{source_record_id}")
+        if active_item_id:
+            keys.add(f"{work_type}:active:{active_item_id}")
+        title = self._text(item.get("title") or item.get("content"))
+        if title:
+            seed = self._json(
+                [
+                    work_type,
+                    self._text(item.get("notice_type")),
+                    title,
+                    self._text(item.get("building")),
+                    self._text(item.get("start_time") or item.get("time_str") or item.get("time")),
+                    self._text(item.get("end_time")),
+                    self._text(item.get("reason")),
+                ]
+            )
+            keys.add(f"{work_type}:fallback:{hashlib.sha1(seed.encode('utf-8')).hexdigest()}")
+        if not keys:
+            keys.add(self._identity_for_item(item))
+        return keys
+
+    def _notice_payload_score(self, item: dict[str, Any]) -> int:
+        item = normalize_notice_identity_payload(item or {})
+        score = 0
+        if canonical_target_record_id(item):
+            score += 12
+        if canonical_source_record_id(item):
+            score += 8
+        if self._text(item.get("active_item_id")):
+            score += 4
+        for field in (
+            "title",
+            "building",
+            "specialty",
+            "maintenance_cycle",
+            "start_time",
+            "end_time",
+            "location",
+            "content",
+            "reason",
+            "impact",
+            "progress",
+            "text",
+        ):
+            if self._text(item.get(field)):
+                score += 1
+        if isinstance(item.get("extra_images"), list) and item.get("extra_images"):
+            score += 1
+        return score
+
+    def _merge_notice_payload(self, existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+        existing = dict(existing or {})
+        incoming = dict(incoming or {})
+        primary, supplement = (
+            (incoming, existing)
+            if self._notice_payload_score(incoming) >= self._notice_payload_score(existing)
+            else (existing, incoming)
+        )
+        merged = dict(primary)
+        for key, value in supplement.items():
+            current = merged.get(key)
+            if current in (None, "", [], {}):
+                merged[key] = value
+        return normalize_notice_identity_payload(merged)
+
     def replace_ongoing_items(self, items: list[dict[str, Any]] | None) -> dict[str, Any]:
         now = time.time()
         snapshot_id = uuid.uuid4().hex
-        normalized = [dict(item) for item in (items or []) if isinstance(item, dict)]
+        normalized: list[dict[str, Any]] = []
+        index_by_key: dict[str, int] = {}
+        for item in (items or []):
+            if not isinstance(item, dict):
+                continue
+            normalized_item = normalize_notice_identity_payload(dict(item))
+            keys = self._identity_keys_for_item(normalized_item)
+            match_index = None
+            for key in keys:
+                if key in index_by_key:
+                    match_index = index_by_key[key]
+                    break
+            if match_index is None:
+                match_index = len(normalized)
+                normalized.append(normalized_item)
+            else:
+                normalized[match_index] = self._merge_notice_payload(
+                    normalized[match_index],
+                    normalized_item,
+                )
+            for key in keys | self._identity_keys_for_item(normalized[match_index]):
+                index_by_key[key] = match_index
         comparable = [
             {"identity": self._identity_for_item(item), "payload": item}
             for item in normalized
@@ -2952,6 +3048,110 @@ class LanPortalStateStore:
             "deleted_at": float(row["deleted_at"] or 0) if row["deleted_at"] is not None else None,
         }
 
+    def _qt_active_identity_probe(self, item: dict[str, Any]) -> dict[str, Any]:
+        payload = (
+            dict(item.get("payload") or {})
+            if isinstance(item.get("payload"), dict)
+            else dict(item or {})
+        )
+        if item.get("active_item_id") and not payload.get("active_item_id"):
+            payload["active_item_id"] = item.get("active_item_id")
+        if item.get("record_id"):
+            payload.setdefault("target_record_id", item.get("record_id"))
+            payload.setdefault("record_id", item.get("record_id"))
+        return normalize_notice_identity_payload(payload)
+
+    def _qt_active_identity_keys(self, item: dict[str, Any]) -> set[str]:
+        payload = self._qt_active_identity_probe(item)
+        work_type = self._text(payload.get("work_type") or payload.get("lan_work_type"))
+        if not work_type:
+            work_type = "event" if self._text(payload.get("notice_type")) == "事件通告" else "maintenance"
+        keys: set[str] = set()
+        target_record_id = canonical_target_record_id(payload)
+        source_record_id = canonical_source_record_id(payload)
+        active_item_id = self._text(payload.get("active_item_id") or item.get("active_item_id"))
+        if target_record_id:
+            keys.add(f"{work_type}:target:{target_record_id}")
+        if source_record_id:
+            keys.add(f"{work_type}:source:{source_record_id}")
+        if active_item_id:
+            keys.add(f"{work_type}:active:{active_item_id}")
+        title = self._text(payload.get("title") or payload.get("content"))
+        if title:
+            fallback_seed = self._json(
+                [
+                    work_type,
+                    self._text(payload.get("notice_type")),
+                    title,
+                    self._text(payload.get("building")),
+                    self._text(payload.get("start_time") or payload.get("time_str") or payload.get("time")),
+                    self._text(payload.get("end_time")),
+                    self._text(payload.get("reason")),
+                ]
+            )
+            keys.add(f"{work_type}:fallback:{hashlib.sha1(fallback_seed.encode('utf-8')).hexdigest()}")
+        return keys
+
+    def _qt_active_item_score(self, item: dict[str, Any]) -> int:
+        payload = self._qt_active_identity_probe(item)
+        return self._notice_payload_score(payload) + (2 if item.get("record_id") else 0)
+
+    def _merge_qt_active_items(self, existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+        existing = dict(existing or {})
+        incoming = dict(incoming or {})
+        primary, supplement = (
+            (incoming, existing)
+            if self._qt_active_item_score(incoming) >= self._qt_active_item_score(existing)
+            else (existing, incoming)
+        )
+        merged = dict(primary)
+        for key, value in supplement.items():
+            if merged.get(key) in (None, "", [], {}):
+                merged[key] = value
+        primary_payload = (
+            dict(primary.get("payload") or {})
+            if isinstance(primary.get("payload"), dict)
+            else {}
+        )
+        supplement_payload = (
+            dict(supplement.get("payload") or {})
+            if isinstance(supplement.get("payload"), dict)
+            else {}
+        )
+        merged_payload = self._merge_notice_payload(supplement_payload, primary_payload)
+        merged_payload.setdefault("active_item_id", merged.get("active_item_id") or supplement.get("active_item_id") or "")
+        if merged.get("record_id"):
+            merged_payload.setdefault("target_record_id", merged.get("record_id"))
+            merged_payload.setdefault("record_id", merged.get("record_id"))
+        merged["payload"] = merged_payload
+        if not merged.get("record_id"):
+            merged["record_id"] = canonical_target_record_id(merged_payload)
+        return merged
+
+    def _dedupe_qt_active_items(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        merged: list[dict[str, Any]] = []
+        index_by_key: dict[str, int] = {}
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            keys = self._qt_active_identity_keys(item)
+            match_index = None
+            for key in keys:
+                if key in index_by_key:
+                    match_index = index_by_key[key]
+                    break
+            if match_index is None:
+                match_index = len(merged)
+                merged.append(dict(item))
+            else:
+                merged[match_index] = self._merge_qt_active_items(
+                    merged[match_index],
+                    item,
+                )
+            for key in self._qt_active_identity_keys(merged[match_index]) | keys:
+                index_by_key[key] = match_index
+        return merged
+
     def list_qt_active_items(self, *, include_deleted: bool = False) -> list[dict[str, Any]]:
         if not self.db_path.exists():
             return []
@@ -2968,7 +3168,8 @@ class LanPortalStateStore:
                     ORDER BY section ASC, sort_order ASC, updated_at DESC
                     """
                 ).fetchall()
-        return [self._qt_active_item_from_row(row) for row in rows]
+        items = [self._qt_active_item_from_row(row) for row in rows]
+        return items if include_deleted else self._dedupe_qt_active_items(items)
 
     def upsert_qt_active_item(
         self,
@@ -2997,6 +3198,47 @@ class LanPortalStateStore:
         with self._lock:
             with closing(self._connect()) as conn:
                 self._ensure_schema_locked(conn)
+                existing_rows = conn.execute(
+                    """
+                    SELECT active_item_id, record_id, notice_type, section, sort_order,
+                           origin, payload_json, updated_at, deleted_at
+                    FROM qt_active_items
+                    WHERE deleted_at IS NULL
+                    """
+                ).fetchall()
+                probe_item = {
+                    "active_item_id": active_item_id,
+                    "record_id": record_id,
+                    "notice_type": notice_type,
+                    "section": section,
+                    "sort_order": int(sort_order or 0),
+                    "origin": origin,
+                    "payload": normalized,
+                }
+                probe_keys = self._qt_active_identity_keys(probe_item)
+                existing_identity = self._notice_identity_lookup_locked(
+                    conn,
+                    work_type=self._text(normalized.get("work_type")),
+                    active_item_id=active_item_id,
+                    source_record_id=canonical_source_record_id(normalized),
+                    target_record_id=record_id,
+                )
+                if existing_identity:
+                    existing_identity_data = self._notice_identity_from_row(existing_identity)
+                    existing_active_item_id = self._text(
+                        existing_identity_data.get("active_item_id")
+                    )
+                    if existing_active_item_id:
+                        active_item_id = existing_active_item_id
+                        normalized["active_item_id"] = active_item_id
+                for row in existing_rows:
+                    existing_item = self._qt_active_item_from_row(row)
+                    if self._text(existing_item.get("active_item_id")) == active_item_id:
+                        continue
+                    if probe_keys and (probe_keys & self._qt_active_identity_keys(existing_item)):
+                        active_item_id = self._text(existing_item.get("active_item_id")) or active_item_id
+                        normalized["active_item_id"] = active_item_id
+                        break
                 conn.execute(
                     """
                     INSERT INTO qt_active_items(
@@ -3025,6 +3267,20 @@ class LanPortalStateStore:
                         now,
                     ),
                 )
+                for row in existing_rows:
+                    existing_item = self._qt_active_item_from_row(row)
+                    duplicate_active_item_id = self._text(existing_item.get("active_item_id"))
+                    if not duplicate_active_item_id or duplicate_active_item_id == active_item_id:
+                        continue
+                    if probe_keys and (probe_keys & self._qt_active_identity_keys(existing_item)):
+                        conn.execute(
+                            """
+                            UPDATE qt_active_items
+                            SET deleted_at = ?, updated_at = ?
+                            WHERE active_item_id = ? AND deleted_at IS NULL
+                            """,
+                            (now, now, duplicate_active_item_id),
+                        )
                 self._upsert_notice_identity_locked(conn, normalized, origin=origin)
                 conn.commit()
         return True

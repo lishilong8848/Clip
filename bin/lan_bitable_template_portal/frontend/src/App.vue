@@ -1056,6 +1056,80 @@ function ongoingLineKey(item: Dict): string {
   return String(item.active_item_id || item.target_record_id || item.feishu_record_id || item.raw_record_id || item.source_record_id || item.record_id || "").trim();
 }
 
+function ongoingIdentityKeys(item: Dict): string[] {
+  const workType = String(item.work_type || item.lan_work_type || "maintenance").trim();
+  const noticeType = String(item.notice_type || "").trim();
+  const target = String(item.target_record_id || item.feishu_record_id || item.raw_record_id || "").trim();
+  const source = String(item.source_record_id || "").trim();
+  const active = String(item.active_item_id || "").trim();
+  const keys: string[] = [];
+  if (target) keys.push(`${workType}:target:${target}`);
+  if (source) keys.push(`${workType}:source:${source}`);
+  if (active) keys.push(`${workType}:active:${active}`);
+  const title = normalizeDraftSignatureText(String(item.title || item.content || ""));
+  if (title) {
+    const start = String(item.start_time || item.time_str || item.time || "").slice(0, 16);
+    const end = String(item.end_time || "").slice(0, 16);
+    const reason = normalizeDraftSignatureText(String(item.reason || ""));
+    const building = normalizeDraftSignatureText(String(item.building || ""));
+    keys.push(`${workType}:fallback:${noticeType}:${building}:${title}:${start}:${end}:${reason}`);
+  }
+  return Array.from(new Set(keys.filter(Boolean)));
+}
+
+function ongoingCompletenessScore(item: Dict): number {
+  let score = 0;
+  if (String(item.target_record_id || item.feishu_record_id || item.raw_record_id || "").trim()) score += 12;
+  if (String(item.source_record_id || "").trim()) score += 8;
+  if (String(item.active_item_id || "").trim()) score += 4;
+  for (const field of ["title", "building", "specialty", "maintenance_cycle", "start_time", "end_time", "location", "content", "reason", "impact", "progress", "text"]) {
+    if (String(item[field] || "").trim()) score += 1;
+  }
+  if (Array.isArray(item.extra_images) && item.extra_images.length) score += 1;
+  return score;
+}
+
+function mergeOngoingItem(existing: Dict, incoming: Dict): Dict {
+  const primary = ongoingCompletenessScore(incoming) >= ongoingCompletenessScore(existing) ? incoming : existing;
+  const supplement = primary === incoming ? existing : incoming;
+  const merged: Dict = { ...primary };
+  for (const [key, value] of Object.entries(supplement || {})) {
+    const current = merged[key];
+    if (current === undefined || current === null || current === "" || (Array.isArray(current) && current.length === 0)) {
+      merged[key] = value;
+    }
+  }
+  return merged;
+}
+
+function dedupeOngoingItems(items: Dict[]): Dict[] {
+  const result: Dict[] = [];
+  const indexByKey = new Map<string, number>();
+  for (const raw of items || []) {
+    if (!raw || typeof raw !== "object") continue;
+    const item = { ...raw };
+    const keys = ongoingIdentityKeys(item);
+    let matchIndex = -1;
+    for (const key of keys) {
+      const index = indexByKey.get(key);
+      if (index !== undefined) {
+        matchIndex = index;
+        break;
+      }
+    }
+    if (matchIndex < 0) {
+      matchIndex = result.length;
+      result.push(item);
+    } else {
+      result[matchIndex] = mergeOngoingItem(result[matchIndex], item);
+    }
+    for (const key of [...keys, ...ongoingIdentityKeys(result[matchIndex])]) {
+      indexByKey.set(key, matchIndex);
+    }
+  }
+  return result;
+}
+
 function isOngoingExpanded(item: Dict): boolean {
   const key = ongoingLineKey(item);
   return Boolean(key && activeOngoingKey.value === key);
@@ -1578,7 +1652,7 @@ async function loadWorkbench(): Promise<void> {
     const data = await api(`/api/workbench?scope=${encodeURIComponent(requestScope)}`);
     if (requestSeq !== workbenchLoadSeq || requestScope !== currentScope.value) return;
     records.value = data.records || [];
-    ongoing.value = data.ongoing || [];
+    ongoing.value = dedupeOngoingItems(data.ongoing || []);
     pruneOngoingExpansion();
     zhihangRecords.value = data.zhihang_change_records || [];
     dailySummary.value = data.daily_summary || { date: "", items: [], stats: {} };

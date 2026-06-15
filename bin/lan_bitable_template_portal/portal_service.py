@@ -7045,18 +7045,106 @@ class MaintenancePortalService:
     ) -> list[dict[str, Any]]:
         scope = self._normalize_scope(scope)
         merged: list[dict[str, Any]] = []
+        index_by_key: dict[str, int] = {}
         for item in ongoing_items or []:
             if not isinstance(item, dict):
                 continue
             if not self._scope_matches_item(scope, item):
                 continue
-            copied = copy.deepcopy(item)
+            copied = normalize_notice_identity_payload(copy.deepcopy(item))
             copied.setdefault("work_type", WORK_TYPE_MAINTENANCE)
             copied.setdefault("notice_type", NOTICE_TYPE_MAINTENANCE)
             if self._is_ongoing_hidden(copied):
                 continue
+            identity_keys = self._ongoing_merge_identity_keys(copied)
+            duplicate_indexes = {
+                index_by_key[key]
+                for key in identity_keys
+                if key in index_by_key
+            }
+            if duplicate_indexes:
+                target_index = min(duplicate_indexes)
+                merged[target_index] = self._merge_duplicate_ongoing_item(
+                    merged[target_index],
+                    copied,
+                )
+                for key in identity_keys | self._ongoing_merge_identity_keys(merged[target_index]):
+                    index_by_key[key] = target_index
+                continue
             merged.append(copied)
+            item_index = len(merged) - 1
+            for key in identity_keys:
+                index_by_key[key] = item_index
         return merged
+
+    def _ongoing_merge_identity_keys(self, item: dict[str, Any]) -> set[str]:
+        item = normalize_notice_identity_payload(item)
+        work_type = str(item.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
+        keys = set(self._work_status_identity_keys(item))
+        fallback_key = str(
+            item.get("work_fallback_key") or item.get("fallback_key") or ""
+        ).strip()
+        if not fallback_key:
+            fallback_key = self._work_status_fallback_key(
+                title=str(item.get("title") or item.get("content") or ""),
+                building=str(item.get("building") or ""),
+                plan_month=str(item.get("plan_month") or ""),
+                reason=str(item.get("reason") or ""),
+            )
+        if fallback_key:
+            keys.add(f"{work_type}:fallback:{fallback_key}")
+        title_key = re.sub(r"\s+", "", str(item.get("title") or item.get("content") or ""))
+        building_key = re.sub(r"\s+", "", str(item.get("building") or ""))
+        start_key = re.sub(r"\s+", "", str(item.get("start_time") or item.get("time_str") or ""))
+        end_key = re.sub(r"\s+", "", str(item.get("end_time") or ""))
+        reason_key = re.sub(r"\s+", "", str(item.get("reason") or ""))
+        if title_key and (start_key or end_key):
+            keys.add(
+                f"{work_type}:title-time:{building_key}:{title_key}:{start_key}:{end_key}:reason:{reason_key}"
+            )
+        return {key for key in keys if key}
+
+    @staticmethod
+    def _ongoing_item_score(item: dict[str, Any]) -> int:
+        item = normalize_notice_identity_payload(item)
+        score = 0
+        for field in (
+            "target_record_id",
+            "active_item_id",
+            "source_record_id",
+            "title",
+            "building",
+            "specialty",
+            "maintenance_cycle",
+            "start_time",
+            "end_time",
+            "location",
+            "content",
+            "reason",
+            "impact",
+            "progress",
+        ):
+            if str(item.get(field) or "").strip():
+                score += 1
+        if item.get("extra_images"):
+            score += 1
+        return score
+
+    def _merge_duplicate_ongoing_item(
+        self,
+        existing: dict[str, Any],
+        incoming: dict[str, Any],
+    ) -> dict[str, Any]:
+        existing = normalize_notice_identity_payload(copy.deepcopy(existing))
+        incoming = normalize_notice_identity_payload(copy.deepcopy(incoming))
+        if self._ongoing_item_score(incoming) > self._ongoing_item_score(existing):
+            base, supplement = incoming, existing
+        else:
+            base, supplement = existing, incoming
+        for key, value in supplement.items():
+            if key not in base or base.get(key) in (None, "", [], {}):
+                base[key] = copy.deepcopy(value)
+        return base
 
     def _source_record_matches_filters(
         self, record: dict[str, Any], *, month: str = "", specialty: str = ""

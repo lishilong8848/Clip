@@ -595,6 +595,41 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
         self.assertEqual(existing_extra_tokens, ["site_token"])
 
+    def test_merge_ongoing_items_dedupes_web_active_and_target_projection(self):
+        service = MaintenancePortalService()
+
+        merged = service._merge_ongoing_items(
+            "A",
+            [
+                {
+                    "work_type": "maintenance",
+                    "notice_type": "维保通告",
+                    "active_item_id": "active-1",
+                    "source_record_id": "src-1",
+                    "title": "测试维保通告",
+                    "building": "A楼",
+                    "start_time": "2026-06-15 09:30",
+                    "end_time": "2026-06-15 18:30",
+                    "progress": "准备中",
+                },
+                {
+                    "work_type": "maintenance",
+                    "notice_type": "维保通告",
+                    "source_record_id": "src-1",
+                    "target_record_id": "target-1",
+                    "title": "测试维保通告",
+                    "building": "A楼",
+                    "start_time": "2026-06-15 09:30",
+                    "end_time": "2026-06-15 18:30",
+                    "location": "A楼",
+                },
+            ],
+        )
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["target_record_id"], "target-1")
+        self.assertEqual(merged[0]["active_item_id"], "active-1")
+
     def test_change_handler_maps_extra_tokens_to_site_images(self):
         handler = ChangeNoticeHandler("设备变更")
         payload = NoticePayload(
@@ -744,6 +779,82 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             snapshot = store.get_ongoing_snapshot()
             self.assertTrue(snapshot["exists"])
             self.assertEqual(snapshot["items"], [])
+
+    def test_lan_portal_state_store_dedupes_ongoing_snapshot_by_notice_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+
+            result = store.replace_ongoing_items(
+                [
+                    {
+                        "active_item_id": "active-1",
+                        "source_record_id": "source-1",
+                        "work_type": "maintenance",
+                        "notice_type": "维保通告",
+                        "title": "A楼维保",
+                        "building": "A楼",
+                        "start_time": "2026-06-15 09:30",
+                        "end_time": "2026-06-15 18:30",
+                        "progress": "准备中",
+                    },
+                    {
+                        "source_record_id": "source-1",
+                        "target_record_id": "target-1",
+                        "work_type": "maintenance",
+                        "notice_type": "维保通告",
+                        "title": "A楼维保",
+                        "building": "A楼",
+                        "start_time": "2026-06-15 09:30",
+                        "end_time": "2026-06-15 18:30",
+                        "location": "A楼",
+                    },
+                ]
+            )
+            snapshot = store.get_ongoing_snapshot()
+
+            self.assertEqual(result["count"], 1)
+            self.assertEqual(snapshot["count"], 1)
+            self.assertEqual(snapshot["items"][0]["active_item_id"], "active-1")
+            self.assertEqual(snapshot["items"][0]["target_record_id"], "target-1")
+
+    def test_lan_portal_state_store_dedupes_qt_active_item_after_target_binding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            store.upsert_qt_active_item(
+                {
+                    "active_item_id": "active-1",
+                    "source_record_id": "source-1",
+                    "work_type": "maintenance",
+                    "notice_type": "维保通告",
+                    "title": "A楼维保",
+                    "building": "A楼",
+                    "text": "【维保通告】状态：开始\n【名称】A楼维保",
+                },
+                section="other",
+                origin="portal",
+            )
+            store.upsert_qt_active_item(
+                {
+                    "source_record_id": "source-1",
+                    "target_record_id": "target-1",
+                    "record_id": "target-1",
+                    "_record_id_kind": "target",
+                    "work_type": "maintenance",
+                    "notice_type": "维保通告",
+                    "title": "A楼维保",
+                    "building": "A楼",
+                    "text": "【维保通告】状态：开始\n【名称】A楼维保",
+                },
+                section="other",
+                origin="portal",
+            )
+
+            items = store.list_qt_active_items()
+
+            self.assertEqual(len(items), 1)
+            self.assertEqual(items[0]["active_item_id"], "active-1")
+            self.assertEqual(items[0]["record_id"], "target-1")
+            self.assertEqual(items[0]["payload"]["target_record_id"], "target-1")
 
     def test_lan_portal_state_store_reports_database_stats(self):
         with tempfile.TemporaryDirectory() as tmp:
