@@ -23,6 +23,7 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
     (14, "notice_identity_map"),
     (15, "notice_work_type_overrides"),
     (16, "notice_upload_attachments"),
+    (17, "mop_notice_bindings"),
 )
 
 

@@ -7,7 +7,7 @@
           <strong>功能入口</strong>
           <p>本页可使用功能</p>
         </div>
-        <b>2 项</b>
+        <b>3 项</b>
       </article>
       <article>
         <span class="metric-icon work"></span>
@@ -54,13 +54,22 @@
         </div>
         <button class="primary" @click="activeFeature = 'handover'">查看链接</button>
       </article>
+      <article class="feature-card">
+        <div class="feature-visual mop-visual" aria-hidden="true"></div>
+        <div>
+          <span class="feature-kicker">工程师工具</span>
+          <strong>维保 MOP 填写</strong>
+          <p>选择当天维保通告，绑定 MOP 表格并预览所有 Sheet。</p>
+        </div>
+        <button class="primary" @click="activeFeature = 'engineer'">选择楼栋</button>
+      </article>
     </div>
 
     <section v-else class="feature-section">
       <header class="feature-section__head">
         <div>
-          <span class="feature-kicker">{{ activeFeature === "workbench" ? "通告工作台" : "交接班审核页" }}</span>
-          <h2>{{ activeFeature === "workbench" ? "选择楼栋进入工作台" : "选择楼栋打开审核页" }}</h2>
+          <span class="feature-kicker">{{ activeFeatureKicker }}</span>
+          <h2>{{ activeFeatureTitle }}</h2>
         </div>
         <button class="secondary" @click="activeFeature = ''">返回功能选择</button>
       </header>
@@ -73,6 +82,7 @@
         >
           <strong>{{ scope.label }}</strong>
           <span v-if="activeFeature === 'workbench'">{{ metricText(scope.value) }}</span>
+          <span v-else-if="activeFeature === 'engineer'">当天维保通告与 MOP 表格对应</span>
           <span v-else>{{ handoverLinks[scope.value] ? "审核页已配置" : "暂未配置审核页链接" }}</span>
           <div class="scope-actions">
             <button
@@ -81,6 +91,13 @@
               @click="$emit('enter', scope.value)"
             >
               进入工作台
+            </button>
+            <button
+              v-else-if="activeFeature === 'engineer'"
+              class="primary"
+              @click="$emit('engineer', scope.value)"
+            >
+              进入 MOP 填写
             </button>
             <a
               v-else-if="handoverLinks[scope.value]"
@@ -112,11 +129,22 @@ const props = defineProps<{
 
 defineEmits<{
   enter: [scope: string];
+  engineer: [scope: string];
 }>();
 
-const activeFeature = ref<"" | "workbench" | "handover">("");
+const activeFeature = ref<"" | "workbench" | "handover" | "engineer">("");
 const configuredHandoverCount = computed(() => {
   return Object.values(props.handoverLinks || {}).filter((value) => String(value || "").trim()).length;
+});
+const activeFeatureKicker = computed(() => {
+  if (activeFeature.value === "workbench") return "通告工作台";
+  if (activeFeature.value === "engineer") return "工程师工具";
+  return "交接班审核页";
+});
+const activeFeatureTitle = computed(() => {
+  if (activeFeature.value === "workbench") return "选择楼栋进入工作台";
+  if (activeFeature.value === "engineer") return "选择楼栋进入 MOP 填写";
+  return "选择楼栋打开审核页";
 });
 
 function normalizeScopeValue(value: string, fallback = "ALL"): string {
@@ -315,7 +343,7 @@ function metricText(scope: string): string {
 }
 
 .feature-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 28px;
 }
 
@@ -468,6 +496,18 @@ function metricText(scope: string): string {
     linear-gradient(45deg, transparent 43%, #fff 44% 56%, transparent 57%),
     linear-gradient(-45deg, transparent 43%, #fff 44% 56%, transparent 57%),
     linear-gradient(135deg, #246eea, #66b2ff);
+}
+
+.mop-visual::before {
+  background: linear-gradient(135deg, #0891b2, #00b7d7);
+}
+
+.mop-visual::after {
+  background:
+    linear-gradient(#fff, #fff) 8px 10px / 20px 4px no-repeat,
+    linear-gradient(#fff, #fff) 8px 19px / 20px 4px no-repeat,
+    linear-gradient(#fff, #fff) 8px 28px / 14px 4px no-repeat,
+    linear-gradient(135deg, #0891b2, #00b7d7);
 }
 
 .feature-section {
@@ -881,6 +921,12 @@ button:disabled {
   .feature-section__head {
     align-items: flex-start;
     flex-direction: column;
+  }
+}
+
+@media (max-width: 1320px) {
+  .feature-grid {
+    grid-template-columns: 1fr;
   }
 }
 </style>

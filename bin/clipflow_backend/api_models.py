@@ -109,6 +109,30 @@ class NoticeMemoryHistorySaveRequest(APIModel):
     matches: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class EngineerMopBindRequest(APIModel):
+    scope: str = "ALL"
+    notice_key: str = ""
+    notice_title: str = ""
+    notice_status: str = ""
+    source_record_id: str = ""
+    target_record_id: str = ""
+    active_item_id: str = ""
+    mop_app_token: str = ""
+    mop_table_id: str = ""
+    mop_record_id: str = ""
+    mop_title: str = ""
+    mop_attachment_token: str = ""
+    mop_attachment_name: str = ""
+    selected_sheet: str = ""
+
+
+class EngineerMopSettingsSaveRequest(APIModel):
+    mop_app_token: str = ""
+    mop_table_id: str = ""
+    mop_title_field: str = "名称"
+    mop_attachment_field: str = "附件"
+
+
 class ChangeTargetLookupRequest(APIModel):
     scope: str = "ALL"
     title: str = ""

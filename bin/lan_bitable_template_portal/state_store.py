@@ -5,6 +5,7 @@ import json
 import hashlib
 import os
 import queue
+import re
 import sqlite3
 import threading
 import time
@@ -49,7 +50,7 @@ class LanPortalStateStore:
     are migration inputs only and are never deleted or overwritten here.
     """
 
-    SCHEMA_VERSION = 16
+    SCHEMA_VERSION = 17
     SOURCE_SCOPE_TABLES = {
         "110": "source_records_110",
         "A": "source_records_a",
@@ -88,6 +89,7 @@ class LanPortalStateStore:
         "notice_identity_map",
         "notice_work_type_overrides",
         "notice_upload_attachments",
+        "mop_notice_bindings",
         "schema_migrations",
     ]
     REQUIRED_INDEXES = [
@@ -103,6 +105,8 @@ class LanPortalStateStore:
         "idx_notice_upload_attachments_expiry",
         "idx_notice_upload_attachments_open",
         "idx_permission_requests_open_status",
+        "idx_mop_notice_bindings_notice",
+        "idx_mop_notice_bindings_mop",
     ]
 
     def __init__(self, db_path: str | Path | None = None):
@@ -434,6 +438,44 @@ class LanPortalStateStore:
             """
             CREATE INDEX IF NOT EXISTS idx_notice_upload_attachments_open
             ON notice_upload_attachments(open_id, created_at)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mop_notice_bindings (
+                binding_id TEXT PRIMARY KEY,
+                notice_key TEXT NOT NULL,
+                scope TEXT,
+                notice_title TEXT,
+                notice_status TEXT,
+                source_record_id TEXT,
+                target_record_id TEXT,
+                active_item_id TEXT,
+                mop_app_token TEXT,
+                mop_table_id TEXT,
+                mop_record_id TEXT NOT NULL,
+                mop_title TEXT,
+                mop_attachment_token TEXT,
+                mop_attachment_name TEXT,
+                selected_sheet TEXT,
+                payload_json TEXT NOT NULL,
+                updated_by TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                deleted_at REAL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_mop_notice_bindings_notice
+            ON mop_notice_bindings(notice_key, scope, deleted_at)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_mop_notice_bindings_mop
+            ON mop_notice_bindings(mop_record_id, mop_attachment_token, deleted_at)
             """
         )
         conn.execute(
@@ -1515,9 +1557,51 @@ class LanPortalStateStore:
                 ]
             )
             keys.add(f"{work_type}:fallback:{hashlib.sha1(seed.encode('utf-8')).hexdigest()}")
+        keys.update(self._business_merge_keys_for_item(item, work_type=work_type))
         if not keys:
             keys.add(self._identity_for_item(item))
         return keys
+
+    def _business_merge_keys_for_item(
+        self, item: dict[str, Any], *, work_type: str = ""
+    ) -> set[str]:
+        item = normalize_notice_identity_payload(item or {})
+        work_type = self._text(work_type or item.get("work_type")) or "maintenance"
+        title_key = self._business_merge_text_key(
+            item.get("title") or item.get("content") or item.get("name")
+        )
+        if not title_key:
+            return set()
+        building_key = self._business_merge_text_key(item.get("building"))
+        reason_key = self._business_merge_text_key(item.get("reason"))
+        time_key = self._business_merge_time_key(item)
+        keys: set[str] = set()
+        if building_key and reason_key:
+            keys.add(f"{work_type}:business:title-building-reason:{building_key}:{title_key}:{reason_key}")
+        if building_key and time_key and reason_key:
+            keys.add(f"{work_type}:business:title-time-reason:{building_key}:{title_key}:{time_key}:{reason_key}")
+        elif building_key and time_key:
+            keys.add(f"{work_type}:business:title-time:{building_key}:{title_key}:{time_key}")
+        return keys
+
+    @staticmethod
+    def _business_merge_text_key(value: Any) -> str:
+        return re.sub(
+            r"[\s,，;；:：。.【】（）()《》<>\"'“”‘’\-－_/\\]+",
+            "",
+            str(value or ""),
+        ).strip().lower()
+
+    @staticmethod
+    def _business_merge_time_key(item: dict[str, Any]) -> str:
+        parts = [
+            str(item.get("start_time") or ""),
+            str(item.get("time_str") or ""),
+            str(item.get("time") or ""),
+            str(item.get("end_time") or ""),
+        ]
+        digits = re.findall(r"\d+", "".join(parts))
+        return "".join(chunk.zfill(2) if len(chunk) <= 2 else chunk for chunk in digits)
 
     def _notice_payload_score(self, item: dict[str, Any]) -> int:
         item = normalize_notice_identity_payload(item or {})
@@ -3090,6 +3174,7 @@ class LanPortalStateStore:
                 ]
             )
             keys.add(f"{work_type}:fallback:{hashlib.sha1(fallback_seed.encode('utf-8')).hexdigest()}")
+        keys.update(self._business_merge_keys_for_item(payload, work_type=work_type))
         return keys
 
     def _qt_active_item_score(self, item: dict[str, Any]) -> int:
@@ -3816,9 +3901,7 @@ class LanPortalStateStore:
     ) -> dict[str, Any]:
         payload = payload if isinstance(payload, dict) else {}
         sections = ("event", "other")
-        rows: list[tuple[str, str, str, str, int, str, str, float]] = []
-        identity_payloads: list[tuple[dict[str, Any], str]] = []
-        seen: set[str] = set()
+        raw_items: list[dict[str, Any]] = []
         now = time.time()
         for section in sections:
             section_items = payload.get(section, [])
@@ -3834,36 +3917,57 @@ class LanPortalStateStore:
                 active_item_id = self._qt_active_item_key(normalized)
                 if not active_item_id:
                     continue
-                if active_item_id in seen:
-                    seed = f"{section}:{sort_order}:{active_item_id}"
-                    active_item_id = f"legacy-{uuid.uuid5(uuid.NAMESPACE_URL, seed).hex}"
-                    suffix = 1
-                    while active_item_id in seen:
-                        suffix += 1
-                        active_item_id = (
-                            f"legacy-{uuid.uuid5(uuid.NAMESPACE_URL, seed + ':' + str(suffix)).hex}"
-                        )
                 normalized.setdefault("active_item_id", active_item_id)
                 if self._text(normalized.get("active_item_id")) != active_item_id:
                     normalized["active_item_id"] = active_item_id
-                seen.add(active_item_id)
                 notice_type = self._text(normalized.get("notice_type"))
                 origin = self._text(normalized.get("origin"))
                 if not origin and bool(normalized.get("lan_created_from_portal")):
                     origin = "portal"
-                identity_payloads.append((dict(normalized), origin))
-                rows.append(
-                    (
-                        active_item_id,
-                        canonical_target_record_id(normalized),
-                        notice_type,
-                        self._normalize_qt_active_section(section),
-                        int(sort_order),
-                        origin,
-                        self._json(normalized),
-                        now,
-                    )
+                raw_items.append(
+                    {
+                        "active_item_id": active_item_id,
+                        "record_id": canonical_target_record_id(normalized),
+                        "notice_type": notice_type,
+                        "section": self._normalize_qt_active_section(section),
+                        "sort_order": int(sort_order),
+                        "origin": origin,
+                        "payload": normalized,
+                        "updated_at": now,
+                        "deleted_at": None,
+                    }
                 )
+        deduped_items = self._dedupe_qt_active_items(raw_items)
+        rows: list[tuple[str, str, str, str, int, str, str, float]] = []
+        identity_payloads: list[tuple[dict[str, Any], str]] = []
+        seen: set[str] = set()
+        for item in deduped_items:
+            active_item_id = self._text(item.get("active_item_id"))
+            if not active_item_id:
+                continue
+            normalized = normalize_notice_identity_payload(
+                item.get("payload") if isinstance(item.get("payload"), dict) else {}
+            )
+            normalized["active_item_id"] = active_item_id
+            record_id = self._text(item.get("record_id")) or canonical_target_record_id(normalized)
+            if record_id:
+                normalized.setdefault("target_record_id", record_id)
+                normalized.setdefault("record_id", record_id)
+            seen.add(active_item_id)
+            origin = self._text(item.get("origin"))
+            identity_payloads.append((dict(normalized), origin))
+            rows.append(
+                (
+                    active_item_id,
+                    record_id,
+                    self._text(item.get("notice_type")),
+                    self._normalize_qt_active_section(self._text(item.get("section"))),
+                    int(item.get("sort_order") or 0),
+                    origin,
+                    self._json(normalized),
+                    now,
+                )
+            )
         with self._lock:
             with closing(self._connect()) as conn:
                 self._ensure_schema_locked(conn)
@@ -3914,7 +4018,12 @@ class LanPortalStateStore:
                         (now, now),
                     )
                 conn.commit()
-        return {"upserted": len(rows), "active": len(seen), "updated_at": now}
+        return {
+            "upserted": len(rows),
+            "active": len(seen),
+            "deduped": max(0, len(raw_items) - len(rows)),
+            "updated_at": now,
+        }
 
     def qt_active_items_stats(self) -> dict[str, Any]:
         if not self.db_path.exists():
@@ -4387,6 +4496,125 @@ class LanPortalStateStore:
                         (text_key, self._json(value), now),
                     )
                 conn.commit()
+
+    def _mop_binding_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        payload = self._loads(str(row["payload_json"] or ""), {})
+        payload = payload if isinstance(payload, dict) else {}
+        return {
+            "binding_id": str(row["binding_id"] or ""),
+            "notice_key": str(row["notice_key"] or ""),
+            "scope": str(row["scope"] or ""),
+            "notice_title": str(row["notice_title"] or ""),
+            "notice_status": str(row["notice_status"] or ""),
+            "source_record_id": str(row["source_record_id"] or ""),
+            "target_record_id": str(row["target_record_id"] or ""),
+            "active_item_id": str(row["active_item_id"] or ""),
+            "mop_app_token": str(row["mop_app_token"] or ""),
+            "mop_table_id": str(row["mop_table_id"] or ""),
+            "mop_record_id": str(row["mop_record_id"] or ""),
+            "mop_title": str(row["mop_title"] or ""),
+            "mop_attachment_token": str(row["mop_attachment_token"] or ""),
+            "mop_attachment_name": str(row["mop_attachment_name"] or ""),
+            "selected_sheet": str(row["selected_sheet"] or ""),
+            "payload": payload,
+            "updated_by": str(row["updated_by"] or ""),
+            "created_at": float(row["created_at"] or 0),
+            "updated_at": float(row["updated_at"] or 0),
+            "deleted_at": float(row["deleted_at"] or 0) if row["deleted_at"] is not None else None,
+        }
+
+    def upsert_mop_notice_binding(self, payload: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(payload or {})
+        notice_key = self._text(payload.get("notice_key"))
+        mop_record_id = self._text(payload.get("mop_record_id"))
+        if not notice_key or not mop_record_id:
+            raise ValueError("MOP绑定缺少 notice_key 或 mop_record_id。")
+        binding_id = self._text(payload.get("binding_id")) or f"mop:{uuid.uuid5(uuid.NAMESPACE_URL, notice_key).hex}"
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                existing = conn.execute(
+                    "SELECT created_at FROM mop_notice_bindings WHERE binding_id = ?",
+                    (binding_id,),
+                ).fetchone()
+                created_at = float(existing["created_at"] or now) if existing else now
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO mop_notice_bindings(
+                        binding_id, notice_key, scope, notice_title, notice_status,
+                        source_record_id, target_record_id, active_item_id,
+                        mop_app_token, mop_table_id, mop_record_id, mop_title,
+                        mop_attachment_token, mop_attachment_name, selected_sheet,
+                        payload_json, updated_by, created_at, updated_at, deleted_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                    """,
+                    (
+                        binding_id,
+                        notice_key,
+                        self._text(payload.get("scope")),
+                        self._text(payload.get("notice_title")),
+                        self._text(payload.get("notice_status")),
+                        self._text(payload.get("source_record_id")),
+                        self._text(payload.get("target_record_id")),
+                        self._text(payload.get("active_item_id")),
+                        self._text(payload.get("mop_app_token")),
+                        self._text(payload.get("mop_table_id")),
+                        mop_record_id,
+                        self._text(payload.get("mop_title")),
+                        self._text(payload.get("mop_attachment_token")),
+                        self._text(payload.get("mop_attachment_name")),
+                        self._text(payload.get("selected_sheet")),
+                        self._json(payload),
+                        self._text(payload.get("updated_by")),
+                        created_at,
+                        now,
+                    ),
+                )
+                conn.commit()
+                row = conn.execute(
+                    "SELECT * FROM mop_notice_bindings WHERE binding_id = ?",
+                    (binding_id,),
+                ).fetchone()
+        return self._mop_binding_from_row(row)
+
+    def list_mop_notice_bindings(
+        self,
+        *,
+        scope: str = "",
+        notice_keys: list[str] | None = None,
+        include_deleted: bool = False,
+    ) -> list[dict[str, Any]]:
+        if not self.db_path.exists():
+            return []
+        clauses = []
+        params: list[Any] = []
+        if not include_deleted:
+            clauses.append("deleted_at IS NULL")
+        scope = self._text(scope)
+        if scope and scope != "ALL":
+            clauses.append("(scope = ? OR scope = '' OR scope = 'ALL')")
+            params.append(scope)
+        keys = [self._text(item) for item in (notice_keys or []) if self._text(item)]
+        if keys:
+            placeholders = ",".join("?" for _ in keys)
+            clauses.append(f"notice_key IN ({placeholders})")
+            params.extend(keys)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                rows = conn.execute(
+                    f"""
+                    SELECT *
+                    FROM mop_notice_bindings
+                    {where}
+                    ORDER BY updated_at DESC
+                    """,
+                    tuple(params),
+                ).fetchall()
+        return [self._mop_binding_from_row(row) for row in rows]
 
     def get_auth_permissions(self) -> dict[str, Any] | None:
         if not self.db_path.exists():

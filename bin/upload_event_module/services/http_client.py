@@ -126,6 +126,55 @@ class FeishuHttpClient:
                 raise FeishuHTTPError(last_error, category="network") from exc
         raise FeishuHTTPError(last_error or "HTTP 请求失败", category="network")
 
+    def request_bytes(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        params: dict[str, Any] | None = None,
+        retries: int | None = None,
+        max_bytes: int = 15 * 1024 * 1024,
+    ) -> tuple[bytes, str]:
+        retry_count = self.retries if retries is None else max(0, int(retries or 0))
+        last_error = ""
+        for attempt in range(retry_count + 1):
+            try:
+                with self._lock:
+                    response = self._client.request(
+                        method,
+                        url,
+                        headers=headers,
+                        params=params,
+                    )
+                if response.status_code in RETRY_STATUS_CODES and attempt < retry_count:
+                    time.sleep(0.35 * (2**attempt) + random.random() * 0.2)
+                    continue
+                response.raise_for_status()
+                content = response.content
+                if len(content) > int(max_bytes or 0):
+                    raise FeishuHTTPError("下载文件过大，已停止预览。", category="business")
+                return content, str(response.headers.get("content-type") or "")
+            except httpx.HTTPStatusError as exc:
+                status = int(exc.response.status_code if exc.response else 0)
+                last_error = str(exc)
+                if status in RETRY_STATUS_CODES and attempt < retry_count:
+                    time.sleep(0.35 * (2**attempt) + random.random() * 0.2)
+                    continue
+                raise FeishuHTTPError(
+                    last_error,
+                    category=classify_feishu_error(status_code=status),
+                ) from exc
+            except Exception as exc:
+                last_error = str(exc)
+                if attempt < retry_count:
+                    time.sleep(0.35 * (2**attempt) + random.random() * 0.2)
+                    continue
+                if isinstance(exc, FeishuHTTPError):
+                    raise
+                raise FeishuHTTPError(last_error, category="network") from exc
+        raise FeishuHTTPError(last_error or "HTTP 请求失败", category="network")
+
 
 def close_all_clients() -> None:
     for client in list(_CLIENTS):

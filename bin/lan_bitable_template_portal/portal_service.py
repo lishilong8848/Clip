@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import datetime as dt
 import base64
+import csv
 import hashlib
 import hmac
+import io
 import json
 import os
 import re
@@ -13,9 +15,12 @@ import threading
 import time
 import uuid
 import copy
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import quote
+import xml.etree.ElementTree as ET
 
 from upload_event_module.config import config, get_field_config
 from upload_event_module.services.feishu_service import (
@@ -7102,7 +7107,57 @@ class MaintenancePortalService:
             keys.add(
                 f"{work_type}:title-time:{building_key}:{title_key}:{start_key}:{end_key}:reason:{reason_key}"
             )
+        keys.update(self._ongoing_business_merge_keys(item, work_type=work_type))
         return {key for key in keys if key}
+
+    def _ongoing_business_merge_keys(
+        self, item: dict[str, Any], *, work_type: str = ""
+    ) -> set[str]:
+        """Best-effort merge keys for the same notice coming from different projections.
+
+        ID-based keys remain authoritative. These keys only bridge cases where the
+        same notice is present once from a source/work-status projection and once
+        from the Qt active projection, but one side has not yet received the other
+        side's ID. Reason is kept in the key when present so same-name maintenance
+        items with different reasons do not collapse into one row.
+        """
+
+        work_type = str(work_type or item.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
+        title_key = self._ongoing_business_text_key(
+            item.get("title") or item.get("content") or item.get("name") or ""
+        )
+        if not title_key:
+            return set()
+        building_key = self._ongoing_business_text_key(item.get("building") or "")
+        reason_key = self._ongoing_business_text_key(item.get("reason") or "")
+        time_key = self._ongoing_business_time_key(item)
+        keys: set[str] = set()
+        if building_key and reason_key:
+            keys.add(f"{work_type}:business:title-building-reason:{building_key}:{title_key}:{reason_key}")
+        if building_key and time_key and reason_key:
+            keys.add(f"{work_type}:business:title-time-reason:{building_key}:{title_key}:{time_key}:{reason_key}")
+        elif building_key and time_key:
+            keys.add(f"{work_type}:business:title-time:{building_key}:{title_key}:{time_key}")
+        return keys
+
+    @staticmethod
+    def _ongoing_business_text_key(value: Any) -> str:
+        return re.sub(
+            r"[\s,，;；:：。.【】（）()《》<>\"'“”‘’\-－_/\\]+",
+            "",
+            str(value or ""),
+        ).strip().lower()
+
+    @staticmethod
+    def _ongoing_business_time_key(item: dict[str, Any]) -> str:
+        parts = [
+            str(item.get("start_time") or ""),
+            str(item.get("time_str") or ""),
+            str(item.get("time") or ""),
+            str(item.get("end_time") or ""),
+        ]
+        digits = re.findall(r"\d+", "".join(parts))
+        return "".join(chunk.zfill(2) if len(chunk) <= 2 else chunk for chunk in digits)
 
     @staticmethod
     def _ongoing_item_score(item: dict[str, Any]) -> int:
@@ -7423,6 +7478,413 @@ class MaintenancePortalService:
             "maintenance_options": self._maintenance_options_for_records(filtered_records),
             "count": len(filtered_records),
         }
+
+    def _engineer_mop_settings(self) -> dict[str, str]:
+        settings = self._state_store.get_settings() or {}
+        app_token = str(
+            settings.get("mop_app_token")
+            or getattr(config, "mop_app_token", "")
+            or ""
+        ).strip()
+        table_id = str(
+            settings.get("mop_table_id")
+            or getattr(config, "mop_table_id", "")
+            or ""
+        ).strip()
+        return {
+            "app_token": app_token,
+            "table_id": table_id,
+            "title_field": str(settings.get("mop_title_field") or "名称").strip(),
+            "attachment_field": str(settings.get("mop_attachment_field") or "附件").strip(),
+        }
+
+    def _engineer_notice_key(self, item: dict[str, Any]) -> str:
+        work_type = str(item.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
+        target_record_id = canonical_target_record_id(item)
+        source_record_id = str(item.get("source_record_id") or "").strip()
+        active_item_id = str(item.get("active_item_id") or "").strip()
+        if target_record_id:
+            return f"{work_type}:target:{target_record_id}"
+        if source_record_id:
+            return f"{work_type}:source:{source_record_id}"
+        if active_item_id:
+            return f"{work_type}:active:{active_item_id}"
+        seed = json.dumps(
+            [
+                work_type,
+                str(item.get("notice_type") or ""),
+                str(item.get("title") or item.get("content") or ""),
+                str(item.get("building") or ""),
+                str(item.get("started_at") or item.get("start_time") or ""),
+                str(item.get("ended_at") or item.get("end_time") or ""),
+                str(item.get("reason") or ""),
+            ],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        return f"{work_type}:generated:{hashlib.sha1(seed.encode('utf-8')).hexdigest()}"
+
+    def _serialize_engineer_notice(self, item: dict[str, Any], *, status: str = "") -> dict[str, Any]:
+        work_type = str(item.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
+        title = str(item.get("title") or item.get("content") or item.get("name") or "").strip()
+        start_time = str(item.get("started_at") or item.get("start_time") or item.get("time") or "").strip()
+        end_time = str(item.get("ended_at") or item.get("end_time") or "").strip()
+        notice_status = status or str(item.get("status") or "").strip() or ("已结束" if end_time else "进行中")
+        return {
+            "notice_key": self._engineer_notice_key(item),
+            "work_type": work_type,
+            "notice_type": str(item.get("notice_type") or NOTICE_TYPE_MAINTENANCE),
+            "title": title,
+            "status": notice_status,
+            "building": str(item.get("building") or ""),
+            "building_codes": item.get("building_codes") if isinstance(item.get("building_codes"), list) else [],
+            "specialty": str(item.get("specialty") or ""),
+            "maintenance_cycle": str(item.get("maintenance_cycle") or ""),
+            "source_record_id": str(item.get("source_record_id") or ""),
+            "target_record_id": canonical_target_record_id(item),
+            "active_item_id": str(item.get("active_item_id") or ""),
+            "start_time": start_time,
+            "end_time": end_time,
+            "location": str(item.get("location") or ""),
+            "content": str(item.get("content") or ""),
+            "reason": str(item.get("reason") or ""),
+            "progress": str(item.get("progress") or ""),
+            "updated_at": str(item.get("ended_at") or item.get("last_updated_at") or item.get("updated_at") or item.get("started_at") or ""),
+        }
+
+    def _engineer_today_maintenance_notices(
+        self, *, scope: str, ongoing_items: list[dict[str, Any]] | None
+    ) -> list[dict[str, Any]]:
+        merged_ongoing = self._merge_ongoing_items(scope, ongoing_items or [])
+        notices_by_key: dict[str, dict[str, Any]] = {}
+        for item in merged_ongoing:
+            if str(item.get("work_type") or WORK_TYPE_MAINTENANCE) != WORK_TYPE_MAINTENANCE:
+                continue
+            notice = self._serialize_engineer_notice(item, status="进行中")
+            notices_by_key[notice["notice_key"]] = notice
+        daily = self.get_daily_summary(scope=scope, ongoing_items=merged_ongoing)
+        for item in daily.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("work_type") or WORK_TYPE_MAINTENANCE) != WORK_TYPE_MAINTENANCE:
+                continue
+            notice = self._serialize_engineer_notice(item)
+            existing = notices_by_key.get(notice["notice_key"])
+            if existing and existing.get("status") != "已结束":
+                continue
+            notices_by_key[notice["notice_key"]] = notice
+        notices = list(notices_by_key.values())
+        notices.sort(
+            key=lambda item: (
+                0 if item.get("status") != "已结束" else 1,
+                str(item.get("building") or ""),
+                str(item.get("updated_at") or ""),
+            ),
+            reverse=False,
+        )
+        return notices
+
+    @staticmethod
+    def _mop_field_text(fields: dict[str, Any], names: list[str]) -> str:
+        for name in names:
+            value = fields.get(name)
+            if isinstance(value, list):
+                text = "、".join(str(item.get("text") or item.get("name") or item) if isinstance(item, dict) else str(item) for item in value)
+            else:
+                text = str(value or "")
+            text = text.strip()
+            if text:
+                return text
+        return ""
+
+    @staticmethod
+    def _extract_mop_attachments(fields: dict[str, Any], preferred_field: str = "") -> list[dict[str, Any]]:
+        candidates: list[Any] = []
+        if preferred_field and preferred_field in fields:
+            candidates.append(fields.get(preferred_field))
+        candidates.extend(value for key, value in fields.items() if key != preferred_field)
+        attachments: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for value in candidates:
+            values = value if isinstance(value, list) else [value]
+            for item in values:
+                if not isinstance(item, dict):
+                    continue
+                token = str(
+                    item.get("file_token")
+                    or item.get("token")
+                    or item.get("tmp_url")
+                    or item.get("url")
+                    or item.get("download_url")
+                    or ""
+                ).strip()
+                name = str(item.get("name") or item.get("file_name") or item.get("filename") or "").strip()
+                if not token and not name:
+                    continue
+                dedupe_key = token or name
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                attachments.append(
+                    {
+                        "file_token": str(item.get("file_token") or item.get("token") or "").strip(),
+                        "name": name or "MOP表格",
+                        "size": item.get("size") or item.get("file_size") or "",
+                        "mime_type": str(item.get("mime_type") or item.get("type") or "").strip(),
+                        "url": str(item.get("download_url") or item.get("url") or item.get("tmp_url") or "").strip(),
+                    }
+                )
+        return attachments
+
+    def _load_engineer_mop_candidates(self) -> tuple[list[dict[str, Any]], list[str], dict[str, str]]:
+        settings = self._engineer_mop_settings()
+        if not settings["app_token"] or not settings["table_id"]:
+            return [], ["未配置 MOP 多维表 app_token/table_id，请先在 SQLite settings 中配置 mop_app_token 和 mop_table_id。"], settings
+        warnings: list[str] = []
+        metas, meta_by_name = self._load_table_fields(
+            app_token=settings["app_token"],
+            table_id=settings["table_id"],
+        )
+        records = self._load_table_records(
+            app_token=settings["app_token"],
+            table_id=settings["table_id"],
+            meta_by_name=meta_by_name,
+            work_type="mop",
+            notice_type="维保MOP",
+        )
+        candidates: list[dict[str, Any]] = []
+        title_names = [
+            settings["title_field"],
+            "MOP名称",
+            "MOP表格",
+            "名称",
+            "标题",
+            "维护总项",
+        ]
+        for record in records:
+            fields = record.get("display_fields") if isinstance(record.get("display_fields"), dict) else {}
+            attachments = self._extract_mop_attachments(fields, settings["attachment_field"])
+            title = self._mop_field_text(fields, title_names) or str(record.get("record_id") or "MOP表格")
+            candidates.append(
+                {
+                    "record_id": str(record.get("record_id") or ""),
+                    "title": title,
+                    "fields": fields,
+                    "attachments": attachments,
+                    "attachment_count": len(attachments),
+                    "app_token": settings["app_token"],
+                    "table_id": settings["table_id"],
+                }
+            )
+        if metas and settings["attachment_field"] not in {meta.field_name for meta in metas}:
+            warnings.append(f"MOP附件字段「{settings['attachment_field']}」未在表中找到，已自动扫描所有附件字段。")
+        return candidates, warnings, settings
+
+    def engineer_mop_bootstrap(
+        self, *, scope: str = "ALL", ongoing_items: list[dict[str, Any]] | None = None
+    ) -> dict[str, Any]:
+        scope = self._normalize_scope(scope)
+        notices = self._engineer_today_maintenance_notices(
+            scope=scope,
+            ongoing_items=ongoing_items,
+        )
+        mop_candidates, warnings, settings = self._load_engineer_mop_candidates()
+        bindings = self._state_store.list_mop_notice_bindings(
+            scope=scope,
+            notice_keys=[item["notice_key"] for item in notices],
+        )
+        bindings_by_notice = {item["notice_key"]: item for item in bindings}
+        for notice in notices:
+            notice["mop_binding"] = bindings_by_notice.get(notice["notice_key"]) or None
+        return {
+            "scope": scope,
+            "scope_label": self._scope_label(scope),
+            "date": dt.date.today().isoformat(),
+            "notices": notices,
+            "mop_candidates": mop_candidates,
+            "bindings": bindings,
+            "mop_settings": {
+                "configured": bool(settings.get("app_token") and settings.get("table_id")),
+                "title_field": settings.get("title_field", ""),
+                "attachment_field": settings.get("attachment_field", ""),
+            },
+            "warnings": warnings,
+        }
+
+    def bind_engineer_mop_notice(
+        self, *, payload: dict[str, Any], updated_by: str = ""
+    ) -> dict[str, Any]:
+        payload = dict(payload or {})
+        payload["updated_by"] = updated_by
+        binding = self._state_store.upsert_mop_notice_binding(payload)
+        self._touch_state_cache_version()
+        return {"binding": binding}
+
+    @staticmethod
+    def _column_index(cell_ref: str) -> int:
+        letters = "".join(ch for ch in str(cell_ref or "") if ch.isalpha()).upper()
+        index = 0
+        for ch in letters:
+            index = index * 26 + (ord(ch) - 64)
+        return max(1, index)
+
+    @staticmethod
+    def _xml_text(element: ET.Element | None) -> str:
+        if element is None:
+            return ""
+        return "".join(element.itertext()).strip()
+
+    def _parse_xlsx_preview(self, content: bytes, *, max_rows: int = 1200, max_cols: int = 120) -> dict[str, Any]:
+        ns = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+        rel_ns = {"rel": "http://schemas.openxmlformats.org/package/2006/relationships"}
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            shared_strings: list[str] = []
+            if "xl/sharedStrings.xml" in archive.namelist():
+                root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+                for si in root.findall("main:si", ns):
+                    shared_strings.append("".join(si.itertext()))
+            workbook = ET.fromstring(archive.read("xl/workbook.xml"))
+            rels = ET.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
+            rel_map = {
+                rel.attrib.get("Id"): rel.attrib.get("Target", "")
+                for rel in rels.findall("rel:Relationship", rel_ns)
+            }
+            sheets: list[dict[str, Any]] = []
+            for sheet in workbook.findall("main:sheets/main:sheet", ns):
+                name = str(sheet.attrib.get("name") or "Sheet")
+                rel_id = sheet.attrib.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id")
+                target = str(rel_map.get(rel_id) or "").lstrip("/")
+                path = target if target.startswith("xl/") else f"xl/{target}"
+                if path not in archive.namelist():
+                    continue
+                sheet_root = ET.fromstring(archive.read(path))
+                rows_out: list[list[str]] = []
+                max_width = 0
+                truncated = False
+                for row in sheet_root.findall("main:sheetData/main:row", ns):
+                    row_values: list[str] = []
+                    for cell in row.findall("main:c", ns):
+                        col_index = self._column_index(cell.attrib.get("r", "")) or len(row_values) + 1
+                        while len(row_values) < col_index - 1:
+                            row_values.append("")
+                        value = ""
+                        cell_type = cell.attrib.get("t")
+                        if cell_type == "inlineStr":
+                            value = self._xml_text(cell.find("main:is", ns))
+                        else:
+                            raw = self._xml_text(cell.find("main:v", ns))
+                            if cell_type == "s":
+                                try:
+                                    value = shared_strings[int(raw)]
+                                except Exception:
+                                    value = raw
+                            else:
+                                value = raw
+                        row_values.append(value)
+                    max_width = max(max_width, len(row_values))
+                    rows_out.append(row_values[:max_cols])
+                    if len(rows_out) >= max_rows:
+                        truncated = True
+                        break
+                sheets.append(
+                    {
+                        "name": name,
+                        "rows": rows_out,
+                        "row_count": len(rows_out),
+                        "column_count": min(max_width, max_cols),
+                        "truncated": truncated or max_width > max_cols,
+                    }
+                )
+        return {"sheets": sheets, "parser": "xlsx"}
+
+    def _parse_csv_preview(self, content: bytes, *, file_name: str = "") -> dict[str, Any]:
+        text = ""
+        for encoding in ("utf-8-sig", "gb18030", "utf-16"):
+            try:
+                text = content.decode(encoding)
+                break
+            except Exception:
+                continue
+        if not text:
+            text = content.decode("utf-8", errors="replace")
+        rows = [row for row in csv.reader(io.StringIO(text))]
+        return {
+            "sheets": [
+                {
+                    "name": Path(file_name or "CSV").stem or "CSV",
+                    "rows": rows,
+                    "row_count": len(rows),
+                    "column_count": max([len(row) for row in rows] or [0]),
+                    "truncated": False,
+                }
+            ],
+            "parser": "csv",
+        }
+
+    def _download_mop_attachment(self, attachment: dict[str, Any]) -> tuple[bytes, str]:
+        url = str(attachment.get("url") or "").strip()
+        token = str(attachment.get("file_token") or "").strip()
+        headers = self._auth_headers()
+        if url:
+            return self._http_client.request_bytes("GET", url, headers=headers)
+        if not token:
+            raise PortalError("MOP附件缺少 file_token 或下载地址。")
+        encoded = quote(token, safe="")
+        download_url = f"https://open.feishu.cn/open-apis/drive/v1/medias/{encoded}/download"
+        return self._http_client.request_bytes("GET", download_url, headers=headers)
+
+    def preview_engineer_mop_attachment(
+        self,
+        *,
+        mop_record_id: str,
+        file_token: str = "",
+        file_name: str = "",
+    ) -> dict[str, Any]:
+        mop_candidates, warnings, settings = self._load_engineer_mop_candidates()
+        if not settings.get("app_token") or not settings.get("table_id"):
+            raise PortalError("未配置 MOP 多维表，无法预览。")
+        record = next(
+            (item for item in mop_candidates if str(item.get("record_id") or "") == str(mop_record_id or "")),
+            None,
+        )
+        if not record:
+            raise PortalError("未找到选择的 MOP 表格记录。")
+        attachments = record.get("attachments") if isinstance(record.get("attachments"), list) else []
+        attachment = None
+        for item in attachments:
+            if not isinstance(item, dict):
+                continue
+            if file_token and str(item.get("file_token") or "") == str(file_token):
+                attachment = item
+                break
+            if file_token and str(item.get("url") or "") == str(file_token):
+                attachment = item
+                break
+            if file_token and str(item.get("name") or "") == str(file_token):
+                attachment = item
+                break
+        if attachment is None and attachments:
+            attachment = attachments[0]
+        if not isinstance(attachment, dict):
+            raise PortalError("该 MOP 记录没有可预览的表格附件。")
+        content, content_type = self._download_mop_attachment(attachment)
+        resolved_name = str(file_name or attachment.get("name") or "").strip()
+        lower_name = resolved_name.lower()
+        if lower_name.endswith(".csv") or "csv" in content_type:
+            parsed = self._parse_csv_preview(content, file_name=resolved_name)
+        elif lower_name.endswith(".xlsx") or content[:2] == b"PK":
+            parsed = self._parse_xlsx_preview(content)
+        else:
+            raise PortalError("暂只支持预览 xlsx/csv 格式的 MOP 表格附件。")
+        parsed.update(
+            {
+                "mop_record_id": record.get("record_id"),
+                "mop_title": record.get("title"),
+                "attachment": attachment,
+                "warnings": warnings,
+            }
+        )
+        return parsed
 
     def _find_record_by_id(self, record_id: str, work_type: str = WORK_TYPE_MAINTENANCE) -> dict[str, Any]:
         if work_type == WORK_TYPE_CHANGE:

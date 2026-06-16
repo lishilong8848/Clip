@@ -40,6 +40,8 @@ from clipflow_backend.api_models import (
     AuthPermissionsSaveRequest,
     ChangeTargetConfirmRequest,
     ChangeTargetLookupRequest,
+    EngineerMopBindRequest,
+    EngineerMopSettingsSaveRequest,
     GenerateTemplatesRequest,
     HandoverLinksAuthRequest,
     HandoverLinksSaveRequest,
@@ -83,7 +85,10 @@ from lan_bitable_template_portal.server import (
     portal_static_roots,
 )
 from lan_bitable_template_portal.portal_auth import AUTH_COOKIE_NAME
-from lan_bitable_template_portal.identity_utils import normalize_notice_identity_payload
+from lan_bitable_template_portal.identity_utils import (
+    canonical_target_record_id,
+    normalize_notice_identity_payload,
+)
 from lan_bitable_template_portal.portal_service import (
     CHANGE_SOURCE_APP_TOKEN,
     CHANGE_SOURCE_TABLE_ID,
@@ -378,6 +383,11 @@ class FastAPIPortalController:
         @app.get("/admin/history-memory")
         @app.get("/admin/history-memory/")
         async def admin_history_memory_page(request: Request):
+            return self._static_file_response(request, portal_index_file(), html=True)
+
+        @app.get("/engineer/mop")
+        @app.get("/engineer/mop/")
+        async def engineer_mop_page(request: Request):
             return self._static_file_response(request, portal_index_file(), html=True)
 
         @app.get("/assets/{asset_path:path}")
@@ -1279,6 +1289,119 @@ class FastAPIPortalController:
                 return self._json_ok(request, session, result)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)
+
+        @app.get("/api/engineer/mop/bootstrap")
+        async def engineer_mop_bootstrap(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                self._ensure_source_snapshot_background()
+                scope = self._authorized_scope_or_error(
+                    session, request.query_params.get("scope") or "ALL"
+                )
+                ongoing = self._get_ongoing(scope)
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.engineer_mop_bootstrap,
+                    scope=scope,
+                    ongoing_items=ongoing,
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
+        @app.post("/api/engineer/mop/bind")
+        async def engineer_mop_bind(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                payload = (
+                    await self._read_model_request(
+                        request,
+                        EngineerMopBindRequest,
+                        max_bytes=512 * 1024,
+                    )
+                ).to_payload()
+                scope = self._authorized_scope_or_error(
+                    session, payload.get("scope") or "ALL"
+                )
+                payload["scope"] = scope
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.bind_engineer_mop_notice,
+                    payload=payload,
+                    updated_by=str(user.get("open_id") or ""),
+                )
+                PortalRuntime.clear_payload_cache()
+                self._clear_read_cache()
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
+        @app.get("/api/engineer/mop/preview")
+        async def engineer_mop_preview(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                self._authorized_scope_or_error(
+                    session, request.query_params.get("scope") or "ALL"
+                )
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.preview_engineer_mop_attachment,
+                    mop_record_id=str(request.query_params.get("mop_record_id") or ""),
+                    file_token=str(request.query_params.get("file_token") or ""),
+                    file_name=str(request.query_params.get("file_name") or ""),
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
+        @app.get("/api/admin/mop-settings")
+        async def admin_mop_settings(request: Request):
+            admin_response, _session = self._require_admin_response(request)
+            if admin_response is not None:
+                return admin_response
+            try:
+                settings = PortalRuntime.service._engineer_mop_settings()
+                return {
+                    "ok": True,
+                    "data": {
+                        "mop_app_token": settings.get("app_token", ""),
+                        "mop_table_id": settings.get("table_id", ""),
+                        "mop_title_field": settings.get("title_field", "名称"),
+                        "mop_attachment_field": settings.get("attachment_field", "附件"),
+                    },
+                }
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=500)
+
+        @app.post("/api/admin/mop-settings")
+        async def save_admin_mop_settings(request: Request):
+            admin_response, _session = self._require_admin_response(request)
+            if admin_response is not None:
+                return admin_response
+            try:
+                payload = (
+                    await self._read_model_request(
+                        request,
+                        EngineerMopSettingsSaveRequest,
+                        max_bytes=64 * 1024,
+                    )
+                ).to_payload()
+                values = {
+                    "mop_app_token": str(payload.get("mop_app_token") or "").strip(),
+                    "mop_table_id": str(payload.get("mop_table_id") or "").strip(),
+                    "mop_title_field": str(payload.get("mop_title_field") or "名称").strip() or "名称",
+                    "mop_attachment_field": str(payload.get("mop_attachment_field") or "附件").strip() or "附件",
+                }
+                PortalRuntime.state_store.put_settings(values)
+                PortalRuntime.clear_payload_cache()
+                self._clear_read_cache()
+                return {"ok": True, "data": values}
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=500)
 
         @app.post("/api/notice-memory/import")
         async def notice_memory_import(request: Request):
@@ -3591,27 +3714,35 @@ class FastAPIPortalController:
     @staticmethod
     def _get_ongoing(scope: str) -> list[dict]:
         merged: list[dict] = []
-        seen: set[str] = set()
+        index_by_key: dict[str, int] = {}
         active_rows: list[dict] = []
         deleted_active_item_ids: set[str] = set()
         deleted_record_ids: set[str] = set()
 
-        def _key(item: dict) -> str:
-            return "|".join(
-                [
-                    str(item.get("active_item_id") or "").strip(),
-                    str(item.get("target_record_id") or "").strip(),
-                    str(item.get("source_record_id") or "").strip(),
-                    str(item.get("title") or "").strip(),
-                ]
-            )
+        def _identity_keys(item: dict) -> set[str]:
+            try:
+                return set(PortalRuntime.service._ongoing_merge_identity_keys(item))
+            except Exception:
+                normalized = normalize_notice_identity_payload(item)
+                work_type = str(normalized.get("work_type") or "maintenance").strip()
+                keys: set[str] = set()
+                target_record_id = str(normalized.get("target_record_id") or "").strip()
+                source_record_id = str(normalized.get("source_record_id") or "").strip()
+                active_item_id = str(normalized.get("active_item_id") or "").strip()
+                if target_record_id:
+                    keys.add(f"{work_type}:target:{target_record_id}")
+                if source_record_id:
+                    keys.add(f"{work_type}:source:{source_record_id}")
+                if active_item_id:
+                    keys.add(f"{work_type}:active:{active_item_id}")
+                title = str(normalized.get("title") or normalized.get("content") or "").strip()
+                if title:
+                    keys.add(f"{work_type}:title:{title}")
+                return {key for key in keys if key}
 
         def _item_deleted_in_qt_store(item: dict) -> bool:
             active_item_id = str(item.get("active_item_id") or "").strip()
-            record_id = str(
-                item.get("target_record_id")
-                or ""
-            ).strip()
+            record_id = canonical_target_record_id(item)
             return bool(
                 (active_item_id and active_item_id in deleted_active_item_ids)
                 or (record_id and record_id in deleted_record_ids)
@@ -3636,11 +3767,31 @@ class FastAPIPortalController:
                 return
             if not PortalRuntime.service._scope_matches_item(scope, item):
                 return
-            key = _key(item)
-            if key in seen:
+            copied = normalize_notice_identity_payload(dict(item))
+            identity_keys = _identity_keys(copied)
+            duplicate_indexes = {
+                index_by_key[key]
+                for key in identity_keys
+                if key in index_by_key
+            }
+            if duplicate_indexes:
+                target_index = min(duplicate_indexes)
+                try:
+                    merged[target_index] = PortalRuntime.service._merge_duplicate_ongoing_item(
+                        merged[target_index],
+                        copied,
+                    )
+                except Exception:
+                    for key, value in copied.items():
+                        if merged[target_index].get(key) in (None, "", [], {}):
+                            merged[target_index][key] = value
+                for key in identity_keys | _identity_keys(merged[target_index]):
+                    index_by_key[key] = target_index
                 return
-            seen.add(key)
-            merged.append(dict(item))
+            item_index = len(merged)
+            merged.append(copied)
+            for key in identity_keys:
+                index_by_key[key] = item_index
 
         try:
             active_rows = PortalRuntime.state_store.list_qt_active_items(
@@ -3653,10 +3804,21 @@ class FastAPIPortalController:
                     continue
                 active_item_id = str(active_item.get("active_item_id") or "").strip()
                 record_id = str(active_item.get("record_id") or "").strip()
+                payload = (
+                    active_item.get("payload")
+                    if isinstance(active_item.get("payload"), dict)
+                    else {}
+                )
+                target_record_id = str(
+                    normalize_notice_identity_payload(payload).get("target_record_id")
+                    or ""
+                ).strip()
                 if active_item_id:
                     deleted_active_item_ids.add(active_item_id)
                 if record_id:
                     deleted_record_ids.add(record_id)
+                if target_record_id:
+                    deleted_record_ids.add(target_record_id)
         except Exception as exc:
             warning = f"SQLite Qt 活动删除状态读取失败: {exc}"
             if not PortalRuntime.last_ongoing_error:
@@ -3745,7 +3907,7 @@ class FastAPIPortalController:
             if not PortalRuntime.last_ongoing_error:
                 PortalRuntime.last_ongoing_error = warning
             log_warning(warning)
-        return merged
+        return PortalRuntime.service._merge_ongoing_items(scope, merged)
 
     @staticmethod
     def _reconcile_orphan_started_items(

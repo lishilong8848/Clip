@@ -13,6 +13,7 @@
         <button :class="{ active: tab === 'status' }" @click="tab = 'status'; loadStatus()">状态</button>
         <button :class="{ active: tab === 'permissions' }" @click="tab = 'permissions'; loadPermissions()">权限</button>
         <button :class="{ active: tab === 'handover' }" @click="tab = 'handover'; loadHandover()">交接班链接</button>
+        <button :class="{ active: tab === 'mop' }" @click="tab = 'mop'; loadMopSettings()">MOP配置</button>
         <button :class="{ active: tab === 'pressure' }" @click="tab = 'pressure'">mock 压测</button>
       </nav>
 
@@ -242,6 +243,34 @@
         </div>
       </section>
 
+      <section v-else-if="tab === 'mop'" class="pane">
+        <div class="actions">
+          <button class="btn blue" @click="loadMopSettings">刷新配置</button>
+          <button class="btn green" @click="saveMopSettings">保存配置</button>
+        </div>
+        <div class="mop-settings-grid">
+          <label>
+            MOP app_token
+            <input v-model="mopSettings.mop_app_token" placeholder="维保MOP所在多维表 app_token" />
+          </label>
+          <label>
+            MOP table_id
+            <input v-model="mopSettings.mop_table_id" placeholder="维保MOP所在表 table_id" />
+          </label>
+          <label>
+            标题字段名
+            <input v-model="mopSettings.mop_title_field" placeholder="名称" />
+          </label>
+          <label>
+            附件字段名
+            <input v-model="mopSettings.mop_attachment_field" placeholder="附件" />
+          </label>
+        </div>
+        <p class="muted-line">
+          该配置只用于工程师 MOP 页面读取候选表格与附件预览，不触发通告发送或多维写入。
+        </p>
+      </section>
+
       <section v-else class="pane">
         <div class="pressure-form">
           <label>数量 <input v-model.number="pressure.count" type="number" min="1" max="60" /></label>
@@ -337,7 +366,7 @@ const buildingScopes = [
   { value: "H", label: "H楼" },
 ];
 
-const tab = ref<"status" | "permissions" | "handover" | "pressure">("status");
+const tab = ref<"status" | "permissions" | "handover" | "mop" | "pressure">("status");
 const busy = ref(false);
 const message = ref("");
 const stats = ref<Dict>({});
@@ -347,6 +376,12 @@ const recentJobs = ref<Dict>({});
 const permissions = reactive<{ users: Dict[]; scope_options: Dict[] }>({ users: [], scope_options: [] });
 const handoverLinks = reactive<Record<string, string>>({});
 const handoverPassword = ref("");
+const mopSettings = reactive({
+  mop_app_token: "",
+  mop_table_id: "",
+  mop_title_field: "名称",
+  mop_attachment_field: "附件",
+});
 const pressure = reactive({
   count: 60,
   concurrency: 10,
@@ -690,6 +725,41 @@ async function saveHandover(): Promise<void> {
     message.value = "交接班链接已保存";
   } catch (error: any) {
     message.value = error?.message || "交接班链接保存失败";
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function loadMopSettings(): Promise<void> {
+  message.value = "";
+  busy.value = true;
+  try {
+    const data = await api("/api/admin/mop-settings");
+    mopSettings.mop_app_token = String(data.mop_app_token || "");
+    mopSettings.mop_table_id = String(data.mop_table_id || "");
+    mopSettings.mop_title_field = String(data.mop_title_field || "名称");
+    mopSettings.mop_attachment_field = String(data.mop_attachment_field || "附件");
+  } catch (error: any) {
+    message.value = error?.message || "MOP 配置加载失败";
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function saveMopSettings(): Promise<void> {
+  busy.value = true;
+  try {
+    const data = await api("/api/admin/mop-settings", {
+      method: "POST",
+      body: JSON.stringify(mopSettings),
+    });
+    mopSettings.mop_app_token = String(data.mop_app_token || "");
+    mopSettings.mop_table_id = String(data.mop_table_id || "");
+    mopSettings.mop_title_field = String(data.mop_title_field || "名称");
+    mopSettings.mop_attachment_field = String(data.mop_attachment_field || "附件");
+    message.value = "MOP 配置已保存";
+  } catch (error: any) {
+    message.value = error?.message || "MOP 配置保存失败";
   } finally {
     busy.value = false;
   }
@@ -1156,7 +1226,8 @@ pre {
 }
 
 .permission-list,
-.handover-grid {
+.handover-grid,
+.mop-settings-grid {
   display: grid;
   gap: 10px;
 }
@@ -1195,7 +1266,8 @@ select {
   font: inherit;
 }
 
-.handover-grid {
+.handover-grid,
+.mop-settings-grid {
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 }
 

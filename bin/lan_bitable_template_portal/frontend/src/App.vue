@@ -10,7 +10,7 @@
       </div>
       <div class="topbar-actions">
         <span v-if="auth.loggedIn" class="user-chip">{{ auth.user?.name || auth.user?.open_id || "已登录" }}</span>
-        <button v-if="auth.loggedIn && isWorkbench" class="btn ghost" @click="returnToHome">功能选择</button>
+        <button v-if="auth.loggedIn && (isWorkbench || isEngineerMopPage)" class="btn ghost" @click="returnToHome">功能选择</button>
         <label v-if="auth.loggedIn && isWorkbench && visibleScopeOptions.length > 1" class="scope-switch">
           <span>切换楼栋</span>
           <select :value="currentScope" :disabled="loading" @change="switchScope(($event.target as HTMLSelectElement).value)">
@@ -62,6 +62,14 @@
       :login-url="auth.loginUrl"
     />
 
+    <EngineerMopPage
+      v-else-if="isEngineerMopPage"
+      :checking="authChecking"
+      :logged-in="auth.loggedIn"
+      :login-url="auth.loginUrl"
+      :scope-options="visibleScopeOptions"
+    />
+
     <AuthPanels
       v-else-if="authChecking || !auth.loggedIn || (auth.loggedIn && !auth.scopeOptions.length)"
       :checking="authChecking"
@@ -82,6 +90,7 @@
       :overview="scopeOverview"
       :handover-links="handoverLinks"
       @enter="enterScope"
+      @engineer="enterEngineerMop"
     />
 
     <section v-else class="workbench">
@@ -430,6 +439,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import AdminTools from "./components/AdminTools.vue";
 import AuthPanels from "./components/AuthPanels.vue";
 import DraftNoticeCard from "./components/DraftNoticeCard.vue";
+import EngineerMopPage from "./components/EngineerMopPage.vue";
 import HistoryMemoryPage from "./components/HistoryMemoryPage.vue";
 import OngoingNoticeCard from "./components/OngoingNoticeCard.vue";
 import RecentUndoPanel from "./components/RecentUndoPanel.vue";
@@ -506,6 +516,7 @@ const repairSpecialtyOptionFallback: Record<string, string> = {
 const authChecking = ref(true);
 const loading = ref(false);
 const isHistoryMemoryPage = ref(window.location.pathname.replace(/\/$/, "") === "/admin/history-memory");
+const isEngineerMopPage = ref(window.location.pathname.replace(/\/$/, "") === "/engineer/mop");
 const repairRefreshing = ref(false);
 const changeRefreshing = ref(false);
 const isWorkbench = ref(false);
@@ -622,6 +633,7 @@ const visibleScopeOptions = computed(() => auth.scopeOptions.length ? auth.scope
 const isAdmin = computed(() => String(auth.user?.role || "").toLowerCase() === "admin");
 const headerSubtitle = computed(() => {
   if (isHistoryMemoryPage.value) return "管理工具 · 历史通告记忆导入";
+  if (isEngineerMopPage.value) return `${scopeLabel(currentScope.value)} · 工程师 MOP 填写`;
   if (authChecking.value) return "功能选择 · 正在检查登录";
   if (!auth.loggedIn) return "功能选择 · 请先登录";
   if (!auth.scopeOptions.length) return "功能选择 · 申请访问权限";
@@ -634,6 +646,18 @@ const pageStatusText = computed(() => {
   if (/^HTTP\s+\d+/i.test(text)) return "后端服务暂未就绪，页面会在连接恢复后自动刷新。";
   return text;
 });
+const hasActiveJobs = computed(() => {
+  for (const state of jobStates.values()) {
+    const phase = String(state?.phase || "");
+    if (phase && !terminalPhase(phase)) return true;
+  }
+  return false;
+});
+const jobRealtimeUnavailable = computed(() => (
+  isWorkbench.value
+  && hasActiveJobs.value
+  && !(sseConnected.value || sharedJobStreamAvailable.value)
+));
 const connectionNotice = computed(() => {
   if (!auth.loggedIn) return null;
   if (backendStatus.offline) {
@@ -652,14 +676,10 @@ const connectionNotice = computed(() => {
       action: flushPendingHiddenRefresh,
     };
   }
-  if (
-    isWorkbench.value
-    && (!(sseConnected.value || sharedJobStreamAvailable.value)
-      || !(activeItemsConnected.value || sharedActiveItemsStreamAvailable.value))
-  ) {
+  if (jobRealtimeUnavailable.value) {
     return {
       tone: "warning",
-      text: "实时同步正在重连，任务状态会用轮询兜底。",
+      text: "任务实时状态正在重连，当前会自动轮询查询。",
       actionLabel: "重连",
       action: retryFrontendConnections,
     };
@@ -1056,6 +1076,31 @@ function ongoingLineKey(item: Dict): string {
   return String(item.active_item_id || item.target_record_id || item.feishu_record_id || item.raw_record_id || item.source_record_id || item.record_id || "").trim();
 }
 
+function ongoingBusinessTimeKey(item: Dict): string {
+  const text = [item.start_time, item.time_str, item.time, item.end_time]
+    .map((value) => String(value || ""))
+    .join("");
+  return Array.from(text.matchAll(/\d+/g))
+    .map((match) => match[0].length <= 2 ? match[0].padStart(2, "0") : match[0])
+    .join("");
+}
+
+function ongoingBusinessIdentityKeys(item: Dict, workType: string): string[] {
+  const title = normalizeDraftSignatureText(String(item.title || item.content || item.name || ""));
+  if (!title) return [];
+  const building = normalizeDraftSignatureText(String(item.building || ""));
+  const reason = normalizeDraftSignatureText(String(item.reason || ""));
+  const timeKey = ongoingBusinessTimeKey(item);
+  const keys: string[] = [];
+  if (building && reason) keys.push(`${workType}:business:title-building-reason:${building}:${title}:${reason}`);
+  if (building && timeKey && reason) {
+    keys.push(`${workType}:business:title-time-reason:${building}:${title}:${timeKey}:${reason}`);
+  } else if (building && timeKey) {
+    keys.push(`${workType}:business:title-time:${building}:${title}:${timeKey}`);
+  }
+  return keys;
+}
+
 function ongoingIdentityKeys(item: Dict): string[] {
   const workType = String(item.work_type || item.lan_work_type || "maintenance").trim();
   const noticeType = String(item.notice_type || "").trim();
@@ -1074,6 +1119,7 @@ function ongoingIdentityKeys(item: Dict): string[] {
     const building = normalizeDraftSignatureText(String(item.building || ""));
     keys.push(`${workType}:fallback:${noticeType}:${building}:${title}:${start}:${end}:${reason}`);
   }
+  keys.push(...ongoingBusinessIdentityKeys(item, workType));
   return Array.from(new Set(keys.filter(Boolean)));
 }
 
@@ -1951,7 +1997,17 @@ function enterScope(scope: string): void {
   switchScope(scope);
 }
 
+function enterEngineerMop(scope: string): void {
+  const url = new URL("/engineer/mop", window.location.origin);
+  url.searchParams.set("scope", normalizeScopeValue(scope, "ALL"));
+  window.location.href = url.toString();
+}
+
 function returnToHome(): void {
+  if (isEngineerMopPage.value || isHistoryMemoryPage.value) {
+    window.location.href = "/";
+    return;
+  }
   if (currentScope.value) saveDrafts();
   stopActiveItemsSse();
   clearWorkbenchRetry();
@@ -3748,7 +3804,7 @@ onMounted(async () => {
   }
   if (auth.loggedIn && auth.scopeOptions.length) {
     await Promise.all([loadOverview(), loadHandoverLinks()]);
-    if (currentScope.value) {
+    if (currentScope.value && !isEngineerMopPage.value && !isHistoryMemoryPage.value) {
       isWorkbench.value = true;
       loadDrafts();
       await loadWorkbench();

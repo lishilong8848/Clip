@@ -1708,13 +1708,14 @@ class PortalRuntime:
             snapshot = PortalRuntime.state_store.get_ongoing_snapshot()
             if snapshot.get("exists"):
                 PortalRuntime.last_ongoing_error = ""
-                return [
+                filtered = [
                     dict(item)
                     for item in snapshot.get("items", [])
                     if isinstance(item, dict)
                     and not _is_ended(item)
                     and self.service._scope_matches_item(scope, item)
                 ]
+                return self.service._merge_ongoing_items(scope, filtered)
         except Exception as exc:
             warning = f"SQLite 进行中状态读取失败: {exc}"
             PortalRuntime.last_ongoing_error = warning
@@ -1739,13 +1740,14 @@ class PortalRuntime:
             return []
         if not isinstance(result, list):
             return []
-        return [
+        filtered = [
             dict(item)
             for item in result
             if isinstance(item, dict)
             and not _is_ended(item)
             and self.service._scope_matches_item(scope, item)
         ]
+        return self.service._merge_ongoing_items(scope, filtered)
 
     @classmethod
     def ensure_source_refresh_worker(cls) -> None:
