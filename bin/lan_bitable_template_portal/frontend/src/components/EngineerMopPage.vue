@@ -186,15 +186,34 @@
             </div>
             <div class="sheet-scroll">
               <table v-if="activeSheet">
+                <thead>
+                  <tr>
+                    <th class="corner-cell"></th>
+                    <th
+                      v-for="colIndex in activeSheetColumnIndexes"
+                      :key="`head:${colIndex}`"
+                      class="column-head"
+                    >
+                      {{ columnLabel(colIndex) }}
+                    </th>
+                  </tr>
+                </thead>
                 <tbody>
                   <tr v-for="(row, rowIndex) in activeSheet.rows || []" :key="rowIndex">
-                    <th>{{ rowIndex + 1 }}</th>
-                    <td
+                    <th class="row-head">{{ rowIndex + 1 }}</th>
+                    <template
                       v-for="colIndex in activeSheetColumnIndexes"
                       :key="`${rowIndex}:${colIndex}`"
                     >
-                      {{ row[colIndex] || "" }}
-                    </td>
+                      <td
+                        v-if="!cellMergeSpan(rowIndex, colIndex).hidden"
+                        :rowspan="cellMergeSpan(rowIndex, colIndex).rowspan"
+                        :colspan="cellMergeSpan(rowIndex, colIndex).colspan"
+                        :class="{ merged: cellMergeSpan(rowIndex, colIndex).rowspan > 1 || cellMergeSpan(rowIndex, colIndex).colspan > 1 }"
+                      >
+                        {{ row[colIndex] || "" }}
+                      </td>
+                    </template>
                   </tr>
                 </tbody>
               </table>
@@ -298,6 +317,36 @@ const activeSheetColumnIndexes = computed(() => {
   const count = Math.max(0, Number(activeSheet.value?.column_count || 0));
   return Array.from({ length: count }, (_value, index) => index);
 });
+
+function columnLabel(index: number): string {
+  const columns = Array.isArray(activeSheet.value?.columns) ? activeSheet.value?.columns : [];
+  const existing = String(columns[index] || "").trim();
+  if (existing) return existing;
+  let value = Math.max(1, index + 1);
+  let label = "";
+  while (value > 0) {
+    const remainder = (value - 1) % 26;
+    label = String.fromCharCode(65 + remainder) + label;
+    value = Math.floor((value - 1) / 26);
+  }
+  return label || String(index + 1);
+}
+
+function cellMergeSpan(rowIndex: number, colIndex: number): { hidden: boolean; rowspan: number; colspan: number } {
+  const merges = Array.isArray(activeSheet.value?.merges) ? activeSheet.value?.merges : [];
+  for (const merge of merges) {
+    const row = Number(merge?.row || 0);
+    const col = Number(merge?.col || 0);
+    const rowspan = Math.max(1, Number(merge?.rowspan || 1));
+    const colspan = Math.max(1, Number(merge?.colspan || 1));
+    const inRows = rowIndex >= row && rowIndex < row + rowspan;
+    const inCols = colIndex >= col && colIndex < col + colspan;
+    if (!inRows || !inCols) continue;
+    if (rowIndex === row && colIndex === col) return { hidden: false, rowspan, colspan };
+    return { hidden: true, rowspan: 1, colspan: 1 };
+  }
+  return { hidden: false, rowspan: 1, colspan: 1 };
+}
 
 function normalizeScope(value: string | null | undefined, fallback = "ALL"): string {
   const text = String(value || "").trim().toUpperCase();
@@ -825,15 +874,41 @@ td {
   word-break: break-word;
 }
 
-th {
-  position: sticky;
-  left: 0;
-  z-index: 1;
-  min-width: 44px;
-  width: 44px;
+.row-head,
+.corner-cell,
+.column-head {
   color: #64748b;
   background: #f8fafc;
   text-align: center;
+  font-weight: 750;
+}
+
+.row-head {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  min-width: 44px;
+  width: 44px;
+}
+
+.corner-cell {
+  position: sticky;
+  top: 0;
+  left: 0;
+  z-index: 4;
+  min-width: 44px;
+  width: 44px;
+}
+
+.column-head {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  min-width: 96px;
+}
+
+td.merged {
+  background: #fbfdff;
 }
 
 @media (max-width: 1180px) {

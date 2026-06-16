@@ -54,6 +54,7 @@ REPAIR_LINK_FAST_RETRY_ATTEMPTS = 6
 REPAIR_LINK_MAX_ATTEMPTS = 18
 BITABLE_DATA_NOT_READY_CODE = 1254607
 BITABLE_TRANSIENT_RETRY_DELAYS = (1.0, 2.5, 5.0)
+MOP_CANDIDATE_CACHE_TTL_SECONDS = 10 * 60
 REPAIR_SOURCE_PAGE_SIZE = 200
 DEFAULT_IMPACT_TEXT = "对IT业务无影响，不会触发BA和BMS系统相关告警"
 DEFAULT_PROGRESS_TEXT = "准备工作已完成，人员已就位，可否开始操作？"
@@ -376,6 +377,8 @@ class MaintenancePortalService:
         self._work_status_cache_signature: tuple[tuple[str, int], ...] | None = None
         self._work_status_cache_items: list[dict[str, Any]] | None = None
         self._target_record_cache: dict[tuple[str, str], dict[str, Any]] = {}
+        self._engineer_mop_cache_lock = threading.RLock()
+        self._engineer_mop_cache: dict[str, Any] | None = None
         self._jobs_lock = threading.RLock()
         self._jobs: dict[str, dict[str, Any]] = self._load_action_jobs_from_state()
         self._handover_password_reset: dict[str, Any] | None = None
@@ -986,6 +989,10 @@ class MaintenancePortalService:
     def clear_target_record_cache(self) -> None:
         with self._refresh_lock:
             self._target_record_cache.clear()
+
+    def clear_engineer_mop_cache(self) -> None:
+        with self._engineer_mop_cache_lock:
+            self._engineer_mop_cache = None
 
     def refresh(self) -> None:
         with self._refresh_lock:
@@ -7640,6 +7647,20 @@ class MaintenancePortalService:
         settings = self._engineer_mop_settings()
         if not settings["app_token"] or not settings["table_id"]:
             return [], ["未配置 MOP 多维表 app_token/table_id，请先在 SQLite settings 中配置 mop_app_token 和 mop_table_id。"], settings
+        signature = json.dumps(settings, ensure_ascii=False, sort_keys=True)
+        now = time.time()
+        with self._engineer_mop_cache_lock:
+            cached = self._engineer_mop_cache
+            if (
+                cached
+                and cached.get("signature") == signature
+                and now - float(cached.get("loaded_ts") or 0.0) < MOP_CANDIDATE_CACHE_TTL_SECONDS
+            ):
+                return (
+                    copy.deepcopy(cached.get("candidates") or []),
+                    list(cached.get("warnings") or []),
+                    dict(cached.get("settings") or settings),
+                )
         warnings: list[str] = []
         metas, meta_by_name = self._load_table_fields(
             app_token=settings["app_token"],
@@ -7678,6 +7699,14 @@ class MaintenancePortalService:
             )
         if metas and settings["attachment_field"] not in {meta.field_name for meta in metas}:
             warnings.append(f"MOP附件字段「{settings['attachment_field']}」未在表中找到，已自动扫描所有附件字段。")
+        with self._engineer_mop_cache_lock:
+            self._engineer_mop_cache = {
+                "signature": signature,
+                "loaded_ts": now,
+                "candidates": copy.deepcopy(candidates),
+                "warnings": list(warnings),
+                "settings": dict(settings),
+            }
         return candidates, warnings, settings
 
     def engineer_mop_bootstrap(
@@ -7728,6 +7757,39 @@ class MaintenancePortalService:
             index = index * 26 + (ord(ch) - 64)
         return max(1, index)
 
+    @classmethod
+    def _cell_position(cls, cell_ref: str) -> tuple[int, int] | None:
+        match = re.match(r"^\$?([A-Za-z]+)\$?(\d+)$", str(cell_ref or "").strip())
+        if not match:
+            return None
+        col = cls._column_index(match.group(1))
+        row = int(match.group(2))
+        if row <= 0 or col <= 0:
+            return None
+        return row, col
+
+    @classmethod
+    def _parse_merge_range(cls, ref: str) -> tuple[int, int, int, int] | None:
+        parts = str(ref or "").split(":")
+        if len(parts) != 2:
+            return None
+        start = cls._cell_position(parts[0])
+        end = cls._cell_position(parts[1])
+        if not start or not end:
+            return None
+        row1, col1 = start
+        row2, col2 = end
+        return min(row1, row2), min(col1, col2), max(row1, row2), max(col1, col2)
+
+    @staticmethod
+    def _column_label(index: int) -> str:
+        index = max(1, int(index or 1))
+        label = ""
+        while index:
+            index, remainder = divmod(index - 1, 26)
+            label = chr(65 + remainder) + label
+        return label
+
     @staticmethod
     def _xml_text(element: ET.Element | None) -> str:
         if element is None:
@@ -7761,6 +7823,27 @@ class MaintenancePortalService:
                 rows_out: list[list[str]] = []
                 max_width = 0
                 truncated = False
+                merges: list[dict[str, int]] = []
+                for merge in sheet_root.findall("main:mergeCells/main:mergeCell", ns):
+                    parsed = self._parse_merge_range(merge.attrib.get("ref", ""))
+                    if not parsed:
+                        continue
+                    row1, col1, row2, col2 = parsed
+                    if row1 > max_rows or col1 > max_cols:
+                        continue
+                    row2 = min(row2, max_rows)
+                    col2 = min(col2, max_cols)
+                    if row2 <= row1 and col2 <= col1:
+                        continue
+                    max_width = max(max_width, col2)
+                    merges.append(
+                        {
+                            "row": row1 - 1,
+                            "col": col1 - 1,
+                            "rowspan": row2 - row1 + 1,
+                            "colspan": col2 - col1 + 1,
+                        }
+                    )
                 for row in sheet_root.findall("main:sheetData/main:row", ns):
                     row_values: list[str] = []
                     for cell in row.findall("main:c", ns):
@@ -7792,6 +7875,8 @@ class MaintenancePortalService:
                         "rows": rows_out,
                         "row_count": len(rows_out),
                         "column_count": min(max_width, max_cols),
+                        "columns": [self._column_label(index + 1) for index in range(min(max_width, max_cols))],
+                        "merges": merges,
                         "truncated": truncated or max_width > max_cols,
                     }
                 )
@@ -7815,6 +7900,8 @@ class MaintenancePortalService:
                     "rows": rows,
                     "row_count": len(rows),
                     "column_count": max([len(row) for row in rows] or [0]),
+                    "columns": [self._column_label(index + 1) for index in range(max([len(row) for row in rows] or [0]))],
+                    "merges": [],
                     "truncated": False,
                 }
             ],

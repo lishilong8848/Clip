@@ -1397,6 +1397,7 @@ class FastAPIPortalController:
                     "mop_attachment_field": str(payload.get("mop_attachment_field") or "附件").strip() or "附件",
                 }
                 PortalRuntime.state_store.put_settings(values)
+                PortalRuntime.service.clear_engineer_mop_cache()
                 PortalRuntime.clear_payload_cache()
                 self._clear_read_cache()
                 return {"ok": True, "data": values}
