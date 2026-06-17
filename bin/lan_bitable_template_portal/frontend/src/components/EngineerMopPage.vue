@@ -102,11 +102,11 @@
               <div v-if="selectedSignaturePeople('implementer').length" class="role-chip-row">
                 <em
                   v-for="person in selectedSignaturePeople('implementer')"
-                  :key="`implementer:${person.record_id}`"
+                  :key="`implementer:${signaturePersonKey(person)}`"
                   :class="{ ok: personHasUsableSignature(person) }"
                 >
-                  {{ person.name || "未命名" }}
-                  <button type="button" @click.stop="removeSignaturePerson('implementer', person.record_id)">移除</button>
+                  {{ signaturePersonDisplayName(person) }}
+                  <button type="button" @click.stop="removeSignaturePerson('implementer', signaturePersonKey(person))">移除</button>
                 </em>
               </div>
               <strong v-else>未选择</strong>
@@ -116,11 +116,11 @@
               <div v-if="selectedSignaturePeople('auditor').length" class="role-chip-row">
                 <em
                   v-for="person in selectedSignaturePeople('auditor')"
-                  :key="`auditor:${person.record_id}`"
+                  :key="`auditor:${signaturePersonKey(person)}`"
                   :class="{ ok: personHasUsableSignature(person) }"
                 >
-                  {{ person.name || "未命名" }}
-                  <button type="button" @click.stop="removeSignaturePerson('auditor', person.record_id)">移除</button>
+                  {{ signaturePersonDisplayName(person) }}
+                  <button type="button" @click.stop="removeSignaturePerson('auditor', signaturePersonKey(person))">移除</button>
                 </em>
               </div>
               <strong v-else>未选择</strong>
@@ -183,19 +183,30 @@
                 <div v-if="selectedRoleSignaturePeople.length" class="selected-signatures">
                   <span
                     v-for="person in selectedRoleSignaturePeople"
-                    :key="`${signatureRole}:${person.record_id}`"
+                    :key="`${signatureRole}:${signaturePersonKey(person)}`"
                     class="selected-signature-chip"
-                    :class="{ active: person.record_id === activeSignatureRecordId }"
-                    @click="setActiveSignaturePerson(person.record_id)"
+                    :class="{ active: person.record_id === activeSignatureRecordId && person.source !== 'temporary' }"
+                    @click="activateSelectedSignaturePerson(person)"
                   >
                     <img
                       v-if="personHasUsableSignature(person)"
                       :src="person.signature_preview_url"
                       alt="已有签名"
-                      @error="handleSignatureImageError(person.record_id)"
+                      @error="handleSelectedSignatureImageError(person)"
                     />
-                    <strong>{{ person.name || "未命名" }}</strong>
-                    <button type="button" @click.stop="removeSignaturePerson(signatureRole, person.record_id)">移除</button>
+                    <span v-else class="signature-chip-state">{{ person.source === 'temporary' ? '待签名' : '待签名' }}</span>
+                    <strong>{{ signaturePersonDisplayName(person) }}</strong>
+                    <button
+                      v-if="person.source !== 'temporary'"
+                      class="chip-action"
+                      type="button"
+                      :disabled="Boolean(signatureLinkSendingById[person.record_id]) || !person.open_id"
+                      :title="personSignatureLinkTitle(person)"
+                      @click.stop="sendSignatureLinkForPerson(person, personHasUsableSignature(person))"
+                    >
+                      {{ signatureLinkSendingById[person.record_id] ? "发送中" : (personHasUsableSignature(person) ? "重新签名" : "发送") }}
+                    </button>
+                    <button type="button" @click.stop="removeSignaturePerson(signatureRole, signaturePersonKey(person))">移除</button>
                   </span>
                 </div>
               </div>
@@ -258,11 +269,20 @@
                     <button
                       class="btn ghost"
                       type="button"
-                      :disabled="signatureLinkSending || !activeSignaturePerson || !activeSignaturePerson.open_id"
-                      :title="signatureLinkDisabledReason"
-                      @click="sendSignatureLink"
+                      :disabled="signatureLinkSending || Boolean(signatureBatchLinkDisabledReason)"
+                      :title="signatureBatchLinkDisabledReason"
+                      @click="sendPendingSignatureLinks"
                     >
-                      {{ signatureLinkSending ? "发送中" : "发送签名链接" }}
+                      {{ signatureLinkSending ? "发送中" : `发送待签名链接（${pendingSignatureLinkCount}人）` }}
+                    </button>
+                    <button
+                      class="btn ghost"
+                      type="button"
+                      :disabled="temporarySignatureSending || Boolean(temporarySignatureDisabledReason)"
+                      :title="temporarySignatureDisabledReason"
+                      @click="sendTemporarySignatureLink"
+                    >
+                      {{ temporarySignatureSending ? "发送中" : "其他人员签名" }}
                     </button>
                     <button
                       class="btn blue"
@@ -337,9 +357,10 @@
           >
             <div class="table-fill-toolbar-row">
               <span>点击单元格后在这里填写，避免遮挡表格内容</span>
-              <button class="btn blue" type="button" :disabled="!activeSheetCheckboxCells.length" @click="markAllCheckboxes('normal')">
-                全部正常/开启/已完成
+              <button v-if="bulkFillCheckboxCells.length" class="btn blue" type="button" @click="markAllCheckboxes('normal')">
+                第10行后全部正常/开启/已完成
               </button>
+              <small v-if="bulkFillCheckboxCells.length">前9行不批量填写</small>
               <em v-if="mopFilledCount">已填写 {{ mopFilledCount }} 项</em>
             </div>
             <div v-if="activeMopCellInfo" class="active-cell-toolbar">
@@ -404,6 +425,9 @@
                       fillable: Boolean(checkboxCellAt(rowIndex, colIndex)),
                       'field-fillable': Boolean(maintenanceFieldAt(rowIndex, colIndex)),
                       'raw-editable': Boolean(editableCellAt(rowIndex, colIndex)),
+                      'cell-modified': mopCellHasOverride(rowIndex, colIndex),
+                      'active-cell': activeMopCellKey === mopCellKey(rowIndex, colIndex),
+                      'signature-cell': Boolean(cellSignatures(rowIndex, colIndex).length),
                       normal: checkboxCellAt(rowIndex, colIndex) ? checkboxStateLabel(checkboxCellAt(rowIndex, colIndex) as Dict).includes('正常') : false,
                       abnormal: checkboxCellAt(rowIndex, colIndex) ? checkboxStateLabel(checkboxCellAt(rowIndex, colIndex) as Dict).includes('异常') : false
                     }"
@@ -667,10 +691,14 @@ const signatureRole = ref<"implementer" | "auditor">("implementer");
 const signatureSearch = ref("");
 const signaturePeople = ref<Dict[]>([]);
 const signaturePeopleById = ref<Record<string, Dict>>({});
+const temporarySignatures = ref<Dict[]>([]);
+const hiddenTemporarySignatureIds = ref<string[]>([]);
 const signaturePeopleTotal = ref(0);
 const signatureLoading = ref(false);
 const signatureSaving = ref(false);
 const signatureLinkSending = ref(false);
+const signatureLinkSendingById = ref<Record<string, boolean>>({});
+const temporarySignatureSending = ref(false);
 const mopFillSaving = ref(false);
 const mopUploadSaving = ref(false);
 const mopResetting = ref(false);
@@ -688,6 +716,7 @@ const signatureHasInk = ref(false);
 let signatureDrawing = false;
 let signatureResizeObserver: ResizeObserver | null = null;
 let signatureSearchTimer: ReturnType<typeof setTimeout> | null = null;
+let temporarySignaturePollTimer: ReturnType<typeof setInterval> | null = null;
 let signatureSearchRequestSeq = 0;
 
 const scopeLabel = computed(() => {
@@ -722,6 +751,14 @@ const selectedNotice = computed(() => notices.value.find((item) => item.notice_k
 const selectedNoticeSourceRecordId = computed(() => String(
   selectedNotice.value?.source_record_id
   || selectedNotice.value?.record_id
+  || "",
+).trim());
+const selectedNoticeSpecialty = computed(() => String(
+  selectedNotice.value?.specialty
+  || selectedNotice.value?.专业
+  || selectedNotice.value?.专业类别
+  || selectedNotice.value?.fields?.专业
+  || selectedNotice.value?.fields?.专业类别
   || "",
 ).trim());
 const selectedMop = computed(() => mopCandidates.value.find((item) => item.record_id === selectedMopRecordId.value) || null);
@@ -774,10 +811,33 @@ const activeSignatureRecordId = computed(() => {
   return records[records.length - 1] || "";
 });
 const selectedRoleSignaturePeople = computed(() => selectedSignaturePeople(signatureRole.value));
-const activeSignaturePerson = computed(() => selectedRoleSignaturePeople.value.find((item) => item.record_id === activeSignatureRecordId.value) || null);
+const activeSignaturePerson = computed(() => selectedFormalSignaturePeople(signatureRole.value).find((item) => item.record_id === activeSignatureRecordId.value) || null);
 const signatureRoleHint = computed(() => {
   const label = signatureRole.value === "implementer" ? "维护实施人" : "维护审核人";
   return activeSignaturePerson.value ? `${label}已选择，可手写后保存。` : `请选择${label}。`;
+});
+const temporarySignatureDisabledReason = computed(() => {
+  if (temporarySignatureSending.value) return "";
+  if (!selectedNotice.value) return "请先选择左侧维保通告";
+  if (!selectedNotice.value.notice_key) return "当前通告缺少记忆键，无法创建临时签名";
+  const recipients = selectedFormalSignaturePeople("implementer").filter((person) => String(person.open_id || "").trim());
+  if (!recipients.length) return "请先选择维护实施人，且该人员需要有 openid";
+  return "";
+});
+const pendingSignatureLinkPeople = computed(() => (
+  selectedFormalSignaturePeople(signatureRole.value)
+    .filter((person) => !personHasUsableSignature(person))
+    .filter((person) => String(person.open_id || "").trim())
+));
+const pendingSignatureLinkCount = computed(() => pendingSignatureLinkPeople.value.length);
+const signatureBatchLinkDisabledReason = computed(() => {
+  if (signatureLinkSending.value) return "";
+  const selectedFormal = selectedFormalSignaturePeople(signatureRole.value);
+  if (!selectedFormal.length) return "当前角色还没有选择正式签名人员";
+  const unsigned = selectedFormal.filter((person) => !personHasUsableSignature(person));
+  if (!unsigned.length) return "当前角色已都有签名；如需覆盖，请点人员旁边的“重新签名”";
+  if (!pendingSignatureLinkPeople.value.length) return "待签名人员缺少 openid，不能发送签名链接";
+  return "";
 });
 const signatureLinkDisabledReason = computed(() => {
   if (!activeSignaturePerson.value) return "请先选择签名人员";
@@ -829,6 +889,9 @@ const activeSheetCheckboxCells = computed(() => {
   const items = activeSheet.value?.checkbox_cells;
   return Array.isArray(items) ? items : [];
 });
+const bulkFillCheckboxCells = computed(() => (
+  activeSheetCheckboxCells.value.filter((cell) => Number(cell.row) >= 9)
+));
 const activeSheetMaintenanceFields = computed(() => {
   const items = activeSheet.value?.maintenance_fields;
   return Array.isArray(items) ? items : [];
@@ -1159,6 +1222,11 @@ function maintenanceFieldIsCompletion(field: Dict): boolean {
   return String(field?.label || "").includes("维护完成情况");
 }
 
+function maintenanceFieldWritesValueOnly(field: Dict): boolean {
+  const label = String(field?.label || "");
+  return label.includes("维护完成时间") || label.includes("审核确认时间");
+}
+
 function fillMaintenanceField(field: Dict, value: string): void {
   const text = String(value || "").trim();
   if (!text) return;
@@ -1176,6 +1244,9 @@ function clearMopFillState(options: { clearSignatures?: boolean } = {}): void {
   filledMopResult.value = null;
   if (options.clearSignatures) {
     signatureSelectedRecords.value = { implementer: [], auditor: [] };
+    temporarySignatures.value = [];
+    hiddenTemporarySignatureIds.value = [];
+    updateTemporarySignaturePolling();
     signatureRole.value = "implementer";
     clearSignatureCanvas();
   }
@@ -1183,7 +1254,7 @@ function clearMopFillState(options: { clearSignatures?: boolean } = {}): void {
 
 function markAllCheckboxes(state: string): void {
   const next = { ...mopCheckboxStates.value };
-  for (const cell of activeSheetCheckboxCells.value) {
+  for (const cell of bulkFillCheckboxCells.value) {
     const options = checkboxOptions(cell);
     const preferred = options.find((option) => String(option.label || "").includes("正常"))
       || options.find((option) => String(option.label || "").includes("开启"))
@@ -1214,6 +1285,14 @@ function checkboxDisplayValue(cell: Dict): string {
   return text;
 }
 
+function mopCellHasOverride(rowIndex: number, colIndex: number): boolean {
+  const checkbox = activeSheetCheckboxCells.value.find((cell) => Number(cell.row) === rowIndex && Number(cell.col) === colIndex);
+  if (checkbox && checkboxState(checkbox)) return true;
+  const field = activeSheetMaintenanceFields.value.find((item) => Number(item.row) === rowIndex && Number(item.value_col) === colIndex);
+  if (field && mopMaintenanceValues.value[maintenanceKey(field)]) return true;
+  return Object.prototype.hasOwnProperty.call(mopCellEdits.value, rawCellKey(rowIndex, colIndex));
+}
+
 function cellOverrideValue(rowIndex: number, colIndex: number): string {
   const checkbox = activeSheetCheckboxCells.value.find((cell) => Number(cell.row) === rowIndex && Number(cell.col) === colIndex);
   if (checkbox) return checkboxDisplayValue(checkbox);
@@ -1222,6 +1301,7 @@ function cellOverrideValue(rowIndex: number, colIndex: number): string {
     const value = mopMaintenanceValues.value[maintenanceKey(field)] || "";
     if (value) {
       const labelCol = Number(field.label_col);
+      if (maintenanceFieldWritesValueOnly(field)) return value;
       return labelCol === colIndex ? `${field.label || ""}：${value}` : value;
     }
   }
@@ -1259,15 +1339,31 @@ function buildMopCellEditPayload(): Dict[] {
 
 function buildMopSignaturePayload(): Dict[] {
   return [
-    ...selectedSignaturePeople("implementer").filter((person) => personHasUsableSignature(person)).map((person) => ({
+    ...selectedFormalSignaturePeople("implementer").filter((person) => personHasUsableSignature(person)).map((person) => ({
+      source: "staff",
       role: "implementer",
       label: "维护实施人",
       record_id: person.record_id,
     })),
-    ...selectedSignaturePeople("auditor").filter((person) => personHasUsableSignature(person)).map((person) => ({
+    ...selectedFormalSignaturePeople("auditor").filter((person) => personHasUsableSignature(person)).map((person) => ({
+      source: "staff",
       role: "auditor",
       label: "维护审核人",
       record_id: person.record_id,
+    })),
+    ...selectedTemporarySignaturePeople("implementer").filter((person) => personHasUsableSignature(person)).map((person) => ({
+      source: "temporary",
+      role: "implementer",
+      label: "维护实施人",
+      temp_id: person.temp_id,
+      record_id: person.record_id || "",
+    })),
+    ...selectedTemporarySignaturePeople("auditor").filter((person) => personHasUsableSignature(person)).map((person) => ({
+      source: "temporary",
+      role: "auditor",
+      label: "维护审核人",
+      temp_id: person.temp_id,
+      record_id: person.record_id || "",
     })),
   ];
 }
@@ -1334,6 +1430,21 @@ function markSignatureUnavailable(recordId: unknown): void {
 function handleSignatureImageError(recordId: unknown): void {
   markSignatureUnavailable(recordId);
   signatureMessage.value = "该人员签名附件不可用，请重新手写保存。";
+  signatureMessageType.value = "failed";
+}
+
+function handleSelectedSignatureImageError(person: Dict): void {
+  if (String(person?.source || "") === "temporary" || person?.temp_id) {
+    const tempId = String(person.temp_id || "");
+    temporarySignatures.value = temporarySignatures.value.map((item) => (
+      String(item.temp_id || "") === tempId
+        ? { ...item, has_signature: false, signature_preview_url: "", status: "pending" }
+        : item
+    ));
+  } else {
+    markSignatureUnavailable(person?.record_id);
+  }
+  signatureMessage.value = "该签名附件不可用，请重新签名保存。";
   signatureMessageType.value = "failed";
 }
 
@@ -1462,6 +1573,11 @@ function setActiveSignaturePerson(recordId: string): void {
 
 function removeSignaturePerson(role: "implementer" | "auditor", recordId: string): void {
   const recordText = String(recordId || "");
+  if (recordText.startsWith("temp:")) {
+    hiddenTemporarySignatureIds.value = [...new Set([...hiddenTemporarySignatureIds.value, recordText.slice(5)])];
+    clearSignatureCanvas();
+    return;
+  }
   signatureSelectedRecords.value = {
     ...signatureSelectedRecords.value,
     [role]: (signatureSelectedRecords.value[role] || []).filter((item) => item !== recordText),
@@ -1469,11 +1585,49 @@ function removeSignaturePerson(role: "implementer" | "auditor", recordId: string
   clearSignatureCanvas();
 }
 
-function selectedSignaturePeople(role: "implementer" | "auditor"): Dict[] {
+function selectedFormalSignaturePeople(role: "implementer" | "auditor"): Dict[] {
   const ids = signatureSelectedRecords.value[role] || [];
   return ids
     .map((id) => signaturePeopleById.value[id] || signaturePeople.value.find((item) => item.record_id === id))
     .filter((item): item is Dict => Boolean(item));
+}
+
+function selectedTemporarySignaturePeople(role: "implementer" | "auditor"): Dict[] {
+  const hidden = new Set(hiddenTemporarySignatureIds.value);
+  return temporarySignatures.value
+    .filter((item) => String(item.role || "") === role)
+    .filter((item) => String(item.status || "") !== "failed")
+    .filter((item) => !hidden.has(String(item.temp_id || "")));
+}
+
+function selectedSignaturePeople(role: "implementer" | "auditor"): Dict[] {
+  return [
+    ...selectedFormalSignaturePeople(role),
+    ...selectedTemporarySignaturePeople(role),
+  ];
+}
+
+function signaturePersonKey(person: Dict): string {
+  const tempId = String(person?.temp_id || "").trim();
+  if (String(person?.source || "") === "temporary" || tempId) {
+    return `temp:${tempId}`;
+  }
+  return String(person?.record_id || "").trim();
+}
+
+function signaturePersonDisplayName(person: Dict): string {
+  const name = String(person?.name || person?.display_name || "未命名").trim() || "未命名";
+  const source = String(person?.source || "");
+  const status = String(person?.status || "");
+  if (source === "temporary") {
+    return `${name} · ${personHasUsableSignature(person) || status === "signed" ? "已签名" : "待签名"}`;
+  }
+  return name;
+}
+
+function activateSelectedSignaturePerson(person: Dict): void {
+  if (String(person?.source || "") === "temporary" || person?.temp_id) return;
+  setActiveSignaturePerson(String(person.record_id || ""));
 }
 
 function roleForMaintenanceLabel(label: unknown): "implementer" | "auditor" | "" {
@@ -1674,28 +1828,168 @@ async function resetMopSigning(): Promise<void> {
   }
 }
 
-async function sendSignatureLink(): Promise<void> {
-  if (!activeSignaturePerson.value || !activeSignaturePerson.value.open_id) return;
-  signatureLinkSending.value = true;
+function personSignatureLinkTitle(person: Dict): string {
+  if (!String(person?.open_id || "").trim()) return "该人员缺少 openid，无法发送链接";
+  return personHasUsableSignature(person)
+    ? "重新发送签名链接；新签名保存前，原签名仍可继续使用"
+    : "发送签名链接";
+}
+
+async function sendSignatureLinkForPerson(person: Dict, forceResign = false): Promise<boolean> {
+  const recordId = String(person?.record_id || "").trim();
+  if (!recordId || !String(person?.open_id || "").trim()) return false;
+  signatureLinkSendingById.value = {
+    ...signatureLinkSendingById.value,
+    [recordId]: true,
+  };
   signatureMessage.value = "";
   signatureMessageType.value = "";
   try {
     const data = await requestJson("/api/signatures/send-link", {
       method: "POST",
       body: JSON.stringify({
-        record_id: activeSignaturePerson.value.record_id,
-        signer_name: activeSignaturePerson.value.name || "",
+        record_id: recordId,
+        signer_name: person.name || "",
         scope: scope.value,
       }),
     });
-    const person = data.person || activeSignaturePerson.value;
-    signatureMessage.value = `签名链接已发送给 ${person.name || activeSignaturePerson.value.name || "该人员"}。`;
+    const resultPerson = data.person || person;
+    signatureMessage.value = forceResign
+      ? `已给 ${resultPerson.name || person.name || "该人员"} 发送重新签名链接；新签名前原签名仍有效。`
+      : `签名链接已发送给 ${resultPerson.name || person.name || "该人员"}。`;
     signatureMessageType.value = "success";
+    return true;
   } catch (error) {
     signatureMessage.value = error instanceof Error ? error.message : "发送签名链接失败";
     signatureMessageType.value = "failed";
+    return false;
+  } finally {
+    const next = { ...signatureLinkSendingById.value };
+    delete next[recordId];
+    signatureLinkSendingById.value = next;
+  }
+}
+
+async function sendPendingSignatureLinks(): Promise<void> {
+  if (signatureBatchLinkDisabledReason.value) return;
+  signatureLinkSending.value = true;
+  signatureMessage.value = "";
+  signatureMessageType.value = "";
+  let success = 0;
+  let failed = 0;
+  try {
+    for (const person of pendingSignatureLinkPeople.value) {
+      const ok = await sendSignatureLinkForPerson(person, false);
+      if (ok) success += 1;
+      else failed += 1;
+    }
+    if (success && !failed) {
+      signatureMessage.value = `已发送 ${success} 个待签名链接。`;
+      signatureMessageType.value = "success";
+    } else if (success && failed) {
+      signatureMessage.value = `已发送 ${success} 个，${failed} 个发送失败，请查看人员旁状态后重试。`;
+      signatureMessageType.value = "failed";
+    } else {
+      signatureMessage.value = "待签名链接发送失败，请稍后重试。";
+      signatureMessageType.value = "failed";
+    }
   } finally {
     signatureLinkSending.value = false;
+  }
+}
+
+function mergeTemporarySignatures(items: Dict[]): void {
+  const next = new Map<string, Dict>();
+  for (const item of temporarySignatures.value) {
+    const id = String(item?.temp_id || "");
+    if (id) next.set(id, item);
+  }
+  for (const item of items) {
+    const id = String(item?.temp_id || "");
+    if (id) next.set(id, { ...(next.get(id) || {}), ...item, source: "temporary" });
+  }
+  temporarySignatures.value = Array.from(next.values());
+}
+
+async function loadTemporarySignatures(options: { silent?: boolean } = {}): Promise<void> {
+  const noticeKey = String(selectedNotice.value?.notice_key || "").trim();
+  if (!noticeKey) {
+    temporarySignatures.value = [];
+    return;
+  }
+  try {
+    const params = new URLSearchParams({
+      scope: scope.value,
+      notice_key: noticeKey,
+    });
+    const data = await requestJson(`/api/signatures/temporary/list?${params.toString()}`);
+    const items = Array.isArray(data.items) ? data.items : [];
+    mergeTemporarySignatures(items);
+    updateTemporarySignaturePolling();
+  } catch (error) {
+    if (!options.silent) {
+      signatureMessage.value = error instanceof Error ? error.message : "读取临时签名失败";
+      signatureMessageType.value = "failed";
+    }
+  }
+}
+
+function temporarySignaturePollNeeded(): boolean {
+  return temporarySignatures.value.some((item) => (
+    !hiddenTemporarySignatureIds.value.includes(String(item.temp_id || ""))
+    && String(item.status || "") !== "failed"
+    && String(item.status || "") !== "signed"
+  ));
+}
+
+function updateTemporarySignaturePolling(): void {
+  const shouldPoll = temporarySignaturePollNeeded();
+  if (shouldPoll && !temporarySignaturePollTimer) {
+    temporarySignaturePollTimer = setInterval(() => {
+      void loadTemporarySignatures({ silent: true });
+    }, 5000);
+  } else if (!shouldPoll && temporarySignaturePollTimer) {
+    clearInterval(temporarySignaturePollTimer);
+    temporarySignaturePollTimer = null;
+  }
+}
+
+async function sendTemporarySignatureLink(): Promise<void> {
+  if (temporarySignatureDisabledReason.value) return;
+  const recipients = [
+    ...new Set(
+      selectedFormalSignaturePeople("implementer")
+        .map((person) => String(person.open_id || "").trim())
+        .filter(Boolean),
+    ),
+  ];
+  temporarySignatureSending.value = true;
+  signatureMessage.value = "";
+  signatureMessageType.value = "";
+  try {
+    const data = await requestJson("/api/signatures/temporary/send-link", {
+      method: "POST",
+      body: JSON.stringify({
+        scope: scope.value,
+        notice_key: selectedNotice.value?.notice_key || "",
+        notice_title: selectedNotice.value?.title || "",
+        specialty: selectedNoticeSpecialty.value,
+        role: signatureRole.value,
+        recipient_open_ids: recipients,
+      }),
+    });
+    if (data.signature) {
+      mergeTemporarySignatures([data.signature]);
+      hiddenTemporarySignatureIds.value = hiddenTemporarySignatureIds.value.filter((id) => id !== String(data.signature.temp_id || ""));
+    }
+    updateTemporarySignaturePolling();
+    signatureMessage.value = `${signatureRole.value === "auditor" ? "维护审核人" : "维护实施人"}其他人员签名链接已发送。`;
+    signatureMessageType.value = "success";
+  } catch (error) {
+    signatureMessage.value = error instanceof Error ? error.message : "发送其他人员签名链接失败";
+    signatureMessageType.value = "failed";
+  } finally {
+    temporarySignatureSending.value = false;
   }
 }
 
@@ -1714,8 +2008,12 @@ function selectNotice(noticeKey: string): void {
   previewMode.value = false;
   mopBindingStatus.value = "";
   mopBindingError.value = "";
+  temporarySignatures.value = [];
+  hiddenTemporarySignatureIds.value = [];
+  updateTemporarySignaturePolling();
   const notice = selectedNotice.value;
   if (notice) applyNoticeBinding(notice);
+  void loadTemporarySignatures({ silent: true });
 }
 
 function selectMop(recordId: string): void {
@@ -1750,6 +2048,7 @@ async function loadPage(): Promise<void> {
     if (!selectedMopRecordId.value && mopCandidates.value.length) {
       selectMop(mopCandidates.value[0].record_id);
     }
+    void loadTemporarySignatures({ silent: true });
   } catch (error) {
     message.value = error instanceof Error ? error.message : "加载工程师 MOP 数据失败";
     messageType.value = "failed";
@@ -1848,6 +2147,7 @@ async function startMopPreview(): Promise<void> {
     if (!signaturePeople.value.length) {
       void loadSignaturePeople();
     }
+    void loadTemporarySignatures({ silent: true });
   } catch (error) {
     message.value = error instanceof Error ? error.message : "读取 MOP 表格失败";
     messageType.value = "failed";
@@ -1893,6 +2193,10 @@ onBeforeUnmount(() => {
   if (signatureSearchTimer) {
     clearTimeout(signatureSearchTimer);
     signatureSearchTimer = null;
+  }
+  if (temporarySignaturePollTimer) {
+    clearInterval(temporarySignaturePollTimer);
+    temporarySignaturePollTimer = null;
   }
   signatureResizeObserver?.disconnect();
   signatureResizeObserver = null;
@@ -2427,6 +2731,11 @@ select:focus {
   font-size: 11px;
 }
 
+.mop-preview-page .sign-person em {
+  min-height: 22px;
+  padding: 4px 7px;
+}
+
 .mop-preview-page .selected-sign-person {
   grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
@@ -2438,8 +2747,9 @@ select:focus {
 
 .mop-preview-page .selected-signatures {
   grid-column: 1 / -1;
-  max-height: 42px;
-  overflow: auto;
+  max-height: 46px;
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .mop-preview-page .mop-sign-canvas {
@@ -2601,16 +2911,26 @@ select:focus {
 }
 
 .sign-person strong {
+  align-self: end;
   font-size: 14px;
+  line-height: 1.25;
 }
 
 .sign-person small {
+  align-self: start;
   color: #64748b;
   font-size: 12px;
+  line-height: 1.25;
 }
 
 .sign-person em {
-  grid-row: span 2;
+  grid-column: 3;
+  grid-row: 1 / 3;
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 24px;
   border-radius: 999px;
   background: #eef2ff;
   padding: 5px 8px;
@@ -2618,6 +2938,8 @@ select:focus {
   font-size: 12px;
   font-style: normal;
   font-weight: 850;
+  line-height: 1;
+  white-space: nowrap;
 }
 
 .sign-person em.ok {
@@ -2709,17 +3031,24 @@ select:focus {
 
 .selected-signatures {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 8px;
+  min-height: 42px;
+  max-height: 42px;
   margin-top: 4px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 2px;
 }
 
 .selected-signature-chip {
   display: inline-grid;
-  grid-template-columns: 74px minmax(52px, auto) auto;
+  grid-template-columns: 58px minmax(68px, 1fr) 64px 42px;
   align-items: center;
   gap: 7px;
-  max-width: 100%;
+  flex: 0 0 auto;
+  width: 285px;
+  height: 38px;
   border: 1px solid #d8e5f7;
   border-radius: 999px;
   background: #ffffff;
@@ -2733,9 +3062,22 @@ select:focus {
 }
 
 .selected-signature-chip img {
-  width: 70px;
+  width: 56px;
   height: 24px;
   object-fit: contain;
+}
+
+.signature-chip-state {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 56px;
+  min-height: 24px;
+  border-radius: 999px;
+  background: #fff7ed;
+  color: #c2410c;
+  font-size: 11px;
+  font-weight: 850;
 }
 
 .selected-signature-chip strong {
@@ -2754,6 +3096,21 @@ select:focus {
   font-size: 12px;
   font-weight: 850;
   cursor: pointer;
+}
+
+.selected-signature-chip .chip-action {
+  width: 64px;
+  background: #e0f2fe;
+  color: #0369a1;
+}
+
+.selected-signature-chip button:not(.chip-action) {
+  width: 42px;
+}
+
+.selected-signature-chip button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .mop-sign-canvas {
@@ -3262,6 +3619,12 @@ select:focus {
   font-weight: 850;
 }
 
+.table-fill-toolbar small {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 750;
+}
+
 .active-cell-toolbar {
   display: flex;
   align-items: center;
@@ -3399,6 +3762,25 @@ td.fillable.normal {
 
 td.fillable.abnormal {
   background: #fff7ed;
+}
+
+td.cell-modified {
+  background: #fff7d6 !important;
+  box-shadow: inset 0 0 0 1px rgba(245, 158, 11, 0.42);
+}
+
+td.signature-cell {
+  background: #eef6ff !important;
+}
+
+td.active-cell {
+  position: relative;
+  background: #eff6ff !important;
+  outline: 2px solid #1e63ff;
+  outline-offset: -2px;
+  box-shadow:
+    inset 0 0 0 1px rgba(30, 99, 255, 0.5),
+    0 0 0 2px rgba(30, 99, 255, 0.08);
 }
 
 .cell-fill-popover {

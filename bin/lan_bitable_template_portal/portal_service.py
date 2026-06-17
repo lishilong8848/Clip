@@ -74,6 +74,13 @@ SIGNATURE_ATTACHMENT_FIELD = "手写签名"
 SIGNATURE_INACTIVE_FIELD = "离职/异动情况"
 SIGNATURE_PEOPLE_CACHE_TTL_SECONDS = 5 * 60
 SIGNATURE_LINK_TOKEN_TTL_SECONDS = 60 * 60
+TEMP_SIGNATURE_TABLE_ID = "tblC77nllNrprHBY"
+TEMP_SIGNATURE_NAME_FIELD = "员工姓名"
+TEMP_SIGNATURE_EMPLOYEE_NO_FIELD = "员工工号"
+TEMP_SIGNATURE_CERT_FIELD = "持证"
+TEMP_SIGNATURE_ATTACHMENT_FIELD = "手写签名"
+TEMP_SIGNATURE_BUILDING_FIELD = "楼栋"
+TEMP_SIGNATURE_SPECIALTY_FIELD = "专业"
 MOP_SIGNED_ATTACHMENT_FIELD = "维护保养单"
 MOP_ENGINEER_CONFIRM_FIELD = "工程师确认"
 MOP_SUPERVISOR_CONFIRM_FIELD = "主管确认"
@@ -586,6 +593,44 @@ class MaintenancePortalService:
         if code != 0:
             raise PortalError(
                 f"飞书记录更新失败: code={code}, msg={payload.get('msg') or 'unknown'}"
+            )
+        return payload
+
+    def _create_record_fields(
+        self,
+        *,
+        app_token: str,
+        table_id: str,
+        fields: dict[str, Any],
+    ) -> dict[str, Any]:
+        app_token = str(app_token or "").strip()
+        table_id = str(table_id or "").strip()
+        if not app_token or not table_id:
+            raise PortalError("创建多维记录缺少 app_token/table_id。")
+        if not isinstance(fields, dict) or not fields:
+            raise PortalError("创建多维记录字段不能为空。")
+        url = (
+            f"https://open.feishu.cn/open-apis/bitable/v1/apps/"
+            f"{app_token}/tables/{table_id}/records"
+        )
+
+        def do_create() -> dict[str, Any]:
+            return self._request_payload(
+                "POST",
+                url,
+                context="飞书记录创建",
+                headers={**self._auth_headers(), "Content-Type": "application/json"},
+                json_payload={"fields": fields},
+            )
+
+        payload = do_create()
+        if int(payload.get("code") or 0) in TOKEN_ERROR_CODES:
+            refresh_feishu_token()
+            payload = do_create()
+        code = payload.get("code", 0)
+        if code != 0:
+            raise PortalError(
+                f"飞书记录创建失败: code={code}, msg={payload.get('msg') or 'unknown'}"
             )
         return payload
 
@@ -8788,6 +8833,295 @@ class MaintenancePortalService:
         }
 
     @staticmethod
+    def _mop_role_label(role: str) -> str:
+        return "维护审核人" if str(role or "") == "auditor" else "维护实施人"
+
+    def _temporary_signature_public_url(
+        self,
+        *,
+        temp_id: str,
+        token: str,
+        scope: str = "",
+        request_base_url: str = "",
+    ) -> str:
+        base_url = self._signature_public_base_url(
+            scope=scope,
+            request_base_url=request_base_url,
+        )
+        return (
+            f"{base_url}/signature?temporary_id={quote(str(temp_id or '').strip(), safe='')}"
+            f"&token={quote(str(token or '').strip(), safe='')}"
+        )
+
+    def _temporary_signature_display_name(
+        self,
+        *,
+        scope: str,
+        notice_key: str,
+    ) -> str:
+        sessions = self._state_store.list_mop_temporary_signature_sessions(
+            scope=scope,
+            notice_key=notice_key,
+            include_expired=True,
+        )
+        return f"临时人员{len(sessions) + 1}"
+
+    def build_temporary_signature_link_message(
+        self,
+        *,
+        scope: str = "ALL",
+        notice_key: str = "",
+        role: str = "implementer",
+        recipient_open_ids: list[str] | None = None,
+        notice_title: str = "",
+        specialty: str = "",
+        request_base_url: str = "",
+        created_by: str = "",
+    ) -> dict[str, Any]:
+        scope = self._normalize_scope(scope or "ALL")
+        notice_key = str(notice_key or "").strip()
+        role = str(role or "implementer").strip()
+        if role not in {"implementer", "auditor"}:
+            raise PortalError("临时签名角色无效。")
+        recipients = [
+            str(item or "").strip()
+            for item in (recipient_open_ids or [])
+            if str(item or "").strip()
+        ]
+        if not recipients:
+            raise PortalError("请先选择维护实施人，再发送其他人员签名链接。")
+        display_name = self._temporary_signature_display_name(
+            scope=scope,
+            notice_key=notice_key,
+        )
+        session = self._state_store.create_mop_temporary_signature_session(
+            scope=scope,
+            notice_key=notice_key,
+            role=role,
+            display_name=display_name,
+            recipient_open_ids=recipients,
+            created_by=created_by,
+            ttl_seconds=SIGNATURE_LINK_TOKEN_TTL_SECONDS,
+            payload={
+                "notice_title": str(notice_title or ""),
+                "specialty": str(specialty or ""),
+            },
+        )
+        link_url = self._temporary_signature_public_url(
+            temp_id=str(session.get("temp_id") or ""),
+            token=str(session.get("token") or ""),
+            scope=scope,
+            request_base_url=request_base_url,
+        )
+        role_label = self._mop_role_label(role)
+        text = "\n".join(
+            [
+                "【线上签名】请现场完成 MOP 其他人员签名",
+                "",
+                f"签名角色：{role_label}",
+                f"临时人员：{display_name}",
+                f"维护通告：{notice_title or '未命名维保通告'}",
+                f"签名链接：{link_url}",
+                "",
+                "请用手机打开链接，让现场人员在页面手写签名并保存。",
+            ]
+        )
+        return {
+            **{key: value for key, value in session.items() if key != "token"},
+            "link_url": link_url,
+            "open_ids": recipients,
+            "text": text,
+            "signature": self._public_temporary_signature_session(
+                session,
+                link_token=str(session.get("token") or ""),
+            ),
+        }
+
+    def _public_temporary_signature_session(
+        self,
+        session: dict[str, Any],
+        *,
+        link_token: str = "",
+    ) -> dict[str, Any]:
+        payload = session.get("payload") if isinstance(session.get("payload"), dict) else {}
+        file_token = str(session.get("signature_file_token") or "").strip()
+        temp_id = str(session.get("temp_id") or "").strip()
+        status = str(session.get("status") or "pending").strip() or "pending"
+        preview_url = ""
+        if file_token and temp_id:
+            preview_url = (
+                f"/api/signatures/temporary/image?temporary_id={quote(temp_id, safe='')}"
+                f"&v={quote(hashlib.sha1(file_token.encode('utf-8')).hexdigest()[:12], safe='')}"
+            )
+            if link_token:
+                preview_url += f"&token={quote(link_token, safe='')}"
+        return {
+            "source": "temporary",
+            "temp_id": temp_id,
+            "record_id": str(session.get("temporary_record_id") or ""),
+            "role": str(session.get("role") or ""),
+            "display_name": str(session.get("display_name") or ""),
+            "name": str(session.get("display_name") or ""),
+            "status": status,
+            "has_signature": bool(file_token and status == "signed"),
+            "signature_file_token": file_token,
+            "signature_preview_url": preview_url,
+            "expires_at": session.get("expires_at"),
+            "notice_title": str(payload.get("notice_title") or ""),
+            "specialty": str(payload.get("specialty") or ""),
+        }
+
+    def temporary_signature_session(
+        self,
+        *,
+        temp_id: str,
+        token: str,
+    ) -> dict[str, Any]:
+        session = self._state_store.get_mop_temporary_signature_session(
+            temp_id=temp_id,
+            token=token,
+            require_valid_token=True,
+        )
+        if not session:
+            raise PortalError("临时签名链接无效或已过期。")
+        return self._public_temporary_signature_session(session, link_token=token)
+
+    def list_temporary_signatures(
+        self,
+        *,
+        scope: str = "ALL",
+        notice_key: str = "",
+    ) -> dict[str, Any]:
+        scope = self._normalize_scope(scope or "ALL")
+        sessions = self._state_store.list_mop_temporary_signature_sessions(
+            scope=scope,
+            notice_key=str(notice_key or "").strip(),
+        )
+        return {
+            "items": [
+                self._public_temporary_signature_session(session)
+                for session in sessions
+            ],
+            "count": len(sessions),
+        }
+
+    def _field_option_write_values(
+        self,
+        meta_by_name: dict[str, FieldMeta],
+        field_name: str,
+        values: list[str],
+    ) -> list[str]:
+        meta = meta_by_name.get(field_name)
+        if not meta:
+            return []
+        available = set(meta.option_names or [])
+        result: list[str] = []
+        for value in values:
+            text = str(value or "").strip()
+            if text and text in available and text not in result:
+                result.append(text)
+        return result
+
+    def save_temporary_signature(
+        self,
+        *,
+        temp_id: str,
+        token: str,
+        signature_png: str,
+    ) -> dict[str, Any]:
+        session = self._state_store.get_mop_temporary_signature_session(
+            temp_id=temp_id,
+            token=token,
+            require_valid_token=True,
+        )
+        if not session:
+            raise PortalError("临时签名链接无效或已过期。")
+        signature_bytes = self._transparent_signature_png(
+            self._decode_signature_png(signature_png)
+        )
+        display_name = str(session.get("display_name") or "临时人员").strip()
+        file_name = f"{self._safe_mop_path_part(display_name, 'temporary')}_{dt.datetime.now().strftime('%Y%m%d%H%M%S')}.png"
+        file_token = self._upload_signature_image(
+            signature_bytes=signature_bytes,
+            file_name=file_name,
+        )
+        _metas, meta_by_name = self._load_table_fields(
+            app_token=SIGNATURE_APP_TOKEN,
+            table_id=TEMP_SIGNATURE_TABLE_ID,
+        )
+        payload = session.get("payload") if isinstance(session.get("payload"), dict) else {}
+        building_values = self._field_option_write_values(
+            meta_by_name,
+            TEMP_SIGNATURE_BUILDING_FIELD,
+            [self._scope_label(str(session.get("scope") or "")), str(session.get("scope") or "")],
+        )
+        specialty_values = self._field_option_write_values(
+            meta_by_name,
+            TEMP_SIGNATURE_SPECIALTY_FIELD,
+            [str(payload.get("specialty") or "")],
+        )
+        fields: dict[str, Any] = {
+            TEMP_SIGNATURE_NAME_FIELD: display_name,
+            TEMP_SIGNATURE_ATTACHMENT_FIELD: [{"file_token": file_token}],
+        }
+        if building_values:
+            fields[TEMP_SIGNATURE_BUILDING_FIELD] = building_values
+        if specialty_values:
+            fields[TEMP_SIGNATURE_SPECIALTY_FIELD] = specialty_values
+        existing_record_id = str(session.get("temporary_record_id") or "").strip()
+        if existing_record_id:
+            self._patch_record_fields(
+                app_token=SIGNATURE_APP_TOKEN,
+                table_id=TEMP_SIGNATURE_TABLE_ID,
+                record_id=existing_record_id,
+                fields=fields,
+            )
+            record_id = existing_record_id
+        else:
+            created = self._create_record_fields(
+                app_token=SIGNATURE_APP_TOKEN,
+                table_id=TEMP_SIGNATURE_TABLE_ID,
+                fields=fields,
+            )
+            data = created.get("data") if isinstance(created.get("data"), dict) else {}
+            record = data.get("record") if isinstance(data.get("record"), dict) else data
+            record_id = str(record.get("record_id") or record.get("id") or "").strip()
+            if not record_id:
+                raise PortalError("临时签名保存成功但未返回记录 ID。")
+        updated = self._state_store.update_mop_temporary_signature_session(
+            temp_id=str(session.get("temp_id") or ""),
+            status="signed",
+            temporary_record_id=record_id,
+            signature_file_token=file_token,
+            payload_patch={"saved_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+        )
+        return self._public_temporary_signature_session(
+            updated or {},
+            link_token=token,
+        )
+
+    def temporary_signature_image_bytes(
+        self,
+        *,
+        temp_id: str,
+    ) -> tuple[bytes, str]:
+        session = self._state_store.get_mop_temporary_signature_session(temp_id=temp_id)
+        if not session:
+            raise PortalError("临时签名记录不存在。")
+        file_token = str(session.get("signature_file_token") or "").strip()
+        if not file_token:
+            raise PortalError("临时人员还没有可用签名。")
+        content, _content_type = self._download_mop_attachment(
+            {"file_token": file_token},
+            cache_category="temporary_signature",
+            app_token=SIGNATURE_APP_TOKEN,
+            table_id=TEMP_SIGNATURE_TABLE_ID,
+            record_id=str(session.get("temporary_record_id") or session.get("temp_id") or ""),
+            latest_publish_time=str(session.get("updated_at") or ""),
+        )
+        return self._transparent_signature_png(content), "image/png"
+
+    @staticmethod
     def _column_index(cell_ref: str) -> int:
         letters = "".join(ch for ch in str(cell_ref or "") if ch.isalpha()).upper()
         index = 0
@@ -9825,7 +10159,8 @@ class MaintenancePortalService:
                     continue
                 label_col = self._mop_cell_int(field.get("label_col"), -1) + 1
                 cell = worksheet.cell(row=row, column=col)
-                cell.value = f"{label}：{fill_value}" if label and label_col == col else fill_value
+                value_only = "维护完成时间" in label or "审核确认时间" in label
+                cell.value = f"{label}：{fill_value}" if label and label_col == col and not value_only else fill_value
                 updated_cells += 1
             for role in ("implementer", "auditor"):
                 field = role_fields.get(role)
@@ -9833,15 +10168,24 @@ class MaintenancePortalService:
                     continue
                 role_signatures = [
                     item for item in signatures
-                    if str(item.get("role") or "") == role and str(item.get("record_id") or "").strip()
+                    if str(item.get("role") or "") == role
+                    and (
+                        str(item.get("record_id") or "").strip()
+                        or str(item.get("temp_id") or "").strip()
+                    )
                 ]
                 if not role_signatures:
                     continue
                 base_row = int(field.get("row") or 0) + 1
                 base_col = 3 if role == "implementer" else 4
                 for offset, signature in enumerate(role_signatures):
+                    source = str(signature.get("source") or "").strip()
+                    temp_id = str(signature.get("temp_id") or "").strip()
                     record_id = str(signature.get("record_id") or "").strip()
-                    image_bytes, _content_type = self.signature_image_bytes(record_id=record_id)
+                    if source == "temporary" or temp_id:
+                        image_bytes, _content_type = self.temporary_signature_image_bytes(temp_id=temp_id)
+                    else:
+                        image_bytes, _content_type = self.signature_image_bytes(record_id=record_id)
                     image = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
                     max_width, max_height = 150, 46
                     ratio = min(max_width / max(1, image.width), max_height / max(1, image.height), 1.0)
@@ -9897,14 +10241,27 @@ class MaintenancePortalService:
             "auditor": "维护审核人",
         }
         roles_by_record: dict[str, set[str]] = {}
+        temporary_by_id: dict[str, set[str]] = {}
         for item in signatures:
             if not isinstance(item, dict):
                 continue
             role = str(item.get("role") or "").strip()
             record_id = str(item.get("record_id") or "").strip()
-            if role in role_to_label and record_id:
+            temp_id = str(item.get("temp_id") or "").strip()
+            source = str(item.get("source") or "").strip()
+            if role not in role_to_label:
+                continue
+            if source == "temporary" or temp_id:
+                if temp_id:
+                    temporary_by_id.setdefault(temp_id, set()).add(role)
+                continue
+            if record_id:
                 roles_by_record.setdefault(record_id, set()).add(role)
-        present_roles = {role for roles in roles_by_record.values() for role in roles}
+        present_roles = {
+            role
+            for roles in list(roles_by_record.values()) + list(temporary_by_id.values())
+            for role in roles
+        }
         missing = [label for role, label in role_to_label.items() if role not in present_roles]
         if missing:
             raise PortalError(f"上传已签名 MOP 前请先选择可用签名：{'、'.join(missing)}。")
@@ -9924,6 +10281,14 @@ class MaintenancePortalService:
                 if str(item.get("record_id") or "").strip()
             }
         entries: list[dict[str, Any]] = []
+        for temp_id, roles in temporary_by_id.items():
+            session = self._state_store.get_mop_temporary_signature_session(temp_id=temp_id)
+            if not session:
+                raise PortalError("临时签名记录不存在，请重新发送签名链接。")
+            if not str(session.get("signature_file_token") or "").strip():
+                raise PortalError(f"{session.get('display_name') or '临时人员'} 暂无可用签名。")
+            # 临时人员没有 openid，只参与 MOP 签名完整性校验和插图，不发送通知。
+            continue
         for record_id, roles in roles_by_record.items():
             person = people_by_id.get(record_id)
             if not person:

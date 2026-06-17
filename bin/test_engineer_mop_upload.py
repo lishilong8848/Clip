@@ -18,6 +18,7 @@ from lan_bitable_template_portal.portal_service import (  # noqa: E402
     PortalError,
     WORK_TYPE_MAINTENANCE,
 )
+from lan_bitable_template_portal.state_store import LanPortalStateStore  # noqa: E402
 
 
 class FakeMopUploadService(MaintenancePortalService):
@@ -27,6 +28,7 @@ class FakeMopUploadService(MaintenancePortalService):
         self.missing_auditor_open_id = missing_auditor_open_id
         self.upload_calls = []
         self.patch_calls = []
+        self._state_store = LanPortalStateStore(self.tmpdir / "state.sqlite3")
 
     def ensure_snapshot_loaded(self, *, refresh_if_expired: bool = False) -> None:
         return None
@@ -152,6 +154,45 @@ class EngineerMopUploadTests(unittest.TestCase):
             self.assertEqual(result["file_token"], "file-token-1")
             self.assertIn("签名人员通知失败", result["notification_warning"])
             self.assertEqual(len(service.patch_calls), 1)
+
+    def test_temporary_signature_counts_for_required_roles_without_notification(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = FakeMopUploadService(tmpdir)
+            session = service._state_store.create_mop_temporary_signature_session(
+                scope="A",
+                notice_key="notice-1",
+                role="implementer",
+                display_name="临时人员1",
+                recipient_open_ids=["ou_impl"],
+                payload={"notice_title": "A楼测试维保", "specialty": "电气"},
+            )
+            service._state_store.update_mop_temporary_signature_session(
+                temp_id=session["temp_id"],
+                status="signed",
+                temporary_record_id="temp-rec-1",
+                signature_file_token="temp-file-token",
+            )
+
+            result = service.upload_signed_engineer_mop_file(
+                scope="A",
+                source_record_id="src-1",
+                notice_title="A楼测试维保",
+                local_file_path=str(Path(tmpdir) / "source.xlsx"),
+                signatures=[
+                    {
+                        "source": "temporary",
+                        "role": "implementer",
+                        "temp_id": session["temp_id"],
+                        "record_id": "temp-rec-1",
+                    },
+                    {"source": "staff", "role": "auditor", "record_id": "person-2"},
+                ],
+            )
+
+            self.assertEqual(result["file_token"], "file-token-1")
+            self.assertEqual(result["notification_warning"], "")
+            self.assertEqual(len(result["notification_results"]), 1)
+            self.assertEqual(result["notification_results"][0]["open_id"], "ou_audit")
 
 
 if __name__ == "__main__":

@@ -74,6 +74,8 @@ from clipflow_backend.api_models import (
     SendGeneratedRequest,
     SignatureSendLinkRequest,
     SignatureSaveRequest,
+    TemporarySignatureSaveRequest,
+    TemporarySignatureSendLinkRequest,
     WorkbenchActionRequest,
     parse_api_model,
 )
@@ -1510,6 +1512,56 @@ class FastAPIPortalController:
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=404)
 
+        @app.get("/api/signatures/temporary/session")
+        async def temporary_signature_session(request: Request):
+            try:
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.temporary_signature_session,
+                    temp_id=str(request.query_params.get("temporary_id") or ""),
+                    token=str(request.query_params.get("token") or ""),
+                )
+                return {"ok": True, "data": data}
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
+        @app.get("/api/signatures/temporary/image")
+        async def temporary_signature_image(request: Request):
+            try:
+                session = self._current_session(request)
+                temp_id = str(request.query_params.get("temporary_id") or "")
+                token = str(request.query_params.get("token") or "")
+                if session is None:
+                    await asyncio.to_thread(
+                        PortalRuntime.service.temporary_signature_session,
+                        temp_id=temp_id,
+                        token=token,
+                    )
+                else:
+                    temp_session = await asyncio.to_thread(
+                        PortalRuntime.state_store.get_mop_temporary_signature_session,
+                        temp_id=temp_id,
+                    )
+                    if not temp_session:
+                        return JSONResponse(
+                            {"ok": False, "error": "临时签名记录不存在。"},
+                            status_code=404,
+                        )
+                    self._authorized_scope_or_error(
+                        session,
+                        str(temp_session.get("scope") or "ALL"),
+                    )
+                content, content_type = await asyncio.to_thread(
+                    PortalRuntime.service.temporary_signature_image_bytes,
+                    temp_id=temp_id,
+                )
+                return Response(
+                    content=content,
+                    media_type=content_type,
+                    headers={"Cache-Control": "private, max-age=300"},
+                )
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=404)
+
         @app.post("/api/signatures/save")
         async def signatures_save(request: Request):
             try:
@@ -1545,6 +1597,26 @@ class FastAPIPortalController:
                         record_id=record_id,
                         token=link_token,
                     )
+                return {"ok": True, "data": data}
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.post("/api/signatures/temporary/save")
+        async def temporary_signature_save(request: Request):
+            try:
+                payload = (
+                    await self._read_model_request(
+                        request,
+                        TemporarySignatureSaveRequest,
+                        max_bytes=4 * 1024 * 1024,
+                    )
+                ).to_payload()
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.save_temporary_signature,
+                    temp_id=str(payload.get("temporary_id") or ""),
+                    token=str(payload.get("token") or ""),
+                    signature_png=str(payload.get("signature_png") or ""),
+                )
                 return {"ok": True, "data": data}
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
@@ -1596,6 +1668,95 @@ class FastAPIPortalController:
                     "ok": True,
                     "data": {
                         "person": data.get("person") or {},
+                        "link_url": data.get("link_url") or "",
+                        "message": message,
+                        "results": results,
+                    },
+                }
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.get("/api/signatures/temporary/list")
+        async def temporary_signature_list(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_scope_or_error(
+                    session,
+                    str(request.query_params.get("scope") or "ALL"),
+                )
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.list_temporary_signatures,
+                    scope=scope,
+                    notice_key=str(request.query_params.get("notice_key") or ""),
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
+        @app.post("/api/signatures/temporary/send-link")
+        async def temporary_signature_send_link(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                payload = (
+                    await self._read_model_request(
+                        request,
+                        TemporarySignatureSendLinkRequest,
+                        max_bytes=64 * 1024,
+                    )
+                ).to_payload()
+                scope = self._authorized_scope_or_error(
+                    session,
+                    str(payload.get("scope") or "ALL"),
+                )
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.build_temporary_signature_link_message,
+                    scope=scope,
+                    notice_key=str(payload.get("notice_key") or ""),
+                    role=str(payload.get("role") or "implementer"),
+                    recipient_open_ids=list(payload.get("recipient_open_ids") or []),
+                    notice_title=str(payload.get("notice_title") or ""),
+                    specialty=str(payload.get("specialty") or ""),
+                    request_base_url=self._request_base_url(request),
+                    created_by=str(user.get("open_id") or ""),
+                )
+                open_ids = [
+                    str(item or "").strip()
+                    for item in (data.get("open_ids") or [])
+                    if str(item or "").strip()
+                ]
+                ok, message, results = await asyncio.to_thread(
+                    _send_text_to_open_ids_guarded,
+                    str(data.get("text") or ""),
+                    open_ids,
+                )
+                if not ok:
+                    with suppress(Exception):
+                        PortalRuntime.state_store.update_mop_temporary_signature_session(
+                            temp_id=str(data.get("temp_id") or ""),
+                            status="failed",
+                            payload_patch={"send_error": message or "签名链接发送失败。"},
+                        )
+                    return JSONResponse(
+                        {
+                            "ok": False,
+                            "error": message or "其他人员签名链接发送失败。",
+                            "data": {
+                                "signature": data.get("signature") or {},
+                                "link_url": data.get("link_url") or "",
+                                "results": results,
+                            },
+                        },
+                        status_code=400,
+                    )
+                return {
+                    "ok": True,
+                    "data": {
+                        "signature": data.get("signature") or {},
                         "link_url": data.get("link_url") or "",
                         "message": message,
                         "results": results,

@@ -147,6 +147,21 @@ class SignatureSendLinkRequest(APIModel):
     scope: str = ""
 
 
+class TemporarySignatureSendLinkRequest(APIModel):
+    scope: str = "ALL"
+    notice_key: str = ""
+    notice_title: str = ""
+    specialty: str = ""
+    role: str = "implementer"
+    recipient_open_ids: list[str] = Field(default_factory=list)
+
+
+class TemporarySignatureSaveRequest(APIModel):
+    temporary_id: str = ""
+    token: str = ""
+    signature_png: str = ""
+
+
 class EngineerMopFillRequest(APIModel):
     scope: str = "ALL"
     local_file_path: str = ""

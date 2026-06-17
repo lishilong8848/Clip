@@ -51,7 +51,7 @@ class LanPortalStateStore:
     are migration inputs only and are never deleted or overwritten here.
     """
 
-    SCHEMA_VERSION = 18
+    SCHEMA_VERSION = 19
     SOURCE_SCOPE_TABLES = {
         "110": "source_records_110",
         "A": "source_records_a",
@@ -92,6 +92,7 @@ class LanPortalStateStore:
         "notice_upload_attachments",
         "mop_notice_bindings",
         "signature_link_tokens",
+        "mop_temporary_signature_sessions",
         "schema_migrations",
     ]
     REQUIRED_INDEXES = [
@@ -112,6 +113,8 @@ class LanPortalStateStore:
         "idx_mop_notice_bindings_mop",
         "idx_signature_link_tokens_record",
         "idx_signature_link_tokens_expiry",
+        "idx_mop_temp_signature_notice",
+        "idx_mop_temp_signature_expiry",
     ]
 
     def __init__(self, db_path: str | Path | None = None):
@@ -515,6 +518,39 @@ class LanPortalStateStore:
             """
             CREATE INDEX IF NOT EXISTS idx_signature_link_tokens_expiry
             ON signature_link_tokens(expires_at)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mop_temporary_signature_sessions (
+                temp_id TEXT PRIMARY KEY,
+                scope TEXT,
+                notice_key TEXT,
+                role TEXT NOT NULL,
+                display_name TEXT NOT NULL,
+                recipient_open_ids_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                token_hash TEXT NOT NULL UNIQUE,
+                expires_at REAL NOT NULL,
+                temporary_record_id TEXT,
+                signature_file_token TEXT,
+                created_by TEXT,
+                payload_json TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_mop_temp_signature_notice
+            ON mop_temporary_signature_sessions(scope, notice_key, role, status)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_mop_temp_signature_expiry
+            ON mop_temporary_signature_sessions(expires_at)
             """
         )
         conn.execute(
@@ -4633,6 +4669,217 @@ class LanPortalStateStore:
                     (now, record_id, token_hash, now),
                 )
                 conn.commit()
+
+    def create_mop_temporary_signature_session(
+        self,
+        *,
+        scope: str,
+        notice_key: str,
+        role: str,
+        display_name: str,
+        recipient_open_ids: list[str],
+        created_by: str = "",
+        ttl_seconds: int = 3600,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        role = self._text(role)
+        if role not in {"implementer", "auditor"}:
+            raise ValueError("临时签名角色无效。")
+        display_name = self._text(display_name) or "临时人员"
+        ttl_seconds = max(300, min(int(ttl_seconds or 3600), 24 * 3600))
+        token = secrets.token_urlsafe(32)
+        token_hash = self._signature_link_token_hash(token)
+        temp_id = uuid.uuid4().hex
+        now = time.time()
+        expires_at = now + ttl_seconds
+        recipients = [
+            self._text(item)
+            for item in (recipient_open_ids or [])
+            if self._text(item)
+        ]
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute(
+                    "DELETE FROM mop_temporary_signature_sessions WHERE expires_at < ? AND status != 'signed'",
+                    (now - 24 * 3600,),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO mop_temporary_signature_sessions(
+                        temp_id, scope, notice_key, role, display_name,
+                        recipient_open_ids_json, status, token_hash, expires_at,
+                        temporary_record_id, signature_file_token, created_by,
+                        payload_json, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, '', '', ?, ?, ?, ?)
+                    """,
+                    (
+                        temp_id,
+                        self._text(scope),
+                        self._text(notice_key),
+                        role,
+                        display_name,
+                        self._json(recipients),
+                        token_hash,
+                        expires_at,
+                        self._text(created_by),
+                        self._json(payload or {}),
+                        now,
+                        now,
+                    ),
+                )
+                conn.commit()
+        return {
+            "temp_id": temp_id,
+            "token": token,
+            "scope": self._text(scope),
+            "notice_key": self._text(notice_key),
+            "role": role,
+            "display_name": display_name,
+            "recipient_open_ids": recipients,
+            "status": "pending",
+            "expires_at": expires_at,
+            "created_at": now,
+        }
+
+    def _mop_temp_signature_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        payload = self._loads(str(row["payload_json"] or ""), {})
+        recipients = self._loads(str(row["recipient_open_ids_json"] or "[]"), [])
+        return {
+            "temp_id": self._text(row["temp_id"]),
+            "scope": self._text(row["scope"]),
+            "notice_key": self._text(row["notice_key"]),
+            "role": self._text(row["role"]),
+            "display_name": self._text(row["display_name"]),
+            "recipient_open_ids": recipients if isinstance(recipients, list) else [],
+            "status": self._text(row["status"]),
+            "expires_at": float(row["expires_at"] or 0),
+            "temporary_record_id": self._text(row["temporary_record_id"]),
+            "signature_file_token": self._text(row["signature_file_token"]),
+            "created_by": self._text(row["created_by"]),
+            "payload": payload if isinstance(payload, dict) else {},
+            "created_at": float(row["created_at"] or 0),
+            "updated_at": float(row["updated_at"] or 0),
+        }
+
+    def get_mop_temporary_signature_session(
+        self,
+        *,
+        temp_id: str,
+        token: str = "",
+        require_valid_token: bool = False,
+    ) -> dict[str, Any] | None:
+        temp_id = self._text(temp_id)
+        token = str(token or "").strip()
+        if not temp_id:
+            return None
+        token_hash = self._signature_link_token_hash(token) if token else ""
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    """
+                    SELECT *
+                    FROM mop_temporary_signature_sessions
+                    WHERE temp_id = ?
+                    """,
+                    (temp_id,),
+                ).fetchone()
+        if not row:
+            return None
+        if require_valid_token:
+            if not token_hash or self._text(row["token_hash"]) != token_hash:
+                return None
+            if float(row["expires_at"] or 0) < now:
+                return None
+        return self._mop_temp_signature_from_row(row)
+
+    def list_mop_temporary_signature_sessions(
+        self,
+        *,
+        scope: str = "",
+        notice_key: str = "",
+        include_expired: bool = False,
+    ) -> list[dict[str, Any]]:
+        now = time.time()
+        clauses = ["1=1"]
+        params: list[Any] = []
+        scope = self._text(scope)
+        notice_key = self._text(notice_key)
+        if scope:
+            clauses.append("scope = ?")
+            params.append(scope)
+        if notice_key:
+            clauses.append("notice_key = ?")
+            params.append(notice_key)
+        if not include_expired:
+            clauses.append("(expires_at >= ? OR status = 'signed')")
+            params.append(now)
+        sql = (
+            "SELECT * FROM mop_temporary_signature_sessions WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY created_at"
+        )
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                rows = conn.execute(sql, params).fetchall()
+        return [self._mop_temp_signature_from_row(row) for row in rows]
+
+    def update_mop_temporary_signature_session(
+        self,
+        *,
+        temp_id: str,
+        status: str = "",
+        temporary_record_id: str = "",
+        signature_file_token: str = "",
+        payload_patch: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        temp_id = self._text(temp_id)
+        if not temp_id:
+            return None
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    "SELECT * FROM mop_temporary_signature_sessions WHERE temp_id = ?",
+                    (temp_id,),
+                ).fetchone()
+                if not row:
+                    return None
+                payload = self._loads(str(row["payload_json"] or ""), {})
+                if not isinstance(payload, dict):
+                    payload = {}
+                if isinstance(payload_patch, dict):
+                    payload.update(payload_patch)
+                next_status = self._text(status) or self._text(row["status"])
+                next_record_id = self._text(temporary_record_id) or self._text(row["temporary_record_id"])
+                next_file_token = self._text(signature_file_token) or self._text(row["signature_file_token"])
+                conn.execute(
+                    """
+                    UPDATE mop_temporary_signature_sessions
+                    SET status = ?,
+                        temporary_record_id = ?,
+                        signature_file_token = ?,
+                        payload_json = ?,
+                        updated_at = ?
+                    WHERE temp_id = ?
+                    """,
+                    (
+                        next_status,
+                        next_record_id,
+                        next_file_token,
+                        self._json(payload),
+                        now,
+                        temp_id,
+                    ),
+                )
+                conn.commit()
+        return self.get_mop_temporary_signature_session(temp_id=temp_id)
 
     def _mop_binding_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
         payload = self._loads(str(row["payload_json"] or ""), {})

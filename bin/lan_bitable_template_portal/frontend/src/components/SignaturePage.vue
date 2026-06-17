@@ -39,9 +39,9 @@
         <div class="person-list">
           <button
             v-for="person in people"
-            :key="person.record_id"
+            :key="personKey(person)"
             class="person-card"
-            :class="{ active: person.record_id === selectedRecordId }"
+            :class="{ active: personKey(person) === selectedRecordId }"
             type="button"
             @click="selectPerson(person)"
           >
@@ -66,11 +66,11 @@
 
       <section class="sign-panel">
         <div class="panel-title">
-          <strong>{{ selectedPerson?.name || (linkMode ? "正在读取签名人员" : "请选择签名人员") }}</strong>
+          <strong>{{ selectedPerson?.name || (temporaryMode ? "正在读取临时签名" : linkMode ? "正在读取签名人员" : "请选择签名人员") }}</strong>
           <small v-if="selectedPerson">
             <template v-if="selectedPerson.employee_no">{{ selectedPerson.employee_no }} · </template>
             <template v-if="selectedPerson.building">{{ selectedPerson.building }} · </template>
-            {{ selectedPerson.position || selectedPerson.team || "签名记录" }}
+            {{ selectedPerson.position || selectedPerson.team || selectedPerson.role_label || "签名记录" }}
           </small>
           <small v-else>{{ linkMode ? "请稍候，正在打开专属签名页" : "左侧选中人员后开始签名" }}</small>
         </div>
@@ -111,9 +111,9 @@
 
         <div class="signature-actions">
           <button class="btn blue" type="button" :disabled="saving || !selectedPerson || !hasInk" @click="saveSignature">
-            {{ saving ? "保存中" : "保存到签名表" }}
+            {{ saving ? "保存中" : (temporaryMode ? "保存临时签名" : "保存到签名表") }}
           </button>
-          <span v-if="signaturePreviewUrl && !hasInk" class="saved-inline">已有签名已加载，可直接复用或重新手写覆盖。</span>
+          <span v-if="signaturePreviewUrl && !hasInk" class="saved-inline">{{ temporaryMode ? "临时签名已保存，可重新手写覆盖。" : "已有签名已加载，可直接复用或重新手写覆盖。" }}</span>
         </div>
 
         <div v-if="!linkMode" class="signature-note">
@@ -135,8 +135,10 @@ const props = defineProps<{
 const params = new URLSearchParams(window.location.search);
 const query = ref(params.get("q") || params.get("name") || "");
 const requestedRecordId = ref(params.get("record_id") || "");
+const requestedTemporaryId = ref(params.get("temporary_id") || "");
 const linkToken = ref(params.get("token") || "");
-const linkMode = computed(() => Boolean(requestedRecordId.value));
+const temporaryMode = computed(() => Boolean(requestedTemporaryId.value));
+const linkMode = computed(() => Boolean(requestedRecordId.value || requestedTemporaryId.value));
 const people = ref<Dict[]>([]);
 const totalCount = ref(0);
 const selectedRecordId = ref("");
@@ -151,7 +153,7 @@ let resizeObserver: ResizeObserver | null = null;
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
 let peopleRequestSeq = 0;
 
-const selectedPerson = computed(() => people.value.find((item) => item.record_id === selectedRecordId.value) || null);
+const selectedPerson = computed(() => people.value.find((item) => personKey(item) === selectedRecordId.value) || null);
 const signaturePreviewUrl = computed(() => (
   personHasUsableSignature(selectedPerson.value) ? String(selectedPerson.value?.signature_preview_url || "") : ""
 ));
@@ -181,6 +183,10 @@ function personInitial(person: Dict): string {
   return name.slice(0, 1).toUpperCase() || "?";
 }
 
+function personKey(person: Dict | null | undefined): string {
+  return String(person?.record_id || person?.temp_id || "").trim();
+}
+
 function personHasUsableSignature(person: Dict | null | undefined): boolean {
   return Boolean(person?.has_signature && String(person?.signature_preview_url || "").trim());
 }
@@ -195,7 +201,7 @@ function markSelectedSignatureUnavailable(): void {
 }
 
 function selectPerson(person: Dict): void {
-  selectedRecordId.value = String(person.record_id || "");
+  selectedRecordId.value = personKey(person);
   clearCanvas();
   setMessage(`${person.name || "该人员"} 已选中，请手写签名。`, "info");
 }
@@ -215,6 +221,19 @@ async function loadPeople(options: { silent?: boolean } = {}): Promise<void> {
   const requestSeq = ++peopleRequestSeq;
   loading.value = true;
   try {
+    if (temporaryMode.value) {
+      const url = new URL("/api/signatures/temporary/session", window.location.origin);
+      url.searchParams.set("temporary_id", requestedTemporaryId.value);
+      url.searchParams.set("token", linkToken.value);
+      const data = await requestJson(`${url.pathname}${url.search}`);
+      if (requestSeq !== peopleRequestSeq) return;
+      const roleLabel = data.role === "auditor" ? "维护审核人" : "维护实施人";
+      people.value = [{ ...data, role_label: roleLabel }];
+      totalCount.value = 1;
+      selectedRecordId.value = personKey(people.value[0]);
+      if (!options.silent) setMessage("临时签名页面已打开。", "info");
+      return;
+    }
     const url = new URL("/api/signatures/people", window.location.origin);
     if (props.defaultScope) url.searchParams.set("scope", props.defaultScope);
     if (query.value.trim()) url.searchParams.set("q", query.value.trim());
@@ -226,9 +245,9 @@ async function loadPeople(options: { silent?: boolean } = {}): Promise<void> {
     people.value = Array.isArray(data.people) ? data.people : [];
     totalCount.value = Number(data.count || people.value.length || 0);
     if (requestedRecordId.value && people.value.length) {
-      selectedRecordId.value = String(people.value[0].record_id || "");
+      selectedRecordId.value = personKey(people.value[0]);
     } else if (!selectedRecordId.value && people.value.length === 1) {
-      selectedRecordId.value = String(people.value[0].record_id || "");
+      selectedRecordId.value = personKey(people.value[0]);
     }
     if (!people.value.length) {
       setMessage("暂未找到匹配人员。", "failed");
@@ -360,20 +379,31 @@ async function saveSignature(): Promise<void> {
   saving.value = true;
   try {
     const signaturePng = canvasRef.value.toDataURL("image/png");
-    const data = await requestJson("/api/signatures/save", {
-      method: "POST",
-      body: JSON.stringify({
-        record_id: selectedPerson.value.record_id,
-        token: linkToken.value,
-        signer_name: selectedPerson.value.name || "",
-        signature_png: signaturePng,
-      }),
-    });
-    setMessage(`${data.name || selectedPerson.value.name || "签名"} 已保存。`, "success");
+    const data = temporaryMode.value
+      ? await requestJson("/api/signatures/temporary/save", {
+        method: "POST",
+        body: JSON.stringify({
+          temporary_id: requestedTemporaryId.value,
+          token: linkToken.value,
+          signature_png: signaturePng,
+        }),
+      })
+      : await requestJson("/api/signatures/save", {
+        method: "POST",
+        body: JSON.stringify({
+          record_id: selectedPerson.value.record_id,
+          token: linkToken.value,
+          signer_name: selectedPerson.value.name || "",
+          signature_png: signaturePng,
+        }),
+      });
+    setMessage(temporaryMode.value ? "签名已保存，可返回 MOP 页面。" : `${data.name || selectedPerson.value.name || "签名"} 已保存。`, "success");
     selectedPerson.value.has_signature = true;
     selectedPerson.value.signature_count = 1;
     selectedPerson.value.signature_preview_url = data.signature_preview_url || selectedPerson.value.signature_preview_url || "";
     selectedPerson.value.signature_version = data.signature_version || selectedPerson.value.signature_version || "";
+    selectedPerson.value.status = data.status || "signed";
+    selectedPerson.value.record_id = data.record_id || selectedPerson.value.record_id || "";
     clearCanvas();
   } catch (error: unknown) {
     const text = error instanceof Error ? error.message : "保存签名失败。";

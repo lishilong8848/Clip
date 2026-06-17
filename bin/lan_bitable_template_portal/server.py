@@ -1127,6 +1127,69 @@ class PortalRuntime:
                 )
             except (PortalError, ValueError) as exc:
                 return self._send_json(404, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/signatures/temporary/session":
+            try:
+                qs = parse_qs(parsed.query)
+                data = self.service.temporary_signature_session(
+                    temp_id=(qs.get("temporary_id") or [""])[0],
+                    token=(qs.get("token") or [""])[0],
+                )
+                return self._send_json(200, {"ok": True, "data": data})
+            except (PortalError, ValueError) as exc:
+                return self._send_json(403, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/signatures/temporary/image":
+            try:
+                qs = parse_qs(parsed.query)
+                session = self._current_session()
+                temp_id = (qs.get("temporary_id") or [""])[0]
+                if session is None:
+                    self.service.temporary_signature_session(
+                        temp_id=temp_id,
+                        token=(qs.get("token") or [""])[0],
+                    )
+                else:
+                    temp_session = PortalRuntime.state_store.get_mop_temporary_signature_session(
+                        temp_id=temp_id,
+                    )
+                    if not temp_session:
+                        return self._send_json(404, {"ok": False, "error": "临时签名记录不存在。"})
+                    self._authorized_scope_or_error(
+                        session,
+                        str(temp_session.get("scope") or "ALL"),
+                    )
+                content, content_type = self.service.temporary_signature_image_bytes(
+                    temp_id=temp_id,
+                )
+                return self._write_response(
+                    200,
+                    {
+                        "Content-Type": content_type,
+                        "Cache-Control": "private, max-age=300",
+                    },
+                    content,
+                )
+            except (PortalError, ValueError) as exc:
+                return self._send_json(404, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/signatures/temporary/list":
+            session = self._require_auth_json()
+            if session is None:
+                return
+            try:
+                qs = parse_qs(parsed.query)
+                scope = self._authorized_scope_or_error(
+                    session,
+                    (qs.get("scope") or ["ALL"])[0],
+                )
+                data = self.service.list_temporary_signatures(
+                    scope=scope,
+                    notice_key=(qs.get("notice_key") or [""])[0],
+                )
+                return self._send_json(
+                    200,
+                    {"ok": True, "data": self._with_auth_context(data, session)},
+                )
+            except (PortalError, ValueError) as exc:
+                return self._send_json(403, {"ok": False, "error": str(exc)})
         if parsed.path == "/api/auth/status":
             session = self._current_session()
             data = PortalRuntime.auth_manager.public_status(
@@ -1500,6 +1563,17 @@ class PortalRuntime:
                 return self._send_json(200, {"ok": True, "data": data})
             except (PortalError, ValueError, json.JSONDecodeError) as exc:
                 return self._send_json(400, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/signatures/temporary/save":
+            try:
+                payload = self._read_json_body(max_bytes=4 * 1024 * 1024)
+                data = self.service.save_temporary_signature(
+                    temp_id=str(payload.get("temporary_id") or ""),
+                    token=str(payload.get("token") or ""),
+                    signature_png=str(payload.get("signature_png") or ""),
+                )
+                return self._send_json(200, {"ok": True, "data": data})
+            except (PortalError, ValueError, json.JSONDecodeError) as exc:
+                return self._send_json(400, {"ok": False, "error": str(exc)})
         if parsed.path == "/api/signatures/send-link":
             session = self._require_auth_json()
             if session is None:
@@ -1540,6 +1614,71 @@ class PortalRuntime:
                         "ok": True,
                         "data": {
                             "person": data.get("person") or {},
+                            "link_url": data.get("link_url") or "",
+                            "message": message,
+                            "results": results,
+                        },
+                    },
+                )
+            except (PortalError, ValueError, json.JSONDecodeError) as exc:
+                return self._send_json(400, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/signatures/temporary/send-link":
+            session = self._require_auth_json()
+            if session is None:
+                return
+            try:
+                payload = self._read_json_body(max_bytes=64 * 1024)
+                scope = self._authorized_scope_or_error(
+                    session,
+                    str(payload.get("scope") or "ALL"),
+                )
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                data = self.service.build_temporary_signature_link_message(
+                    scope=scope,
+                    notice_key=str(payload.get("notice_key") or ""),
+                    role=str(payload.get("role") or "implementer"),
+                    recipient_open_ids=list(payload.get("recipient_open_ids") or []),
+                    notice_title=str(payload.get("notice_title") or ""),
+                    specialty=str(payload.get("specialty") or ""),
+                    request_base_url=self._request_base_url(),
+                    created_by=str(user.get("open_id") or ""),
+                )
+                open_ids = [
+                    str(item or "").strip()
+                    for item in (data.get("open_ids") or [])
+                    if str(item or "").strip()
+                ]
+                ok, message, results = _send_text_to_open_ids_guarded(
+                    str(data.get("text") or ""),
+                    open_ids,
+                )
+                if not ok:
+                    try:
+                        PortalRuntime.state_store.update_mop_temporary_signature_session(
+                            temp_id=str(data.get("temp_id") or ""),
+                            status="failed",
+                            payload_patch={"send_error": message or "签名链接发送失败。"},
+                        )
+                    except Exception:
+                        pass
+                    return self._send_json(
+                        400,
+                        {
+                            "ok": False,
+                            "error": message or "其他人员签名链接发送失败。",
+                            "data": {
+                                "signature": data.get("signature") or {},
+                                "link_url": data.get("link_url") or "",
+                                "results": results,
+                            },
+                        },
+                    )
+                return self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "data": {
+                            "signature": data.get("signature") or {},
                             "link_url": data.get("link_url") or "",
                             "message": message,
                             "results": results,
