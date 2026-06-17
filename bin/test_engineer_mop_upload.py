@@ -62,6 +62,15 @@ class FakeMopUploadService(MaintenancePortalService):
             },
         ]
 
+    def _load_engineer_mop_candidates(self, *, force: bool = False):
+        return [], [], {
+            "app_token": "mop-app",
+            "table_id": "mop-table",
+            "view_id": "",
+            "title_field": "文件名",
+            "attachment_field": "文件",
+        }
+
     def external_signature_image_bytes(self, *, record_id: str):
         self.external_image_calls.append(record_id)
         if record_id != "external-rec-1":
@@ -252,6 +261,60 @@ class EngineerMopUploadTests(unittest.TestCase):
             )
 
             self.assertEqual(base_url, "http://192.168.224.130:18766")
+
+    def test_engineer_mop_bootstrap_includes_current_month_source_records_first(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = FakeMopUploadService(tmpdir)
+            service._records = [
+                {
+                    "record_id": "src-bound",
+                    "work_type": WORK_TYPE_MAINTENANCE,
+                    "notice_type": "维保通告",
+                    "display_fields": {
+                        "楼栋": "A楼",
+                        "计划维护月份": service._current_month_label(),
+                        "维护周期": "每月",
+                        "维护总项": "已绑定已上传",
+                        MOP_SIGNED_ATTACHMENT_FIELD: [{"file_token": "file-1", "name": "mop.xlsx"}],
+                        MOP_ENGINEER_CONFIRM_FIELD: True,
+                        MOP_SUPERVISOR_CONFIRM_FIELD: True,
+                    },
+                },
+                {
+                    "record_id": "src-pending",
+                    "work_type": WORK_TYPE_MAINTENANCE,
+                    "notice_type": "维保通告",
+                    "display_fields": {
+                        "楼栋": "A楼",
+                        "计划维护月份": service._current_month_label(),
+                        "维护周期": "每月",
+                        "维护总项": "未绑定未上传",
+                    },
+                },
+            ]
+            pending_notice = service._serialize_engineer_source_maintenance_notice(service._records[1])
+            assert pending_notice is not None
+            service._state_store.upsert_mop_notice_binding(
+                {
+                    "scope": "A",
+                    "notice_key": service._serialize_engineer_source_maintenance_notice(service._records[0])["notice_key"],
+                    "template_key": service._serialize_engineer_source_maintenance_notice(service._records[0])["mop_template_key"],
+                    "notice_title": "已绑定已上传",
+                    "mop_record_id": "mop-1",
+                    "mop_title": "MOP",
+                }
+            )
+
+            data = service.engineer_mop_bootstrap(scope="A", ongoing_items=[])
+            notices = data["notices"]
+
+            self.assertGreaterEqual(len(notices), 2)
+            self.assertEqual(notices[0]["source_record_id"], "src-pending")
+            self.assertFalse(notices[0]["mop_uploaded"])
+            uploaded = next(item for item in notices if item["source_record_id"] == "src-bound")
+            self.assertTrue(uploaded["mop_uploaded"])
+            self.assertEqual(uploaded["mop_attachment_count"], 1)
+            self.assertTrue(uploaded["mop_binding"])
 
 
 if __name__ == "__main__":

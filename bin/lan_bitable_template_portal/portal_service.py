@@ -7809,16 +7809,176 @@ class MaintenancePortalService:
             "updated_at": str(item.get("ended_at") or item.get("last_updated_at") or item.get("updated_at") or item.get("started_at") or ""),
         }
 
-    def _engineer_today_maintenance_notices(
+    def _mop_source_flag(self, value: Any) -> bool:
+        if isinstance(value, (list, tuple, set)):
+            return any(self._mop_source_flag(item) for item in value)
+        if isinstance(value, dict):
+            for key in ("checked", "value", "text", "name"):
+                if key in value and self._mop_source_flag(value.get(key)):
+                    return True
+            return bool(value)
+        return self._truthy_flag(value)
+
+    def _serialize_engineer_source_maintenance_notice(
+        self, record: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        fields = record.get("display_fields") if isinstance(record.get("display_fields"), dict) else {}
+        maintenance_total = str(fields.get("维护总项") or "").strip()
+        building = str(fields.get("楼栋") or "").strip()
+        if not maintenance_total and not building:
+            return None
+        maintenance_cycle = str(fields.get("维护周期") or "").strip()
+        title = f"{building}{maintenance_total}{('-' + maintenance_cycle) if maintenance_cycle else ''}".strip()
+        signed_attachments = self._extract_mop_attachments(fields, MOP_SIGNED_ATTACHMENT_FIELD)
+        item = {
+            "work_type": WORK_TYPE_MAINTENANCE,
+            "notice_type": NOTICE_TYPE_MAINTENANCE,
+            "title": title or maintenance_total or str(record.get("record_id") or ""),
+            "building": building,
+            "building_codes": self._building_codes_from_value(building),
+            "specialty": str(fields.get("专业类别") or fields.get("专业") or "").strip(),
+            "maintenance_total": maintenance_total,
+            "maintenance_cycle": maintenance_cycle,
+            "source_record_id": str(record.get("record_id") or ""),
+            "display_fields": fields,
+            "location": str(fields.get("位置") or building or "").strip(),
+            "content": str(fields.get("内容") or fields.get("维护内容") or maintenance_total).strip(),
+            "reason": str(fields.get("原因") or fields.get("维护原因") or "").strip(),
+            "progress": str(fields.get("进度") or fields.get("维护进度") or "").strip(),
+            "updated_at": str(fields.get("更新时间") or fields.get("计划维护月份") or ""),
+        }
+        notice = self._serialize_engineer_notice(
+            item,
+            status=self._maintenance_status_value(record) or DEFAULT_MAINTENANCE_STATUS,
+        )
+        notice.update(
+            {
+                "mop_uploaded": bool(signed_attachments),
+                "mop_attachment_count": len(signed_attachments),
+                "mop_engineer_confirmed": self._mop_source_flag(fields.get(MOP_ENGINEER_CONFIRM_FIELD)),
+                "mop_supervisor_confirmed": self._mop_source_flag(fields.get(MOP_SUPERVISOR_CONFIRM_FIELD)),
+                "mop_source_record": True,
+            }
+        )
+        return notice
+
+    @staticmethod
+    def _merge_engineer_mop_notice(
+        existing: dict[str, Any], incoming: dict[str, Any]
+    ) -> dict[str, Any]:
+        merged = dict(existing)
+        for key, value in incoming.items():
+            if value in (None, "", [], {}):
+                continue
+            if key in {
+                "status",
+                "target_record_id",
+                "active_item_id",
+                "start_time",
+                "end_time",
+                "location",
+                "content",
+                "reason",
+                "progress",
+                "updated_at",
+            }:
+                merged[key] = value
+            elif key not in merged or merged.get(key) in (None, "", [], {}):
+                merged[key] = value
+        for key in (
+            "mop_uploaded",
+            "mop_engineer_confirmed",
+            "mop_supervisor_confirmed",
+            "mop_source_record",
+        ):
+            merged[key] = bool(existing.get(key) or incoming.get(key))
+        merged["mop_attachment_count"] = max(
+            int(existing.get("mop_attachment_count") or 0),
+            int(incoming.get("mop_attachment_count") or 0),
+        )
+        return merged
+
+    @staticmethod
+    def _engineer_mop_notice_sort_key(item: dict[str, Any]) -> tuple[Any, ...]:
+        bound = bool(item.get("mop_binding"))
+        uploaded = bool(item.get("mop_uploaded"))
+        ended = str(item.get("status") or "") == "已结束"
+        if not bound and not uploaded:
+            priority = 0
+        elif not bound:
+            priority = 1
+        elif not uploaded:
+            priority = 2
+        elif not ended:
+            priority = 3
+        else:
+            priority = 4
+        return (
+            priority,
+            str(item.get("building") or ""),
+            str(item.get("maintenance_cycle") or ""),
+            str(item.get("title") or ""),
+            str(item.get("updated_at") or ""),
+        )
+
+    def _engineer_month_maintenance_notices(
         self, *, scope: str, ongoing_items: list[dict[str, Any]] | None
     ) -> list[dict[str, Any]]:
         merged_ongoing = self._merge_ongoing_items(scope, ongoing_items or [])
         notices_by_key: dict[str, dict[str, Any]] = {}
+
+        def upsert_notice(notice: dict[str, Any]) -> None:
+            if not notice:
+                return
+            match_key = str(notice.get("notice_key") or "").strip()
+            source_record_id = str(notice.get("source_record_id") or "").strip()
+            template_key = str(notice.get("mop_template_key") or "").strip()
+            if source_record_id:
+                for key, existing in notices_by_key.items():
+                    if str(existing.get("source_record_id") or "").strip() == source_record_id:
+                        match_key = key
+                        break
+            if match_key not in notices_by_key and template_key:
+                for key, existing in notices_by_key.items():
+                    if str(existing.get("mop_template_key") or "").strip() == template_key:
+                        match_key = key
+                        break
+            if match_key in notices_by_key:
+                notices_by_key[match_key] = self._merge_engineer_mop_notice(
+                    notices_by_key[match_key],
+                    notice,
+                )
+            else:
+                notices_by_key[match_key or uuid.uuid4().hex] = notice
+
+        current_month = self._current_month_label()
+        source_records = [
+            record
+            for record in list(self._records or [])
+            if self._record_work_type(record) == WORK_TYPE_MAINTENANCE
+            and self._maintenance_record_matches_month_window(record, current_month)
+            and self._scope_matches_building(
+                scope,
+                (record.get("display_fields") or {}).get("楼栋"),
+            )
+        ]
+        if not source_records:
+            source_records = [
+                record
+                for record in (self._source_snapshot_records(scope) or [])
+                if self._record_work_type(record) == WORK_TYPE_MAINTENANCE
+                and self._maintenance_record_matches_month_window(record, current_month)
+            ]
+        for record in source_records:
+            notice = self._serialize_engineer_source_maintenance_notice(record)
+            if notice:
+                upsert_notice(notice)
+
         for item in merged_ongoing:
             if str(item.get("work_type") or WORK_TYPE_MAINTENANCE) != WORK_TYPE_MAINTENANCE:
                 continue
             notice = self._serialize_engineer_notice(item, status="进行中")
-            notices_by_key[notice["notice_key"]] = notice
+            upsert_notice(notice)
         daily = self.get_daily_summary(scope=scope, ongoing_items=merged_ongoing)
         for item in daily.get("items") or []:
             if not isinstance(item, dict):
@@ -7829,7 +7989,7 @@ class MaintenancePortalService:
             existing = notices_by_key.get(notice["notice_key"])
             if existing and existing.get("status") != "已结束":
                 continue
-            notices_by_key[notice["notice_key"]] = notice
+            upsert_notice(notice)
         notices = list(notices_by_key.values())
         notices.sort(
             key=lambda item: (
@@ -8099,7 +8259,7 @@ class MaintenancePortalService:
         self, *, scope: str = "ALL", ongoing_items: list[dict[str, Any]] | None = None
     ) -> dict[str, Any]:
         scope = self._normalize_scope(scope)
-        notices = self._engineer_today_maintenance_notices(
+        notices = self._engineer_month_maintenance_notices(
             scope=scope,
             ongoing_items=ongoing_items,
         )
@@ -8160,6 +8320,7 @@ class MaintenancePortalService:
                     binding = dict(template_binding)
                     binding["inherited"] = True
             notice["mop_binding"] = binding or None
+        notices.sort(key=self._engineer_mop_notice_sort_key)
         return {
             "scope": scope,
             "scope_label": self._scope_label(scope),

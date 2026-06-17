@@ -3,7 +3,7 @@
     <header v-if="!previewMode" class="mop-head">
       <div>
         <strong>工程师 MOP 填写</strong>
-        <p>选择当天维保通告，绑定已有 MOP 表格后在右侧预览 Sheet 内容。</p>
+        <p>选择本月维保通告，绑定已有 MOP 表格后在右侧预览 Sheet 内容。</p>
       </div>
       <div class="head-actions">
         <label v-if="scopeOptions.length" class="scope-select">
@@ -619,20 +619,24 @@
       <template v-else>
         <section class="mop-summary">
           <article>
-            <span>维保通告</span>
+            <span>本月维保</span>
             <strong>{{ notices.length }}</strong>
+          </article>
+          <article>
+            <span>待关联/上传</span>
+            <strong>{{ pendingMopNoticeCount }}</strong>
           </article>
           <article>
             <span>已绑定</span>
             <strong>{{ boundNoticeCount }}</strong>
           </article>
           <article>
-            <span>MOP 表格</span>
-            <strong>{{ mopCandidates.length }}</strong>
+            <span>已上传MOP</span>
+            <strong>{{ uploadedMopNoticeCount }}</strong>
           </article>
           <article>
-            <span>当前范围</span>
-            <strong>{{ scopeLabel }}</strong>
+            <span>MOP 表格</span>
+            <strong>{{ mopCandidates.length }}</strong>
           </article>
         </section>
 
@@ -640,8 +644,8 @@
           <aside class="panel notice-panel">
             <div class="panel-head">
               <div>
-                <h2>当天维保通告</h2>
-                <p>包含今日进行中与已闭环维保通告。</p>
+                <h2>本月维保通告</h2>
+                <p>显示本月维保，未绑定或未上传维护保养单的优先显示。</p>
               </div>
               <span>{{ filteredNotices.length }}</span>
             </div>
@@ -651,8 +655,10 @@
                 <option value="">全部状态</option>
                 <option value="ongoing">未完成</option>
                 <option value="closed">已完成</option>
+                <option value="pending">待关联/上传</option>
                 <option value="bound">已绑定</option>
                 <option value="unbound">未绑定</option>
+                <option value="uploaded">已上传MOP</option>
               </select>
             </div>
             <div class="list notice-list">
@@ -661,7 +667,7 @@
                 :key="notice.notice_key"
                 type="button"
                 class="notice-row"
-                :class="{ active: notice.notice_key === selectedNoticeKey, closed: notice.status === '已结束' }"
+                :class="{ active: notice.notice_key === selectedNoticeKey, closed: notice.status === '已结束', pending: mopNoticeNeedsAction(notice) }"
                 @click="selectNotice(notice.notice_key)"
               >
                 <span class="row-status" :class="{ closed: notice.status === '已结束' }">{{ notice.status || "进行中" }}</span>
@@ -671,10 +677,17 @@
                   <template v-if="notice.specialty"> · {{ notice.specialty }}</template>
                   <template v-if="notice.maintenance_cycle"> · {{ notice.maintenance_cycle }}</template>
                 </small>
-                <em v-if="notice.mop_binding">
-                  {{ notice.mop_binding.inherited ? "已继承绑定" : "已绑定" }}：{{ notice.mop_binding.mop_title || notice.mop_binding.mop_record_id }}
-                </em>
-                <em v-else>未绑定 MOP 表格</em>
+                <span class="notice-mop-tags">
+                  <em :class="{ success: notice.mop_binding, warning: !notice.mop_binding }">
+                    <template v-if="notice.mop_binding">
+                      {{ notice.mop_binding.inherited ? "已继承绑定" : "已绑定" }}：{{ notice.mop_binding.mop_title || notice.mop_binding.mop_record_id }}
+                    </template>
+                    <template v-else>未绑定 MOP 表格</template>
+                  </em>
+                  <em :class="{ success: noticeMopUploaded(notice), warning: !noticeMopUploaded(notice) }">
+                    {{ noticeMopUploaded(notice) ? `已上传MOP${Number(notice.mop_attachment_count || 0) ? ` ${notice.mop_attachment_count}份` : ""}` : "未上传MOP" }}
+                  </em>
+                </span>
               </button>
             </div>
           </aside>
@@ -856,6 +869,16 @@ const scopeLabel = computed(() => {
 });
 
 const boundNoticeCount = computed(() => notices.value.filter((item) => item.mop_binding).length);
+const uploadedMopNoticeCount = computed(() => notices.value.filter((item) => noticeMopUploaded(item)).length);
+const pendingMopNoticeCount = computed(() => notices.value.filter((item) => mopNoticeNeedsAction(item)).length);
+
+function noticeMopUploaded(notice: Dict): boolean {
+  return Boolean(notice?.mop_uploaded || Number(notice?.mop_attachment_count || 0) > 0);
+}
+
+function mopNoticeNeedsAction(notice: Dict): boolean {
+  return !notice?.mop_binding || !noticeMopUploaded(notice);
+}
 
 const filteredNotices = computed(() => {
   const query = compactText(noticeSearch.value);
@@ -863,8 +886,10 @@ const filteredNotices = computed(() => {
     const status = String(item.status || "");
     if (noticeStatusFilter.value === "ongoing" && status === "已结束") return false;
     if (noticeStatusFilter.value === "closed" && status !== "已结束") return false;
+    if (noticeStatusFilter.value === "pending" && !mopNoticeNeedsAction(item)) return false;
     if (noticeStatusFilter.value === "bound" && !item.mop_binding) return false;
     if (noticeStatusFilter.value === "unbound" && item.mop_binding) return false;
+    if (noticeStatusFilter.value === "uploaded" && !noticeMopUploaded(item)) return false;
     if (!query) return true;
     return compactText([
       item.title,
@@ -2715,7 +2740,7 @@ select:focus {
 
 .mop-summary {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 16px;
 }
 
@@ -2819,6 +2844,11 @@ select:focus {
   border-color: #1e63ff;
   box-shadow: 0 10px 24px rgba(30, 99, 255, 0.13);
   transform: translateY(-1px);
+}
+
+.notice-row.pending {
+  border-color: #bfdbfe;
+  background: linear-gradient(135deg, #ffffff 0%, #f8fbff 100%);
 }
 
 .notice-row strong,
@@ -2975,6 +3005,39 @@ select:focus {
 
 .notice-row em {
   color: #2563eb;
+}
+
+.notice-mop-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.notice-mop-tags em {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  min-height: 24px;
+  margin-top: 0;
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px solid #cfe0ff;
+  background: #eff6ff;
+  color: #1d4ed8;
+  line-height: 1.25;
+}
+
+.notice-mop-tags em.success {
+  border-color: #bbf7d0;
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.notice-mop-tags em.warning {
+  border-color: #fde68a;
+  background: #fffbeb;
+  color: #92400e;
 }
 
 .mop-row small {
