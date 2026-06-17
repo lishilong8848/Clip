@@ -452,11 +452,17 @@ class PortalAuthManager:
         open_id = str(open_id or "").strip()
         if not open_id:
             raise PortalError("缺少 open_id，无法提交权限申请。")
-        if self.scopes_for_open_id(open_id):
-            raise PortalError("当前账号已经有门户权限，无需重复申请。")
         requested_scopes = self._permission_request_scopes_from_raw(scopes)
+        current_scopes = self.scopes_for_open_id(open_id)
+        if self._has_full_scope_access(current_scopes) or "ALL" in current_scopes:
+            raise PortalError("当前账号已经拥有全部楼栋权限，无需继续申请。")
+        if current_scopes:
+            current_scope_set = set(current_scopes)
+            requested_scopes = [
+                scope for scope in requested_scopes if scope not in current_scope_set
+            ]
         if not requested_scopes:
-            raise PortalError("请至少选择一个需要访问的楼栋或园区。")
+            raise PortalError("请选择尚未拥有权限的楼栋或园区。")
         reason = str(reason or "").strip()[:500]
         code = f"{secrets.randbelow(1000000):06d}"
         salt = secrets.token_urlsafe(18)
@@ -584,6 +590,8 @@ class PortalAuthManager:
                 payload["status"] = "failed"
                 self._state_store.put_permission_request(payload)
                 raise PortalError("申请楼栋为空，请重新申请。")
+            current_scopes = self.scopes_for_open_id(open_id)
+            merged_scopes = self._scopes_from_raw([*current_scopes, *requested_scopes])
             payload["status"] = "approved"
             payload["approved_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             payload["approved_at_ts"] = now_ts
@@ -592,7 +600,7 @@ class PortalAuthManager:
                 open_id=open_id,
                 name=str(payload.get("name") or open_id),
                 role="building",
-                scopes=requested_scopes,
+                scopes=merged_scopes,
                 enabled=True,
                 updated_by=updated_by,
             )

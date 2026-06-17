@@ -6,6 +6,7 @@ import hashlib
 import os
 import queue
 import re
+import secrets
 import sqlite3
 import threading
 import time
@@ -50,7 +51,7 @@ class LanPortalStateStore:
     are migration inputs only and are never deleted or overwritten here.
     """
 
-    SCHEMA_VERSION = 17
+    SCHEMA_VERSION = 18
     SOURCE_SCOPE_TABLES = {
         "110": "source_records_110",
         "A": "source_records_a",
@@ -90,6 +91,7 @@ class LanPortalStateStore:
         "notice_work_type_overrides",
         "notice_upload_attachments",
         "mop_notice_bindings",
+        "signature_link_tokens",
         "schema_migrations",
     ]
     REQUIRED_INDEXES = [
@@ -106,7 +108,10 @@ class LanPortalStateStore:
         "idx_notice_upload_attachments_open",
         "idx_permission_requests_open_status",
         "idx_mop_notice_bindings_notice",
+        "idx_mop_notice_bindings_template",
         "idx_mop_notice_bindings_mop",
+        "idx_signature_link_tokens_record",
+        "idx_signature_link_tokens_expiry",
     ]
 
     def __init__(self, db_path: str | Path | None = None):
@@ -445,6 +450,7 @@ class LanPortalStateStore:
             CREATE TABLE IF NOT EXISTS mop_notice_bindings (
                 binding_id TEXT PRIMARY KEY,
                 notice_key TEXT NOT NULL,
+                template_key TEXT,
                 scope TEXT,
                 notice_title TEXT,
                 notice_status TEXT,
@@ -466,6 +472,7 @@ class LanPortalStateStore:
             )
             """
         )
+        self._ensure_column_locked(conn, "mop_notice_bindings", "template_key", "TEXT")
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_mop_notice_bindings_notice
@@ -474,8 +481,40 @@ class LanPortalStateStore:
         )
         conn.execute(
             """
+            CREATE INDEX IF NOT EXISTS idx_mop_notice_bindings_template
+            ON mop_notice_bindings(template_key, scope, deleted_at)
+            """
+        )
+        conn.execute(
+            """
             CREATE INDEX IF NOT EXISTS idx_mop_notice_bindings_mop
             ON mop_notice_bindings(mop_record_id, mop_attachment_token, deleted_at)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS signature_link_tokens (
+                token_id TEXT PRIMARY KEY,
+                record_id TEXT NOT NULL,
+                token_hash TEXT NOT NULL UNIQUE,
+                created_by TEXT,
+                payload_json TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                expires_at REAL NOT NULL,
+                used_at REAL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_signature_link_tokens_record
+            ON signature_link_tokens(record_id, expires_at)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_signature_link_tokens_expiry
+            ON signature_link_tokens(expires_at)
             """
         )
         conn.execute(
@@ -4497,12 +4536,111 @@ class LanPortalStateStore:
                     )
                 conn.commit()
 
+    @staticmethod
+    def _signature_link_token_hash(token: str) -> str:
+        return hashlib.sha256(str(token or "").encode("utf-8")).hexdigest()
+
+    def create_signature_link_token(
+        self,
+        *,
+        record_id: str,
+        created_by: str = "",
+        ttl_seconds: int = 3600,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        record_id = self._text(record_id)
+        if not record_id:
+            raise ValueError("签名链接缺少人员记录 ID。")
+        ttl_seconds = max(300, min(int(ttl_seconds or 3600), 24 * 3600))
+        token = secrets.token_urlsafe(32)
+        token_hash = self._signature_link_token_hash(token)
+        now = time.time()
+        expires_at = now + ttl_seconds
+        token_id = uuid.uuid4().hex
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute(
+                    "DELETE FROM signature_link_tokens WHERE expires_at < ?",
+                    (now - 24 * 3600,),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO signature_link_tokens(
+                        token_id, record_id, token_hash, created_by,
+                        payload_json, created_at, expires_at, used_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+                    """,
+                    (
+                        token_id,
+                        record_id,
+                        token_hash,
+                        self._text(created_by),
+                        self._json(payload or {}),
+                        now,
+                        expires_at,
+                    ),
+                )
+                conn.commit()
+        return {
+            "token_id": token_id,
+            "record_id": record_id,
+            "token": token,
+            "expires_at": expires_at,
+            "created_at": now,
+        }
+
+    def validate_signature_link_token(self, *, record_id: str, token: str) -> bool:
+        record_id = self._text(record_id)
+        token = str(token or "").strip()
+        if not record_id or not token:
+            return False
+        token_hash = self._signature_link_token_hash(token)
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    """
+                    SELECT record_id, expires_at
+                    FROM signature_link_tokens
+                    WHERE token_hash = ?
+                    """,
+                    (token_hash,),
+                ).fetchone()
+        if not row:
+            return False
+        return self._text(row["record_id"]) == record_id and float(row["expires_at"] or 0) >= now
+
+    def mark_signature_link_token_used(self, *, record_id: str, token: str) -> None:
+        record_id = self._text(record_id)
+        token = str(token or "").strip()
+        if not record_id or not token:
+            return
+        token_hash = self._signature_link_token_hash(token)
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute(
+                    """
+                    UPDATE signature_link_tokens
+                    SET used_at = COALESCE(used_at, ?)
+                    WHERE record_id = ? AND token_hash = ? AND expires_at >= ?
+                    """,
+                    (now, record_id, token_hash, now),
+                )
+                conn.commit()
+
     def _mop_binding_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
         payload = self._loads(str(row["payload_json"] or ""), {})
         payload = payload if isinstance(payload, dict) else {}
         return {
             "binding_id": str(row["binding_id"] or ""),
             "notice_key": str(row["notice_key"] or ""),
+            "template_key": str(row["template_key"] or "") if "template_key" in row.keys() else "",
             "scope": str(row["scope"] or ""),
             "notice_title": str(row["notice_title"] or ""),
             "notice_status": str(row["notice_status"] or ""),
@@ -4526,10 +4664,12 @@ class LanPortalStateStore:
     def upsert_mop_notice_binding(self, payload: dict[str, Any]) -> dict[str, Any]:
         payload = dict(payload or {})
         notice_key = self._text(payload.get("notice_key"))
+        template_key = self._text(payload.get("template_key") or payload.get("mop_template_key"))
         mop_record_id = self._text(payload.get("mop_record_id"))
         if not notice_key or not mop_record_id:
             raise ValueError("MOP绑定缺少 notice_key 或 mop_record_id。")
-        binding_id = self._text(payload.get("binding_id")) or f"mop:{uuid.uuid5(uuid.NAMESPACE_URL, notice_key).hex}"
+        binding_seed = template_key or notice_key
+        binding_id = self._text(payload.get("binding_id")) or f"mop:{uuid.uuid5(uuid.NAMESPACE_URL, binding_seed).hex}"
         now = time.time()
         with self._lock:
             with closing(self._connect()) as conn:
@@ -4542,17 +4682,18 @@ class LanPortalStateStore:
                 conn.execute(
                     """
                     INSERT OR REPLACE INTO mop_notice_bindings(
-                        binding_id, notice_key, scope, notice_title, notice_status,
+                        binding_id, notice_key, template_key, scope, notice_title, notice_status,
                         source_record_id, target_record_id, active_item_id,
                         mop_app_token, mop_table_id, mop_record_id, mop_title,
                         mop_attachment_token, mop_attachment_name, selected_sheet,
                         payload_json, updated_by, created_at, updated_at, deleted_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
                     """,
                     (
                         binding_id,
                         notice_key,
+                        template_key,
                         self._text(payload.get("scope")),
                         self._text(payload.get("notice_title")),
                         self._text(payload.get("notice_status")),
@@ -4584,6 +4725,7 @@ class LanPortalStateStore:
         *,
         scope: str = "",
         notice_keys: list[str] | None = None,
+        template_keys: list[str] | None = None,
         include_deleted: bool = False,
     ) -> list[dict[str, Any]]:
         if not self.db_path.exists():
@@ -4596,11 +4738,25 @@ class LanPortalStateStore:
         if scope and scope != "ALL":
             clauses.append("(scope = ? OR scope = '' OR scope = 'ALL')")
             params.append(scope)
+        match_clauses: list[str] = []
+        match_params: list[Any] = []
         keys = [self._text(item) for item in (notice_keys or []) if self._text(item)]
         if keys:
             placeholders = ",".join("?" for _ in keys)
-            clauses.append(f"notice_key IN ({placeholders})")
-            params.extend(keys)
+            match_clauses.append(f"notice_key IN ({placeholders})")
+            match_params.extend(keys)
+        template_keys_normalized = [
+            self._text(item) for item in (template_keys or []) if self._text(item)
+        ]
+        if template_keys_normalized:
+            placeholders = ",".join("?" for _ in template_keys_normalized)
+            match_clauses.append(f"template_key IN ({placeholders})")
+            match_params.extend(template_keys_normalized)
+        if not match_clauses:
+            return []
+        if match_clauses:
+            clauses.append(f"({' OR '.join(match_clauses)})")
+            params.extend(match_params)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._lock:
             with closing(self._connect()) as conn:

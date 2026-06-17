@@ -80,6 +80,8 @@ class ChangeNoticeHandler(BaseNoticeHandler):
 
         if start_dt:
             fields[CHANGE_NOTICE_FIELDS["start_time"]] = self._to_timestamp_ms(start_dt)
+        if end_dt:
+            fields[CHANGE_NOTICE_FIELDS["end_time"]] = self._to_timestamp_ms(end_dt)
 
         if payload.buildings:
             fields[CHANGE_NOTICE_FIELDS["building"]] = self._normalize_buildings_multi(
@@ -147,6 +149,8 @@ class ChangeNoticeHandler(BaseNoticeHandler):
 
         if start_dt:
             fields[CHANGE_NOTICE_FIELDS["start_time"]] = self._to_timestamp_ms(start_dt)
+        if end_dt and not is_end:
+            fields[CHANGE_NOTICE_FIELDS["end_time"]] = self._to_timestamp_ms(end_dt)
 
         if payload.buildings:
             fields[CHANGE_NOTICE_FIELDS["building"]] = self._normalize_buildings_multi(

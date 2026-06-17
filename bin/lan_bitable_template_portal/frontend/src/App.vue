@@ -1,6 +1,6 @@
 <template>
-  <main class="app-shell">
-    <header class="topbar">
+  <main class="app-shell" :class="{ 'signature-link-shell': signatureLinkMode }">
+    <header v-if="!signatureLinkMode" class="topbar">
       <div class="brand">
         <img class="brand-logo" :src="brandLogoSrc" alt="世纪互联官方标识" />
         <div>
@@ -33,7 +33,7 @@
       </div>
     </header>
 
-    <div v-if="connectionNotice" class="status-banner" :class="connectionNotice.tone">
+    <div v-if="!signatureLinkMode && connectionNotice" class="status-banner" :class="connectionNotice.tone">
       <span>{{ connectionNotice.text }}</span>
       <button
         v-if="connectionNotice.action"
@@ -62,6 +62,11 @@
       :login-url="auth.loginUrl"
     />
 
+    <SignaturePage
+      v-else-if="isSignaturePage"
+      :default-scope="currentScope"
+    />
+
     <EngineerMopPage
       v-else-if="isEngineerMopPage"
       :checking="authChecking"
@@ -71,17 +76,22 @@
     />
 
     <AuthPanels
-      v-else-if="authChecking || !auth.loggedIn || (auth.loggedIn && !auth.scopeOptions.length)"
+      v-else-if="showPermissionRequestPanel || authChecking || !auth.loggedIn || (auth.loggedIn && !auth.scopeOptions.length)"
       :checking="authChecking"
       :logged-in="auth.loggedIn"
       :user="auth.user"
       :login-url="auth.loginUrl"
       :busy="permissionBusy"
       :request="permissionRequest"
-      :requestable-scopes="requestableScopes"
+      :requestable-scopes="permissionPanelRequestableScopes"
+      :title="permissionPanelTitle"
+      :description="permissionPanelDescription"
+      :empty-text="permissionPanelEmptyText"
+      :show-back="showPermissionRequestPanel && auth.scopeOptions.length > 0"
       @update-request="updatePermissionRequest"
       @submit="submitPermissionRequest"
       @confirm="confirmPermissionRequest"
+      @back="closePermissionRequestPanel"
     />
 
     <ScopeHome
@@ -89,8 +99,10 @@
       :scope-options="visibleScopeOptions"
       :overview="scopeOverview"
       :handover-links="handoverLinks"
+      :can-request-more-scopes="additionalRequestableScopes.length > 0"
       @enter="enterScope"
       @engineer="enterEngineerMop"
+      @request-permission="openAdditionalPermissionRequest"
     />
 
     <section v-else class="workbench">
@@ -431,6 +443,33 @@
       @preview="previewOngoingBindCandidate"
       @select="selectOngoingBindCandidate"
     />
+    <div v-if="actionConfirm.open" class="action-confirm-backdrop" @click.self="resolveActionConfirm(false)">
+      <section
+        class="action-confirm-modal"
+        :class="`tone-${actionConfirm.tone}`"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="action-confirm-title"
+      >
+        <header>
+          <div>
+            <span>{{ actionConfirm.kicker }}</span>
+            <strong id="action-confirm-title">{{ actionConfirm.title }}</strong>
+          </div>
+          <button class="icon-btn" type="button" aria-label="关闭确认弹窗" @click="resolveActionConfirm(false)">×</button>
+        </header>
+        <p>{{ actionConfirm.message }}</p>
+        <ul v-if="actionConfirm.details.length">
+          <li v-for="detail in actionConfirm.details" :key="detail">{{ detail }}</li>
+        </ul>
+        <footer>
+          <button class="btn ghost" type="button" @click="resolveActionConfirm(false)">{{ actionConfirm.cancelLabel }}</button>
+          <button class="btn" :class="actionConfirm.confirmClass" type="button" @click="resolveActionConfirm(true)">
+            {{ actionConfirm.confirmLabel }}
+          </button>
+        </footer>
+      </section>
+    </div>
   </main>
 </template>
 
@@ -444,6 +483,7 @@ import HistoryMemoryPage from "./components/HistoryMemoryPage.vue";
 import OngoingNoticeCard from "./components/OngoingNoticeCard.vue";
 import RecentUndoPanel from "./components/RecentUndoPanel.vue";
 import ScopeHome from "./components/ScopeHome.vue";
+import SignaturePage from "./components/SignaturePage.vue";
 import TargetRecordSelectionModal from "./components/TargetRecordSelectionModal.vue";
 import VirtualNoticeList, { type NoticeRow } from "./components/VirtualNoticeList.vue";
 import { AUTH_EXPIRED_EVENT, requestBinaryJson, requestJson } from "./api/client";
@@ -484,6 +524,19 @@ import { createCrossTabStreamCoordinator, type CrossTabStreamCoordinator } from 
 
 type Dict = Record<string, any>;
 type ScopeOption = { value: string; label: string };
+type ActionConfirmTone = "danger" | "warning" | "primary";
+type ActionConfirmState = {
+  open: boolean;
+  tone: ActionConfirmTone;
+  kicker: string;
+  title: string;
+  message: string;
+  details: string[];
+  confirmLabel: string;
+  cancelLabel: string;
+  confirmClass: string;
+  resolve?: (confirmed: boolean) => void;
+};
 const brandLogoSrc = "/assets/vnet-logo.png";
 const buildingScopeCodes = ["110", "A", "B", "C", "D", "E", "H"];
 const maintenanceCycleOptions = ["/", "每月", "每季", "每年", "半年", "每两年", "每三年", "每五年", "冬季保温每日"];
@@ -517,6 +570,10 @@ const authChecking = ref(true);
 const loading = ref(false);
 const isHistoryMemoryPage = ref(window.location.pathname.replace(/\/$/, "") === "/admin/history-memory");
 const isEngineerMopPage = ref(window.location.pathname.replace(/\/$/, "") === "/engineer/mop");
+const isSignaturePage = ref(window.location.pathname.replace(/\/$/, "") === "/signature");
+const signatureLinkMode = computed(() => (
+  isSignaturePage.value && Boolean(new URLSearchParams(window.location.search).get("record_id"))
+));
 const repairRefreshing = ref(false);
 const changeRefreshing = ref(false);
 const isWorkbench = ref(false);
@@ -532,6 +589,7 @@ const showPasteParser = ref(false);
 const showManualTypePicker = ref(false);
 const showMemoryImporter = ref(false);
 const showAdminTools = ref(false);
+const showPermissionRequestPanel = ref(false);
 const undoFilter = ref("all");
 const pasteText = ref("");
 const pasteParseBusy = ref(false);
@@ -602,6 +660,17 @@ const ongoingEdits = reactive(new Map<string, Dict>());
 const jobStates = reactive(new Map<string, Dict>());
 const defaults = reactive({ impact: "无", progress: "" });
 const localSummaryAdjustments = reactive({ started: 0, updated: 0, ended: 0, ongoing: 0 });
+const actionConfirm = reactive<ActionConfirmState>({
+  open: false,
+  tone: "primary",
+  kicker: "操作确认",
+  title: "",
+  message: "",
+  details: [],
+  confirmLabel: "确认",
+  cancelLabel: "取消",
+  confirmClass: "blue",
+});
 const draftStackRef = ref<HTMLElement | null>(null);
 const fallbackPollTimers = new Map<string, number>();
 const pollingJobs = new Map<string, string>();
@@ -631,9 +700,36 @@ let activeItemsStreamCoordinator: CrossTabStreamCoordinator<Dict> | null = null;
 
 const visibleScopeOptions = computed(() => auth.scopeOptions.length ? auth.scopeOptions : requestableScopes);
 const isAdmin = computed(() => String(auth.user?.role || "").toLowerCase() === "admin");
+const ownedScopeValues = computed(() => new Set(auth.scopeOptions.map((item) => normalizeScopeValue(item.value))));
+const additionalRequestableScopes = computed(() => {
+  if (!auth.loggedIn || !auth.scopeOptions.length) return requestableScopes;
+  const owned = ownedScopeValues.value;
+  return requestableScopes.filter((item) => !owned.has(normalizeScopeValue(item.value)));
+});
+const permissionPanelRequestableScopes = computed(() => (
+  showPermissionRequestPanel.value && auth.scopeOptions.length
+    ? additionalRequestableScopes.value
+    : requestableScopes
+));
+const permissionPanelTitle = computed(() => (
+  showPermissionRequestPanel.value && auth.scopeOptions.length
+    ? "申请其他楼栋权限"
+    : "当前账号暂无门户权限"
+));
+const permissionPanelDescription = computed(() => (
+  showPermissionRequestPanel.value && auth.scopeOptions.length
+    ? "选择还需要访问的楼栋或园区，管理员确认验证码后会追加到当前账号。"
+    : "请选择需要访问的楼栋或园区，提交后由管理员发放验证码。"
+));
+const permissionPanelEmptyText = computed(() => (
+  showPermissionRequestPanel.value && auth.scopeOptions.length
+    ? "当前账号已经拥有全部可申请入口。"
+    : "当前没有可申请的楼栋权限。"
+));
 const headerSubtitle = computed(() => {
   if (isHistoryMemoryPage.value) return "管理工具 · 历史通告记忆导入";
   if (isEngineerMopPage.value) return `${scopeLabel(currentScope.value)} · 工程师 MOP 填写`;
+  if (isSignaturePage.value) return "线上签名 · 手机手写保存";
   if (authChecking.value) return "功能选择 · 正在检查登录";
   if (!auth.loggedIn) return "功能选择 · 请先登录";
   if (!auth.scopeOptions.length) return "功能选择 · 申请访问权限";
@@ -641,6 +737,7 @@ const headerSubtitle = computed(() => {
   return "功能选择 · 请选择功能";
 });
 const pageStatusText = computed(() => {
+  if (signatureLinkMode.value) return "";
   const text = String(syncText.value || "").trim();
   if (!text || ["准备中", "请选择功能", "切换中"].includes(text)) return "";
   if (/^HTTP\s+\d+/i.test(text)) return "后端服务暂未就绪，页面会在连接恢复后自动刷新。";
@@ -1090,13 +1187,14 @@ function ongoingBusinessIdentityKeys(item: Dict, workType: string): string[] {
   if (!title) return [];
   const building = normalizeDraftSignatureText(String(item.building || ""));
   const reason = normalizeDraftSignatureText(String(item.reason || ""));
+  const cycle = workType === "maintenance" ? normalizeDraftSignatureText(String(item.maintenance_cycle || fieldsOf(item)["维护周期"] || "")) : "";
   const timeKey = ongoingBusinessTimeKey(item);
   const keys: string[] = [];
-  if (building && reason) keys.push(`${workType}:business:title-building-reason:${building}:${title}:${reason}`);
+  if (building && reason) keys.push(`${workType}:business:title-building-reason:${building}:${title}:${cycle}:${reason}`);
   if (building && timeKey && reason) {
-    keys.push(`${workType}:business:title-time-reason:${building}:${title}:${timeKey}:${reason}`);
+    keys.push(`${workType}:business:title-time-reason:${building}:${title}:${cycle}:${timeKey}:${reason}`);
   } else if (building && timeKey) {
-    keys.push(`${workType}:business:title-time:${building}:${title}:${timeKey}`);
+    keys.push(`${workType}:business:title-time:${building}:${title}:${cycle}:${timeKey}`);
   }
   return keys;
 }
@@ -1228,6 +1326,16 @@ function ongoingTimeRange(item: Dict): { start: string; end: string } {
   return { start, end };
 }
 
+function maintenanceCycleForRecord(record: Dict): string {
+  if ((record.work_type || "maintenance") !== "maintenance") return "";
+  return normalizeDraftSignatureText(String(fieldsOf(record)["维护周期"] || record.maintenance_cycle || ""));
+}
+
+function maintenanceCycleForOngoing(item: Dict): string {
+  if ((item.work_type || "maintenance") !== "maintenance") return "";
+  return normalizeDraftSignatureText(String(item.maintenance_cycle || fieldsOf(item)["维护周期"] || ""));
+}
+
 function isRecordOngoing(record: Dict): boolean {
   const titleCandidates = [
     titleForRecord(record),
@@ -1235,6 +1343,7 @@ function isRecordOngoing(record: Dict): boolean {
   ].map((value) => normalizeDraftSignatureText(value)).filter(Boolean);
   const sourceId = record.source_record_id || record.record_id;
   const targetId = targetRecordIdForRecord(record);
+  const recordCycle = maintenanceCycleForRecord(record);
   return ongoing.value.some((item) => {
     if ((item.work_type || "maintenance") !== (record.work_type || "maintenance")) return false;
     const itemSource = String(item.source_record_id || "").trim();
@@ -1247,6 +1356,10 @@ function isRecordOngoing(record: Dict): boolean {
       item.title || "",
       item.content || "",
     ].map((value) => normalizeDraftSignatureText(value)).filter(Boolean);
+    const itemCycle = maintenanceCycleForOngoing(item);
+    if ((record.work_type || "maintenance") === "maintenance" && (recordCycle || itemCycle) && recordCycle !== itemCycle) {
+      return false;
+    }
     return titleCandidates.some((title) => ongoingTitles.includes(title));
   });
 }
@@ -1566,6 +1679,7 @@ function stopRealtimeConnections(): void {
 function pauseJobStatusChecksForHiddenPage(): void {
   for (const timer of fallbackPollTimers.values()) window.clearTimeout(timer);
   fallbackPollTimers.clear();
+  clearOngoingEdits();
   if (batchPollTimer !== null) {
     window.clearTimeout(batchPollTimer);
     batchPollTimer = null;
@@ -1867,7 +1981,7 @@ function removeOngoingLine(key: string): boolean {
   if (!key) return false;
   const before = ongoing.value.length;
   ongoing.value = ongoing.value.filter((item) => ongoingLineKey(item) !== key);
-  ongoingEdits.delete(key);
+  deleteOngoingEdit(key);
   if (activeOngoingKey.value === key) activeOngoingKey.value = "";
   return ongoing.value.length !== before;
 }
@@ -1981,7 +2095,7 @@ function pruneRuntimeState(): void {
   const now = Date.now();
   const staleBefore = now - 30 * 60 * 1000;
   for (const key of Array.from(ongoingEdits.keys())) {
-    if (!visibleKeys.has(key)) ongoingEdits.delete(key);
+    if (!visibleKeys.has(key)) deleteOngoingEdit(key);
   }
   for (const [key, state] of Array.from(jobStates.entries())) {
     const updatedAt = Date.parse(String(state.updated_at || ""));
@@ -2016,6 +2130,7 @@ function returnToHome(): void {
   activeDraftKey.value = "";
   activeOngoingKey.value = "";
   selectedKeys.clear();
+  clearOngoingEdits();
   records.value = [];
   ongoing.value = [];
   zhihangRecords.value = [];
@@ -2041,7 +2156,7 @@ function switchScope(scope: string): void {
   userSelectedWorkType.value = false;
   activeDraftKey.value = "";
   activeOngoingKey.value = "";
-  ongoingEdits.clear();
+  clearOngoingEdits();
   records.value = [];
   ongoing.value = [];
   zhihangRecords.value = [];
@@ -3019,6 +3134,7 @@ async function uploadSitePhotoFile(file: File): Promise<Dict> {
       mime_type: data.mime_type || file.type || "image/png",
       size: data.size || file.size || 0,
       expires_at: data.expires_at || 0,
+      preview_url: URL.createObjectURL(file),
     };
   } catch (error: any) {
     throw new Error(error?.message || "现场照片上传失败");
@@ -3097,9 +3213,44 @@ function removeOngoingPhoto(item: Dict, index: number): void {
   const key = ongoingLineKey(item);
   const edit = ongoingDraft(item);
   const images = ongoingExtraImages(item).slice();
+  revokePhotoPreview(images[index]);
   images.splice(index, 1);
   edit.extra_images = images;
   ongoingEdits.set(key, edit);
+}
+
+function revokePhotoPreview(photo: Dict | undefined): void {
+  const url = String(photo?.preview_url || "");
+  if (url.startsWith("blob:")) {
+    try {
+      URL.revokeObjectURL(url);
+    } catch {
+      // Best effort only; failing to revoke should not block user actions.
+    }
+  }
+}
+
+function revokeOngoingEditPreviews(edit: Dict | undefined): void {
+  const images = Array.isArray(edit?.extra_images) ? edit.extra_images : [];
+  for (const photo of images) revokePhotoPreview(photo);
+}
+
+function deleteOngoingEdit(key: string): void {
+  if (!key) return;
+  revokeOngoingEditPreviews(ongoingEdits.get(key));
+  ongoingEdits.delete(key);
+}
+
+function clearOngoingEdits(): void {
+  for (const edit of ongoingEdits.values()) revokeOngoingEditPreviews(edit);
+  ongoingEdits.clear();
+}
+
+function ongoingExtraImagesForUpload(item: Dict): Dict[] {
+  return ongoingExtraImages(item).map((photo) => {
+    const { preview_url: _previewUrl, data_url: _dataUrl, ...rest } = photo || {};
+    return rest;
+  });
 }
 
 function buildOngoingPayload(item: Dict, action: string): Dict {
@@ -3153,7 +3304,7 @@ function buildOngoingPayload(item: Dict, action: string): Dict {
     quantity: workType === "power" ? draftValue(edit, "quantity", item.quantity || "") : "",
     fault_time: workType === "repair" ? endTime : "",
     expected_time: workType === "repair" ? startTime : "",
-    extra_images: ongoingExtraImages(item),
+    extra_images: ongoingExtraImagesForUpload(item),
     operation_id: opId(`${item.active_item_id || targetRecordId || sourceRecordId}:${action}`),
   };
 }
@@ -3634,11 +3785,61 @@ function stopActiveItemsSse(): void {
   activeItemsStreamScope = "";
 }
 
+function requestActionConfirm(options: {
+  tone?: ActionConfirmTone;
+  kicker?: string;
+  title: string;
+  message: string;
+  details?: string[];
+  confirmLabel?: string;
+  cancelLabel?: string;
+}): Promise<boolean> {
+  return new Promise((resolve) => {
+    const tone = options.tone || "primary";
+    Object.assign(actionConfirm, {
+      open: true,
+      tone,
+      kicker: options.kicker || "操作确认",
+      title: options.title,
+      message: options.message,
+      details: Array.isArray(options.details) ? options.details : [],
+      confirmLabel: options.confirmLabel || "确认",
+      cancelLabel: options.cancelLabel || "取消",
+      confirmClass: tone === "danger" ? "danger" : tone === "warning" ? "green" : "blue",
+      resolve,
+    });
+  });
+}
+
+function resolveActionConfirm(confirmed: boolean): void {
+  const resolver = actionConfirm.resolve;
+  Object.assign(actionConfirm, {
+    open: false,
+    title: "",
+    message: "",
+    details: [],
+    resolve: undefined,
+  });
+  resolver?.(confirmed);
+}
+
 async function deleteOngoing(item: Dict): Promise<void> {
   const key = ongoingLineKey(item);
   const targetRecordId = targetRecordIdForOngoing(item);
   const sourceRecordId = sourceRecordIdForOngoing(item, targetRecordId);
-  if (!window.confirm(`确认删除「${ongoingTitle(item)}」？将同步删除 Qt 条目和多维记录。`)) return;
+  const confirmed = await requestActionConfirm({
+    tone: "danger",
+    kicker: "删除进行中通告",
+    title: ongoingTitle(item),
+    message: "确认删除这条进行中通告？",
+    details: [
+      "会同步移除前端和 Qt 界面的进行中条目。",
+      targetRecordId ? "会尝试删除对应目标多维记录。" : "该条暂无目标多维记录，只删除本地显示状态。",
+      "删除后可在近三天可回退中恢复。",
+    ],
+    confirmLabel: "确认删除",
+  });
+  if (!confirmed) return;
   try {
     rememberJob(key, { text: "删除中", status: "busy", phase: "deleting" });
     await api("/api/ongoing-items/delete", {
@@ -3671,7 +3872,19 @@ async function applyUndo(item: Dict): Promise<void> {
   if (isLineBusy(key)) return;
   const title = String(item.title || ongoingTitle(item) || "该通告").trim();
   const label = String(item.undo_label || "回退上一步").trim();
-  if (!window.confirm(`确认对「${title}」执行${label}？\n\n回退会同步恢复本地状态、Qt/前端展示和多维目标表记录。`)) return;
+  const confirmed = await requestActionConfirm({
+    tone: "warning",
+    kicker: "回退通告操作",
+    title,
+    message: `确认执行${label}？`,
+    details: [
+      "会同步恢复 SQLite 本地状态。",
+      "会刷新前端和 Qt 展示。",
+      "会按回退记录恢复或重建目标多维记录。",
+    ],
+    confirmLabel: label,
+  });
+  if (!confirmed) return;
   try {
     rememberJob(key, { text: "已受理，正在回退", status: "busy", phase: "undo_queued" });
     const data = await api(`/api/notice-undo/${encodeURIComponent(undoId)}/apply`, {
@@ -3749,6 +3962,10 @@ async function logout(): Promise<void> {
 }
 
 async function submitPermissionRequest(): Promise<void> {
+  if (!permissionPanelRequestableScopes.value.length) {
+    permissionRequest.message = "当前没有可申请的楼栋权限。";
+    return;
+  }
   permissionBusy.value = true;
   try {
     const data = await api("/api/auth/permission-requests", {
@@ -3768,6 +3985,30 @@ function updatePermissionRequest(patch: Partial<typeof permissionRequest>): void
   Object.assign(permissionRequest, patch);
 }
 
+async function openAdditionalPermissionRequest(): Promise<void> {
+  Object.assign(permissionRequest, {
+    scopes: [],
+    reason: "",
+    code: "",
+    requestId: "",
+    message: "",
+  });
+  showPermissionRequestPanel.value = true;
+  await loadCurrentPermissionRequest();
+}
+
+function closePermissionRequestPanel(): void {
+  showPermissionRequestPanel.value = false;
+  Object.assign(permissionRequest, {
+    scopes: [],
+    reason: "",
+    code: "",
+    requestId: "",
+    message: "",
+  });
+  syncText.value = "请选择功能";
+}
+
 async function confirmPermissionRequest(): Promise<void> {
   permissionBusy.value = true;
   try {
@@ -3779,6 +4020,8 @@ async function confirmPermissionRequest(): Promise<void> {
     if (auth.scopeOptions.length) {
       await Promise.all([loadOverview(), loadHandoverLinks()]);
       isWorkbench.value = false;
+      showPermissionRequestPanel.value = false;
+      Object.assign(permissionRequest, { scopes: [], reason: "", code: "", requestId: "", message: "" });
       syncText.value = "请选择功能";
       if (!isJobStreamStarted()) startJobSse();
     }
@@ -3798,6 +4041,12 @@ onMounted(async () => {
   pageVisible.value = !document.hidden;
   document.addEventListener("visibilitychange", handleVisibilityChange);
   window.addEventListener(AUTH_EXPIRED_EVENT, handleGlobalAuthExpired);
+  if (isSignaturePage.value) {
+    authChecking.value = false;
+    syncText.value = "";
+    void loadAuthStatus({ silent: true }).catch(() => null);
+    return;
+  }
   await loadAuthStatus();
   if (auth.loggedIn && !auth.scopeOptions.length) {
     await loadCurrentPermissionRequest();
@@ -3846,6 +4095,11 @@ onBeforeUnmount(() => {
   background: #eef3f8;
   color: #0f172a;
   font-family: "Microsoft YaHei", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.app-shell.signature-link-shell {
+  min-height: 100dvh;
+  overflow: hidden;
 }
 
 .topbar {
@@ -5555,6 +5809,98 @@ h1 {
 .btn.blue:hover:not(:disabled),
 .segmented button.active:hover:not(:disabled) {
   background: #1554df;
+}
+
+.action-confirm-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(9, 32, 74, 0.34);
+  backdrop-filter: blur(8px);
+}
+
+.action-confirm-modal {
+  width: min(520px, 100%);
+  overflow: hidden;
+  border: 1px solid #d8e5f7;
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 28px 80px rgba(0, 47, 135, 0.22);
+}
+
+.action-confirm-modal header {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 20px;
+  border-bottom: 1px solid #edf3fb;
+  background: linear-gradient(135deg, #f8fbff, #ffffff);
+}
+
+.action-confirm-modal header span {
+  display: block;
+  color: #155dfc;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.action-confirm-modal header strong {
+  display: block;
+  margin-top: 5px;
+  color: #09204a;
+  font-size: 18px;
+  line-height: 1.35;
+}
+
+.action-confirm-modal.tone-danger header span {
+  color: #e11d48;
+}
+
+.action-confirm-modal.tone-warning header span {
+  color: #b45309;
+}
+
+.action-confirm-modal p {
+  margin: 0;
+  padding: 18px 20px 8px;
+  color: #334155;
+  line-height: 1.65;
+}
+
+.action-confirm-modal ul {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0 20px 18px 38px;
+  color: #64748b;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.action-confirm-modal footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 14px 20px 18px;
+  border-top: 1px solid #edf3fb;
+  background: rgba(248, 251, 255, 0.72);
+}
+
+.icon-btn {
+  display: inline-grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border: 1px solid #d8e5f7;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #64748b;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
 }
 
 .btn.green {

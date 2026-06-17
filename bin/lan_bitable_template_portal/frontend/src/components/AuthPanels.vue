@@ -11,9 +11,11 @@
   </section>
 
   <section v-else class="center-state request-panel">
-    <strong>当前账号暂无门户权限</strong>
-    <p>{{ user?.name || "" }} {{ user?.open_id || "" }}</p>
-    <div class="scope-checks">
+    <button v-if="showBack" class="back-link" type="button" @click="$emit('back')">返回功能选择</button>
+    <strong>{{ title || "当前账号暂无门户权限" }}</strong>
+    <p>{{ description || "请选择需要访问的楼栋或园区，提交后由管理员发放验证码。" }}</p>
+    <p class="user-line">{{ user?.name || "" }} {{ user?.open_id || "" }}</p>
+    <div v-if="requestableScopes.length" class="scope-checks">
       <label
         v-for="scope in requestableScopes"
         :key="scope.value"
@@ -29,13 +31,14 @@
         {{ scope.label }}
       </label>
     </div>
+    <p v-else class="hint">{{ emptyText || "当前没有可继续申请的楼栋权限。" }}</p>
     <textarea
       :value="request.reason"
       placeholder="申请原因"
       @input="$emit('update-request', { reason: ($event.target as HTMLTextAreaElement).value })"
     ></textarea>
     <div class="row-actions">
-      <button class="btn blue" :disabled="busy" @click="$emit('submit')">提交申请</button>
+      <button class="btn blue" :disabled="busy || !requestableScopes.length" @click="$emit('submit')">提交申请</button>
     </div>
     <div v-if="request.requestId" class="verify-box">
       <span>申请已发送给管理员，请输入验证码。</span>
@@ -67,11 +70,16 @@ const props = defineProps<{
     message: string;
   };
   requestableScopes: Array<{ value: string; label: string }>;
+  title?: string;
+  description?: string;
+  emptyText?: string;
+  showBack?: boolean;
 }>();
 
 const emit = defineEmits<{
   submit: [];
   confirm: [];
+  back: [];
   "update-request": [patch: Partial<typeof props.request>];
 }>();
 
@@ -103,6 +111,17 @@ function toggleScope(scope: string, checked: boolean): void {
   color: #071634;
   font-size: 24px;
   font-weight: 900;
+}
+
+.back-link {
+  min-height: 34px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: #0757d7;
+  font-size: 13px;
+  font-weight: 900;
+  cursor: pointer;
 }
 
 .spinner {
@@ -157,6 +176,11 @@ p,
   margin: 0;
   color: #64748b;
   font-size: 13px;
+}
+
+.user-line {
+  color: #31445f;
+  font-weight: 700;
 }
 
 .scope-checks,

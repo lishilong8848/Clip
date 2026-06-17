@@ -35,6 +35,15 @@
       </article>
     </div>
 
+    <div v-if="canRequestMoreScopes" class="permission-more-card">
+      <div>
+        <span class="feature-kicker">权限申请</span>
+        <strong>需要访问其他楼栋？</strong>
+        <p>提交申请后，管理员会收到验证码，确认后即可追加楼栋权限。</p>
+      </div>
+      <button class="secondary" @click="$emit('request-permission')">申请其他楼权限</button>
+    </div>
+
     <div v-if="!activeFeature" class="feature-grid">
       <article class="feature-card">
         <div class="feature-visual workbench-visual" aria-hidden="true"></div>
@@ -125,11 +134,13 @@ const props = defineProps<{
   scopeOptions: Array<{ value: string; label: string }>;
   overview: Record<string, Dict>;
   handoverLinks: Record<string, string>;
+  canRequestMoreScopes?: boolean;
 }>();
 
 defineEmits<{
   enter: [scope: string];
   engineer: [scope: string];
+  "request-permission": [];
 }>();
 
 const activeFeature = ref<"" | "workbench" | "handover" | "engineer">("");
@@ -178,6 +189,34 @@ function metricText(scope: string): string {
 .scope-grid {
   display: grid;
   gap: 22px;
+}
+
+.permission-more-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 20px 22px;
+  border: 1px solid rgba(54, 112, 200, 0.14);
+  border-radius: 18px;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.98), rgba(245, 249, 255, 0.96)),
+    radial-gradient(circle at 8% 24%, rgba(22, 120, 255, 0.12), transparent 30%);
+  box-shadow: 0 16px 38px rgba(22, 78, 151, 0.1);
+}
+
+.permission-more-card strong {
+  display: block;
+  margin-top: 6px;
+  color: #081936;
+  font-size: 20px;
+  font-weight: 900;
+}
+
+.permission-more-card p {
+  margin: 8px 0 0;
+  color: #5c708c;
+  font-size: 13px;
 }
 
 .home-metrics {

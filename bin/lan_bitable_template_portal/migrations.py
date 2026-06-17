@@ -24,6 +24,7 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
     (15, "notice_work_type_overrides"),
     (16, "notice_upload_attachments"),
     (17, "mop_notice_bindings"),
+    (18, "signature_link_tokens"),
 )
 
 

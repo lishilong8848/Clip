@@ -17,6 +17,16 @@
     </div>
     <template v-else>
       <div class="ongoing-expanded" @click.stop>
+        <div class="notice-completion-panel">
+          <span
+            v-for="item in completionItems"
+            :key="item.key"
+            :class="{ done: item.done, pending: !item.done }"
+          >
+            <strong>{{ item.label }}</strong>
+            <em>{{ item.text }}</em>
+          </span>
+        </div>
         <div class="form-grid">
           <label>
             {{ noticeFieldLabel(workType, "title") }}
@@ -162,7 +172,12 @@
             </div>
           </div>
         </section>
-        <section class="site-photo-fields" tabindex="0" @paste.stop="emitPhotoPaste">
+        <section
+          class="site-photo-fields"
+          :class="{ required: sitePhotoRequired, missing: sitePhotoRequired && photoCount === 0 }"
+          tabindex="0"
+          @paste.stop="emitPhotoPaste"
+        >
           <div class="site-photo-head">
             <h3>现场照片</h3>
             <span :class="{ required: sitePhotoRequired && photoCount === 0 }">已添加 {{ photoCount }} 张</span>
@@ -186,20 +201,32 @@
               v-for="(photo, index) in draft.extra_images || []"
               :key="`${lineKey}:photo:${index}`"
               class="site-photo-chip"
+              :class="{ 'has-preview': Boolean(photoPreviewUrl(photo)) }"
               type="button"
               @click="emit('remove-photo', index)"
             >
-              {{ photo.file_name || `现场照片 ${index + 1}` }} ×
+              <img v-if="photoPreviewUrl(photo)" :src="photoPreviewUrl(photo)" :alt="photo.file_name || `现场照片 ${index + 1}`" loading="lazy" />
+              <span>{{ photo.file_name || `现场照片 ${index + 1}` }}</span>
+              <em>移除</em>
             </button>
           </div>
         </section>
-        <div class="card-actions">
+        <div class="card-actions action-clusters">
           <span class="job-line" :class="jobClass(lineKey)">{{ jobText(lineKey) }}</span>
-          <button class="btn blue" :disabled="busy" @click="emit('send', 'update')">发送{{ workTypeLabel(workType) }}更新</button>
-          <button class="btn green" :disabled="busy" @click="emit('send', 'end')">发送{{ workTypeLabel(workType) }}结束</button>
-          <button class="btn danger" :disabled="busy" @click="emit('delete')">删除</button>
-          <button v-if="needsBinding" class="btn ghost" :disabled="busy" @click="emit('bind-target')">关联目标记录</button>
-          <button v-if="item.undo_available" class="btn ghost" :disabled="undoBusy" @click="emit('apply-undo')">回退</button>
+          <div class="action-group primary-actions">
+            <strong>通告操作</strong>
+            <button class="btn blue" :disabled="busy" @click="emit('send', 'update')">发送{{ workTypeLabel(workType) }}更新</button>
+            <button class="btn green" :disabled="busy" @click="emit('send', 'end')">发送{{ workTypeLabel(workType) }}结束</button>
+          </div>
+          <div v-if="needsBinding" class="action-group fix-actions">
+            <strong>异常修复</strong>
+            <button class="btn ghost" :disabled="busy" @click="emit('bind-target')">关联目标记录</button>
+          </div>
+          <div class="action-group danger-actions">
+            <strong>危险操作</strong>
+            <button class="btn danger" :disabled="busy" @click="emit('delete')">删除</button>
+            <button v-if="item.undo_available" class="btn ghost" :disabled="undoBusy" @click="emit('apply-undo')">回退</button>
+          </div>
         </div>
         <div v-if="item.undo_available" class="undo-line">
           {{ item.undo_label || "可回退上一步" }}
@@ -217,6 +244,7 @@ import {
   isNoticeMessageField,
   isNoticeUploadField,
   noticeFieldLabel,
+  noticeTemplate,
   workTypeLabel,
 } from "../noticeTemplates";
 import SpecialtyInput from "./SpecialtyInput.vue";
@@ -258,6 +286,55 @@ const emit = defineEmits<{
 }>();
 
 const workType = computed(() => props.item.work_type || "maintenance");
+const messageFieldStatus = computed(() => {
+  const fields = noticeTemplate(workType.value).messageFields;
+  const total = fields.length;
+  const done = fields.filter((field) => hasValue(props.draft[field] ?? props.item[field])).length;
+  return { total, done };
+});
+const uploadFieldStatus = computed(() => {
+  const fields = noticeTemplate(workType.value).uploadFields.filter((field) => field !== "non_plan" && field !== "zhihang");
+  const total = fields.length;
+  const done = fields.filter((field) => hasValue(props.draft[field] ?? props.item[field])).length;
+  return { total, done };
+});
+const zhihangStatus = computed(() => {
+  if (!isNoticeUploadField(workType.value, "zhihang")) return { required: false, done: true, text: "不涉及" };
+  const involved = Boolean(props.draft.zhihang_involved || props.item.zhihang_involved);
+  if (!involved) return { required: true, done: true, text: "未涉及" };
+  const selected = hasValue(props.draft.zhihang_record_id || props.item.zhihang_record_id);
+  return { required: true, done: selected, text: selected ? "已绑定" : "待选择" };
+});
+const completionItems = computed(() => {
+  const photoDone = !props.sitePhotoRequired || props.photoCount > 0;
+  const uploadDone = uploadFieldStatus.value.total === 0 || uploadFieldStatus.value.done >= uploadFieldStatus.value.total;
+  return [
+    {
+      key: "message",
+      label: "通告字段",
+      text: `${messageFieldStatus.value.done}/${messageFieldStatus.value.total}`,
+      done: messageFieldStatus.value.done >= messageFieldStatus.value.total,
+    },
+    {
+      key: "upload",
+      label: "上传字段",
+      text: uploadFieldStatus.value.total ? `${uploadFieldStatus.value.done}/${uploadFieldStatus.value.total}` : "无额外字段",
+      done: uploadDone,
+    },
+    {
+      key: "photo",
+      label: "现场照片",
+      text: props.sitePhotoRequired ? `${props.photoCount} 张 / 必填` : `${props.photoCount} 张 / 可选`,
+      done: photoDone,
+    },
+    {
+      key: "zhihang",
+      label: "智航绑定",
+      text: zhihangStatus.value.text,
+      done: zhihangStatus.value.done,
+    },
+  ];
+});
 
 function setEdit(key: string, value: any): void {
   emit("set-edit", key, value);
@@ -265,6 +342,20 @@ function setEdit(key: string, value: any): void {
 
 function emitPhotoPaste(event: ClipboardEvent): void {
   emit("photo-paste", event);
+}
+
+function hasValue(value: unknown): boolean {
+  return String(value ?? "").trim() !== "";
+}
+
+function photoPreviewUrl(photo: Dict): string {
+  const direct = String(photo?.preview_url || photo?.url || photo?.download_url || "").trim();
+  if (direct) return direct;
+  const dataUrl = String(photo?.data_url || "").trim();
+  if (dataUrl.startsWith("data:image/")) return dataUrl;
+  const bytes = String(photo?.bytes_b64 || "").trim();
+  const mime = String(photo?.mime_type || "image/png").trim() || "image/png";
+  return bytes ? `data:${mime};base64,${bytes}` : "";
 }
 </script>
 
@@ -493,13 +584,44 @@ textarea {
 }
 
 .site-photo-chip {
+  display: inline-grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  max-width: 100%;
   border: 1px solid #bfdbfe;
-  border-radius: 999px;
-  padding: 5px 9px;
+  border-radius: 12px;
+  padding: 6px 8px;
   background: #ffffff;
   color: #1d4ed8;
   font-size: 12px;
+  text-align: left;
   cursor: pointer;
+}
+
+.site-photo-chip img {
+  width: 42px;
+  height: 32px;
+  border-radius: 8px;
+  object-fit: cover;
+  background: #eff6ff;
+}
+
+.site-photo-chip span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.site-photo-chip em {
+  color: #dc2626;
+  font-style: normal;
+  font-weight: 800;
+}
+
+.site-photo-chip:not(.has-preview) {
+  grid-template-columns: minmax(0, 1fr) auto;
 }
 
 .site-photo-chip:hover {
@@ -817,6 +939,119 @@ textarea:focus {
 
 .btn.danger {
   background: #e11d48;
+}
+
+.notice-completion-panel {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.notice-completion-panel span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid #d8e5f7;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.86);
+}
+
+.notice-completion-panel span.done {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+}
+
+.notice-completion-panel span.pending {
+  border-color: #fde68a;
+  background: #fffbeb;
+}
+
+.notice-completion-panel strong {
+  color: #09204a;
+  font-size: 12px;
+  font-weight: 820;
+}
+
+.notice-completion-panel em {
+  overflow: hidden;
+  color: #64748b;
+  font-size: 12px;
+  font-style: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.site-photo-fields.required {
+  border-color: #bfdbfe;
+}
+
+.site-photo-fields.missing {
+  border-color: #fecaca;
+  background: #fff7f7;
+}
+
+.site-photo-head span.required {
+  border-radius: 999px;
+  padding: 3px 8px;
+  color: #b91c1c;
+  background: #fee2e2;
+  font-weight: 800;
+}
+
+.action-clusters {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) auto auto auto;
+  align-items: start;
+  gap: 8px;
+}
+
+.action-group {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid #d8e5f7;
+  border-radius: 14px;
+  background: rgba(248, 251, 255, 0.82);
+}
+
+.action-group > strong {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 820;
+}
+
+.primary-actions {
+  grid-template-columns: auto auto;
+}
+
+.primary-actions > strong {
+  grid-column: 1 / -1;
+}
+
+.fix-actions {
+  border-color: #bfdbfe;
+  background: #eff6ff;
+}
+
+.danger-actions {
+  border-color: #fde68a;
+  background: #fffbeb;
+}
+
+@media (max-width: 720px) {
+  .notice-completion-panel {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .action-clusters {
+    grid-template-columns: 1fr;
+  }
+
+  .primary-actions {
+    grid-template-columns: 1fr;
+  }
 }
 </style>
 

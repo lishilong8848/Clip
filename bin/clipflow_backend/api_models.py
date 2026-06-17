@@ -129,8 +129,41 @@ class EngineerMopBindRequest(APIModel):
 class EngineerMopSettingsSaveRequest(APIModel):
     mop_app_token: str = ""
     mop_table_id: str = ""
-    mop_title_field: str = "名称"
-    mop_attachment_field: str = "附件"
+    mop_view_id: str = ""
+    mop_title_field: str = "文件名"
+    mop_attachment_field: str = "文件"
+
+
+class SignatureSaveRequest(APIModel):
+    record_id: str = ""
+    token: str = ""
+    signature_png: str = ""
+    signer_name: str = ""
+
+
+class SignatureSendLinkRequest(APIModel):
+    record_id: str = ""
+    signer_name: str = ""
+    scope: str = ""
+
+
+class EngineerMopFillRequest(APIModel):
+    scope: str = "ALL"
+    local_file_path: str = ""
+    mop_record_id: str = ""
+    mop_title: str = ""
+    sheet_name: str = ""
+    fields: list[dict[str, Any]] = Field(default_factory=list)
+    checkboxes: list[dict[str, Any]] = Field(default_factory=list)
+    signatures: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class EngineerMopResetRequest(APIModel):
+    scope: str = "ALL"
+    filled_file_path: str = ""
+    mop_record_id: str = ""
+    file_token: str = ""
+    file_name: str = ""
 
 
 class ChangeTargetLookupRequest(APIModel):

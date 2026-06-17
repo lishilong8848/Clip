@@ -18,6 +18,27 @@
       </nav>
 
       <section v-if="message" class="message">{{ message }}</section>
+      <div v-if="confirmDialog.open" class="admin-confirm-backdrop" @click.self="resolveConfirm(false)">
+        <section class="admin-confirm-modal" :class="`tone-${confirmDialog.tone}`" role="dialog" aria-modal="true">
+          <div class="confirm-icon">{{ confirmDialog.tone === "danger" ? "!" : "i" }}</div>
+          <div>
+            <span>{{ confirmDialog.kicker }}</span>
+            <h3>{{ confirmDialog.title }}</h3>
+            <p>{{ confirmDialog.message }}</p>
+            <ul v-if="confirmDialog.details.length">
+              <li v-for="item in confirmDialog.details" :key="item">{{ item }}</li>
+            </ul>
+            <div class="confirm-actions">
+              <button class="btn ghost" type="button" @click="resolveConfirm(false)">
+                {{ confirmDialog.cancelLabel }}
+              </button>
+              <button class="btn" :class="confirmDialog.confirmClass" type="button" @click="resolveConfirm(true)">
+                {{ confirmDialog.confirmLabel }}
+              </button>
+            </div>
+          </div>
+        </section>
+      </div>
 
       <section v-if="tab === 'status'" class="pane">
         <div class="actions">
@@ -258,12 +279,16 @@
             <input v-model="mopSettings.mop_table_id" placeholder="维保MOP所在表 table_id" />
           </label>
           <label>
+            MOP view_id
+            <input v-model="mopSettings.mop_view_id" placeholder="可选，默认读取 MOP 文件视图" />
+          </label>
+          <label>
             标题字段名
-            <input v-model="mopSettings.mop_title_field" placeholder="名称" />
+            <input v-model="mopSettings.mop_title_field" placeholder="文件名" />
           </label>
           <label>
             附件字段名
-            <input v-model="mopSettings.mop_attachment_field" placeholder="附件" />
+            <input v-model="mopSettings.mop_attachment_field" placeholder="文件" />
           </label>
         </div>
         <p class="muted-line">
@@ -379,8 +404,9 @@ const handoverPassword = ref("");
 const mopSettings = reactive({
   mop_app_token: "",
   mop_table_id: "",
-  mop_title_field: "名称",
-  mop_attachment_field: "附件",
+  mop_view_id: "",
+  mop_title_field: "文件名",
+  mop_attachment_field: "文件",
 });
 const pressure = reactive({
   count: 60,
@@ -394,6 +420,18 @@ const pressure = reactive({
   max_failed: 0,
 });
 const pressureResult = ref<Dict>({});
+const confirmDialog = reactive({
+  open: false,
+  tone: "danger" as "danger" | "warning" | "primary",
+  kicker: "",
+  title: "",
+  message: "",
+  details: [] as string[],
+  confirmLabel: "确认",
+  cancelLabel: "取消",
+  confirmClass: "danger",
+  resolve: undefined as undefined | ((confirmed: boolean) => void),
+});
 
 const attachmentUsagePercent = computed(() => {
   const used = Number(stats.value.upload_attachments?.total_bytes || 0);
@@ -620,7 +658,15 @@ async function retryJob(job: Dict): Promise<void> {
 async function clearJob(job: Dict): Promise<void> {
   const jobId = String(job?.job_id || "").trim();
   if (!jobId || !job.can_clear) return;
-  if (!window.confirm(`确认清理任务 ${shortId(jobId)}？`)) return;
+  const confirmed = await requestConfirm({
+    tone: "danger",
+    kicker: "任务清理",
+    title: `清理任务 ${shortId(jobId)}`,
+    message: "清理后该终态任务会从最近任务列表移除，不影响已经写入的通告记录。",
+    details: ["仅清理后台任务记录", "不会删除 Qt 条目、多维记录或权限配置"],
+    confirmLabel: "确认清理",
+  });
+  if (!confirmed) return;
   busy.value = true;
   try {
     await api(`/api/jobs/${encodeURIComponent(jobId)}/clear`, { method: "POST", body: "{}" });
@@ -636,7 +682,15 @@ async function clearJob(job: Dict): Promise<void> {
 async function markStuckFailed(job: Dict): Promise<void> {
   const jobId = String(job?.job_id || "").trim();
   if (!jobId || !job.can_mark_stuck_failed) return;
-  const ok = window.confirm(`确认将任务 ${shortId(jobId)} 标记为卡住失败？之后可按需点击重试。`);
+  const ok = await requestConfirm({
+    tone: "warning",
+    kicker: "卡住任务处理",
+    title: `标记任务 ${shortId(jobId)} 为失败`,
+    message: "该操作用于释放卡住的后台任务。标记失败后，可在最近任务里按需重试。",
+    details: ["不会重复发送已成功的个人消息", "重试仍会走后端队列和幂等检查"],
+    confirmLabel: "标记失败",
+    confirmClass: "blue",
+  });
   if (!ok) return;
   busy.value = true;
   try {
@@ -671,15 +725,54 @@ function addPermissionUser(): void {
   permissions.users.push({ open_id: "", name: "", role: "building", scopes: [], enabled: true });
 }
 
-function removePermissionUser(user: Dict): void {
+async function removePermissionUser(user: Dict): Promise<void> {
   if (user.locked) return;
   const label = String(user.name || user.open_id || "该用户");
-  if (!window.confirm(`确认删除「${label}」的门户权限？保存后生效。`)) return;
+  const confirmed = await requestConfirm({
+    tone: "danger",
+    kicker: "权限删除",
+    title: `删除「${label}」`,
+    message: "该人员会先从当前编辑列表移除，点击保存权限后才真正生效。",
+    details: ["固定管理员不会被删除", "删除后该 openid 将无法进入已授权楼栋"],
+    confirmLabel: "移除人员",
+  });
+  if (!confirmed) return;
   const index = permissions.users.indexOf(user);
   if (index >= 0) {
     permissions.users.splice(index, 1);
     message.value = "已从列表移除，点击保存权限后生效。";
   }
+}
+
+function requestConfirm(options: {
+  tone?: "danger" | "warning" | "primary";
+  kicker: string;
+  title: string;
+  message: string;
+  details?: string[];
+  confirmLabel?: string;
+  cancelLabel?: string;
+  confirmClass?: string;
+}): Promise<boolean> {
+  confirmDialog.open = true;
+  confirmDialog.tone = options.tone || "danger";
+  confirmDialog.kicker = options.kicker;
+  confirmDialog.title = options.title;
+  confirmDialog.message = options.message;
+  confirmDialog.details = options.details || [];
+  confirmDialog.confirmLabel = options.confirmLabel || "确认";
+  confirmDialog.cancelLabel = options.cancelLabel || "取消";
+  confirmDialog.confirmClass = options.confirmClass || (confirmDialog.tone === "danger" ? "danger" : "blue");
+  return new Promise((resolve) => {
+    confirmDialog.resolve = resolve;
+  });
+}
+
+function resolveConfirm(confirmed: boolean): void {
+  const resolver = confirmDialog.resolve;
+  confirmDialog.open = false;
+  confirmDialog.resolve = undefined;
+  if (resolver) resolver(confirmed);
 }
 
 function toggleUserScope(user: Dict, scope: string, checked: boolean): void {
@@ -737,8 +830,9 @@ async function loadMopSettings(): Promise<void> {
     const data = await api("/api/admin/mop-settings");
     mopSettings.mop_app_token = String(data.mop_app_token || "");
     mopSettings.mop_table_id = String(data.mop_table_id || "");
-    mopSettings.mop_title_field = String(data.mop_title_field || "名称");
-    mopSettings.mop_attachment_field = String(data.mop_attachment_field || "附件");
+    mopSettings.mop_view_id = String(data.mop_view_id || "");
+    mopSettings.mop_title_field = String(data.mop_title_field || "文件名");
+    mopSettings.mop_attachment_field = String(data.mop_attachment_field || "文件");
   } catch (error: any) {
     message.value = error?.message || "MOP 配置加载失败";
   } finally {
@@ -755,8 +849,9 @@ async function saveMopSettings(): Promise<void> {
     });
     mopSettings.mop_app_token = String(data.mop_app_token || "");
     mopSettings.mop_table_id = String(data.mop_table_id || "");
-    mopSettings.mop_title_field = String(data.mop_title_field || "名称");
-    mopSettings.mop_attachment_field = String(data.mop_attachment_field || "附件");
+    mopSettings.mop_view_id = String(data.mop_view_id || "");
+    mopSettings.mop_title_field = String(data.mop_title_field || "文件名");
+    mopSettings.mop_attachment_field = String(data.mop_attachment_field || "文件");
     message.value = "MOP 配置已保存";
   } catch (error: any) {
     message.value = error?.message || "MOP 配置保存失败";
@@ -1706,6 +1801,79 @@ select:focus {
 
 .scope-checks label:has(input:checked) {
   background: linear-gradient(135deg, #1e63ff, #1554df);
+}
+
+.admin-confirm-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(9, 32, 74, 0.46);
+  backdrop-filter: blur(8px);
+}
+
+.admin-confirm-modal {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  gap: 16px;
+  width: min(520px, calc(100vw - 40px));
+  border: 1px solid #d8e5f7;
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.98);
+  padding: 20px;
+  box-shadow: 0 28px 80px rgba(0, 47, 135, 0.24);
+}
+
+.confirm-icon {
+  display: grid;
+  width: 48px;
+  height: 48px;
+  place-items: center;
+  border-radius: 16px;
+  background: linear-gradient(135deg, #1e63ff, #1554df);
+  color: #ffffff;
+  font-size: 22px;
+  font-weight: 900;
+}
+
+.admin-confirm-modal.tone-danger .confirm-icon {
+  background: linear-gradient(135deg, #ef4444, #be123c);
+}
+
+.admin-confirm-modal.tone-warning .confirm-icon {
+  background: linear-gradient(135deg, #f59e0b, #d97706);
+}
+
+.admin-confirm-modal span {
+  color: #1e63ff;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.admin-confirm-modal h3 {
+  margin: 4px 0 8px;
+  color: #09204a;
+  font-size: 20px;
+}
+
+.admin-confirm-modal p,
+.admin-confirm-modal li {
+  color: #52677f;
+  line-height: 1.65;
+}
+
+.admin-confirm-modal ul {
+  margin: 10px 0 0;
+  padding-left: 18px;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
 }
 
 @media (max-width: 1120px) {

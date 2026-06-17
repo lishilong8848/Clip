@@ -11,16 +11,21 @@ import json
 import os
 import re
 import secrets
+import tempfile
 import threading
 import time
 import uuid
 import copy
 import zipfile
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 import xml.etree.ElementTree as ET
+
+import lark_oapi as lark
+from lark_oapi.api.drive.v1 import UploadAllMediaRequest, UploadAllMediaRequestBody
 
 from upload_event_module.config import config, get_field_config
 from upload_event_module.services.feishu_service import (
@@ -55,6 +60,29 @@ REPAIR_LINK_MAX_ATTEMPTS = 18
 BITABLE_DATA_NOT_READY_CODE = 1254607
 BITABLE_TRANSIENT_RETRY_DELAYS = (1.0, 2.5, 5.0)
 MOP_CANDIDATE_CACHE_TTL_SECONDS = 10 * 60
+MOP_SOURCE_APP_TOKEN = "MliKbC3fXa8PXrsndKscmxjdn1g"
+MOP_SOURCE_TABLE_ID = "tblpqwu1kQ0bmi0i"
+MOP_SOURCE_VIEW_ID = "vewrHJHl3v"
+MOP_TITLE_FIELD_NAME = "文件名"
+MOP_ATTACHMENT_FIELD_NAME = "文件"
+SIGNATURE_APP_TOKEN = "HU38bc1vnamMK9sCeOgclUvXnFc"
+SIGNATURE_TABLE_ID = "tbluozblhRAjbljX"
+SIGNATURE_VIEW_ID = ""
+SIGNATURE_NAME_FIELD = "姓名"
+SIGNATURE_USER_FIELD = "员工姓名"
+SIGNATURE_ATTACHMENT_FIELD = "手写签名"
+SIGNATURE_INACTIVE_FIELD = "离职/异动情况"
+SIGNATURE_PEOPLE_CACHE_TTL_SECONDS = 5 * 60
+SIGNATURE_LINK_TOKEN_TTL_SECONDS = 60 * 60
+ATTACHMENT_LATEST_FIELD_NAMES = (
+    "最新发布时间",
+    "最新发布",
+    "发布时间",
+    "更新时间",
+    "最后更新时间",
+    "最新更新时间",
+)
+ATTACHMENT_CACHE_DAILY_MARKER = "attachment_cache_daily_scan.json"
 REPAIR_SOURCE_PAGE_SIZE = 200
 DEFAULT_IMPACT_TEXT = "对IT业务无影响，不会触发BA和BMS系统相关告警"
 DEFAULT_PROGRESS_TEXT = "准备工作已完成，人员已就位，可否开始操作？"
@@ -69,6 +97,7 @@ WORK_TYPE_POLLING = "polling"
 WORK_TYPE_ADJUST = "adjust"
 NOTICE_TYPE_MAINTENANCE = "维保通告"
 NOTICE_TYPE_CHANGE = "设备变更"
+NOTICE_HEADING_CHANGE = NOTICE_TYPE_CHANGE
 NOTICE_TYPE_REPAIR = "设备检修"
 NOTICE_TYPE_POWER = "上下电通告"
 NOTICE_TYPE_POLLING = "设备轮巡"
@@ -88,7 +117,7 @@ NOTICE_TEXT_TEMPLATES = {
         ),
     },
     WORK_TYPE_CHANGE: {
-        "heading": NOTICE_TYPE_CHANGE,
+        "heading": NOTICE_HEADING_CHANGE,
         "fields": (
             ("名称", "title"),
             ("等级", "level"),
@@ -203,6 +232,7 @@ END_SITE_PHOTO_REQUIRED_WORK_TYPES = {
 END_SITE_PHOTO_REQUIRED_NOTICE_TYPES = {
     NOTICE_TYPE_MAINTENANCE,
     NOTICE_TYPE_CHANGE,
+    NOTICE_HEADING_CHANGE,
     NOTICE_TYPE_REPAIR,
 }
 CHANGE_PROGRESS_NOT_STARTED = "未开始"
@@ -358,16 +388,13 @@ class MaintenancePortalService:
         self._last_loaded_at = ""
         self._last_loaded_ts = 0.0
         self._refresh_lock = threading.RLock()
+        # Legacy JSON paths are read only for one-time migration. Do not create
+        # their directories on fresh SQLite-only installs.
         self._memory_dir = Path(get_data_file_path("lan_template_memory"))
-        self._memory_dir.mkdir(parents=True, exist_ok=True)
         self._summary_dir = Path(get_data_file_path("lan_template_daily_summary"))
-        self._summary_dir.mkdir(parents=True, exist_ok=True)
         self._work_status_dir = Path(get_data_file_path("lan_template_work_status"))
-        self._work_status_dir.mkdir(parents=True, exist_ok=True)
         self._handover_links_path = Path(get_data_file_path("lan_handover_links.json"))
-        self._handover_links_path.parent.mkdir(parents=True, exist_ok=True)
         self._hidden_ongoing_path = Path(get_data_file_path("lan_template_hidden_ongoing.json"))
-        self._hidden_ongoing_path.parent.mkdir(parents=True, exist_ok=True)
         self._state_store = LanPortalStateStore()
         self._state_version_lock = threading.RLock()
         self._state_version = 0
@@ -379,6 +406,11 @@ class MaintenancePortalService:
         self._target_record_cache: dict[tuple[str, str], dict[str, Any]] = {}
         self._engineer_mop_cache_lock = threading.RLock()
         self._engineer_mop_cache: dict[str, Any] | None = None
+        self._signature_people_cache_lock = threading.RLock()
+        self._signature_people_cache: dict[str, Any] | None = None
+        self._attachment_cache_lock = threading.RLock()
+        self._attachment_cache_refresh_lock = threading.RLock()
+        self._attachment_cache_refresh_running = False
         self._jobs_lock = threading.RLock()
         self._jobs: dict[str, dict[str, Any]] = self._load_action_jobs_from_state()
         self._handover_password_reset: dict[str, Any] | None = None
@@ -490,19 +522,19 @@ class MaintenancePortalService:
             f"{app_token}/tables/{table_id}/records/{record_id}"
         )
 
-        def do_patch() -> dict[str, Any]:
+        def do_update() -> dict[str, Any]:
             return self._request_payload(
-                "PATCH",
+                "PUT",
                 url,
                 context="飞书记录更新",
                 headers={**self._auth_headers(), "Content-Type": "application/json"},
                 json_payload={"fields": fields},
             )
 
-        payload = do_patch()
+        payload = do_update()
         if int(payload.get("code") or 0) in TOKEN_ERROR_CODES:
             refresh_feishu_token()
-            payload = do_patch()
+            payload = do_update()
         code = payload.get("code", 0)
         if code != 0:
             raise PortalError(
@@ -758,11 +790,14 @@ class MaintenancePortalService:
         meta_by_name: dict[str, FieldMeta],
         work_type: str,
         notice_type: str,
+        view_id: str = "",
     ) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
         page_token = ""
         while True:
             params = {"page_size": 500}
+            if view_id:
+                params["view_id"] = view_id
             if page_token:
                 params["page_token"] = page_token
             payload = self._request_json(
@@ -4045,7 +4080,7 @@ class MaintenancePortalService:
         if not text:
             return []
         pattern = re.compile(
-            r"(?=【(?:维保通告|设备变更|设备检修|上电通告|上下电通告|设备轮巡|设备调整)】\s*状态[:：])"
+            r"(?=【(?:维保通告|设备变更|变更通告|设备检修|上电通告|上下电通告|设备轮巡|设备调整)】\s*状态[:：])"
         )
         parts = [part.strip() for part in pattern.split(text) if part.strip()]
         if len(parts) > 1:
@@ -4101,7 +4136,7 @@ class MaintenancePortalService:
             return WORK_TYPE_POLLING
         if "【设备调整】" in raw:
             return WORK_TYPE_ADJUST
-        if "【设备变更】" in raw or cls._notice_section_value(
+        if "【设备变更】" in raw or "【变更通告】" in raw or cls._notice_section_value(
             sections, ["变更等级", "变更楼栋"]
         ):
             return WORK_TYPE_CHANGE
@@ -7137,14 +7172,20 @@ class MaintenancePortalService:
             return set()
         building_key = self._ongoing_business_text_key(item.get("building") or "")
         reason_key = self._ongoing_business_text_key(item.get("reason") or "")
+        cycle_key = ""
+        if work_type == WORK_TYPE_MAINTENANCE:
+            item_fields = item.get("fields") if isinstance(item.get("fields"), dict) else {}
+            cycle_key = self._ongoing_business_text_key(
+                item.get("maintenance_cycle") or item_fields.get("维护周期") or ""
+            )
         time_key = self._ongoing_business_time_key(item)
         keys: set[str] = set()
         if building_key and reason_key:
-            keys.add(f"{work_type}:business:title-building-reason:{building_key}:{title_key}:{reason_key}")
+            keys.add(f"{work_type}:business:title-building-reason:{building_key}:{title_key}:{cycle_key}:{reason_key}")
         if building_key and time_key and reason_key:
-            keys.add(f"{work_type}:business:title-time-reason:{building_key}:{title_key}:{time_key}:{reason_key}")
+            keys.add(f"{work_type}:business:title-time-reason:{building_key}:{title_key}:{cycle_key}:{time_key}:{reason_key}")
         elif building_key and time_key:
-            keys.add(f"{work_type}:business:title-time:{building_key}:{title_key}:{time_key}")
+            keys.add(f"{work_type}:business:title-time:{building_key}:{title_key}:{cycle_key}:{time_key}")
         return keys
 
     @staticmethod
@@ -7491,18 +7532,24 @@ class MaintenancePortalService:
         app_token = str(
             settings.get("mop_app_token")
             or getattr(config, "mop_app_token", "")
-            or ""
+            or MOP_SOURCE_APP_TOKEN
         ).strip()
         table_id = str(
             settings.get("mop_table_id")
             or getattr(config, "mop_table_id", "")
-            or ""
+            or MOP_SOURCE_TABLE_ID
+        ).strip()
+        view_id = str(
+            settings.get("mop_view_id")
+            or getattr(config, "mop_view_id", "")
+            or MOP_SOURCE_VIEW_ID
         ).strip()
         return {
             "app_token": app_token,
             "table_id": table_id,
-            "title_field": str(settings.get("mop_title_field") or "名称").strip(),
-            "attachment_field": str(settings.get("mop_attachment_field") or "附件").strip(),
+            "view_id": view_id,
+            "title_field": str(settings.get("mop_title_field") or MOP_TITLE_FIELD_NAME).strip(),
+            "attachment_field": str(settings.get("mop_attachment_field") or MOP_ATTACHMENT_FIELD_NAME).strip(),
         }
 
     def _engineer_notice_key(self, item: dict[str, Any]) -> str:
@@ -7531,22 +7578,104 @@ class MaintenancePortalService:
         )
         return f"{work_type}:generated:{hashlib.sha1(seed.encode('utf-8')).hexdigest()}"
 
+    @staticmethod
+    def _normalize_engineer_mop_template_text(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        text = re.sub(r"【[^】]*】", "", text)
+        text = re.sub(r"^(EA118|南通基地|机房)+", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"(维保通告|维护通告|通告)$", "", text)
+        text = re.sub(r"[（）()\[\]【】《》<>，,。；;：:\s_\-~至/]+", "", text)
+        return text.lower()
+
+    def _engineer_mop_template_key(
+        self,
+        item: dict[str, Any],
+        *,
+        title: str = "",
+        building: str = "",
+        maintenance_total: str = "",
+        maintenance_cycle: str = "",
+    ) -> str:
+        work_type = str(item.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
+        if work_type != WORK_TYPE_MAINTENANCE:
+            return ""
+        fields = item.get("display_fields") if isinstance(item.get("display_fields"), dict) else {}
+        building_value = (
+            building
+            or item.get("building")
+            or fields.get("楼栋")
+            or fields.get("变更楼栋")
+            or ""
+        )
+        codes = item.get("building_codes") if isinstance(item.get("building_codes"), list) else []
+        if not codes:
+            codes = self._building_codes_from_value(building_value)
+        building_key = codes[0] if len(codes) == 1 else self._normalize_scope(building_value)
+        if building_key == "ALL":
+            building_key = ""
+        total_value = (
+            maintenance_total
+            or item.get("maintenance_total")
+            or item.get("memory_name")
+            or fields.get("维护总项")
+            or title
+            or item.get("title")
+            or item.get("content")
+            or ""
+        )
+        cycle_value = (
+            maintenance_cycle
+            or item.get("maintenance_cycle")
+            or fields.get("维护周期")
+            or ""
+        )
+        normalized_total = self._normalize_engineer_mop_template_text(total_value)
+        normalized_cycle = self._normalize_engineer_mop_template_text(cycle_value) or "/"
+        if not building_key or not normalized_total:
+            return ""
+        seed = json.dumps(
+            ["maintenance", building_key, normalized_total, normalized_cycle],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        return f"mop-template:{hashlib.sha1(seed.encode('utf-8')).hexdigest()}"
+
     def _serialize_engineer_notice(self, item: dict[str, Any], *, status: str = "") -> dict[str, Any]:
         work_type = str(item.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
+        fields = item.get("display_fields") if isinstance(item.get("display_fields"), dict) else {}
         title = str(item.get("title") or item.get("content") or item.get("name") or "").strip()
         start_time = str(item.get("started_at") or item.get("start_time") or item.get("time") or "").strip()
         end_time = str(item.get("ended_at") or item.get("end_time") or "").strip()
         notice_status = status or str(item.get("status") or "").strip() or ("已结束" if end_time else "进行中")
+        building = str(item.get("building") or fields.get("楼栋") or "")
+        maintenance_total = str(
+            item.get("maintenance_total")
+            or item.get("memory_name")
+            or fields.get("维护总项")
+            or ""
+        ).strip()
+        maintenance_cycle = str(item.get("maintenance_cycle") or fields.get("维护周期") or "").strip()
+        mop_template_key = self._engineer_mop_template_key(
+            item,
+            title=title,
+            building=building,
+            maintenance_total=maintenance_total,
+            maintenance_cycle=maintenance_cycle,
+        )
         return {
             "notice_key": self._engineer_notice_key(item),
+            "mop_template_key": mop_template_key,
             "work_type": work_type,
             "notice_type": str(item.get("notice_type") or NOTICE_TYPE_MAINTENANCE),
             "title": title,
             "status": notice_status,
-            "building": str(item.get("building") or ""),
+            "building": building,
             "building_codes": item.get("building_codes") if isinstance(item.get("building_codes"), list) else [],
             "specialty": str(item.get("specialty") or ""),
-            "maintenance_cycle": str(item.get("maintenance_cycle") or ""),
+            "maintenance_total": maintenance_total,
+            "maintenance_cycle": maintenance_cycle,
             "source_record_id": str(item.get("source_record_id") or ""),
             "target_record_id": canonical_target_record_id(item),
             "active_item_id": str(item.get("active_item_id") or ""),
@@ -7609,7 +7738,8 @@ class MaintenancePortalService:
         candidates: list[Any] = []
         if preferred_field and preferred_field in fields:
             candidates.append(fields.get(preferred_field))
-        candidates.extend(value for key, value in fields.items() if key != preferred_field)
+        else:
+            candidates.extend(fields.values())
         attachments: list[dict[str, Any]] = []
         seen: set[str] = set()
         for value in candidates:
@@ -7643,7 +7773,100 @@ class MaintenancePortalService:
                 )
         return attachments
 
-    def _load_engineer_mop_candidates(self) -> tuple[list[dict[str, Any]], list[str], dict[str, str]]:
+    @classmethod
+    def _attachment_latest_publish_time(cls, fields: dict[str, Any]) -> str:
+        return cls._mop_field_text(fields, list(ATTACHMENT_LATEST_FIELD_NAMES))
+
+    @staticmethod
+    def _attachment_cache_signature(
+        *,
+        category: str,
+        app_token: str,
+        table_id: str,
+        record_id: str,
+        attachment: dict[str, Any],
+        latest_publish_time: str = "",
+    ) -> dict[str, str]:
+        return {
+            "category": str(category or ""),
+            "app_token": str(app_token or ""),
+            "table_id": str(table_id or ""),
+            "record_id": str(record_id or ""),
+            "file_token": str(attachment.get("file_token") or ""),
+            "url": str(attachment.get("url") or ""),
+            "name": str(attachment.get("name") or ""),
+            "size": str(attachment.get("size") or ""),
+            "mime_type": str(attachment.get("mime_type") or ""),
+            "latest_publish_time": str(latest_publish_time or attachment.get("latest_publish_time") or ""),
+        }
+
+    def _attachment_with_cache_context(
+        self,
+        attachment: dict[str, Any],
+        *,
+        category: str,
+        app_token: str,
+        table_id: str,
+        record_id: str,
+        latest_publish_time: str = "",
+    ) -> dict[str, Any]:
+        item = dict(attachment or {})
+        item["cache_category"] = category
+        item["app_token"] = app_token
+        item["table_id"] = table_id
+        item["record_id"] = record_id
+        item["latest_publish_time"] = latest_publish_time
+        return item
+
+    @classmethod
+    def _extract_signature_attachments(cls, fields: dict[str, Any]) -> list[dict[str, Any]]:
+        attachments = cls._extract_mop_attachments(fields, SIGNATURE_ATTACHMENT_FIELD)
+        usable: list[dict[str, Any]] = []
+        for item in attachments:
+            if not isinstance(item, dict):
+                continue
+            token = str(item.get("file_token") or "").strip()
+            name = str(item.get("name") or "").strip().lower()
+            mime_type = str(item.get("mime_type") or "").strip().lower()
+            size_text = str(item.get("size") or "").strip()
+            if size_text in {"0", "0.0"}:
+                continue
+            image_like = (
+                mime_type.startswith("image/")
+                or name.endswith((".png", ".jpg", ".jpeg", ".webp", ".bmp"))
+            )
+            if token and image_like:
+                usable.append(item)
+        return usable
+
+    @staticmethod
+    def _signature_person_inactive(value: Any) -> bool:
+        """Return True when the signature person is marked resigned/transferred."""
+
+        if value is None:
+            return False
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, (list, tuple, set)):
+            return any(MaintenancePortalService._signature_person_inactive(item) for item in value)
+        if isinstance(value, dict):
+            if any(
+                MaintenancePortalService._signature_person_inactive(value.get(key))
+                for key in ("checked", "value", "text", "name")
+                if key in value
+            ):
+                return True
+            return bool(value)
+        text = str(value or "").strip().lower()
+        if not text:
+            return False
+        if text in {"false", "0", "否", "未勾选", "未选", "no", "none", "null"}:
+            return False
+        return True
+
+    def _load_engineer_mop_candidates(self, *, force: bool = False) -> tuple[list[dict[str, Any]], list[str], dict[str, str]]:
         settings = self._engineer_mop_settings()
         if not settings["app_token"] or not settings["table_id"]:
             return [], ["未配置 MOP 多维表 app_token/table_id，请先在 SQLite settings 中配置 mop_app_token 和 mop_table_id。"], settings
@@ -7652,7 +7875,8 @@ class MaintenancePortalService:
         with self._engineer_mop_cache_lock:
             cached = self._engineer_mop_cache
             if (
-                cached
+                not force
+                and cached
                 and cached.get("signature") == signature
                 and now - float(cached.get("loaded_ts") or 0.0) < MOP_CANDIDATE_CACHE_TTL_SECONDS
             ):
@@ -7666,16 +7890,38 @@ class MaintenancePortalService:
             app_token=settings["app_token"],
             table_id=settings["table_id"],
         )
-        records = self._load_table_records(
-            app_token=settings["app_token"],
-            table_id=settings["table_id"],
-            meta_by_name=meta_by_name,
-            work_type="mop",
-            notice_type="维保MOP",
-        )
+        records: list[dict[str, Any]] = []
+        page_token = ""
+        while True:
+            params = {"page_size": 500}
+            if settings.get("view_id"):
+                params["view_id"] = settings["view_id"]
+            if page_token:
+                params["page_token"] = page_token
+            payload = self._request_json(
+                "records",
+                params=params,
+                app_token=settings["app_token"],
+                table_id=settings["table_id"],
+            )
+            data = payload.get("data", {})
+            for item in data.get("items") or []:
+                fields = item.get("fields") if isinstance(item.get("fields"), dict) else {}
+                records.append(
+                    {
+                        "record_id": str(item.get("record_id") or ""),
+                        "display_fields": fields,
+                    }
+                )
+            if not data.get("has_more"):
+                break
+            page_token = str(data.get("page_token") or "").strip()
+            if not page_token:
+                break
         candidates: list[dict[str, Any]] = []
         title_names = [
             settings["title_field"],
+            "文件名",
             "MOP名称",
             "MOP表格",
             "名称",
@@ -7684,17 +7930,36 @@ class MaintenancePortalService:
         ]
         for record in records:
             fields = record.get("display_fields") if isinstance(record.get("display_fields"), dict) else {}
-            attachments = self._extract_mop_attachments(fields, settings["attachment_field"])
+            record_id = str(record.get("record_id") or "")
+            latest_publish_time = self._attachment_latest_publish_time(fields)
+            attachments = [
+                self._attachment_with_cache_context(
+                    attachment,
+                    category="mop",
+                    app_token=settings["app_token"],
+                    table_id=settings["table_id"],
+                    record_id=record_id,
+                    latest_publish_time=latest_publish_time,
+                )
+                for attachment in self._extract_mop_attachments(fields, settings["attachment_field"])
+            ]
             title = self._mop_field_text(fields, title_names) or str(record.get("record_id") or "MOP表格")
             candidates.append(
                 {
-                    "record_id": str(record.get("record_id") or ""),
+                    "record_id": record_id,
                     "title": title,
                     "fields": fields,
                     "attachments": attachments,
                     "attachment_count": len(attachments),
+                    "latest_publish_time": latest_publish_time,
                     "app_token": settings["app_token"],
                     "table_id": settings["table_id"],
+                    "view_id": settings.get("view_id", ""),
+                    "file_no": self._mop_field_text(fields, ["文件编号"]),
+                    "specialty": self._mop_field_text(fields, ["专业"]),
+                    "maintenance_type": self._mop_field_text(fields, ["维护类型"]),
+                    "version": self._mop_field_text(fields, ["版本号"]),
+                    "file_status": self._mop_field_text(fields, ["文件状态"]),
                 }
             )
         if metas and settings["attachment_field"] not in {meta.field_name for meta in metas}:
@@ -7718,13 +7983,62 @@ class MaintenancePortalService:
             ongoing_items=ongoing_items,
         )
         mop_candidates, warnings, settings = self._load_engineer_mop_candidates()
+        self._maybe_start_daily_attachment_cache_refresh()
         bindings = self._state_store.list_mop_notice_bindings(
             scope=scope,
             notice_keys=[item["notice_key"] for item in notices],
+            template_keys=[str(item.get("mop_template_key") or "") for item in notices],
         )
-        bindings_by_notice = {item["notice_key"]: item for item in bindings}
+        bindings_by_notice: dict[str, dict[str, Any]] = {}
+        for item in bindings:
+            notice_key = str(item.get("notice_key") or "")
+            if notice_key and notice_key not in bindings_by_notice:
+                bindings_by_notice[notice_key] = item
+        bindings_by_template: dict[str, dict[str, Any]] = {}
+        for binding in bindings:
+            template_key = str(binding.get("template_key") or "").strip()
+            if template_key and template_key not in bindings_by_template:
+                bindings_by_template[template_key] = binding
         for notice in notices:
-            notice["mop_binding"] = bindings_by_notice.get(notice["notice_key"]) or None
+            binding = bindings_by_notice.get(notice["notice_key"])
+            template_key = str(notice.get("mop_template_key") or "").strip()
+            if binding and template_key and not str(binding.get("template_key") or "").strip() and template_key not in bindings_by_template:
+                try:
+                    backfill_payload = dict(binding.get("payload") or {})
+                    backfill_payload.update(
+                        {
+                            "scope": binding.get("scope") or scope,
+                            "notice_key": notice["notice_key"],
+                            "template_key": template_key,
+                            "notice_title": notice.get("title") or binding.get("notice_title") or "",
+                            "notice_status": notice.get("status") or binding.get("notice_status") or "",
+                            "building": notice.get("building") or "",
+                            "maintenance_total": notice.get("maintenance_total") or "",
+                            "maintenance_cycle": notice.get("maintenance_cycle") or "",
+                            "source_record_id": notice.get("source_record_id") or binding.get("source_record_id") or "",
+                            "target_record_id": notice.get("target_record_id") or binding.get("target_record_id") or "",
+                            "active_item_id": notice.get("active_item_id") or binding.get("active_item_id") or "",
+                            "mop_app_token": binding.get("mop_app_token") or "",
+                            "mop_table_id": binding.get("mop_table_id") or "",
+                            "mop_record_id": binding.get("mop_record_id") or "",
+                            "mop_title": binding.get("mop_title") or "",
+                            "mop_attachment_token": binding.get("mop_attachment_token") or "",
+                            "mop_attachment_name": binding.get("mop_attachment_name") or "",
+                            "selected_sheet": binding.get("selected_sheet") or "",
+                            "updated_by": binding.get("updated_by") or "template-backfill",
+                        }
+                    )
+                    backfilled = self._state_store.upsert_mop_notice_binding(backfill_payload)
+                    binding = backfilled
+                    bindings_by_template[template_key] = backfilled
+                except Exception as exc:
+                    warnings.append(f"MOP绑定模板补齐失败: {exc}")
+            if not binding:
+                template_binding = bindings_by_template.get(template_key)
+                if template_binding:
+                    binding = dict(template_binding)
+                    binding["inherited"] = True
+            notice["mop_binding"] = binding or None
         return {
             "scope": scope,
             "scope_label": self._scope_label(scope),
@@ -7744,10 +8058,618 @@ class MaintenancePortalService:
         self, *, payload: dict[str, Any], updated_by: str = ""
     ) -> dict[str, Any]:
         payload = dict(payload or {})
+        if not str(payload.get("template_key") or payload.get("mop_template_key") or "").strip():
+            payload["template_key"] = self._engineer_mop_template_key(
+                {
+                    "work_type": WORK_TYPE_MAINTENANCE,
+                    "title": payload.get("notice_title") or payload.get("title") or "",
+                    "building": payload.get("building") or "",
+                    "maintenance_total": payload.get("maintenance_total") or "",
+                    "maintenance_cycle": payload.get("maintenance_cycle") or "",
+                },
+                title=str(payload.get("notice_title") or payload.get("title") or ""),
+                building=str(payload.get("building") or ""),
+                maintenance_total=str(payload.get("maintenance_total") or ""),
+                maintenance_cycle=str(payload.get("maintenance_cycle") or ""),
+            )
         payload["updated_by"] = updated_by
         binding = self._state_store.upsert_mop_notice_binding(payload)
         self._touch_state_cache_version()
         return {"binding": binding}
+
+    @staticmethod
+    def _lark_response_is_token_error(response: Any) -> bool:
+        code = int(getattr(response, "code", 0) or 0)
+        msg = str(getattr(response, "msg", "") or "").lower()
+        return code in TOKEN_ERROR_CODES or "token" in msg or "access_token" in msg
+
+    @staticmethod
+    def _signature_open_id_from_user(value: dict[str, Any]) -> str:
+        """Return a real Feishu open_id from a bitable user field payload."""
+
+        if not isinstance(value, dict):
+            return ""
+        candidates = (
+            value.get("open_id"),
+            value.get("openId"),
+            value.get("id"),
+        )
+        for candidate in candidates:
+            text = str(candidate or "").strip()
+            if text.startswith("ou_"):
+                return text
+        return ""
+
+    @classmethod
+    def _signature_user_info(cls, value: Any) -> dict[str, str]:
+        if isinstance(value, list) and value:
+            first = value[0]
+            if isinstance(first, dict):
+                return {
+                    "open_id": cls._signature_open_id_from_user(first),
+                    "name": str(first.get("name") or first.get("en_name") or "").strip(),
+                    "email": str(first.get("email") or "").strip(),
+                }
+        if isinstance(value, dict):
+            return {
+                "open_id": cls._signature_open_id_from_user(value),
+                "name": str(value.get("name") or value.get("en_name") or "").strip(),
+                "email": str(value.get("email") or "").strip(),
+            }
+        return {"open_id": "", "name": "", "email": ""}
+
+    @staticmethod
+    def _decode_signature_png(signature_png: str) -> bytes:
+        text = str(signature_png or "").strip()
+        if not text:
+            raise PortalError("签名图片为空，请先手写签名。")
+        if "," in text and text.lower().startswith("data:image/"):
+            header, text = text.split(",", 1)
+            if "png" not in header.lower():
+                raise PortalError("签名图片必须是 PNG 格式。")
+        try:
+            raw = base64.b64decode(text, validate=True)
+        except Exception as exc:
+            raise PortalError("签名图片格式无效，请重新签名。") from exc
+        if len(raw) < 64:
+            raise PortalError("签名图片内容过小，请重新签名。")
+        if len(raw) > 2 * 1024 * 1024:
+            raise PortalError("签名图片超过 2MB，请清空后重新签名。")
+        if not raw.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise PortalError("签名图片必须是 PNG 格式。")
+        return raw
+
+    @staticmethod
+    def _signature_attachment_version(attachment: dict[str, Any]) -> str:
+        seed = "|".join(
+            str(attachment.get(key) or "")
+            for key in ("file_token", "url", "name", "size", "tmp_url")
+        )
+        return hashlib.sha1(seed.encode("utf-8", errors="ignore")).hexdigest()[:12]
+
+    @staticmethod
+    def _signature_preview_url(*, record_id: str, signature_version: str, link_token: str = "") -> str:
+        record_id = str(record_id or "").strip()
+        signature_version = str(signature_version or "").strip()
+        if not record_id or not signature_version:
+            return ""
+        url = f"/api/signatures/image?record_id={quote(record_id, safe='')}&v={quote(signature_version, safe='')}"
+        link_token = str(link_token or "").strip()
+        if link_token:
+            url += f"&token={quote(link_token, safe='')}"
+        return url
+
+    @classmethod
+    def _transparent_signature_png(cls, signature_bytes: bytes) -> bytes:
+        """Normalize a canvas/image signature to black ink on transparent background."""
+
+        try:
+            from PIL import Image, ImageChops
+        except Exception as exc:  # pragma: no cover - dependency bootstrap should provide Pillow.
+            raise PortalError("缺少 Pillow 依赖，无法处理透明签名图片。") from exc
+
+        try:
+            image = Image.open(io.BytesIO(signature_bytes)).convert("RGBA")
+        except Exception as exc:
+            raise PortalError("签名图片无法读取，请重新签名。") from exc
+        gray = image.convert("L")
+        ink_alpha = gray.point(lambda p: 0 if p >= 246 else min(255, max(0, (246 - int(p)) * 5)))
+        source_alpha = image.getchannel("A")
+        alpha = ImageChops.multiply(ink_alpha, source_alpha)
+        transparent = Image.new("RGBA", image.size, (0, 0, 0, 0))
+        transparent.putalpha(alpha)
+        bbox = alpha.point(lambda p: 255 if p > 8 else 0).getbbox()
+        if not bbox:
+            raise PortalError("签名图片未识别到有效笔迹，请重新签名。")
+        left = max(0, bbox[0] - 8)
+        top = max(0, bbox[1] - 8)
+        right = min(image.size[0], bbox[2] + 8)
+        bottom = min(image.size[1], bbox[3] + 8)
+        transparent = transparent.crop((left, top, right, bottom))
+        output = io.BytesIO()
+        transparent.save(output, format="PNG", optimize=True)
+        return output.getvalue()
+
+    def _upload_signature_image(self, *, signature_bytes: bytes, file_name: str) -> str:
+        token = str(ensure_feishu_token() or config.user_token or "").strip()
+        if not token:
+            raise PortalError("未配置有效的飞书 user_token，无法上传签名。")
+        temp_file_path = ""
+        try:
+            with tempfile.NamedTemporaryFile(
+                delete=False,
+                prefix="clipflow_signature_",
+                suffix=".png",
+            ) as tmp:
+                tmp.write(signature_bytes)
+                temp_file_path = tmp.name
+
+            def attempt_upload(upload_token: str) -> Any:
+                with open(temp_file_path, "rb") as file_obj:
+                    client = (
+                        lark.Client.builder()
+                        .enable_set_token(True)
+                        .log_level(lark.LogLevel.ERROR)
+                        .build()
+                    )
+                    request = (
+                        UploadAllMediaRequest.builder()
+                        .request_body(
+                            UploadAllMediaRequestBody.builder()
+                            .file_name(file_name)
+                            .parent_type("bitable_image")
+                            .parent_node(SIGNATURE_APP_TOKEN)
+                            .size(str(len(signature_bytes)))
+                            .file(file_obj)
+                            .build()
+                        )
+                        .build()
+                    )
+                    option = lark.RequestOption.builder().user_access_token(upload_token).build()
+                    return client.drive.v1.media.upload_all(request, option)
+
+            response = attempt_upload(token)
+            if not response.success() and self._lark_response_is_token_error(response):
+                token = str(refresh_feishu_token() or config.user_token or "").strip()
+                response = attempt_upload(token)
+            if not response.success():
+                raise PortalError(
+                    f"签名图片上传失败: {response.code} - {response.msg}"
+                )
+            file_token = str(getattr(response.data, "file_token", "") or "").strip()
+            if not file_token:
+                raise PortalError("签名图片上传成功但未返回 file_token。")
+            return file_token
+        finally:
+            if temp_file_path:
+                with suppress(Exception):
+                    os.remove(temp_file_path)
+
+    def _load_signature_people(self, *, force: bool = False) -> list[dict[str, Any]]:
+        now = time.time()
+        with self._signature_people_cache_lock:
+            cached = self._signature_people_cache
+            if (
+                not force
+                and cached
+                and now - float(cached.get("loaded_ts") or 0.0)
+                < SIGNATURE_PEOPLE_CACHE_TTL_SECONDS
+            ):
+                return copy.deepcopy(cached.get("people") or [])
+
+        people: list[dict[str, Any]] = []
+        page_token = ""
+        while True:
+            params = {"page_size": 500}
+            if SIGNATURE_VIEW_ID:
+                params["view_id"] = SIGNATURE_VIEW_ID
+            if page_token:
+                params["page_token"] = page_token
+            payload = self._request_json(
+                "records",
+                params=params,
+                app_token=SIGNATURE_APP_TOKEN,
+                table_id=SIGNATURE_TABLE_ID,
+            )
+            data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+            for item in data.get("items") or []:
+                fields = item.get("fields") if isinstance(item.get("fields"), dict) else {}
+                if self._signature_person_inactive(fields.get(SIGNATURE_INACTIVE_FIELD)):
+                    continue
+                user_info = self._signature_user_info(fields.get(SIGNATURE_USER_FIELD))
+                name = (
+                    self._mop_field_text(fields, [SIGNATURE_NAME_FIELD])
+                    or user_info.get("name")
+                    or str(item.get("record_id") or "")
+                )
+                record_id = str(item.get("record_id") or "")
+                latest_publish_time = self._attachment_latest_publish_time(fields)
+                attachments = [
+                    self._attachment_with_cache_context(
+                        attachment,
+                        category="signature",
+                        app_token=SIGNATURE_APP_TOKEN,
+                        table_id=SIGNATURE_TABLE_ID,
+                        record_id=record_id,
+                        latest_publish_time=latest_publish_time,
+                    )
+                    for attachment in self._extract_signature_attachments(fields)
+                ]
+                first_signature = attachments[0] if attachments else {}
+                signature_version = (
+                    self._signature_attachment_version(first_signature)
+                    if isinstance(first_signature, dict)
+                    else ""
+                )
+                building = self._mop_field_text(fields, ["楼栋", "机楼/专业"])
+                has_signature = bool(signature_version)
+                person = {
+                    "record_id": record_id,
+                    "name": name,
+                    "open_id": user_info.get("open_id", ""),
+                    "email": user_info.get("email", ""),
+                    "employee_no": self._mop_field_text(fields, ["员工工号", "工号"]),
+                    "building": building,
+                    "scope_text": building,
+                    "position": self._mop_field_text(fields, ["岗位"]),
+                    "team": self._mop_field_text(fields, ["班组"]),
+                    "shift": self._mop_field_text(fields, ["班次"]),
+                    "has_signature": has_signature,
+                    "signature_count": len(attachments) if has_signature else 0,
+                    "signature_version": signature_version,
+                    "latest_publish_time": latest_publish_time,
+                    "signature_preview_url": (
+                        self._signature_preview_url(
+                            record_id=record_id,
+                            signature_version=signature_version,
+                        )
+                        if record_id and has_signature
+                        else ""
+                    ),
+                    "raw_fields": fields,
+                }
+                people.append(person)
+            if not data.get("has_more"):
+                break
+            page_token = str(data.get("page_token") or "").strip()
+            if not page_token:
+                break
+
+        people.sort(
+            key=lambda item: (
+                0 if item.get("name") else 1,
+                str(item.get("building") or ""),
+                str(item.get("name") or ""),
+            )
+        )
+        with self._signature_people_cache_lock:
+            self._signature_people_cache = {
+                "loaded_ts": now,
+                "people": copy.deepcopy(people),
+            }
+        return people
+
+    def signature_people(
+        self,
+        *,
+        scope: str = "",
+        query: str = "",
+        record_id: str = "",
+        link_token: str = "",
+        limit: int = 80,
+        refresh: bool = False,
+    ) -> dict[str, Any]:
+        scope = self._normalize_scope(scope or "ALL")
+        query_text = re.sub(r"\s+", "", str(query or "")).lower()
+        record_id = str(record_id or "").strip()
+        people = self._load_signature_people(force=bool(refresh or record_id))
+        self._maybe_start_daily_attachment_cache_refresh()
+
+        def matches_scope(person: dict[str, Any]) -> bool:
+            if scope in {"", "ALL", "CAMPUS"}:
+                return True
+            building = str(person.get("building") or person.get("scope_text") or "")
+            if not building:
+                return True
+            aliases = [scope, f"{scope}楼", f"{scope}栋"]
+            if scope == "110":
+                aliases.extend(["110站", "110KV", "110kv"])
+            return any(alias and alias in building for alias in aliases)
+
+        def matches_query(person: dict[str, Any]) -> bool:
+            if record_id and str(person.get("record_id") or "") != record_id:
+                return False
+            if not query_text:
+                return True
+            haystack = re.sub(
+                r"\s+",
+                "",
+                "|".join(
+                    str(person.get(key) or "")
+                    for key in (
+                        "record_id",
+                        "name",
+                        "open_id",
+                        "email",
+                        "employee_no",
+                        "building",
+                        "position",
+                        "team",
+                        "shift",
+                    )
+                ),
+            ).lower()
+            return query_text in haystack
+
+        filtered = [
+            {
+                key: value
+                for key, value in person.items()
+                if key != "raw_fields"
+            }
+            for person in people
+            if matches_scope(person) and matches_query(person)
+        ]
+        limited = filtered[: max(1, min(500, int(limit or 80)))]
+        link_token = str(link_token or "").strip()
+        if link_token and record_id:
+            for person in limited:
+                if str(person.get("record_id") or "") != record_id:
+                    continue
+                signature_version = str(person.get("signature_version") or "")
+                if signature_version:
+                    person["signature_preview_url"] = self._signature_preview_url(
+                        record_id=record_id,
+                        signature_version=signature_version,
+                        link_token=link_token,
+                    )
+        return {
+            "people": limited,
+            "count": len(filtered),
+            "returned": len(limited),
+            "scope": scope,
+            "loaded_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    def create_signature_link_token(self, *, record_id: str, created_by: str = "") -> dict[str, Any]:
+        return self._state_store.create_signature_link_token(
+            record_id=record_id,
+            created_by=created_by,
+            ttl_seconds=SIGNATURE_LINK_TOKEN_TTL_SECONDS,
+            payload={"purpose": "signature_link"},
+        )
+
+    def validate_signature_link_token(self, *, record_id: str, token: str) -> bool:
+        return self._state_store.validate_signature_link_token(
+            record_id=record_id,
+            token=token,
+        )
+
+    def mark_signature_link_token_used(self, *, record_id: str, token: str) -> None:
+        self._state_store.mark_signature_link_token_used(
+            record_id=record_id,
+            token=token,
+        )
+
+    def save_signature_for_person(
+        self,
+        *,
+        record_id: str,
+        signature_png: str,
+        signer_name: str = "",
+        link_token: str = "",
+    ) -> dict[str, Any]:
+        record_id = str(record_id or "").strip()
+        if not record_id:
+            raise PortalError("请选择要保存签名的人员。")
+        signature_bytes = self._transparent_signature_png(
+            self._decode_signature_png(signature_png)
+        )
+        people = self._load_signature_people(force=True)
+        person = next(
+            (item for item in people if str(item.get("record_id") or "") == record_id),
+            None,
+        )
+        if not person:
+            raise PortalError("签名人员记录不存在或无权访问。")
+        safe_name = self._safe_mop_path_part(
+            signer_name or str(person.get("name") or "signature"),
+            "signature",
+        )
+        file_name = f"{safe_name}_{dt.datetime.now().strftime('%Y%m%d%H%M%S')}.png"
+        file_token = self._upload_signature_image(
+            signature_bytes=signature_bytes,
+            file_name=file_name,
+        )
+        self._patch_record_fields(
+            app_token=SIGNATURE_APP_TOKEN,
+            table_id=SIGNATURE_TABLE_ID,
+            record_id=record_id,
+            fields={SIGNATURE_ATTACHMENT_FIELD: [{"file_token": file_token}]},
+        )
+        with self._signature_people_cache_lock:
+            self._signature_people_cache = None
+        signature_version = hashlib.sha1(file_token.encode("utf-8")).hexdigest()[:12]
+        return {
+            "record_id": record_id,
+            "name": str(person.get("name") or signer_name or ""),
+            "file_token": file_token,
+            "signature_version": signature_version,
+            "signature_preview_url": self._signature_preview_url(
+                record_id=record_id,
+                signature_version=signature_version,
+                link_token=link_token,
+            ),
+            "has_signature": True,
+            "saved_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    def signature_image_bytes(self, *, record_id: str) -> tuple[bytes, str]:
+        record_id = str(record_id or "").strip()
+        if not record_id:
+            raise PortalError("缺少签名人员记录。")
+        people = self._load_signature_people(force=False)
+        person = next(
+            (item for item in people if str(item.get("record_id") or "") == record_id),
+            None,
+        )
+        if not person:
+            people = self._load_signature_people(force=True)
+            person = next(
+                (item for item in people if str(item.get("record_id") or "") == record_id),
+                None,
+            )
+        if not person:
+            raise PortalError("签名人员记录不存在。")
+        fields = person.get("raw_fields") if isinstance(person.get("raw_fields"), dict) else {}
+        attachments = [
+            self._attachment_with_cache_context(
+                attachment,
+                category="signature",
+                app_token=SIGNATURE_APP_TOKEN,
+                table_id=SIGNATURE_TABLE_ID,
+                record_id=record_id,
+                latest_publish_time=str(person.get("latest_publish_time") or self._attachment_latest_publish_time(fields)),
+            )
+            for attachment in self._extract_signature_attachments(fields)
+        ]
+        if not attachments:
+            raise PortalError("该人员还没有可用签名。")
+        content, _content_type = self._download_mop_attachment(attachments[0])
+        return self._transparent_signature_png(content), "image/png"
+
+    @staticmethod
+    def _url_host_for_display(host: str) -> str:
+        host = str(host or "").strip()
+        if not host:
+            return ""
+        if ":" in host and not host.startswith("[") and not host.endswith("]"):
+            return f"[{host}]"
+        return host
+
+    def _signature_public_base_url(
+        self,
+        *,
+        scope: str = "",
+        request_base_url: str = "",
+    ) -> str:
+        """Build the public portal URL used in signature links.
+
+        The host/IP follows the configured handover audit link for the same
+        scope when available. The port stays on the portal service so the
+        generated /signature page is always served by this program.
+        """
+
+        base_text = str(request_base_url or "").strip().rstrip("/")
+        if base_text and "://" not in base_text:
+            base_text = f"http://{base_text}"
+        parsed_base = urlparse(base_text) if base_text else None
+        scheme = (
+            parsed_base.scheme
+            if parsed_base and parsed_base.scheme in {"http", "https"}
+            else "http"
+        )
+        port = (
+            parsed_base.port
+            if parsed_base and parsed_base.port
+            else int(getattr(config, "lan_template_portal_port", 18766) or 18766)
+        )
+        host = parsed_base.hostname if parsed_base and parsed_base.hostname else ""
+
+        normalized_scope = self._normalize_scope(scope or "ALL")
+        handover_links = self.get_handover_links().get("links") or {}
+        handover_url = ""
+        if isinstance(handover_links, dict):
+            handover_url = str(handover_links.get(normalized_scope) or "").strip()
+            if not handover_url and normalized_scope != "ALL":
+                handover_url = str(handover_links.get("ALL") or "").strip()
+        try:
+            parsed_handover = urlparse(handover_url)
+            handover_host = str(parsed_handover.hostname or "").strip()
+            if handover_host and handover_host not in {"0.0.0.0", "::"}:
+                host = handover_host
+        except Exception:
+            pass
+
+        configured_host = str(getattr(config, "lan_template_portal_host", "") or "").strip()
+        if (
+            (not host or host in {"127.0.0.1", "localhost", "0.0.0.0", "::"})
+            and configured_host
+            and configured_host not in {"0.0.0.0", "::"}
+        ):
+            host = configured_host
+        if not host or host in {"0.0.0.0", "::"}:
+            host = "127.0.0.1"
+        return f"{scheme}://{self._url_host_for_display(host)}:{port}"
+
+    def _signature_person_for_link(self, *, record_id: str) -> dict[str, Any]:
+        record_id = str(record_id or "").strip()
+        if not record_id:
+            raise PortalError("请选择要发送签名链接的人员。")
+        people = self._load_signature_people(force=False)
+        person = next(
+            (item for item in people if str(item.get("record_id") or "") == record_id),
+            None,
+        )
+        if not person:
+            people = self._load_signature_people(force=True)
+            person = next(
+                (item for item in people if str(item.get("record_id") or "") == record_id),
+                None,
+            )
+        if not person:
+            raise PortalError("签名人员记录不存在。")
+        open_id = str(person.get("open_id") or "").strip()
+        if not open_id:
+            raise PortalError("该人员记录缺少员工姓名 openid，无法发送签名链接。")
+        return {
+            key: value
+            for key, value in person.items()
+            if key != "raw_fields"
+        }
+
+    def build_signature_link_message(
+        self,
+        *,
+        record_id: str,
+        signer_name: str = "",
+        scope: str = "",
+        request_base_url: str = "",
+        created_by: str = "",
+    ) -> dict[str, Any]:
+        person = self._signature_person_for_link(record_id=record_id)
+        base_url = self._signature_public_base_url(
+            scope=scope,
+            request_base_url=request_base_url,
+        )
+        token_data = self.create_signature_link_token(
+            record_id=record_id,
+            created_by=created_by,
+        )
+        link_token = str(token_data.get("token") or "").strip()
+        link_url = (
+            f"{base_url}/signature?record_id={quote(str(record_id or '').strip(), safe='')}"
+            f"&token={quote(link_token, safe='')}"
+        )
+        name = str(signer_name or person.get("name") or "签名人员").strip()
+        text = "\n".join(
+            [
+                "【线上签名】请完成 MOP 手写签名",
+                "",
+                f"签名人员：{name}",
+                f"签名链接：{link_url}",
+                "",
+                "请用手机打开链接，在页面手写签名并保存。",
+            ]
+        )
+        return {
+            "record_id": str(record_id or "").strip(),
+            "person": person,
+            "open_id": str(person.get("open_id") or "").strip(),
+            "link_url": link_url,
+            "expires_at": token_data.get("expires_at"),
+            "text": text,
+        }
 
     @staticmethod
     def _column_index(cell_ref: str) -> int:
@@ -7789,6 +8711,379 @@ class MaintenancePortalService:
             index, remainder = divmod(index - 1, 26)
             label = chr(65 + remainder) + label
         return label
+
+    @classmethod
+    def _mop_signature_target_column(cls, worksheet: Any, *, row: int, label_col: int) -> int:
+        """Return the column immediately to the right of the signature label cell.
+
+        If the label cell is part of a merged range, the signature goes into the
+        first cell after that merged range. This keeps the label text intact and
+        places signatures in the user's expected fill area.
+        """
+
+        row = max(1, int(row or 1))
+        label_col = max(1, int(label_col or 1))
+        label_ref = f"{cls._column_label(label_col)}{row}"
+        for merged_range in getattr(getattr(worksheet, "merged_cells", None), "ranges", []) or []:
+            try:
+                if label_ref in merged_range:
+                    return int(getattr(merged_range, "max_col", label_col)) + 1
+            except Exception:
+                continue
+        return label_col + 1
+
+    def _attachment_cache_paths(
+        self,
+        *,
+        category: str,
+        app_token: str,
+        table_id: str,
+        record_id: str,
+        attachment: dict[str, Any],
+    ) -> tuple[Path, Path]:
+        name = str(attachment.get("name") or "attachment").strip() or "attachment"
+        suffix = Path(name).suffix
+        if not suffix:
+            mime_type = str(attachment.get("mime_type") or "").lower()
+            if "png" in mime_type:
+                suffix = ".png"
+            elif "jpeg" in mime_type or "jpg" in mime_type:
+                suffix = ".jpg"
+            elif "webp" in mime_type:
+                suffix = ".webp"
+            elif "csv" in mime_type:
+                suffix = ".csv"
+            else:
+                suffix = ".xlsx"
+        stable_seed = json.dumps(
+            [
+                str(category or ""),
+                str(app_token or ""),
+                str(table_id or ""),
+                str(record_id or ""),
+                str(attachment.get("file_token") or ""),
+                str(attachment.get("url") or ""),
+                name,
+            ],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        digest = hashlib.sha1(stable_seed.encode("utf-8", errors="ignore")).hexdigest()[:16]
+        cache_dir = Path(
+            get_data_file_path(
+                os.path.join(
+                    "attachment_cache",
+                    self._safe_mop_path_part(category or "attachment", "attachment"),
+                    self._safe_mop_path_part(app_token or "app", "app"),
+                    self._safe_mop_path_part(table_id or "table", "table"),
+                    self._safe_mop_path_part(record_id or "record", "record"),
+                )
+            )
+        )
+        cache_name = f"{self._safe_mop_path_part(Path(name).stem or 'attachment', 'attachment')}_{digest}{suffix}"
+        return cache_dir / cache_name, cache_dir / f"{cache_name}.meta.json"
+
+    @staticmethod
+    def _attachment_meta_matches(expected: dict[str, str], actual: dict[str, Any]) -> bool:
+        for key in ("category", "app_token", "table_id", "record_id", "file_token", "url", "name", "size"):
+            if str(actual.get(key) or "") != str(expected.get(key) or ""):
+                return False
+        expected_time = str(expected.get("latest_publish_time") or "")
+        actual_time = str(actual.get("latest_publish_time") or "")
+        if expected_time and expected_time != actual_time:
+            return False
+        return True
+
+    def _read_cached_attachment(
+        self,
+        *,
+        category: str,
+        app_token: str,
+        table_id: str,
+        record_id: str,
+        attachment: dict[str, Any],
+        latest_publish_time: str = "",
+    ) -> tuple[bytes, str] | None:
+        expected = self._attachment_cache_signature(
+            category=category,
+            app_token=app_token,
+            table_id=table_id,
+            record_id=record_id,
+            attachment=attachment,
+            latest_publish_time=latest_publish_time,
+        )
+        file_path, meta_path = self._attachment_cache_paths(
+            category=category,
+            app_token=app_token,
+            table_id=table_id,
+            record_id=record_id,
+            attachment=attachment,
+        )
+        with self._attachment_cache_lock:
+            if not file_path.is_file() or not meta_path.is_file():
+                return None
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except Exception:
+                return None
+            if not isinstance(meta, dict) or not self._attachment_meta_matches(expected, meta):
+                return None
+            try:
+                return file_path.read_bytes(), str(meta.get("content_type") or attachment.get("mime_type") or "")
+            except Exception:
+                return None
+
+    def _write_cached_attachment(
+        self,
+        *,
+        category: str,
+        app_token: str,
+        table_id: str,
+        record_id: str,
+        attachment: dict[str, Any],
+        latest_publish_time: str = "",
+        content: bytes,
+        content_type: str,
+    ) -> None:
+        if not content:
+            return
+        expected = self._attachment_cache_signature(
+            category=category,
+            app_token=app_token,
+            table_id=table_id,
+            record_id=record_id,
+            attachment=attachment,
+            latest_publish_time=latest_publish_time,
+        )
+        file_path, meta_path = self._attachment_cache_paths(
+            category=category,
+            app_token=app_token,
+            table_id=table_id,
+            record_id=record_id,
+            attachment=attachment,
+        )
+        meta = {
+            **expected,
+            "content_type": str(content_type or attachment.get("mime_type") or ""),
+            "cached_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "size_bytes": len(content),
+            "file_name": file_path.name,
+        }
+        with self._attachment_cache_lock:
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_bytes(content)
+            meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    @staticmethod
+    def _mop_checkbox_value(original: Any, state: str) -> str:
+        state = str(state or "").strip().lower()
+        normal_mark = "☑" if state == "normal" else "□"
+        abnormal_mark = "☑" if state == "abnormal" else "□"
+        text = str(original or "□正常 □异常")
+        text = re.sub(r"[□☐■☑√✔]\s*正常", f"{normal_mark}正常", text)
+        text = re.sub(r"[□☐■☑√✔]\s*异常", f"{abnormal_mark}异常", text)
+        if "正常" not in text or "异常" not in text:
+            return f"{normal_mark}正常 {abnormal_mark}异常"
+        return text
+
+    @staticmethod
+    def _mop_cell_int(value: Any, fallback: int = 0) -> int:
+        try:
+            return int(value)
+        except Exception:
+            return fallback
+
+    @staticmethod
+    def _safe_mop_path_part(value: str, fallback: str = "MOP") -> str:
+        text = str(value or "").strip() or fallback
+        text = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", text)
+        text = re.sub(r"\s+", " ", text).strip(" ._")
+        return (text or fallback)[:96]
+
+    @staticmethod
+    def _mop_plain_text(value: Any) -> str:
+        return re.sub(r"\s+", "", str(value or "").replace("\u3000", "")).strip()
+
+    @classmethod
+    def _is_mop_cover_sheet(cls, sheet_name: str, rows: list[list[str]]) -> bool:
+        name = cls._mop_plain_text(sheet_name)
+        if any(token in name for token in ("封面", "目录", "说明")):
+            return True
+        first_cells = "".join(
+            cls._mop_plain_text(cell)
+            for row in rows[:20]
+            for cell in row[:8]
+        )
+        cover_tokens = ("文件封面", "封面", "版本履历", "修订记录")
+        return any(token in first_cells for token in cover_tokens) and not any(
+            token in first_cells for token in ("□正常", "□异常", "维护实施人", "维护开始时间", "维护完成时间")
+        )
+
+    @classmethod
+    def _is_mop_checkbox_cell(cls, value: Any) -> bool:
+        text = cls._mop_plain_text(value)
+        if not text:
+            return False
+        checkbox_marks = ("□", "☐", "■", "☑", "√", "✔")
+        return ("正常" in text or "异常" in text) and any(mark in text for mark in checkbox_marks)
+
+    @classmethod
+    def _extract_mop_sheet_targets(cls, *, sheet_name: str, rows: list[list[str]]) -> dict[str, Any]:
+        is_cover = cls._is_mop_cover_sheet(sheet_name, rows)
+        checkbox_cells: list[dict[str, Any]] = []
+        maintenance_fields: list[dict[str, Any]] = []
+        if is_cover:
+            return {
+                "is_cover": True,
+                "checkbox_cells": checkbox_cells,
+                "maintenance_fields": maintenance_fields,
+                "fillable_count": 0,
+            }
+        labels = (
+            "维护实施人",
+            "维护开始时间",
+            "维护完成时间",
+            "维护完成情况",
+            "维护审核人",
+            "审核确认时间",
+        )
+        same_column_time_labels = {"维护完成时间", "审核确认时间"}
+        checkbox_scan_columns = tuple(range(3, 7))  # D-G inclusive, zero-based D=3.
+        checkbox_columns: list[int] = []
+        for row_index, row in enumerate(rows):
+            for col_zero in checkbox_scan_columns:
+                value = row[col_zero] if col_zero < len(row) else ""
+                if cls._is_mop_checkbox_cell(value):
+                    if col_zero not in checkbox_columns:
+                        checkbox_columns.append(col_zero)
+                    checkbox_cells.append(
+                        {
+                            "sheet": sheet_name,
+                            "row": row_index,
+                            "row_number": row_index + 1,
+                            "col": col_zero,
+                            "column": cls._column_label(col_zero + 1),
+                            "cell_ref": f"{cls._column_label(col_zero + 1)}{row_index + 1}",
+                            "value": str(value or ""),
+                            "kind": "normal_abnormal",
+                        }
+                    )
+        for row_index, row in enumerate(rows):
+            for col_index, value in enumerate(row):
+                text = cls._mop_plain_text(value)
+                if not text:
+                    continue
+                for label in labels:
+                    if label not in text:
+                        continue
+                    inline_value = ""
+                    label_pos = text.find(label)
+                    if label_pos >= 0:
+                        inline_value = text[label_pos + len(label) :].lstrip(":：")
+                    value_col = min(col_index + 1, max(len(row), col_index + 2) - 1)
+                    value_text = ""
+                    for candidate_col in range(col_index + 1, min(len(row), col_index + 8)):
+                        candidate = str(row[candidate_col] or "").strip()
+                        if candidate:
+                            value_col = candidate_col
+                            value_text = candidate
+                            break
+                    if inline_value and not value_text:
+                        value_col = col_index
+                        value_text = inline_value
+                    target_value_cols = [value_col]
+                    if label in same_column_time_labels and checkbox_columns:
+                        target_value_cols = [col_index] if col_index in checkbox_columns else list(checkbox_columns)
+                    for target_value_col in target_value_cols:
+                        target_value = ""
+                        if target_value_col < len(row):
+                            target_value = str(row[target_value_col] or "").strip()
+                        if target_value_col == value_col:
+                            target_value = value_text
+                        if inline_value and target_value_col == col_index and not target_value:
+                            target_value = inline_value
+                        value_col = target_value_col
+                        value_text = target_value
+                        maintenance_fields.append(
+                            {
+                                "sheet": sheet_name,
+                                "label": label,
+                                "row": row_index,
+                                "row_number": row_index + 1,
+                                "label_col": col_index,
+                                "label_cell_ref": f"{cls._column_label(col_index + 1)}{row_index + 1}",
+                                "value_col": value_col,
+                                "value_column": cls._column_label(value_col + 1),
+                                "value_cell_ref": f"{cls._column_label(value_col + 1)}{row_index + 1}",
+                                "value": value_text,
+                                "kind": "maintenance_meta",
+                            }
+                        )
+                    break
+        return {
+            "is_cover": False,
+            "checkbox_cells": checkbox_cells,
+            "maintenance_fields": maintenance_fields,
+            "fillable_count": len(checkbox_cells) + len(maintenance_fields),
+        }
+
+    def _save_mop_attachment_copy(
+        self,
+        content: bytes,
+        *,
+        scope: str,
+        mop_record_id: str,
+        file_name: str,
+        content_type: str = "",
+    ) -> dict[str, Any]:
+        scope_part = self._safe_mop_path_part(self._scope_label(self._normalize_scope(scope)) or scope, "ALL")
+        date_part = dt.date.today().isoformat()
+        original_name = self._safe_mop_path_part(file_name or "MOP表格.xlsx", "MOP表格.xlsx")
+        suffix = Path(original_name).suffix
+        if not suffix:
+            if "csv" in str(content_type or "").lower():
+                suffix = ".csv"
+            else:
+                suffix = ".xlsx"
+        stem = self._safe_mop_path_part(Path(original_name).stem or "MOP表格", "MOP表格")
+        digest = hashlib.sha1(content).hexdigest()[:10]
+        save_dir = Path(get_data_file_path(os.path.join("engineer_mop_files", date_part, scope_part)))
+        save_dir.mkdir(parents=True, exist_ok=True)
+        save_path = save_dir / f"{stem}_{digest}{suffix}"
+        save_path.write_bytes(content)
+        data_root = Path(get_data_file_path("")).resolve()
+        try:
+            relative_path = str(save_path.resolve().relative_to(data_root))
+        except Exception:
+            relative_path = save_path.name
+        return {
+            "file_name": save_path.name,
+            "path": str(save_path),
+            "relative_path": relative_path,
+            "size": len(content),
+            "saved_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    @staticmethod
+    def _mop_editable_summary(sheets: list[dict[str, Any]]) -> dict[str, Any]:
+        checkbox_count = 0
+        maintenance_field_count = 0
+        editable_sheet_count = 0
+        for sheet in sheets:
+            if not isinstance(sheet, dict) or sheet.get("is_cover"):
+                continue
+            sheet_checkbox_count = len(sheet.get("checkbox_cells") or [])
+            sheet_field_count = len(sheet.get("maintenance_fields") or [])
+            checkbox_count += sheet_checkbox_count
+            maintenance_field_count += sheet_field_count
+            if sheet_checkbox_count or sheet_field_count:
+                editable_sheet_count += 1
+        return {
+            "editable_sheet_count": editable_sheet_count,
+            "checkbox_count": checkbox_count,
+            "maintenance_field_count": maintenance_field_count,
+            "total": checkbox_count + maintenance_field_count,
+        }
 
     @staticmethod
     def _xml_text(element: ET.Element | None) -> str:
@@ -7869,6 +9164,7 @@ class MaintenancePortalService:
                     if len(rows_out) >= max_rows:
                         truncated = True
                         break
+                targets = self._extract_mop_sheet_targets(sheet_name=name, rows=rows_out)
                 sheets.append(
                     {
                         "name": name,
@@ -7878,6 +9174,7 @@ class MaintenancePortalService:
                         "columns": [self._column_label(index + 1) for index in range(min(max_width, max_cols))],
                         "merges": merges,
                         "truncated": truncated or max_width > max_cols,
+                        **targets,
                     }
                 )
         return {"sheets": sheets, "parser": "xlsx"}
@@ -7893,36 +9190,176 @@ class MaintenancePortalService:
         if not text:
             text = content.decode("utf-8", errors="replace")
         rows = [row for row in csv.reader(io.StringIO(text))]
+        sheet_name = Path(file_name or "CSV").stem or "CSV"
+        targets = self._extract_mop_sheet_targets(sheet_name=sheet_name, rows=rows)
         return {
             "sheets": [
                 {
-                    "name": Path(file_name or "CSV").stem or "CSV",
+                    "name": sheet_name,
                     "rows": rows,
                     "row_count": len(rows),
                     "column_count": max([len(row) for row in rows] or [0]),
                     "columns": [self._column_label(index + 1) for index in range(max([len(row) for row in rows] or [0]))],
                     "merges": [],
                     "truncated": False,
+                    **targets,
                 }
             ],
             "parser": "csv",
         }
 
-    def _download_mop_attachment(self, attachment: dict[str, Any]) -> tuple[bytes, str]:
+    def _download_mop_attachment(
+        self,
+        attachment: dict[str, Any],
+        *,
+        cache_category: str = "",
+        app_token: str = "",
+        table_id: str = "",
+        record_id: str = "",
+        latest_publish_time: str = "",
+        force_download: bool = False,
+    ) -> tuple[bytes, str]:
+        cache_category = str(cache_category or attachment.get("cache_category") or "mop").strip()
+        app_token = str(app_token or attachment.get("app_token") or "").strip()
+        table_id = str(table_id or attachment.get("table_id") or "").strip()
+        record_id = str(record_id or attachment.get("record_id") or "").strip()
+        latest_publish_time = str(latest_publish_time or attachment.get("latest_publish_time") or "").strip()
+        if cache_category and app_token and table_id and record_id and not force_download:
+            cached = self._read_cached_attachment(
+                category=cache_category,
+                app_token=app_token,
+                table_id=table_id,
+                record_id=record_id,
+                attachment=attachment,
+                latest_publish_time=latest_publish_time,
+            )
+            if cached is not None:
+                return cached
         url = str(attachment.get("url") or "").strip()
         token = str(attachment.get("file_token") or "").strip()
         headers = self._auth_headers()
         if url:
-            return self._http_client.request_bytes("GET", url, headers=headers)
-        if not token:
-            raise PortalError("MOP附件缺少 file_token 或下载地址。")
-        encoded = quote(token, safe="")
-        download_url = f"https://open.feishu.cn/open-apis/drive/v1/medias/{encoded}/download"
-        return self._http_client.request_bytes("GET", download_url, headers=headers)
+            content, content_type = self._http_client.request_bytes("GET", url, headers=headers)
+        else:
+            if not token:
+                raise PortalError("MOP附件缺少 file_token 或下载地址。")
+            encoded = quote(token, safe="")
+            download_url = f"https://open.feishu.cn/open-apis/drive/v1/medias/{encoded}/download"
+            content, content_type = self._http_client.request_bytes("GET", download_url, headers=headers)
+        if cache_category and app_token and table_id and record_id:
+            self._write_cached_attachment(
+                category=cache_category,
+                app_token=app_token,
+                table_id=table_id,
+                record_id=record_id,
+                attachment=attachment,
+                latest_publish_time=latest_publish_time,
+                content=content,
+                content_type=content_type,
+            )
+        return content, content_type
+
+    def _attachment_cache_daily_marker_path(self) -> Path:
+        return Path(get_data_file_path(os.path.join("attachment_cache", ATTACHMENT_CACHE_DAILY_MARKER)))
+
+    def _maybe_start_daily_attachment_cache_refresh(self) -> None:
+        today = dt.date.today().isoformat()
+        now = time.time()
+        marker_path = self._attachment_cache_daily_marker_path()
+        try:
+            marker = json.loads(marker_path.read_text(encoding="utf-8")) if marker_path.is_file() else {}
+        except Exception:
+            marker = {}
+        if isinstance(marker, dict) and marker.get("date") == today:
+            status = str(marker.get("status") or "").strip()
+            if status == "success":
+                return
+            try:
+                next_retry_at = float(marker.get("next_retry_at") or 0)
+            except Exception:
+                next_retry_at = 0.0
+            if next_retry_at > now:
+                return
+        with self._attachment_cache_refresh_lock:
+            if self._attachment_cache_refresh_running:
+                return
+            self._attachment_cache_refresh_running = True
+        thread = threading.Thread(
+            target=self._refresh_attachment_cache_daily,
+            args=(today,),
+            name="clipflow-attachment-cache-refresh",
+            daemon=True,
+        )
+        thread.start()
+
+    def _refresh_attachment_cache_daily(self, today: str) -> None:
+        stats = {
+            "date": today,
+            "started_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "mop_checked": 0,
+            "signature_checked": 0,
+            "failed": 0,
+            "errors": [],
+        }
+        try:
+            try:
+                candidates, _warnings, _settings = self._load_engineer_mop_candidates(force=True)
+                for candidate in candidates:
+                    for attachment in candidate.get("attachments") or []:
+                        if not isinstance(attachment, dict):
+                            continue
+                        stats["mop_checked"] += 1
+                        try:
+                            self._download_mop_attachment(attachment)
+                        except Exception as exc:
+                            stats["failed"] += 1
+                            if len(stats["errors"]) < 10:
+                                stats["errors"].append(f"MOP:{candidate.get('title') or candidate.get('record_id')}: {exc}")
+            except Exception as exc:
+                stats["failed"] += 1
+                stats["errors"].append(f"MOP扫描失败: {exc}")
+            try:
+                people = self._load_signature_people(force=True)
+                for person in people:
+                    fields = person.get("raw_fields") if isinstance(person.get("raw_fields"), dict) else {}
+                    for attachment in self._extract_signature_attachments(fields):
+                        contextual = self._attachment_with_cache_context(
+                            attachment,
+                            category="signature",
+                            app_token=SIGNATURE_APP_TOKEN,
+                            table_id=SIGNATURE_TABLE_ID,
+                            record_id=str(person.get("record_id") or ""),
+                            latest_publish_time=str(person.get("latest_publish_time") or ""),
+                        )
+                        stats["signature_checked"] += 1
+                        try:
+                            self._download_mop_attachment(contextual)
+                        except Exception as exc:
+                            stats["failed"] += 1
+                            if len(stats["errors"]) < 10:
+                                stats["errors"].append(f"签名:{person.get('name') or person.get('record_id')}: {exc}")
+            except Exception as exc:
+                stats["failed"] += 1
+                stats["errors"].append(f"签名扫描失败: {exc}")
+        finally:
+            stats["finished_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            stats["status"] = "success" if not stats["failed"] else "partial" if (stats["mop_checked"] or stats["signature_checked"]) else "failed"
+            if stats["failed"]:
+                stats["next_retry_at"] = time.time() + 30 * 60
+                stats["next_retry_at_text"] = dt.datetime.fromtimestamp(
+                    float(stats["next_retry_at"])
+                ).strftime("%Y-%m-%d %H:%M:%S")
+            with suppress(Exception):
+                marker_path = self._attachment_cache_daily_marker_path()
+                marker_path.parent.mkdir(parents=True, exist_ok=True)
+                marker_path.write_text(json.dumps(stats, ensure_ascii=False, indent=2), encoding="utf-8")
+            with self._attachment_cache_refresh_lock:
+                self._attachment_cache_refresh_running = False
 
     def preview_engineer_mop_attachment(
         self,
         *,
+        scope: str = "ALL",
         mop_record_id: str,
         file_token: str = "",
         file_name: str = "",
@@ -7954,8 +9391,15 @@ class MaintenancePortalService:
             attachment = attachments[0]
         if not isinstance(attachment, dict):
             raise PortalError("该 MOP 记录没有可预览的表格附件。")
-        content, content_type = self._download_mop_attachment(attachment)
         resolved_name = str(file_name or attachment.get("name") or "").strip()
+        content, content_type = self._download_mop_attachment(attachment)
+        local_file = self._save_mop_attachment_copy(
+            content,
+            scope=scope,
+            mop_record_id=str(record.get("record_id") or mop_record_id or ""),
+            file_name=resolved_name or str(attachment.get("name") or "MOP表格.xlsx"),
+            content_type=content_type,
+        )
         lower_name = resolved_name.lower()
         if lower_name.endswith(".csv") or "csv" in content_type:
             parsed = self._parse_csv_preview(content, file_name=resolved_name)
@@ -7968,10 +9412,201 @@ class MaintenancePortalService:
                 "mop_record_id": record.get("record_id"),
                 "mop_title": record.get("title"),
                 "attachment": attachment,
+                "local_file": local_file,
+                "editable_summary": self._mop_editable_summary(parsed.get("sheets") or []),
                 "warnings": warnings,
             }
         )
         return parsed
+
+    def fill_engineer_mop_file(
+        self,
+        *,
+        scope: str = "ALL",
+        local_file_path: str = "",
+        mop_record_id: str = "",
+        mop_title: str = "",
+        sheet_name: str = "",
+        fields: list[dict[str, Any]] | None = None,
+        checkboxes: list[dict[str, Any]] | None = None,
+        signatures: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        try:
+            from openpyxl import load_workbook
+            from openpyxl.drawing.image import Image as ExcelImage
+            from PIL import Image
+        except Exception as exc:  # pragma: no cover - dependency bootstrap should provide these.
+            raise PortalError("缺少 openpyxl/Pillow 依赖，无法生成已签名 MOP。") from exc
+
+        data_root = Path(get_data_file_path("")).resolve()
+        source_path = Path(str(local_file_path or "")).resolve()
+        try:
+            source_path.relative_to(data_root)
+        except Exception as exc:
+            raise PortalError("MOP 本地文件路径无效。") from exc
+        if not source_path.is_file():
+            raise PortalError("MOP 本地文件不存在，请重新查看表格后再生成。")
+        if source_path.suffix.lower() not in {".xlsx", ".xlsm"}:
+            raise PortalError("当前仅支持对 xlsx/xlsm MOP 文件插入签名。")
+
+        fields = [item for item in (fields or []) if isinstance(item, dict)]
+        checkboxes = [item for item in (checkboxes or []) if isinstance(item, dict)]
+        signatures = [item for item in (signatures or []) if isinstance(item, dict)]
+        if not signatures:
+            raise PortalError("请选择至少一个维护实施人或维护审核人签名。")
+
+        role_to_label = {
+            "implementer": "维护实施人",
+            "auditor": "维护审核人",
+        }
+        role_fields: dict[str, dict[str, Any]] = {}
+        for field in fields:
+            label = str(field.get("label") or "")
+            for role, role_label in role_to_label.items():
+                if role_label in label and role not in role_fields:
+                    role_fields[role] = field
+        missing_roles = sorted(
+            {
+                str(item.get("role") or "")
+                for item in signatures
+                if str(item.get("role") or "") in role_to_label
+            }
+            - set(role_fields)
+        )
+        if missing_roles:
+            raise PortalError("当前 Sheet 未识别到对应签名位置，请切换到非封面填写页。")
+
+        workbook = load_workbook(source_path)
+        worksheet = workbook[sheet_name] if sheet_name and sheet_name in workbook.sheetnames else workbook.active
+        inserted = 0
+        updated_cells = 0
+        temp_paths: list[str] = []
+        try:
+            for checkbox in checkboxes:
+                state = str(checkbox.get("state") or "").strip().lower()
+                if state not in {"normal", "abnormal"}:
+                    continue
+                row = self._mop_cell_int(checkbox.get("row"), -1) + 1
+                col = self._mop_cell_int(checkbox.get("col"), -1) + 1
+                if row <= 0 or col <= 0:
+                    continue
+                cell = worksheet.cell(row=row, column=col)
+                cell.value = self._mop_checkbox_value(cell.value, state)
+                updated_cells += 1
+            for field in fields:
+                fill_value = str(field.get("fill_value") or "").strip()
+                if not fill_value:
+                    continue
+                label = str(field.get("label") or "").strip()
+                if label in {"维护实施人", "维护审核人"}:
+                    continue
+                row = self._mop_cell_int(field.get("row"), -1) + 1
+                value_col_zero = self._mop_cell_int(
+                    field.get("value_col"),
+                    self._mop_cell_int(field.get("label_col"), -1),
+                )
+                col = value_col_zero + 1
+                if row <= 0 or col <= 0:
+                    continue
+                label_col = self._mop_cell_int(field.get("label_col"), -1) + 1
+                cell = worksheet.cell(row=row, column=col)
+                cell.value = f"{label}：{fill_value}" if label and label_col == col else fill_value
+                updated_cells += 1
+            for role in ("implementer", "auditor"):
+                field = role_fields.get(role)
+                if not field:
+                    continue
+                role_signatures = [
+                    item for item in signatures
+                    if str(item.get("role") or "") == role and str(item.get("record_id") or "").strip()
+                ]
+                if not role_signatures:
+                    continue
+                base_row = int(field.get("row") or 0) + 1
+                base_col = 3 if role == "implementer" else 4
+                for offset, signature in enumerate(role_signatures):
+                    record_id = str(signature.get("record_id") or "").strip()
+                    image_bytes, _content_type = self.signature_image_bytes(record_id=record_id)
+                    image = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+                    max_width, max_height = 150, 46
+                    ratio = min(max_width / max(1, image.width), max_height / max(1, image.height), 1.0)
+                    if ratio < 1.0:
+                        image = image.resize(
+                            (max(1, int(image.width * ratio)), max(1, int(image.height * ratio)))
+                        )
+                    temp = tempfile.NamedTemporaryFile(delete=False, suffix=".png", prefix="clipflow_mop_signature_")
+                    temp.close()
+                    image.save(temp.name, format="PNG")
+                    temp_paths.append(temp.name)
+                    excel_image = ExcelImage(temp.name)
+                    excel_image.width = image.width
+                    excel_image.height = image.height
+                    anchor_col = base_col + offset * 2
+                    worksheet.add_image(excel_image, f"{self._column_label(anchor_col)}{base_row}")
+                    inserted += 1
+            if not inserted:
+                raise PortalError("没有可插入的签名。")
+            scope_part = self._safe_mop_path_part(self._scope_label(self._normalize_scope(scope)) or scope, "ALL")
+            date_part = dt.date.today().isoformat()
+            stem = self._safe_mop_path_part(
+                Path(source_path.name).stem or mop_title or mop_record_id or "MOP",
+                "MOP",
+            )
+            output_dir = Path(get_data_file_path(os.path.join("engineer_mop_filled", date_part, scope_part)))
+            output_dir.mkdir(parents=True, exist_ok=True)
+            output_path = output_dir / f"{stem}_已签名_{dt.datetime.now().strftime('%H%M%S')}{source_path.suffix}"
+            workbook.save(output_path)
+        finally:
+            for path in temp_paths:
+                with suppress(Exception):
+                    os.remove(path)
+
+        try:
+            relative_path = str(output_path.resolve().relative_to(data_root))
+        except Exception:
+            relative_path = output_path.name
+        return {
+            "file_name": output_path.name,
+            "path": str(output_path),
+            "relative_path": relative_path,
+            "inserted": inserted,
+            "updated_cells": updated_cells,
+            "saved_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    def reset_engineer_mop_file(
+        self,
+        *,
+        scope: str = "ALL",
+        filled_file_path: str = "",
+        mop_record_id: str = "",
+        file_token: str = "",
+        file_name: str = "",
+    ) -> dict[str, Any]:
+        data_root = Path(get_data_file_path("")).resolve()
+        deleted = False
+        filled_text = str(filled_file_path or "").strip()
+        if filled_text:
+            filled_path = Path(filled_text).resolve()
+            try:
+                relative = filled_path.relative_to(data_root)
+                parts = {part.lower() for part in relative.parts}
+                if "engineer_mop_filled" in parts and filled_path.is_file():
+                    filled_path.unlink()
+                    deleted = True
+            except Exception as exc:
+                raise PortalError("已签名 MOP 文件路径无效，已停止重新签名。") from exc
+        preview = self.preview_engineer_mop_attachment(
+            scope=scope,
+            mop_record_id=mop_record_id,
+            file_token=file_token,
+            file_name=file_name,
+        )
+        preview["reset"] = {
+            "deleted_old_file": deleted,
+            "reset_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        return preview
 
     def _find_record_by_id(self, record_id: str, work_type: str = WORK_TYPE_MAINTENANCE) -> dict[str, Any]:
         if work_type == WORK_TYPE_CHANGE:

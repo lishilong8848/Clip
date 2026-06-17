@@ -41,6 +41,8 @@ from clipflow_backend.api_models import (
     ChangeTargetConfirmRequest,
     ChangeTargetLookupRequest,
     EngineerMopBindRequest,
+    EngineerMopFillRequest,
+    EngineerMopResetRequest,
     EngineerMopSettingsSaveRequest,
     GenerateTemplatesRequest,
     HandoverLinksAuthRequest,
@@ -69,6 +71,8 @@ from clipflow_backend.api_models import (
     QtLocalHeartbeatRequest,
     QtOngoingSnapshotRequest,
     SendGeneratedRequest,
+    SignatureSendLinkRequest,
+    SignatureSaveRequest,
     WorkbenchActionRequest,
     parse_api_model,
 )
@@ -388,6 +392,11 @@ class FastAPIPortalController:
         @app.get("/engineer/mop")
         @app.get("/engineer/mop/")
         async def engineer_mop_page(request: Request):
+            return self._static_file_response(request, portal_index_file(), html=True)
+
+        @app.get("/signature")
+        @app.get("/signature/")
+        async def signature_page(request: Request):
             return self._static_file_response(request, portal_index_file(), html=True)
 
         @app.get("/assets/{asset_path:path}")
@@ -1350,6 +1359,7 @@ class FastAPIPortalController:
                 )
                 data = await asyncio.to_thread(
                     PortalRuntime.service.preview_engineer_mop_attachment,
+                    scope=str(request.query_params.get("scope") or "ALL"),
                     mop_record_id=str(request.query_params.get("mop_record_id") or ""),
                     file_token=str(request.query_params.get("file_token") or ""),
                     file_name=str(request.query_params.get("file_name") or ""),
@@ -1357,6 +1367,214 @@ class FastAPIPortalController:
                 return self._json_ok(request, session, data)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)
+
+        @app.post("/api/engineer/mop/fill")
+        async def engineer_mop_fill(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                payload = (
+                    await self._read_model_request(
+                        request,
+                        EngineerMopFillRequest,
+                        max_bytes=1024 * 1024,
+                    )
+                ).to_payload()
+                scope = self._authorized_scope_or_error(
+                    session, payload.get("scope") or "ALL"
+                )
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.fill_engineer_mop_file,
+                    scope=scope,
+                    local_file_path=str(payload.get("local_file_path") or ""),
+                    mop_record_id=str(payload.get("mop_record_id") or ""),
+                    mop_title=str(payload.get("mop_title") or ""),
+                    sheet_name=str(payload.get("sheet_name") or ""),
+                    fields=payload.get("fields") or [],
+                    checkboxes=payload.get("checkboxes") or [],
+                    signatures=payload.get("signatures") or [],
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
+        @app.post("/api/engineer/mop/reset")
+        async def engineer_mop_reset(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                payload = (
+                    await self._read_model_request(
+                        request,
+                        EngineerMopResetRequest,
+                        max_bytes=256 * 1024,
+                    )
+                ).to_payload()
+                scope = self._authorized_scope_or_error(
+                    session, payload.get("scope") or "ALL"
+                )
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.reset_engineer_mop_file,
+                    scope=scope,
+                    filled_file_path=str(payload.get("filled_file_path") or ""),
+                    mop_record_id=str(payload.get("mop_record_id") or ""),
+                    file_token=str(payload.get("file_token") or ""),
+                    file_name=str(payload.get("file_name") or ""),
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
+        @app.get("/api/signatures/people")
+        async def signatures_people(request: Request):
+            try:
+                session = self._current_session(request)
+                record_id = str(request.query_params.get("record_id") or "")
+                link_token = str(request.query_params.get("token") or "")
+                if session is None:
+                    if not PortalRuntime.service.validate_signature_link_token(
+                        record_id=record_id,
+                        token=link_token,
+                    ):
+                        return JSONResponse(
+                            {"ok": False, "error": "签名链接无效或已过期。"},
+                            status_code=403,
+                        )
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.signature_people,
+                    scope=str(request.query_params.get("scope") or ""),
+                    query=str(request.query_params.get("q") or ""),
+                    record_id=record_id,
+                    link_token=link_token if session is None else "",
+                    limit=int(str(request.query_params.get("limit") or "80") or 80),
+                    refresh=str(request.query_params.get("refresh") or "").lower() in {"1", "true", "yes"},
+                )
+                return {"ok": True, "data": data}
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=500)
+
+        @app.get("/api/signatures/image")
+        async def signatures_image(request: Request):
+            try:
+                session = self._current_session(request)
+                record_id = str(request.query_params.get("record_id") or "")
+                if session is None and not PortalRuntime.service.validate_signature_link_token(
+                    record_id=record_id,
+                    token=str(request.query_params.get("token") or ""),
+                ):
+                    return JSONResponse(
+                        {"ok": False, "error": "签名链接无效或已过期。"},
+                        status_code=404,
+                    )
+                content, content_type = await asyncio.to_thread(
+                    PortalRuntime.service.signature_image_bytes,
+                    record_id=record_id,
+                )
+                return Response(
+                    content=content,
+                    media_type=content_type,
+                    headers={
+                        "Cache-Control": "private, max-age=300",
+                    },
+                )
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=404)
+
+        @app.post("/api/signatures/save")
+        async def signatures_save(request: Request):
+            try:
+                session = self._current_session(request)
+                payload = (
+                    await self._read_model_request(
+                        request,
+                        SignatureSaveRequest,
+                        max_bytes=4 * 1024 * 1024,
+                    )
+                ).to_payload()
+                record_id = str(payload.get("record_id") or "")
+                link_token = str(payload.get("token") or "")
+                if session is None:
+                    if not PortalRuntime.service.validate_signature_link_token(
+                        record_id=record_id,
+                        token=link_token,
+                    ):
+                        return JSONResponse(
+                            {"ok": False, "error": "签名链接无效或已过期。"},
+                            status_code=403,
+                        )
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.save_signature_for_person,
+                    record_id=record_id,
+                    signature_png=str(payload.get("signature_png") or ""),
+                    signer_name=str(payload.get("signer_name") or ""),
+                    link_token=link_token if session is None else "",
+                )
+                if session is None:
+                    await asyncio.to_thread(
+                        PortalRuntime.service.mark_signature_link_token_used,
+                        record_id=record_id,
+                        token=link_token,
+                    )
+                return {"ok": True, "data": data}
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.post("/api/signatures/send-link")
+        async def signatures_send_link(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                payload = (
+                    await self._read_model_request(
+                        request,
+                        SignatureSendLinkRequest,
+                        max_bytes=64 * 1024,
+                    )
+                ).to_payload()
+                scope = self._authorized_scope_or_error(
+                    session,
+                    str(payload.get("scope") or "ALL"),
+                )
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.build_signature_link_message,
+                    record_id=str(payload.get("record_id") or ""),
+                    signer_name=str(payload.get("signer_name") or ""),
+                    scope=scope,
+                    request_base_url=self._request_base_url(request),
+                    created_by=str((session.get("user") or {}).get("open_id") if isinstance(session.get("user"), dict) else ""),
+                )
+                ok, message, results = await asyncio.to_thread(
+                    _send_text_to_open_ids_guarded,
+                    str(data.get("text") or ""),
+                    [str(data.get("open_id") or "")],
+                )
+                if not ok:
+                    return JSONResponse(
+                        {
+                            "ok": False,
+                            "error": message or "签名链接发送失败。",
+                            "data": {
+                                "person": data.get("person") or {},
+                                "link_url": data.get("link_url") or "",
+                                "results": results,
+                            },
+                        },
+                        status_code=400,
+                    )
+                return {
+                    "ok": True,
+                    "data": {
+                        "person": data.get("person") or {},
+                        "link_url": data.get("link_url") or "",
+                        "message": message,
+                        "results": results,
+                    },
+                }
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
 
         @app.get("/api/admin/mop-settings")
         async def admin_mop_settings(request: Request):
@@ -1370,8 +1588,9 @@ class FastAPIPortalController:
                     "data": {
                         "mop_app_token": settings.get("app_token", ""),
                         "mop_table_id": settings.get("table_id", ""),
-                        "mop_title_field": settings.get("title_field", "名称"),
-                        "mop_attachment_field": settings.get("attachment_field", "附件"),
+                        "mop_view_id": settings.get("view_id", ""),
+                        "mop_title_field": settings.get("title_field", "文件名"),
+                        "mop_attachment_field": settings.get("attachment_field", "文件"),
                     },
                 }
             except Exception as exc:
@@ -1393,8 +1612,9 @@ class FastAPIPortalController:
                 values = {
                     "mop_app_token": str(payload.get("mop_app_token") or "").strip(),
                     "mop_table_id": str(payload.get("mop_table_id") or "").strip(),
-                    "mop_title_field": str(payload.get("mop_title_field") or "名称").strip() or "名称",
-                    "mop_attachment_field": str(payload.get("mop_attachment_field") or "附件").strip() or "附件",
+                    "mop_view_id": str(payload.get("mop_view_id") or "").strip(),
+                    "mop_title_field": str(payload.get("mop_title_field") or "文件名").strip() or "文件名",
+                    "mop_attachment_field": str(payload.get("mop_attachment_field") or "文件").strip() or "文件",
                 }
                 PortalRuntime.state_store.put_settings(values)
                 PortalRuntime.service.clear_engineer_mop_cache()
@@ -2871,6 +3091,10 @@ class FastAPIPortalController:
         )
         try:
             PortalRuntime.service.ensure_snapshot_loaded()
+        except Exception:
+            pass
+        try:
+            PortalRuntime.service._maybe_start_daily_attachment_cache_refresh()
         except Exception:
             pass
         PortalRuntime.auth_manager = PortalAuthManager()

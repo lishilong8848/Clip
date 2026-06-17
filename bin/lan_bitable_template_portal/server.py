@@ -408,7 +408,7 @@ class PortalRuntime:
             body,
         )
 
-    def _read_json_body(self) -> dict:
+    def _read_json_body(self, *, max_bytes: int | None = None) -> dict:
         raw_length = self.headers.get("Content-Length", "0") or "0"
         try:
             length = int(raw_length)
@@ -416,7 +416,8 @@ class PortalRuntime:
             raise ValueError("请求体长度无效。") from exc
         if length < 0:
             raise ValueError("请求体长度无效。")
-        if length > MAX_JSON_BODY_BYTES:
+        limit = int(max_bytes or MAX_JSON_BODY_BYTES)
+        if length > limit:
             raise ValueError("请求体过大，请减少粘贴内容后重试。")
         raw = self.rfile.read(length) if length > 0 else b"{}"
         try:
@@ -1019,12 +1020,110 @@ class PortalRuntime:
         parsed = urlparse(self.path)
         if self._redirect_root_oauth_callback(parsed):
             return
-        if parsed.path == "/":
+        if parsed.path in {
+            "/",
+            "/signature",
+            "/signature/",
+            "/engineer/mop",
+            "/engineer/mop/",
+        }:
             return self._send_html(portal_index_file())
         if parsed.path.startswith("/assets/"):
             relative_text = parsed.path[len("/assets/") :]
             relative = Path(*relative_text.split("/")) if relative_text else Path()
             return self._send_static_file(portal_asset_file(relative))
+        if parsed.path == "/api/engineer/mop/bootstrap":
+            session = self._require_auth_json()
+            if session is None:
+                return
+            try:
+                qs = parse_qs(parsed.query)
+                scope = self._authorized_scope_or_error(
+                    session, (qs.get("scope") or ["ALL"])[0]
+                )
+                ongoing = self._get_ongoing(scope)
+                data = self.service.engineer_mop_bootstrap(
+                    scope=scope,
+                    ongoing_items=ongoing,
+                )
+                return self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "data": self._with_auth_context(data, session),
+                    },
+                )
+            except (PortalError, ValueError) as exc:
+                return self._send_json(403, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/engineer/mop/preview":
+            session = self._require_auth_json()
+            if session is None:
+                return
+            try:
+                qs = parse_qs(parsed.query)
+                scope = self._authorized_scope_or_error(
+                    session, (qs.get("scope") or ["ALL"])[0]
+                )
+                data = self.service.preview_engineer_mop_attachment(
+                    scope=scope,
+                    mop_record_id=(qs.get("mop_record_id") or [""])[0],
+                    file_token=(qs.get("file_token") or [""])[0],
+                    file_name=(qs.get("file_name") or [""])[0],
+                )
+                return self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "data": self._with_auth_context(data, session),
+                    },
+                )
+            except (PortalError, ValueError) as exc:
+                return self._send_json(403, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/signatures/people":
+            try:
+                qs = parse_qs(parsed.query)
+                session = self._current_session()
+                record_id = (qs.get("record_id") or [""])[0]
+                link_token = (qs.get("token") or [""])[0]
+                if session is None and not self.service.validate_signature_link_token(
+                    record_id=record_id,
+                    token=link_token,
+                ):
+                    return self._send_json(403, {"ok": False, "error": "签名链接无效或已过期。"})
+                data = self.service.signature_people(
+                    scope=(qs.get("scope") or [""])[0],
+                    query=(qs.get("q") or [""])[0],
+                    record_id=record_id,
+                    link_token=link_token if session is None else "",
+                    limit=int((qs.get("limit") or ["80"])[0] or 80),
+                    refresh=str((qs.get("refresh") or [""])[0]).lower() in {"1", "true", "yes"},
+                )
+                return self._send_json(200, {"ok": True, "data": data})
+            except (PortalError, ValueError) as exc:
+                return self._send_json(500, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/signatures/image":
+            try:
+                qs = parse_qs(parsed.query)
+                session = self._current_session()
+                record_id = (qs.get("record_id") or [""])[0]
+                if session is None and not self.service.validate_signature_link_token(
+                    record_id=record_id,
+                    token=(qs.get("token") or [""])[0],
+                ):
+                    return self._send_json(404, {"ok": False, "error": "签名链接无效或已过期。"})
+                content, content_type = self.service.signature_image_bytes(
+                    record_id=record_id,
+                )
+                return self._write_response(
+                    200,
+                    {
+                        "Content-Type": content_type,
+                        "Cache-Control": "private, max-age=300",
+                    },
+                    content,
+                )
+            except (PortalError, ValueError) as exc:
+                return self._send_json(404, {"ok": False, "error": str(exc)})
         if parsed.path == "/api/auth/status":
             session = self._current_session()
             data = PortalRuntime.auth_manager.public_status(
@@ -1373,9 +1472,151 @@ class PortalRuntime:
                 },
                 body,
             )
+        if parsed.path == "/api/signatures/save":
+            try:
+                session = self._current_session()
+                payload = self._read_json_body(max_bytes=4 * 1024 * 1024)
+                record_id = str(payload.get("record_id") or "")
+                link_token = str(payload.get("token") or "")
+                if session is None and not self.service.validate_signature_link_token(
+                    record_id=record_id,
+                    token=link_token,
+                ):
+                    return self._send_json(403, {"ok": False, "error": "签名链接无效或已过期。"})
+                data = self.service.save_signature_for_person(
+                    record_id=record_id,
+                    signature_png=str(payload.get("signature_png") or ""),
+                    signer_name=str(payload.get("signer_name") or ""),
+                    link_token=link_token if session is None else "",
+                )
+                if session is None:
+                    self.service.mark_signature_link_token_used(
+                        record_id=record_id,
+                        token=link_token,
+                    )
+                return self._send_json(200, {"ok": True, "data": data})
+            except (PortalError, ValueError, json.JSONDecodeError) as exc:
+                return self._send_json(400, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/signatures/send-link":
+            session = self._require_auth_json()
+            if session is None:
+                return
+            try:
+                payload = self._read_json_body(max_bytes=64 * 1024)
+                scope = self._authorized_scope_or_error(
+                    session,
+                    str(payload.get("scope") or "ALL"),
+                )
+                data = self.service.build_signature_link_message(
+                    record_id=str(payload.get("record_id") or ""),
+                    signer_name=str(payload.get("signer_name") or ""),
+                    scope=scope,
+                    request_base_url=self._request_base_url(),
+                    created_by=str((session.get("user") or {}).get("open_id") if isinstance(session.get("user"), dict) else ""),
+                )
+                ok, message, results = _send_text_to_open_ids_guarded(
+                    str(data.get("text") or ""),
+                    [str(data.get("open_id") or "")],
+                )
+                if not ok:
+                    return self._send_json(
+                        400,
+                        {
+                            "ok": False,
+                            "error": message or "签名链接发送失败。",
+                            "data": {
+                                "person": data.get("person") or {},
+                                "link_url": data.get("link_url") or "",
+                                "results": results,
+                            },
+                        },
+                    )
+                return self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "data": {
+                            "person": data.get("person") or {},
+                            "link_url": data.get("link_url") or "",
+                            "message": message,
+                            "results": results,
+                        },
+                    },
+                )
+            except (PortalError, ValueError, json.JSONDecodeError) as exc:
+                return self._send_json(400, {"ok": False, "error": str(exc)})
         session = self._require_auth_json()
         if session is None:
             return
+        if parsed.path == "/api/engineer/mop/bind":
+            try:
+                payload = self._read_json_body(max_bytes=512 * 1024)
+                scope = self._authorized_scope_or_error(
+                    session, str(payload.get("scope") or "ALL")
+                )
+                payload["scope"] = scope
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                data = self.service.bind_engineer_mop_notice(
+                    payload=payload,
+                    updated_by=str(user.get("open_id") or ""),
+                )
+                PortalRuntime.clear_payload_cache()
+                return self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "data": self._with_auth_context(data, session),
+                    },
+                )
+            except (PortalError, ValueError, json.JSONDecodeError) as exc:
+                return self._send_json(403, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/engineer/mop/fill":
+            try:
+                payload = self._read_json_body(max_bytes=1024 * 1024)
+                scope = self._authorized_scope_or_error(
+                    session, str(payload.get("scope") or "ALL")
+                )
+                data = self.service.fill_engineer_mop_file(
+                    scope=scope,
+                    local_file_path=str(payload.get("local_file_path") or ""),
+                    mop_record_id=str(payload.get("mop_record_id") or ""),
+                    mop_title=str(payload.get("mop_title") or ""),
+                    sheet_name=str(payload.get("sheet_name") or ""),
+                    fields=payload.get("fields") if isinstance(payload.get("fields"), list) else [],
+                    checkboxes=payload.get("checkboxes") if isinstance(payload.get("checkboxes"), list) else [],
+                    signatures=payload.get("signatures") if isinstance(payload.get("signatures"), list) else [],
+                )
+                return self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "data": self._with_auth_context(data, session),
+                    },
+                )
+            except (PortalError, ValueError, json.JSONDecodeError) as exc:
+                return self._send_json(403, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/engineer/mop/reset":
+            try:
+                payload = self._read_json_body(max_bytes=256 * 1024)
+                scope = self._authorized_scope_or_error(
+                    session, str(payload.get("scope") or "ALL")
+                )
+                data = self.service.reset_engineer_mop_file(
+                    scope=scope,
+                    filled_file_path=str(payload.get("filled_file_path") or ""),
+                    mop_record_id=str(payload.get("mop_record_id") or ""),
+                    file_token=str(payload.get("file_token") or ""),
+                    file_name=str(payload.get("file_name") or ""),
+                )
+                return self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "data": self._with_auth_context(data, session),
+                    },
+                )
+            except (PortalError, ValueError, json.JSONDecodeError) as exc:
+                return self._send_json(403, {"ok": False, "error": str(exc)})
         if parsed.path in {"/api/maintenance-actions", "/api/workbench-actions"}:
             try:
                 payload = self._read_json_body()

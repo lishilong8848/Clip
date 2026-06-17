@@ -655,6 +655,55 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             ],
         )
 
+    def test_change_handler_writes_planned_end_before_end_state(self):
+        handler = ChangeNoticeHandler("设备变更")
+        payload = NoticePayload(
+            text=(
+                "【变更通告】状态：开始\n"
+                "【名称】测试变更\n"
+                "【等级】低风险\n"
+                "【时间】2026-06-12 09:30~2026-06-12 18:30\n"
+                "【进度】准备开始"
+            ),
+            response_time="2026-06-12 09:35",
+        )
+        expected_plan_end = int(dt.datetime(2026, 6, 12, 18, 30).timestamp() * 1000)
+
+        create_fields = handler.build_create_fields(payload)
+        update_fields = handler.build_update_fields(
+            NoticePayload(
+                text=payload.text.replace("状态：开始", "状态：更新").replace("准备开始", "执行中"),
+                response_time="2026-06-12 10:00",
+            )
+        )
+
+        self.assertEqual(
+            create_fields[CHANGE_NOTICE_FIELDS["end_time"]],
+            expected_plan_end,
+        )
+        self.assertEqual(
+            update_fields[CHANGE_NOTICE_FIELDS["end_time"]],
+            expected_plan_end,
+        )
+
+    def test_change_handler_end_state_overwrites_end_time_with_response_time(self):
+        handler = ChangeNoticeHandler("设备变更")
+        payload = NoticePayload(
+            text=(
+                "【变更通告】状态：结束\n"
+                "【名称】测试变更\n"
+                "【等级】低风险\n"
+                "【时间】2026-06-12 09:30~2026-06-12 18:30\n"
+                "【进度】执行完成"
+            ),
+            response_time="2026-06-12 18:35",
+        )
+        expected_actual_end = int(dt.datetime(2026, 6, 12, 18, 35).timestamp() * 1000)
+
+        fields = handler.build_update_fields(payload)
+
+        self.assertEqual(fields[CHANGE_NOTICE_FIELDS["end_time"]], expected_actual_end)
+
     def test_feishu_http_client_returns_business_json_on_http_error(self):
         transport = httpx.MockTransport(
             lambda request: httpx.Response(
@@ -5402,7 +5451,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(prepared["building_codes"], ["A"])
             self.assertEqual(prepared["specialty"], "电气")
             self.assertEqual(prepared["level"], "I3")
-            self.assertIn("【设备变更】状态：开始", prepared["text"])
+            self.assertIn("【变更通告】状态：开始", prepared["text"])
             self.assertIn("【名称】EA118机房A楼冷却塔清洗", prepared["text"])
             self.assertNotIn("【维保通告】", prepared["text"])
             self.assertTrue(prepared["skip_personal_message"])
@@ -6619,6 +6668,45 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     code=request["code"],
                 )
                 self.assertEqual(manager.scopes_for_open_id("ou_disabled_apply"), ["E"])
+
+    def test_portal_auth_permission_request_adds_missing_scopes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            def fake_data_path(name):
+                return str(root / name)
+
+            with patch(
+                "lan_bitable_template_portal.portal_auth.get_data_file_path",
+                side_effect=fake_data_path,
+            ):
+                manager = PortalAuthManager()
+                manager.save_permissions_payload(
+                    [
+                        {
+                            "open_id": "ou_add_scope",
+                            "name": "追加楼栋",
+                            "role": "building",
+                            "scopes": ["A"],
+                            "enabled": True,
+                        }
+                    ],
+                    updated_by="ou_actor",
+                )
+                request = manager.create_permission_request(
+                    open_id="ou_add_scope",
+                    name="追加楼栋",
+                    scopes=["A", "B"],
+                    reason="临时支援B楼",
+                )
+                self.assertEqual(request["requested_scopes"], ["B"])
+                manager.activate_permission_request(request["request_id"])
+                manager.confirm_permission_request(
+                    open_id="ou_add_scope",
+                    request_id=request["request_id"],
+                    code=request["code"],
+                )
+                self.assertEqual(manager.scopes_for_open_id("ou_add_scope"), ["A", "B"])
 
     def test_portal_auth_rejects_reserved_meta_open_id(self):
         with tempfile.TemporaryDirectory() as tmp:

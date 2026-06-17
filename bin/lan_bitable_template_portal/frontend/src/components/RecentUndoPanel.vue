@@ -1,38 +1,45 @@
 <template>
   <section v-if="items.length" class="recent-undo-panel">
     <div class="panel-head compact">
-      <h3>近三天可回退</h3>
-      <span>{{ filteredItems.length }}/{{ items.length }}</span>
-    </div>
-    <div class="undo-filter">
-      <button
-        v-for="option in filterOptions"
-        :key="option.value"
-        type="button"
-        :class="{ active: modelValue === option.value }"
-        @click="emit('update:modelValue', option.value)"
-      >
-        {{ option.label }} {{ filterCounts[option.value] || 0 }}
-      </button>
-    </div>
-    <article v-for="item in filteredItems" :key="undoLineKey(item)" class="undo-card">
       <div>
-        <strong>{{ item.title || "未命名通告" }}</strong>
-        <p>
-          <span class="undo-action-chip">{{ undoActionLabel(item) }}</span>
-          {{ workTypeLabel(item.work_type) }} · {{ item.building || "-" }} · {{ formatUndoTime(item.undo_created_at) }}
-        </p>
+        <h3>近三天可回退</h3>
+        <small>删除、结束、更新可在这里恢复最近一次状态</small>
       </div>
-      <button class="btn ghost" :disabled="isLineBusy(undoLineKey(item))" @click="emit('apply', item)">
-        {{ undoButtonLabel(item) }}
+      <button class="undo-toggle" type="button" @click="expanded = !expanded">
+        {{ expanded ? "收起" : `展开 ${items.length}` }}
       </button>
-      <span class="job-line" :class="jobClass(undoLineKey(item))">{{ jobText(undoLineKey(item)) }}</span>
-    </article>
+    </div>
+    <template v-if="expanded">
+      <div class="undo-filter">
+        <button
+          v-for="option in filterOptions"
+          :key="option.value"
+          type="button"
+          :class="{ active: modelValue === option.value }"
+          @click="emit('update:modelValue', option.value)"
+        >
+          {{ option.label }} {{ filterCounts[option.value] || 0 }}
+        </button>
+      </div>
+      <article v-for="item in filteredItems" :key="undoLineKey(item)" class="undo-card">
+        <div>
+          <strong>{{ item.title || "未命名通告" }}</strong>
+          <p>
+            <span class="undo-action-chip">{{ undoActionLabel(item) }}</span>
+            {{ workTypeLabel(item.work_type) }} · {{ item.building || "-" }} · {{ formatUndoTime(item.undo_created_at) }}
+          </p>
+        </div>
+        <button class="btn ghost" :disabled="isLineBusy(undoLineKey(item))" @click="emit('apply', item)">
+          {{ undoButtonLabel(item) }}
+        </button>
+        <span class="job-line" :class="jobClass(undoLineKey(item))">{{ jobText(undoLineKey(item)) }}</span>
+      </article>
+    </template>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import { workTypeLabel } from "../noticeTemplates";
 
 type Dict = Record<string, any>;
@@ -49,6 +56,8 @@ const emit = defineEmits<{
   "update:modelValue": [value: string];
   apply: [item: Dict];
 }>();
+
+const expanded = ref(false);
 
 const filterOptions = [
   { value: "all", label: "全部" },
@@ -120,18 +129,33 @@ function undoButtonLabel(item: Dict): string {
   padding: 0 0 4px;
 }
 
+.panel-head.compact > div {
+  display: grid;
+  gap: 3px;
+}
+
 .panel-head.compact h3 {
   margin: 0;
   font-size: 14px;
 }
 
-.panel-head span {
-  flex: 0 0 auto;
-  padding: 3px 8px;
-  border-radius: 999px;
-  background: #eef2ff;
-  color: #3730a3;
+.panel-head small {
+  color: #64748b;
   font-size: 12px;
+  line-height: 1.4;
+}
+
+.undo-toggle {
+  flex: 0 0 auto;
+  min-height: 34px;
+  border: 1px solid #cfe2f8;
+  border-radius: 999px;
+  background: #eaf3ff;
+  padding: 6px 12px;
+  color: #0757d7;
+  font-size: 12px;
+  font-weight: 900;
+  cursor: pointer;
 }
 
 .undo-filter {
@@ -236,7 +260,7 @@ function undoButtonLabel(item: Dict): string {
   font-weight: 900;
 }
 
-.panel-head span,
+.undo-toggle,
 .undo-action-chip {
   border-color: #cfe2f8;
   background: #eaf3ff;

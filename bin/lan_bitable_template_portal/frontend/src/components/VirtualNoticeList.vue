@@ -15,6 +15,9 @@
           <span class="notice-row__type">{{ rows[virtualRow.index]?.type || "通告" }}</span>
           <strong>{{ rows[virtualRow.index]?.title || "未命名通告" }}</strong>
           <small>{{ rows[virtualRow.index]?.meta || "" }}</small>
+          <small v-if="rows[virtualRow.index]?.disabled && rows[virtualRow.index]?.disabledReason" class="notice-row__disabled-reason">
+            {{ rows[virtualRow.index]?.disabledReason }}
+          </small>
         </div>
         <span
           v-if="showStatus"
@@ -182,6 +185,18 @@ function handleSelect(row: NoticeRow | undefined): void {
 
 .notice-row__main small {
   white-space: nowrap;
+}
+
+.notice-row__disabled-reason {
+  width: fit-content;
+  max-width: 100%;
+  border: 1px solid #fed7aa;
+  border-radius: 999px;
+  background: #fff7ed;
+  padding: 2px 8px;
+  color: #c2410c;
+  font-size: 11px;
+  font-weight: 800;
 }
 
 .notice-row__type,

@@ -19,6 +19,19 @@
     <div v-else-if="!isAdmin" class="notice-box danger">仅管理员可使用历史通告记忆导入。</div>
 
     <template v-else>
+      <section class="history-steps" aria-label="历史记忆导入步骤">
+        <article
+          v-for="step in historySteps"
+          :key="step.key"
+          :class="{ active: historyStep === step.key, done: step.done }"
+        >
+          <span>{{ step.index }}</span>
+          <div>
+            <strong>{{ step.title }}</strong>
+            <small>{{ step.text }}</small>
+          </div>
+        </article>
+      </section>
       <section class="scan-bar">
         <label>
           范围
@@ -402,6 +415,34 @@ const savePreviewItems = computed(() => pendingSavePayload.value.slice(0, 6).map
     origin: item.field_origin === "candidate" ? "使用历史候选字段" : sourceFieldOriginLabel(source.id || ""),
   };
 }));
+const historyStep = computed(() => {
+  if (!sourceItems.value.length && !candidates.value.length) return "scan";
+  if (selectedCount.value > 0 || recommendedMatchCount.value > 0) return "confirm";
+  return "review";
+});
+const historySteps = computed(() => [
+  {
+    key: "scan",
+    index: "1",
+    title: "扫描历史",
+    text: sourceItems.value.length ? `已识别 ${sourceItems.value.length} 条源表事项` : "先读取近三个月历史记录",
+    done: sourceItems.value.length > 0 || candidates.value.length > 0,
+  },
+  {
+    key: "review",
+    index: "2",
+    title: "确认匹配",
+    text: recommendedMatchCount.value ? `有 ${recommendedMatchCount.value} 条推荐可填充` : "选择左侧事项并核对字段",
+    done: selectedCount.value > 0,
+  },
+  {
+    key: "confirm",
+    index: "3",
+    title: "保存记忆",
+    text: selectedCount.value ? `准备保存 ${selectedCount.value} 条` : "确认后写入 SQLite 记忆",
+    done: false,
+  },
+]);
 const filteredSources = computed(() => {
   const q = query.value.trim().toLowerCase();
   return sourceItems.value.filter((item) => {
@@ -650,6 +691,7 @@ function goHome(): void {
 }
 
 .page-head,
+.history-steps,
 .scan-bar,
 .filters,
 .summary-grid,
@@ -678,6 +720,65 @@ function goHome(): void {
 .candidate-row small,
 .match-note span {
   color: #64748b;
+}
+
+.history-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  padding: 10px;
+}
+
+.history-steps article {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  border: 1px solid #dbeafe;
+  border-radius: 12px;
+  background: #f8fbff;
+  padding: 10px;
+}
+
+.history-steps article > span {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border-radius: 12px;
+  background: #eaf3ff;
+  color: #0757d7;
+  font-weight: 900;
+}
+
+.history-steps article.active {
+  border-color: #1678ff;
+  background: #eff6ff;
+}
+
+.history-steps article.done > span,
+.history-steps article.active > span {
+  background: linear-gradient(135deg, #0757d7, #1678ff);
+  color: #ffffff;
+}
+
+.history-steps strong,
+.history-steps small {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-steps strong {
+  color: #09204a;
+  font-size: 14px;
+}
+
+.history-steps small {
+  color: #64748b;
+  font-size: 12px;
 }
 
 .head-actions,

@@ -237,6 +237,11 @@ def send_text_to_open_ids(
     detail = "；".join(
         f"{item.get('open_id')}: {item.get('message')}" for item in failed
     )
+    if "NO availability" in detail or "no availability" in detail.lower():
+        detail = (
+            f"{detail}。已按 open_id 发送，但飞书返回机器人对该用户不可用；"
+            "请在飞书应用后台确认机器人已启用且应用可用范围包含该用户。"
+        )
     log_error(f"个人消息发送失败: {detail}")
     return False, detail or "发送失败", results
 

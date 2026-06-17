@@ -52,9 +52,12 @@
         </aside>
       </div>
       <div class="candidate-modal-actions">
-        <span class="job-line">只关联当前通告；确认后会把目标记录字段回填到空白项中。</span>
+        <span class="job-line">
+          <template v-if="confirmDisabledReason">{{ confirmDisabledReason }}</template>
+          <template v-else>只关联当前通告；确认后会把目标记录字段回填到空白项中。</template>
+        </span>
         <button class="btn ghost" type="button" @click="emit('cancel')">取消</button>
-        <button class="btn blue" type="button" :disabled="!canConfirm" @click="emit('confirm')">确认关联</button>
+        <button class="btn blue" type="button" :disabled="!canConfirm" :title="confirmDisabledReason" @click="emit('confirm')">确认关联</button>
       </div>
     </section>
   </div>
@@ -113,6 +116,12 @@ const visibleActiveCandidate = computed(() => {
 const detailRows = computed(() => props.detailRowsFor(visibleActiveCandidate.value));
 
 const canConfirm = computed(() => selectedVisible.value);
+const confirmDisabledReason = computed(() => {
+  if (canConfirm.value) return "";
+  if (!props.candidates.length) return "暂未找到可关联的目标记录。";
+  if (!filteredCandidates.value.length) return "当前搜索条件下没有候选记录，请调整搜索。";
+  return "请先在左侧选择一条目标记录。";
+});
 </script>
 
 <style scoped>

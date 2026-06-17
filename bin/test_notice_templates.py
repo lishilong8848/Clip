@@ -18,6 +18,7 @@ from lan_bitable_template_portal.portal_service import (  # noqa: E402
     WORK_TYPE_POWER,
     WORK_TYPE_REPAIR,
 )
+from upload_event_module.core.parser import extract_event_info  # noqa: E402
 
 
 class NoticeTemplateTests(unittest.TestCase):
@@ -77,6 +78,10 @@ class NoticeTemplateTests(unittest.TestCase):
                 "【进度】执行中",
             ],
         )
+        info = extract_event_info(text)
+        self.assertIsNotNone(info)
+        self.assertEqual(info["notice_type"], "设备变更")
+        self.assertEqual(info["title"], "EA118机房C楼蓄电池放电变更")
 
     def test_repair_notice_text_contract(self):
         text = MaintenancePortalService.build_repair_notice_text(

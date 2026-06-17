@@ -5,7 +5,7 @@ from ..utils import WHITESPACE_TRANSLATOR
 
 NOTICE_TYPE_WEIBAO = "维保通告"  # 维保通告
 NOTICE_TYPE_BIANGENG = "设备变更"  # 设备变更
-NOTICE_TYPE_BIANGENG_LEGACY = "变更通告"  # 历史/口语化变更通告标记
+NOTICE_TYPE_BIANGENG_LEGACY = "变更通告"  # 用户可见变更通告标记，内部仍归一为设备变更
 NOTICE_TYPE_TIAOZHENG = "设备调整"  # 设备调整
 NOTICE_TYPE_SHIJIAN = "事件通告"  # 事件通告
 NOTICE_TYPE_POWER = "上下电通告"  # 上下电通告

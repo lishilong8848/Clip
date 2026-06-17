@@ -24,6 +24,16 @@
       </p>
       <p v-if="warningText" class="draft-warning-line">{{ warningText }}</p>
       <p v-if="missingText" class="draft-required-line">{{ missingText }}</p>
+      <div class="notice-completion-panel">
+        <span
+          v-for="item in completionItems"
+          :key="item.key"
+          :class="{ done: item.done, pending: !item.done }"
+        >
+          <strong>{{ item.label }}</strong>
+          <em>{{ item.text }}</em>
+        </span>
+      </div>
 
       <div class="form-grid">
         <label v-if="record.manual">
@@ -189,11 +199,13 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from "vue";
 import {
   hasNoticeUploadFields,
   isNoticeMessageField,
   isNoticeUploadField,
   noticeFieldLabel,
+  noticeTemplate,
   workTypeLabel,
   workTypes,
 } from "../noticeTemplates";
@@ -261,6 +273,59 @@ function changeBuilding(value: string): void {
 function changeZhihang(value: string): void {
   setDraft("zhihang_record_id", value);
   emit("bind-zhihang", value);
+}
+
+const messageFieldStatus = computed(() => {
+  const fields = noticeTemplate(props.workType).messageFields;
+  const total = fields.length;
+  const done = fields.filter((field) => hasValue(props.draft[field] ?? props.record[field])).length;
+  return { total, done };
+});
+const uploadFieldStatus = computed(() => {
+  const fields = noticeTemplate(props.workType).uploadFields.filter((field) => field !== "non_plan" && field !== "zhihang");
+  const total = fields.length;
+  const done = fields.filter((field) => hasValue(props.draft[field] ?? props.record[field])).length;
+  return { total, done };
+});
+const zhihangStatus = computed(() => {
+  if (!isNoticeUploadField(props.workType, "zhihang")) return { done: true, text: "不涉及" };
+  const involved = Boolean(props.draft.zhihang_involved || props.record.zhihang_involved);
+  if (!involved) return { done: true, text: "未涉及" };
+  const selected = hasValue(props.draft.zhihang_record_id || props.record.zhihang_record_id);
+  return { done: selected, text: selected ? "已绑定" : "待选择" };
+});
+const completionItems = computed(() => {
+  const uploadDone = uploadFieldStatus.value.total === 0 || uploadFieldStatus.value.done >= uploadFieldStatus.value.total;
+  return [
+    {
+      key: "message",
+      label: "通告字段",
+      text: `${messageFieldStatus.value.done}/${messageFieldStatus.value.total}`,
+      done: messageFieldStatus.value.done >= messageFieldStatus.value.total,
+    },
+    {
+      key: "upload",
+      label: "上传字段",
+      text: uploadFieldStatus.value.total ? `${uploadFieldStatus.value.done}/${uploadFieldStatus.value.total}` : "无额外字段",
+      done: uploadDone,
+    },
+    {
+      key: "photo",
+      label: "现场照片",
+      text: "开始不必填",
+      done: true,
+    },
+    {
+      key: "zhihang",
+      label: "智航绑定",
+      text: zhihangStatus.value.text,
+      done: zhihangStatus.value.done,
+    },
+  ];
+});
+
+function hasValue(value: unknown): boolean {
+  return String(value ?? "").trim() !== "";
 }
 </script>
 
@@ -785,6 +850,54 @@ textarea:focus {
 
 .btn.blue:hover:not(:disabled) {
   background: #1554df;
+}
+
+.notice-completion-panel {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.notice-completion-panel span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid #d8e5f7;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.86);
+}
+
+.notice-completion-panel span.done {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+}
+
+.notice-completion-panel span.pending {
+  border-color: #fde68a;
+  background: #fffbeb;
+}
+
+.notice-completion-panel strong {
+  color: #09204a;
+  font-size: 12px;
+  font-weight: 820;
+}
+
+.notice-completion-panel em {
+  overflow: hidden;
+  color: #64748b;
+  font-size: 12px;
+  font-style: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  .notice-completion-panel {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 </style>
 
