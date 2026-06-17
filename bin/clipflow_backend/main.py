@@ -1378,7 +1378,7 @@ class FastAPIPortalController:
                     await self._read_model_request(
                         request,
                         EngineerMopFillRequest,
-                        max_bytes=1024 * 1024,
+                        max_bytes=4 * 1024 * 1024,
                     )
                 ).to_payload()
                 scope = self._authorized_scope_or_error(
@@ -1393,6 +1393,7 @@ class FastAPIPortalController:
                     sheet_name=str(payload.get("sheet_name") or ""),
                     fields=payload.get("fields") or [],
                     checkboxes=payload.get("checkboxes") or [],
+                    cell_edits=payload.get("cell_edits") or [],
                     signatures=payload.get("signatures") or [],
                 )
                 return self._json_ok(request, session, data)
@@ -1736,7 +1737,9 @@ class FastAPIPortalController:
                 scope = self._authorized_scope_or_error(
                     session, request.query_params.get("scope") or "ALL"
                 )
-                refresh_result = PortalRuntime.request_repair_source_refresh()
+                refresh_result = await asyncio.to_thread(
+                    PortalRuntime._refresh_repair_source_singleflight
+                )
                 self._clear_read_cache()
                 ongoing = self._get_ongoing(scope)
                 self._reconcile_orphan_started_items(scope, ongoing)

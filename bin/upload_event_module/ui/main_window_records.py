@@ -3023,14 +3023,31 @@ class MainWindowRecordsMixin:
             return data_dict
         if not getattr(self, "cache_store", None):
             return data_dict
+        infer_buildings = getattr(self, "_infer_buildings_from_notice_text", None)
+        normalize_today = getattr(self, "_normalize_today_in_progress_state", None)
+        normalize_binding = getattr(self, "_normalize_record_binding_state", None)
+        normalize_match = getattr(self, "_normalize_match_text", None)
+        normalize_routing = getattr(self, "_normalize_routing_state", None)
+        ensure_identity = getattr(self, "_ensure_active_item_identity", None)
+
+        def _fallback_buildings() -> list:
+            if callable(infer_buildings):
+                return self._normalize_buildings_value(
+                    infer_buildings(data_dict.get("text", ""))
+                )
+            return []
+
+        def _normalize_optional(callable_obj, value, default=""):
+            if callable(callable_obj):
+                return callable_obj(value)
+            return default if value in (None, "") else str(value).strip()
+
         record_id = self._get_cache_identity(data_dict)
         if not record_id:
             existing_buildings = self._normalize_buildings_value(
                 data_dict.get("buildings")
             )
-            data_dict["buildings"] = existing_buildings or self._infer_buildings_from_notice_text(
-                data_dict.get("text", "")
-            )
+            data_dict["buildings"] = existing_buildings or _fallback_buildings()
             data_dict.pop("specialty", None)
             return data_dict
         cache_fields = self.cache_store.get_record_fields(
@@ -3059,9 +3076,7 @@ class MainWindowRecordsMixin:
                 cache_fields.get("buildings")
             )
         else:
-            data_dict["buildings"] = existing_buildings or self._infer_buildings_from_notice_text(
-                data_dict.get("text", "")
-            )
+            data_dict["buildings"] = existing_buildings or _fallback_buildings()
         if "specialty" in cache_fields:
             specialty = str(cache_fields.get("specialty") or "").strip()
             if specialty:
@@ -3097,12 +3112,14 @@ class MainWindowRecordsMixin:
         else:
             data_dict.pop("level_locked", None)
         if "today_in_progress_state" in cache_fields:
-            data_dict["today_in_progress_state"] = self._normalize_today_in_progress_state(
+            data_dict["today_in_progress_state"] = _normalize_optional(
+                normalize_today,
                 cache_fields.get("today_in_progress_state")
             )
         else:
             data_dict.pop("today_in_progress_state", None)
-        binding_state = self._normalize_record_binding_state(
+        binding_state = _normalize_optional(
+            normalize_binding,
             cache_fields.get("record_binding_state")
         )
         if binding_state:
@@ -3117,7 +3134,7 @@ class MainWindowRecordsMixin:
         active_item_id = str(cache_fields.get("active_item_id") or "").strip()
         if active_item_id:
             data_dict["active_item_id"] = active_item_id
-        match_title = self._normalize_match_text(cache_fields.get("match_title"))
+        match_title = _normalize_optional(normalize_match, cache_fields.get("match_title"))
         if match_title:
             data_dict["match_title"] = match_title
         else:
@@ -3127,7 +3144,11 @@ class MainWindowRecordsMixin:
             data_dict["match_key"] = match_key
         else:
             data_dict.pop("match_key", None)
-        routing_state = self._normalize_routing_state(cache_fields.get("routing_state"))
+        routing_state = _normalize_optional(
+            normalize_routing,
+            cache_fields.get("routing_state"),
+            default="",
+        )
         data_dict["routing_state"] = routing_state
         routing_error = str(cache_fields.get("routing_error") or "").strip()
         if routing_state == "conflicted" and routing_error:
@@ -3144,7 +3165,9 @@ class MainWindowRecordsMixin:
             data_dict["transfer_to_overhaul"] = bool(
                 cache_fields.get("transfer_to_overhaul")
             )
-        return self._ensure_active_item_identity(data_dict)
+        if callable(ensure_identity):
+            return ensure_identity(data_dict)
+        return data_dict
 
     def _resolve_upload_fields_from_cache(
         self, data_dict: dict, dialog_fields: dict | None = None
@@ -3483,12 +3506,19 @@ class MainWindowRecordsMixin:
                         )
                 if not success:
                     data["_has_unuploaded_changes"] = True
+                else:
+                    data["_has_unuploaded_changes"] = False
                 has_unuploaded_changes = data.get("_has_unuploaded_changes")
 
                 data["_pending_upload_hash"] = None
                 data["_upload_in_progress"] = False
                 data.pop("_upload_started_monotonic", None)
                 item.setData(Qt.ItemDataRole.UserRole, data)
+                if hasattr(self, "_upsert_active_notice_model_item"):
+                    try:
+                        self._upsert_active_notice_model_item(list_widget, item, data)
+                    except Exception:
+                        pass
                 self._rebuild_active_item_widget(
                     list_widget,
                     item,

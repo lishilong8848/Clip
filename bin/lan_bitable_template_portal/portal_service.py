@@ -100,6 +100,8 @@ NOTICE_TYPE_CHANGE = "设备变更"
 NOTICE_HEADING_CHANGE = NOTICE_TYPE_CHANGE
 NOTICE_TYPE_REPAIR = "设备检修"
 NOTICE_TYPE_POWER = "上下电通告"
+NOTICE_TYPE_POWER_UP = "上电通告"
+NOTICE_TYPE_POWER_DOWN = "下电通告"
 NOTICE_TYPE_POLLING = "设备轮巡"
 NOTICE_TYPE_ADJUST = "设备调整"
 NOTICE_TIME_SEPARATOR = "~"
@@ -217,8 +219,8 @@ WORK_TYPE_BY_NOTICE_TYPE = {
     NOTICE_TYPE_REPAIR: WORK_TYPE_REPAIR,
     "检修通告": WORK_TYPE_REPAIR,
     NOTICE_TYPE_POWER: WORK_TYPE_POWER,
-    "上电通告": WORK_TYPE_POWER,
-    "下电通告": WORK_TYPE_POWER,
+    NOTICE_TYPE_POWER_UP: WORK_TYPE_POWER,
+    NOTICE_TYPE_POWER_DOWN: WORK_TYPE_POWER,
     NOTICE_TYPE_POLLING: WORK_TYPE_POLLING,
     "轮巡通告": WORK_TYPE_POLLING,
     NOTICE_TYPE_ADJUST: WORK_TYPE_ADJUST,
@@ -2946,6 +2948,16 @@ class MaintenancePortalService:
         job_id = str(job_id or "").strip()
         if not job_id:
             return
+        job = self.get_job(job_id) or {}
+        prepared = job.get("prepared") if isinstance(job.get("prepared"), dict) else {}
+        notice_text = str(job.get("notice_text") or prepared.get("text") or "").strip()
+        message_error = str(job.get("message_error") or "").strip()
+        message_warning = str(job.get("message_warning") or "").strip()
+        if success and message_error:
+            message_warning = (
+                f"多维上传成功；个人消息发送失败，可复制通告文本：{message_error}"
+            )
+            message = message_warning
         phase = "success" if success else "failed"
         patch = {
             "phase": phase,
@@ -2953,6 +2965,15 @@ class MaintenancePortalService:
             "upload_message": str(message or ""),
             "record_id": str(record_id or ""),
         }
+        if notice_text:
+            patch["notice_text"] = notice_text
+            patch["copy_text"] = notice_text
+        if message_warning:
+            patch["message_warning"] = message_warning
+        if message_error:
+            patch["message_error"] = message_error
+            patch["message_failed"] = True
+            patch["message_failed_continue"] = True
         if active_item_id:
             patch["active_item_id"] = str(active_item_id or "")
         if success:
@@ -7529,27 +7550,34 @@ class MaintenancePortalService:
 
     def _engineer_mop_settings(self) -> dict[str, str]:
         settings = self._state_store.get_settings() or {}
-        app_token = str(
-            settings.get("mop_app_token")
-            or getattr(config, "mop_app_token", "")
-            or MOP_SOURCE_APP_TOKEN
-        ).strip()
-        table_id = str(
-            settings.get("mop_table_id")
-            or getattr(config, "mop_table_id", "")
-            or MOP_SOURCE_TABLE_ID
-        ).strip()
-        view_id = str(
-            settings.get("mop_view_id")
-            or getattr(config, "mop_view_id", "")
-            or MOP_SOURCE_VIEW_ID
-        ).strip()
+        def first_text(*values: Any) -> str:
+            for value in values:
+                text = str(value or "").strip()
+                if text and text.lower() not in {"none", "null", "undefined"}:
+                    return text
+            return ""
+
+        app_token = first_text(
+            settings.get("mop_app_token"),
+            getattr(config, "mop_app_token", ""),
+            MOP_SOURCE_APP_TOKEN,
+        )
+        table_id = first_text(
+            settings.get("mop_table_id"),
+            getattr(config, "mop_table_id", ""),
+            MOP_SOURCE_TABLE_ID,
+        )
+        view_id = first_text(
+            settings.get("mop_view_id"),
+            getattr(config, "mop_view_id", ""),
+            MOP_SOURCE_VIEW_ID,
+        )
         return {
             "app_token": app_token,
             "table_id": table_id,
             "view_id": view_id,
-            "title_field": str(settings.get("mop_title_field") or MOP_TITLE_FIELD_NAME).strip(),
-            "attachment_field": str(settings.get("mop_attachment_field") or MOP_ATTACHMENT_FIELD_NAME).strip(),
+            "title_field": first_text(settings.get("mop_title_field"), MOP_TITLE_FIELD_NAME),
+            "attachment_field": first_text(settings.get("mop_attachment_field"), MOP_ATTACHMENT_FIELD_NAME),
         }
 
     def _engineer_notice_key(self, item: dict[str, Any]) -> str:
@@ -8876,15 +8904,133 @@ class MaintenancePortalService:
 
     @staticmethod
     def _mop_checkbox_value(original: Any, state: str) -> str:
-        state = str(state or "").strip().lower()
-        normal_mark = "☑" if state == "normal" else "□"
-        abnormal_mark = "☑" if state == "abnormal" else "□"
-        text = str(original or "□正常 □异常")
-        text = re.sub(r"[□☐■☑√✔]\s*正常", f"{normal_mark}正常", text)
-        text = re.sub(r"[□☐■☑√✔]\s*异常", f"{abnormal_mark}异常", text)
-        if "正常" not in text or "异常" not in text:
-            return f"{normal_mark}正常 {abnormal_mark}异常"
-        return text
+        return MaintenancePortalService._mop_choice_value(original, state)
+
+    @classmethod
+    def _mop_choice_options(cls, value: Any) -> list[dict[str, Any]]:
+        text = cls._mop_plain_text(value)
+        if not text:
+            return []
+        options: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        prefix_pattern = re.compile(r"([□☐■☑√✔✓])([^□☐■☑√✔✓\[\]；;，,、/]+)")
+        for match in prefix_pattern.finditer(text):
+            label = match.group(2).strip()
+            if not label or label in seen:
+                continue
+            seen.add(label)
+            checked = match.group(1) in {"☑", "■", "√", "✔", "✓"}
+            options.append(
+                {
+                    "key": f"opt{len(options)}",
+                    "label": label,
+                    "checked": checked,
+                    "style": "prefix_checkbox",
+                }
+            )
+        if len(options) >= 2:
+            return options
+
+        options = []
+        seen.clear()
+        bracket_pattern = re.compile(r"([^\[\]□☐■☑√✔✓；;，,、/]{1,24})\[(.*?)\]")
+        for match in bracket_pattern.finditer(text):
+            label = match.group(1).strip()
+            if "：" in label or ":" in label:
+                label = re.split(r"[:：]", label)[-1].strip()
+            if not label or label in seen:
+                continue
+            seen.add(label)
+            checked = bool(str(match.group(2) or "").strip())
+            options.append(
+                {
+                    "key": f"opt{len(options)}",
+                    "label": label,
+                    "checked": checked,
+                    "style": "suffix_bracket",
+                }
+            )
+        return options if len(options) >= 2 else []
+
+    @classmethod
+    def _mop_choice_label_for_state(cls, value: Any, state: str) -> str:
+        state_text = str(state or "").strip()
+        state_lower = state_text.lower()
+        options = cls._mop_choice_options(value)
+        if not options:
+            if state_lower == "normal":
+                return "正常"
+            if state_lower == "abnormal":
+                return "异常"
+            return state_text
+        for option in options:
+            label = str(option.get("label") or "")
+            key = str(option.get("key") or "")
+            if state_text and state_text in {label, key}:
+                return label
+        if state_lower == "normal":
+            for option in options:
+                label = str(option.get("label") or "")
+                if "正常" in label:
+                    return label
+        if state_lower == "abnormal":
+            for option in options:
+                label = str(option.get("label") or "")
+                if "异常" in label:
+                    return label
+        checked = next((str(item.get("label") or "") for item in options if item.get("checked")), "")
+        return checked or str(options[0].get("label") or "")
+
+    @classmethod
+    def _mop_choice_value(cls, original: Any, state: str) -> str:
+        raw_text = str(original or "")
+        text = raw_text or "□正常 □异常"
+        selected_label = cls._mop_choice_label_for_state(text, state)
+        options = cls._mop_choice_options(text)
+        if not selected_label and options:
+            selected_label = str(options[0].get("label") or "")
+
+        prefix_pattern = re.compile(r"([□☐■☑√✔✓])(\s*)([^□☐■☑√✔✓\[\]；;，,、/\s]+)")
+        prefix_changed = False
+
+        def replace_prefix(match: re.Match[str]) -> str:
+            nonlocal prefix_changed
+            label = match.group(3).strip()
+            if not any(str(item.get("label") or "") == label for item in options):
+                return match.group(0)
+            prefix_changed = True
+            mark = "☑" if label == selected_label else "□"
+            return f"{mark}{match.group(2)}{match.group(3)}"
+
+        text = prefix_pattern.sub(replace_prefix, text)
+        if prefix_changed:
+            return text
+
+        bracket_pattern = re.compile(r"([^\[\]□☐■☑√✔✓；;，,、/]{1,24})\[(.*?)\]")
+        bracket_changed = False
+
+        def replace_bracket(match: re.Match[str]) -> str:
+            nonlocal bracket_changed
+            label = match.group(1).strip()
+            option_label = re.split(r"[:：]", label)[-1].strip()
+            if not any(str(item.get("label") or "") == option_label for item in options):
+                return match.group(0)
+            bracket_changed = True
+            mark = "√" if option_label == selected_label else " "
+            return f"{match.group(1)}[{mark}]"
+
+        text = bracket_pattern.sub(replace_bracket, text)
+        if bracket_changed:
+            return text
+
+        if options:
+            return " ".join(
+                f"{'☑' if str(item.get('label') or '') == selected_label else '□'}{item.get('label') or ''}"
+                for item in options
+            )
+        normal_mark = "☑" if str(state or "").strip().lower() == "normal" else "□"
+        abnormal_mark = "☑" if str(state or "").strip().lower() == "abnormal" else "□"
+        return f"{normal_mark}正常 {abnormal_mark}异常"
 
     @staticmethod
     def _mop_cell_int(value: Any, fallback: int = 0) -> int:
@@ -8921,11 +9067,19 @@ class MaintenancePortalService:
 
     @classmethod
     def _is_mop_checkbox_cell(cls, value: Any) -> bool:
+        return bool(cls._mop_choice_options(value))
+
+    @classmethod
+    def _is_mop_datetime_placeholder(cls, value: Any) -> bool:
         text = cls._mop_plain_text(value)
         if not text:
             return False
-        checkbox_marks = ("□", "☐", "■", "☑", "√", "✔")
-        return ("正常" in text or "异常" in text) and any(mark in text for mark in checkbox_marks)
+        return all(token in text for token in ("年", "月", "日", "时")) and (
+            "__" in text
+            or "年月日时" in text
+            or re.search(r"年\s*月\s*日\s*时", str(value or ""))
+            or not re.search(r"\d{4}年\d{1,2}月\d{1,2}日\d{1,2}时", text)
+        )
 
     @classmethod
     def _extract_mop_sheet_targets(cls, *, sheet_name: str, rows: list[list[str]]) -> dict[str, Any]:
@@ -8948,14 +9102,14 @@ class MaintenancePortalService:
             "审核确认时间",
         )
         same_column_time_labels = {"维护完成时间", "审核确认时间"}
-        checkbox_scan_columns = tuple(range(3, 7))  # D-G inclusive, zero-based D=3.
         checkbox_columns: list[int] = []
         for row_index, row in enumerate(rows):
-            for col_zero in checkbox_scan_columns:
-                value = row[col_zero] if col_zero < len(row) else ""
+            for col_zero, value in enumerate(row):
                 if cls._is_mop_checkbox_cell(value):
                     if col_zero not in checkbox_columns:
                         checkbox_columns.append(col_zero)
+                    options = cls._mop_choice_options(value)
+                    option_labels = {str(item.get("label") or "") for item in options}
                     checkbox_cells.append(
                         {
                             "sheet": sheet_name,
@@ -8965,7 +9119,12 @@ class MaintenancePortalService:
                             "column": cls._column_label(col_zero + 1),
                             "cell_ref": f"{cls._column_label(col_zero + 1)}{row_index + 1}",
                             "value": str(value or ""),
-                            "kind": "normal_abnormal",
+                            "kind": (
+                                "normal_abnormal"
+                                if {"正常", "异常"}.issubset(option_labels)
+                                else "choice_group"
+                            ),
+                            "options": options,
                         }
                     )
         for row_index, row in enumerate(rows):
@@ -8973,6 +9132,9 @@ class MaintenancePortalService:
                 text = cls._mop_plain_text(value)
                 if not text:
                     continue
+                if cls._is_mop_checkbox_cell(value):
+                    continue
+                datetime_placeholder = cls._is_mop_datetime_placeholder(value)
                 for label in labels:
                     if label not in text:
                         continue
@@ -9020,6 +9182,36 @@ class MaintenancePortalService:
                             }
                         )
                     break
+                else:
+                    if not datetime_placeholder:
+                        continue
+                    if any(
+                        int(field.get("row") or -1) == row_index
+                        and int(field.get("value_col") or -1) == col_index
+                        for field in maintenance_fields
+                    ):
+                        continue
+                    label = "日期时间"
+                    for candidate_col in range(col_index - 1, max(-1, col_index - 5), -1):
+                        candidate = cls._mop_plain_text(row[candidate_col] if candidate_col < len(row) else "")
+                        if candidate and not cls._is_mop_checkbox_cell(candidate):
+                            label = candidate.rstrip(":：")
+                            break
+                    maintenance_fields.append(
+                        {
+                            "sheet": sheet_name,
+                            "label": label,
+                            "row": row_index,
+                            "row_number": row_index + 1,
+                            "label_col": col_index,
+                            "label_cell_ref": f"{cls._column_label(col_index + 1)}{row_index + 1}",
+                            "value_col": col_index,
+                            "value_column": cls._column_label(col_index + 1),
+                            "value_cell_ref": f"{cls._column_label(col_index + 1)}{row_index + 1}",
+                            "value": str(value or ""),
+                            "kind": "datetime_placeholder",
+                        }
+                    )
         return {
             "is_cover": False,
             "checkbox_cells": checkbox_cells,
@@ -9091,7 +9283,7 @@ class MaintenancePortalService:
             return ""
         return "".join(element.itertext()).strip()
 
-    def _parse_xlsx_preview(self, content: bytes, *, max_rows: int = 1200, max_cols: int = 120) -> dict[str, Any]:
+    def _parse_xlsx_preview(self, content: bytes, *, max_rows: int = 0, max_cols: int = 0) -> dict[str, Any]:
         ns = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
         rel_ns = {"rel": "http://schemas.openxmlformats.org/package/2006/relationships"}
         with zipfile.ZipFile(io.BytesIO(content)) as archive:
@@ -9124,10 +9316,10 @@ class MaintenancePortalService:
                     if not parsed:
                         continue
                     row1, col1, row2, col2 = parsed
-                    if row1 > max_rows or col1 > max_cols:
+                    if (max_rows and row1 > max_rows) or (max_cols and col1 > max_cols):
                         continue
-                    row2 = min(row2, max_rows)
-                    col2 = min(col2, max_cols)
+                    row2 = min(row2, max_rows) if max_rows else row2
+                    col2 = min(col2, max_cols) if max_cols else col2
                     if row2 <= row1 and col2 <= col1:
                         continue
                     max_width = max(max_width, col2)
@@ -9160,8 +9352,8 @@ class MaintenancePortalService:
                                 value = raw
                         row_values.append(value)
                     max_width = max(max_width, len(row_values))
-                    rows_out.append(row_values[:max_cols])
-                    if len(rows_out) >= max_rows:
+                    rows_out.append(row_values[:max_cols] if max_cols else row_values)
+                    if max_rows and len(rows_out) >= max_rows:
                         truncated = True
                         break
                 targets = self._extract_mop_sheet_targets(sheet_name=name, rows=rows_out)
@@ -9170,10 +9362,13 @@ class MaintenancePortalService:
                         "name": name,
                         "rows": rows_out,
                         "row_count": len(rows_out),
-                        "column_count": min(max_width, max_cols),
-                        "columns": [self._column_label(index + 1) for index in range(min(max_width, max_cols))],
+                        "column_count": min(max_width, max_cols) if max_cols else max_width,
+                        "columns": [
+                            self._column_label(index + 1)
+                            for index in range(min(max_width, max_cols) if max_cols else max_width)
+                        ],
                         "merges": merges,
-                        "truncated": truncated or max_width > max_cols,
+                        "truncated": truncated or bool(max_cols and max_width > max_cols),
                         **targets,
                     }
                 )
@@ -9429,6 +9624,7 @@ class MaintenancePortalService:
         sheet_name: str = "",
         fields: list[dict[str, Any]] | None = None,
         checkboxes: list[dict[str, Any]] | None = None,
+        cell_edits: list[dict[str, Any]] | None = None,
         signatures: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         try:
@@ -9451,6 +9647,7 @@ class MaintenancePortalService:
 
         fields = [item for item in (fields or []) if isinstance(item, dict)]
         checkboxes = [item for item in (checkboxes or []) if isinstance(item, dict)]
+        cell_edits = [item for item in (cell_edits or []) if isinstance(item, dict)]
         signatures = [item for item in (signatures or []) if isinstance(item, dict)]
         if not signatures:
             raise PortalError("请选择至少一个维护实施人或维护审核人签名。")
@@ -9478,20 +9675,50 @@ class MaintenancePortalService:
 
         workbook = load_workbook(source_path)
         worksheet = workbook[sheet_name] if sheet_name and sheet_name in workbook.sheetnames else workbook.active
+        protected_cells: set[tuple[int, int]] = set()
+        for checkbox in checkboxes:
+            row = self._mop_cell_int(checkbox.get("row"), -1) + 1
+            col = self._mop_cell_int(checkbox.get("col"), -1) + 1
+            if row > 0 and col > 0:
+                protected_cells.add((row, col))
+        for field in fields:
+            row = self._mop_cell_int(field.get("row"), -1) + 1
+            label_col = self._mop_cell_int(field.get("label_col"), -1) + 1
+            value_col = self._mop_cell_int(
+                field.get("value_col"),
+                self._mop_cell_int(field.get("label_col"), -1),
+            ) + 1
+            if row > 0 and label_col > 0:
+                protected_cells.add((row, label_col))
+            if row > 0 and value_col > 0:
+                protected_cells.add((row, value_col))
         inserted = 0
         updated_cells = 0
         temp_paths: list[str] = []
         try:
+            for edit in cell_edits:
+                row = self._mop_cell_int(edit.get("row"), -1) + 1
+                col = self._mop_cell_int(edit.get("col"), -1) + 1
+                if row <= 0 or col <= 0 or (row, col) in protected_cells:
+                    continue
+                worksheet.cell(row=row, column=col).value = str(edit.get("value") or "")
+                updated_cells += 1
             for checkbox in checkboxes:
-                state = str(checkbox.get("state") or "").strip().lower()
-                if state not in {"normal", "abnormal"}:
+                state = str(
+                    checkbox.get("selection")
+                    or checkbox.get("selected_label")
+                    or checkbox.get("selected_key")
+                    or checkbox.get("state")
+                    or ""
+                ).strip()
+                if not state:
                     continue
                 row = self._mop_cell_int(checkbox.get("row"), -1) + 1
                 col = self._mop_cell_int(checkbox.get("col"), -1) + 1
                 if row <= 0 or col <= 0:
                     continue
                 cell = worksheet.cell(row=row, column=col)
-                cell.value = self._mop_checkbox_value(cell.value, state)
+                cell.value = self._mop_choice_value(cell.value, state)
                 updated_cells += 1
             for field in fields:
                 fill_value = str(field.get("fill_value") or "").strip()
@@ -9772,12 +9999,14 @@ class MaintenancePortalService:
         work_type: str,
         status: str,
         values: dict[str, Any],
+        heading_override: str = "",
     ) -> str:
         template = NOTICE_TEXT_TEMPLATES.get(
             str(work_type or "").strip(),
             NOTICE_TEXT_TEMPLATES[WORK_TYPE_MAINTENANCE],
         )
-        lines = [f"【{template['heading']}】状态：{str(status or '').strip()}"]
+        heading = str(heading_override or template["heading"]).strip()
+        lines = [f"【{heading}】状态：{str(status or '').strip()}"]
         for label, key in template["fields"]:
             value = values.get(key, "")
             lines.append(f"【{label}】{str(value or '').strip()}")
@@ -10026,12 +10255,24 @@ class MaintenancePortalService:
         cls, request_payload: dict[str, Any]
     ) -> dict[str, Any]:
         payload = dict(request_payload or {})
+        requested_notice_type = str(payload.get("notice_type") or "").strip()
         work_type = cls._manual_payload_notice_work_type(
             payload,
             cls._request_work_type_fallback(payload),
         )
         payload["work_type"] = work_type
-        payload["notice_type"] = cls._notice_type_for_work_type(work_type)
+        if work_type == WORK_TYPE_POWER and requested_notice_type in {
+            NOTICE_TYPE_POWER_UP,
+            NOTICE_TYPE_POWER_DOWN,
+            NOTICE_TYPE_POWER,
+        }:
+            payload["notice_type"] = (
+                requested_notice_type
+                if requested_notice_type != NOTICE_TYPE_POWER
+                else NOTICE_TYPE_POWER_UP
+            )
+        else:
+            payload["notice_type"] = cls._notice_type_for_work_type(work_type)
         return payload
 
     @classmethod
@@ -10445,6 +10686,10 @@ class MaintenancePortalService:
             "depends_on_phase": "",
             "message_sent": bool(job.get("message_sent")),
             "message_signature": str(job.get("message_signature") or ""),
+            "message_failed": bool(job.get("message_failed")),
+            "message_failed_continue": bool(job.get("message_failed_continue")),
+            "message_error": str(job.get("message_error") or ""),
+            "message_warning": str(job.get("message_warning") or ""),
             "message_queue_position": 0,
             "message_queue_size": 0,
             "qt_phase": str(job.get("qt_phase") or ""),
@@ -10460,6 +10705,17 @@ class MaintenancePortalService:
             "error_category": "",
             "error_retryable": False,
             "upload_message": str(job.get("upload_message") or ""),
+            "notice_text": str(
+                job.get("notice_text")
+                or (job.get("prepared") or {}).get("text")
+                or ""
+            ),
+            "copy_text": str(
+                job.get("copy_text")
+                or job.get("notice_text")
+                or (job.get("prepared") or {}).get("text")
+                or ""
+            ),
             "prepared": {},
         }
         self._jobs[job_id] = compacted
@@ -10489,6 +10745,10 @@ class MaintenancePortalService:
             "depends_on_phase": str(job.get("depends_on_phase") or ""),
             "message_sent": bool(job.get("message_sent")),
             "message_signature": str(job.get("message_signature") or ""),
+            "message_failed": bool(job.get("message_failed")),
+            "message_failed_continue": bool(job.get("message_failed_continue")),
+            "message_error": str(job.get("message_error") or ""),
+            "message_warning": str(job.get("message_warning") or ""),
             "message_queue_position": 0,
             "message_queue_size": 0,
             "qt_phase": str(job.get("qt_phase") or ""),
@@ -10505,6 +10765,17 @@ class MaintenancePortalService:
             "error_retryable": retryable,
             "upload_message": str(job.get("upload_message") or ""),
             "retry_count": int(job.get("retry_count") or 0),
+            "notice_text": str(
+                job.get("notice_text")
+                or (job.get("prepared") or {}).get("text")
+                or ""
+            ),
+            "copy_text": str(
+                job.get("copy_text")
+                or job.get("notice_text")
+                or (job.get("prepared") or {}).get("text")
+                or ""
+            ),
             "prepared": {},
         }
         if retryable:
@@ -10635,7 +10906,7 @@ class MaintenancePortalService:
         work_type = str(work_type or "").strip()
         if work_type == WORK_TYPE_POWER:
             return {
-                "notice_type": NOTICE_TYPE_POWER,
+                "notice_type": NOTICE_TYPE_POWER_UP,
                 "heading": "上电通告",
                 "status_label": "上电状态",
                 "title_label": "名称",
@@ -10679,10 +10950,18 @@ class MaintenancePortalService:
         device: str = "",
         cabinet: str = "",
         quantity: str = "",
+        notice_type: str = "",
     ) -> str:
+        heading = (
+            notice_type
+            if work_type == WORK_TYPE_POWER
+            and str(notice_type or "").strip() in {NOTICE_TYPE_POWER_UP, NOTICE_TYPE_POWER_DOWN}
+            else ""
+        )
         return MaintenancePortalService._render_notice_text(
             work_type=work_type,
             status=status,
+            heading_override=heading,
             values={
                 "title": title,
                 "time_range": MaintenancePortalService._format_notice_time_range(
@@ -10712,7 +10991,13 @@ class MaintenancePortalService:
         if work_type not in {WORK_TYPE_POWER, WORK_TYPE_POLLING, WORK_TYPE_ADJUST}:
             raise PortalError("不支持的手填通告类型。")
         profile = self._simple_notice_profile(work_type)
-        notice_type = profile["notice_type"]
+        request_notice_type = str(request_payload.get("notice_type") or "").strip()
+        notice_type = (
+            request_notice_type
+            if work_type == WORK_TYPE_POWER
+            and request_notice_type in {NOTICE_TYPE_POWER_UP, NOTICE_TYPE_POWER_DOWN}
+            else profile["notice_type"]
+        )
         scope = self._normalize_scope(request_payload.get("scope"))
         manual = self._truthy_flag(request_payload.get("manual"))
         record_id = str(
@@ -10782,6 +11067,7 @@ class MaintenancePortalService:
             device=device,
             cabinet=cabinet,
             quantity=quantity,
+            notice_type=notice_type,
         )
         building_code, recipients, recipient_error = self._recipients_for_building_codes(
             building_codes,
@@ -11402,16 +11688,13 @@ class MaintenancePortalService:
             impact=impact,
             progress=progress,
         )
-        recipients: list[str] = []
-        skip_personal_message = True
-        if manual:
-            _, recipients, recipient_error = self._recipients_for_building_codes(
-                building_codes,
-                fallback_building=building,
-            )
-            if recipient_error:
-                raise PortalError(recipient_error)
-            skip_personal_message = False
+        _, recipients, recipient_error = self._recipients_for_building_codes(
+            building_codes,
+            fallback_building=building,
+        )
+        if recipient_error:
+            raise PortalError(recipient_error)
+        skip_personal_message = False
         response_time = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
         return {
             "job_id": job_id,
@@ -11602,56 +11885,100 @@ class MaintenancePortalService:
                 fault_time = request_text("fault_time")
                 target_record_id = ""
             else:
-                record = self._find_record_by_id(record_id, WORK_TYPE_REPAIR)
-                fields = record.get("display_fields") or {}
-                if not self._is_valid_repair_record(record):
-                    raise PortalError("该检修记录缺少有效检修通告名称/维修名称或楼栋，不能发起。")
-                source_progress = self._repair_source_status(record)
-                if source_progress != DEFAULT_MAINTENANCE_STATUS:
-                    raise PortalError(
-                        f"该检修当前源状态不是{DEFAULT_MAINTENANCE_STATUS}: {source_progress or '-'}"
+                try:
+                    record = self._find_record_by_id(record_id, WORK_TYPE_REPAIR)
+                except PortalError as exc:
+                    record = None
+                    fields = {}
+                    title = request_first_text(("title", "content"))
+                    building_codes = [
+                        str(code or "").strip().upper()
+                        for code in (request_payload.get("building_codes") or [])
+                        if str(code or "").strip()
+                    ]
+                    if not building_codes:
+                        building_codes = self._repair_building_codes_from_value(
+                            request_payload.get("building")
+                        )
+                    if not title or not building_codes:
+                        raise PortalError(
+                            "未找到检修源记录，且前端字段不足，不能发起检修通告。"
+                        ) from exc
+                    source_progress = request_text(
+                        "source_progress", DEFAULT_MAINTENANCE_STATUS
+                    ) or DEFAULT_MAINTENANCE_STATUS
+                    if source_progress != DEFAULT_MAINTENANCE_STATUS:
+                        raise PortalError(
+                            f"该检修当前源状态不是{DEFAULT_MAINTENANCE_STATUS}: {source_progress or '-'}"
+                        ) from exc
+                    building = (
+                        str(request_payload.get("building") or "").strip()
+                        or self._building_label_from_codes(building_codes)
                     )
-                title = request_first_text(
-                    ("title", "content"), default=self._repair_title(record)
-                )
-                building_codes = self._repair_record_building_codes(record)
-                building = self._building_label_from_codes(building_codes)
-                specialty = self._clean_source_text(request_payload.get("specialty"))
-                if not specialty or specialty == "全部":
-                    specialty = self._repair_specialty(record)
-                level = request_text("level", self._repair_level(fields))
-                default_start, default_end, _ = self._repair_time_range(record)
-                repair_device = request_text("repair_device", self._repair_device_text(fields))
-                repair_fault = request_text(
-                    "repair_fault",
-                    self._repair_first_field(fields, "维修故障", "故障维修原因"),
-                )
-                fault_type = request_text(
-                    "fault_type", self._repair_first_field(fields, "故障类型") or "设备故障"
-                )
-                repair_mode = request_text(
-                    "repair_mode",
-                    self._repair_first_field(fields, "维修方式", "维修方", "供应商名称"),
-                )
-                discovery = request_text(
-                    "discovery", self._repair_first_field(fields, "对应来源")
-                )
-                symptom = request_text(
-                    "symptom", self._repair_first_field(fields, "故障发生现象描述", "故障现象")
-                )
-                solution = request_text(
-                    "solution",
-                    self._repair_first_field(fields, "解决方案", "维修方案", "后续整改措施"),
-                )
-                spare_parts = request_text(
-                    "spare_parts",
-                    self._repair_first_field(fields, "备件更换情况", "备件使用情况"),
-                )
-                source_fault_time = self._repair_first_field(
-                    fields, "故障发生时间", "发现故障时间"
-                )
-                fault_time = request_text("fault_time", source_fault_time)
-                target_record_id = self._repair_target_record_id(record)
+                    specialty = self._clean_source_text(request_payload.get("specialty"))
+                    level = request_text("level")
+                    default_start = ""
+                    default_end = ""
+                    repair_device = request_text("repair_device")
+                    repair_fault = request_text("repair_fault")
+                    fault_type = request_text("fault_type") or "设备故障"
+                    repair_mode = request_text("repair_mode")
+                    discovery = request_text("discovery")
+                    symptom = request_text("symptom")
+                    solution = request_text("solution")
+                    spare_parts = request_text("spare_parts")
+                    fault_time = request_text("fault_time")
+                    target_record_id = ""
+                else:
+                    fields = record.get("display_fields") or {}
+                    if not self._is_valid_repair_record(record):
+                        raise PortalError("该检修记录缺少有效检修通告名称/维修名称或楼栋，不能发起。")
+                    source_progress = self._repair_source_status(record)
+                    if source_progress != DEFAULT_MAINTENANCE_STATUS:
+                        raise PortalError(
+                            f"该检修当前源状态不是{DEFAULT_MAINTENANCE_STATUS}: {source_progress or '-'}"
+                        )
+                    title = request_first_text(
+                        ("title", "content"), default=self._repair_title(record)
+                    )
+                    building_codes = self._repair_record_building_codes(record)
+                    building = self._building_label_from_codes(building_codes)
+                    specialty = self._clean_source_text(request_payload.get("specialty"))
+                    if not specialty or specialty == "全部":
+                        specialty = self._repair_specialty(record)
+                    level = request_text("level", self._repair_level(fields))
+                    default_start, default_end, _ = self._repair_time_range(record)
+                    repair_device = request_text("repair_device", self._repair_device_text(fields))
+                    repair_fault = request_text(
+                        "repair_fault",
+                        self._repair_first_field(fields, "维修故障", "故障维修原因"),
+                    )
+                    fault_type = request_text(
+                        "fault_type", self._repair_first_field(fields, "故障类型") or "设备故障"
+                    )
+                    repair_mode = request_text(
+                        "repair_mode",
+                        self._repair_first_field(fields, "维修方式", "维修方", "供应商名称"),
+                    )
+                    discovery = request_text(
+                        "discovery", self._repair_first_field(fields, "对应来源")
+                    )
+                    symptom = request_text(
+                        "symptom", self._repair_first_field(fields, "故障发生现象描述", "故障现象")
+                    )
+                    solution = request_text(
+                        "solution",
+                        self._repair_first_field(fields, "解决方案", "维修方案", "后续整改措施"),
+                    )
+                    spare_parts = request_text(
+                        "spare_parts",
+                        self._repair_first_field(fields, "备件更换情况", "备件使用情况"),
+                    )
+                    source_fault_time = self._repair_first_field(
+                        fields, "故障发生时间", "发现故障时间"
+                    )
+                    fault_time = request_text("fault_time", source_fault_time)
+                    target_record_id = self._repair_target_record_id(record)
         else:
             source_record_id = str(request_payload.get("source_record_id") or "").strip()
             active_item_id = str(request_payload.get("active_item_id") or "").strip()
@@ -11871,16 +12198,13 @@ class MaintenancePortalService:
             fault_time=fault_time,
             expected_time=expected_time,
         )
-        recipients: list[str] = []
-        skip_personal_message = True
-        if manual:
-            _, recipients, recipient_error = self._recipients_for_building_codes(
-                building_codes,
-                fallback_building=building,
-            )
-            if recipient_error:
-                raise PortalError(recipient_error)
-            skip_personal_message = False
+        _, recipients, recipient_error = self._recipients_for_building_codes(
+            building_codes,
+            fallback_building=building,
+        )
+        if recipient_error:
+            raise PortalError(recipient_error)
+        skip_personal_message = False
         response_time = now_text
         return {
             "job_id": job_id,

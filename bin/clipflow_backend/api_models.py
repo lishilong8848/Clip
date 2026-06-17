@@ -155,6 +155,7 @@ class EngineerMopFillRequest(APIModel):
     sheet_name: str = ""
     fields: list[dict[str, Any]] = Field(default_factory=list)
     checkboxes: list[dict[str, Any]] = Field(default_factory=list)
+    cell_edits: list[dict[str, Any]] = Field(default_factory=list)
     signatures: list[dict[str, Any]] = Field(default_factory=list)
 
 

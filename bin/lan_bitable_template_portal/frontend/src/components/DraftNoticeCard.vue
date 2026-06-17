@@ -13,6 +13,7 @@
       <p>{{ summary || "已加入待发起通告，点击展开编辑。" }}</p>
       <div class="card-actions compact-actions">
         <span class="job-line" :class="jobClass(rowKey)">{{ jobText(rowKey) }}</span>
+        <button v-if="copyText" class="btn ghost" type="button" @click.stop="emit('copy-notice')">复制通告</button>
         <button class="btn ghost" :disabled="busy" @click.stop="emit('pin')">编辑</button>
         <button class="btn ghost" :disabled="busy" @click.stop="emit('remove')">移除</button>
       </div>
@@ -40,6 +41,13 @@
           通告类型
           <select :value="draft.work_type" @change="changeManualType(($event.target as HTMLSelectElement).value)">
             <option v-for="type in workTypes" :key="type.value" :value="type.value">{{ type.label }}</option>
+          </select>
+        </label>
+        <label v-if="record.manual && workType === 'power'">
+          上/下电类型
+          <select :value="draft.notice_type || '上电通告'" @change="setDraft('notice_type', ($event.target as HTMLSelectElement).value)">
+            <option value="上电通告">上电通告</option>
+            <option value="下电通告">下电通告</option>
           </select>
         </label>
         <label :class="fieldClass('title')">
@@ -94,7 +102,7 @@
       </div>
 
       <section v-if="workType === 'power'" class="repair-fields">
-        <h3>上电字段</h3>
+        <h3>上/下电字段</h3>
         <div class="form-grid">
           <label :class="fieldClass('cabinet')"><span>柜号</span><input :value="draft.cabinet" @input="setDraft('cabinet', ($event.target as HTMLInputElement).value)" /></label>
           <label :class="fieldClass('quantity')"><span>数量</span><input :value="draft.quantity" @input="setDraft('quantity', ($event.target as HTMLInputElement).value)" /></label>
@@ -178,6 +186,7 @@
 
       <div class="card-actions">
         <span class="job-line" :class="jobClass(rowKey)">{{ jobText(rowKey) }}</span>
+        <button v-if="copyText" class="btn ghost" type="button" @click.stop="emit('copy-notice')">复制通告</button>
         <button
           v-if="typeOverrideVisible"
           class="btn ghost"
@@ -241,6 +250,7 @@ const props = defineProps<{
   fieldClass: (field: string) => ClassMap;
   jobText: (key: string) => string;
   jobClass: (key: string) => string;
+  copyText: string;
 }>();
 
 const emit = defineEmits<{
@@ -252,6 +262,7 @@ const emit = defineEmits<{
   "building-change": [];
   "bind-zhihang": [recordId: string];
   "toggle-preview": [];
+  "copy-notice": [];
   send: [];
   "toggle-work-type-override": [];
 }>();

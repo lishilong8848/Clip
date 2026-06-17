@@ -9,6 +9,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import socket
 import threading
 import time
@@ -1401,7 +1402,7 @@ class PortalRuntime:
                 scope = self._authorized_scope_or_error(
                     session, (qs.get("scope") or ["ALL"])[0]
                 )
-                refresh_result = PortalRuntime.request_repair_source_refresh()
+                refresh_result = PortalRuntime._refresh_repair_source_singleflight()
                 ongoing = self._get_ongoing(scope)
                 self._reconcile_orphan_started_items(scope, ongoing)
                 data = self.service.get_bootstrap(
@@ -1572,7 +1573,7 @@ class PortalRuntime:
                 return self._send_json(403, {"ok": False, "error": str(exc)})
         if parsed.path == "/api/engineer/mop/fill":
             try:
-                payload = self._read_json_body(max_bytes=1024 * 1024)
+                payload = self._read_json_body(max_bytes=4 * 1024 * 1024)
                 scope = self._authorized_scope_or_error(
                     session, str(payload.get("scope") or "ALL")
                 )
@@ -1584,6 +1585,7 @@ class PortalRuntime:
                     sheet_name=str(payload.get("sheet_name") or ""),
                     fields=payload.get("fields") if isinstance(payload.get("fields"), list) else [],
                     checkboxes=payload.get("checkboxes") if isinstance(payload.get("checkboxes"), list) else [],
+                    cell_edits=payload.get("cell_edits") if isinstance(payload.get("cell_edits"), list) else [],
                     signatures=payload.get("signatures") if isinstance(payload.get("signatures"), list) else [],
                 )
                 return self._send_json(
@@ -2270,12 +2272,6 @@ class PortalRuntime:
 
     @classmethod
     def enqueue_initial_message_or_upload_job(cls, job_id: str) -> None:
-        job = cls.service.get_job(job_id) or {}
-        request = job.get("request") if isinstance(job.get("request"), dict) else {}
-        work_type = str((request or {}).get("work_type") or "maintenance").strip()
-        if work_type in {"change", "repair"}:
-            cls.enqueue_action_job(job_id)
-            return
         cls.enqueue_message_job(job_id)
 
     @classmethod
@@ -2349,6 +2345,10 @@ class PortalRuntime:
         scope = str((request or {}).get("scope") or "").strip().upper()
         if not scope:
             return [primary_job_id]
+        # 只合并明确单楼入口的维保个人消息。ALL/园区等汇总入口可能包含
+        # 不同楼栋、不同 openid 收件人，合并会造成误发或漏发。
+        if scope not in {"110", "A", "B", "C", "D", "E", "H"}:
+            return [primary_job_id]
         wait_seconds = float(getattr(cls, "message_batch_wait_seconds", 0.0) or 0.0)
         if wait_seconds > 0:
             time.sleep(wait_seconds)
@@ -2405,21 +2405,30 @@ class PortalRuntime:
             job_id, prepared = batched_prepared[0]
             ok, message = cls.service.send_action_personal_message(prepared)
             if not ok:
+                warning = f"个人消息发送失败，已继续上传多维，可复制通告文本：{message}"
                 cls.service.mark_job(
                     job_id,
-                    phase="failed",
-                    error=message,
+                    phase="upload_queued",
+                    message=str(warning),
+                    message_error=str(message or ""),
+                    message_warning=warning,
+                    message_failed=True,
+                    message_failed_continue=True,
                     message_sent=False,
+                    message_signature=str(prepared.get("message_signature") or ""),
+                    message_queue_position=0,
+                    queue_position=0,
                 )
                 try:
                     cls.state_store.mark_runtime_queue_item(
                         "message",
                         job_id,
-                        "failed",
+                        "done",
                         error=message,
                     )
                 except Exception:
                     pass
+                cls.enqueue_action_job(job_id)
                 return
             cls.service.mark_job(
                 job_id,
@@ -2448,21 +2457,31 @@ class PortalRuntime:
         ok, message, results = _send_text_to_open_ids_guarded(combined_text, recipients)
         for job_id, prepared in batched_prepared:
             if not ok:
+                warning = f"个人消息发送失败，已继续上传多维，可复制通告文本：{message}"
                 cls.service.mark_job(
                     job_id,
-                    phase="failed",
-                    error=message,
+                    phase="upload_queued",
+                    message=str(warning),
+                    message_error=str(message or ""),
+                    message_warning=warning,
+                    message_failed=True,
+                    message_failed_continue=True,
                     message_sent=False,
+                    message_signature=str(prepared.get("message_signature") or ""),
+                    recipient_results=copy.deepcopy(results),
+                    message_queue_position=0,
+                    queue_position=0,
                 )
                 try:
                     cls.state_store.mark_runtime_queue_item(
                         "message",
                         job_id,
-                        "failed",
+                        "done",
                         error=message,
                     )
                 except Exception:
                     pass
+                cls.enqueue_action_job(job_id)
                 continue
             cls.service.mark_job(
                 job_id,
@@ -2923,9 +2942,16 @@ class PortalRuntime:
         existing_response_time: str | None = None,
     ) -> NoticePayload:
         prepared = prepared if isinstance(prepared, dict) else {}
+        notice_type = str(prepared.get("notice_type") or "").strip()
+        level = str(prepared.get("level") or "").strip()
+        if notice_type in ("设备变更", "变更通告"):
+            level = PortalRuntime._normalize_change_notice_level(
+                text=str(prepared.get("text") or ""),
+                level=level,
+            )
         return NoticePayload(
             text=str(prepared.get("text") or ""),
-            level=str(prepared.get("level") or "").strip() or None,
+            level=level or None,
             buildings=[
                 str(item or "").strip()
                 for item in (prepared.get("buildings") or [])
@@ -2946,6 +2972,33 @@ class PortalRuntime:
             robot_group_choice="auto",
             maintenance_cycle=str(prepared.get("maintenance_cycle") or "").strip() or None,
         )
+
+    @staticmethod
+    def _normalize_change_notice_level(*, text: str = "", level: str = "") -> str:
+        explicit_level = str(level or "").strip()
+        if explicit_level:
+            return explicit_level
+        info = extract_event_info(text or "") or {}
+        raw_level = str(info.get("level") or "").strip()
+        if not raw_level:
+            match = re.search(
+                r"【等级】(?P<value>.*?)(?=【[^】]+】|$)",
+                text or "",
+                re.S,
+            )
+            raw_level = str(match.group("value") if match else "").strip()
+        normalized = raw_level.upper()
+        if normalized in {"I3", "I2", "I1", "E0", "/"}:
+            return normalized
+        if "超低" in raw_level:
+            return "I3"
+        if "低" in raw_level:
+            return "I3"
+        if "中" in raw_level:
+            return "I2"
+        if "高" in raw_level:
+            return "I1"
+        return "I3"
 
     @staticmethod
     def _notice_supports_site_image_field(notice_type: str) -> bool:
@@ -4317,9 +4370,12 @@ class PortalRuntime:
     def _process_maintenance_action_job(cls, job_id: str) -> None:
         try:
             prepared = cls.service.prepare_action_job(job_id)
+            current_job = cls.service.get_job(job_id) or {}
+            message_failed_continue = bool(current_job.get("message_failed_continue"))
             if (
                 not prepared.get("skip_personal_message")
                 and not prepared.get("message_sent")
+                and not message_failed_continue
             ):
                 try:
                     cls.state_store.mark_runtime_queue_item(
@@ -4352,7 +4408,7 @@ class PortalRuntime:
                     job_id,
                     phase="upload_waiting",
                     qt_phase="backend_upload",
-                    message_sent=True,
+                    message_sent=bool(prepared.get("message_sent")),
                     message_signature=str(prepared.get("message_signature") or ""),
                 )
             cls.service.mark_job(

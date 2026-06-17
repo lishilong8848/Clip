@@ -13,6 +13,7 @@
       <p>{{ compactSummary || "已开始未结束，点击展开后可更新、结束或删除。" }}</p>
       <div class="card-actions compact-actions">
         <span class="job-line" :class="jobClass(lineKey)">{{ jobText(lineKey) }}</span>
+        <button v-if="copyText" class="btn ghost" type="button" @click.stop="emit('copy-notice')">复制通告</button>
       </div>
     </div>
     <template v-else>
@@ -213,6 +214,7 @@
         </section>
         <div class="card-actions action-clusters">
           <span class="job-line" :class="jobClass(lineKey)">{{ jobText(lineKey) }}</span>
+          <button v-if="copyText" class="btn ghost" type="button" @click.stop="emit('copy-notice')">复制通告</button>
           <div class="action-group primary-actions">
             <strong>通告操作</strong>
             <button class="btn blue" :disabled="busy" @click="emit('send', 'update')">发送{{ workTypeLabel(workType) }}更新</button>
@@ -269,6 +271,7 @@ const props = defineProps<{
   zhihangRecords: Dict[];
   jobText: (key: string) => string;
   jobClass: (key: string) => string;
+  copyText: string;
 }>();
 
 const emit = defineEmits<{
@@ -280,6 +283,7 @@ const emit = defineEmits<{
   "photo-paste": [event: ClipboardEvent];
   "remove-photo": [index: number];
   send: [action: string];
+  "copy-notice": [];
   delete: [];
   "bind-target": [];
   "apply-undo": [];

@@ -171,6 +171,9 @@ class _NativeFastAPIRouteService:
     def _scope_matches_item(self, scope, item):
         return True
 
+    def _merge_ongoing_items(self, scope, ongoing_items):
+        return list(ongoing_items or [])
+
     def reconcile_orphan_started_items(self, *, scope, ongoing_items):
         return {"removed": 0}
 
@@ -1741,6 +1744,141 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 PortalRuntime.message_worker_threads = old_workers
                 PortalRuntime.message_worker_stop = old_stop
                 PortalRuntime.message_worker_count = old_count
+
+    def test_initial_action_enqueue_routes_change_and_repair_to_message_queue(self):
+        class _FakeService:
+            def get_job(self, job_id):
+                work_type = {"job-change": "change", "job-repair": "repair"}.get(job_id)
+                if not work_type:
+                    return {}
+                return {
+                    "phase": "accepted",
+                    "request": {"work_type": work_type, "scope": "A"},
+                }
+
+            def mark_job(self, *args, **kwargs):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            old_store = PortalRuntime.state_store
+            old_service = PortalRuntime.service
+            old_event = PortalRuntime.message_queue_event
+            old_workers = list(PortalRuntime.message_worker_threads)
+            old_stop = PortalRuntime.message_worker_stop
+            old_count = PortalRuntime.message_worker_count
+            try:
+                PortalRuntime.state_store = store
+                PortalRuntime.service = _FakeService()
+                PortalRuntime.message_queue_event = threading.Event()
+                PortalRuntime.message_worker_threads = []
+                PortalRuntime.message_worker_count = 0
+                PortalRuntime.message_worker_stop = False
+
+                PortalRuntime.enqueue_initial_message_or_upload_job("job-change")
+                PortalRuntime.enqueue_initial_message_or_upload_job("job-repair")
+
+                counts = store.runtime_queue_counts()
+                self.assertEqual(counts["message"]["queued"], 2)
+                self.assertEqual(counts.get("qt_action", {}).get("queued", 0), 0)
+                self.assertTrue(PortalRuntime.message_queue_event.is_set())
+            finally:
+                PortalRuntime.state_store = old_store
+                PortalRuntime.service = old_service
+                PortalRuntime.message_queue_event = old_event
+                PortalRuntime.message_worker_threads = old_workers
+                PortalRuntime.message_worker_stop = old_stop
+                PortalRuntime.message_worker_count = old_count
+
+    def test_personal_message_failure_continues_to_upload_queue(self):
+        class _FakeService:
+            def __init__(self):
+                self.marked = []
+
+            def send_action_personal_message(self, prepared):
+                return False, "openid unavailable"
+
+            def mark_job(self, job_id, **kwargs):
+                self.marked.append((job_id, kwargs))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            service = _FakeService()
+            old_store = PortalRuntime.state_store
+            old_service = PortalRuntime.service
+            old_ensure = PortalRuntime.ensure_action_worker
+            old_event = PortalRuntime.action_queue_event
+            try:
+                PortalRuntime.state_store = store
+                PortalRuntime.service = service
+                PortalRuntime.action_queue_event = threading.Event()
+                PortalRuntime.ensure_action_worker = classmethod(lambda cls: None)
+                store.upsert_runtime_queue_item("message", "job-a")
+
+                PortalRuntime._process_message_batch(
+                    [
+                        (
+                            "job-a",
+                            {
+                                "text": "【维保通告】状态：开始\n【名称】测试",
+                                "message_signature": "sig-a",
+                            },
+                        )
+                    ]
+                )
+
+                counts = store.runtime_queue_counts()
+                self.assertEqual(counts["message"]["done"], 1)
+                self.assertEqual(counts["qt_action"]["queued"], 1)
+                patches = [patch for job_id, patch in service.marked if job_id == "job-a"]
+                self.assertTrue(
+                    any(
+                        patch.get("phase") == "upload_queued"
+                        and patch.get("message_failed_continue") is True
+                        and patch.get("message_sent") is False
+                        for patch in patches
+                    )
+                )
+            finally:
+                PortalRuntime.state_store = old_store
+                PortalRuntime.service = old_service
+                PortalRuntime.ensure_action_worker = old_ensure
+                PortalRuntime.action_queue_event = old_event
+
+    def test_upload_success_after_message_failure_preserves_copyable_notice_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = _TestMaintenancePortalService()
+            service._state_store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            service._jobs = {
+                "job-a": {
+                    "job_id": "job-a",
+                    "phase": "uploading",
+                    "created_at": "2026-06-17 10:00",
+                    "updated_at": "2026-06-17 10:00",
+                    "message_error": "openid unavailable",
+                    "message_warning": "个人消息发送失败，已继续上传多维，可复制通告文本：openid unavailable",
+                    "message_failed": True,
+                    "message_failed_continue": True,
+                    "prepared": {
+                        "text": "【维保通告】状态：开始\n【名称】测试",
+                    },
+                }
+            }
+
+            service.mark_action_upload_result(
+                "job-a",
+                success=True,
+                message="上传成功",
+                record_id="rec-test",
+            )
+
+            job = service.get_job("job-a") or {}
+            self.assertEqual(job.get("phase"), "success")
+            self.assertIn("多维上传成功", job.get("upload_message") or "")
+            self.assertTrue(job.get("message_failed"))
+            self.assertEqual(job.get("record_id"), "rec-test")
+            self.assertIn("【维保通告】", job.get("notice_text") or "")
+            self.assertEqual(job.get("prepared"), {})
 
     def test_portal_message_batch_collects_same_scope_from_sqlite_queue(self):
         class _FakeService:
@@ -4594,7 +4732,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertTrue(should_start)
             prepared = service.prepare_action_job(start_job_id)
             self.assertEqual(prepared["work_type"], WORK_TYPE_CHANGE)
-            self.assertTrue(prepared["skip_personal_message"])
+            self.assertFalse(prepared["skip_personal_message"])
+            self.assertGreaterEqual(len(prepared["recipients"]), 2)
             service.mark_action_upload_result(
                 start_job_id,
                 success=True,
@@ -4666,8 +4805,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             prepared = service.prepare_action_job(start_job_id)
             self.assertEqual(prepared["work_type"], WORK_TYPE_REPAIR)
             self.assertEqual(prepared["notice_type"], "设备检修")
-            self.assertEqual(prepared["recipients"], [])
-            self.assertTrue(prepared["skip_personal_message"])
+            self.assertGreaterEqual(len(prepared["recipients"]), 2)
+            self.assertFalse(prepared["skip_personal_message"])
             self.assertIn("【设备检修】状态：开始", prepared["text"])
             self.assertIn("【标题】手动检修标题", prepared["text"])
             self.assertIn("【地点】", prepared["text"])
@@ -4688,6 +4827,54 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(prepared["expected_time"], "2026-05-08 23:50")
             self.assertEqual(prepared["fault_time"], "2026-05-08 08:20")
             self.assertEqual(prepared["building_code"], "D")
+
+    def test_repair_start_can_build_text_from_payload_when_snapshot_record_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            service._repair_records = []
+            service._repair_loaded_once = True
+
+            start_job_id, should_start = service.create_action_job(
+                {
+                    "action": "start",
+                    "work_type": "repair",
+                    "scope": "D",
+                    "record_id": "missing-repair-source",
+                    "source_record_id": "missing-repair-source",
+                    "source_progress": "未开始",
+                    "building": "D楼",
+                    "building_codes": ["D"],
+                    "specialty": "电气",
+                    "title": "D楼UPS检修",
+                    "level": "低",
+                    "expected_time": "2026-05-08T23:50",
+                    "fault_time": "2026-05-08T08:20",
+                    "location": "D-UPS间",
+                    "reason": "测试故障原因",
+                    "impact": "测试影响",
+                    "progress": "准备开始",
+                    "repair_device": "UPS-01",
+                    "repair_fault": "UPS故障",
+                    "fault_type": "设备故障",
+                    "repair_mode": "自维",
+                    "discovery": "巡检发现",
+                    "symptom": "通讯中断",
+                    "solution": "更换模块",
+                    "operation_id": "repair-start-payload-fallback",
+                }
+            )
+
+            self.assertTrue(should_start)
+            prepared = service.prepare_action_job(start_job_id)
+            self.assertEqual(prepared["record_id"], "missing-repair-source")
+            self.assertEqual(prepared["source_app_token"], "AnEBwJlvGiJfDdkOB32cUPuknzg")
+            self.assertGreaterEqual(len(prepared["recipients"]), 2)
+            self.assertFalse(prepared["skip_personal_message"])
+            self.assertIn("【设备检修】状态：开始", prepared["text"])
+            self.assertIn("【标题】D楼UPS检修", prepared["text"])
+            self.assertIn("【地点】D-UPS间", prepared["text"])
+            self.assertIn("【维修设备】UPS-01", prepared["text"])
+            self.assertIn("【解决方案】更换模块", prepared["text"])
 
     def test_repair_defaults_use_notice_title_formula_level_and_source(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -5451,10 +5638,11 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(prepared["building_codes"], ["A"])
             self.assertEqual(prepared["specialty"], "电气")
             self.assertEqual(prepared["level"], "I3")
-            self.assertIn("【变更通告】状态：开始", prepared["text"])
+            self.assertIn("【设备变更】状态：开始", prepared["text"])
             self.assertIn("【名称】EA118机房A楼冷却塔清洗", prepared["text"])
             self.assertNotIn("【维保通告】", prepared["text"])
-            self.assertTrue(prepared["skip_personal_message"])
+            self.assertFalse(prepared["skip_personal_message"])
+            self.assertGreaterEqual(len(prepared["recipients"]), 2)
 
     def test_prepare_actions_reject_time_range_shorter_than_one_hour(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -5664,8 +5852,11 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             "quantity": "1",
             "progress": "测试进度",
         }
-        with self.assertRaisesRegex(PortalError, "现场照片"):
-            service.prepare_simple_manual_notice_action(power_payload, job_id="job-power-end-missing-photo")
+        prepared_power_without_photo = service.prepare_simple_manual_notice_action(
+            power_payload,
+            job_id="job-power-end-missing-photo",
+        )
+        self.assertEqual(prepared_power_without_photo["extra_images"], [])
         prepared_power = service.prepare_simple_manual_notice_action(
             {**power_payload, "extra_images": site_photo},
             job_id="job-power-end-photo",

@@ -4,6 +4,7 @@ import threading
 import time
 import hashlib
 import uuid
+import re
 from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtGui import QStandardItem, QStandardItemModel
 from PyQt6.QtWidgets import (
@@ -898,6 +899,40 @@ class MainWindowWorkflowMixin:
             return "auto"
         return self._prompt_i2_robot_group_choice(notice_type)
 
+    @staticmethod
+    def _normalize_change_upload_level(data_dict: dict | None, level: str = "") -> str:
+        explicit_level = str(level or "").strip()
+        if explicit_level:
+            return explicit_level
+        if isinstance(data_dict, dict):
+            cached_level = str(data_dict.get("level") or "").strip()
+            if cached_level:
+                return cached_level
+            text = str(data_dict.get("text") or "")
+        else:
+            text = ""
+        info = extract_event_info(text) or {}
+        raw_level = str(info.get("level") or "").strip()
+        if not raw_level:
+            match = re.search(
+                r"【等级】(?P<value>.*?)(?=【[^】]+】|$)",
+                text,
+                re.S,
+            )
+            raw_level = str(match.group("value") if match else "").strip()
+        normalized = raw_level.upper()
+        if normalized in {"I3", "I2", "I1", "E0", "/"}:
+            return normalized
+        if "超低" in raw_level:
+            return "I3"
+        if "低" in raw_level:
+            return "I3"
+        if "中" in raw_level:
+            return "I2"
+        if "高" in raw_level:
+            return "I1"
+        return "I3"
+
     def _restore_screenshot_dialog_after_group_choice_cancel(self):
         self._set_delete_interaction_enabled(False)
         self._pause_clipboard_timer()
@@ -1064,7 +1099,10 @@ class MainWindowWorkflowMixin:
             if notice_type == "事件通告":
                 dialog_level = str(request.get("event_level") or "").strip()
             elif notice_type in ("设备变更", "变更通告"):
-                dialog_level = str(request.get("change_level") or "").strip()
+                dialog_level = self._normalize_change_upload_level(
+                    payload_data if isinstance(payload_data, dict) else {},
+                    str(request.get("change_level") or "").strip(),
+                )
             resolved = self._resolve_upload_fields_from_cache(
                 payload_data if isinstance(payload_data, dict) else {},
                 {
@@ -1081,7 +1119,12 @@ class MainWindowWorkflowMixin:
             )
             resolved_level = str(resolved.get("level") or "").strip()
             pending_change_level = (
-                resolved_level if notice_type in ("设备变更", "变更通告") else ""
+                self._normalize_change_upload_level(
+                    payload_data if isinstance(payload_data, dict) else {},
+                    resolved_level or dialog_level,
+                )
+                if notice_type in ("设备变更", "变更通告")
+                else ""
             )
             pending_event_level = resolved_level if notice_type == "事件通告" else ""
             action_type = request.get("action_type", "update")
@@ -2134,6 +2177,7 @@ class MainWindowWorkflowMixin:
         if notice_type == "事件通告":
             dialog_level = event_level
         elif notice_type in ("设备变更", "变更通告"):
+            change_level = self._normalize_change_upload_level(data_dict, change_level)
             dialog_level = change_level
         resolved_fields = self._resolve_upload_fields_from_cache(
             data_dict,
@@ -2175,7 +2219,10 @@ class MainWindowWorkflowMixin:
         if notice_type == "事件通告":
             event_level = resolved_level
         elif notice_type in ("设备变更", "变更通告"):
-            change_level = resolved_level
+            change_level = self._normalize_change_upload_level(
+                data_dict,
+                resolved_level or change_level,
+            )
         elif resolved_level:
             data_dict["level"] = resolved_level
         record_id = data_dict.get("record_id")

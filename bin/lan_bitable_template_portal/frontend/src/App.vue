@@ -349,6 +349,7 @@
               :field-class="(field) => draftFieldClass(row.record, row.draft, field)"
               :job-text="jobText"
               :job-class="jobClass"
+              :copy-text="jobCopyText(row.key, noticePreviewText(row.record, row.draft))"
               @activate="activeDraftKey = row.key"
               @pin="pinDraftInMiddlePanel(row.key)"
               @remove="removeDraft(row.key)"
@@ -357,6 +358,7 @@
               @building-change="onDraftBuildingChange(row.draft)"
               @bind-zhihang="bindZhihang(row.draft)"
               @toggle-preview="previewDraftKey = previewDraftKey === row.key ? '' : row.key"
+              @copy-notice="copyJobNoticeText(row.key, noticePreviewText(row.record, row.draft))"
               @send="sendStart(row.key)"
               @toggle-work-type-override="toggleWorkTypeOverride(row.record)"
             />
@@ -392,6 +394,7 @@
               :zhihang-records="zhihangRecords"
               :job-text="jobText"
               :job-class="jobClass"
+              :copy-text="jobCopyText(ongoingLineKey(item), ongoingNoticePreviewText(item))"
               @expand="expandOngoingCard(item)"
               @toggle="toggleOngoingCard(item)"
               @set-edit="(key, value) => setOngoingEdit(item, key, value)"
@@ -400,6 +403,7 @@
               @photo-paste="(event) => handleOngoingPhotoPaste(item, event)"
               @remove-photo="(index) => removeOngoingPhoto(item, index)"
               @send="(action) => sendOngoing(item, action)"
+              @copy-notice="copyJobNoticeText(ongoingLineKey(item), ongoingNoticePreviewText(item))"
               @delete="deleteOngoing(item)"
               @bind-target="bindOngoingTarget(item)"
               @apply-undo="applyUndo(item)"
@@ -1386,6 +1390,7 @@ function manualDraftDefaults(type: string): Dict {
   return {
     manual: true,
     work_type: normalizedType,
+    notice_type: normalizedType === "power" ? "上电通告" : "",
     title: "",
     building,
     building_codes: buildingCodesFromText(building),
@@ -1426,7 +1431,7 @@ function manualRecordFromDraft(key: string, draft: Dict): Dict {
     maintenance: "维保通告",
     change: "设备变更",
     repair: "设备检修",
-    power: "上下电通告",
+    power: draft.notice_type === "下电通告" ? "下电通告" : "上电通告",
     polling: "设备轮巡",
     adjust: "设备调整",
   };
@@ -1465,6 +1470,9 @@ function onManualDraftTypeChange(draft: Dict): void {
   const type = normalizeWorkType(draft.work_type);
   draft.work_type = type;
   if (type === "change" && !draft.level) draft.level = "I3";
+  if (type === "power" && !["上电通告", "下电通告"].includes(String(draft.notice_type || ""))) {
+    draft.notice_type = "上电通告";
+  }
   if (type !== "maintenance") draft.non_plan = false;
   saveDrafts();
 }
@@ -2334,6 +2342,24 @@ function noticePreviewText(record: Dict, draft: Dict): string {
   return lines.join("\n");
 }
 
+function ongoingNoticePreviewText(item: Dict): string {
+  const draft = ongoingDraft(item);
+  const action = String(jobStates.get(ongoingLineKey(item))?.payload?.action || "update").toLowerCase();
+  return noticePreviewText(
+    {
+      ...item,
+      manual: true,
+      work_type: item.work_type || "maintenance",
+    },
+    {
+      ...draft,
+      manual: true,
+      work_type: item.work_type || "maintenance",
+      parsed_action: action || "update",
+    },
+  );
+}
+
 function draftUploadPreviewRows(record: Dict, draft: Dict): Array<{ label: string; value: string }> {
   const type = draftWorkType(record, draft);
   const rows: Array<{ label: string; value: string }> = [
@@ -2687,6 +2713,9 @@ async function parsePastedNotice(): Promise<void> {
     const type = pastedNoticeWorkType(text, sections);
     const draft = manualDraftDefaults(type);
     draft.parsed_work_type = type;
+    if (type === "power") {
+      draft.notice_type = /【\s*下电通告\s*】|下电通告/.test(text) ? "下电通告" : "上电通告";
+    }
     const status = pastedNoticeStatus(text);
     const action = parsedActionFromStatus(status);
     const timeRange = splitNoticeTimeRange(sectionValue(sections, ["时间"]));
@@ -2907,9 +2936,7 @@ function opId(key: string): string {
 
 function payloadSendsPersonalMessage(payload: Dict): boolean {
   const type = String(payload?.work_type || "maintenance");
-  if (type === "maintenance") return true;
-  if (["power", "polling", "adjust"].includes(type)) return true;
-  return Boolean(payload?.manual);
+  return ["maintenance", "change", "repair", "power", "polling", "adjust"].includes(type);
 }
 
 function buildStartPayload(key: string): Dict | null {
@@ -3486,6 +3513,39 @@ function jobClass(key: string): string {
   return jobStates.get(key)?.status || "";
 }
 
+function jobCopyText(key: string, fallback = ""): string {
+  const state = jobStates.get(key) || {};
+  return String(state.notice_text || state.copy_text || fallback || "").trim();
+}
+
+async function copyTextToClipboard(text: string): Promise<void> {
+  const value = String(text || "").trim();
+  if (!value) throw new Error("没有可复制的通告文本");
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.setAttribute("readonly", "readonly");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  document.body.appendChild(textarea);
+  textarea.select();
+  const ok = document.execCommand("copy");
+  document.body.removeChild(textarea);
+  if (!ok) throw new Error("复制失败，请手动选中文本复制");
+}
+
+async function copyJobNoticeText(key: string, fallback = ""): Promise<void> {
+  try {
+    await copyTextToClipboard(jobCopyText(key, fallback));
+    syncText.value = "通告文本已复制";
+  } catch (error: any) {
+    syncText.value = error?.message || "复制失败";
+  }
+}
+
 function isLineBusy(key: string): boolean {
   const phase = jobStates.get(key)?.phase || "";
   return Boolean(phase && !terminalPhase(phase));
@@ -3493,7 +3553,13 @@ function isLineBusy(key: string): boolean {
 
 function applyJobStatusToLine(lineKey: string, job: Dict): void {
   const { phase, status, text } = backendJobStatusPatch(job);
-  rememberJob(lineKey, { phase, status, text });
+  const noticeText = String(job?.prepared?.text || job?.notice_text || job?.copy_text || "").trim();
+  rememberJob(lineKey, {
+    phase,
+    status,
+    text,
+    notice_text: noticeText || jobStates.get(lineKey)?.notice_text || "",
+  });
   if (terminalPhase(phase)) {
     clearFallbackPoll(lineKey);
     handleTerminalJob(lineKey, phase);

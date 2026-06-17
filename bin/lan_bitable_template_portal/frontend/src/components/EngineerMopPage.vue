@@ -55,13 +55,13 @@
         >
           <div class="detect-summary">
             <span :class="{ muted: !activeSheet.is_cover }">{{ activeSheet.is_cover ? "封面页" : "非封面页" }}</span>
-            <strong>D-G 正常异常项 {{ activeSheetCheckboxCells.length }} 个</strong>
-            <strong>维护实施/审核字段 {{ activeSheetMaintenanceFields.length }} 个</strong>
+            <strong>选择项 {{ activeSheetCheckboxCells.length }} 个</strong>
+            <strong>日期/维护字段 {{ activeSheetMaintenanceFields.length }} 个</strong>
             <em v-if="!activeSheet.is_cover && mopFilledCount">已填写 {{ mopFilledCount }} 项</em>
           </div>
           <div v-if="activeSheet.is_cover" class="detect-empty">当前 Sheet 识别为封面页，不提取填写项。</div>
           <div v-else-if="!activeSheetCheckboxCells.length && !activeSheetMaintenanceFields.length" class="detect-empty">
-            当前 Sheet 暂未识别到 D-G 正常异常项或维护实施/审核字段。
+            当前 Sheet 暂未识别到选择项、日期占位或维护实施/审核字段；普通单元格仍可点击编辑。
           </div>
         </div>
         <section v-if="activeSheet && !activeSheet.is_cover" class="mop-sign-panel">
@@ -270,14 +270,14 @@
         <div v-if="activeSheet?.truncated" class="sheet-note">
           表格较大，当前预览已限制显示前 {{ activeSheet.row_count }} 行 / {{ activeSheet.column_count }} 列。
         </div>
-        <div class="sheet-scroll preview-scroll" @click="activeMopCellKey = ''">
+        <div class="sheet-scroll preview-scroll">
           <div
-            v-if="activeSheet && !activeSheet.is_cover && (activeSheetCheckboxCells.length || activeSheetMaintenanceFields.length)"
+            v-if="activeSheet && !activeSheet.is_cover"
             class="table-fill-toolbar"
           >
             <span>点击表格单元格可固定显示填写操作</span>
             <button class="btn blue" type="button" :disabled="!activeSheetCheckboxCells.length" @click="markAllCheckboxes('normal')">
-              全部正常
+              全部正常/开启/已完成
             </button>
             <em v-if="mopFilledCount">已填写 {{ mopFilledCount }} 项</em>
           </div>
@@ -309,8 +309,9 @@
                       merged: cellMergeSpan(rowIndex, colIndex).rowspan > 1 || cellMergeSpan(rowIndex, colIndex).colspan > 1,
                       fillable: Boolean(checkboxCellAt(rowIndex, colIndex)),
                       'field-fillable': Boolean(maintenanceFieldAt(rowIndex, colIndex)),
-                      normal: checkboxCellAt(rowIndex, colIndex) ? checkboxState(checkboxCellAt(rowIndex, colIndex) as Dict) === 'normal' : false,
-                      abnormal: checkboxCellAt(rowIndex, colIndex) ? checkboxState(checkboxCellAt(rowIndex, colIndex) as Dict) === 'abnormal' : false
+                      'raw-editable': Boolean(editableCellAt(rowIndex, colIndex)),
+                      normal: checkboxCellAt(rowIndex, colIndex) ? checkboxStateLabel(checkboxCellAt(rowIndex, colIndex) as Dict).includes('正常') : false,
+                      abnormal: checkboxCellAt(rowIndex, colIndex) ? checkboxStateLabel(checkboxCellAt(rowIndex, colIndex) as Dict).includes('异常') : false
                     }"
                     @click.stop="activateMopCell(rowIndex, colIndex)"
                   >
@@ -330,18 +331,13 @@
                     >
                       <span>{{ checkboxCellAt(rowIndex, colIndex)?.cell_ref || columnLabel(colIndex) + (rowIndex + 1) }}</span>
                       <button
+                        v-for="option in checkboxOptions(checkboxCellAt(rowIndex, colIndex) as Dict)"
+                        :key="option.key || option.label"
                         type="button"
-                        :class="{ active: checkboxState(checkboxCellAt(rowIndex, colIndex) as Dict) === 'normal' }"
-                        @click.stop="setCheckboxState(checkboxCellAt(rowIndex, colIndex) as Dict, 'normal')"
+                        :class="{ active: checkboxState(checkboxCellAt(rowIndex, colIndex) as Dict) === checkboxOptionValue(option) }"
+                        @click.stop="setCheckboxState(checkboxCellAt(rowIndex, colIndex) as Dict, checkboxOptionValue(option))"
                       >
-                        正常
-                      </button>
-                      <button
-                        type="button"
-                        :class="{ active: checkboxState(checkboxCellAt(rowIndex, colIndex) as Dict) === 'abnormal' }"
-                        @click.stop="setCheckboxState(checkboxCellAt(rowIndex, colIndex) as Dict, 'abnormal')"
-                      >
-                        异常
+                        {{ option.label || option.key }}
                       </button>
                     </div>
                     <div
@@ -358,6 +354,18 @@
                         <button type="button" @click.stop="fillMaintenanceField(maintenanceFieldAt(rowIndex, colIndex) as Dict, '已完成[√] 未完成[ ]')">已完成</button>
                         <button type="button" @click.stop="fillMaintenanceField(maintenanceFieldAt(rowIndex, colIndex) as Dict, '已完成[ ] 未完成[√]')">未完成</button>
                       </template>
+                    </div>
+                    <div
+                      v-else-if="editableCellAt(rowIndex, colIndex) && activeMopCellKey === mopCellKey(rowIndex, colIndex)"
+                      class="cell-field-popover raw-cell-popover pinned"
+                      @click.stop
+                    >
+                      <span>{{ columnLabel(colIndex) }}{{ rowIndex + 1 }} 普通单元格</span>
+                      <textarea
+                        :value="editableCellValue(rowIndex, colIndex)"
+                        @input="setEditableCellValue(rowIndex, colIndex, ($event.target as HTMLTextAreaElement).value)"
+                      ></textarea>
+                      <button type="button" @click.stop="clearEditableCell(rowIndex, colIndex)">还原</button>
                     </div>
                   </td>
                 </template>
@@ -571,8 +579,9 @@ const signatureLinkSending = ref(false);
 const mopFillSaving = ref(false);
 const mopResetting = ref(false);
 const filledMopResult = ref<Dict | null>(null);
-const mopCheckboxStates = ref<Record<string, "normal" | "abnormal">>({});
+const mopCheckboxStates = ref<Record<string, string>>({});
 const mopMaintenanceValues = ref<Record<string, string>>({});
+const mopCellEdits = ref<Record<string, string>>({});
 const mopFillDateTime = ref(defaultDateTimeLocal());
 const activeMopCellKey = ref("");
 const signatureMessage = ref("");
@@ -708,7 +717,8 @@ const mopFilledCount = computed(() => {
   if (!sheetName) return 0;
   const checkboxCount = activeSheetCheckboxCells.value.filter((cell) => Boolean(mopCheckboxStates.value[checkboxKey(cell)])).length;
   const fieldCount = activeSheetMaintenanceFields.value.filter((field) => Boolean(mopMaintenanceValues.value[maintenanceKey(field)])).length;
-  return checkboxCount + fieldCount;
+  const editCount = Object.keys(mopCellEdits.value).filter((key) => key.startsWith(`${sheetName}:`)).length;
+  return checkboxCount + fieldCount + editCount;
 });
 const mopCompletionItems = computed(() => {
   const implementerCount = selectedSignaturePeople("implementer").filter((person) => personHasUsableSignature(person)).length;
@@ -794,6 +804,10 @@ function compactText(value: unknown): string {
   return String(value || "").replace(/\s+/g, "").toLowerCase();
 }
 
+function escapeRegExp(value: string): string {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function attachmentKey(attachment: Dict): string {
   return String(attachment?.file_token || attachment?.url || attachment?.name || "").trim();
 }
@@ -824,8 +838,27 @@ function maintenanceKey(field: Dict): string {
   return `${activeSheet.value?.name || ""}:${field.label || ""}:${field.value_cell_ref || field.label_cell_ref || `${field.row}:${field.value_col}`}`;
 }
 
-function checkboxState(cell: Dict): "normal" | "abnormal" | "" {
+function checkboxState(cell: Dict): string {
   return mopCheckboxStates.value[checkboxKey(cell)] || "";
+}
+
+function checkboxOptions(cell: Dict): Dict[] {
+  const items = Array.isArray(cell?.options) ? cell.options : [];
+  if (items.length) return items;
+  return [
+    { key: "normal", label: "正常" },
+    { key: "abnormal", label: "异常" },
+  ];
+}
+
+function checkboxOptionValue(option: Dict): string {
+  return String(option?.label || option?.key || "").trim();
+}
+
+function checkboxStateLabel(cell: Dict): string {
+  const state = checkboxState(cell);
+  if (!state) return "";
+  return checkboxOptions(cell).find((option) => checkboxOptionValue(option) === state)?.label || state;
 }
 
 function mopCellKey(rowIndex: number, colIndex: number): string {
@@ -833,11 +866,11 @@ function mopCellKey(rowIndex: number, colIndex: number): string {
 }
 
 function activateMopCell(rowIndex: number, colIndex: number): void {
-  if (!checkboxCellAt(rowIndex, colIndex) && !maintenanceFieldAt(rowIndex, colIndex)) return;
+  if (!checkboxCellAt(rowIndex, colIndex) && !maintenanceFieldAt(rowIndex, colIndex) && !editableCellAt(rowIndex, colIndex)) return;
   activeMopCellKey.value = mopCellKey(rowIndex, colIndex);
 }
 
-function setCheckboxState(cell: Dict, state: "normal" | "abnormal"): void {
+function setCheckboxState(cell: Dict, state: string): void {
   mopCheckboxStates.value = {
     ...mopCheckboxStates.value,
     [checkboxKey(cell)]: state,
@@ -858,9 +891,59 @@ function maintenanceFieldAt(rowIndex: number, colIndex: number): Dict | null {
   )) || null;
 }
 
+function rawCellKey(rowIndex: number, colIndex: number): string {
+  return `${activeSheet.value?.name || ""}:${rowIndex}:${colIndex}`;
+}
+
+function protectedMopCell(rowIndex: number, colIndex: number): boolean {
+  if (!activeSheet.value || activeSheet.value.is_cover) return true;
+  if (cellMergeSpan(rowIndex, colIndex).hidden) return true;
+  if (checkboxCellAt(rowIndex, colIndex)) return true;
+  if (activeSheetMaintenanceFields.value.some((field) => (
+    Number(field.row) === rowIndex
+    && (Number(field.value_col) === colIndex || Number(field.label_col) === colIndex)
+  ))) return true;
+  if (cellSignatures(rowIndex, colIndex).length) return true;
+  return false;
+}
+
+function editableCellAt(rowIndex: number, colIndex: number): boolean {
+  return !protectedMopCell(rowIndex, colIndex);
+}
+
+function editableCellValue(rowIndex: number, colIndex: number): string {
+  const key = rawCellKey(rowIndex, colIndex);
+  if (Object.prototype.hasOwnProperty.call(mopCellEdits.value, key)) {
+    return mopCellEdits.value[key];
+  }
+  const row = Array.isArray(activeSheet.value?.rows?.[rowIndex]) ? activeSheet.value?.rows?.[rowIndex] : [];
+  return String(row?.[colIndex] || "");
+}
+
+function setEditableCellValue(rowIndex: number, colIndex: number, value: string): void {
+  if (!editableCellAt(rowIndex, colIndex)) return;
+  mopCellEdits.value = {
+    ...mopCellEdits.value,
+    [rawCellKey(rowIndex, colIndex)]: String(value || ""),
+  };
+  filledMopResult.value = null;
+}
+
+function clearEditableCell(rowIndex: number, colIndex: number): void {
+  const next = { ...mopCellEdits.value };
+  delete next[rawCellKey(rowIndex, colIndex)];
+  mopCellEdits.value = next;
+  filledMopResult.value = null;
+}
+
 function maintenanceFieldIsTime(field: Dict): boolean {
   const label = String(field?.label || "");
-  return label.includes("维护开始时间") || label.includes("维护完成时间") || label.includes("审核确认时间");
+  return field?.kind === "datetime_placeholder"
+    || label.includes("维护开始时间")
+    || label.includes("维护完成时间")
+    || label.includes("审核确认时间")
+    || label.includes("日期")
+    || label.includes("时间");
 }
 
 function maintenanceFieldIsCompletion(field: Dict): boolean {
@@ -880,6 +963,7 @@ function fillMaintenanceField(field: Dict, value: string): void {
 function clearMopFillState(options: { clearSignatures?: boolean } = {}): void {
   mopCheckboxStates.value = {};
   mopMaintenanceValues.value = {};
+  mopCellEdits.value = {};
   filledMopResult.value = null;
   if (options.clearSignatures) {
     signatureSelectedRecords.value = { implementer: [], auditor: [] };
@@ -888,10 +972,15 @@ function clearMopFillState(options: { clearSignatures?: boolean } = {}): void {
   }
 }
 
-function markAllCheckboxes(state: "normal" | "abnormal"): void {
+function markAllCheckboxes(state: string): void {
   const next = { ...mopCheckboxStates.value };
   for (const cell of activeSheetCheckboxCells.value) {
-    next[checkboxKey(cell)] = state;
+    const options = checkboxOptions(cell);
+    const preferred = options.find((option) => String(option.label || "").includes("正常"))
+      || options.find((option) => String(option.label || "").includes("开启"))
+      || options.find((option) => String(option.label || "").includes("已完成"))
+      || options[0];
+    next[checkboxKey(cell)] = checkboxOptionValue(preferred) || state;
   }
   mopCheckboxStates.value = next;
   filledMopResult.value = null;
@@ -901,13 +990,17 @@ function checkboxDisplayValue(cell: Dict): string {
   const state = checkboxState(cell);
   const original = String(cell.value || "");
   if (!state) return original;
-  const normalMark = state === "normal" ? "☑" : "□";
-  const abnormalMark = state === "abnormal" ? "☑" : "□";
-  let text = original || "□正常 □异常";
-  text = text.replace(/[□☐■☑√✔]\s*正常/g, `${normalMark}正常`);
-  text = text.replace(/[□☐■☑√✔]\s*异常/g, `${abnormalMark}异常`);
-  if (!text.includes("正常") || !text.includes("异常")) {
-    text = `${normalMark}正常 ${abnormalMark}异常`;
+  const labels = checkboxOptions(cell).map((option) => String(option.label || option.key || "").trim()).filter(Boolean);
+  let text = original || labels.map((label) => `□${label}`).join(" ");
+  for (const label of labels) {
+    const mark = label === state ? "☑" : "□";
+    const prefixPattern = new RegExp(`[□☐■☑√✔✓]\\s*${escapeRegExp(label)}`, "g");
+    const bracketPattern = new RegExp(`${escapeRegExp(label)}\\[[^\\]]*\\]`, "g");
+    if (prefixPattern.test(text)) {
+      text = text.replace(prefixPattern, `${mark}${label}`);
+    } else if (bracketPattern.test(text)) {
+      text = text.replace(bracketPattern, `${label}[${label === state ? "√" : " "}]`);
+    }
   }
   return text;
 }
@@ -923,13 +1016,17 @@ function cellOverrideValue(rowIndex: number, colIndex: number): string {
       return labelCol === colIndex ? `${field.label || ""}：${value}` : value;
     }
   }
+  const editKey = rawCellKey(rowIndex, colIndex);
+  if (Object.prototype.hasOwnProperty.call(mopCellEdits.value, editKey)) {
+    return mopCellEdits.value[editKey];
+  }
   return "";
 }
 
 function buildMopCheckboxPayload(): Dict[] {
   return activeSheetCheckboxCells.value
-    .map((cell) => ({ ...cell, state: checkboxState(cell) }))
-    .filter((cell) => cell.state);
+    .map((cell) => ({ ...cell, selection: checkboxState(cell), selected_label: checkboxState(cell) }))
+    .filter((cell) => cell.selection);
 }
 
 function buildMopFieldPayload(): Dict[] {
@@ -937,6 +1034,18 @@ function buildMopFieldPayload(): Dict[] {
     ...field,
     fill_value: mopMaintenanceValues.value[maintenanceKey(field)] || "",
   }));
+}
+
+function buildMopCellEditPayload(): Dict[] {
+  return Object.entries(mopCellEdits.value).map(([key, value]) => {
+    const parts = key.split(":");
+    return {
+      sheet: parts.slice(0, -2).join(":"),
+      row: Number(parts[parts.length - 2] || 0),
+      col: Number(parts[parts.length - 1] || 0),
+      value,
+    };
+  });
 }
 
 function personInitial(person: Dict): string {
@@ -1271,6 +1380,7 @@ async function fillMopSignatures(): Promise<void> {
         sheet_name: activeSheet.value?.name || "",
         fields: buildMopFieldPayload(),
         checkboxes: buildMopCheckboxPayload(),
+        cell_edits: buildMopCellEditPayload(),
         signatures,
       }),
     });

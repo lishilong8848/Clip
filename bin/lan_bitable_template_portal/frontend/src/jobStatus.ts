@@ -19,10 +19,10 @@ export function friendlyFailureText(error: unknown, fallback = "失败"): string
 
 export function backendJobStatusPatch(job: Dict): { phase: string; status: string; text: string } {
   const phase = String(job.phase || job.status || "");
-  const text = String(job.message || job.upload_message || phase || "处理中");
+  const text = String(job.message_warning || job.message || job.upload_message || phase || "处理中");
   return {
     phase,
     status: phase === "success" ? "success" : phase === "failed" ? "failed" : "busy",
-    text: phase === "success" ? "成功" : phase === "failed" ? friendlyFailureText(job.error || text, "失败") : text,
+    text: phase === "success" ? text || "成功" : phase === "failed" ? friendlyFailureText(job.error || text, "失败") : text,
   };
 }

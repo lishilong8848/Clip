@@ -18,6 +18,7 @@ from lan_bitable_template_portal.portal_service import (  # noqa: E402
     WORK_TYPE_POWER,
     WORK_TYPE_REPAIR,
 )
+from lan_bitable_template_portal.server import PortalRuntime  # noqa: E402
 from upload_event_module.core.parser import extract_event_info  # noqa: E402
 
 
@@ -130,6 +131,55 @@ class NoticeTemplateTests(unittest.TestCase):
                 "【完成情况】设备恢复正常",
             ],
         )
+
+    def test_change_qt_upload_payload_defaults_to_i3_when_level_missing(self):
+        payload = PortalRuntime._prepared_to_notice_payload(
+            {
+                "notice_type": "设备变更",
+                "text": (
+                    "【设备变更】状态：开始\n"
+                    "【名称】EA118机房A楼测试变更\n"
+                    "【时间】2026-06-12 09:00~2026-06-12 18:00"
+                ),
+            }
+        )
+        self.assertEqual(payload.level, "I3")
+
+    def test_change_qt_upload_payload_respects_text_level(self):
+        payload = PortalRuntime._prepared_to_notice_payload(
+            {
+                "notice_type": "设备变更",
+                "text": (
+                    "【设备变更】状态：开始\n"
+                    "【名称】EA118机房A楼测试变更\n"
+                    "【等级】中风险\n"
+                    "【时间】2026-06-12 09:00~2026-06-12 18:00"
+                ),
+            }
+        )
+        self.assertEqual(payload.level, "I2")
+
+    def test_message_batch_does_not_merge_all_scope_maintenance(self):
+        original_service = PortalRuntime.service
+
+        class DummyService:
+            def get_job(self, job_id):
+                return {
+                    "job_id": job_id,
+                    "request": {
+                        "work_type": "maintenance",
+                        "scope": "ALL",
+                    },
+                }
+
+        try:
+            PortalRuntime.service = DummyService()
+            self.assertEqual(
+                PortalRuntime._collect_message_batch_job_ids("job_primary"),
+                ["job_primary"],
+            )
+        finally:
+            PortalRuntime.service = original_service
 
     def test_simple_notice_text_contracts_do_not_include_backend_only_fields(self):
         cases = [
