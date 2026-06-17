@@ -74,6 +74,9 @@ SIGNATURE_ATTACHMENT_FIELD = "手写签名"
 SIGNATURE_INACTIVE_FIELD = "离职/异动情况"
 SIGNATURE_PEOPLE_CACHE_TTL_SECONDS = 5 * 60
 SIGNATURE_LINK_TOKEN_TTL_SECONDS = 60 * 60
+MOP_SIGNED_ATTACHMENT_FIELD = "维护保养单"
+MOP_ENGINEER_CONFIRM_FIELD = "工程师确认"
+MOP_SUPERVISOR_CONFIRM_FIELD = "主管确认"
 ATTACHMENT_LATEST_FIELD_NAMES = (
     "最新发布时间",
     "最新发布",
@@ -289,6 +292,48 @@ ACTION_JOB_FAILED_RETENTION_SECONDS = 14 * 24 * 60 * 60
 
 def external_mock_enabled() -> bool:
     return os.environ.get("CLIPFLOW_BACKEND_MOCK_EXTERNAL") == "1"
+
+
+def _payload_list(payload: dict[str, Any], key: str) -> list[Any]:
+    value = payload.get(key) if isinstance(payload, dict) else None
+    return value if isinstance(value, list) else []
+
+
+def engineer_mop_fill_kwargs_from_payload(
+    payload: dict[str, Any], *, scope: str
+) -> dict[str, Any]:
+    payload = payload if isinstance(payload, dict) else {}
+    return {
+        "scope": str(scope or payload.get("scope") or "ALL"),
+        "local_file_path": str(payload.get("local_file_path") or ""),
+        "mop_record_id": str(payload.get("mop_record_id") or ""),
+        "mop_title": str(payload.get("mop_title") or ""),
+        "sheet_name": str(payload.get("sheet_name") or ""),
+        "fields": _payload_list(payload, "fields"),
+        "checkboxes": _payload_list(payload, "checkboxes"),
+        "cell_edits": _payload_list(payload, "cell_edits"),
+        "signatures": _payload_list(payload, "signatures"),
+    }
+
+
+def engineer_mop_upload_signed_kwargs_from_payload(
+    payload: dict[str, Any],
+    *,
+    scope: str,
+    operator_open_id: str = "",
+    operator_name: str = "",
+) -> dict[str, Any]:
+    kwargs = engineer_mop_fill_kwargs_from_payload(payload, scope=scope)
+    kwargs.update(
+        {
+            "source_record_id": str(payload.get("source_record_id") or ""),
+            "notice_title": str(payload.get("notice_title") or ""),
+            "notice_key": str(payload.get("notice_key") or ""),
+            "operator_open_id": str(operator_open_id or ""),
+            "operator_name": str(operator_name or ""),
+        }
+    )
+    return kwargs
 
 
 def external_real_write_guard() -> dict[str, Any]:
@@ -6109,16 +6154,17 @@ class MaintenancePortalService:
             )
         self._remove_hidden_ongoing_keys(identity_keys)
         self._touch_state_cache_version()
-        self._state_store.append_event_async(
-            "notice_undo",
-            {
-                "event": "undo_applied_local",
-                "undo_id": str(undo.get("undo_id") or ""),
-                "job_id": str(job_id or ""),
-                "applied_by": str(applied_by or ""),
-                "target_record_id": str(target_record_id or undo.get("target_record_id") or ""),
-            },
-        )
+        with suppress(Exception):
+            self._state_store.append_event(
+                "notice_undo",
+                {
+                    "event": "undo_applied_local",
+                    "undo_id": str(undo.get("undo_id") or ""),
+                    "job_id": str(job_id or ""),
+                    "applied_by": str(applied_by or ""),
+                    "target_record_id": str(target_record_id or undo.get("target_record_id") or ""),
+                },
+            )
         return {
             "restored_active": restored_active,
             "removed_active": removed_active,
@@ -8273,6 +8319,59 @@ class MaintenancePortalService:
                 with suppress(Exception):
                     os.remove(temp_file_path)
 
+    def _upload_bitable_file(
+        self,
+        *,
+        file_path: str | Path,
+        file_name: str = "",
+        app_token: str = DEFAULT_APP_TOKEN,
+    ) -> str:
+        token = str(ensure_feishu_token() or config.user_token or "").strip()
+        if not token:
+            raise PortalError("未配置有效的飞书 user_token，无法上传 MOP 文件。")
+        path = Path(str(file_path or "")).resolve()
+        if not path.is_file():
+            raise PortalError("待上传的已签名 MOP 文件不存在。")
+        upload_name = str(file_name or path.name).strip() or path.name
+        size = path.stat().st_size
+        if size <= 0:
+            raise PortalError("待上传的已签名 MOP 文件为空。")
+
+        def attempt_upload(upload_token: str) -> Any:
+            with open(path, "rb") as file_obj:
+                client = (
+                    lark.Client.builder()
+                    .enable_set_token(True)
+                    .log_level(lark.LogLevel.ERROR)
+                    .build()
+                )
+                request = (
+                    UploadAllMediaRequest.builder()
+                    .request_body(
+                        UploadAllMediaRequestBody.builder()
+                        .file_name(upload_name)
+                        .parent_type("bitable_file")
+                        .parent_node(str(app_token or DEFAULT_APP_TOKEN))
+                        .size(str(size))
+                        .file(file_obj)
+                        .build()
+                    )
+                    .build()
+                )
+                option = lark.RequestOption.builder().user_access_token(upload_token).build()
+                return client.drive.v1.media.upload_all(request, option)
+
+        response = attempt_upload(token)
+        if not response.success() and self._lark_response_is_token_error(response):
+            token = str(refresh_feishu_token() or config.user_token or "").strip()
+            response = attempt_upload(token)
+        if not response.success():
+            raise PortalError(f"MOP 文件上传失败: {response.code} - {response.msg}")
+        file_token = str(getattr(response.data, "file_token", "") or "").strip()
+        if not file_token:
+            raise PortalError("MOP 文件上传成功但未返回 file_token。")
+        return file_token
+
     def _load_signature_people(self, *, force: bool = False) -> list[dict[str, Any]]:
         now = time.time()
         with self._signature_people_cache_lock:
@@ -8323,10 +8422,10 @@ class MaintenancePortalService:
                     )
                     for attachment in self._extract_signature_attachments(fields)
                 ]
-                first_signature = attachments[0] if attachments else {}
+                first_signature = attachments[0] if attachments else None
                 signature_version = (
                     self._signature_attachment_version(first_signature)
-                    if isinstance(first_signature, dict)
+                    if isinstance(first_signature, dict) and first_signature
                     else ""
                 )
                 building = self._mop_field_text(fields, ["楼栋", "机楼/专业"])
@@ -8393,17 +8492,6 @@ class MaintenancePortalService:
         people = self._load_signature_people(force=bool(refresh or record_id))
         self._maybe_start_daily_attachment_cache_refresh()
 
-        def matches_scope(person: dict[str, Any]) -> bool:
-            if scope in {"", "ALL", "CAMPUS"}:
-                return True
-            building = str(person.get("building") or person.get("scope_text") or "")
-            if not building:
-                return True
-            aliases = [scope, f"{scope}楼", f"{scope}栋"]
-            if scope == "110":
-                aliases.extend(["110站", "110KV", "110kv"])
-            return any(alias and alias in building for alias in aliases)
-
         def matches_query(person: dict[str, Any]) -> bool:
             if record_id and str(person.get("record_id") or "") != record_id:
                 return False
@@ -8436,7 +8524,7 @@ class MaintenancePortalService:
                 if key != "raw_fields"
             }
             for person in people
-            if matches_scope(person) and matches_query(person)
+            if matches_query(person)
         ]
         limited = filtered[: max(1, min(500, int(limit or 80)))]
         link_token = str(link_token or "").strip()
@@ -9801,6 +9889,235 @@ class MaintenancePortalService:
             "saved_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
 
+    def _mop_signature_people_for_upload(
+        self, signatures: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        role_to_label = {
+            "implementer": "维护实施人",
+            "auditor": "维护审核人",
+        }
+        roles_by_record: dict[str, set[str]] = {}
+        for item in signatures:
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "").strip()
+            record_id = str(item.get("record_id") or "").strip()
+            if role in role_to_label and record_id:
+                roles_by_record.setdefault(record_id, set()).add(role)
+        present_roles = {role for roles in roles_by_record.values() for role in roles}
+        missing = [label for role, label in role_to_label.items() if role not in present_roles]
+        if missing:
+            raise PortalError(f"上传已签名 MOP 前请先选择可用签名：{'、'.join(missing)}。")
+
+        people = self._load_signature_people(force=False)
+        people_by_id = {
+            str(item.get("record_id") or "").strip(): item
+            for item in people
+            if str(item.get("record_id") or "").strip()
+        }
+        missing_records = [record_id for record_id in roles_by_record if record_id not in people_by_id]
+        if missing_records:
+            people = self._load_signature_people(force=True)
+            people_by_id = {
+                str(item.get("record_id") or "").strip(): item
+                for item in people
+                if str(item.get("record_id") or "").strip()
+            }
+        entries: list[dict[str, Any]] = []
+        for record_id, roles in roles_by_record.items():
+            person = people_by_id.get(record_id)
+            if not person:
+                raise PortalError("签名人员记录不存在，请刷新后重试。")
+            if not person.get("has_signature"):
+                raise PortalError(f"{person.get('name') or record_id} 暂无可用签名。")
+            role_labels = [role_to_label[role] for role in ("implementer", "auditor") if role in roles]
+            entries.append(
+                {
+                    "record_id": record_id,
+                    "name": str(person.get("name") or record_id),
+                    "open_id": str(person.get("open_id") or "").strip(),
+                    "roles": [role for role in ("implementer", "auditor") if role in roles],
+                    "role_labels": role_labels,
+                }
+            )
+        return entries
+
+    def _send_mop_signature_upload_notifications(
+        self,
+        *,
+        people: list[dict[str, Any]],
+        notice_title: str,
+        building: str = "",
+        maintenance_cycle: str = "",
+        file_name: str = "",
+        operator_name: str = "",
+        operator_open_id: str = "",
+    ) -> tuple[list[dict[str, Any]], str]:
+        grouped: dict[str, dict[str, Any]] = {}
+        results: list[dict[str, Any]] = []
+        for person in people:
+            open_id = str(person.get("open_id") or "").strip()
+            key = open_id or f"missing:{person.get('record_id') or person.get('name')}"
+            target = grouped.setdefault(
+                key,
+                {
+                    "open_id": open_id,
+                    "name": str(person.get("name") or ""),
+                    "role_labels": [],
+                },
+            )
+            for label in person.get("role_labels") or []:
+                if label not in target["role_labels"]:
+                    target["role_labels"].append(label)
+
+        for item in grouped.values():
+            open_id = str(item.get("open_id") or "").strip()
+            role_text = "、".join(item.get("role_labels") or []) or "签名人员"
+            if not open_id:
+                results.append(
+                    {
+                        "open_id": "",
+                        "name": item.get("name") or "",
+                        "roles": role_text,
+                        "ok": False,
+                        "message": "该人员缺少 openid，无法发送个人消息。",
+                    }
+                )
+                continue
+            text_lines = [
+                "【MOP签名确认】已上传维护保养单",
+                "",
+                f"签名角色：{role_text}",
+                f"维护通告：{notice_title or '未命名维保通告'}",
+            ]
+            if building:
+                text_lines.append(f"楼栋：{building}")
+            if maintenance_cycle:
+                text_lines.append(f"维护周期：{maintenance_cycle}")
+            if file_name:
+                text_lines.append(f"MOP文件：{file_name}")
+            text_lines.extend(
+                [
+                    f"操作人：{operator_name or '未知'}"
+                    + (f"（{operator_open_id}）" if operator_open_id else ""),
+                    f"时间：{dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                ]
+            )
+            if external_mock_enabled():
+                ok, message, send_results = True, "mock external send skipped", [
+                    {"open_id": open_id, "ok": True, "message": "mock external send skipped"}
+                ]
+            else:
+                ok, message, send_results = send_text_to_open_ids("\n".join(text_lines), [open_id])
+            send_result = (send_results or [{}])[0] if send_results else {}
+            results.append(
+                {
+                    "open_id": open_id,
+                    "name": item.get("name") or "",
+                    "roles": role_text,
+                    "ok": bool(ok and send_result.get("ok", ok)),
+                    "message": str(send_result.get("message") or message or ""),
+                }
+            )
+        failed = [item for item in results if not item.get("ok")]
+        warning = ""
+        if failed:
+            warning = "签名人员通知失败：" + "；".join(
+                f"{item.get('name') or item.get('open_id') or '未知人员'}({item.get('roles')})：{item.get('message') or '发送失败'}"
+                for item in failed
+            )
+        return results, warning
+
+    def upload_signed_engineer_mop_file(
+        self,
+        *,
+        scope: str = "ALL",
+        source_record_id: str = "",
+        notice_title: str = "",
+        notice_key: str = "",
+        operator_open_id: str = "",
+        operator_name: str = "",
+        local_file_path: str = "",
+        mop_record_id: str = "",
+        mop_title: str = "",
+        sheet_name: str = "",
+        fields: list[dict[str, Any]] | None = None,
+        checkboxes: list[dict[str, Any]] | None = None,
+        cell_edits: list[dict[str, Any]] | None = None,
+        signatures: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        self.ensure_snapshot_loaded()
+        source_record_id = str(source_record_id or "").strip()
+        if not source_record_id:
+            raise PortalError("缺少维保源表记录 ID，无法上传已签名 MOP。")
+        record = self._find_record_by_id(source_record_id, WORK_TYPE_MAINTENANCE)
+        display_fields = record.get("display_fields") or {}
+        building_codes = self._building_codes_from_value(display_fields.get("楼栋"))
+        normalized_scope = self._normalize_scope(scope)
+        if not self._scope_matches_buildings(normalized_scope, building_codes):
+            raise PortalError("当前账号无权上传该楼栋的 MOP。")
+
+        signature_people = self._mop_signature_people_for_upload(
+            [item for item in (signatures or []) if isinstance(item, dict)]
+        )
+        filled = self.fill_engineer_mop_file(
+            scope=scope,
+            local_file_path=local_file_path,
+            mop_record_id=mop_record_id,
+            mop_title=mop_title,
+            sheet_name=sheet_name,
+            fields=fields or [],
+            checkboxes=checkboxes or [],
+            cell_edits=cell_edits or [],
+            signatures=signatures or [],
+        )
+        file_token = self._upload_bitable_file(
+            file_path=str(filled.get("path") or ""),
+            file_name=str(filled.get("file_name") or ""),
+            app_token=DEFAULT_APP_TOKEN,
+        )
+        update_fields = {
+            MOP_SIGNED_ATTACHMENT_FIELD: [{"file_token": file_token}],
+            MOP_ENGINEER_CONFIRM_FIELD: True,
+            MOP_SUPERVISOR_CONFIRM_FIELD: True,
+        }
+        self._patch_record_fields(
+            app_token=DEFAULT_APP_TOKEN,
+            table_id=DEFAULT_TABLE_ID,
+            record_id=source_record_id,
+            fields=update_fields,
+        )
+        self._touch_state_cache_version()
+        title = (
+            str(notice_title or "").strip()
+            or self._maintenance_title(record)
+            or str(display_fields.get("维护总项") or "")
+        )
+        building = self._building_label_from_codes(building_codes)
+        maintenance_cycle = str(display_fields.get("维护周期") or "").strip()
+        notification_results, notification_warning = self._send_mop_signature_upload_notifications(
+            people=signature_people,
+            notice_title=title,
+            building=building,
+            maintenance_cycle=maintenance_cycle,
+            file_name=str(filled.get("file_name") or ""),
+            operator_name=operator_name,
+            operator_open_id=operator_open_id,
+        )
+        return {
+            "source_record_id": source_record_id,
+            "notice_key": str(notice_key or ""),
+            "notice_title": title,
+            "building": building,
+            "maintenance_cycle": maintenance_cycle,
+            "file_token": file_token,
+            "filled_file": filled,
+            "updated_fields": list(update_fields.keys()),
+            "notification_results": notification_results,
+            "notification_warning": notification_warning,
+            "uploaded_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
     def reset_engineer_mop_file(
         self,
         *,
@@ -10266,11 +10583,9 @@ class MaintenancePortalService:
             NOTICE_TYPE_POWER_DOWN,
             NOTICE_TYPE_POWER,
         }:
-            payload["notice_type"] = (
-                requested_notice_type
-                if requested_notice_type != NOTICE_TYPE_POWER
-                else NOTICE_TYPE_POWER_UP
-            )
+            if requested_notice_type in {NOTICE_TYPE_POWER_UP, NOTICE_TYPE_POWER_DOWN}:
+                payload["power_notice_heading"] = requested_notice_type
+            payload["notice_type"] = NOTICE_TYPE_POWER
         else:
             payload["notice_type"] = cls._notice_type_for_work_type(work_type)
         return payload
@@ -10906,7 +11221,7 @@ class MaintenancePortalService:
         work_type = str(work_type or "").strip()
         if work_type == WORK_TYPE_POWER:
             return {
-                "notice_type": NOTICE_TYPE_POWER_UP,
+                "notice_type": NOTICE_TYPE_POWER,
                 "heading": "上电通告",
                 "status_label": "上电状态",
                 "title_label": "名称",
@@ -10992,12 +11307,13 @@ class MaintenancePortalService:
             raise PortalError("不支持的手填通告类型。")
         profile = self._simple_notice_profile(work_type)
         request_notice_type = str(request_payload.get("notice_type") or "").strip()
-        notice_type = (
+        heading_notice_type = (
             request_notice_type
             if work_type == WORK_TYPE_POWER
             and request_notice_type in {NOTICE_TYPE_POWER_UP, NOTICE_TYPE_POWER_DOWN}
-            else profile["notice_type"]
+            else str(request_payload.get("power_notice_heading") or "").strip()
         )
+        notice_type = profile["notice_type"]
         scope = self._normalize_scope(request_payload.get("scope"))
         manual = self._truthy_flag(request_payload.get("manual"))
         record_id = str(
@@ -11067,7 +11383,7 @@ class MaintenancePortalService:
             device=device,
             cabinet=cabinet,
             quantity=quantity,
-            notice_type=notice_type,
+            notice_type=heading_notice_type,
         )
         building_code, recipients, recipient_error = self._recipients_for_building_codes(
             building_codes,

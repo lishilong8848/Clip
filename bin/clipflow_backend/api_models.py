@@ -159,6 +159,12 @@ class EngineerMopFillRequest(APIModel):
     signatures: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class EngineerMopUploadSignedRequest(EngineerMopFillRequest):
+    source_record_id: str = ""
+    notice_title: str = ""
+    notice_key: str = ""
+
+
 class EngineerMopResetRequest(APIModel):
     scope: str = "ALL"
     filled_file_path: str = ""

@@ -1,3 +1,4 @@
+import gc
 import sys
 import tempfile
 import unittest
@@ -63,63 +64,68 @@ class NoticeUndoTests(unittest.TestCase):
     def test_restore_local_snapshot_returns_ended_item_to_ongoing(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             service = self._service(tmpdir)
-            item = {
-                "key": "maintenance:source:src-1",
-                "active_item_id": "aid-1",
-                "source_record_id": "src-1",
-                "target_record_id": "rec-1",
-                "feishu_record_id": "rec-1",
-                "work_type": WORK_TYPE_MAINTENANCE,
-                "notice_type": NOTICE_TYPE_MAINTENANCE,
-                "title": "A楼测试维保",
-                "building": "A楼",
-                "building_codes": ["A"],
-                "status": "进行中",
-                "started_at": "2026-05-26 09:30",
-            }
-            service._state_store.upsert_qt_active_item(
-                {**item, "record_id": "rec-1"},
-                section="other",
-                origin="portal",
-            )
-            service._state_store.put_document(
-                STATE_NS_DAILY_SUMMARY,
-                "2026-05-26",
-                {"date": "2026-05-26", "items": [dict(item)]},
-            )
-            service._state_store.put_document(
-                STATE_NS_WORK_STATUS,
-                "A",
-                {"version": 1, "items": [dict(item)]},
-            )
-            undo_id = service.create_notice_undo_checkpoint(
-                "end",
-                item,
-                remote_fields={"名称": "A楼测试维保", "维保状态": "开始"},
-                scope="A",
-            )
-            undo = service._state_store.get_notice_undo_action(undo_id)
+            try:
+                item = {
+                    "key": "maintenance:source:src-1",
+                    "active_item_id": "aid-1",
+                    "source_record_id": "src-1",
+                    "target_record_id": "rec-1",
+                    "feishu_record_id": "rec-1",
+                    "work_type": WORK_TYPE_MAINTENANCE,
+                    "notice_type": NOTICE_TYPE_MAINTENANCE,
+                    "title": "A楼测试维保",
+                    "building": "A楼",
+                    "building_codes": ["A"],
+                    "status": "进行中",
+                    "started_at": "2026-05-26 09:30",
+                }
+                service._state_store.upsert_qt_active_item(
+                    {**item, "record_id": "rec-1"},
+                    section="other",
+                    origin="portal",
+                )
+                service._state_store.put_document(
+                    STATE_NS_DAILY_SUMMARY,
+                    "2026-05-26",
+                    {"date": "2026-05-26", "items": [dict(item)]},
+                )
+                service._state_store.put_document(
+                    STATE_NS_WORK_STATUS,
+                    "A",
+                    {"version": 1, "items": [dict(item)]},
+                )
+                undo_id = service.create_notice_undo_checkpoint(
+                    "end",
+                    item,
+                    remote_fields={"名称": "A楼测试维保", "维保状态": "开始"},
+                    scope="A",
+                )
+                undo = service._state_store.get_notice_undo_action(undo_id)
 
-            ended_item = {**item, "status": "已结束", "ended_at": "2026-05-26 18:30"}
-            service._state_store.delete_qt_active_item(active_item_id="aid-1")
-            service._state_store.put_document(
-                STATE_NS_DAILY_SUMMARY,
-                "2026-05-26",
-                {"date": "2026-05-26", "items": [ended_item]},
-            )
-            service._state_store.put_document(
-                STATE_NS_WORK_STATUS,
-                "A",
-                {"version": 1, "items": [ended_item]},
-            )
+                ended_item = {**item, "status": "已结束", "ended_at": "2026-05-26 18:30"}
+                service._state_store.delete_qt_active_item(active_item_id="aid-1")
+                service._state_store.put_document(
+                    STATE_NS_DAILY_SUMMARY,
+                    "2026-05-26",
+                    {"date": "2026-05-26", "items": [ended_item]},
+                )
+                service._state_store.put_document(
+                    STATE_NS_WORK_STATUS,
+                    "A",
+                    {"version": 1, "items": [ended_item]},
+                )
 
-            result = service.restore_notice_undo_local(undo, target_record_id="rec-1")
-            self.assertTrue(result["restored_active"])
-            active = service._state_store.list_qt_active_items()
-            self.assertEqual(len(active), 1)
-            self.assertEqual(active[0]["payload"]["status"], "进行中")
-            summary = service._state_store.get_document(STATE_NS_DAILY_SUMMARY, "2026-05-26")
-            self.assertEqual(summary["items"][0]["status"], "进行中")
+                result = service.restore_notice_undo_local(undo, target_record_id="rec-1")
+                self.assertTrue(result["restored_active"])
+                active = service._state_store.list_qt_active_items()
+                self.assertEqual(len(active), 1)
+                self.assertEqual(active[0]["payload"]["status"], "进行中")
+                summary = service._state_store.get_document(STATE_NS_DAILY_SUMMARY, "2026-05-26")
+                self.assertEqual(summary["items"][0]["status"], "进行中")
+            finally:
+                service._state_store.shutdown_write_worker(timeout=1.0)
+                del service
+                gc.collect()
 
     def test_checkpoint_enriches_scope_and_reason_from_qt_active_item(self):
         with tempfile.TemporaryDirectory() as tmpdir:

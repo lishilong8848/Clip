@@ -1,0 +1,158 @@
+import os
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+BIN_DIR = Path(__file__).resolve().parent
+if str(BIN_DIR) not in sys.path:
+    sys.path.insert(0, str(BIN_DIR))
+
+from lan_bitable_template_portal.portal_service import (  # noqa: E402
+    DEFAULT_APP_TOKEN,
+    DEFAULT_TABLE_ID,
+    MOP_ENGINEER_CONFIRM_FIELD,
+    MOP_SIGNED_ATTACHMENT_FIELD,
+    MOP_SUPERVISOR_CONFIRM_FIELD,
+    MaintenancePortalService,
+    PortalError,
+    WORK_TYPE_MAINTENANCE,
+)
+
+
+class FakeMopUploadService(MaintenancePortalService):
+    def __init__(self, tmpdir: str, *, missing_auditor_open_id: bool = False):
+        super().__init__()
+        self.tmpdir = Path(tmpdir)
+        self.missing_auditor_open_id = missing_auditor_open_id
+        self.upload_calls = []
+        self.patch_calls = []
+
+    def ensure_snapshot_loaded(self, *, refresh_if_expired: bool = False) -> None:
+        return None
+
+    def _find_record_by_id(self, record_id: str, work_type: str) -> dict:
+        assert record_id == "src-1"
+        assert work_type == WORK_TYPE_MAINTENANCE
+        return {
+            "record_id": "src-1",
+            "display_fields": {
+                "楼栋": "A楼",
+                "维护周期": "每月",
+                "维护总项": "测试维保",
+            },
+        }
+
+    def _load_signature_people(self, *, force: bool = False) -> list[dict]:
+        return [
+            {
+                "record_id": "person-1",
+                "name": "实施人",
+                "open_id": "ou_impl",
+                "has_signature": True,
+            },
+            {
+                "record_id": "person-2",
+                "name": "审核人",
+                "open_id": "" if self.missing_auditor_open_id else "ou_audit",
+                "has_signature": True,
+            },
+        ]
+
+    def fill_engineer_mop_file(self, **kwargs) -> dict:
+        output = self.tmpdir / "测试_已签名.xlsx"
+        output.write_bytes(b"fake signed mop")
+        return {
+            "path": str(output),
+            "file_name": output.name,
+            "relative_path": output.name,
+        }
+
+    def _upload_bitable_file(self, **kwargs) -> str:
+        self.upload_calls.append(dict(kwargs))
+        return "file-token-1"
+
+    def _patch_record_fields(self, **kwargs) -> dict:
+        self.patch_calls.append(dict(kwargs))
+        return {"ok": True}
+
+
+class EngineerMopUploadTests(unittest.TestCase):
+    def setUp(self):
+        self._old_mock = os.environ.get("CLIPFLOW_BACKEND_MOCK_EXTERNAL")
+        os.environ["CLIPFLOW_BACKEND_MOCK_EXTERNAL"] = "1"
+
+    def tearDown(self):
+        if self._old_mock is None:
+            os.environ.pop("CLIPFLOW_BACKEND_MOCK_EXTERNAL", None)
+        else:
+            os.environ["CLIPFLOW_BACKEND_MOCK_EXTERNAL"] = self._old_mock
+
+    def _signatures(self) -> list[dict]:
+        return [
+            {"role": "implementer", "record_id": "person-1"},
+            {"role": "auditor", "record_id": "person-2"},
+        ]
+
+    def test_upload_signed_mop_overwrites_attachment_and_confirms(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = FakeMopUploadService(tmpdir)
+            result = service.upload_signed_engineer_mop_file(
+                scope="A",
+                source_record_id="src-1",
+                notice_title="A楼测试维保",
+                operator_open_id="ou_operator",
+                operator_name="操作人",
+                local_file_path=str(Path(tmpdir) / "source.xlsx"),
+                mop_record_id="mop-1",
+                mop_title="MOP",
+                sheet_name="Sheet1",
+                signatures=self._signatures(),
+            )
+
+            self.assertEqual(result["file_token"], "file-token-1")
+            self.assertEqual(result["notification_warning"], "")
+            self.assertEqual(len(service.upload_calls), 1)
+            self.assertEqual(len(service.patch_calls), 1)
+            patch = service.patch_calls[0]
+            self.assertEqual(patch["app_token"], DEFAULT_APP_TOKEN)
+            self.assertEqual(patch["table_id"], DEFAULT_TABLE_ID)
+            self.assertEqual(patch["record_id"], "src-1")
+            self.assertEqual(
+                patch["fields"][MOP_SIGNED_ATTACHMENT_FIELD],
+                [{"file_token": "file-token-1"}],
+            )
+            self.assertIs(patch["fields"][MOP_ENGINEER_CONFIRM_FIELD], True)
+            self.assertIs(patch["fields"][MOP_SUPERVISOR_CONFIRM_FIELD], True)
+
+    def test_missing_required_signature_blocks_upload(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = FakeMopUploadService(tmpdir)
+            with self.assertRaises(PortalError):
+                service.upload_signed_engineer_mop_file(
+                    scope="A",
+                    source_record_id="src-1",
+                    local_file_path=str(Path(tmpdir) / "source.xlsx"),
+                    signatures=[{"role": "implementer", "record_id": "person-1"}],
+                )
+            self.assertEqual(service.upload_calls, [])
+            self.assertEqual(service.patch_calls, [])
+
+    def test_notification_failure_does_not_block_upload(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = FakeMopUploadService(tmpdir, missing_auditor_open_id=True)
+            result = service.upload_signed_engineer_mop_file(
+                scope="A",
+                source_record_id="src-1",
+                notice_title="A楼测试维保",
+                local_file_path=str(Path(tmpdir) / "source.xlsx"),
+                signatures=self._signatures(),
+            )
+
+            self.assertEqual(result["file_token"], "file-token-1")
+            self.assertIn("签名人员通知失败", result["notification_warning"])
+            self.assertEqual(len(service.patch_calls), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -2347,9 +2347,13 @@ class MainWindowRuntimeMixin:
         if self._closing or self._ui_update_in_progress:
             return
         max_count = max(1, int(self._ui_mutation_max_per_tick or 1))
+        tick_started = time.perf_counter()
+        tick_budget_ms = max(10.0, float(getattr(self, "_ui_mutation_budget_ms", 40.0) or 40.0))
         self._ui_update_in_progress = True
         try:
             for _ in range(max_count):
+                if (time.perf_counter() - tick_started) * 1000.0 >= tick_budget_ms:
+                    break
                 try:
                     tag, fn, _ = self._ui_mutation_queue.get_nowait()
                 except queue.Empty:

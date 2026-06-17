@@ -1204,8 +1204,10 @@ class ClipboardItemWidget(QWidget):
     @staticmethod
     def _coerce_today_progress_state(state):
         text = str(state or "").strip().lower()
-        if text in ("yes", "no", "unknown"):
+        if text in ("yes", "no", "unknown", "syncing"):
             return text
+        if text in ("同步中", "正在同步"):
+            return "syncing"
         if text in ("是", "在进行"):
             return "yes"
         if text in ("否", "未进行"):
@@ -1251,7 +1253,26 @@ class ClipboardItemWidget(QWidget):
         normalized = self._coerce_today_progress_state(state)
         self.today_in_progress_state = normalized
         self.data["today_in_progress_state"] = normalized
-        if normalized == "yes":
+        if normalized == "syncing":
+            text = "同步中"
+            style = """
+                QPushButton {
+                    background: #1E3A8A;
+                    color: #DBEAFE;
+                    border: 1px solid #2563EB;
+                    border-radius: 14px;
+                    font-size: 12px;
+                    font-weight: 700;
+                    padding: 0 10px;
+                }
+                QPushButton:disabled {
+                    background: #1E3A8A;
+                    color: rgba(219,234,254,0.82);
+                    border-color: #2563EB;
+                }
+            """
+            enabled = False
+        elif normalized == "yes":
             text = "在进行"
             style = """
                 QPushButton {
@@ -1312,6 +1333,8 @@ class ClipboardItemWidget(QWidget):
 
     def on_today_progress_click(self):
         if not self._supports_today_progress():
+            return
+        if self.today_in_progress_state == "syncing":
             return
         target_state = "no" if self.today_in_progress_state == "yes" else "yes"
         self.today_progress_clicked.emit(self.data, target_state)

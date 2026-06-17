@@ -370,10 +370,9 @@ def setup_logging():
 def handle_exception(exc_type, exc_value, exc_traceback):
     """Global exception handler."""
     if issubclass(exc_type, KeyboardInterrupt):
-        try:
-            sys.__excepthook__(exc_type, exc_value, exc_traceback)
-        except Exception:
-            pass
+        # KeyboardInterrupt is an intentional process interruption, not an app
+        # crash.  Do not print through redirected stderr; otherwise users see a
+        # scary traceback and the ERROR logger treats a normal stop as failure.
         return
     try:
         logging.critical(

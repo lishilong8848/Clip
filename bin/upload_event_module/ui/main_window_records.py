@@ -1955,6 +1955,45 @@ class MainWindowRecordsMixin:
                 seen.add(record_id)
                 self._persist_today_in_progress_state(record_id, normalized_state)
 
+    def _mark_today_in_progress_syncing(
+        self,
+        data_dict: dict | None,
+        syncing: bool,
+        *,
+        fallback_record_id: str = "",
+    ):
+        list_widget, item = self._find_today_in_progress_active_item(
+            data_dict,
+            fallback_record_id=fallback_record_id,
+        )
+        if not item or not list_widget:
+            return
+        current = item.data(Qt.ItemDataRole.UserRole) or {}
+        if not isinstance(current, dict):
+            return
+        updated = dict(current)
+        if syncing:
+            updated["_today_in_progress_syncing"] = True
+        else:
+            updated.pop("_today_in_progress_syncing", None)
+        try:
+            item.setData(Qt.ItemDataRole.UserRole, updated)
+        except Exception:
+            return
+        self._upsert_active_notice_model_item(list_widget, item, updated)
+        widget = self._safe_item_widget(list_widget, item)
+        if widget:
+            try:
+                if hasattr(widget, "data"):
+                    widget.data = dict(updated)
+                if hasattr(widget, "set_today_progress_state"):
+                    widget.set_today_progress_state(
+                        "syncing" if syncing else updated.get("today_in_progress_state"),
+                        enabled=not syncing,
+                    )
+            except Exception:
+                pass
+
     def _schedule_today_in_progress_sync(self, data_dict: dict | None):
         if os.environ.get("CLIPFLOW_QT_REMOTE_VALIDATION", "0") != "1":
             return
@@ -2126,12 +2165,12 @@ class MainWindowRecordsMixin:
         )
         widget = self._safe_item_widget(list_widget, item)
         if widget and hasattr(widget, "set_today_progress_state"):
-            widget.set_today_progress_state(current_state, enabled=False)
+            widget.set_today_progress_state("syncing", enabled=False)
 
         self._today_in_progress_pending_record_ids.add(record_id)
-        self._apply_today_in_progress_state_to_active_item(
+        self._mark_today_in_progress_syncing(
             data_dict,
-            desired_state,
+            True,
             fallback_record_id=record_id,
         )
         field_name = self._get_today_in_progress_field_name(notice_type)
@@ -2139,6 +2178,11 @@ class MainWindowRecordsMixin:
         controller = getattr(self, "lan_template_portal_controller", None)
         if controller is None or not hasattr(controller, "submit_qt_command"):
             self._today_in_progress_pending_record_ids.discard(record_id)
+            self._mark_today_in_progress_syncing(
+                data_dict,
+                False,
+                fallback_record_id=record_id,
+            )
             self._apply_today_in_progress_state_to_active_item(
                 data_dict,
                 current_state,
@@ -2181,12 +2225,22 @@ class MainWindowRecordsMixin:
                 )
                 if success:
                     self._today_in_progress_synced_record_ids.add(record_id)
+                    self._mark_today_in_progress_syncing(
+                        data_dict,
+                        False,
+                        fallback_record_id=record_id,
+                    )
                     self._apply_today_in_progress_state_to_active_item(
                         data_dict,
                         desired_state,
                         fallback_record_id=record_id,
                     )
                     return
+                self._mark_today_in_progress_syncing(
+                    data_dict,
+                    False,
+                    fallback_record_id=record_id,
+                )
                 self._apply_today_in_progress_state_to_active_item(
                     data_dict,
                     current_state,

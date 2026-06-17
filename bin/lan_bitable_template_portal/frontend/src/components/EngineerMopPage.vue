@@ -43,6 +43,15 @@
               <template v-if="activeSheet"> · {{ activeSheet.name }} · {{ activeSheet.row_count || 0 }} 行</template>
             </p>
           </div>
+          <div class="preview-head-status">
+            <span
+              v-for="item in mopCompletionItems"
+              :key="`head:${item.key}`"
+              :class="{ done: item.done, pending: !item.done }"
+            >
+              {{ item.label }}：{{ item.text }}
+            </span>
+          </div>
         </header>
         <div v-if="preview.local_file" class="mop-file-status">
           <span>已下载到本机</span>
@@ -86,6 +95,36 @@
                 维护审核人
               </button>
             </div>
+          </div>
+          <div class="signature-role-summary">
+            <section :class="{ active: signatureRole === 'implementer' }" @click="signatureRole = 'implementer'">
+              <span>维护实施人</span>
+              <div v-if="selectedSignaturePeople('implementer').length" class="role-chip-row">
+                <em
+                  v-for="person in selectedSignaturePeople('implementer')"
+                  :key="`implementer:${person.record_id}`"
+                  :class="{ ok: personHasUsableSignature(person) }"
+                >
+                  {{ person.name || "未命名" }}
+                  <button type="button" @click.stop="removeSignaturePerson('implementer', person.record_id)">移除</button>
+                </em>
+              </div>
+              <strong v-else>未选择</strong>
+            </section>
+            <section :class="{ active: signatureRole === 'auditor' }" @click="signatureRole = 'auditor'">
+              <span>维护审核人</span>
+              <div v-if="selectedSignaturePeople('auditor').length" class="role-chip-row">
+                <em
+                  v-for="person in selectedSignaturePeople('auditor')"
+                  :key="`auditor:${person.record_id}`"
+                  :class="{ ok: personHasUsableSignature(person) }"
+                >
+                  {{ person.name || "未命名" }}
+                  <button type="button" @click.stop="removeSignaturePerson('auditor', person.record_id)">移除</button>
+                </em>
+              </div>
+              <strong v-else>未选择</strong>
+            </section>
           </div>
           <div class="sign-workspace">
             <div class="sign-people">
@@ -198,6 +237,17 @@
                   <em>{{ item.text }}</em>
                 </span>
               </div>
+              <div class="mop-upload-readiness">
+                <strong>上传前检查</strong>
+                <span
+                  v-for="item in mopRequirementItems"
+                  :key="item.key"
+                  :class="{ done: item.done, pending: !item.done }"
+                >
+                  {{ item.label }}
+                  <em>{{ item.done ? "已满足" : item.text }}</em>
+                </span>
+              </div>
               <div class="sign-actions">
                 <span class="sign-status" :class="{ failed: signatureMessageType === 'failed', success: signatureMessageType === 'success' }">
                   {{ signatureMessage || signatureRoleHint }}
@@ -230,19 +280,28 @@
                   <strong>当前 MOP 文件</strong>
                   <div>
                     <button
-                      class="btn blue"
+                      class="btn blue upload-signed-mop"
                       type="button"
-                      :disabled="mopFillSaving || Boolean(fillMopDisabledReason)"
+                      :disabled="mopUploadSaving || mopFillSaving || mopResetting || Boolean(uploadSignedMopDisabledReason)"
+                      :title="uploadSignedMopDisabledReason"
+                      @click="uploadSignedMop"
+                    >
+                      {{ mopUploadSaving ? "上传中" : "上传已签名MOP" }}
+                    </button>
+                    <button
+                      class="btn ghost local-fill"
+                      type="button"
+                      :disabled="mopFillSaving || mopUploadSaving || Boolean(fillMopDisabledReason)"
                       :title="fillMopDisabledReason"
                       @click="fillMopSignatures"
                     >
-                      {{ mopFillSaving ? "生成中" : "生成已签名 MOP" }}
+                      {{ mopFillSaving ? "写入中" : "仅写入本地文件" }}
                     </button>
                     <button
                       v-if="filledMopResult"
                       class="btn ghost reset-clean"
                       type="button"
-                      :disabled="mopResetting || mopFillSaving"
+                      :disabled="mopResetting || mopFillSaving || mopUploadSaving"
                       title="会删除当前已签名文件，并重新下载一份干净 MOP"
                       @click="resetMopSigning"
                     >
@@ -250,6 +309,7 @@
                     </button>
                   </div>
                   <small v-if="fillMopDisabledReason">{{ fillMopDisabledReason }}</small>
+                  <small v-else-if="uploadSignedMopDisabledReason">{{ uploadSignedMopDisabledReason }}</small>
                   <small v-else-if="filledMopResult" class="warning-hint">重新下载会删除当前已签名文件。</small>
                 </div>
               </div>
@@ -275,11 +335,45 @@
             v-if="activeSheet && !activeSheet.is_cover"
             class="table-fill-toolbar"
           >
-            <span>点击表格单元格可固定显示填写操作</span>
-            <button class="btn blue" type="button" :disabled="!activeSheetCheckboxCells.length" @click="markAllCheckboxes('normal')">
-              全部正常/开启/已完成
-            </button>
-            <em v-if="mopFilledCount">已填写 {{ mopFilledCount }} 项</em>
+            <div class="table-fill-toolbar-row">
+              <span>点击单元格后在这里填写，避免遮挡表格内容</span>
+              <button class="btn blue" type="button" :disabled="!activeSheetCheckboxCells.length" @click="markAllCheckboxes('normal')">
+                全部正常/开启/已完成
+              </button>
+              <em v-if="mopFilledCount">已填写 {{ mopFilledCount }} 项</em>
+            </div>
+            <div v-if="activeMopCellInfo" class="active-cell-toolbar">
+              <strong>{{ activeMopCellInfo.label }}</strong>
+              <template v-if="activeMopCellCheckbox">
+                <button
+                  v-for="option in checkboxOptions(activeMopCellCheckbox as Dict)"
+                  :key="`active:${option.key || option.label}`"
+                  type="button"
+                  :class="{ active: checkboxState(activeMopCellCheckbox as Dict) === checkboxOptionValue(option) }"
+                  @click.stop="setCheckboxState(activeMopCellCheckbox as Dict, checkboxOptionValue(option))"
+                >
+                  {{ option.label || option.key }}
+                </button>
+              </template>
+              <template v-else-if="activeMopCellMaintenanceField">
+                <template v-if="maintenanceFieldIsTime(activeMopCellMaintenanceField as Dict)">
+                  <input v-model="mopFillDateTime" type="datetime-local" step="3600" />
+                  <button type="button" @click.stop="fillMaintenanceField(activeMopCellMaintenanceField as Dict, formatMopDateTime(mopFillDateTime))">填入时间</button>
+                </template>
+                <template v-else-if="maintenanceFieldIsCompletion(activeMopCellMaintenanceField as Dict)">
+                  <button type="button" @click.stop="fillMaintenanceField(activeMopCellMaintenanceField as Dict, '已完成[√] 未完成[ ]')">已完成</button>
+                  <button type="button" @click.stop="fillMaintenanceField(activeMopCellMaintenanceField as Dict, '已完成[ ] 未完成[√]')">未完成</button>
+                </template>
+              </template>
+              <template v-else-if="activeMopCellEditable">
+                <textarea
+                  :value="activeMopCellEditableValue"
+                  @input="setActiveEditableCellValue(($event.target as HTMLTextAreaElement).value)"
+                ></textarea>
+                <button type="button" @click.stop="clearActiveEditableCell">还原</button>
+              </template>
+              <button class="ghost-mini" type="button" @click.stop="activeMopCellKey = ''">取消选中</button>
+            </div>
           </div>
           <table v-if="activeSheet">
             <thead>
@@ -475,6 +569,7 @@
                   @click="selectMop(mop.record_id)"
                 >
                   <strong>{{ mop.title || "未命名 MOP" }}</strong>
+                  <em v-if="isRecommendedMop(mop)" class="mop-recommend">推荐</em>
                   <small>
                     <template v-if="mop.file_no">{{ mop.file_no }} · </template>
                     <template v-if="mop.specialty">{{ mop.specialty }} · </template>
@@ -577,6 +672,7 @@ const signatureLoading = ref(false);
 const signatureSaving = ref(false);
 const signatureLinkSending = ref(false);
 const mopFillSaving = ref(false);
+const mopUploadSaving = ref(false);
 const mopResetting = ref(false);
 const filledMopResult = ref<Dict | null>(null);
 const mopCheckboxStates = ref<Record<string, string>>({});
@@ -623,7 +719,13 @@ const filteredNotices = computed(() => {
 });
 
 const selectedNotice = computed(() => notices.value.find((item) => item.notice_key === selectedNoticeKey.value) || null);
+const selectedNoticeSourceRecordId = computed(() => String(
+  selectedNotice.value?.source_record_id
+  || selectedNotice.value?.record_id
+  || "",
+).trim());
 const selectedMop = computed(() => mopCandidates.value.find((item) => item.record_id === selectedMopRecordId.value) || null);
+const recommendedMopRecordId = computed(() => String(selectedNotice.value?.mop_binding?.mop_record_id || "").trim());
 const selectedMopAttachments = computed(() => {
   const items = selectedMop.value?.attachments;
   return Array.isArray(items) ? items : [];
@@ -694,10 +796,29 @@ const canFillMopSignatures = computed(() => {
     || selectedSignaturePeople("auditor").some((person) => personHasUsableSignature(person))
   );
 });
+const hasImplementerSignature = computed(() => selectedSignaturePeople("implementer").some((person) => personHasUsableSignature(person)));
+const hasAuditorSignature = computed(() => selectedSignaturePeople("auditor").some((person) => personHasUsableSignature(person)));
 const fillMopDisabledReason = computed(() => {
   if (!preview.value?.local_file?.path) return "请先打开 MOP 表格";
   if (!activeSheet.value) return "请先选择需要填写的 Sheet";
   if (!canFillMopSignatures.value) return "请至少选择一个已有可用签名的人员";
+  return "";
+});
+const canUploadSignedMop = computed(() => Boolean(
+  preview.value?.local_file?.path
+  && activeSheet.value
+  && selectedNotice.value
+  && selectedNoticeSourceRecordId.value
+  && hasImplementerSignature.value
+  && hasAuditorSignature.value,
+));
+const uploadSignedMopDisabledReason = computed(() => {
+  if (!preview.value?.local_file?.path) return "请先打开 MOP 表格";
+  if (!activeSheet.value) return "请先选择需要填写的 Sheet";
+  if (!selectedNotice.value) return "请先选择左侧通告";
+  if (!selectedNoticeSourceRecordId.value) return "当前通告缺少源表记录 ID，无法上传";
+  if (!hasImplementerSignature.value) return "请至少选择一个维护实施人签名";
+  if (!hasAuditorSignature.value) return "请至少选择一个维护审核人签名";
   return "";
 });
 const activeSheet = computed(() => {
@@ -751,9 +872,81 @@ const mopCompletionItems = computed(() => {
     },
   ];
 });
+const mopRequirementItems = computed(() => [
+  {
+    key: "notice",
+    label: "维保通告",
+    text: "请选择左侧通告",
+    done: Boolean(selectedNotice.value && selectedNoticeSourceRecordId.value),
+  },
+  {
+    key: "file",
+    label: "MOP文件",
+    text: "请先打开表格",
+    done: Boolean(preview.value?.local_file?.path && activeSheet.value),
+  },
+  {
+    key: "implementer",
+    label: "实施人签名",
+    text: "至少 1 个可用签名",
+    done: hasImplementerSignature.value,
+  },
+  {
+    key: "auditor",
+    label: "审核人签名",
+    text: "至少 1 个可用签名",
+    done: hasAuditorSignature.value,
+  },
+  {
+    key: "upload",
+    label: "源表写入",
+    text: uploadSignedMopDisabledReason.value || "可上传",
+    done: canUploadSignedMop.value,
+  },
+]);
 const activeSheetColumnIndexes = computed(() => {
   const count = Math.max(0, Number(activeSheet.value?.column_count || 0));
   return Array.from({ length: count }, (_value, index) => index);
+});
+const activeMopCellPosition = computed(() => {
+  const key = activeMopCellKey.value;
+  if (!key) return null;
+  const parts = key.split(":");
+  const row = Number(parts[parts.length - 2]);
+  const col = Number(parts[parts.length - 1]);
+  if (!Number.isFinite(row) || !Number.isFinite(col)) return null;
+  return { row, col };
+});
+const activeMopCellCheckbox = computed(() => {
+  const position = activeMopCellPosition.value;
+  return position ? checkboxCellAt(position.row, position.col) : null;
+});
+const activeMopCellMaintenanceField = computed(() => {
+  const position = activeMopCellPosition.value;
+  return position ? maintenanceFieldAt(position.row, position.col) : null;
+});
+const activeMopCellEditable = computed(() => {
+  const position = activeMopCellPosition.value;
+  return Boolean(position && editableCellAt(position.row, position.col));
+});
+const activeMopCellEditableValue = computed(() => {
+  const position = activeMopCellPosition.value;
+  return position ? editableCellValue(position.row, position.col) : "";
+});
+const activeMopCellInfo = computed(() => {
+  const position = activeMopCellPosition.value;
+  if (!position) return null;
+  const cellRef = `${columnLabel(position.col)}${position.row + 1}`;
+  if (activeMopCellCheckbox.value) {
+    return { label: `${activeMopCellCheckbox.value.cell_ref || cellRef} 选择项` };
+  }
+  if (activeMopCellMaintenanceField.value) {
+    return { label: `${activeMopCellMaintenanceField.value.label || cellRef}` };
+  }
+  if (activeMopCellEditable.value) {
+    return { label: `${cellRef} 普通单元格` };
+  }
+  return null;
 });
 const activeSheetMergeMap = computed(() => {
   const map = new Map<string, { hidden: boolean; rowspan: number; colspan: number }>();
@@ -810,6 +1003,10 @@ function escapeRegExp(value: string): string {
 
 function attachmentKey(attachment: Dict): string {
   return String(attachment?.file_token || attachment?.url || attachment?.name || "").trim();
+}
+
+function isRecommendedMop(mop: Dict): boolean {
+  return Boolean(recommendedMopRecordId.value && String(mop?.record_id || "") === recommendedMopRecordId.value);
 }
 
 function pad2(value: number): string {
@@ -936,6 +1133,18 @@ function clearEditableCell(rowIndex: number, colIndex: number): void {
   filledMopResult.value = null;
 }
 
+function setActiveEditableCellValue(value: string): void {
+  const position = activeMopCellPosition.value;
+  if (!position) return;
+  setEditableCellValue(position.row, position.col, value);
+}
+
+function clearActiveEditableCell(): void {
+  const position = activeMopCellPosition.value;
+  if (!position) return;
+  clearEditableCell(position.row, position.col);
+}
+
 function maintenanceFieldIsTime(field: Dict): boolean {
   const label = String(field?.label || "");
   return field?.kind === "datetime_placeholder"
@@ -1046,6 +1255,36 @@ function buildMopCellEditPayload(): Dict[] {
       value,
     };
   });
+}
+
+function buildMopSignaturePayload(): Dict[] {
+  return [
+    ...selectedSignaturePeople("implementer").filter((person) => personHasUsableSignature(person)).map((person) => ({
+      role: "implementer",
+      label: "维护实施人",
+      record_id: person.record_id,
+    })),
+    ...selectedSignaturePeople("auditor").filter((person) => personHasUsableSignature(person)).map((person) => ({
+      role: "auditor",
+      label: "维护审核人",
+      record_id: person.record_id,
+    })),
+  ];
+}
+
+function buildMopRequestPayload(extra: Dict = {}): Dict {
+  return {
+    scope: scope.value,
+    local_file_path: preview.value?.local_file?.path || "",
+    mop_record_id: preview.value?.mop_record_id || selectedMop.value?.record_id || "",
+    mop_title: preview.value?.mop_title || selectedMop.value?.title || "",
+    sheet_name: activeSheet.value?.name || "",
+    fields: buildMopFieldPayload(),
+    checkboxes: buildMopCheckboxPayload(),
+    cell_edits: buildMopCellEditPayload(),
+    signatures: buildMopSignaturePayload(),
+    ...extra,
+  };
 }
 
 function personInitial(person: Dict): string {
@@ -1358,40 +1597,46 @@ async function fillMopSignatures(): Promise<void> {
   signatureMessage.value = "";
   signatureMessageType.value = "";
   try {
-    const signatures = [
-      ...selectedSignaturePeople("implementer").filter((person) => personHasUsableSignature(person)).map((person) => ({
-        role: "implementer",
-        label: "维护实施人",
-        record_id: person.record_id,
-      })),
-      ...selectedSignaturePeople("auditor").filter((person) => personHasUsableSignature(person)).map((person) => ({
-        role: "auditor",
-        label: "维护审核人",
-        record_id: person.record_id,
-      })),
-    ];
     const data = await requestJson("/api/engineer/mop/fill", {
       method: "POST",
-      body: JSON.stringify({
-        scope: scope.value,
-        local_file_path: preview.value.local_file.path,
-        mop_record_id: preview.value.mop_record_id || selectedMop.value?.record_id || "",
-        mop_title: preview.value.mop_title || selectedMop.value?.title || "",
-        sheet_name: activeSheet.value?.name || "",
-        fields: buildMopFieldPayload(),
-        checkboxes: buildMopCheckboxPayload(),
-        cell_edits: buildMopCellEditPayload(),
-        signatures,
-      }),
+      body: JSON.stringify(buildMopRequestPayload()),
     });
     filledMopResult.value = data;
-    signatureMessage.value = `已生成已签名 MOP：${data.relative_path || data.file_name || "本地文件"}`;
+    signatureMessage.value = `已写入本地 MOP：${data.relative_path || data.file_name || "本地文件"}`;
     signatureMessageType.value = "success";
   } catch (error) {
-    signatureMessage.value = error instanceof Error ? error.message : "生成已签名 MOP 失败";
+    signatureMessage.value = error instanceof Error ? error.message : "签名写入 MOP 失败";
     signatureMessageType.value = "failed";
   } finally {
     mopFillSaving.value = false;
+  }
+}
+
+async function uploadSignedMop(): Promise<void> {
+  if (!canUploadSignedMop.value || !preview.value?.local_file?.path || !selectedNotice.value) return;
+  mopUploadSaving.value = true;
+  signatureMessage.value = "";
+  signatureMessageType.value = "";
+  try {
+    const data = await requestJson("/api/engineer/mop/upload-signed", {
+      method: "POST",
+      body: JSON.stringify(buildMopRequestPayload({
+        source_record_id: selectedNoticeSourceRecordId.value,
+        notice_title: selectedNotice.value.title || "",
+        notice_key: selectedNotice.value.notice_key || "",
+      })),
+    });
+    filledMopResult.value = data.filled_file || filledMopResult.value;
+    const warning = String(data.notification_warning || "").trim();
+    signatureMessage.value = warning
+      ? `已上传已签名 MOP，并已勾选确认项；${warning}`
+      : "已上传已签名 MOP，并已勾选工程师确认、主管确认。";
+    signatureMessageType.value = "success";
+  } catch (error) {
+    signatureMessage.value = error instanceof Error ? error.message : "上传已签名 MOP 失败";
+    signatureMessageType.value = "failed";
+  } finally {
+    mopUploadSaving.value = false;
   }
 }
 
@@ -1601,9 +1846,6 @@ async function startMopPreview(): Promise<void> {
     ensureSignatureCanvasObserver();
     resizeSignatureCanvas();
     if (!signaturePeople.value.length) {
-      if (!signatureSearch.value && selectedNotice.value?.building) {
-        signatureSearch.value = String(selectedNotice.value.building || "");
-      }
       void loadSignaturePeople();
     }
   } catch (error) {
@@ -1636,6 +1878,10 @@ watch(selectedMopAttachments, (items) => {
   if (!items.some((item) => attachmentKey(item) === selectedAttachmentToken.value)) {
     selectedAttachmentToken.value = attachmentKey(items[0]);
   }
+});
+
+watch(activeSheetName, () => {
+  activeMopCellKey.value = "";
 });
 
 onMounted(() => {
@@ -1920,6 +2166,19 @@ select:focus {
   -webkit-line-clamp: 2;
 }
 
+.mop-recommend {
+  width: fit-content;
+  margin-top: -2px;
+  border: 1px solid #bbf7d0;
+  border-radius: 999px;
+  background: #ecfdf5;
+  padding: 3px 8px;
+  color: #047857;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 900;
+}
+
 .mop-candidate-list {
   max-height: clamp(240px, 42vh, 480px);
   min-height: 220px;
@@ -2120,6 +2379,89 @@ select:focus {
   box-shadow: 0 10px 24px rgba(0, 47, 135, 0.07);
 }
 
+.mop-preview-page .mop-sign-panel {
+  grid-column: 2;
+  grid-row: 2 / span 5;
+  position: sticky;
+  top: 12px;
+  max-height: calc(100vh - 112px);
+  overflow: auto;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 16px;
+}
+
+.mop-preview-page .sign-panel-head {
+  min-height: 32px;
+}
+
+.mop-preview-page .sign-panel-head p,
+.mop-preview-page .selected-sign-person small {
+  display: none;
+}
+
+.mop-preview-page .sign-workspace {
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+
+.mop-preview-page .sign-person-list {
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  max-height: 168px;
+}
+
+.mop-preview-page .sign-person {
+  min-height: 46px;
+  grid-template-columns: 30px minmax(0, 1fr) auto;
+  padding: 6px 8px;
+}
+
+.mop-preview-page .sign-person > span {
+  width: 30px;
+  height: 30px;
+  border-radius: 10px;
+}
+
+.mop-preview-page .sign-person small,
+.mop-preview-page .sign-person em {
+  font-size: 11px;
+}
+
+.mop-preview-page .selected-sign-person {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+}
+
+.mop-preview-page .selected-sign-person > span {
+  grid-column: 1;
+}
+
+.mop-preview-page .selected-signatures {
+  grid-column: 1 / -1;
+  max-height: 42px;
+  overflow: auto;
+}
+
+.mop-preview-page .mop-sign-canvas {
+  min-height: 96px;
+}
+
+.mop-preview-page .mop-sign-canvas canvas {
+  height: 96px;
+}
+
+.mop-preview-page .sign-actions {
+  grid-template-columns: 1fr;
+}
+
+.mop-preview-page .action-group {
+  padding: 9px;
+}
+
+.mop-preview-page .action-group small {
+  display: none;
+}
+
 .sign-panel-head {
   display: flex;
   align-items: center;
@@ -2292,6 +2634,77 @@ select:focus {
   color: #2563eb;
   font-size: 12px;
   font-weight: 850;
+}
+
+.signature-role-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.signature-role-summary section {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  border: 1px solid #d8e5f7;
+  border-radius: 14px;
+  background: #ffffff;
+  padding: 9px 10px;
+  cursor: pointer;
+}
+
+.signature-role-summary section.active {
+  border-color: #1e63ff;
+  background: linear-gradient(135deg, #f8fbff, #eef6ff);
+  box-shadow: 0 8px 18px rgba(30, 99, 255, 0.12);
+}
+
+.signature-role-summary span {
+  color: #3156c9;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.signature-role-summary section > strong {
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.role-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.role-chip-row em {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  border: 1px solid #fde68a;
+  border-radius: 999px;
+  background: #fffbeb;
+  padding: 4px 7px;
+  color: #92400e;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 850;
+}
+
+.role-chip-row em.ok {
+  border-color: #bbf7d0;
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.role-chip-row button {
+  border: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.78);
+  color: inherit;
+  font-size: 12px;
+  font-weight: 850;
+  cursor: pointer;
 }
 
 .selected-signatures {
@@ -2480,6 +2893,11 @@ select:focus {
   background: linear-gradient(135deg, rgba(239, 246, 255, 0.88), rgba(255, 255, 255, 0.86));
 }
 
+.local-fill {
+  color: #3156c9;
+  background: #f8fbff;
+}
+
 .reset-clean {
   border-color: #fde68a;
   color: #92400e;
@@ -2544,6 +2962,51 @@ select:focus {
   white-space: nowrap;
 }
 
+.mop-upload-readiness {
+  display: grid;
+  gap: 7px;
+  border: 1px solid #d8e5f7;
+  border-radius: 14px;
+  background: linear-gradient(135deg, #f8fbff, #ffffff);
+  padding: 10px;
+}
+
+.mop-upload-readiness > strong {
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.mop-upload-readiness span {
+  display: grid;
+  grid-template-columns: minmax(86px, auto) minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #fde68a;
+  border-radius: 12px;
+  background: #fffbeb;
+  padding: 7px 8px;
+  color: #92400e;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.mop-upload-readiness span.done {
+  border-color: #bbf7d0;
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.mop-upload-readiness em {
+  min-width: 0;
+  overflow: hidden;
+  color: inherit;
+  font-style: normal;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .sheet-tabs {
   display: flex;
   gap: 8px;
@@ -2579,9 +3042,9 @@ select:focus {
 }
 
 .sheet-scroll {
-  min-height: 470px;
-  max-height: 68vh;
-  overflow: auto;
+  min-height: 0;
+  max-height: none;
+  overflow: visible;
   border: 1px solid #d8e5f7;
   border-radius: 16px;
   background: #ffffff;
@@ -2589,14 +3052,19 @@ select:focus {
 
 .mop-preview-page {
   display: grid;
-  grid-template-rows: auto auto auto auto auto minmax(0, 1fr);
-  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) minmax(360px, 430px);
+  grid-template-rows: auto auto auto auto auto;
+  align-items: start;
+  column-gap: 14px;
+  gap: 8px;
   min-height: calc(100vh - 46px);
+  overflow: visible;
 }
 
 .preview-head {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-column: 1 / -1;
+  grid-template-columns: auto minmax(0, 1fr) minmax(320px, auto);
   align-items: center;
   gap: 14px;
   padding: 14px 16px;
@@ -2625,8 +3093,33 @@ select:focus {
   white-space: nowrap;
 }
 
+.preview-head-status {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.preview-head-status span {
+  border: 1px solid #fde68a;
+  border-radius: 999px;
+  background: #fffbeb;
+  padding: 5px 8px;
+  color: #92400e;
+  font-size: 12px;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.preview-head-status span.done {
+  border-color: #bbf7d0;
+  background: #ecfdf5;
+  color: #047857;
+}
+
 .mop-file-status,
 .mop-detect-panel {
+  grid-column: 1;
   border: 1px solid #d8e5f7;
   border-radius: 16px;
   background: rgba(255, 255, 255, 0.86);
@@ -2634,10 +3127,11 @@ select:focus {
 }
 
 .mop-file-status {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 4px 12px;
-  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 34px;
+  padding: 7px 10px;
 }
 
 .mop-file-status span {
@@ -2660,15 +3154,12 @@ select:focus {
 }
 
 .mop-file-status small {
-  grid-column: 2;
   color: #64748b;
   font-size: 12px;
 }
 
 .mop-detect-panel {
-  display: grid;
-  gap: 10px;
-  padding: 12px 14px;
+  display: none;
 }
 
 .detect-summary {
@@ -2719,16 +3210,20 @@ select:focus {
 }
 
 .preview-tabs {
-  padding: 4px;
+  grid-column: 1;
+  padding: 3px;
   border: 1px solid #d8e5f7;
   border-radius: 16px;
   background: rgba(255, 255, 255, 0.72);
 }
 
 .preview-scroll {
+  grid-column: 1;
   position: relative;
   min-height: 0;
-  max-height: calc(100vh - 330px);
+  height: auto;
+  max-height: none;
+  overflow: visible;
   border-radius: 18px;
 }
 
@@ -2736,13 +3231,18 @@ select:focus {
   position: sticky;
   top: 0;
   z-index: 8;
-  display: flex;
-  align-items: center;
+  display: grid;
   gap: 8px;
   border-bottom: 1px solid #e2e8f0;
   background: rgba(248, 251, 255, 0.96);
   padding: 8px 10px;
   backdrop-filter: blur(10px);
+}
+
+.table-fill-toolbar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .table-fill-toolbar span {
@@ -2760,6 +3260,68 @@ select:focus {
   font-size: 12px;
   font-style: normal;
   font-weight: 850;
+}
+
+.active-cell-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid #cfe0ff;
+  border-radius: 14px;
+  background: #ffffff;
+  padding: 8px;
+  box-shadow: 0 10px 24px rgba(30, 99, 255, 0.1);
+}
+
+.active-cell-toolbar strong {
+  flex: 0 0 auto;
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.active-cell-toolbar button {
+  border: 0;
+  border-radius: 999px;
+  background: #eef2ff;
+  padding: 6px 10px;
+  color: #3156c9;
+  font-size: 12px;
+  font-weight: 850;
+  cursor: pointer;
+}
+
+.active-cell-toolbar button.active,
+.active-cell-toolbar button:hover {
+  background: #1e63ff;
+  color: #ffffff;
+}
+
+.active-cell-toolbar .ghost-mini {
+  margin-left: auto;
+  background: #f8fafc;
+  color: #64748b;
+}
+
+.active-cell-toolbar input {
+  min-height: 30px;
+  height: 30px;
+  border-radius: 999px;
+  font-size: 12px;
+}
+
+.active-cell-toolbar textarea {
+  flex: 1 1 320px;
+  min-height: 34px;
+  max-height: 86px;
+  resize: vertical;
+  border: 1px solid #d8e5f7;
+  border-radius: 12px;
+  padding: 7px 9px;
+  color: #0f172a;
+  font: inherit;
+  font-size: 12px;
 }
 
 table {
@@ -2817,9 +3379,18 @@ td.merged {
 }
 
 td.fillable,
-td.field-fillable {
+td.field-fillable,
+td.raw-editable {
   position: relative;
+}
+
+td.fillable,
+td.field-fillable {
   background: #f8fbff;
+}
+
+td.raw-editable {
+  cursor: text;
 }
 
 td.fillable.normal {
@@ -2933,6 +3504,45 @@ td.field-fillable:focus-within .cell-field-popover,
   color: #ffffff;
 }
 
+.raw-cell-popover {
+  z-index: 24;
+  top: calc(100% - 2px);
+  right: auto;
+  bottom: auto;
+  left: 6px;
+  display: none;
+  width: min(360px, calc(100vw - 96px));
+  min-width: 240px;
+  align-items: stretch;
+  border-radius: 14px;
+  padding: 8px;
+}
+
+.raw-cell-popover.pinned {
+  display: grid;
+  gap: 7px;
+}
+
+.raw-cell-popover textarea {
+  min-height: 86px;
+  resize: vertical;
+  box-sizing: border-box;
+  border: 1px solid #dbe3ee;
+  border-radius: 12px;
+  padding: 8px 10px;
+  color: #0f172a;
+  background: #ffffff;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.45;
+  outline: none;
+}
+
+.mop-preview-page .cell-fill-popover,
+.mop-preview-page .cell-field-popover {
+  display: none !important;
+}
+
 @media (max-width: 1180px) {
   .mop-summary,
   .mop-layout {
@@ -2995,12 +3605,43 @@ td.field-fillable:focus-within .cell-field-popover,
     padding: 14px;
   }
 
+  .mop-preview-page {
+    grid-template-columns: 1fr;
+  }
+
+  .mop-preview-page .mop-sign-panel,
+  .mop-file-status,
+  .mop-detect-panel,
+  .preview-tabs,
+  .preview-scroll {
+    grid-column: 1;
+  }
+
+  .mop-preview-page .mop-sign-panel {
+    position: static;
+    max-height: none;
+    grid-row: auto;
+  }
+
   .preview-head {
     grid-template-columns: 1fr;
   }
 
+  .preview-head-status {
+    justify-content: flex-start;
+  }
+
+  .table-fill-toolbar-row,
+  .active-cell-toolbar {
+    flex-wrap: wrap;
+  }
+
+  .active-cell-toolbar .ghost-mini {
+    margin-left: 0;
+  }
+
   .preview-scroll {
-    max-height: calc(100vh - 230px);
+    max-height: none;
   }
 }
 </style>

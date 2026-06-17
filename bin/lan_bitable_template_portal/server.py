@@ -25,6 +25,8 @@ from .portal_service import (
     PortalError,
     SCOPE_OPTIONS,
     SOURCE_CACHE_TTL_SECONDS,
+    engineer_mop_fill_kwargs_from_payload,
+    engineer_mop_upload_signed_kwargs_from_payload,
     external_real_write_guard,
 )
 from .identity_utils import (
@@ -1578,16 +1580,33 @@ class PortalRuntime:
                     session, str(payload.get("scope") or "ALL")
                 )
                 data = self.service.fill_engineer_mop_file(
-                    scope=scope,
-                    local_file_path=str(payload.get("local_file_path") or ""),
-                    mop_record_id=str(payload.get("mop_record_id") or ""),
-                    mop_title=str(payload.get("mop_title") or ""),
-                    sheet_name=str(payload.get("sheet_name") or ""),
-                    fields=payload.get("fields") if isinstance(payload.get("fields"), list) else [],
-                    checkboxes=payload.get("checkboxes") if isinstance(payload.get("checkboxes"), list) else [],
-                    cell_edits=payload.get("cell_edits") if isinstance(payload.get("cell_edits"), list) else [],
-                    signatures=payload.get("signatures") if isinstance(payload.get("signatures"), list) else [],
+                    **engineer_mop_fill_kwargs_from_payload(payload, scope=scope),
                 )
+                return self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "data": self._with_auth_context(data, session),
+                    },
+                )
+            except (PortalError, ValueError, json.JSONDecodeError) as exc:
+                return self._send_json(403, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/engineer/mop/upload-signed":
+            try:
+                payload = self._read_json_body(max_bytes=4 * 1024 * 1024)
+                scope = self._authorized_scope_or_error(
+                    session, str(payload.get("scope") or "ALL")
+                )
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                data = self.service.upload_signed_engineer_mop_file(
+                    **engineer_mop_upload_signed_kwargs_from_payload(
+                        payload,
+                        scope=scope,
+                        operator_open_id=str(user.get("open_id") or ""),
+                        operator_name=str(user.get("name") or ""),
+                    ),
+                )
+                PortalRuntime.clear_payload_cache()
                 return self._send_json(
                     200,
                     {
@@ -4360,10 +4379,80 @@ class PortalRuntime:
             notice_type,
             {field_name: field_value},
         )
+        projection_warning = ""
+        event_ids: list[str] = []
+        if ok:
+            state_text = str(field_value or "").strip()
+            if state_text == "是":
+                normalized_state = "yes"
+            elif state_text == "否":
+                normalized_state = "no"
+            else:
+                normalized_state = "unknown"
+            try:
+                active_item_id = str(payload.get("active_item_id") or "").strip()
+                for item in cls.state_store.list_qt_active_items():
+                    item_record_id = str(item.get("record_id") or "").strip()
+                    item_active_id = str(item.get("active_item_id") or "").strip()
+                    if (
+                        (record_id and item_record_id == record_id)
+                        or (active_item_id and item_active_id == active_item_id)
+                    ):
+                        event_payload = dict(item.get("payload") or {})
+                        event_payload.setdefault("active_item_id", item_active_id)
+                        event_payload["record_id"] = record_id
+                        event_payload["target_record_id"] = record_id
+                        event_payload["today_in_progress_state"] = normalized_state
+                        event_payload.pop("_today_in_progress_syncing", None)
+                        cls.state_store.upsert_qt_active_item(
+                            event_payload,
+                            section=str(item.get("section") or "other"),
+                            sort_order=int(item.get("sort_order") or 0),
+                            origin=str(item.get("origin") or event_payload.get("origin") or "qt"),
+                        )
+                        event_ids.append(
+                            cls.state_store.enqueue_outbox_event(
+                                "qt_action",
+                                {
+                                    "kind": "active_upsert",
+                                    "payload": {
+                                        "item": {
+                                            "active_item_id": str(
+                                                event_payload.get("active_item_id")
+                                                or item_active_id
+                                            ),
+                                            "record_id": record_id,
+                                            "notice_type": notice_type,
+                                            "section": str(item.get("section") or "other"),
+                                            "sort_order": int(item.get("sort_order") or 0),
+                                            "origin": str(
+                                                item.get("origin")
+                                                or event_payload.get("origin")
+                                                or "qt"
+                                            ),
+                                            "payload": event_payload,
+                                        },
+                                        "source": "qt",
+                                    },
+                                },
+                            )
+                        )
+                cls.clear_payload_cache()
+                if hasattr(cls.service, "_touch_state_cache_version"):
+                    cls.service._touch_state_cache_version()
+            except Exception as exc:
+                projection_warning = str(exc)
         return {
             "ok": bool(ok),
             "message": str(result or ""),
             "record_id": record_id,
+            "today_in_progress_state": (
+                "yes" if str(field_value or "").strip() == "是"
+                else "no" if str(field_value or "").strip() == "否"
+                else "unknown"
+            ),
+            "event_ids": event_ids,
+            "projection_warning": projection_warning,
         }
 
     @classmethod

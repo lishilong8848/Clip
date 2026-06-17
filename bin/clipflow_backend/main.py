@@ -44,6 +44,7 @@ from clipflow_backend.api_models import (
     EngineerMopFillRequest,
     EngineerMopResetRequest,
     EngineerMopSettingsSaveRequest,
+    EngineerMopUploadSignedRequest,
     GenerateTemplatesRequest,
     HandoverLinksAuthRequest,
     HandoverLinksSaveRequest,
@@ -109,6 +110,8 @@ from lan_bitable_template_portal.portal_service import (
     WORK_TYPE_BY_NOTICE_TYPE,
     ZHIHANG_CHANGE_APP_TOKEN,
     ZHIHANG_CHANGE_TABLE_ID,
+    engineer_mop_fill_kwargs_from_payload,
+    engineer_mop_upload_signed_kwargs_from_payload,
 )
 from lan_bitable_template_portal.portal_service import MaintenancePortalService
 from lan_bitable_template_portal.portal_auth import PortalAuthManager
@@ -1386,16 +1389,40 @@ class FastAPIPortalController:
                 )
                 data = await asyncio.to_thread(
                     PortalRuntime.service.fill_engineer_mop_file,
-                    scope=scope,
-                    local_file_path=str(payload.get("local_file_path") or ""),
-                    mop_record_id=str(payload.get("mop_record_id") or ""),
-                    mop_title=str(payload.get("mop_title") or ""),
-                    sheet_name=str(payload.get("sheet_name") or ""),
-                    fields=payload.get("fields") or [],
-                    checkboxes=payload.get("checkboxes") or [],
-                    cell_edits=payload.get("cell_edits") or [],
-                    signatures=payload.get("signatures") or [],
+                    **engineer_mop_fill_kwargs_from_payload(payload, scope=scope),
                 )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
+        @app.post("/api/engineer/mop/upload-signed")
+        async def engineer_mop_upload_signed(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                payload = (
+                    await self._read_model_request(
+                        request,
+                        EngineerMopUploadSignedRequest,
+                        max_bytes=4 * 1024 * 1024,
+                    )
+                ).to_payload()
+                scope = self._authorized_scope_or_error(
+                    session, payload.get("scope") or "ALL"
+                )
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.upload_signed_engineer_mop_file,
+                    **engineer_mop_upload_signed_kwargs_from_payload(
+                        payload,
+                        scope=scope,
+                        operator_open_id=str(user.get("open_id") or ""),
+                        operator_name=str(user.get("name") or ""),
+                    ),
+                )
+                PortalRuntime.clear_payload_cache()
+                self._clear_read_cache()
                 return self._json_ok(request, session, data)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)

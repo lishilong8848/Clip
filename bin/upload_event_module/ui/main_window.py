@@ -171,7 +171,8 @@ class ClipboardTool(
         )
         self._ui_signal_timer.start(100)
         self._ui_mutation_queue = queue.Queue(maxsize=500)
-        self._ui_mutation_max_per_tick = 2
+        self._ui_mutation_max_per_tick = 1
+        self._ui_mutation_budget_ms = 40.0
         self._ui_slow_threshold_ms = 120.0
         self._ui_slow_log_interval_s = 10.0
         self._ui_slow_last_log_ts = 0.0

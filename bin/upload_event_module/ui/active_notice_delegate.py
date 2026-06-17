@@ -116,7 +116,12 @@ class ActiveNoticeDelegate(QStyledItemDelegate):
             state = ActiveNoticeModel.normalize_today_progress_state(
                 record.get("today_in_progress_state")
             )
-            if state == "yes":
+            syncing = ActiveNoticeModel.is_today_progress_syncing(record)
+            if syncing:
+                border = QColor("#2563EB")
+                text_color = QColor("#DBEAFE")
+                fill = QColor("#1E3A8A")
+            elif state == "yes":
                 border = QColor("#15803D")
                 text_color = QColor("#FFFFFF")
                 fill = QColor("#16A34A")
@@ -222,6 +227,8 @@ class ActiveNoticeDelegate(QStyledItemDelegate):
                     )
             return True
         if buttons.get("today") and buttons["today"].contains(pos):
+            if ActiveNoticeModel.is_today_progress_syncing(record):
+                return True
             if hasattr(model, "todayProgressRequested"):
                 model.todayProgressRequested.emit(
                     dict(record), ActiveNoticeModel.next_today_progress_state(record)
