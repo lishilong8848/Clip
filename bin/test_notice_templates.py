@@ -105,8 +105,8 @@ class NoticeTemplateTests(unittest.TestCase):
             symptom="加湿异常",
             solution="更换循环泵",
             spare_parts="无",
-            fault_time="2026-06-12 10:44",
-            expected_time="2026-06-12 23:30",
+            fault_time="2026-06-12T10:44",
+            expected_time="2026-06-12T23:30",
         )
         self._assert_lines(
             text,
@@ -131,6 +131,8 @@ class NoticeTemplateTests(unittest.TestCase):
                 "【完成情况】设备恢复正常",
             ],
         )
+        for internal_key in ("fault_type", "repair_mode", "discovery", "symptom"):
+            self.assertNotIn(internal_key, text)
 
     def test_change_qt_upload_payload_defaults_to_i3_when_level_missing(self):
         payload = PortalRuntime._prepared_to_notice_payload(
@@ -270,6 +272,112 @@ class NoticeTemplateTests(unittest.TestCase):
                 self.assertNotIn("record_id", text)
                 self.assertNotIn("target_record_id", text)
                 self.assertNotIn("source_record_id", text)
+
+    def test_generated_notice_text_never_leaks_internal_field_keys(self):
+        samples = [
+            MaintenancePortalService.build_notice_text(
+                status="开始",
+                title="测试维保",
+                start_time="2026-06-12T09:30",
+                end_time="2026-06-12T18:30",
+                location="测试位置",
+                content="测试内容",
+                reason="测试原因",
+                impact="测试影响",
+                progress="测试进度",
+            ),
+            MaintenancePortalService.build_change_notice_text(
+                status="更新",
+                title="测试变更",
+                level="I3",
+                start_time="2026-06-12T09:30",
+                end_time="2026-06-12T18:30",
+                location="测试位置",
+                content="测试内容",
+                reason="测试原因",
+                impact="测试影响",
+                progress="测试进度",
+            ),
+            MaintenancePortalService.build_repair_notice_text(
+                status="更新",
+                title="测试检修",
+                specialty="电气",
+                level="低",
+                start_time="",
+                end_time="",
+                location="测试地点",
+                content="",
+                reason="测试故障原因",
+                impact="测试影响范围",
+                progress="测试完成情况",
+                repair_device="测试设备",
+                repair_fault="测试故障",
+                fault_type="设备故障",
+                repair_mode="自维",
+                discovery="告警发现",
+                symptom="测试现象",
+                solution="测试方案",
+                spare_parts="无",
+                fault_time="2026-06-12T10:44",
+                expected_time="2026-06-12T23:30",
+            ),
+            MaintenancePortalService.build_simple_notice_text(
+                work_type=WORK_TYPE_POWER,
+                status="开始",
+                title="测试上电",
+                start_time="2026-06-12T09:30",
+                end_time="2026-06-12T18:30",
+                building="A楼",
+                specialty="电气",
+                cabinet="A01",
+                quantity="2",
+                progress="测试进度",
+            ),
+            MaintenancePortalService.build_simple_notice_text(
+                work_type=WORK_TYPE_POLLING,
+                status="开始",
+                title="测试轮巡",
+                start_time="2026-06-12T09:30",
+                end_time="2026-06-12T18:30",
+                building="A楼",
+                specialty="暖通",
+                device="测试设备",
+                content="测试内容",
+                impact="测试影响",
+                progress="测试进度",
+            ),
+            MaintenancePortalService.build_simple_notice_text(
+                work_type=WORK_TYPE_ADJUST,
+                status="开始",
+                title="测试调整",
+                start_time="2026-06-12T09:30",
+                end_time="2026-06-12T18:30",
+                building="A楼",
+                specialty="暖通",
+                location="测试位置",
+                content="测试内容",
+                reason="测试原因",
+                impact="测试影响",
+                progress="测试进度",
+            ),
+        ]
+        forbidden = (
+            "fault_type",
+            "repair_mode",
+            "discovery",
+            "symptom",
+            "record_id",
+            "target_record_id",
+            "source_record_id",
+            "T09:",
+            "T10:",
+            "T18:",
+            "T23:",
+        )
+        for text in samples:
+            with self.subTest(text=text.splitlines()[0]):
+                for token in forbidden:
+                    self.assertNotIn(token, text)
 
     def test_all_notice_templates_use_unified_time_separator(self):
         self.assertEqual(NOTICE_TIME_SEPARATOR, "~")

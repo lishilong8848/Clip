@@ -1265,6 +1265,16 @@ def check_notice_type_mappings() -> tuple[bool, list[str]]:
         errors.append(f"读取 noticeTemplates.ts 失败: {exc}")
         return not errors, errors
 
+    frontend_required_labels = {
+        "fault_type": "故障类型",
+        "repair_mode": "维修方式",
+        "discovery": "故障发现方式",
+        "symptom": "故障现象",
+    }
+    for field_name, label in frontend_required_labels.items():
+        if f'{field_name}: "{label}"' not in frontend_text:
+            errors.append(f"noticeTemplates.ts 缺少 {field_name} 的中文标签 {label}")
+
     frontend_message_fields = {
         work_type: [field for _label, field in fields]
         for work_type, fields in expected_fields.items()
