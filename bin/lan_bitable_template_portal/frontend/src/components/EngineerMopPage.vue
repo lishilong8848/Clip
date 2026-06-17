@@ -667,10 +667,10 @@
                 :key="notice.notice_key"
                 type="button"
                 class="notice-row"
-                :class="{ active: notice.notice_key === selectedNoticeKey, closed: notice.status === '已结束', pending: mopNoticeNeedsAction(notice) }"
+                :class="{ active: notice.notice_key === selectedNoticeKey, closed: noticeIsEnded(notice), pending: mopNoticeNeedsAction(notice) }"
                 @click="selectNotice(notice.notice_key)"
               >
-                <span class="row-status" :class="{ closed: notice.status === '已结束' }">{{ notice.status || "进行中" }}</span>
+                <span class="row-status" :class="{ closed: noticeIsEnded(notice) }">{{ notice.status || "进行中" }}</span>
                 <strong>{{ notice.title || "未命名维保通告" }}</strong>
                 <small>
                   {{ notice.building || "未识别楼栋" }}
@@ -880,12 +880,18 @@ function mopNoticeNeedsAction(notice: Dict): boolean {
   return !notice?.mop_binding || !noticeMopUploaded(notice);
 }
 
+function noticeIsEnded(notice: Dict): boolean {
+  const status = String(notice?.status || "").trim();
+  if (!status || /未(结束|完成|闭环)/.test(status)) return false;
+  return /(已结束|正常结束|维修完成|已完成|闭环)/.test(status);
+}
+
 const filteredNotices = computed(() => {
   const query = compactText(noticeSearch.value);
   return notices.value.filter((item) => {
-    const status = String(item.status || "");
-    if (noticeStatusFilter.value === "ongoing" && status === "已结束") return false;
-    if (noticeStatusFilter.value === "closed" && status !== "已结束") return false;
+    const ended = noticeIsEnded(item);
+    if (noticeStatusFilter.value === "ongoing" && ended) return false;
+    if (noticeStatusFilter.value === "closed" && !ended) return false;
     if (noticeStatusFilter.value === "pending" && !mopNoticeNeedsAction(item)) return false;
     if (noticeStatusFilter.value === "bound" && !item.mop_binding) return false;
     if (noticeStatusFilter.value === "unbound" && item.mop_binding) return false;

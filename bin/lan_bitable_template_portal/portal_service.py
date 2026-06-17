@@ -7899,10 +7899,17 @@ class MaintenancePortalService:
         return merged
 
     @staticmethod
-    def _engineer_mop_notice_sort_key(item: dict[str, Any]) -> tuple[Any, ...]:
+    def _engineer_notice_is_ended_status(status: Any) -> bool:
+        text = str(status or "").strip()
+        if not text or any(token in text for token in ("未结束", "未完成", "未闭环")):
+            return False
+        return any(token in text for token in ("已结束", "正常结束", "维修完成", "已完成", "闭环"))
+
+    @classmethod
+    def _engineer_maintenance_notice_sort_key(cls, item: dict[str, Any]) -> tuple[Any, ...]:
         bound = bool(item.get("mop_binding"))
         uploaded = bool(item.get("mop_uploaded"))
-        ended = str(item.get("status") or "") == "已结束"
+        ended = cls._engineer_notice_is_ended_status(item.get("status"))
         needs_action = not bound or not uploaded
         if not bound and not uploaded:
             priority = 0
@@ -7988,11 +7995,11 @@ class MaintenancePortalService:
                 continue
             notice = self._serialize_engineer_notice(item)
             existing = notices_by_key.get(notice["notice_key"])
-            if existing and existing.get("status") != "已结束":
+            if existing and not self._engineer_notice_is_ended_status(existing.get("status")):
                 continue
             upsert_notice(notice)
         notices = list(notices_by_key.values())
-        notices.sort(key=self._engineer_mop_notice_sort_key)
+        notices.sort(key=self._engineer_maintenance_notice_sort_key)
         return notices
 
     @staticmethod
@@ -8314,7 +8321,7 @@ class MaintenancePortalService:
                     binding = dict(template_binding)
                     binding["inherited"] = True
             notice["mop_binding"] = binding or None
-        notices.sort(key=self._engineer_mop_notice_sort_key)
+        notices.sort(key=self._engineer_maintenance_notice_sort_key)
         return {
             "scope": scope,
             "scope_label": self._scope_label(scope),

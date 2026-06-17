@@ -289,7 +289,7 @@ class EngineerMopUploadTests(unittest.TestCase):
                         "计划维护月份": service._current_month_label(),
                         "维护周期": "每月",
                         "维护总项": "正常结束未绑定未上传",
-                        "维护实施状态": "已结束",
+                        "维护实施状态": "正常结束",
                     },
                 },
                 {
@@ -322,7 +322,7 @@ class EngineerMopUploadTests(unittest.TestCase):
 
             self.assertGreaterEqual(len(notices), 2)
             self.assertEqual(notices[0]["source_record_id"], "src-ended")
-            self.assertEqual(notices[0]["status"], "已结束")
+            self.assertEqual(notices[0]["status"], "正常结束")
             self.assertFalse(notices[0]["mop_uploaded"])
             self.assertEqual(notices[1]["source_record_id"], "src-pending")
             uploaded = next(item for item in notices if item["source_record_id"] == "src-bound")
