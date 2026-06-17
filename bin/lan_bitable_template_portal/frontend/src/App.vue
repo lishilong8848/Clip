@@ -5066,7 +5066,7 @@ textarea {
     linear-gradient(90deg, rgba(4, 46, 145, 0.98), rgba(10, 103, 224, 0.98) 46%, rgba(0, 116, 236, 0.96)),
     linear-gradient(180deg, rgba(255, 255, 255, 0.12), transparent);
   box-shadow: 0 16px 42px rgba(3, 55, 140, 0.18);
-  overflow: hidden;
+  overflow: visible;
   isolation: isolate;
 }
 
@@ -5138,7 +5138,7 @@ h1 {
 
 .topbar-actions {
   position: relative;
-  z-index: 1;
+  z-index: 30;
   flex: 1 1 560px;
   min-width: 360px;
   margin-left: auto;
@@ -5148,21 +5148,25 @@ h1 {
 .refresh-menu {
   position: relative;
   display: inline-flex;
+  z-index: 60;
 }
 
 .refresh-menu-panel {
   position: absolute;
-  top: calc(100% + 10px);
+  top: calc(100% + 12px);
   right: 0;
-  z-index: 20;
-  width: 238px;
+  z-index: 120;
+  width: min(320px, calc(100vw - 32px));
+  max-height: min(420px, 70vh);
+  overflow: auto;
   display: grid;
   gap: 8px;
-  padding: 12px;
+  padding: 14px;
   border: 1px solid #d8e7f8;
-  border-radius: 14px;
+  border-radius: 16px;
   background: rgba(255, 255, 255, 0.98);
   box-shadow: 0 18px 40px rgba(9, 55, 120, 0.18);
+  white-space: normal;
 }
 
 .refresh-menu-panel::before {

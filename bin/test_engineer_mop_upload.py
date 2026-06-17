@@ -28,6 +28,7 @@ class FakeMopUploadService(MaintenancePortalService):
         self.missing_auditor_open_id = missing_auditor_open_id
         self.upload_calls = []
         self.patch_calls = []
+        self.external_image_calls = []
         self._state_store = LanPortalStateStore(self.tmpdir / "state.sqlite3")
 
     def ensure_snapshot_loaded(self, *, refresh_if_expired: bool = False) -> None:
@@ -60,6 +61,12 @@ class FakeMopUploadService(MaintenancePortalService):
                 "has_signature": True,
             },
         ]
+
+    def external_signature_image_bytes(self, *, record_id: str):
+        self.external_image_calls.append(record_id)
+        if record_id != "external-rec-1":
+            raise PortalError("其他人员签名不存在")
+        return b"fake png", "image/png"
 
     def fill_engineer_mop_file(self, **kwargs) -> dict:
         output = self.tmpdir / "测试_已签名.xlsx"
@@ -193,6 +200,58 @@ class EngineerMopUploadTests(unittest.TestCase):
             self.assertEqual(result["notification_warning"], "")
             self.assertEqual(len(result["notification_results"]), 1)
             self.assertEqual(result["notification_results"][0]["open_id"], "ou_audit")
+
+    def test_external_signature_counts_for_required_roles_without_notification(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = FakeMopUploadService(tmpdir)
+            result = service.upload_signed_engineer_mop_file(
+                scope="A",
+                source_record_id="src-1",
+                notice_title="A楼测试维保",
+                local_file_path=str(Path(tmpdir) / "source.xlsx"),
+                signatures=[
+                    {
+                        "source": "external",
+                        "role": "implementer",
+                        "record_id": "external-rec-1",
+                    },
+                    {"source": "staff", "role": "auditor", "record_id": "person-2"},
+                ],
+            )
+
+            self.assertEqual(result["file_token"], "file-token-1")
+            self.assertEqual(result["notification_warning"], "")
+            self.assertEqual(service.external_image_calls, ["external-rec-1"])
+            self.assertEqual(len(result["notification_results"]), 1)
+            self.assertEqual(result["notification_results"][0]["open_id"], "ou_audit")
+
+    def test_temporary_signature_link_uses_custom_display_name(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = FakeMopUploadService(tmpdir)
+            data = service.build_temporary_signature_link_message(
+                scope="A",
+                notice_key="notice-1",
+                role="implementer",
+                recipient_open_ids=["ou_impl"],
+                notice_title="A楼测试维保",
+                display_name="张三",
+                request_base_url="http://192.168.224.130:18766",
+            )
+
+            self.assertEqual(data["signature"]["display_name"], "张三")
+            self.assertIn("临时人员：张三", data["text"])
+
+    def test_signature_link_prefers_current_page_origin(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = FakeMopUploadService(tmpdir)
+            service.get_handover_links = lambda: {"links": {"A": "http://10.0.0.8:18766/audit"}}
+
+            base_url = service._signature_public_base_url(
+                scope="A",
+                request_base_url="http://192.168.224.130:18766",
+            )
+
+            self.assertEqual(base_url, "http://192.168.224.130:18766")
 
 
 if __name__ == "__main__":

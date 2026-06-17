@@ -145,6 +145,7 @@ class SignatureSendLinkRequest(APIModel):
     record_id: str = ""
     signer_name: str = ""
     scope: str = ""
+    request_base_url: str = ""
 
 
 class TemporarySignatureSendLinkRequest(APIModel):
@@ -152,8 +153,10 @@ class TemporarySignatureSendLinkRequest(APIModel):
     notice_key: str = ""
     notice_title: str = ""
     specialty: str = ""
+    display_name: str = ""
     role: str = "implementer"
     recipient_open_ids: list[str] = Field(default_factory=list)
+    request_base_url: str = ""
 
 
 class TemporarySignatureSaveRequest(APIModel):

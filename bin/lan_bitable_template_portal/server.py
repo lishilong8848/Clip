@@ -1142,10 +1142,23 @@ class PortalRuntime:
                 qs = parse_qs(parsed.query)
                 session = self._current_session()
                 temp_id = (qs.get("temporary_id") or [""])[0]
-                if session is None:
+                record_id = (qs.get("record_id") or [""])[0]
+                if record_id:
+                    if session is None:
+                        return self._send_json(401, {"ok": False, "error": "请先登录。"})
+                    requested_scope = (qs.get("scope") or [""])[0]
+                    if requested_scope:
+                        self._authorized_scope_or_error(session, requested_scope)
+                    content, content_type = self.service.external_signature_image_bytes(
+                        record_id=record_id,
+                    )
+                elif session is None:
                     self.service.temporary_signature_session(
                         temp_id=temp_id,
                         token=(qs.get("token") or [""])[0],
+                    )
+                    content, content_type = self.service.temporary_signature_image_bytes(
+                        temp_id=temp_id,
                     )
                 else:
                     temp_session = PortalRuntime.state_store.get_mop_temporary_signature_session(
@@ -1157,9 +1170,9 @@ class PortalRuntime:
                         session,
                         str(temp_session.get("scope") or "ALL"),
                     )
-                content, content_type = self.service.temporary_signature_image_bytes(
-                    temp_id=temp_id,
-                )
+                    content, content_type = self.service.temporary_signature_image_bytes(
+                        temp_id=temp_id,
+                    )
                 return self._write_response(
                     200,
                     {
@@ -1183,6 +1196,28 @@ class PortalRuntime:
                 data = self.service.list_temporary_signatures(
                     scope=scope,
                     notice_key=(qs.get("notice_key") or [""])[0],
+                )
+                return self._send_json(
+                    200,
+                    {"ok": True, "data": self._with_auth_context(data, session)},
+                )
+            except (PortalError, ValueError) as exc:
+                return self._send_json(403, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/signatures/temporary/people":
+            session = self._require_auth_json()
+            if session is None:
+                return
+            try:
+                qs = parse_qs(parsed.query)
+                scope = self._authorized_scope_or_error(
+                    session,
+                    (qs.get("scope") or ["ALL"])[0],
+                )
+                data = self.service.temporary_signature_people(
+                    scope=scope,
+                    query=(qs.get("q") or [""])[0],
+                    limit=int((qs.get("limit") or ["80"])[0] or 80),
+                    refresh=str((qs.get("refresh") or [""])[0]).lower() in {"1", "true", "yes"},
                 )
                 return self._send_json(
                     200,
@@ -1588,7 +1623,8 @@ class PortalRuntime:
                     record_id=str(payload.get("record_id") or ""),
                     signer_name=str(payload.get("signer_name") or ""),
                     scope=scope,
-                    request_base_url=self._request_base_url(),
+                    request_base_url=str(payload.get("request_base_url") or "")
+                    or self._request_base_url(),
                     created_by=str((session.get("user") or {}).get("open_id") if isinstance(session.get("user"), dict) else ""),
                 )
                 ok, message, results = _send_text_to_open_ids_guarded(
@@ -1640,7 +1676,9 @@ class PortalRuntime:
                     recipient_open_ids=list(payload.get("recipient_open_ids") or []),
                     notice_title=str(payload.get("notice_title") or ""),
                     specialty=str(payload.get("specialty") or ""),
-                    request_base_url=self._request_base_url(),
+                    display_name=str(payload.get("display_name") or ""),
+                    request_base_url=str(payload.get("request_base_url") or "")
+                    or self._request_base_url(),
                     created_by=str(user.get("open_id") or ""),
                 )
                 open_ids = [

@@ -1529,12 +1529,27 @@ class FastAPIPortalController:
             try:
                 session = self._current_session(request)
                 temp_id = str(request.query_params.get("temporary_id") or "")
+                record_id = str(request.query_params.get("record_id") or "")
                 token = str(request.query_params.get("token") or "")
-                if session is None:
+                if record_id:
+                    if session is None:
+                        return self._auth_required_response()
+                    requested_scope = str(request.query_params.get("scope") or "").strip()
+                    if requested_scope:
+                        self._authorized_scope_or_error(session, requested_scope)
+                    content, content_type = await asyncio.to_thread(
+                        PortalRuntime.service.external_signature_image_bytes,
+                        record_id=record_id,
+                    )
+                elif session is None:
                     await asyncio.to_thread(
                         PortalRuntime.service.temporary_signature_session,
                         temp_id=temp_id,
                         token=token,
+                    )
+                    content, content_type = await asyncio.to_thread(
+                        PortalRuntime.service.temporary_signature_image_bytes,
+                        temp_id=temp_id,
                     )
                 else:
                     temp_session = await asyncio.to_thread(
@@ -1550,10 +1565,10 @@ class FastAPIPortalController:
                         session,
                         str(temp_session.get("scope") or "ALL"),
                     )
-                content, content_type = await asyncio.to_thread(
-                    PortalRuntime.service.temporary_signature_image_bytes,
-                    temp_id=temp_id,
-                )
+                    content, content_type = await asyncio.to_thread(
+                        PortalRuntime.service.temporary_signature_image_bytes,
+                        temp_id=temp_id,
+                    )
                 return Response(
                     content=content,
                     media_type=content_type,
@@ -1643,7 +1658,8 @@ class FastAPIPortalController:
                     record_id=str(payload.get("record_id") or ""),
                     signer_name=str(payload.get("signer_name") or ""),
                     scope=scope,
-                    request_base_url=self._request_base_url(request),
+                    request_base_url=str(payload.get("request_base_url") or "")
+                    or self._request_base_url(request),
                     created_by=str((session.get("user") or {}).get("open_id") if isinstance(session.get("user"), dict) else ""),
                 )
                 ok, message, results = await asyncio.to_thread(
@@ -1695,6 +1711,27 @@ class FastAPIPortalController:
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)
 
+        @app.get("/api/signatures/temporary/people")
+        async def temporary_signature_people(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_scope_or_error(
+                    session,
+                    str(request.query_params.get("scope") or "ALL"),
+                )
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.temporary_signature_people,
+                    scope=scope,
+                    query=str(request.query_params.get("q") or ""),
+                    limit=int(str(request.query_params.get("limit") or "80") or 80),
+                    refresh=str(request.query_params.get("refresh") or "").lower() in {"1", "true", "yes"},
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
         @app.post("/api/signatures/temporary/send-link")
         async def temporary_signature_send_link(request: Request):
             session = self._current_session(request)
@@ -1721,7 +1758,9 @@ class FastAPIPortalController:
                     recipient_open_ids=list(payload.get("recipient_open_ids") or []),
                     notice_title=str(payload.get("notice_title") or ""),
                     specialty=str(payload.get("specialty") or ""),
-                    request_base_url=self._request_base_url(request),
+                    display_name=str(payload.get("display_name") or ""),
+                    request_base_url=str(payload.get("request_base_url") or "")
+                    or self._request_base_url(request),
                     created_by=str(user.get("open_id") or ""),
                 )
                 open_ids = [

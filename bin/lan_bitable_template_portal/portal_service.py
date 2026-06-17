@@ -462,6 +462,8 @@ class MaintenancePortalService:
         self._engineer_mop_cache: dict[str, Any] | None = None
         self._signature_people_cache_lock = threading.RLock()
         self._signature_people_cache: dict[str, Any] | None = None
+        self._external_signature_people_cache_lock = threading.RLock()
+        self._external_signature_people_cache: dict[str, Any] | None = None
         self._attachment_cache_lock = threading.RLock()
         self._attachment_cache_refresh_lock = threading.RLock()
         self._attachment_cache_refresh_running = False
@@ -8592,6 +8594,158 @@ class MaintenancePortalService:
             "loaded_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
 
+    @staticmethod
+    def _external_signature_preview_url(*, record_id: str, signature_version: str) -> str:
+        record_id = str(record_id or "").strip()
+        signature_version = str(signature_version or "").strip()
+        if not record_id or not signature_version:
+            return ""
+        return (
+            f"/api/signatures/temporary/image?record_id={quote(record_id, safe='')}"
+            f"&v={quote(signature_version, safe='')}"
+        )
+
+    def _load_external_signature_people(self, *, force: bool = False) -> list[dict[str, Any]]:
+        now = time.time()
+        with self._external_signature_people_cache_lock:
+            cached = self._external_signature_people_cache
+            if (
+                not force
+                and cached
+                and now - float(cached.get("loaded_ts") or 0.0)
+                < SIGNATURE_PEOPLE_CACHE_TTL_SECONDS
+            ):
+                return copy.deepcopy(cached.get("people") or [])
+
+        people: list[dict[str, Any]] = []
+        page_token = ""
+        while True:
+            params = {"page_size": 500}
+            if page_token:
+                params["page_token"] = page_token
+            payload = self._request_json(
+                "records",
+                params=params,
+                app_token=SIGNATURE_APP_TOKEN,
+                table_id=TEMP_SIGNATURE_TABLE_ID,
+            )
+            data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+            for item in data.get("items") or []:
+                fields = item.get("fields") if isinstance(item.get("fields"), dict) else {}
+                record_id = str(item.get("record_id") or "").strip()
+                if not record_id:
+                    continue
+                latest_publish_time = self._attachment_latest_publish_time(fields)
+                attachments = [
+                    self._attachment_with_cache_context(
+                        attachment,
+                        category="temporary_signature",
+                        app_token=SIGNATURE_APP_TOKEN,
+                        table_id=TEMP_SIGNATURE_TABLE_ID,
+                        record_id=record_id,
+                        latest_publish_time=latest_publish_time,
+                    )
+                    for attachment in self._extract_signature_attachments(fields)
+                ]
+                if not attachments:
+                    continue
+                first_signature = attachments[0]
+                signature_version = self._signature_attachment_version(first_signature)
+                name = (
+                    self._mop_field_text(fields, [TEMP_SIGNATURE_NAME_FIELD, "姓名", "名称"])
+                    or record_id
+                )
+                building = self._mop_field_text(fields, [TEMP_SIGNATURE_BUILDING_FIELD, "楼栋"])
+                specialty = self._mop_field_text(fields, [TEMP_SIGNATURE_SPECIALTY_FIELD, "专业"])
+                people.append(
+                    {
+                        "source": "external",
+                        "record_id": record_id,
+                        "name": name,
+                        "display_name": name,
+                        "building": building,
+                        "scope_text": building,
+                        "specialty": specialty,
+                        "employee_no": self._mop_field_text(fields, [TEMP_SIGNATURE_EMPLOYEE_NO_FIELD, "工号"]),
+                        "certificate": self._mop_field_text(fields, [TEMP_SIGNATURE_CERT_FIELD, "持证"]),
+                        "has_signature": True,
+                        "signature_count": len(attachments),
+                        "signature_version": signature_version,
+                        "latest_publish_time": latest_publish_time,
+                        "signature_preview_url": self._external_signature_preview_url(
+                            record_id=record_id,
+                            signature_version=signature_version,
+                        ),
+                        "raw_fields": fields,
+                    }
+                )
+            if not data.get("has_more"):
+                break
+            page_token = str(data.get("page_token") or "").strip()
+            if not page_token:
+                break
+
+        people.sort(
+            key=lambda item: (
+                str(item.get("building") or ""),
+                str(item.get("specialty") or ""),
+                str(item.get("name") or ""),
+            )
+        )
+        with self._external_signature_people_cache_lock:
+            self._external_signature_people_cache = {
+                "loaded_ts": now,
+                "people": copy.deepcopy(people),
+            }
+        return people
+
+    def temporary_signature_people(
+        self,
+        *,
+        scope: str = "ALL",
+        query: str = "",
+        limit: int = 80,
+        refresh: bool = False,
+    ) -> dict[str, Any]:
+        scope = self._normalize_scope(scope or "ALL")
+        query_text = re.sub(r"\s+", "", str(query or "")).lower()
+        people = self._load_external_signature_people(force=bool(refresh))
+
+        def matches_query(person: dict[str, Any]) -> bool:
+            if not query_text:
+                return True
+            haystack = re.sub(
+                r"\s+",
+                "",
+                "|".join(
+                    str(person.get(key) or "")
+                    for key in (
+                        "record_id",
+                        "name",
+                        "display_name",
+                        "building",
+                        "specialty",
+                        "employee_no",
+                        "certificate",
+                    )
+                ),
+            ).lower()
+            return query_text in haystack
+
+        filtered = [
+            {key: value for key, value in person.items() if key != "raw_fields"}
+            for person in people
+            if matches_query(person)
+        ]
+        limited = filtered[: max(1, min(500, int(limit or 80)))]
+        return {
+            "people": limited,
+            "count": len(filtered),
+            "returned": len(limited),
+            "scope": scope,
+            "loaded_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
     def create_signature_link_token(self, *, record_id: str, created_by: str = "") -> dict[str, Any]:
         return self._state_store.create_signature_link_token(
             record_id=record_id,
@@ -8699,6 +8853,40 @@ class MaintenancePortalService:
         content, _content_type = self._download_mop_attachment(attachments[0])
         return self._transparent_signature_png(content), "image/png"
 
+    def external_signature_image_bytes(self, *, record_id: str) -> tuple[bytes, str]:
+        record_id = str(record_id or "").strip()
+        if not record_id:
+            raise PortalError("缺少其他人员签名记录。")
+        people = self._load_external_signature_people(force=False)
+        person = next(
+            (item for item in people if str(item.get("record_id") or "") == record_id),
+            None,
+        )
+        if not person:
+            people = self._load_external_signature_people(force=True)
+            person = next(
+                (item for item in people if str(item.get("record_id") or "") == record_id),
+                None,
+            )
+        if not person:
+            raise PortalError("其他人员签名记录不存在。")
+        fields = person.get("raw_fields") if isinstance(person.get("raw_fields"), dict) else {}
+        attachments = [
+            self._attachment_with_cache_context(
+                attachment,
+                category="temporary_signature",
+                app_token=SIGNATURE_APP_TOKEN,
+                table_id=TEMP_SIGNATURE_TABLE_ID,
+                record_id=record_id,
+                latest_publish_time=str(person.get("latest_publish_time") or self._attachment_latest_publish_time(fields)),
+            )
+            for attachment in self._extract_signature_attachments(fields)
+        ]
+        if not attachments:
+            raise PortalError("该其他人员还没有可用签名。")
+        content, _content_type = self._download_mop_attachment(attachments[0])
+        return self._transparent_signature_png(content), "image/png"
+
     @staticmethod
     def _url_host_for_display(host: str) -> str:
         host = str(host or "").strip()
@@ -8716,15 +8904,23 @@ class MaintenancePortalService:
     ) -> str:
         """Build the public portal URL used in signature links.
 
-        The host/IP follows the configured handover audit link for the same
-        scope when available. The port stays on the portal service so the
-        generated /signature page is always served by this program.
+        A browser-origin URL from the current page has the highest priority,
+        because phones must open the same LAN address the operator is using.
+        Legacy callers without request context still fall back to configured
+        handover/portal host values.
         """
 
         base_text = str(request_base_url or "").strip().rstrip("/")
         if base_text and "://" not in base_text:
             base_text = f"http://{base_text}"
         parsed_base = urlparse(base_text) if base_text else None
+        if (
+            parsed_base
+            and parsed_base.scheme in {"http", "https"}
+            and parsed_base.netloc
+            and str(parsed_base.hostname or "").strip() not in {"0.0.0.0", "::"}
+        ):
+            return f"{parsed_base.scheme}://{parsed_base.netloc}"
         scheme = (
             parsed_base.scheme
             if parsed_base and parsed_base.scheme in {"http", "https"}
@@ -8875,6 +9071,7 @@ class MaintenancePortalService:
         recipient_open_ids: list[str] | None = None,
         notice_title: str = "",
         specialty: str = "",
+        display_name: str = "",
         request_base_url: str = "",
         created_by: str = "",
     ) -> dict[str, Any]:
@@ -8890,7 +9087,7 @@ class MaintenancePortalService:
         ]
         if not recipients:
             raise PortalError("请先选择维护实施人，再发送其他人员签名链接。")
-        display_name = self._temporary_signature_display_name(
+        display_name = str(display_name or "").strip() or self._temporary_signature_display_name(
             scope=scope,
             notice_key=notice_key,
         )
@@ -9095,6 +9292,8 @@ class MaintenancePortalService:
             signature_file_token=file_token,
             payload_patch={"saved_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
         )
+        with self._external_signature_people_cache_lock:
+            self._external_signature_people_cache = None
         return self._public_temporary_signature_session(
             updated or {},
             link_token=token,
@@ -10184,6 +10383,8 @@ class MaintenancePortalService:
                     record_id = str(signature.get("record_id") or "").strip()
                     if source == "temporary" or temp_id:
                         image_bytes, _content_type = self.temporary_signature_image_bytes(temp_id=temp_id)
+                    elif source == "external":
+                        image_bytes, _content_type = self.external_signature_image_bytes(record_id=record_id)
                     else:
                         image_bytes, _content_type = self.signature_image_bytes(record_id=record_id)
                     image = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
@@ -10213,7 +10414,10 @@ class MaintenancePortalService:
             )
             output_dir = Path(get_data_file_path(os.path.join("engineer_mop_filled", date_part, scope_part)))
             output_dir.mkdir(parents=True, exist_ok=True)
-            output_path = output_dir / f"{stem}_已签名_{dt.datetime.now().strftime('%H%M%S')}{source_path.suffix}"
+            output_path = output_dir / (
+                f"{stem}_已签名_{dt.datetime.now().strftime('%H%M%S')}_{uuid.uuid4().hex[:8]}"
+                f"{source_path.suffix}"
+            )
             workbook.save(output_path)
         finally:
             for path in temp_paths:
@@ -10242,6 +10446,7 @@ class MaintenancePortalService:
         }
         roles_by_record: dict[str, set[str]] = {}
         temporary_by_id: dict[str, set[str]] = {}
+        external_by_record: dict[str, set[str]] = {}
         for item in signatures:
             if not isinstance(item, dict):
                 continue
@@ -10255,11 +10460,15 @@ class MaintenancePortalService:
                 if temp_id:
                     temporary_by_id.setdefault(temp_id, set()).add(role)
                 continue
+            if source == "external":
+                if record_id:
+                    external_by_record.setdefault(record_id, set()).add(role)
+                continue
             if record_id:
                 roles_by_record.setdefault(record_id, set()).add(role)
         present_roles = {
             role
-            for roles in list(roles_by_record.values()) + list(temporary_by_id.values())
+            for roles in list(roles_by_record.values()) + list(temporary_by_id.values()) + list(external_by_record.values())
             for role in roles
         }
         missing = [label for role, label in role_to_label.items() if role not in present_roles]
@@ -10288,6 +10497,13 @@ class MaintenancePortalService:
             if not str(session.get("signature_file_token") or "").strip():
                 raise PortalError(f"{session.get('display_name') or '临时人员'} 暂无可用签名。")
             # 临时人员没有 openid，只参与 MOP 签名完整性校验和插图，不发送通知。
+            continue
+        for record_id in external_by_record:
+            try:
+                self.external_signature_image_bytes(record_id=record_id)
+            except Exception as exc:
+                raise PortalError("其他人员签名不可用，请重新选择或重新签名。") from exc
+            # 其他人员没有可通知 openid，只参与 MOP 签名完整性校验和插图。
             continue
         for record_id, roles in roles_by_record.items():
             person = people_by_id.get(record_id)
