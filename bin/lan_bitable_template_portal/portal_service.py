@@ -7903,18 +7903,19 @@ class MaintenancePortalService:
         bound = bool(item.get("mop_binding"))
         uploaded = bool(item.get("mop_uploaded"))
         ended = str(item.get("status") or "") == "已结束"
+        needs_action = not bound or not uploaded
         if not bound and not uploaded:
             priority = 0
         elif not bound:
             priority = 1
         elif not uploaded:
             priority = 2
-        elif not ended:
-            priority = 3
         else:
-            priority = 4
+            priority = 3
         return (
+            0 if ended or needs_action else 1,
             priority,
+            0 if ended else 1,
             str(item.get("building") or ""),
             str(item.get("maintenance_cycle") or ""),
             str(item.get("title") or ""),
@@ -7991,14 +7992,7 @@ class MaintenancePortalService:
                 continue
             upsert_notice(notice)
         notices = list(notices_by_key.values())
-        notices.sort(
-            key=lambda item: (
-                0 if item.get("status") != "已结束" else 1,
-                str(item.get("building") or ""),
-                str(item.get("updated_at") or ""),
-            ),
-            reverse=False,
-        )
+        notices.sort(key=self._engineer_mop_notice_sort_key)
         return notices
 
     @staticmethod

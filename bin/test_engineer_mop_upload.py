@@ -281,6 +281,18 @@ class EngineerMopUploadTests(unittest.TestCase):
                     },
                 },
                 {
+                    "record_id": "src-ended",
+                    "work_type": WORK_TYPE_MAINTENANCE,
+                    "notice_type": "维保通告",
+                    "display_fields": {
+                        "楼栋": "A楼",
+                        "计划维护月份": service._current_month_label(),
+                        "维护周期": "每月",
+                        "维护总项": "正常结束未绑定未上传",
+                        "维护实施状态": "已结束",
+                    },
+                },
+                {
                     "record_id": "src-pending",
                     "work_type": WORK_TYPE_MAINTENANCE,
                     "notice_type": "维保通告",
@@ -292,7 +304,7 @@ class EngineerMopUploadTests(unittest.TestCase):
                     },
                 },
             ]
-            pending_notice = service._serialize_engineer_source_maintenance_notice(service._records[1])
+            pending_notice = service._serialize_engineer_source_maintenance_notice(service._records[2])
             assert pending_notice is not None
             service._state_store.upsert_mop_notice_binding(
                 {
@@ -309,8 +321,10 @@ class EngineerMopUploadTests(unittest.TestCase):
             notices = data["notices"]
 
             self.assertGreaterEqual(len(notices), 2)
-            self.assertEqual(notices[0]["source_record_id"], "src-pending")
+            self.assertEqual(notices[0]["source_record_id"], "src-ended")
+            self.assertEqual(notices[0]["status"], "已结束")
             self.assertFalse(notices[0]["mop_uploaded"])
+            self.assertEqual(notices[1]["source_record_id"], "src-pending")
             uploaded = next(item for item in notices if item["source_record_id"] == "src-bound")
             self.assertTrue(uploaded["mop_uploaded"])
             self.assertEqual(uploaded["mop_attachment_count"], 1)
