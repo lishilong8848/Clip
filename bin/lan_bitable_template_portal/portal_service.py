@@ -7368,29 +7368,27 @@ class MaintenancePortalService:
     def _ongoing_merge_identity_keys(self, item: dict[str, Any]) -> set[str]:
         item = normalize_notice_identity_payload(item)
         work_type = str(item.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
-        keys = set(self._work_status_identity_keys(item))
-        fallback_key = str(
-            item.get("work_fallback_key") or item.get("fallback_key") or ""
-        ).strip()
-        if not fallback_key:
-            fallback_key = self._work_status_fallback_key(
-                title=str(item.get("title") or item.get("content") or ""),
-                building=str(item.get("building") or ""),
-                plan_month=str(item.get("plan_month") or ""),
-                reason=str(item.get("reason") or ""),
-            )
-        if fallback_key:
-            keys.add(f"{work_type}:fallback:{fallback_key}")
-        title_key = re.sub(r"\s+", "", str(item.get("title") or item.get("content") or ""))
-        building_key = re.sub(r"\s+", "", str(item.get("building") or ""))
-        start_key = re.sub(r"\s+", "", str(item.get("start_time") or item.get("time_str") or ""))
-        end_key = re.sub(r"\s+", "", str(item.get("end_time") or ""))
-        reason_key = re.sub(r"\s+", "", str(item.get("reason") or ""))
-        if title_key and (start_key or end_key):
+        keys: set[str] = set()
+        for kind, value in (
+            ("active", item.get("active_item_id")),
+            ("source", canonical_source_record_id(item)),
+            ("target", canonical_target_record_id(item)),
+        ):
+            value = str(value or "").strip()
+            if value:
+                keys.add(f"{work_type}:{kind}:{value}")
+        exact_signature = self._ongoing_exact_duplicate_signature(item)
+        if exact_signature:
             keys.add(
-                f"{work_type}:title-time:{building_key}:{title_key}:{start_key}:{end_key}:reason:{reason_key}"
+                f"{work_type}:exact:"
+                + hashlib.sha1(
+                    json.dumps(
+                        exact_signature,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).encode("utf-8", errors="ignore")
+                ).hexdigest()
             )
-        keys.update(self._ongoing_business_merge_keys(item, work_type=work_type))
         return {key for key in keys if key}
 
     def _ongoing_business_merge_keys(

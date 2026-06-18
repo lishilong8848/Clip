@@ -1100,7 +1100,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 {"target-1", "target-2"},
             )
 
-    def test_lan_portal_state_store_collapses_exact_duplicate_active_items(self):
+    def test_lan_portal_state_store_keeps_exact_duplicate_active_items(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
             base = {
@@ -1139,9 +1139,13 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
             items = store.list_qt_active_items()
 
-            self.assertEqual(len(items), 1)
+            self.assertEqual(len(items), 2)
+            self.assertEqual(
+                {item["active_item_id"] for item in items},
+                {"active-1", "active-2"},
+            )
 
-    def test_lan_portal_state_store_collapses_progress_only_active_item_changes(self):
+    def test_lan_portal_state_store_keeps_progress_only_active_item_changes(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
             base = {
@@ -1179,7 +1183,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 origin="portal",
             )
 
-            self.assertEqual(len(store.list_qt_active_items()), 1)
+            self.assertEqual(len(store.list_qt_active_items()), 2)
 
     def test_c_building_seven_similar_maintenance_notices_remain_visible(self):
         notices = [
@@ -2413,6 +2417,64 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(payload["other"][0]["data"]["record_id"], "current-record")
             self.assertEqual([item["active_item_id"] for item in qt_items], ["current-active"])
 
+    def test_active_cache_store_merges_legacy_items_when_sqlite_has_fewer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_path = Path(tmp) / "active_cache.json"
+            legacy_items = [
+                {
+                    "data": {
+                        "active_item_id": f"legacy-active-{index}",
+                        "record_id": f"legacy-record-{index}",
+                        "target_record_id": f"legacy-record-{index}",
+                        "notice_type": "维保通告",
+                        "work_type": "maintenance",
+                        "building_codes": ["C"],
+                        "text": (
+                            "【维保通告】状态：开始\n"
+                            f"【名称】C楼旧缓存通告{index}\n"
+                            "【时间】2026-06-18 09:30~2026-06-18 18:30\n"
+                            f"【原因】旧缓存原因{index}"
+                        ),
+                    }
+                }
+                for index in range(1, 8)
+            ]
+            cache_path.write_text(
+                json.dumps({"version": 2, "event": [], "other": legacy_items}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            state_store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            for entry in legacy_items[:5]:
+                state_store.upsert_qt_active_item(
+                    entry["data"],
+                    section="other",
+                    origin="qt",
+                )
+            cache_store = ActiveCacheStore(str(cache_path), state_store)
+
+            result = cache_store.migrate_legacy_cache_file_to_sqlite()
+            qt_items = state_store.list_qt_active_items()
+
+            self.assertEqual(result["status"], "merged")
+            self.assertEqual(result["imported"], 7)
+            self.assertEqual(len(qt_items), 7)
+            self.assertEqual(
+                {item["record_id"] for item in qt_items},
+                {f"legacy-record-{index}" for index in range(1, 8)},
+            )
+
+            state_store.delete_qt_active_item(active_item_id="legacy-active-7")
+            restarted_cache_store = ActiveCacheStore(str(cache_path), state_store)
+            second_result = restarted_cache_store.migrate_legacy_cache_file_to_sqlite()
+            qt_items_after_delete = state_store.list_qt_active_items()
+
+            self.assertEqual(second_result["status"], "skipped")
+            self.assertEqual(len(qt_items_after_delete), 6)
+            self.assertNotIn(
+                "legacy-record-7",
+                {item["record_id"] for item in qt_items_after_delete},
+            )
+
     def test_backend_clipboard_notice_projects_to_active_upsert_event(self):
         with tempfile.TemporaryDirectory() as tmp:
             previous_store = PortalRuntime.state_store
@@ -2784,8 +2846,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 now = time.time()
                 duplicate_payload = dict(active_payload)
                 duplicate_payload["active_item_id"] = "active-soft-deleted-duplicate"
-                duplicate_payload["record_id"] = "rec-soft-deleted-duplicate"
-                duplicate_payload["target_record_id"] = "rec-soft-deleted-duplicate"
+                duplicate_payload["record_id"] = "rec-survivor"
+                duplicate_payload["target_record_id"] = "rec-survivor"
                 conn = store._connect()
                 try:
                     conn.execute(
@@ -2798,7 +2860,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                         """,
                         (
                             "active-soft-deleted-duplicate",
-                            "rec-soft-deleted-duplicate",
+                            "rec-survivor",
                             "维保通告",
                             "other",
                             0,
@@ -8429,6 +8491,14 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             PortalRuntime.state_store = service._state_store
             PortalRuntime.auth_manager._state_store = service._state_store
             PortalRuntime.auth_manager.upsert_permission_user(
+                open_id="ou_workbench",
+                name="测试用户",
+                role="user",
+                scopes=["C"],
+                enabled=True,
+                updated_by="test",
+            )
+            PortalRuntime.auth_manager.upsert_permission_user(
                 open_id="ou_admin",
                 name="admin",
                 role="admin",
@@ -9268,6 +9338,80 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             temp_dir.cleanup()
             with PortalRuntime.auth_manager._lock:
                 PortalRuntime.auth_manager._sessions = original_sessions
+
+    def test_fastapi_workbench_returns_current_qt_active_items(self):
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        original_service = PortalRuntime.service
+        original_state_store = PortalRuntime.state_store
+        original_auth_state_store = PortalRuntime.auth_manager._state_store
+        original_sessions = dict(PortalRuntime.auth_manager._sessions)
+        temp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        service = self._new_temp_service(Path(temp_dir.name))
+        try:
+            service.ensure_snapshot_loaded = lambda: None
+            PortalRuntime.service = service
+            PortalRuntime.state_store = service._state_store
+            PortalRuntime.auth_manager._state_store = service._state_store
+            items = [
+                {
+                    "active_item_id": f"api-active-{index}",
+                    "record_id": f"api-target-{index}",
+                    "target_record_id": f"api-target-{index}",
+                    "notice_type": "维保通告",
+                    "work_type": "maintenance",
+                    "title": f"C楼接口进行中通告{index}",
+                    "building": "C楼",
+                    "building_codes": ["C"],
+                    "time_str": "2026-06-18 09:30~2026-06-18 18:30",
+                    "content": f"维护内容{index}",
+                    "reason": f"维护原因{index}",
+                    "text": (
+                        "【维保通告】状态：开始\n"
+                        f"【名称】C楼接口进行中通告{index}\n"
+                        "【时间】2026-06-18 09:30~2026-06-18 18:30\n"
+                        f"【内容】维护内容{index}\n"
+                        f"【原因】维护原因{index}"
+                    ),
+                }
+                for index in range(1, 8)
+            ]
+            PortalRuntime.state_store.replace_ongoing_items(items[:5])
+            for item in items:
+                PortalRuntime.state_store.upsert_qt_active_item(
+                    item,
+                    section="other",
+                    origin="qt",
+                )
+            session_id = "workbench-current-qt-session"
+            with PortalRuntime.auth_manager._lock:
+                PortalRuntime.auth_manager._sessions[session_id] = {
+                    "session_id": session_id,
+                    "user": {"name": "测试用户", "open_id": ""},
+                    "role": "admin",
+                    "allowed_scopes": ["ALL"],
+                    "expires_at": time.time() + 3600,
+                }
+            client = TestClient(controller._build_app())
+            response = client.get(
+                "/api/workbench?scope=C",
+                headers={"Cookie": f"{AUTH_COOKIE_NAME}={session_id}"},
+            )
+
+            self.assertEqual(response.status_code, 200, response.text)
+            payload = response.json()["data"]
+            self.assertEqual(len(payload["ongoing"]), 7)
+            self.assertEqual(
+                {item["target_record_id"] for item in payload["ongoing"]},
+                {f"api-target-{index}" for index in range(1, 8)},
+            )
+        finally:
+            service._state_store.shutdown_write_worker()
+            PortalRuntime.service = original_service
+            PortalRuntime.state_store = original_state_store
+            PortalRuntime.auth_manager._state_store = original_auth_state_store
+            with PortalRuntime.auth_manager._lock:
+                PortalRuntime.auth_manager._sessions = original_sessions
+            temp_dir.cleanup()
 
     def test_fastapi_ongoing_delete_runs_backend_delete_before_qt_projection(self):
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)

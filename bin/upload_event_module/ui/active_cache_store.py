@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import threading
 import time
 import uuid
@@ -26,6 +27,7 @@ class ActiveCacheStore:
     _SECTIONS = ("event", "other")
     _STATE_NAMESPACE = "qt_active_cache"
     _STATE_KEY = "active_cache"
+    _LEGACY_MERGE_MARKER_KEY = "legacy_active_cache_merge"
 
     def __init__(self, cache_file: str, state_store: LanPortalStateStore | None = None):
         self.cache_file = str(cache_file or "")
@@ -133,6 +135,52 @@ class ActiveCacheStore:
             total += len(values) if isinstance(values, list) else 0
         return total
 
+    def _legacy_file_signature_unlocked(self, payload: dict | None = None) -> dict[str, Any]:
+        try:
+            stat = os.stat(self.cache_file)
+        except Exception:
+            return {}
+        signature = {
+            "path": os.path.abspath(self.cache_file),
+            "mtime": float(stat.st_mtime or 0),
+            "size": int(stat.st_size or 0),
+        }
+        if isinstance(payload, dict):
+            signature["count"] = self._count_payload_items(payload)
+        return signature
+
+    @staticmethod
+    def _legacy_cache_entry_ended(data: dict | None) -> bool:
+        if not isinstance(data, dict):
+            return False
+        if bool(data.get("_ended_moved")):
+            return True
+        status = str(data.get("status") or "").strip()
+        if status == "结束":
+            return True
+        text = str(data.get("text") or data.get("content") or "").strip()
+        return bool(re.search(r"状态\s*[:：]?\s*结束", text))
+
+    def _merge_legacy_payload_into_qt_items_unlocked(self, payload: dict) -> int:
+        merged = 0
+        for section in self._SECTIONS:
+            section_items = payload.get(section, [])
+            if not isinstance(section_items, list):
+                continue
+            for entry in section_items:
+                if not isinstance(entry, dict):
+                    continue
+                data = entry.get("data")
+                if not isinstance(data, dict) or self._legacy_cache_entry_ended(data):
+                    continue
+                if self._state_store.upsert_qt_active_item(
+                    dict(data),
+                    section=section,
+                    origin=str(data.get("origin") or "legacy_active_cache"),
+                ):
+                    merged += 1
+        return merged
+
     def _migrate_legacy_cache_file_unlocked(self) -> dict[str, Any]:
         if self._legacy_file_migration_result is not None:
             return dict(self._legacy_file_migration_result)
@@ -147,19 +195,9 @@ class ActiveCacheStore:
             self._legacy_file_migration_result = result
             return dict(result)
         try:
-            existing_doc = self._state_store.get_document(
-                self._STATE_NAMESPACE, self._STATE_KEY
-            )
-        except Exception:
-            existing_doc = None
-        try:
             existing_qt_items = self._state_store.list_qt_active_items(include_deleted=True)
         except Exception:
             existing_qt_items = []
-        if isinstance(existing_doc, dict) or existing_qt_items:
-            result["reason"] = "sqlite_already_initialized"
-            self._legacy_file_migration_result = result
-            return dict(result)
         try:
             with open(self.cache_file, "r", encoding="utf-8") as f:
                 payload = json.load(f)
@@ -174,9 +212,68 @@ class ActiveCacheStore:
             self._legacy_file_migration_result = result
             return dict(result)
         payload = self._normalize_payload(payload)
+        legacy_signature = self._legacy_file_signature_unlocked(payload)
+        try:
+            existing_doc = self._state_store.get_document(
+                self._STATE_NAMESPACE, self._STATE_KEY
+            )
+        except Exception:
+            existing_doc = None
+        if isinstance(existing_doc, dict) or existing_qt_items:
+            try:
+                active_qt_count = len(self._state_store.list_qt_active_items())
+            except Exception:
+                active_qt_count = 0
+            legacy_count = self._count_payload_items(payload)
+            try:
+                marker = self._state_store.get_document(
+                    self._STATE_NAMESPACE, self._LEGACY_MERGE_MARKER_KEY
+                )
+            except Exception:
+                marker = None
+            already_merged = bool(
+                isinstance(marker, dict)
+                and marker.get("legacy_signature") == legacy_signature
+            )
+            if legacy_count > active_qt_count and not already_merged:
+                try:
+                    imported = self._merge_legacy_payload_into_qt_items_unlocked(payload)
+                    self._state_store.put_document(
+                        self._STATE_NAMESPACE,
+                        self._LEGACY_MERGE_MARKER_KEY,
+                        {
+                            "legacy_signature": legacy_signature,
+                            "active_qt_count_before": active_qt_count,
+                            "legacy_count": legacy_count,
+                            "imported": imported,
+                            "merged_at": time.time(),
+                        },
+                    )
+                    result["status"] = "merged"
+                    result["imported"] = imported
+                    result["reason"] = ""
+                except Exception as exc:
+                    result["status"] = "failed"
+                    result["reason"] = f"sqlite_merge_failed: {exc}"
+                self._legacy_file_migration_result = result
+                return dict(result)
+            result["reason"] = "sqlite_already_initialized"
+            self._legacy_file_migration_result = result
+            return dict(result)
         try:
             self._state_store.put_document(self._STATE_NAMESPACE, self._STATE_KEY, payload)
             migrated = self._state_store.replace_qt_active_items_from_payload(payload)
+            self._state_store.put_document(
+                self._STATE_NAMESPACE,
+                self._LEGACY_MERGE_MARKER_KEY,
+                {
+                    "legacy_signature": legacy_signature,
+                    "active_qt_count_before": 0,
+                    "legacy_count": self._count_payload_items(payload),
+                    "imported": int((migrated or {}).get("upserted") or self._count_payload_items(payload)),
+                    "merged_at": time.time(),
+                },
+            )
         except Exception as exc:
             result["status"] = "failed"
             result["reason"] = f"sqlite_import_failed: {exc}"

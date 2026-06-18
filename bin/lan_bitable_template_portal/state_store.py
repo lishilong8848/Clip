@@ -1618,21 +1618,25 @@ class LanPortalStateStore:
             keys.add(f"{work_type}:source:{source_record_id}")
         if active_item_id:
             keys.add(f"{work_type}:active:{active_item_id}")
-        title = self._text(item.get("title") or item.get("content"))
+        title = self._business_merge_text_key(
+            item.get("title") or item.get("content") or item.get("name")
+        )
         if title:
             seed = self._json(
                 [
                     work_type,
                     self._text(item.get("notice_type")),
                     title,
-                    self._text(item.get("building")),
-                    self._text(item.get("start_time") or item.get("time_str") or item.get("time")),
-                    self._text(item.get("end_time")),
-                    self._text(item.get("reason")),
+                    self._business_merge_text_key(item.get("building")),
+                    self._business_merge_text_key(item.get("maintenance_cycle")),
+                    self._business_merge_time_key(item),
+                    self._business_merge_text_key(item.get("location")),
+                    self._business_merge_text_key(item.get("content")),
+                    self._business_merge_text_key(item.get("reason")),
+                    self._business_merge_text_key(item.get("impact")),
                 ]
             )
-            keys.add(f"{work_type}:fallback:{hashlib.sha1(seed.encode('utf-8')).hexdigest()}")
-        keys.update(self._business_merge_keys_for_item(item, work_type=work_type))
+            keys.add(f"{work_type}:exact:{hashlib.sha1(seed.encode('utf-8')).hexdigest()}")
         if not keys:
             keys.add(self._identity_for_item(item))
         return keys
@@ -3272,177 +3276,6 @@ class LanPortalStateStore:
             "deleted_at": float(row["deleted_at"] or 0) if row["deleted_at"] is not None else None,
         }
 
-    def _qt_active_identity_probe(self, item: dict[str, Any]) -> dict[str, Any]:
-        payload = (
-            dict(item.get("payload") or {})
-            if isinstance(item.get("payload"), dict)
-            else dict(item or {})
-        )
-        if item.get("active_item_id") and not payload.get("active_item_id"):
-            payload["active_item_id"] = item.get("active_item_id")
-        if item.get("record_id"):
-            payload.setdefault("target_record_id", item.get("record_id"))
-            payload.setdefault("record_id", item.get("record_id"))
-        payload = self._enrich_notice_payload_from_text(payload)
-        return normalize_notice_identity_payload(payload)
-
-    def _qt_active_identity_keys(self, item: dict[str, Any]) -> set[str]:
-        payload = self._qt_active_identity_probe(item)
-        work_type = self._text(payload.get("work_type") or payload.get("lan_work_type"))
-        if not work_type:
-            work_type = "event" if self._text(payload.get("notice_type")) == "事件通告" else "maintenance"
-        keys: set[str] = set()
-        target_record_id = canonical_target_record_id(payload)
-        source_record_id = canonical_source_record_id(payload)
-        active_item_id = self._text(payload.get("active_item_id") or item.get("active_item_id"))
-        if target_record_id:
-            keys.add(f"{work_type}:target:{target_record_id}")
-        if source_record_id:
-            keys.add(f"{work_type}:source:{source_record_id}")
-        if active_item_id:
-            keys.add(f"{work_type}:active:{active_item_id}")
-        title = self._text(payload.get("title") or payload.get("content"))
-        if title:
-            fallback_seed = self._json(
-                [
-                    work_type,
-                    self._text(payload.get("notice_type")),
-                    title,
-                    self._text(payload.get("building")),
-                    self._text(payload.get("start_time") or payload.get("time_str") or payload.get("time")),
-                    self._text(payload.get("end_time")),
-                    self._text(payload.get("reason")),
-                ]
-            )
-            keys.add(f"{work_type}:fallback:{hashlib.sha1(fallback_seed.encode('utf-8')).hexdigest()}")
-        keys.update(self._business_merge_keys_for_item(payload, work_type=work_type))
-        return keys
-
-    def _qt_active_identity_conflicts(
-        self, existing: dict[str, Any], incoming: dict[str, Any]
-    ) -> bool:
-        """Return True when two active rows are definitely different notices.
-
-        Fallback/business keys are only a bridge between projections of the same
-        notice. They must not collapse two already uploaded target records.
-        """
-
-        left = self._qt_active_identity_probe(existing)
-        right = self._qt_active_identity_probe(incoming)
-        left_work_type = self._text(left.get("work_type") or left.get("lan_work_type"))
-        right_work_type = self._text(right.get("work_type") or right.get("lan_work_type"))
-        if left_work_type and right_work_type and left_work_type != right_work_type:
-            return True
-        left_notice_type = self._text(left.get("notice_type"))
-        right_notice_type = self._text(right.get("notice_type"))
-        if left_notice_type and right_notice_type and left_notice_type != right_notice_type:
-            return True
-        left_active = self._text(left.get("active_item_id"))
-        right_active = self._text(right.get("active_item_id"))
-        if left_active and right_active and left_active == right_active:
-            return False
-        if self._qt_active_exact_duplicate_signature(
-            left
-        ) and self._qt_active_exact_duplicate_signature(
-            left
-        ) == self._qt_active_exact_duplicate_signature(right):
-            return False
-        left_target = canonical_target_record_id(left)
-        right_target = canonical_target_record_id(right)
-        if left_target and right_target:
-            return left_target != right_target
-        left_source = canonical_source_record_id(left)
-        right_source = canonical_source_record_id(right)
-        if left_source and right_source:
-            return left_source != right_source
-        if left_active and right_active:
-            return left_active != right_active
-        return False
-
-    def _qt_active_exact_duplicate_signature(self, payload: dict[str, Any]) -> tuple[str, ...]:
-        payload = normalize_notice_identity_payload(payload or {})
-        title = self._business_merge_text_key(
-            payload.get("title") or payload.get("content") or payload.get("name")
-        )
-        if not title:
-            return ()
-        return (
-            self._text(payload.get("work_type") or payload.get("lan_work_type")),
-            self._text(payload.get("notice_type")),
-            title,
-            self._business_merge_text_key(payload.get("building")),
-            self._business_merge_text_key(payload.get("maintenance_cycle")),
-            self._business_merge_time_key(payload),
-            self._business_merge_text_key(payload.get("location")),
-            self._business_merge_text_key(payload.get("content")),
-            self._business_merge_text_key(payload.get("reason")),
-            self._business_merge_text_key(payload.get("impact")),
-        )
-
-    def _qt_active_item_score(self, item: dict[str, Any]) -> int:
-        payload = self._qt_active_identity_probe(item)
-        return self._notice_payload_score(payload) + (2 if item.get("record_id") else 0)
-
-    def _merge_qt_active_items(self, existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
-        existing = dict(existing or {})
-        incoming = dict(incoming or {})
-        primary, supplement = (
-            (incoming, existing)
-            if self._qt_active_item_score(incoming) >= self._qt_active_item_score(existing)
-            else (existing, incoming)
-        )
-        merged = dict(primary)
-        for key, value in supplement.items():
-            if merged.get(key) in (None, "", [], {}):
-                merged[key] = value
-        primary_payload = (
-            dict(primary.get("payload") or {})
-            if isinstance(primary.get("payload"), dict)
-            else {}
-        )
-        supplement_payload = (
-            dict(supplement.get("payload") or {})
-            if isinstance(supplement.get("payload"), dict)
-            else {}
-        )
-        merged_payload = self._merge_notice_payload(supplement_payload, primary_payload)
-        merged_payload.setdefault("active_item_id", merged.get("active_item_id") or supplement.get("active_item_id") or "")
-        if merged.get("record_id"):
-            merged_payload.setdefault("target_record_id", merged.get("record_id"))
-            merged_payload.setdefault("record_id", merged.get("record_id"))
-        merged["payload"] = merged_payload
-        if not merged.get("record_id"):
-            merged["record_id"] = canonical_target_record_id(merged_payload)
-        return merged
-
-    def _dedupe_qt_active_items(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        merged: list[dict[str, Any]] = []
-        index_by_key: dict[str, int] = {}
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            keys = self._qt_active_identity_keys(item)
-            match_index = None
-            for key in keys:
-                if key in index_by_key:
-                    candidate_index = index_by_key[key]
-                    if not self._qt_active_identity_conflicts(
-                        merged[candidate_index], item
-                    ):
-                        match_index = candidate_index
-                        break
-            if match_index is None:
-                match_index = len(merged)
-                merged.append(dict(item))
-            else:
-                merged[match_index] = self._merge_qt_active_items(
-                    merged[match_index],
-                    item,
-                )
-            for key in self._qt_active_identity_keys(merged[match_index]) | keys:
-                index_by_key[key] = match_index
-        return merged
-
     def list_qt_active_items(self, *, include_deleted: bool = False) -> list[dict[str, Any]]:
         if not self.db_path.exists():
             return []
@@ -3460,7 +3293,7 @@ class LanPortalStateStore:
                     """
                 ).fetchall()
         items = [self._qt_active_item_from_row(row) for row in rows]
-        return items if include_deleted else self._dedupe_qt_active_items(items)
+        return items
 
     def upsert_qt_active_item(
         self,
@@ -3475,6 +3308,7 @@ class LanPortalStateStore:
         normalized = normalize_notice_identity_payload(
             self._enrich_notice_payload_from_text(payload or {})
         )
+        explicit_active_item_id = self._text(normalized.get("active_item_id"))
         active_item_id = self._qt_active_item_key(normalized)
         if not active_item_id:
             return False
@@ -3491,32 +3325,17 @@ class LanPortalStateStore:
         with self._lock:
             with closing(self._connect()) as conn:
                 self._ensure_schema_locked(conn)
-                existing_rows = conn.execute(
-                    """
-                    SELECT active_item_id, record_id, notice_type, section, sort_order,
-                           origin, payload_json, updated_at, deleted_at
-                    FROM qt_active_items
-                    WHERE deleted_at IS NULL
-                    """
-                ).fetchall()
-                probe_item = {
-                    "active_item_id": active_item_id,
-                    "record_id": record_id,
-                    "notice_type": notice_type,
-                    "section": section,
-                    "sort_order": int(sort_order or 0),
-                    "origin": origin,
-                    "payload": normalized,
-                }
-                probe_keys = self._qt_active_identity_keys(probe_item)
-                existing_identity = self._notice_identity_lookup_locked(
-                    conn,
-                    work_type=self._text(normalized.get("work_type")),
-                    active_item_id=active_item_id,
-                    source_record_id=canonical_source_record_id(normalized),
-                    target_record_id=record_id,
-                )
-                if existing_identity:
+                if not explicit_active_item_id:
+                    existing_identity = self._notice_identity_lookup_locked(
+                        conn,
+                        work_type=self._text(normalized.get("work_type")),
+                        active_item_id=active_item_id,
+                        source_record_id=canonical_source_record_id(normalized),
+                        target_record_id=record_id,
+                    )
+                else:
+                    existing_identity = None
+                if existing_identity is not None:
                     existing_identity_data = self._notice_identity_from_row(existing_identity)
                     existing_active_item_id = self._text(
                         existing_identity_data.get("active_item_id")
@@ -3524,20 +3343,6 @@ class LanPortalStateStore:
                     if existing_active_item_id:
                         active_item_id = existing_active_item_id
                         normalized["active_item_id"] = active_item_id
-                for row in existing_rows:
-                    existing_item = self._qt_active_item_from_row(row)
-                    if self._text(existing_item.get("active_item_id")) == active_item_id:
-                        continue
-                    if (
-                        probe_keys
-                        and (probe_keys & self._qt_active_identity_keys(existing_item))
-                        and not self._qt_active_identity_conflicts(
-                            existing_item, probe_item
-                        )
-                    ):
-                        active_item_id = self._text(existing_item.get("active_item_id")) or active_item_id
-                        normalized["active_item_id"] = active_item_id
-                        break
                 conn.execute(
                     """
                     INSERT INTO qt_active_items(
@@ -3566,26 +3371,6 @@ class LanPortalStateStore:
                         now,
                     ),
                 )
-                for row in existing_rows:
-                    existing_item = self._qt_active_item_from_row(row)
-                    duplicate_active_item_id = self._text(existing_item.get("active_item_id"))
-                    if not duplicate_active_item_id or duplicate_active_item_id == active_item_id:
-                        continue
-                    if (
-                        probe_keys
-                        and (probe_keys & self._qt_active_identity_keys(existing_item))
-                        and not self._qt_active_identity_conflicts(
-                            existing_item, probe_item
-                        )
-                    ):
-                        conn.execute(
-                            """
-                            UPDATE qt_active_items
-                            SET deleted_at = ?, updated_at = ?
-                            WHERE active_item_id = ? AND deleted_at IS NULL
-                            """,
-                            (now, now, duplicate_active_item_id),
-                        )
                 self._upsert_notice_identity_locked(conn, normalized, origin=origin)
                 conn.commit()
         return True
@@ -4157,11 +3942,10 @@ class LanPortalStateStore:
                         "deleted_at": None,
                     }
                 )
-        deduped_items = self._dedupe_qt_active_items(raw_items)
         rows: list[tuple[str, str, str, str, int, str, str, float]] = []
         identity_payloads: list[tuple[dict[str, Any], str]] = []
         seen: set[str] = set()
-        for item in deduped_items:
+        for item in raw_items:
             active_item_id = self._text(item.get("active_item_id"))
             if not active_item_id:
                 continue

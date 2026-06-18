@@ -2207,16 +2207,12 @@ class PortalRuntime:
             snapshot = PortalRuntime.state_store.get_ongoing_snapshot()
             active_items = _qt_active_payloads()
             deleted_keys = _deleted_identity_keys(active_items)
-            if snapshot.get("exists"):
-                PortalRuntime.last_ongoing_error = ""
-                filtered = _filter_items(snapshot.get("items", []), deleted_keys)
-                filtered.extend(_filter_items(active_items, deleted_keys))
-                return self.service._merge_ongoing_items(scope, filtered)
             if active_items:
                 PortalRuntime.last_ongoing_error = ""
-                return self.service._merge_ongoing_items(
-                    scope, _filter_items(active_items, deleted_keys)
-                )
+                return _filter_items(active_items, deleted_keys)
+            if snapshot.get("exists"):
+                PortalRuntime.last_ongoing_error = ""
+                return _filter_items(snapshot.get("items", []), deleted_keys)
         except Exception as exc:
             warning = f"SQLite 进行中状态读取失败: {exc}"
             PortalRuntime.last_ongoing_error = warning
@@ -2248,7 +2244,7 @@ class PortalRuntime:
             and not _is_ended(item)
             and self.service._scope_matches_item(scope, item)
         ]
-        return self.service._merge_ongoing_items(scope, filtered)
+        return filtered
 
     @classmethod
     def ensure_source_refresh_worker(cls) -> None:

@@ -4190,11 +4190,9 @@ class FastAPIPortalController:
 
     @staticmethod
     def _get_ongoing(scope: str) -> list[dict]:
-        merged: list[dict] = []
-        index_by_key: dict[str, int] = {}
         active_rows: list[dict] = []
-        deleted_active_item_ids: set[str] = set()
-        deleted_record_ids: set[str] = set()
+        active_qt_identity_keys: set[str] = set()
+        deleted_qt_identity_keys: set[str] = set()
 
         def _identity_keys(item: dict) -> set[str]:
             try:
@@ -4217,13 +4215,23 @@ class FastAPIPortalController:
                     keys.add(f"{work_type}:title:{title}")
                 return {key for key in keys if key}
 
-        def _item_deleted_in_qt_store(item: dict) -> bool:
-            active_item_id = str(item.get("active_item_id") or "").strip()
-            record_id = canonical_target_record_id(item)
-            return bool(
-                (active_item_id and active_item_id in deleted_active_item_ids)
-                or (record_id and record_id in deleted_record_ids)
+        def _row_payload(active_item: dict) -> dict:
+            payload = (
+                active_item.get("payload")
+                if isinstance(active_item, dict)
+                and isinstance(active_item.get("payload"), dict)
+                else {}
             )
+            item = normalize_notice_identity_payload(dict(payload or {}))
+            item.setdefault("active_item_id", str(active_item.get("active_item_id") or ""))
+            item.setdefault("target_record_id", str(active_item.get("record_id") or ""))
+            item.setdefault("record_id", str(active_item.get("record_id") or ""))
+            item.setdefault("notice_type", active_item.get("notice_type"))
+            item.setdefault("origin", active_item.get("origin"))
+            return item
+
+        def _item_deleted_in_qt_store(item: dict) -> bool:
+            return bool(_identity_keys(item) & deleted_qt_identity_keys)
 
         def _item_is_ended(item: dict) -> bool:
             status = str(item.get("status") or "").strip()
@@ -4244,40 +4252,7 @@ class FastAPIPortalController:
                 return
             if not PortalRuntime.service._scope_matches_item(scope, item):
                 return
-            copied = normalize_notice_identity_payload(dict(item))
-            identity_keys = _identity_keys(copied)
-            duplicate_indexes = [
-                index_by_key[key]
-                for key in identity_keys
-                if key in index_by_key
-            ]
-            target_index = next(
-                (
-                    index
-                    for index in sorted(set(duplicate_indexes))
-                    if not PortalRuntime.service._ongoing_identity_conflicts(
-                        merged[index], copied
-                    )
-                ),
-                None,
-            )
-            if target_index is not None:
-                try:
-                    merged[target_index] = PortalRuntime.service._merge_duplicate_ongoing_item(
-                        merged[target_index],
-                        copied,
-                    )
-                except Exception:
-                    for key, value in copied.items():
-                        if merged[target_index].get(key) in (None, "", [], {}):
-                            merged[target_index][key] = value
-                for key in identity_keys | _identity_keys(merged[target_index]):
-                    index_by_key[key] = target_index
-                return
-            item_index = len(merged)
-            merged.append(copied)
-            for key in identity_keys:
-                index_by_key[key] = item_index
+            qt_projected_items.append(normalize_notice_identity_payload(dict(item)))
 
         try:
             active_rows = PortalRuntime.state_store.list_qt_active_items(
@@ -4286,50 +4261,28 @@ class FastAPIPortalController:
             for active_item in active_rows:
                 if not isinstance(active_item, dict):
                     continue
+                if active_item.get("deleted_at") is not None:
+                    continue
+                active_qt_identity_keys.update(_identity_keys(_row_payload(active_item)))
+            for active_item in active_rows:
+                if not isinstance(active_item, dict):
+                    continue
                 if active_item.get("deleted_at") is None:
                     continue
-                active_item_id = str(active_item.get("active_item_id") or "").strip()
-                record_id = str(active_item.get("record_id") or "").strip()
-                payload = (
-                    active_item.get("payload")
-                    if isinstance(active_item.get("payload"), dict)
-                    else {}
-                )
-                target_record_id = str(
-                    normalize_notice_identity_payload(payload).get("target_record_id")
-                    or ""
-                ).strip()
-                if active_item_id:
-                    deleted_active_item_ids.add(active_item_id)
-                if record_id:
-                    deleted_record_ids.add(record_id)
-                if target_record_id:
-                    deleted_record_ids.add(target_record_id)
+                deleted_qt_identity_keys.update(_identity_keys(_row_payload(active_item)))
+            deleted_qt_identity_keys.difference_update(active_qt_identity_keys)
         except Exception as exc:
             warning = f"SQLite Qt 活动删除状态读取失败: {exc}"
             if not PortalRuntime.last_ongoing_error:
                 PortalRuntime.last_ongoing_error = warning
             log_warning(warning)
 
-        try:
-            snapshot = PortalRuntime.state_store.get_ongoing_snapshot()
-            if snapshot.get("exists"):
-                PortalRuntime.last_ongoing_error = ""
-                for item in snapshot.get("items", []):
-                    _append(item)
-        except Exception as exc:
-            PortalRuntime.last_ongoing_error = f"SQLite 进行中状态读取失败: {exc}"
-            log_warning(PortalRuntime.last_ongoing_error)
+        qt_projected_items: list[dict] = []
         try:
             for active_item in active_rows or PortalRuntime.state_store.list_qt_active_items():
                 if active_item.get("deleted_at") is not None:
                     continue
-                payload = (
-                    active_item.get("payload")
-                    if isinstance(active_item, dict)
-                    and isinstance(active_item.get("payload"), dict)
-                    else {}
-                )
+                payload = _row_payload(active_item)
                 if not payload:
                     continue
                 text = str(payload.get("text") or "").strip()
@@ -4392,12 +4345,30 @@ class FastAPIPortalController:
                         PortalRuntime.service._building_codes_from_value(building_text)
                     )
                 _append(item)
+            if active_rows:
+                PortalRuntime.last_ongoing_error = ""
+                return qt_projected_items
         except Exception as exc:
             warning = f"SQLite Qt 活动条目合并失败: {exc}"
             if not PortalRuntime.last_ongoing_error:
                 PortalRuntime.last_ongoing_error = warning
             log_warning(warning)
-        return PortalRuntime.service._merge_ongoing_items(scope, merged)
+        try:
+            snapshot = PortalRuntime.state_store.get_ongoing_snapshot()
+            if snapshot.get("exists"):
+                PortalRuntime.last_ongoing_error = ""
+                return [
+                    normalize_notice_identity_payload(dict(item))
+                    for item in snapshot.get("items", [])
+                    if isinstance(item, dict)
+                    and not _item_is_ended(item)
+                    and not _item_deleted_in_qt_store(item)
+                    and PortalRuntime.service._scope_matches_item(scope, item)
+                ]
+        except Exception as exc:
+            PortalRuntime.last_ongoing_error = f"SQLite 进行中状态读取失败: {exc}"
+            log_warning(PortalRuntime.last_ongoing_error)
+        return []
 
     @staticmethod
     def _reconcile_orphan_started_items(
