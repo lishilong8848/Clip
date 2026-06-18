@@ -68,7 +68,7 @@ class NoticeTemplateTests(unittest.TestCase):
         self._assert_lines(
             text,
             [
-                "【设备变更】状态：更新",
+                "【变更通告】状态：更新",
                 "【名称】EA118机房C楼蓄电池放电变更",
                 "【等级】I3",
                 "【时间】2026-06-12 09:00~2026-06-12 18:00",
@@ -81,7 +81,7 @@ class NoticeTemplateTests(unittest.TestCase):
         )
         info = extract_event_info(text)
         self.assertIsNotNone(info)
-        self.assertEqual(info["notice_type"], "设备变更")
+        self.assertEqual(info["notice_type"], "变更通告")
         self.assertEqual(info["title"], "EA118机房C楼蓄电池放电变更")
 
     def test_repair_notice_text_contract(self):
@@ -137,9 +137,9 @@ class NoticeTemplateTests(unittest.TestCase):
     def test_change_qt_upload_payload_defaults_to_i3_when_level_missing(self):
         payload = PortalRuntime._prepared_to_notice_payload(
             {
-                "notice_type": "设备变更",
+                "notice_type": "变更通告",
                 "text": (
-                    "【设备变更】状态：开始\n"
+                    "【变更通告】状态：开始\n"
                     "【名称】EA118机房A楼测试变更\n"
                     "【时间】2026-06-12 09:00~2026-06-12 18:00"
                 ),
@@ -150,9 +150,9 @@ class NoticeTemplateTests(unittest.TestCase):
     def test_change_qt_upload_payload_respects_text_level(self):
         payload = PortalRuntime._prepared_to_notice_payload(
             {
-                "notice_type": "设备变更",
+                "notice_type": "变更通告",
                 "text": (
-                    "【设备变更】状态：开始\n"
+                    "【变更通告】状态：开始\n"
                     "【名称】EA118机房A楼测试变更\n"
                     "【等级】中风险\n"
                     "【时间】2026-06-12 09:00~2026-06-12 18:00"

@@ -157,6 +157,10 @@
             <input :checked="Boolean(draft.non_plan)" type="checkbox" @change="setDraft('non_plan', ($event.target as HTMLInputElement).checked)" />
             <span>非计划，发送时标题末尾自动追加“（非计划性）”</span>
           </label>
+          <label v-if="syncMaintenanceVisible" class="checkbox-field span-2">
+            <input :checked="draft.sync_maintenance_target !== false" type="checkbox" @change="setDraft('sync_maintenance_target', ($event.target as HTMLInputElement).checked)" />
+            <span>同时上传维保多维（只同步维保目标表，不发送维保通告）</span>
+          </label>
           <div v-if="isNoticeUploadField(workType, 'zhihang')" class="zhihang-line span-2">
             <label>
               <input :checked="Boolean(draft.zhihang_involved)" type="checkbox" @change="setDraft('zhihang_involved', ($event.target as HTMLInputElement).checked)" />
@@ -246,6 +250,7 @@ const props = defineProps<{
   typeOverrideVisible: boolean;
   typeOverrideBusy: boolean;
   typeOverrideLabel: string;
+  syncMaintenanceVisible: boolean;
   sendLabel: string;
   fieldClass: (field: string) => ClassMap;
   jobText: (key: string) => string;

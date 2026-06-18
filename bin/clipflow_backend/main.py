@@ -8,6 +8,7 @@ import hashlib
 import json
 import mimetypes
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -104,6 +105,7 @@ from lan_bitable_template_portal.portal_service import (
     NOTICE_TYPE_CHANGE,
     NOTICE_TYPE_MAINTENANCE,
     NOTICE_TYPE_REPAIR,
+    NOTICE_TYPE_BY_WORK_TYPE,
     PortalError,
     REPAIR_SOURCE_APP_TOKEN,
     REPAIR_SOURCE_TABLE_ID,
@@ -4305,7 +4307,11 @@ class FastAPIPortalController:
                 info = extract_event_info(text) or {}
                 if str(info.get("status") or "").strip() == "结束":
                     continue
-                item = dict(payload)
+                item = FastAPIPortalController._merge_projected_notice_fields(
+                    dict(payload),
+                    FastAPIPortalController._projected_notice_fields_from_text(text),
+                    overwrite=False,
+                )
                 item.setdefault("active_item_id", active_item.get("active_item_id"))
                 item.setdefault("target_record_id", active_item.get("record_id"))
                 if not str(item.get("record_id") or "").strip():
@@ -4514,6 +4520,188 @@ class FastAPIPortalController:
                 return item
         return None
 
+    @staticmethod
+    def _clean_projected_notice_field(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        return re.sub(r"\s+", " ", text).strip(" ;；")
+
+    @classmethod
+    def _normalize_projected_notice_type(
+        cls, notice_type: str, work_type: str
+    ) -> str:
+        notice_type = str(notice_type or "").strip()
+        work_type = str(work_type or "").strip()
+        if notice_type in {"设备变更", "变更通告"}:
+            return NOTICE_TYPE_CHANGE
+        if notice_type:
+            return notice_type
+        return str(NOTICE_TYPE_BY_WORK_TYPE.get(work_type) or "").strip()
+
+    @classmethod
+    def _split_projected_notice_time_range(cls, value: Any) -> tuple[str, str]:
+        text = str(value or "").strip()
+        if not text:
+            return "", ""
+        normalized = (
+            text.replace("－", "-")
+            .replace("—", "-")
+            .replace("～", "~")
+            .replace("：", ":")
+        )
+
+        def _format(parsed: dt.datetime | None, fallback: str) -> str:
+            if parsed:
+                return parsed.strftime("%Y-%m-%d %H:%M")
+            return cls._clean_projected_notice_field(fallback)
+
+        for separator in ("~", "至", "到"):
+            if separator not in normalized:
+                continue
+            left, right = normalized.split(separator, 1)
+            left = left.strip()
+            right = right.strip()
+            left_dt = PortalRuntime.service._parse_notice_datetime(left)
+            right_dt = PortalRuntime.service._parse_notice_datetime(right)
+            if left_dt and not right_dt:
+                time_only = re.search(r"(\d{1,2})\s*[:点时.]\s*(\d{1,2})?", right)
+                if time_only:
+                    right_dt = left_dt.replace(
+                        hour=int(time_only.group(1)),
+                        minute=int(time_only.group(2) or 0),
+                    )
+            return _format(left_dt, left), _format(right_dt, right)
+
+        hyphen = re.match(
+            r"(.+?\d{1,2}\s*[:点时.]\s*\d{0,2})\s*-\s*(\d{1,2}\s*[:点时.]\s*\d{0,2}.*)$",
+            normalized,
+        )
+        if hyphen:
+            left = hyphen.group(1).strip()
+            right = hyphen.group(2).strip()
+            left_dt = PortalRuntime.service._parse_notice_datetime(left)
+            right_dt = PortalRuntime.service._parse_notice_datetime(right)
+            if left_dt and not right_dt:
+                time_only = re.search(r"(\d{1,2})\s*[:点时.]\s*(\d{1,2})?", right)
+                if time_only:
+                    right_dt = left_dt.replace(
+                        hour=int(time_only.group(1)),
+                        minute=int(time_only.group(2) or 0),
+                    )
+            return _format(left_dt, left), _format(right_dt, right)
+        parsed = PortalRuntime.service._parse_notice_datetime(normalized)
+        return _format(parsed, normalized), ""
+
+    @classmethod
+    def _projected_notice_fields_from_text(
+        cls, text: str, *, entry: dict | None = None
+    ) -> dict[str, Any]:
+        text = str(text or "").strip()
+        if not text:
+            return {}
+        entry = entry if isinstance(entry, dict) else {}
+        sections = PortalRuntime.service._parse_notice_sections(text)
+        work_type = PortalRuntime.service._notice_work_type_from_text(text, sections)
+
+        def value(names: list[str], fallback: Any = "") -> str:
+            return cls._clean_projected_notice_field(
+                PortalRuntime.service._notice_section_value(sections, names, str(fallback or ""))
+            )
+
+        notice_type = cls._normalize_projected_notice_type(
+            str(entry.get("notice_type") or ""), work_type
+        )
+        title = value(
+            ["名称", "标题", "通告名称", "维修名称", "事件描述"],
+            entry.get("title"),
+        )
+        time_str = value(["时间", "计划时间", "维护时间"], entry.get("time_str"))
+        start_time, end_time = cls._split_projected_notice_time_range(time_str)
+        projected: dict[str, Any] = {
+            "notice_type": notice_type,
+            "work_type": work_type,
+            "lan_work_type": work_type,
+            "title": title,
+            "time_str": time_str,
+            "level": value(["等级", "变更等级", "紧急程度"], entry.get("level")),
+            "specialty": value(["专业", "专业类别", "所属专业"]),
+            "location": value(["地点", "位置"]),
+            "content": value(["内容"]),
+            "reason": value(["原因", "故障原因", "故障维修原因"]),
+            "impact": value(["影响", "影响范围"]),
+            "progress": value(["进度", "完成情况"]),
+            "start_time": start_time,
+            "end_time": end_time,
+            "maintenance_cycle": value(["维保周期", "维护周期"]),
+            "repair_device": value(["维修设备"]),
+            "repair_fault": value(["维修故障"]),
+            "fault_type": value(["故障类型"]),
+            "repair_mode": value(["维修方式"]),
+            "discovery": value(["故障发现方式"]),
+            "symptom": value(["故障现象"]),
+            "solution": value(["解决方案"]),
+            "spare_parts": value(["备件更换情况", "备件使用情况"]),
+            "device": value(["设备"]),
+            "cabinet": value(["柜号"]),
+            "quantity": value(["数量"]),
+        }
+        building_codes = PortalRuntime.service._building_codes_from_notice_text(
+            value(["楼栋", "变更楼栋", "所属楼栋"]),
+            projected.get("location"),
+            title,
+            text,
+        )
+        if building_codes:
+            projected["building_codes"] = building_codes
+        if work_type == "repair":
+            fault_time = value(["发现故障时间", "故障发生时间", "发生故障时间"])
+            expected_time = value(["期望完成时间", "计划完成时间"])
+            projected["fault_time"] = (
+                cls._split_projected_notice_time_range(fault_time)[0] or fault_time
+            )
+            projected["expected_time"] = (
+                cls._split_projected_notice_time_range(expected_time)[0] or expected_time
+            )
+            if projected.get("expected_time"):
+                projected["start_time"] = projected["expected_time"]
+            if projected.get("fault_time"):
+                projected["end_time"] = projected["fault_time"]
+        return {
+            key: value
+            for key, value in projected.items()
+            if value not in (None, "", [], {})
+        }
+
+    @classmethod
+    def _merge_projected_notice_fields(
+        cls,
+        payload: dict[str, Any],
+        projected: dict[str, Any],
+        *,
+        overwrite: bool,
+    ) -> dict[str, Any]:
+        merged = dict(payload or {})
+        for key, value in (projected or {}).items():
+            if value in (None, "", [], {}):
+                continue
+            if key == "building_codes" and isinstance(value, list):
+                current_codes = merged.get(key)
+                if (
+                    overwrite
+                    or not isinstance(current_codes, list)
+                    or not current_codes
+                    or len(current_codes) > len(value)
+                ):
+                    merged[key] = list(value)
+                continue
+            if key == "notice_type" and merged.get(key) == "设备变更" and value == NOTICE_TYPE_CHANGE:
+                merged[key] = value
+                continue
+            if overwrite or merged.get(key) in (None, "", [], {}):
+                merged[key] = value
+        return merged
+
     @classmethod
     def _project_clipboard_entry_to_active(cls, entry: dict) -> dict:
         status = str(entry.get("status") or "").strip()
@@ -4537,18 +4725,20 @@ class FastAPIPortalController:
             is_placeholder = bool(data.get("_is_placeholder_record"))
         else:
             is_placeholder = not bool(str(data.get("record_id") or "").strip())
+        projected_fields = cls._projected_notice_fields_from_text(content, entry=entry)
+        data = cls._merge_projected_notice_fields(
+            data,
+            projected_fields,
+            overwrite=True,
+        )
         building_codes = data.get("building_codes")
         if not isinstance(building_codes, list):
-            building_codes = PortalRuntime.service._building_codes_from_value(
-                " ".join(
-                    str(value or "")
-                    for value in (
-                        data.get("building"),
-                        data.get("location"),
-                        entry.get("title"),
-                        content,
-                    )
-                )
+            building_codes = PortalRuntime.service._building_codes_from_notice_text(
+                data.get("building"),
+                data.get("location"),
+                entry.get("title"),
+                data.get("title"),
+                content,
             )
         work_type = data.get("work_type") or data.get("lan_work_type") or ""
         if not work_type:
@@ -4558,18 +4748,19 @@ class FastAPIPortalController:
                 work_type = "change"
             elif notice_type == "设备检修":
                 work_type = "repair"
+        notice_type = cls._normalize_projected_notice_type(notice_type, work_type)
         data.update(
             {
                 "active_item_id": active_item_id,
                 "record_id": record_id,
                 "_is_placeholder_record": is_placeholder,
                 "text": content,
-                "title": entry.get("title") or data.get("title", ""),
+                "title": data.get("title") or entry.get("title") or "",
                 "notice_type": notice_type,
-                "level": entry.get("level") or data.get("level"),
+                "level": data.get("level") or entry.get("level"),
                 "source": entry.get("source") or data.get("source", ""),
-                "time_str": entry.get("time_str") or data.get("time_str", ""),
-                "reason": entry.get("reason") or data.get("reason", ""),
+                "time_str": data.get("time_str") or entry.get("time_str") or "",
+                "reason": data.get("reason") or entry.get("reason") or "",
                 "_has_unuploaded_changes": True,
                 "_pending_upload_hash": None,
                 "_upload_in_progress": False,

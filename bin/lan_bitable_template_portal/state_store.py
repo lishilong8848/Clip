@@ -3252,6 +3252,67 @@ class LanPortalStateStore:
         keys.update(self._business_merge_keys_for_item(payload, work_type=work_type))
         return keys
 
+    def _qt_active_identity_conflicts(
+        self, existing: dict[str, Any], incoming: dict[str, Any]
+    ) -> bool:
+        """Return True when two active rows are definitely different notices.
+
+        Fallback/business keys are only a bridge between projections of the same
+        notice. They must not collapse two already uploaded target records.
+        """
+
+        left = self._qt_active_identity_probe(existing)
+        right = self._qt_active_identity_probe(incoming)
+        left_work_type = self._text(left.get("work_type") or left.get("lan_work_type"))
+        right_work_type = self._text(right.get("work_type") or right.get("lan_work_type"))
+        if left_work_type and right_work_type and left_work_type != right_work_type:
+            return True
+        left_notice_type = self._text(left.get("notice_type"))
+        right_notice_type = self._text(right.get("notice_type"))
+        if left_notice_type and right_notice_type and left_notice_type != right_notice_type:
+            return True
+        left_active = self._text(left.get("active_item_id"))
+        right_active = self._text(right.get("active_item_id"))
+        if left_active and right_active and left_active == right_active:
+            return False
+        if self._qt_active_exact_duplicate_signature(
+            left
+        ) and self._qt_active_exact_duplicate_signature(
+            left
+        ) == self._qt_active_exact_duplicate_signature(right):
+            return False
+        left_target = canonical_target_record_id(left)
+        right_target = canonical_target_record_id(right)
+        if left_target and right_target:
+            return left_target != right_target
+        left_source = canonical_source_record_id(left)
+        right_source = canonical_source_record_id(right)
+        if left_source and right_source:
+            return left_source != right_source
+        if left_active and right_active:
+            return left_active != right_active
+        return False
+
+    def _qt_active_exact_duplicate_signature(self, payload: dict[str, Any]) -> tuple[str, ...]:
+        payload = normalize_notice_identity_payload(payload or {})
+        title = self._business_merge_text_key(
+            payload.get("title") or payload.get("content") or payload.get("name")
+        )
+        if not title:
+            return ()
+        return (
+            self._text(payload.get("work_type") or payload.get("lan_work_type")),
+            self._text(payload.get("notice_type")),
+            title,
+            self._business_merge_text_key(payload.get("building")),
+            self._business_merge_text_key(payload.get("maintenance_cycle")),
+            self._business_merge_time_key(payload),
+            self._business_merge_text_key(payload.get("location")),
+            self._business_merge_text_key(payload.get("content")),
+            self._business_merge_text_key(payload.get("reason")),
+            self._business_merge_text_key(payload.get("impact")),
+        )
+
     def _qt_active_item_score(self, item: dict[str, Any]) -> int:
         payload = self._qt_active_identity_probe(item)
         return self._notice_payload_score(payload) + (2 if item.get("record_id") else 0)
@@ -3298,8 +3359,12 @@ class LanPortalStateStore:
             match_index = None
             for key in keys:
                 if key in index_by_key:
-                    match_index = index_by_key[key]
-                    break
+                    candidate_index = index_by_key[key]
+                    if not self._qt_active_identity_conflicts(
+                        merged[candidate_index], item
+                    ):
+                        match_index = candidate_index
+                        break
             if match_index is None:
                 match_index = len(merged)
                 merged.append(dict(item))
@@ -3395,7 +3460,13 @@ class LanPortalStateStore:
                     existing_item = self._qt_active_item_from_row(row)
                     if self._text(existing_item.get("active_item_id")) == active_item_id:
                         continue
-                    if probe_keys and (probe_keys & self._qt_active_identity_keys(existing_item)):
+                    if (
+                        probe_keys
+                        and (probe_keys & self._qt_active_identity_keys(existing_item))
+                        and not self._qt_active_identity_conflicts(
+                            existing_item, probe_item
+                        )
+                    ):
                         active_item_id = self._text(existing_item.get("active_item_id")) or active_item_id
                         normalized["active_item_id"] = active_item_id
                         break
@@ -3432,7 +3503,13 @@ class LanPortalStateStore:
                     duplicate_active_item_id = self._text(existing_item.get("active_item_id"))
                     if not duplicate_active_item_id or duplicate_active_item_id == active_item_id:
                         continue
-                    if probe_keys and (probe_keys & self._qt_active_identity_keys(existing_item)):
+                    if (
+                        probe_keys
+                        and (probe_keys & self._qt_active_identity_keys(existing_item))
+                        and not self._qt_active_identity_conflicts(
+                            existing_item, probe_item
+                        )
+                    ):
                         conn.execute(
                             """
                             UPDATE qt_active_items

@@ -3145,15 +3145,17 @@ class PortalRuntime:
                 text=str(prepared.get("text") or ""),
                 level=level,
             )
+        buildings = [
+            str(item or "").strip()
+            for item in (prepared.get("buildings") or [])
+            if str(item or "").strip()
+        ]
+        if not buildings and str(prepared.get("building") or "").strip():
+            buildings = [str(prepared.get("building") or "").strip()]
         return NoticePayload(
             text=str(prepared.get("text") or ""),
             level=level or None,
-            buildings=[
-                str(item or "").strip()
-                for item in (prepared.get("buildings") or [])
-                if str(item or "").strip()
-            ]
-            or None,
+            buildings=buildings or None,
             specialty=str(prepared.get("specialty") or "").strip() or None,
             event_source=str(prepared.get("event_source") or "").strip() or None,
             response_time=str(prepared.get("response_time") or "").strip() or None,
@@ -3926,6 +3928,88 @@ class PortalRuntime:
                 error=str(result or "多维更新失败。"),
             )
         return bool(ok), str(result or ""), record_id
+
+    @classmethod
+    def _execute_paired_maintenance_upload(
+        cls, prepared: dict
+    ) -> tuple[bool, str, str]:
+        prepared = prepared if isinstance(prepared, dict) else {}
+        if not prepared.get("sync_maintenance_target"):
+            return True, "未开启维保多维同步。", ""
+        paired = prepared.get("paired_maintenance_upload")
+        if not isinstance(paired, dict) or not paired:
+            return True, "没有需要同步的维保多维。", ""
+        paired = dict(paired)
+        action = str(paired.get("action") or "").strip().lower()
+        if action not in {"start", "update", "end"}:
+            return False, "维保多维同步动作无效。", ""
+        target_record_id = str(
+            paired.get("target_record_id")
+            or prepared.get("paired_maintenance_target_record_id")
+            or ""
+        ).strip()
+        paired["target_record_id"] = target_record_id
+        if action == "start":
+            return cls._execute_backend_prepared_upload(paired)
+        if target_record_id:
+            ok_existing, message_existing, record_existing = (
+                cls._execute_backend_prepared_upload(paired)
+            )
+            if ok_existing or not cls._remote_record_not_found(message_existing):
+                return ok_existing, message_existing, record_existing
+
+        actual_start_time = str(
+            paired.get("paired_maintenance_actual_start_time")
+            or prepared.get("paired_maintenance_actual_start_time")
+            or paired.get("response_time")
+            or ""
+        ).strip()
+        create_prepared = {
+            **paired,
+            "action": "start",
+            "target_record_id": "",
+            "record_id": str(paired.get("source_record_id") or paired.get("record_id") or ""),
+            "response_time": actual_start_time or str(paired.get("response_time") or ""),
+        }
+        ok, message, created_record_id = cls._execute_backend_prepared_upload(create_prepared)
+        if not ok:
+            return ok, message, created_record_id
+        if action != "end":
+            return True, message, created_record_id
+
+        end_prepared = {
+            **paired,
+            "action": "end",
+            "target_record_id": created_record_id,
+            "record_id": created_record_id,
+        }
+        ok_end, message_end, end_record_id = cls._execute_backend_prepared_upload(end_prepared)
+        return ok_end, message_end, end_record_id or created_record_id
+
+    @classmethod
+    def _apply_paired_maintenance_upload_result(
+        cls,
+        prepared: dict,
+        *,
+        success: bool,
+        message: str,
+        record_id: str,
+    ) -> dict:
+        prepared = dict(prepared or {})
+        paired = prepared.get("paired_maintenance_upload")
+        if isinstance(paired, dict):
+            paired = dict(paired)
+            if record_id:
+                paired["target_record_id"] = record_id
+            prepared["paired_maintenance_upload"] = paired
+        if record_id:
+            prepared["paired_maintenance_target_record_id"] = record_id
+        prepared["paired_upload_status"] = "success" if success else "failed"
+        if success:
+            prepared["paired_upload_warning"] = ""
+        else:
+            prepared["paired_upload_warning"] = str(message or "维保多维同步失败。")
+        return prepared
 
     @classmethod
     def confirm_change_target_candidate(
@@ -4705,10 +4789,36 @@ class PortalRuntime:
                 except Exception:
                     pass
                 return
+            paired_warning = ""
+            if prepared.get("sync_maintenance_target"):
+                paired_ok, paired_message, paired_record_id = (
+                    cls._execute_paired_maintenance_upload(prepared)
+                )
+                prepared = cls._apply_paired_maintenance_upload_result(
+                    prepared,
+                    success=paired_ok,
+                    message=paired_message,
+                    record_id=paired_record_id,
+                )
+                if not paired_ok:
+                    paired_warning = f"维保多维同步失败：{paired_message}"
+            cls.service.mark_job(
+                job_id,
+                prepared=prepared,
+                paired_upload_status=str(prepared.get("paired_upload_status") or ""),
+                paired_upload_warning=str(prepared.get("paired_upload_warning") or ""),
+                paired_maintenance_target_record_id=str(
+                    prepared.get("paired_maintenance_target_record_id") or ""
+                ),
+            )
             cls.service.mark_action_upload_result(
                 job_id,
                 success=True,
-                message=result_message,
+                message=(
+                    f"{result_message}；{paired_warning}"
+                    if paired_warning
+                    else result_message
+                ),
                 record_id=str(remote_record_id or ""),
                 active_item_id=str(prepared.get("active_item_id") or ""),
             )

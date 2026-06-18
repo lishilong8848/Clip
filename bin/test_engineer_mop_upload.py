@@ -262,6 +262,69 @@ class EngineerMopUploadTests(unittest.TestCase):
 
             self.assertEqual(base_url, "http://192.168.224.130:18766")
 
+    def test_signature_open_id_detection_accepts_nested_and_text_values(self):
+        self.assertEqual(
+            MaintenancePortalService._signature_open_id_from_any(
+                {"user_id": "ou_nested_user_id"}
+            ),
+            "ou_nested_user_id",
+        )
+        self.assertEqual(
+            MaintenancePortalService._signature_open_id_from_any(
+                "人员 openid: ou_text_field"
+            ),
+            "ou_text_field",
+        )
+
+    def test_mop_signature_fields_use_cell_right_of_merged_label(self):
+        targets = MaintenancePortalService._extract_mop_sheet_targets(
+            sheet_name="Sheet1",
+            rows=[["维护实施人：", "", "", "维护审核人：", "", ""]],
+            merges=[
+                {"row": 0, "col": 0, "rowspan": 1, "colspan": 2},
+                {"row": 0, "col": 3, "rowspan": 1, "colspan": 2},
+            ],
+        )
+        fields = {
+            item["label"]: item
+            for item in targets["maintenance_fields"]
+            if item["label"] in {"维护实施人", "维护审核人"}
+        }
+
+        self.assertEqual(fields["维护实施人"]["value_col"], 2)
+        self.assertEqual(fields["维护实施人"]["value_cell_ref"], "C1")
+        self.assertEqual(fields["维护审核人"]["value_col"], 5)
+        self.assertEqual(fields["维护审核人"]["value_cell_ref"], "F1")
+
+    def test_mop_preview_column_count_includes_empty_signature_target(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = FakeMopUploadService(tmpdir)
+            try:
+                from openpyxl import Workbook
+            except Exception as exc:
+                self.skipTest(f"openpyxl unavailable: {exc}")
+
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.title = "MOP"
+            sheet.merge_cells("A1:B1")
+            sheet.merge_cells("D1:E1")
+            sheet["A1"] = "维护实施人："
+            sheet["D1"] = "维护审核人："
+            path = Path(tmpdir) / "mop.xlsx"
+            workbook.save(path)
+
+            parsed = service._parse_xlsx_preview(path.read_bytes())
+            sheet_data = parsed["sheets"][0]
+            self.assertGreaterEqual(sheet_data["column_count"], 6)
+            fields = {
+                item["label"]: item
+                for item in sheet_data["maintenance_fields"]
+                if item["label"] in {"维护实施人", "维护审核人"}
+            }
+            self.assertEqual(fields["维护实施人"]["value_cell_ref"], "C1")
+            self.assertEqual(fields["维护审核人"]["value_cell_ref"], "F1")
+
     def test_engineer_mop_bootstrap_includes_current_month_source_records_first(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             service = FakeMopUploadService(tmpdir)

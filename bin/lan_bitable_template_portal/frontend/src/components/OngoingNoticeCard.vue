@@ -151,6 +151,14 @@
                 <option v-for="cycle in maintenanceCycleOptions" :key="cycle" :value="cycle">{{ cycle }}</option>
               </select>
             </label>
+            <label v-if="syncMaintenanceVisible" class="checkbox-field span-2">
+              <input
+                :checked="draft.sync_maintenance_target !== false"
+                type="checkbox"
+                @change="setEdit('sync_maintenance_target', ($event.target as HTMLInputElement).checked)"
+              />
+              <span>同时上传维保多维（只同步维保目标表，不发送维保通告）</span>
+            </label>
             <div v-if="isNoticeUploadField(workType, 'zhihang')" class="zhihang-line span-2">
               <label>
                 <input
@@ -269,6 +277,7 @@ const props = defineProps<{
   sitePhotoRequired: boolean;
   maintenanceCycleOptions: string[];
   zhihangRecords: Dict[];
+  syncMaintenanceVisible: boolean;
   jobText: (key: string) => string;
   jobClass: (key: string) => string;
   copyText: string;

@@ -10,6 +10,8 @@ if str(BIN_DIR) not in sys.path:
 
 from upload_event_module.ui.main_window_runtime import MainWindowRuntimeMixin  # noqa: E402
 from upload_event_module.ui.main_window_clipboard import MainWindowClipboardMixin  # noqa: E402
+from clipflow_backend.main import FastAPIPortalController  # noqa: E402
+from lan_bitable_template_portal.server import PortalRuntime  # noqa: E402
 from lan_bitable_template_portal.state_store import LanPortalStateStore  # noqa: E402
 
 
@@ -107,6 +109,170 @@ class _ClipboardHarness(MainWindowClipboardMixin):
 
 
 class QtShellBackendEventTests(unittest.TestCase):
+    def test_notice_text_projection_covers_all_non_event_work_types(self):
+        cases = [
+            (
+                "maintenance",
+                (
+                    "【维保通告】状态：开始\n"
+                    "【名称】EA118机房B楼过滤网维护\n"
+                    "【时间】2026-06-18 09:00~2026-06-18 18:00\n"
+                    "【位置】B楼空调间\n"
+                    "【内容】更换过滤网\n"
+                    "【原因】周期维保\n"
+                    "【影响】无影响\n"
+                    "【进度】准备完成"
+                ),
+                {"location": "B楼空调间", "content": "更换过滤网", "reason": "周期维保", "impact": "无影响", "progress": "准备完成"},
+            ),
+            (
+                "repair",
+                (
+                    "【设备检修】状态：更新\n"
+                    "【标题】EA118_C01机房D楼直流屏系统总故障告警检修\n"
+                    "【地点】D-178配电室\n"
+                    "【紧急程度】低\n"
+                    "【专业】电气\n"
+                    "【发现故障时间】2026-06-18 10:44\n"
+                    "【期望完成时间】2026-06-18 23:50\n"
+                    "【维修设备】D-178-AD001\n"
+                    "【维修故障】直流屏系统总故障\n"
+                    "【故障类型】设备故障\n"
+                    "【维修方式】自维\n"
+                    "【影响范围】无影响\n"
+                    "【故障发现方式】告警发现\n"
+                    "【故障现象】系统总故障\n"
+                    "【故障原因】BMS告警\n"
+                    "【解决方案】检查直流屏\n"
+                    "【备件更换情况】无\n"
+                    "【完成情况】处理中"
+                ),
+                {"location": "D-178配电室", "repair_device": "D-178-AD001", "fault_type": "设备故障", "repair_mode": "自维", "discovery": "告警发现", "symptom": "系统总故障", "progress": "处理中"},
+            ),
+            (
+                "power",
+                (
+                    "【上电通告】状态：开始\n"
+                    "【名称】EA118机房E楼设备上电通告\n"
+                    "【时间】2026-06-18 09:00~2026-06-18 18:00\n"
+                    "【柜号】E-201 B01\n"
+                    "【数量】2个\n"
+                    "【进度】准备上电"
+                ),
+                {"cabinet": "E-201 B01", "quantity": "2个", "progress": "准备上电"},
+            ),
+            (
+                "polling",
+                (
+                    "【设备轮巡】状态：开始\n"
+                    "【标题】EA118机房C楼制冷单元轮巡通告\n"
+                    "【时间】2026-06-18 09:00~2026-06-18 18:00\n"
+                    "【设备】C-127制冷单元\n"
+                    "【内容】3号轮巡至2号运行\n"
+                    "【影响】无影响\n"
+                    "【进度】准备完成"
+                ),
+                {"device": "C-127制冷单元", "content": "3号轮巡至2号运行", "impact": "无影响", "progress": "准备完成"},
+            ),
+            (
+                "adjust",
+                (
+                    "【设备调整】状态：开始\n"
+                    "【名称】EA118机房H楼空调调整通告\n"
+                    "【时间】2026-06-18 09:00~2026-06-18 18:00\n"
+                    "【位置】H-440空调间\n"
+                    "【内容】调整空调参数\n"
+                    "【原因】环境优化\n"
+                    "【影响】无影响\n"
+                    "【进度】准备完成"
+                ),
+                {"location": "H-440空调间", "content": "调整空调参数", "reason": "环境优化", "impact": "无影响", "progress": "准备完成"},
+            ),
+        ]
+        for work_type, text, expected in cases:
+            with self.subTest(work_type=work_type):
+                fields = FastAPIPortalController._projected_notice_fields_from_text(text)
+                self.assertEqual(fields["work_type"], work_type)
+                for key, value in expected.items():
+                    self.assertEqual(fields.get(key), value)
+
+    def test_clipboard_projection_keeps_full_change_fields_and_normalizes_heading(self):
+        text = (
+            "【变更通告】状态：开始\n"
+            "【名称】EA118机房A楼蓄电池测试变更\n"
+            "【等级】I3\n"
+            "【时间】2026-06-18 09:00~2026-06-18 18:00\n"
+            "【位置】A-245配电室\n"
+            "【内容】工程师对蓄电池进行测试\n"
+            "【原因】容量测试\n"
+            "【影响】对IT业务无影响\n"
+            "【进度】准备工作已完成"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            original_store = PortalRuntime.state_store
+            PortalRuntime.state_store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            try:
+                entry = FastAPIPortalController._clipboard_entry_from_content(text)
+                self.assertIsNotNone(entry)
+                result = FastAPIPortalController._project_clipboard_entry_to_active(entry or {})
+                payload = result["item"]["payload"]
+                self.assertEqual(payload["notice_type"], "变更通告")
+                self.assertEqual(payload["work_type"], "change")
+                self.assertEqual(payload["location"], "A-245配电室")
+                self.assertEqual(payload["content"], "工程师对蓄电池进行测试")
+                self.assertEqual(payload["reason"], "容量测试")
+                self.assertEqual(payload["impact"], "对IT业务无影响")
+                self.assertEqual(payload["progress"], "准备工作已完成")
+                self.assertEqual(payload["start_time"], "2026-06-18 09:00")
+                self.assertEqual(payload["end_time"], "2026-06-18 18:00")
+
+                ongoing = FastAPIPortalController._get_ongoing("A")
+                self.assertEqual(len(ongoing), 1)
+                self.assertEqual(ongoing[0]["location"], "A-245配电室")
+                self.assertEqual(ongoing[0]["content"], "工程师对蓄电池进行测试")
+                self.assertEqual(ongoing[0]["impact"], "对IT业务无影响")
+                self.assertEqual(ongoing[0]["progress"], "准备工作已完成")
+            finally:
+                PortalRuntime.state_store = original_store
+
+    def test_sparse_qt_active_payload_is_backfilled_from_notice_text(self):
+        text = (
+            "【设备变更】状态：开始\n"
+            "【名称】EA118机房A楼冷源设备变更\n"
+            "【时间】2026-06-18 09:00~2026-06-18 18:00\n"
+            "【位置】A-127冷站\n"
+            "【内容】调整冷源设备\n"
+            "【原因】运行优化\n"
+            "【影响】无业务影响\n"
+            "【进度】执行中"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            original_store = PortalRuntime.state_store
+            PortalRuntime.state_store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            try:
+                PortalRuntime.state_store.upsert_qt_active_item(
+                    {
+                        "active_item_id": "sparse-change-1",
+                        "record_id": "local_sparse-change-1",
+                        "notice_type": "设备变更",
+                        "work_type": "change",
+                        "title": "EA118机房A楼冷源设备变更",
+                        "text": text,
+                    },
+                    origin="clipboard",
+                )
+                ongoing = FastAPIPortalController._get_ongoing("A")
+                self.assertEqual(len(ongoing), 1)
+                item = ongoing[0]
+                self.assertEqual(item["notice_type"], "变更通告")
+                self.assertEqual(item["location"], "A-127冷站")
+                self.assertEqual(item["content"], "调整冷源设备")
+                self.assertEqual(item["reason"], "运行优化")
+                self.assertEqual(item["impact"], "无业务影响")
+                self.assertEqual(item["progress"], "执行中")
+            finally:
+                PortalRuntime.state_store = original_store
+
     def test_bootstrap_clipboard_candidates_are_acknowledged_not_reprojected(self):
         harness = _Harness()
 

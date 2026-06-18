@@ -4,8 +4,8 @@ from ..utils import WHITESPACE_TRANSLATOR
 # 通告类型常量
 
 NOTICE_TYPE_WEIBAO = "维保通告"  # 维保通告
-NOTICE_TYPE_BIANGENG = "设备变更"  # 设备变更
-NOTICE_TYPE_BIANGENG_LEGACY = "变更通告"  # 用户可见变更通告标记，内部仍归一为设备变更
+NOTICE_TYPE_BIANGENG = "变更通告"  # 变更通告（用户可见 canonical 标题）
+NOTICE_TYPE_BIANGENG_LEGACY = "设备变更"  # 历史标题，仅作为兼容输入
 NOTICE_TYPE_TIAOZHENG = "设备调整"  # 设备调整
 NOTICE_TYPE_SHIJIAN = "事件通告"  # 事件通告
 NOTICE_TYPE_POWER = "上下电通告"  # 上下电通告
@@ -40,7 +40,7 @@ PATTERN_TITLE = re.compile(r"【名称】(.*?)(?:【|$)", re.DOTALL)
 PATTERN_TITLE_ALT = re.compile(r"【标题】(.*?)(?:【|$)", re.DOTALL)  # 事件通告使用【标题】
 PATTERN_TIME = re.compile(r"【时间】(.*?)(?:【|$)", re.DOTALL)
 PATTERN_LOCATION = re.compile(r"【位置】(.*?)(?:【|$)", re.DOTALL)
-PATTERN_LEVEL = re.compile(r"【等级】(.*?)(?:【|$)", re.DOTALL)  # 设备变更特有
+PATTERN_LEVEL = re.compile(r"【等级】(.*?)(?:【|$)", re.DOTALL)  # 变更通告特有
 PATTERN_REASON = re.compile(r"【(?:原因|故障原因|故障维修原因)】(.*?)(?:【|$)", re.DOTALL)
 
 
@@ -80,7 +80,7 @@ def _prepare_notice_text(content: str) -> str:
 
 def extract_notice_info(content):
     """
-    从文本中提取通告信息（支持维保通告、设备变更、设备调整）
+    从文本中提取通告信息（支持维保通告、变更通告、设备调整）
     :param content: 文本内容
     :return: dict (notice_type, status, unique_key, title, content) or None
     """
@@ -133,7 +133,7 @@ def extract_notice_info(content):
     else:
         unique_key = f"{title}|{time_str}"
 
-    # 提取等级（仅设备变更）
+    # 提取等级（仅变更通告）
     level = None
     if notice_type == NOTICE_TYPE_BIANGENG:
         level_match = PATTERN_LEVEL.search(raw_content)

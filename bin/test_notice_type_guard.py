@@ -164,7 +164,7 @@ class NoticeTypeGuardTests(unittest.TestCase):
                     "manual": True,
                     "scope": "C",
                     "action": "update",
-                    "notice_type": "设备变更",
+                    "notice_type": "变更通告",
                     "target_record_id": "rec-change-1",
                     "title": "EA118机房C楼蓄电池放电变更通告",
                     "operation_id": "legacy-change-update:update",
@@ -172,7 +172,7 @@ class NoticeTypeGuardTests(unittest.TestCase):
             )
             job = service.get_job(job_id)
             self.assertEqual(job["request"]["work_type"], "change")
-            self.assertEqual(job["request"]["notice_type"], "设备变更")
+            self.assertEqual(job["request"]["notice_type"], "变更通告")
             self.assertEqual(job["target_key"], "change:target:rec-change-1")
 
     def test_manual_notice_type_guard_rejects_cross_type_keywords_for_all_types(self):

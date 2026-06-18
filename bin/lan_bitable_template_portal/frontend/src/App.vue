@@ -371,6 +371,7 @@
               :type-override-visible="canToggleWorkTypeOverride(row.record)"
               :type-override-busy="typeOverrideBusyKey === row.key"
               :type-override-label="workTypeOverrideButtonLabel(row.record)"
+              :sync-maintenance-visible="isConvertedMaintenanceChange(row.record, row.draft)"
               :send-label="sendDraftButtonLabel(row.record, row.draft)"
               :field-class="(field) => draftFieldClass(row.record, row.draft, field)"
               :job-text="jobText"
@@ -418,6 +419,7 @@
               :site-photo-required="ongoingEndRequiresSitePhoto(item)"
               :maintenance-cycle-options="maintenanceCycleOptions"
               :zhihang-records="zhihangRecords"
+              :sync-maintenance-visible="sourceWorkTypeForRecord(item) === 'maintenance' && String(item.work_type || '') === 'change'"
               :job-text="jobText"
               :job-class="jobClass"
               :copy-text="jobCopyText(ongoingLineKey(item), ongoingNoticePreviewText(item))"
@@ -1027,12 +1029,21 @@ function repairDeviceText(record: Dict): string {
 }
 
 function titleForRecord(record: Dict): string {
-  if (record.manual) return fieldsOf(record)["手动标题"] || record.title || `手动${workTypeLabel(record.work_type)}通告`;
+  if (record.manual) {
+    return normalize110StationNoticeTitle(
+      fieldsOf(record)["手动标题"] || record.title || `手动${workTypeLabel(record.work_type)}通告`,
+      buildingForRecord(record),
+      record.building_codes || [],
+    );
+  }
   const f = fieldsOf(record);
   const type = record.work_type || "maintenance";
-  if (type === "change") return f["变更简述"] || record.title || record.record_id;
-  if (type === "repair") return record.title || f["检修通告名称"] || f["维修名称"] || record.record_id;
-  return `EA118机房${f["楼栋"] || ""}${f["维护总项"] || ""}`;
+  const rawTitle = type === "change"
+    ? (f["变更简述"] || record.title || record.record_id)
+    : type === "repair"
+      ? (record.title || f["检修通告名称"] || f["维修名称"] || record.record_id)
+      : `EA118机房${f["楼栋"] || ""}${f["维护总项"] || ""}`;
+  return normalize110StationNoticeTitle(rawTitle, buildingForRecord(record), record.building_codes || []);
 }
 
 function recordCardTitle(record: Dict): string {
@@ -1067,7 +1078,21 @@ function manualDraftTitle(draft: Dict, type: string): string {
   const title = type === "repair"
     ? combineTitleSupplement(baseTitle, supplement)
     : (baseTitle || supplement);
-  return type === "maintenance" ? appendNonPlanTitleSuffix(title, Boolean(draft.non_plan)) : title;
+  const titled = type === "maintenance" ? appendNonPlanTitleSuffix(title, Boolean(draft.non_plan)) : title;
+  return normalize110StationNoticeTitle(titled, draft.building || "", draft.building_codes || []);
+}
+
+function normalize110StationNoticeTitle(title: string, building = "", buildingCodes: unknown[] = []): string {
+  const value = String(title || "").trim();
+  if (!value) return value;
+  const targetPrefix = "EA118-110KV阿里中天变";
+  if (value.startsWith(targetPrefix)) return value;
+  const codes = new Set((Array.isArray(buildingCodes) ? buildingCodes : []).map((code) => String(code || "").trim().toUpperCase()).filter(Boolean));
+  const looksLike110 = codes.has("110")
+    || String(building || "").includes("110站")
+    || /^EA118\s*(?:机房)?\s*[-－]?\s*110\s*(?:站|KV)?/i.test(value);
+  if (!looksLike110) return value;
+  return value.replace(/^EA118\s*(?:机房)?\s*[-－]?\s*110\s*(?:站|KV)?\s*/i, targetPrefix).trim() || value;
 }
 
 function combineTitleSupplement(title: string, supplement: string): string {
@@ -1181,6 +1206,19 @@ function canToggleWorkTypeOverride(record: Dict): boolean {
   return sourceType === "maintenance" && (displayType === "maintenance" || displayType === "change");
 }
 
+function isConvertedMaintenanceChange(record: Dict, draft?: Dict): boolean {
+  const displayType = draft ? draftWorkType(record, draft) : String(record?.work_type || "maintenance");
+  return sourceWorkTypeForRecord(record) === "maintenance" && displayType === "change";
+}
+
+function syncMaintenanceTargetValue(record: Dict, draft: Dict): boolean {
+  if (!isConvertedMaintenanceChange(record, draft)) return false;
+  if (Object.prototype.hasOwnProperty.call(draft, "sync_maintenance_target")) {
+    return draft.sync_maintenance_target !== false;
+  }
+  return true;
+}
+
 function targetOverrideWorkType(record: Dict): string {
   return String(record.work_type || "maintenance") === "change" && sourceWorkTypeForRecord(record) === "maintenance"
     ? "maintenance"
@@ -1264,6 +1302,46 @@ function ongoingCompletenessScore(item: Dict): number {
   return score;
 }
 
+function ongoingIdentityConflicts(existing: Dict, incoming: Dict): boolean {
+  const existingWorkType = String(existing.work_type || existing.lan_work_type || "").trim();
+  const incomingWorkType = String(incoming.work_type || incoming.lan_work_type || "").trim();
+  if (existingWorkType && incomingWorkType && existingWorkType !== incomingWorkType) return true;
+  const existingNoticeType = String(existing.notice_type || "").trim();
+  const incomingNoticeType = String(incoming.notice_type || "").trim();
+  if (existingNoticeType && incomingNoticeType && existingNoticeType !== incomingNoticeType) return true;
+  const existingActive = String(existing.active_item_id || "").trim();
+  const incomingActive = String(incoming.active_item_id || "").trim();
+  if (existingActive && incomingActive && existingActive === incomingActive) return false;
+  const existingSignature = ongoingExactDuplicateSignature(existing);
+  if (existingSignature && existingSignature === ongoingExactDuplicateSignature(incoming)) return false;
+  const existingTarget = targetRecordIdForOngoing(existing);
+  const incomingTarget = targetRecordIdForOngoing(incoming);
+  if (existingTarget && incomingTarget) return existingTarget !== incomingTarget;
+  const existingSource = String(existing.source_record_id || "").trim();
+  const incomingSource = String(incoming.source_record_id || "").trim();
+  if (existingSource && incomingSource) return existingSource !== incomingSource;
+  if (existingActive && incomingActive) return existingActive !== incomingActive;
+  return false;
+}
+
+function ongoingExactDuplicateSignature(item: Dict): string {
+  const title = normalizeDraftSignatureText(String(item.title || item.content || item.name || ""));
+  if (!title) return "";
+  const fields = fieldsOf(item);
+  return [
+    String(item.work_type || item.lan_work_type || "").trim(),
+    String(item.notice_type || "").trim(),
+    title,
+    normalizeDraftSignatureText(String(item.building || "")),
+    normalizeDraftSignatureText(String(item.maintenance_cycle || fields["维护周期"] || "")),
+    ongoingBusinessTimeKey(item),
+    normalizeDraftSignatureText(String(item.location || "")),
+    normalizeDraftSignatureText(String(item.content || "")),
+    normalizeDraftSignatureText(String(item.reason || "")),
+    normalizeDraftSignatureText(String(item.impact || "")),
+  ].join("|");
+}
+
 function mergeOngoingItem(existing: Dict, incoming: Dict): Dict {
   const primary = ongoingCompletenessScore(incoming) >= ongoingCompletenessScore(existing) ? incoming : existing;
   const supplement = primary === incoming ? existing : incoming;
@@ -1287,7 +1365,7 @@ function dedupeOngoingItems(items: Dict[]): Dict[] {
     let matchIndex = -1;
     for (const key of keys) {
       const index = indexByKey.get(key);
-      if (index !== undefined) {
+      if (index !== undefined && !ongoingIdentityConflicts(result[index], item)) {
         matchIndex = index;
         break;
       }
@@ -1456,7 +1534,7 @@ function manualRecordFromDraft(key: string, draft: Dict): Dict {
   const title = manualDraftTitle(draft, type);
   const noticeTypeMap: Record<string, string> = {
     maintenance: "维保通告",
-    change: "设备变更",
+    change: "变更通告",
     repair: "设备检修",
     power: draft.notice_type === "下电通告" ? "下电通告" : "上电通告",
     polling: "设备轮巡",
@@ -1569,6 +1647,10 @@ function getDraft(record: Dict): Dict {
         reason: memory.reason || "",
         impact: memory.impact || defaults.impact,
         progress: memory.progress || defaults.progress,
+        sync_maintenance_target: sourceWorkTypeForRecord(record) === "maintenance" && isChange,
+        paired_maintenance_target_record_id: record.paired_maintenance_target_record_id || "",
+        paired_maintenance_original_title: record.paired_maintenance_original_title || titleForRecord(record),
+        paired_maintenance_actual_start_time: record.paired_maintenance_actual_start_time || "",
         zhihang_involved: Boolean(zhihangMemory.zhihang_involved),
         zhihang_record_id: zhihangMemory.zhihang_record_id || "",
         zhihang_title: zhihangMemory.zhihang_title || "",
@@ -2416,6 +2498,10 @@ function draftUploadPreviewRows(record: Dict, draft: Dict): Array<{ label: strin
   if (type === "change") {
     rows.push({ label: "变更等级", value: draft.level || levelForRecord(record) || "I3" });
     rows.push({ label: "涉及智航", value: draft.zhihang_involved ? (draft.zhihang_title || "是") : "" });
+    if (isConvertedMaintenanceChange(record, draft)) {
+      rows.push({ label: "同步维保多维", value: syncMaintenanceTargetValue(record, draft) ? "是" : "否" });
+      rows.push({ label: "维保原名称", value: draft.paired_maintenance_original_title || titleForRecord(record) });
+    }
   }
   if (type === "repair") {
     rows.push({ label: "紧急程度", value: draft.level || "" });
@@ -2989,6 +3075,7 @@ function buildStartPayload(key: string): Dict | null {
   if (record.manual && draft.work_type !== type) draft.work_type = type;
   const action = record.manual ? draftActionForRecord(record, draft) : sourceActionForRecord(record);
   const targetRecordId = record.manual ? String(draft.target_record_id || draft.feishu_record_id || draft.raw_record_id || "").trim() : targetRecordIdForRecord(record);
+  const syncMaintenanceTarget = syncMaintenanceTargetValue(record, draft);
   return {
     action,
     scope: currentScope.value || "ALL",
@@ -3004,6 +3091,10 @@ function buildStartPayload(key: string): Dict | null {
     source_record_id: record.manual ? (draft.source_record_id || "") : record.record_id,
     source_work_type: record.manual ? (draft.source_work_type || type) : sourceWorkTypeForRecord(record),
     converted_from_work_type: record.manual ? (draft.converted_from_work_type || "") : (record.converted_from_work_type || ""),
+    sync_maintenance_target: syncMaintenanceTarget,
+    paired_maintenance_target_record_id: syncMaintenanceTarget ? (draft.paired_maintenance_target_record_id || record.paired_maintenance_target_record_id || "") : "",
+    paired_maintenance_original_title: syncMaintenanceTarget ? (draft.paired_maintenance_original_title || titleForRecord(record)) : "",
+    paired_maintenance_actual_start_time: syncMaintenanceTarget ? (draft.paired_maintenance_actual_start_time || record.paired_maintenance_actual_start_time || "") : "",
     target_record_id: action !== "start" ? targetRecordId : "",
     source_progress: sourceProgressForRecord(record),
     building_codes: record.manual ? (draft.building_codes || []) : (record.building_codes || []),
@@ -3138,6 +3229,10 @@ function ongoingDraft(item: Dict): Dict {
       extra_images: Array.isArray(item.extra_images) ? [...item.extra_images] : [],
       target_record_id: targetRecordIdForOngoing(item),
       source_record_id: sourceRecordIdForOngoing(item, targetRecordIdForOngoing(item)),
+      sync_maintenance_target: Boolean(item.sync_maintenance_target),
+      paired_maintenance_target_record_id: item.paired_maintenance_target_record_id || "",
+      paired_maintenance_original_title: item.paired_maintenance_original_title || item.title || "",
+      paired_maintenance_actual_start_time: item.paired_maintenance_actual_start_time || "",
     });
   }
   return ongoingEdits.get(id) || {};
@@ -3330,6 +3425,9 @@ function buildOngoingPayload(item: Dict, action: string): Dict {
   const simpleManual = ["power", "polling", "adjust"].includes(workType);
   const startTime = draftValue(edit, "start_time", ongoingTimeRange(item).start);
   const endTime = draftValue(edit, "end_time", ongoingTimeRange(item).end);
+  const syncMaintenanceTarget = sourceWorkTypeForRecord(item) === "maintenance"
+    && workType === "change"
+    && edit.sync_maintenance_target !== false;
   return {
     action,
     scope: currentScope.value || "ALL",
@@ -3343,6 +3441,10 @@ function buildOngoingPayload(item: Dict, action: string): Dict {
     source_record_id: sourceRecordId,
     source_work_type: String(item.source_work_type || item.converted_from_work_type || workType),
     converted_from_work_type: String(item.converted_from_work_type || ""),
+    sync_maintenance_target: syncMaintenanceTarget,
+    paired_maintenance_target_record_id: syncMaintenanceTarget ? draftValue(edit, "paired_maintenance_target_record_id", item.paired_maintenance_target_record_id || "") : "",
+    paired_maintenance_original_title: syncMaintenanceTarget ? draftValue(edit, "paired_maintenance_original_title", item.paired_maintenance_original_title || item.title || "") : "",
+    paired_maintenance_actual_start_time: syncMaintenanceTarget ? draftValue(edit, "paired_maintenance_actual_start_time", item.paired_maintenance_actual_start_time || "") : "",
     title: draftValue(edit, "title", item.title || item.content || ""),
     specialty: cleanDisplayText(draftValue(edit, "specialty", item.specialty || "")),
     building: item.building || "",

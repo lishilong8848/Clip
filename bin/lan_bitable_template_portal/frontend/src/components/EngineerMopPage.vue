@@ -223,19 +223,31 @@
                         <span v-else class="signature-chip-state">待签名</span>
                         <div>
                           <strong>{{ person.name || person.display_name || '未命名' }}</strong>
-                          <small>{{ person.source === 'temporary' ? '其他人员 · 临时' : (person.source === 'external' ? '其他人员 · 已保存' : (person.open_id ? '正式人员' : '缺少 openid')) }}</small>
+                          <small>{{ person.source === 'temporary' ? '其他人员 · 临时' : (person.source === 'external' ? '其他人员 · 已保存' : '正式人员') }}</small>
                         </div>
-                        <button
-                          v-if="!person.source || person.source === 'staff'"
-                          class="drawer-action"
-                          type="button"
-                          :disabled="Boolean(signatureLinkSendingById[person.record_id]) || !person.open_id"
-                          :title="personSignatureLinkTitle(person)"
-                          @click.stop="sendSignatureLinkForPerson(person, personHasUsableSignature(person))"
-                        >
-                          {{ signatureLinkSendingById[person.record_id] ? "发送中" : (personHasUsableSignature(person) ? "重新签名" : "发送") }}
-                        </button>
-                        <button class="drawer-remove" type="button" @click.stop="removeSignaturePerson(signatureRole, signaturePersonKey(person))">移除</button>
+                        <div class="drawer-actions">
+                          <button
+                            v-if="!person.source || person.source === 'staff'"
+                            class="drawer-action"
+                            type="button"
+                            :disabled="!person.record_id"
+                            :title="person.record_id ? '在当前网页手写并保存到该人员签名库' : '该人员记录缺少 ID，无法手写'"
+                            @click.stop="openSignaturePadForPerson(person)"
+                          >
+                            {{ personHasUsableSignature(person) ? "网页重签" : "网页手写" }}
+                          </button>
+                          <button
+                            v-if="!person.source || person.source === 'staff'"
+                            class="drawer-action link-action"
+                            type="button"
+                            :disabled="Boolean(signatureLinkSendingById[person.record_id]) || !person.record_id"
+                            :title="personSignatureLinkTitle(person)"
+                            @click.stop="sendSignatureLinkForPerson(person, personHasUsableSignature(person))"
+                          >
+                            {{ signatureLinkSendingById[person.record_id] ? "发送中" : (personHasUsableSignature(person) ? "重发链接" : "发链接") }}
+                          </button>
+                          <button class="drawer-remove" type="button" @click.stop="removeSignaturePerson(signatureRole, signaturePersonKey(person))">移除</button>
+                        </div>
                       </article>
                     </div>
                   </div>
@@ -341,33 +353,32 @@
                   </button>
                 </div>
               </section>
-              <div class="mop-sign-canvas" :class="{ disabled: !activeSignaturePerson }">
-                <button
-                  v-if="activeSignaturePerson"
-                  class="sign-clear-inline"
-                  type="button"
-                  :disabled="signatureSaving"
-                  @click="clearSignatureCanvas"
-                >
-                  清空
-                </button>
+              <div class="signature-launch-card" :class="{ disabled: !activeSignaturePerson }">
+                <div>
+                  <strong>{{ activeSignaturePerson ? signaturePersonDisplayName(activeSignaturePerson) : "请选择签名人员" }}</strong>
+                  <small>
+                    <template v-if="activeSignaturePerson">
+                      {{ personHasUsableSignature(activeSignaturePerson) ? "已有签名，可重新手写覆盖。" : "点击按钮打开大签名区手写。" }}
+                    </template>
+                    <template v-else>先在左侧选择维护实施人或维护审核人。</template>
+                  </small>
+                  <small v-if="selectedFormalSignaturePeople(signatureRole).length > 1">多人未签时，可点“查看全部”后对指定人员逐个网页手写。</small>
+                </div>
                 <img
-                  v-if="personHasUsableSignature(activeSignaturePerson) && !signatureHasInk"
-                  class="mop-sign-preview-img"
+                  v-if="personHasUsableSignature(activeSignaturePerson)"
                   :src="activeSignaturePerson?.signature_preview_url"
                   alt="已有手写签名"
                   @error="handleSignatureImageError(activeSignaturePerson?.record_id)"
                 />
-                <canvas
-                  ref="signatureCanvasRef"
-                  aria-label="MOP手写签名区域"
-                  @pointerdown="startSignatureDraw"
-                  @pointermove="moveSignatureDraw"
-                  @pointerup="endSignatureDraw"
-                  @pointercancel="endSignatureDraw"
-                  @pointerleave="endSignatureDraw"
-                ></canvas>
-                <div v-if="!signatureHasInk && !personHasUsableSignature(activeSignaturePerson)" class="sign-placeholder">在此处手写签名</div>
+                <button
+                  class="btn blue"
+                  type="button"
+                  :disabled="Boolean(openSignaturePadDisabledReason)"
+                  :title="openSignaturePadDisabledReason"
+                  @click="openSignaturePad"
+                >
+                  {{ personHasUsableSignature(activeSignaturePerson) ? "重新手写签名" : "手写签名" }}
+                </button>
               </div>
               <div class="mop-completion-panel">
                 <span
@@ -395,7 +406,7 @@
                   {{ signatureMessage || signatureRoleHint }}
                 </span>
                 <div class="action-group">
-                  <strong>签名库</strong>
+                  <strong>签名链接</strong>
                   <div>
                     <button
                       class="btn ghost"
@@ -406,17 +417,8 @@
                     >
                       {{ signatureLinkSending ? "发送中" : `发送待签名链接（${pendingSignatureLinkCount}人）` }}
                     </button>
-                    <button
-                      class="btn blue"
-                      type="button"
-                      :disabled="signatureSaving || Boolean(saveSignatureDisabledReason)"
-                      :title="saveSignatureDisabledReason"
-                      @click="saveMopSignature"
-                    >
-                      {{ signatureSaving ? "保存中" : "保存签名" }}
-                    </button>
                   </div>
-                  <small v-if="saveSignatureDisabledReason">{{ saveSignatureDisabledReason }}</small>
+                  <small>网页手写请使用上方当前人员按钮；多人时点“查看全部”逐个处理。</small>
                 </div>
                 <div class="action-group file-action-group">
                   <strong>当前 MOP 文件</strong>
@@ -458,6 +460,59 @@
             </div>
           </div>
         </section>
+        <div v-if="signaturePadOpen" class="signature-pad-backdrop" @click.self="closeSignaturePad">
+          <section class="signature-pad-modal" role="dialog" aria-modal="true" aria-label="手写签名">
+            <header>
+              <div>
+                <strong>{{ activeSignaturePerson?.name || "手写签名" }}</strong>
+                <p>{{ signatureRole === "auditor" ? "维护审核人" : "维护实施人" }} · 请在下方大签名区手写后保存。</p>
+              </div>
+              <button type="button" class="btn ghost" :disabled="signatureSaving" @click="closeSignaturePad">关闭</button>
+            </header>
+            <div class="mop-sign-canvas signature-pad-canvas" :class="{ disabled: !activeSignaturePerson }">
+              <button
+                class="sign-clear-inline"
+                type="button"
+                :disabled="signatureSaving"
+                @click="clearSignatureCanvas"
+              >
+                清空
+              </button>
+              <img
+                v-if="personHasUsableSignature(activeSignaturePerson) && !signatureHasInk"
+                class="mop-sign-preview-img"
+                :src="activeSignaturePerson?.signature_preview_url"
+                alt="已有手写签名"
+                @error="handleSignatureImageError(activeSignaturePerson?.record_id)"
+              />
+              <canvas
+                ref="signatureCanvasRef"
+                aria-label="MOP手写签名区域"
+                @pointerdown="startSignatureDraw"
+                @pointermove="moveSignatureDraw"
+                @pointerup="endSignatureDraw"
+                @pointercancel="endSignatureDraw"
+                @pointerleave="endSignatureDraw"
+              ></canvas>
+              <div v-if="!signatureHasInk && !personHasUsableSignature(activeSignaturePerson)" class="sign-placeholder">在此处手写签名</div>
+            </div>
+            <footer>
+              <span class="sign-status" :class="{ failed: signatureMessageType === 'failed', success: signatureMessageType === 'success' }">
+                {{ signatureMessage || saveSignatureDisabledReason || "手写完成后点击保存签名。" }}
+              </span>
+              <button class="btn ghost" type="button" :disabled="signatureSaving" @click="clearSignatureCanvas">清空</button>
+              <button
+                class="btn blue"
+                type="button"
+                :disabled="signatureSaving || Boolean(saveSignatureDisabledReason)"
+                :title="saveSignatureDisabledReason"
+                @click="saveMopSignature"
+              >
+                {{ signatureSaving ? "保存中" : "保存签名" }}
+              </button>
+            </footer>
+          </section>
+        </div>
         <div class="sheet-tabs preview-tabs">
           <button
             v-for="sheet in preview.sheets || []"
@@ -839,6 +894,7 @@ const signatureLoading = ref(false);
 const signatureSaving = ref(false);
 const signatureLinkSending = ref(false);
 const signatureLinkSendingById = ref<Record<string, boolean>>({});
+const signaturePadOpen = ref(false);
 const temporarySignatureSendingByDraft = ref<Record<string, boolean>>({});
 const mopFillSaving = ref(false);
 const mopUploadSaving = ref(false);
@@ -1001,7 +1057,7 @@ const addOtherSignatureDisabledReason = computed(() => {
 const pendingSignatureLinkPeople = computed(() => (
   selectedFormalSignaturePeople(signatureRole.value)
     .filter((person) => !personHasUsableSignature(person))
-    .filter((person) => String(person.open_id || "").trim())
+    .filter((person) => String(person.record_id || "").trim())
 ));
 const pendingSignatureLinkCount = computed(() => pendingSignatureLinkPeople.value.length);
 const unsignedSelectedSignaturePeople = computed(() => selectedRoleSignaturePeople.value.filter((person) => !personHasUsableSignature(person)));
@@ -1019,12 +1075,18 @@ const signatureBatchLinkDisabledReason = computed(() => {
   if (!selectedFormal.length) return "当前角色还没有选择正式签名人员";
   const unsigned = selectedFormal.filter((person) => !personHasUsableSignature(person));
   if (!unsigned.length) return "当前角色已都有签名；如需覆盖，请点人员旁边的“重新签名”";
-  if (!pendingSignatureLinkPeople.value.length) return "待签名人员缺少 openid，不能发送签名链接";
+  if (!pendingSignatureLinkPeople.value.length) return "当前角色没有可发送签名链接的待签名人员";
   return "";
 });
 const signatureLinkDisabledReason = computed(() => {
   if (!activeSignaturePerson.value) return "请先选择签名人员";
-  if (!activeSignaturePerson.value.open_id) return "该人员缺少 openid，无法发送链接";
+  if (!activeSignaturePerson.value.record_id) return "该人员记录缺少 ID，无法发送链接";
+  return "";
+});
+const openSignaturePadDisabledReason = computed(() => {
+  if (signatureSaving.value) return "";
+  if (!activeSignaturePerson.value) return "请先选择签名人员";
+  if (!activeSignaturePerson.value.record_id) return "该人员记录缺少 ID，无法手写签名";
   return "";
 });
 const saveSignatureDisabledReason = computed(() => {
@@ -1197,10 +1259,12 @@ const activeSheetSignatureCellMap = computed(() => {
     const role = roleForMaintenanceLabel(field?.label);
     if (!role) continue;
     const row = Number(field.row);
-    const baseCol = signatureBaseColumn(role);
-    signedSelectedPeopleByRole.value[role].forEach((person, index) => {
-      map.set(`${row}:${baseCol + index * 2}`, [person]);
-    });
+    const valueCol = Number(field.value_col);
+    const labelCol = Number(field.label_col);
+    const baseCol = Number.isFinite(valueCol)
+      ? valueCol
+      : (Number.isFinite(labelCol) ? labelCol + 1 : 0);
+    map.set(`${row}:${baseCol}`, signedSelectedPeopleByRole.value[role]);
   }
   return map;
 });
@@ -1729,6 +1793,38 @@ function ensureSignatureCanvasObserver(): void {
   signatureResizeObserver.observe(signatureCanvasRef.value);
 }
 
+function disconnectSignatureCanvasObserver(): void {
+  signatureResizeObserver?.disconnect();
+  signatureResizeObserver = null;
+}
+
+async function openSignaturePad(): Promise<void> {
+  if (openSignaturePadDisabledReason.value) return;
+  signatureMessage.value = "";
+  signatureMessageType.value = "";
+  signatureHasInk.value = false;
+  signaturePadOpen.value = true;
+  await nextTick();
+  disconnectSignatureCanvasObserver();
+  ensureSignatureCanvasObserver();
+  resizeSignatureCanvas();
+}
+
+async function openSignaturePadForPerson(person: Dict): Promise<void> {
+  const recordId = String(person?.record_id || "").trim();
+  if (!recordId || (person.source && person.source !== "staff")) return;
+  setActiveSignaturePerson(recordId);
+  await nextTick();
+  await openSignaturePad();
+}
+
+function closeSignaturePad(): void {
+  signatureDrawing = false;
+  signaturePadOpen.value = false;
+  signatureHasInk.value = false;
+  disconnectSignatureCanvasObserver();
+}
+
 function signaturePointFromEvent(event: PointerEvent): { x: number; y: number } {
   const rect = signatureCanvasRef.value?.getBoundingClientRect();
   return {
@@ -1878,10 +1974,6 @@ function roleForMaintenanceLabel(label: unknown): "implementer" | "auditor" | ""
   return "";
 }
 
-function signatureBaseColumn(role: "implementer" | "auditor"): number {
-  return role === "implementer" ? 2 : 3;
-}
-
 function cellSignatures(rowIndex: number, colIndex: number): Dict[] {
   return activeSheetSignatureCellMap.value.get(`${rowIndex}:${colIndex}`) || [];
 }
@@ -1954,6 +2046,7 @@ async function saveMopSignature(): Promise<void> {
       signature_version: data.signature_version || activeSignaturePerson.value.signature_version || "",
     });
     clearSignatureCanvas();
+    closeSignaturePad();
     updateFormalSignaturePolling();
   } catch (error) {
     signatureMessage.value = error instanceof Error ? error.message : "保存签名失败";
@@ -2047,7 +2140,7 @@ async function resetMopSigning(): Promise<void> {
 }
 
 function personSignatureLinkTitle(person: Dict): string {
-  if (!String(person?.open_id || "").trim()) return "该人员缺少 openid，无法发送链接";
+  if (!String(person?.record_id || "").trim()) return "该人员记录缺少 ID，无法发送链接";
   return personHasUsableSignature(person)
     ? "重新发送签名链接；新签名保存前，原签名仍可继续使用"
     : "发送签名链接";
@@ -2055,7 +2148,7 @@ function personSignatureLinkTitle(person: Dict): string {
 
 async function sendSignatureLinkForPerson(person: Dict, forceResign = false): Promise<boolean> {
   const recordId = String(person?.record_id || "").trim();
-  if (!recordId || !String(person?.open_id || "").trim()) return false;
+  if (!recordId) return false;
   signatureLinkSendingById.value = {
     ...signatureLinkSendingById.value,
     [recordId]: true,
@@ -2598,8 +2691,7 @@ onBeforeUnmount(() => {
     clearInterval(formalSignaturePollTimer);
     formalSignaturePollTimer = null;
   }
-  signatureResizeObserver?.disconnect();
-  signatureResizeObserver = null;
+  disconnectSignatureCanvasObserver();
 });
 
 watch(signatureRole, () => {
@@ -3122,6 +3214,8 @@ select:focus {
 
 .mop-sign-panel {
   display: grid;
+  position: relative;
+  z-index: 20;
   gap: 12px;
   padding: 14px;
   border: 1px solid #d8e5f7;
@@ -3134,9 +3228,13 @@ select:focus {
   grid-column: 2;
   grid-row: 2 / span 5;
   position: sticky;
+  z-index: 80;
   top: 12px;
   max-height: calc(100vh - 112px);
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
   gap: 10px;
   padding: 12px;
   border-radius: 16px;
@@ -3154,11 +3252,12 @@ select:focus {
 .mop-preview-page .sign-workspace {
   grid-template-columns: 1fr;
   gap: 10px;
+  min-height: 0;
 }
 
 .mop-preview-page .sign-person-list {
   grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
-  max-height: 168px;
+  max-height: 142px;
 }
 
 .mop-preview-page .sign-person {
@@ -3184,6 +3283,8 @@ select:focus {
 }
 
 .mop-preview-page .selected-sign-person {
+  position: relative;
+  z-index: 90;
   grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
 }
@@ -3195,7 +3296,13 @@ select:focus {
 .mop-preview-page .selected-signatures {
   grid-column: 1 / -1;
   max-height: 46px;
-  overflow: visible;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 4px;
+}
+
+.mop-preview-page .selected-signature-chip {
+  width: 150px;
 }
 
 .mop-preview-page .mop-sign-canvas {
@@ -3212,6 +3319,60 @@ select:focus {
 
 .mop-preview-page .action-group {
   padding: 9px;
+}
+
+.mop-preview-page .action-group .btn {
+  flex: 1 1 150px;
+  min-width: 0;
+}
+
+.mop-preview-page .mop-completion-panel {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.mop-preview-page .other-signature-list,
+.mop-preview-page .external-signature-results {
+  max-height: 132px;
+}
+
+.mop-preview-page .other-signature-row {
+  grid-template-columns: 62px minmax(0, 1fr) auto;
+}
+
+.mop-preview-page .other-signature-row img {
+  width: 60px;
+}
+
+.mop-preview-page .other-signature-row.draft {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+}
+
+.mop-preview-page .other-signature-row.draft input {
+  grid-column: 1 / -1;
+}
+
+.mop-preview-page .other-signature-row.draft .other-signature-state {
+  justify-self: start;
+}
+
+.mop-preview-page .other-signature-row > button {
+  padding-inline: 8px;
+}
+
+.mop-preview-page .external-signature-results button {
+  grid-template-columns: 58px minmax(0, 1fr) auto;
+}
+
+.mop-preview-page .external-signature-results img {
+  width: 56px;
+}
+
+.mop-preview-page .inline-search {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.mop-preview-page .signature-refresh {
+  width: 100%;
 }
 
 .mop-preview-page .action-group small {
@@ -3477,6 +3638,8 @@ select:focus {
 }
 
 .selected-signatures {
+  position: relative;
+  z-index: 1;
   display: flex;
   flex-wrap: nowrap;
   gap: 8px;
@@ -3563,6 +3726,7 @@ select:focus {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  flex: 0 0 auto;
   height: 38px;
   border: 1px solid #bfdbfe;
   border-radius: 999px;
@@ -3584,7 +3748,7 @@ select:focus {
 
 .selected-signature-drawer {
   position: absolute;
-  z-index: 30;
+  z-index: 220;
   top: calc(100% + 8px);
   right: 0;
   width: min(520px, calc(100vw - 48px));
@@ -3593,6 +3757,15 @@ select:focus {
   background: rgba(255, 255, 255, 0.98);
   box-shadow: 0 22px 50px rgba(12, 46, 108, 0.22);
   padding: 12px;
+}
+
+.mop-preview-page .selected-signature-drawer {
+  position: fixed;
+  top: 132px;
+  right: 24px;
+  width: min(520px, calc(100vw - 48px));
+  max-height: calc(100vh - 164px);
+  overflow: hidden;
 }
 
 .drawer-head {
@@ -3627,9 +3800,13 @@ select:focus {
   overflow: auto;
 }
 
+.mop-preview-page .drawer-signature-list {
+  max-height: calc(100vh - 250px);
+}
+
 .drawer-signature-list article {
   display: grid;
-  grid-template-columns: 78px minmax(0, 1fr) auto auto;
+  grid-template-columns: 78px minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
   min-height: 52px;
@@ -3675,6 +3852,15 @@ select:focus {
   font-size: 12px;
 }
 
+.drawer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+  max-width: 210px;
+}
+
 .drawer-action,
 .drawer-remove {
   border: 0;
@@ -3688,6 +3874,11 @@ select:focus {
 .drawer-action {
   background: #dbeafe;
   color: #1d4ed8;
+}
+
+.drawer-action.link-action {
+  background: #e0f2fe;
+  color: #0369a1;
 }
 
 .drawer-remove {
@@ -3903,6 +4094,54 @@ select:focus {
   font-size: 12px;
 }
 
+.signature-launch-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid #d8e5f7;
+  border-radius: 16px;
+  background: linear-gradient(135deg, rgba(248, 251, 255, 0.96), rgba(255, 255, 255, 0.92));
+  padding: 10px;
+}
+
+.signature-launch-card.disabled {
+  opacity: 0.72;
+}
+
+.signature-launch-card strong,
+.signature-launch-card small {
+  display: block;
+  min-width: 0;
+}
+
+.signature-launch-card strong {
+  overflow: hidden;
+  color: #0f172a;
+  font-size: 14px;
+  font-weight: 900;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.signature-launch-card small {
+  margin-top: 3px;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.signature-launch-card img {
+  width: 92px;
+  height: 34px;
+  object-fit: contain;
+}
+
+.signature-launch-card .btn {
+  grid-column: 1 / -1;
+  width: 100%;
+}
+
 .mop-sign-canvas {
   position: relative;
   min-height: 180px;
@@ -3975,6 +4214,76 @@ select:focus {
   pointer-events: none;
   color: #94a3b8;
   font-weight: 850;
+}
+
+.signature-pad-backdrop {
+  position: fixed;
+  z-index: 1200;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(15, 23, 42, 0.42);
+  padding: 24px;
+  backdrop-filter: blur(10px);
+}
+
+.signature-pad-modal {
+  display: grid;
+  grid-template-rows: auto minmax(360px, 1fr) auto;
+  gap: 14px;
+  width: min(1080px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  border: 1px solid rgba(191, 219, 254, 0.9);
+  border-radius: 24px;
+  background: #ffffff;
+  box-shadow: 0 32px 88px rgba(12, 46, 108, 0.32);
+  padding: 18px;
+}
+
+.signature-pad-modal header,
+.signature-pad-modal footer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.signature-pad-modal header {
+  justify-content: space-between;
+}
+
+.signature-pad-modal header strong {
+  display: block;
+  color: #0f172a;
+  font-size: 22px;
+  font-weight: 950;
+}
+
+.signature-pad-modal header p {
+  margin: 4px 0 0;
+  color: #64748b;
+  font-size: 14px;
+}
+
+.signature-pad-modal footer {
+  justify-content: flex-end;
+  border-top: 1px solid #e2e8f0;
+  padding-top: 12px;
+}
+
+.signature-pad-modal footer .sign-status {
+  margin-right: auto;
+}
+
+.signature-pad-canvas,
+.mop-preview-page .signature-pad-canvas {
+  min-height: min(56vh, 520px);
+  border-radius: 20px;
+}
+
+.signature-pad-canvas canvas,
+.mop-preview-page .signature-pad-canvas canvas {
+  height: min(56vh, 520px);
+  min-height: 360px;
 }
 
 .sheet-cell-signatures {

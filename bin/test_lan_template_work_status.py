@@ -633,6 +633,155 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(merged[0]["target_record_id"], "target-1")
         self.assertEqual(merged[0]["active_item_id"], "active-1")
 
+    def test_merge_ongoing_items_keeps_distinct_uploaded_records_with_different_reason(self):
+        service = MaintenancePortalService()
+
+        merged = service._merge_ongoing_items(
+            "A",
+            [
+                {
+                    "work_type": "maintenance",
+                    "notice_type": "维保通告",
+                    "active_item_id": "active-1",
+                    "target_record_id": "target-1",
+                    "title": "A楼测试维保通告",
+                    "building": "A楼",
+                    "start_time": "2026-06-15 09:30",
+                    "end_time": "2026-06-15 18:30",
+                    "reason": "测试原因一",
+                },
+                {
+                    "work_type": "maintenance",
+                    "notice_type": "维保通告",
+                    "active_item_id": "active-2",
+                    "target_record_id": "target-2",
+                    "title": "A楼测试维保通告",
+                    "building": "A楼",
+                    "start_time": "2026-06-15 09:30",
+                    "end_time": "2026-06-15 18:30",
+                    "reason": "测试原因二",
+                },
+            ],
+        )
+
+        self.assertEqual(len(merged), 2)
+        self.assertEqual(
+            {item["target_record_id"] for item in merged},
+            {"target-1", "target-2"},
+        )
+
+    def test_merge_ongoing_items_collapses_exact_duplicates_but_keeps_period_or_time_changes(self):
+        service = MaintenancePortalService()
+        base = {
+            "work_type": "maintenance",
+            "notice_type": "维保通告",
+            "title": "EA118机房C楼交直流列头柜及PDU维护",
+            "building": "C楼",
+            "start_time": "2026-06-18 09:30",
+            "end_time": "2026-06-18 18:30",
+            "location": "C楼",
+            "content": "按计划对C栋直流列头柜及PDU季度维护",
+            "reason": "按计划对C栋直流列头柜及PDU季度维护，保证供电正常",
+            "impact": "对IT设备无影响，不会产生动环报警",
+            "progress": "准备工作已完成，人员已就位，是否可以操作？",
+        }
+        monthly = {
+            **base,
+            "active_item_id": "active-2",
+            "target_record_id": "target-2",
+            "content": "按计划对C栋直流列头柜及PDU月度维护",
+            "reason": "按计划对C栋直流列头柜及PDU月度维护，保证供电正常",
+        }
+        duplicate_quarterly = {
+            **base,
+            "active_item_id": "active-3",
+            "target_record_id": "target-3",
+        }
+        later_quarterly = {
+            **base,
+            "active_item_id": "active-4",
+            "target_record_id": "target-4",
+            "start_time": "2026-06-18 10:30",
+        }
+        merged = service._merge_ongoing_items(
+            "C",
+            [
+                {**base, "active_item_id": "active-1", "target_record_id": "target-1"},
+                monthly,
+                duplicate_quarterly,
+                later_quarterly,
+            ],
+        )
+
+        self.assertEqual(len(merged), 3)
+        signatures = {
+            (
+                item.get("start_time"),
+                item.get("content"),
+                item.get("reason"),
+            )
+            for item in merged
+        }
+        self.assertIn(
+            (
+                "2026-06-18 09:30",
+                "按计划对C栋直流列头柜及PDU季度维护",
+                "按计划对C栋直流列头柜及PDU季度维护，保证供电正常",
+            ),
+            signatures,
+        )
+        self.assertIn(
+            (
+                "2026-06-18 09:30",
+                "按计划对C栋直流列头柜及PDU月度维护",
+                "按计划对C栋直流列头柜及PDU月度维护，保证供电正常",
+            ),
+            signatures,
+        )
+        self.assertIn(
+            (
+                "2026-06-18 10:30",
+                "按计划对C栋直流列头柜及PDU季度维护",
+                "按计划对C栋直流列头柜及PDU季度维护，保证供电正常",
+            ),
+            signatures,
+        )
+
+    def test_merge_ongoing_items_treats_progress_only_change_as_same_notice(self):
+        service = MaintenancePortalService()
+        base = {
+            "work_type": "maintenance",
+            "notice_type": "维保通告",
+            "title": "EA118机房C楼交直流列头柜及PDU维护",
+            "building": "C楼",
+            "start_time": "2026-06-18 09:30",
+            "end_time": "2026-06-18 18:30",
+            "location": "C楼",
+            "content": "按计划对C栋直流列头柜及PDU季度维护",
+            "reason": "按计划对C栋直流列头柜及PDU季度维护，保证供电正常",
+            "impact": "对IT设备无影响，不会产生动环报警",
+        }
+
+        merged = service._merge_ongoing_items(
+            "C",
+            [
+                {
+                    **base,
+                    "active_item_id": "active-1",
+                    "target_record_id": "target-1",
+                    "progress": "准备工作已完成，人员已就位，是否可以操作？",
+                },
+                {
+                    **base,
+                    "active_item_id": "active-2",
+                    "target_record_id": "target-2",
+                    "progress": "工作已开始，正在检查设备状态",
+                },
+            ],
+        )
+
+        self.assertEqual(len(merged), 1)
+
     def test_change_handler_maps_extra_tokens_to_site_images(self):
         handler = ChangeNoticeHandler("设备变更")
         payload = NoticePayload(
@@ -907,6 +1056,174 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(items[0]["active_item_id"], "active-1")
             self.assertEqual(items[0]["record_id"], "target-1")
             self.assertEqual(items[0]["payload"]["target_record_id"], "target-1")
+
+    def test_lan_portal_state_store_keeps_different_reason_active_items_with_different_targets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            base = {
+                "work_type": "maintenance",
+                "notice_type": "维保通告",
+                "title": "A楼测试维保通告",
+                "building": "A楼",
+                "start_time": "2026-06-15 09:30",
+                "end_time": "2026-06-15 18:30",
+                "reason": "测试原因",
+            }
+            store.upsert_qt_active_item(
+                {
+                    **base,
+                    "active_item_id": "active-1",
+                    "target_record_id": "target-1",
+                    "record_id": "target-1",
+                    "reason": "测试原因一",
+                },
+                section="other",
+                origin="portal",
+            )
+            store.upsert_qt_active_item(
+                {
+                    **base,
+                    "active_item_id": "active-2",
+                    "target_record_id": "target-2",
+                    "record_id": "target-2",
+                    "reason": "测试原因二",
+                },
+                section="other",
+                origin="portal",
+            )
+
+            items = store.list_qt_active_items()
+
+            self.assertEqual(len(items), 2)
+            self.assertEqual(
+                {item["record_id"] for item in items},
+                {"target-1", "target-2"},
+            )
+
+    def test_lan_portal_state_store_collapses_exact_duplicate_active_items(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            base = {
+                "work_type": "maintenance",
+                "notice_type": "维保通告",
+                "title": "EA118机房C楼交直流列头柜及PDU维护",
+                "building": "C楼",
+                "start_time": "2026-06-18 09:30",
+                "end_time": "2026-06-18 18:30",
+                "location": "C楼",
+                "content": "按计划对C栋直流列头柜及PDU季度维护",
+                "reason": "按计划对C栋直流列头柜及PDU季度维护，保证供电正常",
+                "impact": "对IT设备无影响，不会产生动环报警",
+                "progress": "准备工作已完成，人员已就位，是否可以操作？",
+            }
+            store.upsert_qt_active_item(
+                {
+                    **base,
+                    "active_item_id": "active-1",
+                    "target_record_id": "target-1",
+                    "record_id": "target-1",
+                },
+                section="other",
+                origin="portal",
+            )
+            store.upsert_qt_active_item(
+                {
+                    **base,
+                    "active_item_id": "active-2",
+                    "target_record_id": "target-2",
+                    "record_id": "target-2",
+                },
+                section="other",
+                origin="portal",
+            )
+
+            items = store.list_qt_active_items()
+
+            self.assertEqual(len(items), 1)
+
+    def test_lan_portal_state_store_collapses_progress_only_active_item_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            base = {
+                "work_type": "maintenance",
+                "notice_type": "维保通告",
+                "title": "EA118机房C楼交直流列头柜及PDU维护",
+                "building": "C楼",
+                "start_time": "2026-06-18 09:30",
+                "end_time": "2026-06-18 18:30",
+                "location": "C楼",
+                "content": "按计划对C栋直流列头柜及PDU季度维护",
+                "reason": "按计划对C栋直流列头柜及PDU季度维护，保证供电正常",
+                "impact": "对IT设备无影响，不会产生动环报警",
+            }
+            store.upsert_qt_active_item(
+                {
+                    **base,
+                    "active_item_id": "active-1",
+                    "target_record_id": "target-1",
+                    "record_id": "target-1",
+                    "progress": "准备工作已完成，人员已就位，是否可以操作？",
+                },
+                section="other",
+                origin="portal",
+            )
+            store.upsert_qt_active_item(
+                {
+                    **base,
+                    "active_item_id": "active-2",
+                    "target_record_id": "target-2",
+                    "record_id": "target-2",
+                    "progress": "工作已开始，正在检查设备状态",
+                },
+                section="other",
+                origin="portal",
+            )
+
+            self.assertEqual(len(store.list_qt_active_items()), 1)
+
+    def test_c_building_seven_similar_maintenance_notices_remain_visible(self):
+        notices = [
+            ("EA118机房C楼火灾报警系统维护", "厂家对C栋消防月度维护"),
+            ("EA118机房C楼交直流列头柜及PDU维护", "按计划对C栋直流列头柜及PDU季度维护，保证供电正常"),
+            ("EA118机房C楼消火栓系统维护", "厂家对C栋消防月度维护"),
+            ("EA118机房C楼消防排烟系统维护", "厂家对C栋消防半年度维护"),
+            ("EA118机房C楼消防排烟系统维护", "厂家对C栋消防月度维护"),
+            ("EA118机房C楼自动喷淋灭火系统维护", "按计划对C楼自动喷淋灭火系统进行月度维护"),
+            ("EA118机房C楼冷站Y型过滤器检查", "按维保计划工程师对C楼冷站Y型过滤器进行检查、清洗，确保制冷单元运行正常"),
+        ]
+        items = [
+            {
+                "work_type": "maintenance",
+                "notice_type": "维保通告",
+                "active_item_id": f"active-{index}",
+                "target_record_id": f"target-{index}",
+                "record_id": f"target-{index}",
+                "title": title,
+                "building": "C楼",
+                "start_time": "2026-06-18 09:30",
+                "end_time": "2026-06-18 18:30",
+                "reason": reason,
+                "progress": "准备工作已完成，人员已就位，是否可以操作？",
+            }
+            for index, (title, reason) in enumerate(notices, start=1)
+        ]
+
+        service = MaintenancePortalService()
+        merged = service._merge_ongoing_items("C", items)
+
+        self.assertEqual(len(merged), 7)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            for item in items:
+                store.upsert_qt_active_item(item, section="other", origin="portal")
+
+            stored = store.list_qt_active_items()
+
+        self.assertEqual(len(stored), 7)
+        self.assertEqual(
+            {item["record_id"] for item in stored},
+            {f"target-{index}" for index in range(1, 8)},
+        )
 
     def test_lan_portal_state_store_reports_database_stats(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2354,7 +2671,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         )
 
         self.assertIsNotNone(info)
-        self.assertEqual(info["notice_type"], "设备变更")
+        self.assertEqual(info["notice_type"], "变更通告")
         self.assertEqual(info["title"], "测试测试测试变更")
         self.assertEqual(info["status"], "开始")
 
@@ -2364,7 +2681,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         )
 
         self.assertIsNotNone(info)
-        self.assertEqual(info["notice_type"], "设备变更")
+        self.assertEqual(info["notice_type"], "变更通告")
         self.assertEqual(info["status"], "结束")
         self.assertEqual(info["title"], "EA118-D楼直流屏蓄电池整组更换变更")
 
@@ -4744,7 +5061,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             result = service.query_records(month="5月", scope="CAMPUS")
             summary = result["records"][0]["work_summary"]
             self.assertEqual(summary["work_type"], WORK_TYPE_CHANGE)
-            self.assertEqual(summary["notice_type"], "设备变更")
+            self.assertEqual(summary["notice_type"], "变更通告")
             self.assertEqual(summary["source_record_id"], "c2")
             self.assertEqual(summary["feishu_record_id"], "change-target-1")
             self.assertEqual(summary["status"], "进行中")
@@ -5630,7 +5947,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             )
 
             self.assertEqual(prepared["work_type"], WORK_TYPE_CHANGE)
-            self.assertEqual(prepared["notice_type"], "设备变更")
+            self.assertEqual(prepared["notice_type"], "变更通告")
             self.assertEqual(prepared["source_work_type"], WORK_TYPE_MAINTENANCE)
             self.assertEqual(prepared["source_app_token"], service.app_token)
             self.assertEqual(prepared["source_table_id"], service.table_id)
@@ -5638,11 +5955,113 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(prepared["building_codes"], ["A"])
             self.assertEqual(prepared["specialty"], "电气")
             self.assertEqual(prepared["level"], "I3")
-            self.assertIn("【设备变更】状态：开始", prepared["text"])
+            self.assertIn("【变更通告】状态：开始", prepared["text"])
             self.assertIn("【名称】EA118机房A楼冷却塔清洗", prepared["text"])
             self.assertNotIn("【维保通告】", prepared["text"])
             self.assertFalse(prepared["skip_personal_message"])
             self.assertGreaterEqual(len(prepared["recipients"]), 2)
+            self.assertTrue(prepared["sync_maintenance_target"])
+            self.assertEqual(prepared["paired_upload_status"], "pending")
+            self.assertEqual(
+                prepared["paired_maintenance_original_title"],
+                "EA118机房A楼冷却塔清洗",
+            )
+            paired = prepared["paired_maintenance_upload"]
+            self.assertEqual(paired["notice_type"], "维保通告")
+            self.assertEqual(paired["work_type"], WORK_TYPE_MAINTENANCE)
+            self.assertEqual(paired["title"], "EA118机房A楼冷却塔清洗")
+            self.assertEqual(paired["text"].splitlines()[0], "【维保通告】状态：开始")
+            self.assertIn("【名称】EA118机房A楼冷却塔清洗", paired["text"])
+            self.assertEqual(paired["maintenance_cycle"], "每月")
+            self.assertEqual(
+                paired["paired_maintenance_actual_start_time"],
+                prepared["response_time"],
+            )
+            self.assertEqual(paired["recipients"], [])
+
+    def test_converted_maintenance_change_allows_empty_maintenance_cycle_for_pair_upload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            current_month = MaintenancePortalService._current_month_label()
+            service._records = [
+                _build_record(
+                    "m-convert-no-cycle",
+                    "A楼",
+                    "电池内阻刷新维护",
+                    current_month,
+                    maintenance_cycle="",
+                )
+            ]
+            service._change_records = []
+            service._repair_records = []
+            service._zhihang_change_records = []
+            service._maintenance_loaded_once = True
+            service._change_loaded_once = True
+            service._repair_loaded_once = True
+            service._zhihang_change_loaded_once = True
+
+            prepared = service.prepare_change_action(
+                {
+                    "action": "start",
+                    "scope": "A",
+                    "work_type": WORK_TYPE_CHANGE,
+                    "source_work_type": WORK_TYPE_MAINTENANCE,
+                    "record_id": "m-convert-no-cycle",
+                    "source_record_id": "m-convert-no-cycle",
+                    "start_time": "2026-06-12T09:30",
+                    "end_time": "2026-06-12T18:30",
+                    "location": "A楼",
+                    "content": "工程师进行维护",
+                    "reason": "按计划维护",
+                    "impact": "无影响",
+                    "progress": "准备工作已完成",
+                },
+                job_id="job-converted-no-cycle",
+            )
+
+            self.assertTrue(prepared["sync_maintenance_target"])
+            self.assertEqual(prepared["paired_maintenance_upload"]["maintenance_cycle"], "")
+
+    def test_110_station_notice_titles_use_aliyun_zhongtian_prefix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            current_month = MaintenancePortalService._current_month_label()
+            service._records = [
+                _build_record(
+                    "m-110",
+                    "110站",
+                    "电池内阻刷新维护通告",
+                    current_month,
+                    maintenance_cycle="每月",
+                )
+            ]
+            service._maintenance_loaded_once = True
+            prepared = service.prepare_maintenance_action(
+                {
+                    "action": "start",
+                    "scope": "110",
+                    "work_type": WORK_TYPE_MAINTENANCE,
+                    "record_id": "m-110",
+                    "source_record_id": "m-110",
+                    "start_time": "2026-06-12T09:30",
+                    "end_time": "2026-06-12T18:30",
+                    "location": "110站",
+                    "content": "工程师进行维护",
+                    "reason": "按计划维护",
+                    "impact": "无影响",
+                    "progress": "准备工作已完成",
+                },
+                job_id="job-110-title",
+            )
+
+            self.assertEqual(
+                prepared["title"],
+                "EA118-110KV阿里中天变电池内阻刷新维护通告",
+            )
+            self.assertIn(
+                "【名称】EA118-110KV阿里中天变电池内阻刷新维护通告",
+                prepared["text"],
+            )
 
     def test_prepare_actions_reject_time_range_shorter_than_one_hour(self):
         with tempfile.TemporaryDirectory() as tmp:
