@@ -1678,8 +1678,73 @@ class LanPortalStateStore:
         digits = re.findall(r"\d+", "".join(parts))
         return "".join(chunk.zfill(2) if len(chunk) <= 2 else chunk for chunk in digits)
 
+    @staticmethod
+    def _notice_sections_from_text(text: Any) -> dict[str, str]:
+        sections: dict[str, str] = {}
+        current_key = ""
+        buffer: list[str] = []
+        for raw_line in str(text or "").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            match = re.match(r"^【([^】]+)】\s*(.*)$", line)
+            if match:
+                if current_key:
+                    sections[current_key] = "\n".join(buffer).strip()
+                current_key = match.group(1).strip()
+                buffer = [match.group(2).strip()]
+            elif current_key:
+                buffer.append(line)
+        if current_key:
+            sections[current_key] = "\n".join(buffer).strip()
+        return sections
+
+    @staticmethod
+    def _notice_section_first(
+        sections: dict[str, str], names: tuple[str, ...], fallback: Any = ""
+    ) -> str:
+        for name in names:
+            value = str(sections.get(name) or "").strip()
+            if value:
+                return value
+        return str(fallback or "").strip()
+
+    def _enrich_notice_payload_from_text(self, payload: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(payload or {})
+        sections = self._notice_sections_from_text(payload.get("text") or "")
+        if not sections:
+            return payload
+        mapping = {
+            "title": ("名称", "标题", "通告名称", "维修名称", "事件描述"),
+            "time_str": ("时间", "计划时间", "维护时间"),
+            "location": ("地点", "位置"),
+            "content": ("内容",),
+            "reason": ("原因", "故障原因", "故障维修原因"),
+            "impact": ("影响", "影响范围"),
+            "progress": ("进度", "完成情况"),
+            "maintenance_cycle": ("维保周期", "维护周期"),
+        }
+        for field_name, labels in mapping.items():
+            if payload.get(field_name) in (None, "", [], {}):
+                value = self._notice_section_first(sections, labels)
+                if value:
+                    payload[field_name] = value
+        if payload.get("start_time") in (None, "", [], {}) and payload.get("time_str"):
+            parts = re.split(
+                r"\s*(?:~|至|-|－|—)\s*",
+                str(payload.get("time_str") or ""),
+                maxsplit=1,
+            )
+            if parts:
+                payload["start_time"] = parts[0].strip()
+            if len(parts) > 1 and payload.get("end_time") in (None, "", [], {}):
+                payload["end_time"] = parts[1].strip()
+        return payload
+
     def _notice_payload_score(self, item: dict[str, Any]) -> int:
-        item = normalize_notice_identity_payload(item or {})
+        item = normalize_notice_identity_payload(
+            self._enrich_notice_payload_from_text(item or {})
+        )
         score = 0
         if canonical_target_record_id(item):
             score += 12
@@ -1708,8 +1773,8 @@ class LanPortalStateStore:
         return score
 
     def _merge_notice_payload(self, existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
-        existing = dict(existing or {})
-        incoming = dict(incoming or {})
+        existing = self._enrich_notice_payload_from_text(existing or {})
+        incoming = self._enrich_notice_payload_from_text(incoming or {})
         primary, supplement = (
             (incoming, existing)
             if self._notice_payload_score(incoming) >= self._notice_payload_score(existing)
@@ -3218,6 +3283,7 @@ class LanPortalStateStore:
         if item.get("record_id"):
             payload.setdefault("target_record_id", item.get("record_id"))
             payload.setdefault("record_id", item.get("record_id"))
+        payload = self._enrich_notice_payload_from_text(payload)
         return normalize_notice_identity_payload(payload)
 
     def _qt_active_identity_keys(self, item: dict[str, Any]) -> set[str]:
@@ -3406,7 +3472,9 @@ class LanPortalStateStore:
     ) -> bool:
         if not isinstance(payload, dict):
             return False
-        normalized = normalize_notice_identity_payload(payload or {})
+        normalized = normalize_notice_identity_payload(
+            self._enrich_notice_payload_from_text(payload or {})
+        )
         active_item_id = self._qt_active_item_key(normalized)
         if not active_item_id:
             return False

@@ -3418,6 +3418,26 @@ class FastAPIPortalController:
         return hashlib.sha1(raw.encode("utf-8")).hexdigest(), len(compact)
 
     @staticmethod
+    def _scoped_qt_active_signature(scope: str) -> tuple[str, int]:
+        try:
+            active_rows = PortalRuntime.state_store.list_qt_active_items()
+        except Exception:
+            active_rows = []
+        payloads: list[dict] = []
+        for row in active_rows:
+            if not isinstance(row, dict):
+                continue
+            payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+            if not isinstance(payload, dict):
+                continue
+            item = dict(payload)
+            item.setdefault("active_item_id", str(row.get("active_item_id") or ""))
+            item.setdefault("record_id", str(row.get("record_id") or ""))
+            item.setdefault("target_record_id", str(row.get("record_id") or ""))
+            payloads.append(item)
+        return FastAPIPortalController._scoped_ongoing_signature(scope, payloads)
+
+    @staticmethod
     def _is_local_client(request: Request) -> bool:
         host = str(request.client.host if request.client else "").strip()
         return host in {"127.0.0.1", "::1", "localhost", "testclient"}
@@ -4226,13 +4246,22 @@ class FastAPIPortalController:
                 return
             copied = normalize_notice_identity_payload(dict(item))
             identity_keys = _identity_keys(copied)
-            duplicate_indexes = {
+            duplicate_indexes = [
                 index_by_key[key]
                 for key in identity_keys
                 if key in index_by_key
-            }
-            if duplicate_indexes:
-                target_index = min(duplicate_indexes)
+            ]
+            target_index = next(
+                (
+                    index
+                    for index in sorted(set(duplicate_indexes))
+                    if not PortalRuntime.service._ongoing_identity_conflicts(
+                        merged[index], copied
+                    )
+                ),
+                None,
+            )
+            if target_index is not None:
                 try:
                     merged[target_index] = PortalRuntime.service._merge_duplicate_ongoing_item(
                         merged[target_index],
@@ -5294,10 +5323,13 @@ class FastAPIPortalController:
                 scoped_signature, scoped_count = self._scoped_ongoing_signature(
                     scope, list(snapshot.get("items") or [])
                 )
+                qt_scoped_signature, qt_scoped_count = self._scoped_qt_active_signature(
+                    scope
+                )
                 qt_active_items = dict(PortalRuntime.state_store.qt_active_items_stats())
                 qt_active_items.pop("checked_at", None)
                 display_signature = hashlib.sha1(
-                    f"{scoped_signature}|{source_signature}".encode("utf-8")
+                    f"{scoped_signature}|{qt_scoped_signature}|{source_signature}".encode("utf-8")
                 ).hexdigest()
                 payload = json.dumps(
                     {
@@ -5305,7 +5337,9 @@ class FastAPIPortalController:
                         "snapshot_id": snapshot.get("snapshot_id", ""),
                         "count": snapshot.get("count", 0),
                         "scope_count": scoped_count,
+                        "qt_scope_count": qt_scoped_count,
                         "scope_signature": scoped_signature,
+                        "qt_scope_signature": qt_scoped_signature,
                         "display_signature": display_signature,
                         "source_snapshot_id": source_active.get("snapshot_id", ""),
                         "source_snapshot_updated_at": source_active.get("updated_at", 0),

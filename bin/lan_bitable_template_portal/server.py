@@ -2143,18 +2143,80 @@ class PortalRuntime:
             info = extract_event_info(text) or {}
             return str(info.get("status") or "").strip() == "结束"
 
+        def _qt_active_payloads(*, include_deleted: bool = False) -> list[dict]:
+            payloads: list[dict] = []
+            try:
+                rows = PortalRuntime.state_store.list_qt_active_items(
+                    include_deleted=include_deleted
+                )
+            except Exception:
+                return payloads
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+                if not isinstance(payload, dict):
+                    continue
+                copied = dict(payload)
+                copied.setdefault("active_item_id", str(row.get("active_item_id") or ""))
+                copied.setdefault("target_record_id", str(row.get("record_id") or ""))
+                copied.setdefault("record_id", str(row.get("record_id") or ""))
+                if row.get("deleted_at") is not None:
+                    copied["_qt_deleted_at"] = row.get("deleted_at")
+                payloads.append(copied)
+            return payloads
+
+        def _deleted_identity_keys(active_items: list[dict] | None = None) -> set[str]:
+            active_keys: set[str] = set()
+            for item in active_items or []:
+                try:
+                    active_keys.update(self.service._ongoing_merge_identity_keys(item))
+                except Exception:
+                    continue
+            keys: set[str] = set()
+            for item in _qt_active_payloads(include_deleted=True):
+                if item.get("_qt_deleted_at") is None:
+                    continue
+                try:
+                    keys.update(self.service._ongoing_merge_identity_keys(item))
+                except Exception:
+                    continue
+            return {key for key in keys if key not in active_keys}
+
+        def _not_deleted_by_qt(item: dict, deleted_keys: set[str]) -> bool:
+            if not deleted_keys:
+                return True
+            try:
+                return not bool(
+                    self.service._ongoing_merge_identity_keys(item) & deleted_keys
+                )
+            except Exception:
+                return True
+
+        def _filter_items(items: list[dict], deleted_keys: set[str]) -> list[dict]:
+            return [
+                dict(item)
+                for item in items
+                if isinstance(item, dict)
+                and not _is_ended(item)
+                and _not_deleted_by_qt(item, deleted_keys)
+                and self.service._scope_matches_item(scope, item)
+            ]
+
         try:
             snapshot = PortalRuntime.state_store.get_ongoing_snapshot()
+            active_items = _qt_active_payloads()
+            deleted_keys = _deleted_identity_keys(active_items)
             if snapshot.get("exists"):
                 PortalRuntime.last_ongoing_error = ""
-                filtered = [
-                    dict(item)
-                    for item in snapshot.get("items", [])
-                    if isinstance(item, dict)
-                    and not _is_ended(item)
-                    and self.service._scope_matches_item(scope, item)
-                ]
+                filtered = _filter_items(snapshot.get("items", []), deleted_keys)
+                filtered.extend(_filter_items(active_items, deleted_keys))
                 return self.service._merge_ongoing_items(scope, filtered)
+            if active_items:
+                PortalRuntime.last_ongoing_error = ""
+                return self.service._merge_ongoing_items(
+                    scope, _filter_items(active_items, deleted_keys)
+                )
         except Exception as exc:
             warning = f"SQLite 进行中状态读取失败: {exc}"
             PortalRuntime.last_ongoing_error = warning

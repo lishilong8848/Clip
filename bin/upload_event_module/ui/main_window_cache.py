@@ -43,6 +43,10 @@ class ActiveCacheMixin:
             self._is_restoring_cache = False
         if hasattr(self, "_sync_all_active_notice_models"):
             self._sync_all_active_notice_models()
+        try:
+            QTimer.singleShot(0, lambda: self.request_active_cache_save(0, force=True))
+        except Exception:
+            pass
         if hasattr(self, "_consume_qt_shell_bootstrap_state"):
             self._consume_qt_shell_bootstrap_state(payload)
 

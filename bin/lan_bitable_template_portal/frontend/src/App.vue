@@ -395,10 +395,10 @@
         <aside class="panel ongoing-panel">
           <div class="panel-head">
             <h2>已开始未结束</h2>
-            <span>{{ filteredOngoing.length }}</span>
+            <span>{{ ongoingCountLabel }}</span>
           </div>
           <div v-if="filteredOngoing.length === 0" class="empty-block">
-            {{ specialtyFilter ? "当前专业下没有进行中通告" : "当前没有进行中通告" }}
+            {{ specialtyFilter ? `当前专业下没有进行中通告，共 ${ongoing.length} 条` : "当前没有进行中通告" }}
           </div>
           <div v-else class="ongoing-list">
             <OngoingNoticeCard
@@ -892,6 +892,12 @@ const selectedDraftRowsAll = computed(() => {
 });
 const selectedDraftRows = computed(() => selectedDraftRowsAll.value.filter((row) => matchesSpecialtyFilter(draftSpecialtyForRow(row))));
 const filteredOngoing = computed(() => ongoing.value.filter((item) => matchesSpecialtyFilter(ongoingSpecialtyForItem(item))));
+const ongoingCountLabel = computed(() => {
+  if (specialtyFilter.value && filteredOngoing.value.length !== ongoing.value.length) {
+    return `${filteredOngoing.value.length} / ${ongoing.value.length}`;
+  }
+  return String(filteredOngoing.value.length);
+});
 const specialtyFilterOptions = computed(() => {
   const values = new Set<string>();
   for (const record of scopedRecords.value) {

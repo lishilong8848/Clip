@@ -2587,6 +2587,133 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             finally:
                 PortalRuntime.state_store = previous_store
 
+    def test_backend_ongoing_merges_current_qt_active_items_over_stale_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            previous_store = PortalRuntime.state_store
+            PortalRuntime.state_store = LanPortalStateStore(
+                Path(tmp) / "lan_portal_state.sqlite3"
+            )
+            try:
+                items = [
+                    {
+                        "active_item_id": f"active-{index}",
+                        "record_id": f"target-{index}",
+                        "target_record_id": f"target-{index}",
+                        "notice_type": "维保通告",
+                        "work_type": "maintenance",
+                        "title": f"C楼测试维保{index}",
+                        "building": "C楼",
+                        "building_codes": ["C"],
+                        "start_time": "2026-06-18 09:30",
+                        "end_time": "2026-06-18 18:30",
+                        "reason": f"原因{index}",
+                        "text": f"【维保通告】状态：开始\n【名称】C楼测试维保{index}",
+                    }
+                    for index in range(1, 8)
+                ]
+                PortalRuntime.state_store.replace_ongoing_items(items[:5])
+                for item in items:
+                    PortalRuntime.state_store.upsert_qt_active_item(
+                        item,
+                        section="other",
+                        origin="qt",
+                    )
+
+                controller = FastAPIPortalController()
+                ongoing = controller._get_ongoing("C")
+
+                self.assertEqual(len(ongoing), 7)
+                self.assertEqual(
+                    {item["target_record_id"] for item in ongoing},
+                    {f"target-{index}" for index in range(1, 8)},
+                )
+            finally:
+                PortalRuntime.state_store = previous_store
+
+    def test_backend_ongoing_preserves_text_only_qt_items_with_different_notice_body(self):
+        notices = [
+            ("EA118机房C楼火灾报警系统维护", "C栋", "C栋消防厂家月度维护", "厂家对C栋消防月度维护"),
+            ("EA118机房C楼交直流列头柜及PDU维护", "C楼", "按计划对C栋直流列头柜及PDU季度维护", "按计划对C栋直流列头柜及PDU季度维护，保证供电正常"),
+            ("EA118机房C楼消火栓系统维护", "C栋", "C栋消防厂家月度维护", "厂家对C栋消防月度维护"),
+            ("EA118机房C楼消防排烟系统维护", "C栋", "C栋消防厂家半年度维护", "厂家对C栋消防半年度维护"),
+            ("EA118机房C楼消防排烟系统维护", "C栋", "C栋消防厂家月度维护", "厂家对C栋消防月度维护"),
+            ("EA118机房C楼自动喷淋灭火系统维护", "C栋", "厂家对C楼自动喷淋灭火系统月度维护", "按计划对C楼自动喷淋灭火系统进行月度维护"),
+            ("EA118机房C楼冷站Y型过滤器检查", "C楼C-127冷冻站", "工程师对C楼冷站Y型过滤器进行年度检查", "按维保计划工程师对C楼冷站Y型过滤器进行检查、清洗，确保制冷单元运行正常"),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            previous_store = PortalRuntime.state_store
+            PortalRuntime.state_store = LanPortalStateStore(
+                Path(tmp) / "lan_portal_state.sqlite3"
+            )
+            try:
+                for index, (title, location, content, reason) in enumerate(notices, start=1):
+                    text = (
+                        "【维保通告】状态：开始\n"
+                        f"【名称】{title}\n"
+                        "【时间】2026-06-18 09:30~2026-06-18 18:30\n"
+                        f"【位置】{location}\n"
+                        f"【内容】{content}\n"
+                        f"【原因】{reason}\n"
+                        "【影响】对IT业务无影响，不会触发BA和BMS系统相关告警\n"
+                        "【进度】准备工作已完成，人员已就位，是否可以操作？"
+                    )
+                    PortalRuntime.state_store.upsert_qt_active_item(
+                        {
+                            "active_item_id": f"active-text-only-{index}",
+                            "record_id": f"target-text-only-{index}",
+                            "target_record_id": f"target-text-only-{index}",
+                            "notice_type": "维保通告",
+                            "work_type": "maintenance",
+                            "title": title,
+                            "building": "C楼",
+                            "building_codes": ["C"],
+                            "time_str": "2026-06-18 09:30~2026-06-18 18:30",
+                            "text": text,
+                        },
+                        section="other",
+                        origin="qt",
+                    )
+
+                qt_items = PortalRuntime.state_store.list_qt_active_items()
+                ongoing = FastAPIPortalController._get_ongoing("C")
+
+                self.assertEqual(len(qt_items), 7)
+                self.assertEqual(len(ongoing), 7)
+            finally:
+                PortalRuntime.state_store = previous_store
+
+    def test_qt_active_scope_signature_changes_with_current_qt_active_items(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            previous_store = PortalRuntime.state_store
+            PortalRuntime.state_store = LanPortalStateStore(
+                Path(tmp) / "lan_portal_state.sqlite3"
+            )
+            try:
+                empty_signature, empty_count = FastAPIPortalController._scoped_qt_active_signature("C")
+                PortalRuntime.state_store.upsert_qt_active_item(
+                    {
+                        "active_item_id": "active-sse-c-1",
+                        "target_record_id": "target-sse-c-1",
+                        "record_id": "target-sse-c-1",
+                        "notice_type": "维保通告",
+                        "work_type": "maintenance",
+                        "title": "C楼SSE签名测试",
+                        "building": "C楼",
+                        "building_codes": ["C"],
+                        "text": "【维保通告】状态：开始\n【名称】C楼SSE签名测试",
+                    },
+                    section="other",
+                    origin="qt",
+                )
+
+                signature, count = FastAPIPortalController._scoped_qt_active_signature("C")
+
+                self.assertEqual(empty_count, 0)
+                self.assertEqual(count, 1)
+                self.assertNotEqual(signature, empty_signature)
+            finally:
+                PortalRuntime.state_store = previous_store
+
     def test_backend_ongoing_filters_ended_item_from_stale_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
             previous_store = PortalRuntime.state_store
@@ -2624,6 +2751,71 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
                 self.assertEqual(len(ongoing), 1)
                 self.assertEqual(ongoing[0]["active_item_id"], "active-running-change")
+            finally:
+                PortalRuntime.state_store = previous_store
+
+    def test_backend_ongoing_keeps_active_item_when_deleted_duplicate_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            previous_store = PortalRuntime.state_store
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            PortalRuntime.state_store = store
+            try:
+                active_payload = {
+                    "active_item_id": "active-survivor",
+                    "record_id": "rec-survivor",
+                    "target_record_id": "rec-survivor",
+                    "notice_type": "维保通告",
+                    "work_type": "maintenance",
+                    "title": "C楼软删除重复项测试",
+                    "building": "C楼",
+                    "building_codes": ["C"],
+                    "time_str": "2026-06-18 09:30~2026-06-18 18:30",
+                    "content": "按计划维护",
+                    "reason": "按计划维护",
+                    "text": (
+                        "【维保通告】状态：开始\n"
+                        "【名称】C楼软删除重复项测试\n"
+                        "【时间】2026-06-18 09:30~2026-06-18 18:30\n"
+                        "【内容】按计划维护\n"
+                        "【原因】按计划维护"
+                    ),
+                }
+                store.upsert_qt_active_item(active_payload, section="other", origin="qt")
+                now = time.time()
+                duplicate_payload = dict(active_payload)
+                duplicate_payload["active_item_id"] = "active-soft-deleted-duplicate"
+                duplicate_payload["record_id"] = "rec-soft-deleted-duplicate"
+                duplicate_payload["target_record_id"] = "rec-soft-deleted-duplicate"
+                conn = store._connect()
+                try:
+                    conn.execute(
+                        """
+                        INSERT INTO qt_active_items(
+                            active_item_id, record_id, notice_type, section, sort_order,
+                            origin, payload_json, updated_at, deleted_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            "active-soft-deleted-duplicate",
+                            "rec-soft-deleted-duplicate",
+                            "维保通告",
+                            "other",
+                            0,
+                            "qt",
+                            json.dumps(duplicate_payload, ensure_ascii=False),
+                            now,
+                            now,
+                        ),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+
+                ongoing = FastAPIPortalController()._get_ongoing("C")
+
+                self.assertEqual(len(ongoing), 1)
+                self.assertEqual(ongoing[0]["active_item_id"], "active-survivor")
             finally:
                 PortalRuntime.state_store = previous_store
 
