@@ -22,7 +22,7 @@ from lark_oapi.api.drive.v1 import UploadAllMediaRequest, UploadAllMediaRequestB
 from lark_oapi.api.wiki.v2 import GetNodeSpaceRequest
 
 from ..config import config
-from ..logger import log_error, log_info
+from ..logger import log_error, log_info, log_warning
 from .feishu_token_manager import (
     TOKEN_REFRESH_MARGIN_SECONDS,
     FeishuTokenError,
@@ -51,6 +51,24 @@ FEISHU_ERROR_SUGGESTIONS = {
 }
 
 _token_refresh_lock = threading.RLock()
+
+# These fields are useful when the target table has them, but older customer
+# tables may not.  Missing optional fields must not block the core notice state
+# update, especially for end notices.
+OPTIONAL_TARGET_FIELD_NAMES = {
+    "钉钉响应截图",
+    "进展更新截图",
+    "事件恢复截图",
+    "事件结束截图",
+    "变更开始钉钉截图",
+    "过程更新钉钉截图",
+    "变更结束钉钉截图",
+    "过程通告图片",
+    "过程通告截图",
+    "过程现场图片",
+}
+_field_cache_lock = threading.RLock()
+_field_cache: dict[str, list[str]] = {}
 
 
 def _info_logging_enabled() -> bool:
@@ -91,40 +109,94 @@ def _get_bitable_fields(notice_type: str) -> list:
         字段名称列表
     """
     try:
+        notice_key = str(notice_type or "").strip()
+        with _field_cache_lock:
+            cached = _field_cache.get(notice_key)
+        if cached is not None:
+            return list(cached)
+
         handler, table_id, err = _resolve_handler(notice_type)
         if err or not table_id:
             return []
 
         client = _build_client()
-        request = (
-            ListAppTableFieldRequest.builder()
-            .app_token(config.app_token)
-            .table_id(table_id)
-            .page_size(200)
-            .build()
-        )
-
-        def do_list(token: str):
-            option = lark.RequestOption.builder().user_access_token(token).build()
-            return client.bitable.v1.app_table_field.list(request, option)
-
-        response = _with_token_retry(do_list)
-
-        if not response.success():
-            return []
-
-        # 提取字段名称
         field_names = []
-        if response.data and response.data.items:
-            for field in response.data.items:
-                if field.field_name:
+        page_token = ""
+
+        while True:
+            builder = (
+                ListAppTableFieldRequest.builder()
+                .app_token(config.app_token)
+                .table_id(table_id)
+                .page_size(200)
+            )
+            if page_token:
+                builder = builder.page_token(page_token)
+            request = builder.build()
+
+            def do_list(token: str):
+                option = lark.RequestOption.builder().user_access_token(token).build()
+                return client.bitable.v1.app_table_field.list(request, option)
+
+            response = _with_token_retry(do_list)
+            if not response.success():
+                return []
+
+            data = getattr(response, "data", None)
+            for field in list(getattr(data, "items", None) or []):
+                if getattr(field, "field_name", None):
                     field_names.append(field.field_name)
 
+            if not bool(getattr(data, "has_more", False)):
+                break
+            page_token = str(getattr(data, "page_token", "") or "").strip()
+            if not page_token:
+                break
+
+        with _field_cache_lock:
+            _field_cache[notice_key] = list(field_names)
         return field_names
 
     except Exception as e:
         log_error(f"获取多维表格字段失败: {e}")
         return []
+
+
+def _filter_missing_optional_fields(notice_type: str, fields: dict) -> dict:
+    """Drop optional fields that are not present in the actual target table.
+
+    Required fields are intentionally left untouched so the normal Feishu error
+    still exposes bad config.  This only handles optional attachments such as
+    site photos, where losing the attachment is better than blocking an end
+    notice.
+    """
+    if not isinstance(fields, dict) or not fields:
+        return fields
+    optional_present = [
+        field_name
+        for field_name in fields
+        if str(field_name or "") in OPTIONAL_TARGET_FIELD_NAMES
+    ]
+    if not optional_present:
+        return fields
+    actual_fields = _get_bitable_fields(notice_type)
+    if not actual_fields:
+        return fields
+    actual_field_set = set(actual_fields)
+    missing = [
+        field_name
+        for field_name in optional_present
+        if field_name not in actual_field_set
+    ]
+    if not missing:
+        return fields
+    filtered = dict(fields)
+    for field_name in missing:
+        filtered.pop(field_name, None)
+    log_warning(
+        f"目标表缺少可选字段，已跳过写入: notice_type={notice_type}, fields={missing}"
+    )
+    return filtered
 
 
 def _check_field_mismatch(notice_type: str, fields: dict) -> str:
@@ -452,7 +524,9 @@ def create_bitable_record(
         recover=recover,
         maintenance_cycle=maintenance_cycle,
     )
-    fields = handler.build_create_fields(payload)
+    fields = _filter_missing_optional_fields(
+        notice_type, handler.build_create_fields(payload)
+    )
     if _info_logging_enabled():
         log_info(f"Creating record({notice_type}) with fields: {fields}")
 
@@ -496,7 +570,9 @@ def create_bitable_record_by_payload(notice_type: str, payload: NoticePayload):
     if err:
         return False, err
 
-    fields = handler.build_create_fields(payload)
+    fields = _filter_missing_optional_fields(
+        notice_type, handler.build_create_fields(payload)
+    )
     if _info_logging_enabled():
         log_info(f"Creating record({notice_type}) with fields: {fields}")
 
@@ -543,6 +619,7 @@ def create_bitable_record_fields(notice_type: str, fields: dict):
     if err:
         return False, err
 
+    fields = _filter_missing_optional_fields(notice_type, fields)
     if _info_logging_enabled():
         log_info(f"Creating record fields({notice_type}) with fields: {fields}")
 
@@ -590,7 +667,12 @@ def batch_create_bitable_records_by_payload(notice_type: str, payloads: list[Not
     if err:
         return [(False, err) for _ in payloads]
 
-    fields_list = [handler.build_create_fields(payload) for payload in payloads]
+    fields_list = [
+        _filter_missing_optional_fields(
+            notice_type, handler.build_create_fields(payload)
+        )
+        for payload in payloads
+    ]
     if _info_logging_enabled():
         log_info(f"Batch creating records({notice_type}) count={len(fields_list)}")
 
@@ -761,7 +843,9 @@ def update_bitable_record(
         recover=recover,
         maintenance_cycle=maintenance_cycle,
     )
-    fields = handler.build_update_fields(payload)
+    fields = _filter_missing_optional_fields(
+        notice_type, handler.build_update_fields(payload)
+    )
     if _info_logging_enabled():
         log_info(f"Updating record({notice_type}) {record_id} with fields: {fields}")
 
@@ -806,7 +890,9 @@ def update_bitable_record_by_payload(record_id: str, notice_type: str, payload: 
     if err:
         return False, err
 
-    fields = handler.build_update_fields(payload)
+    fields = _filter_missing_optional_fields(
+        notice_type, handler.build_update_fields(payload)
+    )
     if _info_logging_enabled():
         log_info(f"Updating record({notice_type}) {record_id} with fields: {fields}")
 
@@ -859,7 +945,12 @@ def batch_update_bitable_records_by_payload(notice_type: str, updates: list[tupl
     if err:
         return [(False, err) for _ in normalized]
 
-    fields_list = [handler.build_update_fields(payload) for _record_id, payload in normalized]
+    fields_list = [
+        _filter_missing_optional_fields(
+            notice_type, handler.build_update_fields(payload)
+        )
+        for _record_id, payload in normalized
+    ]
     records = [
         AppTableRecord.builder().record_id(record_id).fields(fields).build()
         for (record_id, _payload), fields in zip(normalized, fields_list)
@@ -916,6 +1007,7 @@ def update_bitable_record_fields(record_id: str, notice_type: str, fields: dict)
     if err:
         return False, err
 
+    fields = _filter_missing_optional_fields(notice_type, fields)
     if _info_logging_enabled():
         log_info(f"Updating record fields({notice_type}) {record_id} with fields: {fields}")
 

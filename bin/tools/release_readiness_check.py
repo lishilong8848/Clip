@@ -18,6 +18,27 @@ if str(BIN_DIR) not in sys.path:
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+REQUIRED_IMPORTS_FOR_CHECK = {
+    "httpx": "httpx",
+    "fastapi": "fastapi",
+    "starlette": "starlette",
+    "pydantic": "pydantic",
+    "uvicorn": "uvicorn",
+    "apscheduler": "APScheduler",
+    "lark_oapi": "lark-oapi",
+}
+
+_missing_for_check = [
+    package
+    for module, package in REQUIRED_IMPORTS_FOR_CHECK.items()
+    if importlib.util.find_spec(module) is None
+]
+if _missing_for_check:
+    print("[ReleaseCheck] FAIL")
+    print("- 发布就绪检查缺少运行依赖: " + ", ".join(_missing_for_check))
+    print("  请先运行 package_portable.py 或主程序依赖自安装后重试。")
+    sys.exit(1)
+
 from lan_bitable_template_portal.state_store import LanPortalStateStore  # noqa: E402
 from lan_bitable_template_portal import server as portal_server  # noqa: E402
 from lan_bitable_template_portal.portal_service import (  # noqa: E402
@@ -197,7 +218,7 @@ def check_frontend_dist() -> tuple[bool, str, bool]:
     if missing_css_markers:
         return False, "Vue dist CSS 缺少 VNET 蓝白生产样式: " + ", ".join(missing_css_markers), False
     js_text = dist_text_by_suffix.get(".js", "")
-    js_markers = ("南通基地-运维灯塔工作台", "功能入口", "交接班审核页", "维保 / 变更 / 检修")
+    js_markers = ("南通基地-运维灯塔工作台", "业务模块", "维护管理", "变更管理", "检修管理")
     missing_js_markers = [marker for marker in js_markers if marker not in js_text]
     if missing_js_markers:
         return False, "Vue dist JS 缺少生产页面关键文案: " + ", ".join(missing_js_markers), False
@@ -366,7 +387,7 @@ def check_frontend_vnet_skin() -> tuple[bool, list[str]]:
             errors.append(f"AuthPanels.vue 权限申请楼栋选择未统一蓝白胶囊样式: {marker}")
 
     scope_text = files["ScopeHome.vue"]
-    for marker in ("home-metrics", "feature-card", "feature-visual", "交接班审核页"):
+    for marker in ("home-metrics", "module-card", "module-icon", "交接班审核页"):
         if marker not in scope_text:
             errors.append(f"ScopeHome.vue 功能选择页缺少生产入口样式/文案: {marker}")
 
@@ -1148,7 +1169,7 @@ def check_event_relay_stop_clears_thread_state() -> tuple[bool, list[str]]:
 def check_notice_type_mappings() -> tuple[bool, list[str]]:
     expected = {
         "maintenance": "维保通告",
-        "change": "变更通告",
+        "change": "设备变更",
         "repair": "设备检修",
         "power": "上下电通告",
         "polling": "设备轮巡",

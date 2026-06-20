@@ -180,7 +180,7 @@ export function manualTemplateSnapshot(draft: Dict): Dict {
 }
 
 export function loadManualTemplateMemoryFromStorage(openId: string, scope: string, type: string): Dict | null {
-  if (!manualPrefillWorkTypes.has(type)) return null;
+  if (!isKnownWorkType(type) || !manualPrefillWorkTypes.has(type)) return null;
   const key = manualTemplateMemoryKey(openId, scope, type);
   try {
     const result = readJsonValue<unknown>(localStorage.getItem(key), manualTemplateTtlMs);
@@ -198,7 +198,7 @@ export function loadManualTemplateMemoryFromStorage(openId: string, scope: strin
 }
 
 export function saveManualTemplateMemoryToStorage(openId: string, scope: string, type: string, draft: Dict): boolean {
-  if (!manualPrefillWorkTypes.has(type)) return true;
+  if (!isKnownWorkType(type) || !manualPrefillWorkTypes.has(type)) return true;
   try {
     setJsonValue(
       manualTemplateMemoryKey(openId, scope, type),

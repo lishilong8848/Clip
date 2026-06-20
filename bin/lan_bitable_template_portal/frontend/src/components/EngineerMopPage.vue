@@ -96,6 +96,17 @@
               </button>
             </div>
           </div>
+          <div class="mop-step-flow" aria-label="MOP签名流程">
+            <span
+              v-for="(item, index) in mopRequirementItems"
+              :key="`flow:${item.key}`"
+              :class="{ done: item.done, pending: !item.done }"
+            >
+              <b>{{ index + 1 }}</b>
+              <strong>{{ item.label }}</strong>
+              <em>{{ item.done ? "完成" : item.text }}</em>
+            </span>
+          </div>
           <div class="signature-role-summary">
             <section :class="{ active: signatureRole === 'implementer' }" @click="signatureRole = 'implementer'">
               <span>维护实施人</span>
@@ -3247,6 +3258,68 @@ select:focus {
 .mop-preview-page .sign-panel-head p,
 .mop-preview-page .selected-sign-person small {
   display: none;
+}
+
+.mop-step-flow {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid #dbe7f5;
+  border-radius: 14px;
+  background: #f8fbff;
+}
+
+.mop-step-flow span {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: 2px 6px;
+  align-items: center;
+  padding: 7px;
+  border-radius: 12px;
+  color: #667892;
+  background: #fff;
+}
+
+.mop-step-flow b {
+  grid-row: span 2;
+  width: 24px;
+  height: 24px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 50%;
+  color: #60728d;
+  background: #edf4ff;
+  font-size: 12px;
+}
+
+.mop-step-flow strong,
+.mop-step-flow em {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mop-step-flow strong {
+  color: #12345f;
+  font-size: 12px;
+  font-weight: 950;
+}
+
+.mop-step-flow em {
+  font-size: 11px;
+  font-style: normal;
+}
+
+.mop-step-flow span.done b {
+  color: #fff;
+  background: #10b981;
+}
+
+.mop-step-flow span.done strong {
+  color: #087a58;
 }
 
 .mop-preview-page .sign-workspace {

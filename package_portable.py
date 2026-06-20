@@ -270,6 +270,17 @@ SMOKE_IMPORT_MODULES = [
     "lark_oapi",
 ]
 
+PACKAGING_PREFLIGHT_MODULES = [
+    "httpx",
+    "anyio",
+    "apscheduler",
+    "pydantic",
+    "starlette",
+    "fastapi",
+    "uvicorn",
+    "lark_oapi",
+]
+
 
 
 
@@ -946,6 +957,64 @@ def _missing_runtime_modules(venv_python: Path) -> list[str]:
     return [line.strip() for line in output.splitlines() if line.strip()]
 
 
+def _missing_selected_modules(venv_python: Path, modules: list[str]) -> list[str]:
+    script_lines = [
+        "import importlib",
+        "mods = " + repr(modules),
+        "missing = []",
+        "for name in mods:",
+        "    try:",
+        "        importlib.import_module(name)",
+        "    except Exception:",
+        "        missing.append(name)",
+        "print('\\n'.join(missing))",
+    ]
+    ok, output = _run_cmd_capture([str(venv_python), "-c", "\n".join(script_lines)])
+    if not ok:
+        return modules
+    return [line.strip() for line in output.splitlines() if line.strip()]
+
+
+def _ensure_packaging_preflight_dependencies() -> None:
+    missing = _missing_selected_modules(Path(sys.executable), PACKAGING_PREFLIGHT_MODULES)
+    if not missing:
+        return
+
+    packages = list(
+        dict.fromkeys(
+            RUNTIME_MODULE_TO_PACKAGE[m]
+            for m in PACKAGING_PREFLIGHT_MODULES
+            if m in missing and m in RUNTIME_MODULE_TO_PACKAGE
+        )
+    )
+    if not packages:
+        return
+
+    log("发布就绪检查缺少依赖，先补齐: " + ", ".join(packages))
+    if WHEELS_DIR.exists():
+        _pip_install_packages(Path(sys.executable), packages, use_local_wheels=True)
+
+    missing_after_wheels = _missing_selected_modules(Path(sys.executable), PACKAGING_PREFLIGHT_MODULES)
+    if not missing_after_wheels:
+        log("发布就绪检查依赖已从本地 wheels 补齐。")
+        return
+
+    packages_after_wheels = list(
+        dict.fromkeys(
+            RUNTIME_MODULE_TO_PACKAGE[m]
+            for m in PACKAGING_PREFLIGHT_MODULES
+            if m in missing_after_wheels and m in RUNTIME_MODULE_TO_PACKAGE
+        )
+    )
+    if packages_after_wheels:
+        _pip_install_packages(Path(sys.executable), packages_after_wheels, use_local_wheels=False)
+
+    final_missing = _missing_selected_modules(Path(sys.executable), PACKAGING_PREFLIGHT_MODULES)
+    if final_missing:
+        missing_text = ", ".join(RUNTIME_MODULE_TO_PACKAGE.get(m, m) for m in final_missing)
+        raise RuntimeError(f"发布就绪检查依赖缺失: {missing_text}")
+
+
 
 
 
@@ -1298,6 +1367,7 @@ def _run_packaging_preflight_tests() -> None:
 
     readiness_script = PROJECT_ROOT / "bin" / "tools" / "release_readiness_check.py"
     if readiness_script.exists():
+        _ensure_packaging_preflight_dependencies()
         subprocess.run(
             [sys.executable, os.fspath(readiness_script)],
             cwd=PROJECT_ROOT,

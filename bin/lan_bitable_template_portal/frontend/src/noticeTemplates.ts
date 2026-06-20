@@ -5,10 +5,7 @@ export type NoticeTemplate = {
   uploadFields: string[];
 };
 
-export type WorkTypeOption = {
-  value: string;
-  label: string;
-};
+import type { WorkTypeOption, WorkTypeValue } from "./types";
 
 export const workTypes: WorkTypeOption[] = [
   { value: "maintenance", label: "维保" },
@@ -19,9 +16,9 @@ export const workTypes: WorkTypeOption[] = [
   { value: "adjust", label: "调整" },
 ];
 
-export const manualPrefillWorkTypes = new Set(["repair", "power", "polling", "adjust"]);
+export const manualPrefillWorkTypes = new Set<WorkTypeValue>(["repair", "power", "polling", "adjust"]);
 
-export const noticeTemplates: Record<string, NoticeTemplate> = {
+export const noticeTemplates: Record<WorkTypeValue, NoticeTemplate> = {
   maintenance: {
     heading: "维保通告",
     titleLabel: "名称",
@@ -29,7 +26,7 @@ export const noticeTemplates: Record<string, NoticeTemplate> = {
     uploadFields: ["specialty", "maintenance_cycle", "non_plan"],
   },
   change: {
-    heading: "变更通告",
+    heading: "设备变更",
     titleLabel: "名称",
     messageFields: ["title", "level", "start_time", "end_time", "location", "content", "reason", "impact", "progress"],
     uploadFields: ["specialty", "zhihang"],
@@ -175,11 +172,11 @@ const noticeFieldLabels: Record<string, Record<string, string>> = {
   },
 };
 
-export function isKnownWorkType(value: string): boolean {
+export function isKnownWorkType(value: string): value is WorkTypeValue {
   return workTypes.some((item) => item.value === value);
 }
 
-export function normalizeWorkType(value: string, fallback = "maintenance"): string {
+export function normalizeWorkType(value: string, fallback = "maintenance"): WorkTypeValue {
   return isKnownWorkType(value) ? value : isKnownWorkType(fallback) ? fallback : "maintenance";
 }
 
@@ -188,7 +185,7 @@ export function workTypeLabel(value: string): string {
 }
 
 export function noticeTemplate(type: string): NoticeTemplate {
-  return noticeTemplates[type || "maintenance"] || noticeTemplates.maintenance;
+  return noticeTemplates[normalizeWorkType(type || "maintenance")];
 }
 
 export function isNoticeMessageField(type: string, field: string): boolean {

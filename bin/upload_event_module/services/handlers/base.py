@@ -62,7 +62,12 @@ class BaseNoticeHandler:
 
     def is_end_state(self, payload: NoticePayload) -> bool:
         text = payload.text or ""
-        return STATUS_END in text[:20] or STATUS_END in text[-20:]
+        info = extract_event_info(text) or {}
+        if str(info.get("status") or "").strip() == STATUS_END:
+            return True
+        first_line = (text.splitlines() or [""])[0]
+        match = re.search(r"状态\s*[:：]\s*([^；;，,\s]+)", first_line)
+        return bool(match and match.group(1).strip() == STATUS_END)
 
     def merge_tokens(
         self,

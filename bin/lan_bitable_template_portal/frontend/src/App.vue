@@ -1,63 +1,32 @@
 <template>
   <main class="app-shell" :class="{ 'signature-link-shell': signatureLinkMode }">
-    <header v-if="!signatureLinkMode" class="topbar">
-      <div class="brand">
-        <img class="brand-logo" :src="brandLogoSrc" alt="世纪互联官方标识" />
-        <div>
-          <h1>南通基地-运维灯塔工作台</h1>
-          <p>{{ headerSubtitle }}</p>
-        </div>
-      </div>
-      <div class="topbar-actions">
-        <span v-if="auth.loggedIn" class="user-chip">{{ auth.user?.name || auth.user?.open_id || "已登录" }}</span>
-        <button v-if="auth.loggedIn && (isWorkbench || isEngineerMopPage)" class="btn ghost" @click="returnToHome">功能选择</button>
-        <label v-if="auth.loggedIn && isWorkbench && visibleScopeOptions.length > 1" class="scope-switch">
-          <span>切换楼栋</span>
-          <select :value="currentScope" :disabled="loading" @change="switchScope(($event.target as HTMLSelectElement).value)">
-            <option v-for="item in visibleScopeOptions" :key="item.value" :value="normalizeScopeValue(item.value)">
-              {{ item.label }}
-            </option>
-          </select>
-        </label>
-        <div v-if="auth.loggedIn && isWorkbench" class="refresh-menu">
-          <button class="btn ghost" type="button" @click="refreshMenuOpen = !refreshMenuOpen">
-            刷新数据
-          </button>
-          <div v-if="refreshMenuOpen" class="refresh-menu-panel">
-            <p>低频使用。刷新失败时不会清空页面，会继续显示上次成功数据。</p>
-            <button
-              class="btn ghost"
-              type="button"
-              :disabled="loading || refreshCooldown.workbench"
-              :title="refreshButtonTitle('workbench')"
-              @click="manualRefreshWorkbench"
-            >
-              {{ loading ? "刷新中" : refreshCooldown.workbench ? "刚刷新过，稍后再试" : "刷新本页" }}
-            </button>
-            <button
-              class="btn ghost"
-              type="button"
-              :disabled="repairRefreshing || refreshCooldown.repair"
-              :title="refreshButtonTitle('repair')"
-              @click="refreshRepair"
-            >
-              {{ repairRefreshing ? "检修刷新中" : refreshCooldown.repair ? "刚刷新过，稍后再试" : "刷新检修" }}
-            </button>
-            <button
-              class="btn ghost"
-              type="button"
-              :disabled="changeRefreshing || refreshCooldown.change"
-              :title="refreshButtonTitle('change')"
-              @click="refreshChange"
-            >
-              {{ changeRefreshing ? "变更刷新中" : refreshCooldown.change ? "刚刷新过，稍后再试" : "刷新变更" }}
-            </button>
-          </div>
-        </div>
-        <button v-if="isAdmin" class="btn ghost" @click="showAdminTools = true">管理/诊断</button>
-        <button v-if="auth.loggedIn" class="btn danger-text" @click="logout">退出</button>
-      </div>
-    </header>
+    <AppTopbar
+      v-if="!signatureLinkMode"
+      :brand-logo-src="brandLogoSrc"
+      :header-subtitle="headerSubtitle"
+      :auth="auth"
+      :is-workbench="isWorkbench"
+      :is-engineer-mop-page="isEngineerMopPage"
+      :visible-scope-options="normalizedVisibleScopeOptions"
+      :current-scope="currentScope"
+      :loading="loading"
+      :refresh-menu-open="refreshMenuOpen"
+      :repair-refreshing="repairRefreshing"
+      :change-refreshing="changeRefreshing"
+      :refresh-cooldown="refreshCooldown"
+      :workbench-refresh-title="refreshButtonTitle('workbench')"
+      :repair-refresh-title="refreshButtonTitle('repair')"
+      :change-refresh-title="refreshButtonTitle('change')"
+      :is-admin="isAdmin"
+      @return-home="returnToHome"
+      @switch-scope="switchScope"
+      @update:refresh-menu-open="refreshMenuOpen = $event"
+      @refresh-workbench="manualRefreshWorkbench"
+      @refresh-repair="refreshRepair"
+      @refresh-change="refreshChange"
+      @open-admin="showAdminTools = true"
+      @logout="logout"
+    />
 
     <div v-if="!signatureLinkMode && connectionNotice" class="status-banner" :class="connectionNotice.tone">
       <span>{{ connectionNotice.text }}</span>
@@ -173,36 +142,13 @@
             <option v-for="item in specialtyFilterOptions" :key="item" :value="item">{{ item }}</option>
           </select>
         </label>
-        <div class="manual-create">
-          <button class="btn ghost" @click="showManualTypePicker = !showManualTypePicker">纯手填</button>
-          <div v-if="showManualTypePicker" class="manual-type-popover">
-            <strong>选择纯手填通告类型</strong>
-            <p>先选类型再填写，避免在维保页误发成维保通告。</p>
-            <div v-if="manualRecentTypeOptions.length" class="manual-recent">
-              <span>最近使用</span>
-              <button
-                v-for="type in manualRecentTypeOptions"
-                :key="type.value"
-                type="button"
-                @click="addManualDraft(type.value)"
-              >
-                {{ type.label }}
-              </button>
-            </div>
-            <div class="manual-type-grid">
-              <button
-                v-for="type in workTypes"
-                :key="type.value"
-                type="button"
-                @click="addManualDraft(type.value)"
-              >
-                <span>{{ type.label }}</span>
-                <small v-if="manualPrefillWorkTypes.has(type.value)">带入上次内容</small>
-                <small v-else>空白模板</small>
-              </button>
-            </div>
-          </div>
-        </div>
+        <ManualTypePicker
+          v-model:open="showManualTypePicker"
+          :work-types="workTypes"
+          :recent-types="manualRecentTypeOptions"
+          :prefill-types="manualPrefillTypeValues"
+          @select="addManualDraft"
+        />
         <button class="btn ghost" @click="showPasteParser = !showPasteParser">解析粘贴通告</button>
         <button v-if="isAdmin" class="btn ghost" @click="showMemoryImporter = !showMemoryImporter">导入历史记忆</button>
         <span v-if="draftSaveText" class="draft-save-status" :class="{ failed: draftSaveFailed }">
@@ -395,10 +341,28 @@
         <aside class="panel ongoing-panel">
           <div class="panel-head">
             <h2>已开始未结束</h2>
-            <span>{{ ongoingCountLabel }}</span>
+            <div class="panel-head-actions">
+              <div class="ongoing-type-filter" aria-label="进行中通告显示范围">
+                <button
+                  type="button"
+                  :class="{ active: ongoingTypeFilter === 'all' }"
+                  @click="ongoingTypeFilter = 'all'"
+                >
+                  全部
+                </button>
+                <button
+                  type="button"
+                  :class="{ active: ongoingTypeFilter === 'current' }"
+                  @click="ongoingTypeFilter = 'current'"
+                >
+                  当前类型
+                </button>
+              </div>
+              <span>{{ ongoingCountLabel }}</span>
+            </div>
           </div>
           <div v-if="filteredOngoing.length === 0" class="empty-block">
-            {{ specialtyFilter ? `当前专业下没有进行中通告，共 ${ongoing.length} 条` : "当前没有进行中通告" }}
+            {{ ongoingEmptyText }}
           </div>
           <div v-else class="ongoing-list">
             <OngoingNoticeCard
@@ -508,10 +472,12 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import AdminTools from "./components/AdminTools.vue";
+import AppTopbar from "./components/AppTopbar.vue";
 import AuthPanels from "./components/AuthPanels.vue";
 import DraftNoticeCard from "./components/DraftNoticeCard.vue";
 import EngineerMopPage from "./components/EngineerMopPage.vue";
 import HistoryMemoryPage from "./components/HistoryMemoryPage.vue";
+import ManualTypePicker from "./components/ManualTypePicker.vue";
 import OngoingNoticeCard from "./components/OngoingNoticeCard.vue";
 import RecentUndoPanel from "./components/RecentUndoPanel.vue";
 import ScopeHome from "./components/ScopeHome.vue";
@@ -553,9 +519,9 @@ import {
   toDatetimeLocal,
 } from "./noticeParsing";
 import { createCrossTabStreamCoordinator, type CrossTabStreamCoordinator } from "./streamCoordinator";
+import type { LooseDict, ScopeOption, WorkTypeOption, WorkTypeValue } from "./types";
 
-type Dict = Record<string, any>;
-type ScopeOption = { value: string; label: string };
+type Dict = LooseDict;
 type ActionConfirmTone = "danger" | "warning" | "primary";
 type ActionConfirmState = {
   open: boolean;
@@ -610,14 +576,17 @@ const repairRefreshing = ref(false);
 const changeRefreshing = ref(false);
 const refreshMenuOpen = ref(false);
 const isWorkbench = ref(false);
-const currentScope = ref(new URLSearchParams(window.location.search).get("scope") || "");
+const initialUrlParams = new URLSearchParams(window.location.search);
+const initialWorkType = normalizeWorkType(initialUrlParams.get("work_type") || "maintenance");
+const currentScope = ref(normalizeScopeValue(initialUrlParams.get("scope") || "", ""));
 const syncText = ref("准备中");
-const workType = ref("maintenance");
-const userSelectedWorkType = ref(false);
+const workType = ref(initialWorkType);
+const userSelectedWorkType = ref(Boolean(initialUrlParams.get("work_type")));
 const searchText = ref("");
 const specialtyFilter = ref("");
 const activeDraftKey = ref("");
 const activeOngoingKey = ref("");
+const ongoingTypeFilter = ref<"all" | "current">("all");
 const showPasteParser = ref(false);
 const showManualTypePicker = ref(false);
 const showMemoryImporter = ref(false);
@@ -732,6 +701,12 @@ let jobStreamCoordinator: CrossTabStreamCoordinator<Dict> | null = null;
 let activeItemsStreamCoordinator: CrossTabStreamCoordinator<Dict> | null = null;
 
 const visibleScopeOptions = computed(() => auth.scopeOptions.length ? auth.scopeOptions : requestableScopes);
+const normalizedVisibleScopeOptions = computed<ScopeOption[]>(() => (
+  visibleScopeOptions.value.map((item) => ({
+    ...item,
+    value: normalizeScopeValue(item.value),
+  }))
+));
 const isAdmin = computed(() => String(auth.user?.role || "").toLowerCase() === "admin");
 const ownedScopeValues = computed(() => new Set(auth.scopeOptions.map((item) => normalizeScopeValue(item.value))));
 const additionalRequestableScopes = computed(() => {
@@ -833,7 +808,8 @@ const scopedRecords = computed(() => records.value.filter((record) => recordMatc
 const manualRecentTypeOptions = computed(() => manualRecentTypes.value
   .map((value) => workTypes.find((item) => item.value === value))
   .filter(Boolean)
-  .slice(0, 2) as Array<{ value: string; label: string }>);
+  .slice(0, 2) as WorkTypeOption[]);
+const manualPrefillTypeValues = computed(() => Array.from(manualPrefillWorkTypes));
 const draftSaveText = computed(() => {
   if (!selectedKeys.size && !drafts.size) return "";
   if (draftSaveFailed.value) return "草稿保存失败";
@@ -891,12 +867,28 @@ const selectedDraftRowsAll = computed(() => {
   }).filter(Boolean) as Array<{ key: string; record: Dict; draft: Dict; title: string }>;
 });
 const selectedDraftRows = computed(() => selectedDraftRowsAll.value.filter((row) => matchesSpecialtyFilter(draftSpecialtyForRow(row))));
-const filteredOngoing = computed(() => ongoing.value.filter((item) => matchesSpecialtyFilter(ongoingSpecialtyForItem(item))));
+const typeFilteredOngoing = computed(() => {
+  if (ongoingTypeFilter.value !== "current") return ongoing.value;
+  return ongoing.value.filter((item) => String(item.work_type || "maintenance") === workType.value);
+});
+const filteredOngoing = computed(() => (
+  typeFilteredOngoing.value.filter((item) => matchesSpecialtyFilter(ongoingSpecialtyForItem(item)))
+));
 const ongoingCountLabel = computed(() => {
-  if (specialtyFilter.value && filteredOngoing.value.length !== ongoing.value.length) {
+  const baseCount = typeFilteredOngoing.value.length;
+  if (filteredOngoing.value.length !== ongoing.value.length || ongoingTypeFilter.value === "current") {
     return `${filteredOngoing.value.length} / ${ongoing.value.length}`;
   }
-  return String(filteredOngoing.value.length);
+  return String(baseCount);
+});
+const ongoingEmptyText = computed(() => {
+  if (specialtyFilter.value) {
+    return `当前专业下没有进行中通告，共 ${ongoing.value.length} 条`;
+  }
+  if (ongoingTypeFilter.value === "current" && ongoing.value.length) {
+    return `当前类型没有进行中通告，全部类型共 ${ongoing.value.length} 条`;
+  }
+  return "当前没有进行中通告";
 });
 const specialtyFilterOptions = computed(() => {
   const values = new Set<string>();
@@ -1225,7 +1217,7 @@ function syncMaintenanceTargetValue(record: Dict, draft: Dict): boolean {
   return true;
 }
 
-function targetOverrideWorkType(record: Dict): string {
+function targetOverrideWorkType(record: Dict): WorkTypeValue {
   return String(record.work_type || "maintenance") === "change" && sourceWorkTypeForRecord(record) === "maintenance"
     ? "maintenance"
     : "change";
@@ -1399,7 +1391,7 @@ function manualRecordFromDraft(key: string, draft: Dict): Dict {
   const title = manualDraftTitle(draft, type);
   const noticeTypeMap: Record<string, string> = {
     maintenance: "维保通告",
-    change: "变更通告",
+    change: "设备变更",
     repair: "设备检修",
     power: draft.notice_type === "下电通告" ? "下电通告" : "上电通告",
     polling: "设备轮巡",
@@ -1872,7 +1864,7 @@ async function loadAvailableUndos(scope = currentScope.value, requestSeq = workb
   }
 }
 
-function resolveInitialWorkType(preferred: string): string {
+function resolveInitialWorkType(preferred: string): WorkTypeValue {
   const preferredType = normalizeWorkType(preferred);
   if (recordTypeCounts.value[preferredType] > 0) return preferredType;
   const fallback = workTypes.find((item) => recordTypeCounts.value[item.value] > 0);
@@ -1880,8 +1872,9 @@ function resolveInitialWorkType(preferred: string): string {
 }
 
 function selectWorkType(value: string): void {
-  workType.value = value;
+  workType.value = normalizeWorkType(value);
   userSelectedWorkType.value = true;
+  updateWorkbenchUrl(workType.value);
 }
 
 async function toggleWorkTypeOverride(record: Dict): Promise<void> {
@@ -2104,8 +2097,8 @@ function pruneRuntimeState(): void {
   }
 }
 
-function enterScope(scope: string): void {
-  switchScope(scope);
+function enterScope(scope: string, nextWorkType = ""): void {
+  switchScope(scope, nextWorkType);
 }
 
 function enterEngineerMop(scope: string): void {
@@ -2137,20 +2130,44 @@ function returnToHome(): void {
   syncText.value = "请选择功能";
   const url = new URL(window.location.href);
   url.searchParams.delete("scope");
+  url.searchParams.delete("work_type");
   window.history.replaceState({}, "", url);
 }
 
-function switchScope(scope: string): void {
+function updateWorkbenchUrl(nextWorkType = workType.value): void {
+  if (!currentScope.value) return;
+  const url = new URL(window.location.href);
+  url.searchParams.set("scope", currentScope.value);
+  url.searchParams.set("work_type", normalizeWorkType(nextWorkType));
+  window.history.replaceState({}, "", url);
+}
+
+function switchScope(scope: string, nextWorkType = ""): void {
   const nextScope = normalizeScopeValue(scope, "ALL");
   if (!nextScope) return;
-  if (nextScope === currentScope.value && isWorkbench.value) return;
+  const nextSelectedWorkType = nextWorkType
+    ? normalizeWorkType(nextWorkType)
+    : (isWorkbench.value ? normalizeWorkType(workType.value) : "");
+  if (nextScope === currentScope.value && isWorkbench.value) {
+    if (nextSelectedWorkType && nextSelectedWorkType !== workType.value) {
+      workType.value = nextSelectedWorkType;
+      userSelectedWorkType.value = true;
+      updateWorkbenchUrl(nextSelectedWorkType);
+    }
+    return;
+  }
   clearWorkbenchRetry();
   if (currentScope.value && nextScope !== currentScope.value) {
     saveDrafts();
   }
   currentScope.value = nextScope;
   isWorkbench.value = true;
-  userSelectedWorkType.value = false;
+  if (nextSelectedWorkType) {
+    workType.value = nextSelectedWorkType;
+    userSelectedWorkType.value = true;
+  } else {
+    userSelectedWorkType.value = false;
+  }
   activeDraftKey.value = "";
   activeOngoingKey.value = "";
   clearOngoingEdits();
@@ -2163,6 +2180,11 @@ function switchScope(scope: string): void {
   syncText.value = "切换中";
   const url = new URL(window.location.href);
   url.searchParams.set("scope", currentScope.value);
+  if (nextSelectedWorkType) {
+    url.searchParams.set("work_type", nextSelectedWorkType);
+  } else {
+    url.searchParams.delete("work_type");
+  }
   window.history.replaceState({}, "", url);
   loadDrafts();
   loadWorkbench();
@@ -2659,7 +2681,8 @@ function applyChangeTargetCandidateDefaults(draft: Dict, candidate: Dict): Dict 
 }
 
 function completeParsedNoticeDraft(type: string, draft: Dict, options: Dict = {}): void {
-  const key = `manual:${type}:${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const normalizedType = normalizeWorkType(type);
+  const key = `manual:${normalizedType}:${Date.now()}-${Math.random().toString(16).slice(2)}`;
   Object.assign(draft, options, { manual_origin: "paste" });
   const candidateRecord = manualRecordFromDraft(key, draft);
   const duplicateKey = findDuplicateDraftKey(candidateRecord, draft, key);
@@ -2672,7 +2695,7 @@ function completeParsedNoticeDraft(type: string, draft: Dict, options: Dict = {}
   drafts.set(key, draft);
   selectedKeys.add(key);
   pinDraftInMiddlePanel(key);
-  workType.value = type;
+  workType.value = normalizedType;
   pasteText.value = "";
   pendingChangeTargetSelection.value = null;
   selectedChangeTargetId.value = "";
@@ -2681,7 +2704,7 @@ function completeParsedNoticeDraft(type: string, draft: Dict, options: Dict = {}
   changeTargetSearchText.value = "";
   changeSourceSearchText.value = "";
   showPasteParser.value = false;
-  pasteParseLine.value = `已解析为${workTypeLabel(type)}${parsedActionLabel(draft.parsed_action || "start")}通告。`;
+  pasteParseLine.value = `已解析为${workTypeLabel(normalizedType)}${parsedActionLabel(draft.parsed_action || "start")}通告。`;
   pasteParseStatus.value = "success";
   saveDrafts();
 }
@@ -4873,6 +4896,42 @@ button:disabled {
   background: #eef2ff;
   color: #3730a3;
   font-size: 12px;
+}
+
+.panel-head-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.ongoing-type-filter {
+  display: inline-flex;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid #dbe7f5;
+  border-radius: 999px;
+  background: #f7fbff;
+}
+
+.ongoing-type-filter button {
+  min-height: 24px;
+  padding: 3px 8px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: #60728d;
+  font-size: 12px;
+  font-weight: 900;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ongoing-type-filter button.active {
+  color: #fff;
+  background: linear-gradient(135deg, #1678ff, #005bd8);
+  box-shadow: 0 8px 16px rgba(22, 120, 255, 0.2);
 }
 
 .draft-stack,
