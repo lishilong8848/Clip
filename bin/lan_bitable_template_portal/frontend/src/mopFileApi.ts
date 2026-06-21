@@ -11,11 +11,19 @@ export function bindEngineerMop(payload: Dict): Promise<Dict> {
   });
 }
 
+export function uploadLocalEngineerMop(formData: FormData): Promise<Dict> {
+  return requestJson("/api/engineer/mop/upload-local", {
+    method: "POST",
+    body: formData,
+  });
+}
+
 export function previewEngineerMop(params: {
   scope: string;
   mopRecordId: string;
   fileToken: string;
   fileName: string;
+  uploadId?: string;
 }): Promise<Dict> {
   const query = new URLSearchParams({
     scope: params.scope,
@@ -23,6 +31,7 @@ export function previewEngineerMop(params: {
     file_token: params.fileToken,
     file_name: params.fileName,
   });
+  if (params.uploadId) query.set("upload_id", params.uploadId);
   return requestJson(`/api/engineer/mop/preview?${query.toString()}`);
 }
 

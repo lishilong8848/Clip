@@ -345,8 +345,13 @@
             :mop-candidates="filteredMopCandidates"
             :selected-mop-record-id="selectedMopRecordId"
             :is-recommended-mop="isRecommendedMop"
+            :local-upload-busy="localMopUploadBusy"
+            :local-upload-status="localMopUploadStatus"
+            :local-upload-message="localMopUploadMessage"
             @open="startMopPreview"
             @select-mop="selectMop"
+            @upload-local="uploadLocalMopFile"
+            @upload-local-invalid="handleLocalMopUploadInvalid"
           />
         </section>
       </template>
@@ -363,6 +368,7 @@ import {
   fillEngineerMop,
   previewEngineerMop,
   resetEngineerMop,
+  uploadLocalEngineerMop,
   uploadSignedEngineerMop,
 } from "../mopFileApi";
 import {
@@ -443,6 +449,10 @@ const message = ref("");
 const messageType = ref("");
 const mopBindingStatus = ref("");
 const mopBindingError = ref("");
+const localMopUploadBusy = ref(false);
+const localMopUploadStatus = ref("");
+const localMopUploadMessage = ref("");
+const LOCAL_MOP_MAX_BYTES = 20 * 1024 * 1024;
 const warnings = ref<string[]>([]);
 const notices = ref<Dict[]>([]);
 const mopCandidates = ref<Dict[]>([]);
@@ -3131,6 +3141,8 @@ function selectNotice(noticeKey: string): void {
   previewMode.value = false;
   mopBindingStatus.value = "";
   mopBindingError.value = "";
+  localMopUploadStatus.value = "";
+  localMopUploadMessage.value = "";
   temporarySignatures.value = [];
   otherSignatureDrafts.value = [];
   hiddenOtherSignatureKeys.value = [];
@@ -3145,6 +3157,11 @@ function selectMop(recordId: string): void {
   closeMopTransientUi();
   releaseMopEditSession();
   selectedMopRecordId.value = recordId;
+  const nextMop = mopCandidates.value.find((item) => String(item.record_id || "") === String(recordId || ""));
+  if (nextMop && !(nextMop.local_upload || nextMop.source === "local_upload") && localMopUploadStatus.value === "success") {
+    localMopUploadStatus.value = "";
+    localMopUploadMessage.value = "";
+  }
   preview.value = null;
   clearMopOutputState();
   previewMode.value = false;
@@ -3210,6 +3227,8 @@ async function saveBinding(options: { silent?: boolean } = {}): Promise<Dict | n
       source_record_id: selectedNotice.value.source_record_id,
       target_record_id: selectedNotice.value.target_record_id,
       active_item_id: selectedNotice.value.active_item_id,
+      mop_source: selectedMop.value.source === "local_upload" || selectedMop.value.local_upload ? "local_upload" : "bitable",
+      upload_id: selectedMop.value.upload_id || attachment.upload_id || "",
       mop_app_token: selectedMop.value.app_token,
       mop_table_id: selectedMop.value.table_id,
       mop_record_id: selectedMop.value.record_id,
@@ -3241,6 +3260,74 @@ async function saveBinding(options: { silent?: boolean } = {}): Promise<Dict | n
   }
 }
 
+function handleLocalMopUploadInvalid(messageText: string): void {
+  localMopUploadStatus.value = "failed";
+  localMopUploadMessage.value = messageText || "请上传 Excel MOP 文件。";
+}
+
+function upsertMopCandidate(candidate: Dict): void {
+  const recordId = String(candidate?.record_id || "").trim();
+  if (!recordId) return;
+  const next = mopCandidates.value.filter((item) => String(item.record_id || "") !== recordId);
+  mopCandidates.value = [candidate, ...next];
+}
+
+async function uploadLocalMopFile(file: File): Promise<void> {
+  if (!selectedNotice.value) {
+    handleLocalMopUploadInvalid("请先选择一条维保通告。");
+    return;
+  }
+  if (!selectedNoticeSourceRecordId.value) {
+    handleLocalMopUploadInvalid("当前维保通告缺少源记录，无法绑定本地 MOP。");
+    return;
+  }
+  if (!/\.(xlsx|xlsm|xls)$/i.test(file.name || "")) {
+    handleLocalMopUploadInvalid("请选择 xlsx、xlsm 或 xls 格式的 Excel 文件。");
+    return;
+  }
+  if (file.size > LOCAL_MOP_MAX_BYTES) {
+    handleLocalMopUploadInvalid("MOP 文件超过 20MB，请压缩或更换文件后再上传。");
+    return;
+  }
+  localMopUploadBusy.value = true;
+  localMopUploadStatus.value = "";
+  localMopUploadMessage.value = "上传中 / 识别中";
+  mopBindingStatus.value = "";
+  mopBindingError.value = "";
+  try {
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("scope", scope.value);
+    formData.append("source_record_id", selectedNoticeSourceRecordId.value);
+    formData.append("notice_key", String(selectedNotice.value.notice_key || ""));
+    formData.append("notice_title", String(selectedNotice.value.title || ""));
+    const data = await uploadLocalEngineerMop(formData);
+    const candidate = data.local_mop_candidate || {};
+    const recordId = String(candidate.record_id || "");
+    if (!recordId) throw new Error("本地 MOP 上传成功但未返回可选记录。");
+    upsertMopCandidate(candidate);
+    selectMop(recordId);
+    const attachment = Array.isArray(candidate.attachments) ? candidate.attachments[0] : null;
+    selectedAttachmentToken.value = attachment ? attachmentKey(attachment) : "";
+    localMopUploadStatus.value = "success";
+    const warningText = Array.isArray(data.warnings) && data.warnings.length ? `；${data.warnings[0]}` : "";
+    localMopUploadMessage.value = `已选中：${data.file_name || file.name}${warningText}`;
+    message.value = "本地 MOP 已上传并选中，可打开填写。";
+    messageType.value = "success";
+    if (Array.isArray(data.warnings)) {
+      warnings.value = [...new Set([...warnings.value, ...data.warnings.map((item: unknown) => String(item))])];
+    }
+  } catch (error) {
+    const text = error instanceof Error ? error.message : "本地 MOP 上传失败";
+    localMopUploadStatus.value = "failed";
+    localMopUploadMessage.value = text;
+    message.value = text;
+    messageType.value = "failed";
+  } finally {
+    localMopUploadBusy.value = false;
+  }
+}
+
 async function startMopPreview(): Promise<void> {
   if (!canPreview.value || !selectedMop.value) return;
   const binding = await saveBinding({ silent: true });
@@ -3255,6 +3342,7 @@ async function startMopPreview(): Promise<void> {
       mopRecordId: String(selectedMop.value.record_id || ""),
       fileToken: attachmentKey(attachment),
       fileName: String(attachment.name || ""),
+      uploadId: String(selectedMop.value.upload_id || attachment.upload_id || ""),
     });
     clearMopFillState({ clearSignatures: true });
     preview.value = data;

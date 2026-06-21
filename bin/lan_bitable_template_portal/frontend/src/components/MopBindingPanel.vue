@@ -95,12 +95,57 @@
           </small>
         </button>
       </div>
+
+      <section
+        class="local-mop-upload"
+        :class="{ dragging: localDragActive, busy: localUploadBusy, success: localUploadStatus === 'success', failed: localUploadStatus === 'failed' }"
+        tabindex="0"
+        role="button"
+        aria-label="上传本地 MOP 文件"
+        @click="triggerLocalFileInput"
+        @keydown.enter.prevent="triggerLocalFileInput"
+        @keydown.space.prevent="triggerLocalFileInput"
+        @dragenter.prevent="localDragActive = true"
+        @dragover.prevent="localDragActive = true"
+        @dragleave.prevent="localDragActive = false"
+        @drop.prevent="handleLocalDrop"
+        @paste="handleLocalPaste"
+      >
+        <input
+          ref="localFileInput"
+          class="local-mop-file-input"
+          type="file"
+          accept=".xlsx,.xlsm,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel.sheet.macroEnabled.12,application/vnd.ms-excel"
+          :disabled="localUploadBusy"
+          @click.stop
+          @change="handleLocalInput"
+        />
+        <div class="local-upload-icon" aria-hidden="true">
+          <span v-if="localUploadBusy">···</span>
+          <span v-else>↑</span>
+        </div>
+        <div class="local-upload-copy">
+          <strong>{{ localUploadTitle }}</strong>
+          <small>{{ localUploadHint }}</small>
+          <em v-if="localUploadMessage" :class="{ failed: localUploadStatus === 'failed', success: localUploadStatus === 'success' }">
+            {{ localUploadMessage }}
+          </em>
+        </div>
+        <button
+          class="local-upload-button"
+          type="button"
+          :disabled="localUploadBusy"
+          @click.stop="triggerLocalFileInput"
+        >
+          选择文件
+        </button>
+      </section>
     </template>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import type { Dict } from "../api/client";
 import MopSelectedFileCard from "./MopSelectedFileCard.vue";
 
@@ -120,6 +165,9 @@ const props = defineProps<{
   selectedMopRecordId: string;
   mopSearch: string;
   isRecommendedMop: (mop: Dict) => boolean;
+  localUploadBusy: boolean;
+  localUploadStatus: string;
+  localUploadMessage: string;
 }>();
 
 const emit = defineEmits<{
@@ -127,7 +175,12 @@ const emit = defineEmits<{
   "update:mopSearch": [value: string];
   open: [];
   "select-mop": [recordId: string];
+  "upload-local": [file: File];
+  "upload-local-invalid": [message: string];
 }>();
+
+const localFileInput = ref<HTMLInputElement | null>(null);
+const localDragActive = ref(false);
 
 const selectedAttachmentModel = computed({
   get: () => props.selectedAttachmentToken,
@@ -163,6 +216,20 @@ const nextStepTone = computed(() => {
   return "active";
 });
 
+const localUploadTitle = computed(() => {
+  if (props.localUploadBusy) return "上传中 / 识别中";
+  if (props.localUploadStatus === "success") return "已选本地 MOP";
+  if (props.localUploadStatus === "failed") return "本地 MOP 上传失败";
+  return "没有合适的 MOP？上传本地文件";
+});
+
+const localUploadHint = computed(() => {
+  if (props.localUploadBusy) return "正在保存并识别表格，请稍候。";
+  if (props.localUploadStatus === "success") return "已自动选中，可点击“打开填写”。";
+  if (props.localUploadStatus === "failed") return "请更换文件，或拖入/粘贴 Excel 文件重试。";
+  return "支持点击选择、拖入文件、Ctrl+V 粘贴 Excel 文件。";
+});
+
 function recommended(mop: Dict): boolean {
   return props.isRecommendedMop(mop);
 }
@@ -171,6 +238,52 @@ function recommendationReason(mop: Dict): string {
   if (props.selectedNotice?.mop_binding?.inherited) return "推荐原因：继承上次同类通告绑定";
   if (String(mop.record_id || "") === String(props.selectedNotice?.mop_binding?.mop_record_id || "")) return "推荐原因：该通告已绑定过这个 MOP";
   return "推荐原因：与当前维保通告匹配";
+}
+
+function triggerLocalFileInput(): void {
+  if (props.localUploadBusy) return;
+  localFileInput.value?.click();
+}
+
+function firstValidExcelFile(files: FileList | File[] | null | undefined): File | null {
+  const items = Array.from(files || []);
+  return items.find((file) => /\.(xlsx|xlsm|xls)$/i.test(file.name || "")) || null;
+}
+
+function submitLocalFile(file: File | null): void {
+  if (!file || props.localUploadBusy) return;
+  emit("upload-local", file);
+}
+
+function handleLocalInput(event: Event): void {
+  const input = event.target as HTMLInputElement;
+  const hasFiles = Boolean(input.files?.length);
+  const file = firstValidExcelFile(input.files);
+  if (!file && hasFiles) {
+    emit("upload-local-invalid", "请选择 xlsx、xlsm 或 xls 格式的 Excel 文件。");
+  }
+  submitLocalFile(file);
+  input.value = "";
+}
+
+function handleLocalDrop(event: DragEvent): void {
+  localDragActive.value = false;
+  const file = firstValidExcelFile(event.dataTransfer?.files);
+  if (!file) {
+    emit("upload-local-invalid", "请拖入 xlsx、xlsm 或 xls 格式的 Excel 文件。");
+    return;
+  }
+  submitLocalFile(file);
+}
+
+function handleLocalPaste(event: ClipboardEvent): void {
+  const file = firstValidExcelFile(event.clipboardData?.files);
+  if (!file) {
+    emit("upload-local-invalid", "请粘贴 Excel 文件，普通文本或图片不能作为 MOP 表格。");
+    return;
+  }
+  event.preventDefault();
+  submitLocalFile(file);
 }
 </script>
 
@@ -472,6 +585,145 @@ function recommendationReason(mop: Dict): string {
   padding-right: 4px;
 }
 
+.local-mop-upload {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 92px;
+  border: 1.5px dashed #9fc5ff;
+  border-radius: 18px;
+  padding: 14px;
+  background:
+    linear-gradient(135deg, rgba(239, 246, 255, 0.95), rgba(255, 255, 255, 0.88)),
+    #ffffff;
+  color: #0f172a;
+  cursor: pointer;
+  transition: border-color 0.16s ease, background 0.16s ease, box-shadow 0.16s ease;
+}
+
+.local-mop-upload:hover,
+.local-mop-upload:focus-visible,
+.local-mop-upload.dragging {
+  border-color: #1e63ff;
+  background:
+    linear-gradient(135deg, rgba(219, 234, 254, 0.96), rgba(255, 255, 255, 0.92)),
+    #ffffff;
+  box-shadow: 0 14px 28px rgba(30, 99, 255, 0.12);
+  outline: none;
+}
+
+.local-mop-upload.busy {
+  cursor: wait;
+  opacity: 0.86;
+}
+
+.local-mop-upload.success {
+  border-color: #86efac;
+  background: linear-gradient(135deg, rgba(236, 253, 245, 0.96), rgba(255, 255, 255, 0.9));
+}
+
+.local-mop-upload.failed {
+  border-color: #fecaca;
+  background: linear-gradient(135deg, rgba(254, 242, 242, 0.96), rgba(255, 255, 255, 0.9));
+}
+
+.local-mop-file-input {
+  display: none;
+}
+
+.local-upload-icon {
+  width: 46px;
+  height: 46px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 16px;
+  background: linear-gradient(135deg, #1e63ff, #005bd8);
+  color: #ffffff;
+  font-size: 24px;
+  font-weight: 950;
+  box-shadow: 0 12px 26px rgba(30, 99, 255, 0.22);
+}
+
+.local-mop-upload.success .local-upload-icon {
+  background: linear-gradient(135deg, #10b981, #059669);
+  box-shadow: 0 12px 26px rgba(16, 185, 129, 0.2);
+}
+
+.local-mop-upload.failed .local-upload-icon {
+  background: linear-gradient(135deg, #ef4444, #dc2626);
+  box-shadow: 0 12px 26px rgba(239, 68, 68, 0.16);
+}
+
+.local-upload-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.local-upload-copy strong {
+  color: #0f172a;
+  font-size: 14px;
+  font-weight: 950;
+}
+
+.local-upload-copy small {
+  color: #48627f;
+  font-size: 12px;
+  font-weight: 850;
+  line-height: 1.45;
+}
+
+.local-upload-copy em {
+  display: -webkit-box;
+  overflow: hidden;
+  width: fit-content;
+  max-width: 100%;
+  border: 1px solid #cfe0ff;
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: #eff6ff;
+  color: #0757d7;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 900;
+  text-overflow: ellipsis;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.local-upload-copy em.success {
+  border-color: #bbf7d0;
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.local-upload-copy em.failed {
+  border-color: #fecaca;
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+.local-upload-button {
+  min-height: 34px;
+  border: 1px solid #bdd2f4;
+  border-radius: 999px;
+  padding: 0 13px;
+  background: rgba(255, 255, 255, 0.94);
+  color: #0757d7;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 950;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.local-upload-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.56;
+}
+
 .mop-row {
   position: relative;
   width: 100%;
@@ -612,6 +864,15 @@ function recommendationReason(mop: Dict): string {
 
   .mop-flow-steps {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .local-mop-upload {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .local-upload-button {
+    grid-column: 1 / -1;
+    width: 100%;
   }
 }
 </style>

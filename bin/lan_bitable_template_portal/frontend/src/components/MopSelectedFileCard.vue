@@ -2,9 +2,11 @@
   <section class="mop-selected-file-card">
     <div class="selected-file-main">
       <span>已选 MOP 表格</span>
+      <em v-if="isLocalUpload" class="source-badge local">本地上传</em>
       <strong>{{ title }}</strong>
       <small>{{ attachmentLabel }}</small>
       <small class="attachment-count">{{ attachmentCountText }}</small>
+      <small v-if="localWarnings.length" class="local-warning">{{ localWarnings[0] }}</small>
       <em v-if="bindingStatus" class="bind-status success">{{ bindingStatus }}</em>
       <em v-else-if="bindingError" class="bind-status failed">{{ bindingError }}</em>
     </div>
@@ -65,6 +67,11 @@ const emit = defineEmits<{
 }>();
 
 const title = computed(() => String(props.selectedMop.title || "未命名 MOP"));
+const isLocalUpload = computed(() => Boolean(props.selectedMop.local_upload || props.selectedMop.source === "local_upload"));
+const localWarnings = computed(() => {
+  const items = props.selectedMop.warnings;
+  return Array.isArray(items) ? items.map((item) => String(item)).filter(Boolean) : [];
+});
 
 const attachmentLabel = computed(() => {
   if (props.selectedAttachment?.name) return String(props.selectedAttachment.name);
@@ -153,6 +160,30 @@ function emitAttachmentChange(event: Event): void {
   padding: 3px 7px;
   color: #0757d7 !important;
   font-weight: 900;
+}
+
+.source-badge {
+  width: fit-content;
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 950;
+}
+
+.source-badge.local {
+  border: 1px solid #bbf7d0;
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.local-warning {
+  border: 1px solid #fde68a;
+  border-radius: 10px;
+  background: #fffbeb;
+  padding: 5px 7px;
+  color: #92400e !important;
+  font-weight: 850;
 }
 
 .bind-status {

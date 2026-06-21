@@ -51,7 +51,7 @@ class LanPortalStateStore:
     are migration inputs only and are never deleted or overwritten here.
     """
 
-    SCHEMA_VERSION = 21
+    SCHEMA_VERSION = 22
     SOURCE_SCOPE_TABLES = {
         "110": "source_records_110",
         "A": "source_records_a",
@@ -94,6 +94,7 @@ class LanPortalStateStore:
         "notice_upload_attachments",
         "mop_notice_bindings",
         "mop_fill_memory",
+        "engineer_mop_local_files",
         "signature_link_tokens",
         "mop_temporary_signature_sessions",
         "schema_migrations",
@@ -117,6 +118,8 @@ class LanPortalStateStore:
         "idx_mop_notice_bindings_template",
         "idx_mop_notice_bindings_mop",
         "idx_mop_fill_memory_updated",
+        "idx_engineer_mop_local_notice",
+        "idx_engineer_mop_local_status",
         "idx_signature_link_tokens_record",
         "idx_signature_link_tokens_expiry",
         "idx_mop_temp_signature_notice",
@@ -518,6 +521,40 @@ class LanPortalStateStore:
             """
             CREATE INDEX IF NOT EXISTS idx_mop_fill_memory_updated
             ON mop_fill_memory(updated_at)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS engineer_mop_local_files (
+                upload_id TEXT PRIMARY KEY,
+                scope TEXT,
+                source_record_id TEXT,
+                notice_key TEXT,
+                notice_title TEXT,
+                original_file_name TEXT,
+                local_file_path TEXT NOT NULL,
+                file_size INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL,
+                detected_json TEXT NOT NULL,
+                warnings_json TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_by_openid TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                deleted_at REAL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_engineer_mop_local_notice
+            ON engineer_mop_local_files(source_record_id, notice_key, deleted_at)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_engineer_mop_local_status
+            ON engineer_mop_local_files(status, updated_at, deleted_at)
             """
         )
         conn.execute(
@@ -5602,6 +5639,163 @@ class LanPortalStateStore:
                     (memory_key,),
                 ).fetchone()
         return self._mop_fill_memory_from_row(row)
+
+    def _mop_local_file_from_row(self, row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if not row:
+            return None
+        detected = self._loads(str(row["detected_json"] or "{}"), {})
+        warnings = self._loads(str(row["warnings_json"] or "[]"), [])
+        payload = self._loads(str(row["payload_json"] or "{}"), {})
+        if not isinstance(detected, dict):
+            detected = {}
+        if not isinstance(warnings, list):
+            warnings = []
+        if not isinstance(payload, dict):
+            payload = {}
+        return {
+            "upload_id": str(row["upload_id"] or ""),
+            "scope": str(row["scope"] or ""),
+            "source_record_id": str(row["source_record_id"] or ""),
+            "notice_key": str(row["notice_key"] or ""),
+            "notice_title": str(row["notice_title"] or ""),
+            "original_file_name": str(row["original_file_name"] or ""),
+            "local_file_path": str(row["local_file_path"] or ""),
+            "file_size": int(row["file_size"] or 0),
+            "status": str(row["status"] or ""),
+            "detected": detected,
+            "warnings": [str(item) for item in warnings],
+            "payload": payload,
+            "created_by_openid": str(row["created_by_openid"] or ""),
+            "created_at": float(row["created_at"] or 0),
+            "updated_at": float(row["updated_at"] or 0),
+            "deleted_at": float(row["deleted_at"] or 0) if row["deleted_at"] is not None else None,
+        }
+
+    def upsert_engineer_mop_local_file(self, payload: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(payload or {})
+        upload_id = self._text(payload.get("upload_id")) or uuid.uuid4().hex
+        local_file_path = self._text(payload.get("local_file_path"))
+        if not local_file_path:
+            raise ValueError("本地 MOP 文件缺少保存路径。")
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                existing = conn.execute(
+                    "SELECT created_at FROM engineer_mop_local_files WHERE upload_id = ?",
+                    (upload_id,),
+                ).fetchone()
+                created_at = float(existing["created_at"] or now) if existing else now
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO engineer_mop_local_files(
+                        upload_id, scope, source_record_id, notice_key, notice_title,
+                        original_file_name, local_file_path, file_size, status,
+                        detected_json, warnings_json, payload_json, created_by_openid,
+                        created_at, updated_at, deleted_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        upload_id,
+                        self._text(payload.get("scope")),
+                        self._text(payload.get("source_record_id")),
+                        self._text(payload.get("notice_key")),
+                        self._text(payload.get("notice_title")),
+                        self._text(payload.get("original_file_name")),
+                        local_file_path,
+                        int(payload.get("file_size") or 0),
+                        self._text(payload.get("status")) or "ready",
+                        self._json(payload.get("detected") if isinstance(payload.get("detected"), dict) else {}),
+                        self._json(payload.get("warnings") if isinstance(payload.get("warnings"), list) else []),
+                        self._json(payload.get("payload") if isinstance(payload.get("payload"), dict) else {}),
+                        self._text(payload.get("created_by_openid")),
+                        created_at,
+                        now,
+                        payload.get("deleted_at"),
+                    ),
+                )
+                conn.commit()
+                row = conn.execute(
+                    "SELECT * FROM engineer_mop_local_files WHERE upload_id = ?",
+                    (upload_id,),
+                ).fetchone()
+        return self._mop_local_file_from_row(row) or {}
+
+    def get_engineer_mop_local_file(
+        self,
+        upload_id: str,
+        *,
+        include_deleted: bool = False,
+    ) -> dict[str, Any] | None:
+        upload_id = self._text(upload_id)
+        if not upload_id or not self.db_path.exists():
+            return None
+        clauses = ["upload_id = ?"]
+        if not include_deleted:
+            clauses.append("deleted_at IS NULL")
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    f"SELECT * FROM engineer_mop_local_files WHERE {' AND '.join(clauses)}",
+                    (upload_id,),
+                ).fetchone()
+        return self._mop_local_file_from_row(row)
+
+    def list_engineer_mop_local_files(
+        self,
+        *,
+        source_record_id: str = "",
+        notice_key: str = "",
+        scope: str = "",
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        if not self.db_path.exists():
+            return []
+        clauses = ["deleted_at IS NULL"]
+        params: list[Any] = []
+        if self._text(source_record_id):
+            clauses.append("source_record_id = ?")
+            params.append(self._text(source_record_id))
+        if self._text(notice_key):
+            clauses.append("notice_key = ?")
+            params.append(self._text(notice_key))
+        if self._text(scope) and self._text(scope) != "ALL":
+            clauses.append("(scope = ? OR scope = '' OR scope = 'ALL')")
+            params.append(self._text(scope))
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                rows = conn.execute(
+                    f"""
+                    SELECT *
+                    FROM engineer_mop_local_files
+                    WHERE {' AND '.join(clauses)}
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (*params, max(1, int(limit or 20))),
+                ).fetchall()
+        return [item for item in (self._mop_local_file_from_row(row) for row in rows) if item]
+
+    def mark_old_engineer_mop_local_files_deleted(self, *, older_than_ts: float) -> int:
+        if not self.db_path.exists():
+            return 0
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                cursor = conn.execute(
+                    """
+                    UPDATE engineer_mop_local_files
+                    SET deleted_at = ?, updated_at = ?
+                    WHERE deleted_at IS NULL AND updated_at < ?
+                    """,
+                    (now, now, float(older_than_ts or 0)),
+                )
+                conn.commit()
+                return int(cursor.rowcount or 0)
 
     def get_auth_permissions(self) -> dict[str, Any] | None:
         if not self.db_path.exists():

@@ -64,6 +64,8 @@ REPAIR_LINK_MAX_ATTEMPTS = 18
 BITABLE_DATA_NOT_READY_CODE = 1254607
 BITABLE_TRANSIENT_RETRY_DELAYS = (1.0, 2.5, 5.0)
 MOP_CANDIDATE_CACHE_TTL_SECONDS = 10 * 60
+MOP_LOCAL_UPLOAD_MAX_BYTES = 20 * 1024 * 1024
+MOP_LOCAL_UPLOAD_EXTENSIONS = {".xlsx", ".xlsm", ".xls"}
 MOP_SOURCE_APP_TOKEN = "MliKbC3fXa8PXrsndKscmxjdn1g"
 MOP_SOURCE_TABLE_ID = "tblpqwu1kQ0bmi0i"
 MOP_SOURCE_VIEW_ID = "vewrHJHl3v"
@@ -8729,6 +8731,29 @@ class MaintenancePortalService:
             template_key = str(binding.get("template_key") or "").strip()
             if template_key and template_key not in bindings_by_template:
                 bindings_by_template[template_key] = binding
+        local_candidate_by_id: dict[str, dict[str, Any]] = {}
+        for binding in bindings:
+            payload = binding.get("payload") if isinstance(binding.get("payload"), dict) else {}
+            upload_id = self._upload_id_from_local_mop_ref(
+                payload.get("upload_id"),
+                allow_plain=True,
+            ) or self._upload_id_from_local_mop_ref(
+                binding.get("mop_record_id"),
+                binding.get("mop_attachment_token"),
+            )
+            if not upload_id or upload_id in local_candidate_by_id:
+                continue
+            stored = self._state_store.get_engineer_mop_local_file(upload_id)
+            if not stored:
+                warnings.append(f"本地上传 MOP 已失效，请重新上传：{binding.get('mop_title') or upload_id}")
+                continue
+            local_candidate_by_id[upload_id] = self._engineer_mop_local_candidate(stored)
+        if local_candidate_by_id:
+            existing_ids = {str(item.get("record_id") or "") for item in mop_candidates}
+            mop_candidates = [
+                *[item for item in local_candidate_by_id.values() if str(item.get("record_id") or "") not in existing_ids],
+                *mop_candidates,
+            ]
         for notice in notices:
             binding = bindings_by_notice.get(notice["notice_key"])
             template_key = str(notice.get("mop_template_key") or "").strip()
@@ -10804,6 +10829,230 @@ class MaintenancePortalService:
         }
 
     @staticmethod
+    def _local_mop_record_id(upload_id: str) -> str:
+        text = str(upload_id or "").strip()
+        return f"local:{text}" if text and not text.startswith("local:") else text
+
+    @staticmethod
+    def _upload_id_from_local_mop_ref(*values: Any, allow_plain: bool = False) -> str:
+        for value in values:
+            text = str(value or "").strip()
+            if not text:
+                continue
+            if text.startswith("local:"):
+                return text.split(":", 1)[1].strip()
+            if allow_plain and re.fullmatch(r"[0-9a-fA-F]{16,64}", text):
+                return text
+        return ""
+
+    def _engineer_mop_local_file_meta(
+        self,
+        *,
+        path: str,
+        file_name: str,
+        size: int,
+        upload_id: str = "",
+    ) -> dict[str, Any]:
+        data_root = Path(get_data_file_path("")).resolve()
+        source_path = Path(str(path or "")).resolve()
+        try:
+            relative_path = str(source_path.relative_to(data_root))
+        except Exception:
+            relative_path = source_path.name
+        return {
+            "file_name": str(file_name or source_path.name),
+            "path": str(source_path),
+            "relative_path": relative_path,
+            "size": int(size or 0),
+            "upload_id": str(upload_id or ""),
+            "saved_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    def _engineer_mop_local_candidate(self, item: dict[str, Any]) -> dict[str, Any]:
+        upload_id = str(item.get("upload_id") or "").strip()
+        file_name = str(item.get("original_file_name") or "本地MOP表格.xlsx").strip()
+        record_id = self._local_mop_record_id(upload_id)
+        attachment = {
+            "name": file_name,
+            "file_token": record_id,
+            "upload_id": upload_id,
+            "size": int(item.get("file_size") or 0),
+            "source": "local_upload",
+            "local_upload": True,
+        }
+        return {
+            "record_id": record_id,
+            "upload_id": upload_id,
+            "source": "local_upload",
+            "local_upload": True,
+            "title": Path(file_name).stem or "本地上传 MOP",
+            "app_token": "",
+            "table_id": "",
+            "file_no": "",
+            "specialty": "",
+            "maintenance_type": "",
+            "version": "",
+            "file_status": "本地上传",
+            "attachment_count": 1,
+            "attachments": [attachment],
+            "fields": {
+                "来源": "本地上传",
+                "文件名": file_name,
+            },
+            "warnings": item.get("warnings") or [],
+            "detected": item.get("detected") or {},
+        }
+
+    def _convert_xls_to_xlsx_content(self, content: bytes) -> bytes:
+        try:
+            import xlrd
+            from openpyxl import Workbook
+        except Exception as exc:  # pragma: no cover - dependency bootstrap should provide these.
+            raise PortalError("缺少 xlrd/openpyxl 依赖，无法识别 xls 文件。") from exc
+        try:
+            workbook = xlrd.open_workbook(file_contents=content, formatting_info=True)
+        except Exception:
+            workbook = xlrd.open_workbook(file_contents=content, formatting_info=False)
+        output = Workbook()
+        default_sheet = output.active
+        for sheet_index, sheet in enumerate(workbook.sheets()):
+            worksheet = default_sheet if sheet_index == 0 else output.create_sheet()
+            safe_title = re.sub(r"[\[\]\:\*\?\/\\]", "_", str(sheet.name or f"Sheet{sheet_index + 1}")).strip() or f"Sheet{sheet_index + 1}"
+            worksheet.title = safe_title[:31]
+            for row_index in range(sheet.nrows):
+                for col_index in range(sheet.ncols):
+                    value = sheet.cell_value(row_index, col_index)
+                    worksheet.cell(row=row_index + 1, column=col_index + 1).value = value
+            for row1, row2, col1, col2 in getattr(sheet, "merged_cells", []) or []:
+                if row2 > row1 + 1 or col2 > col1 + 1:
+                    with suppress(Exception):
+                        worksheet.merge_cells(
+                            start_row=row1 + 1,
+                            start_column=col1 + 1,
+                            end_row=row2,
+                            end_column=col2,
+                        )
+        buffer = io.BytesIO()
+        output.save(buffer)
+        return buffer.getvalue()
+
+    def _parse_mop_local_file_content(
+        self,
+        content: bytes,
+        *,
+        file_name: str,
+    ) -> tuple[dict[str, Any], bytes, str]:
+        suffix = Path(str(file_name or "")).suffix.lower()
+        if suffix == ".xls":
+            converted = self._convert_xls_to_xlsx_content(content)
+            return self._parse_xlsx_preview(converted), converted, ".xlsx"
+        if suffix in {".xlsx", ".xlsm"} or content[:2] == b"PK":
+            return self._parse_xlsx_preview(content), content, suffix or ".xlsx"
+        raise PortalError("当前仅支持上传 xlsx/xlsm/xls 格式的 MOP 表格。")
+
+    def upload_engineer_mop_local_file(
+        self,
+        *,
+        scope: str = "ALL",
+        source_record_id: str = "",
+        notice_key: str = "",
+        notice_title: str = "",
+        file_name: str = "",
+        content: bytes = b"",
+        created_by_openid: str = "",
+    ) -> dict[str, Any]:
+        source_record_id = str(source_record_id or "").strip()
+        if not source_record_id:
+            raise PortalError("请先选择一条维保通告，再上传本地 MOP。")
+        if not content:
+            raise PortalError("上传文件为空，请重新选择 MOP 文件。")
+        if len(content) > MOP_LOCAL_UPLOAD_MAX_BYTES:
+            raise PortalError("MOP 文件超过 20MB，请压缩或更换文件后再上传。")
+        original_name = str(file_name or "").strip() or "本地MOP表格.xlsx"
+        suffix = Path(original_name).suffix.lower()
+        if suffix not in MOP_LOCAL_UPLOAD_EXTENSIONS:
+            raise PortalError("仅支持上传 xlsx、xlsm、xls 格式的 MOP 表格。")
+        with suppress(Exception):
+            self._state_store.mark_old_engineer_mop_local_files_deleted(
+                older_than_ts=time.time() - 30 * 24 * 60 * 60
+            )
+
+        self.ensure_snapshot_loaded()
+        record = self._find_record_by_id(source_record_id, WORK_TYPE_MAINTENANCE)
+        display_fields = record.get("display_fields") if isinstance(record.get("display_fields"), dict) else {}
+        building_codes = self._building_codes_from_value(display_fields.get("楼栋"))
+        normalized_scope = self._normalize_scope(scope)
+        if not self._scope_matches_buildings(normalized_scope, building_codes):
+            raise PortalError("当前账号无权为该楼栋上传 MOP 文件。")
+
+        upload_id = uuid.uuid4().hex
+        scope_part = self._safe_mop_path_part(self._scope_label(normalized_scope) or normalized_scope, "ALL")
+        source_part = self._safe_mop_path_part(source_record_id, "source")
+        save_dir = Path(get_data_file_path(os.path.join("mop_local_uploads", scope_part, source_part, upload_id)))
+        save_dir.mkdir(parents=True, exist_ok=True)
+        safe_name = self._safe_mop_path_part(original_name, "本地MOP表格.xlsx")
+        original_path = save_dir / safe_name
+        original_path.write_bytes(content)
+
+        warnings: list[str] = []
+        try:
+            parsed, working_content, working_suffix = self._parse_mop_local_file_content(
+                content,
+                file_name=original_name,
+            )
+        except PortalError:
+            raise
+        except Exception as exc:
+            raise PortalError(f"MOP 文件识别失败：{exc}") from exc
+
+        working_path = original_path
+        if suffix == ".xls":
+            working_path = save_dir / f"{self._safe_mop_path_part(Path(safe_name).stem, '本地MOP表格')}_converted.xlsx"
+            working_path.write_bytes(working_content)
+            warnings.append("已将 xls 文件转换为 xlsx 工作副本，最终签名会写入转换后的文件。")
+        elif suffix == ".xlsm":
+            warnings.append("已识别 xlsm 文件；签名写入时会尽量保留工作簿结构。")
+
+        editable_summary = self._mop_editable_summary(parsed.get("sheets") or [])
+        if not editable_summary.get("field_count") and not editable_summary.get("checkbox_count"):
+            warnings.append("部分字段未识别，可打开后手动编辑单元格继续。")
+        detected = {
+            "parser": parsed.get("parser") or ("xls" if suffix == ".xls" else "xlsx"),
+            "sheet_count": len(parsed.get("sheets") or []),
+            "editable_summary": editable_summary,
+        }
+        stored = self._state_store.upsert_engineer_mop_local_file(
+            {
+                "upload_id": upload_id,
+                "scope": normalized_scope,
+                "source_record_id": source_record_id,
+                "notice_key": notice_key,
+                "notice_title": notice_title,
+                "original_file_name": original_name,
+                "local_file_path": str(working_path),
+                "file_size": len(content),
+                "status": "ready",
+                "detected": detected,
+                "warnings": warnings,
+                "payload": {
+                    "original_file_path": str(original_path),
+                    "working_file_path": str(working_path),
+                    "working_suffix": working_suffix,
+                },
+                "created_by_openid": created_by_openid,
+            }
+        )
+        candidate = self._engineer_mop_local_candidate(stored)
+        return {
+            "upload_id": upload_id,
+            "file_name": original_name,
+            "file_size": len(content),
+            "detected_summary": detected,
+            "warnings": warnings,
+            "local_mop_candidate": candidate,
+        }
+
+    @staticmethod
     def _normalize_mop_fill_memory_name(
         *, mop_title: str = "", mop_file_name: str = ""
     ) -> str:
@@ -11218,7 +11467,79 @@ class MaintenancePortalService:
         mop_record_id: str,
         file_token: str = "",
         file_name: str = "",
+        upload_id: str = "",
     ) -> dict[str, Any]:
+        local_upload_id = self._upload_id_from_local_mop_ref(
+            upload_id,
+            allow_plain=True,
+        ) or self._upload_id_from_local_mop_ref(mop_record_id, file_token)
+        if local_upload_id:
+            stored = self._state_store.get_engineer_mop_local_file(local_upload_id)
+            if not stored:
+                raise PortalError("本地上传的 MOP 文件不存在，请重新上传。")
+            stored_scope = self._normalize_scope(stored.get("scope") or "ALL")
+            request_scope = self._normalize_scope(scope)
+            if (
+                stored_scope
+                and stored_scope != "ALL"
+                and request_scope != "ALL"
+                and stored_scope != request_scope
+            ):
+                raise PortalError("当前楼栋与本地 MOP 上传记录不匹配，请重新上传。")
+            stored_source_record_id = str(stored.get("source_record_id") or "").strip()
+            if stored_source_record_id:
+                record = self._find_record_by_id(stored_source_record_id, WORK_TYPE_MAINTENANCE)
+                display_fields = record.get("display_fields") if isinstance(record.get("display_fields"), dict) else {}
+                if not self._scope_matches_buildings(request_scope, self._building_codes_from_value(display_fields.get("楼栋"))):
+                    raise PortalError("当前账号无权预览该本地 MOP 文件。")
+            source_path = Path(str(stored.get("local_file_path") or "")).resolve()
+            data_root = Path(get_data_file_path("")).resolve()
+            try:
+                source_path.relative_to(data_root)
+            except Exception as exc:
+                raise PortalError("本地 MOP 文件路径无效，请重新上传。") from exc
+            if not source_path.is_file():
+                raise PortalError("本地 MOP 文件已被移动或删除，请重新上传。")
+            content = source_path.read_bytes()
+            resolved_name = str(file_name or stored.get("original_file_name") or source_path.name).strip()
+            suffix = source_path.suffix.lower()
+            if suffix in {".xlsx", ".xlsm"} or content[:2] == b"PK":
+                parsed = self._parse_xlsx_preview(content)
+            else:
+                raise PortalError("本地 MOP 工作文件格式无效，请重新上传 xlsx/xlsm 文件。")
+            memory_key = self._mop_fill_memory_key(
+                mop_title=str(Path(resolved_name).stem or "本地上传 MOP"),
+                mop_file_name=resolved_name,
+            )
+            fill_memory = self._state_store.get_mop_fill_memory(memory_key) if memory_key else None
+            parsed.update(
+                {
+                    "mop_record_id": self._local_mop_record_id(local_upload_id),
+                    "mop_title": str(Path(resolved_name).stem or "本地上传 MOP"),
+                    "mop_file_name": resolved_name,
+                    "mop_source": "local_upload",
+                    "upload_id": local_upload_id,
+                    "mop_fill_memory_key": memory_key,
+                    "fill_memory": fill_memory,
+                    "attachment": {
+                        "name": resolved_name,
+                        "upload_id": local_upload_id,
+                        "file_token": self._local_mop_record_id(local_upload_id),
+                        "source": "local_upload",
+                        "local_upload": True,
+                    },
+                    "local_file": self._engineer_mop_local_file_meta(
+                        path=str(source_path),
+                        file_name=source_path.name,
+                        size=int(stored.get("file_size") or source_path.stat().st_size),
+                        upload_id=local_upload_id,
+                    ),
+                    "editable_summary": self._mop_editable_summary(parsed.get("sheets") or []),
+                    "warnings": stored.get("warnings") or [],
+                }
+            )
+            return parsed
+
         mop_candidates, warnings, settings = self._load_engineer_mop_candidates()
         if not settings.get("app_token") or not settings.get("table_id"):
             raise PortalError("未配置 MOP 多维表，无法预览。")

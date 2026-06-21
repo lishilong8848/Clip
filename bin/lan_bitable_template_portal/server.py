@@ -1157,6 +1157,7 @@ class PortalRuntime:
                     mop_record_id=(qs.get("mop_record_id") or [""])[0],
                     file_token=(qs.get("file_token") or [""])[0],
                     file_name=(qs.get("file_name") or [""])[0],
+                    upload_id=(qs.get("upload_id") or [""])[0],
                 )
                 return self._send_json(
                     200,

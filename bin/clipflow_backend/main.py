@@ -23,7 +23,7 @@ from typing import Any, AsyncIterator
 from urllib.parse import urlencode
 
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from clipflow_backend.preflight import (
@@ -1399,6 +1399,41 @@ class FastAPIPortalController:
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)
 
+        @app.post("/api/engineer/mop/upload-local")
+        async def engineer_mop_upload_local(
+            request: Request,
+            file: UploadFile = File(...),
+            scope: str = Form("ALL"),
+            source_record_id: str = Form(""),
+            notice_key: str = Form(""),
+            notice_title: str = Form(""),
+        ):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                normalized_scope = self._authorized_scope_or_error(session, scope or "ALL")
+                content = await file.read(21 * 1024 * 1024)
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.upload_engineer_mop_local_file,
+                    scope=normalized_scope,
+                    source_record_id=source_record_id,
+                    notice_key=notice_key,
+                    notice_title=notice_title,
+                    file_name=str(file.filename or ""),
+                    content=content,
+                    created_by_openid=str(user.get("open_id") or ""),
+                )
+                PortalRuntime.clear_payload_cache()
+                self._clear_read_cache()
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+            finally:
+                with suppress(Exception):
+                    await file.close()
+
         @app.get("/api/engineer/mop/preview")
         async def engineer_mop_preview(request: Request):
             session = self._current_session(request)
@@ -1414,6 +1449,7 @@ class FastAPIPortalController:
                     mop_record_id=str(request.query_params.get("mop_record_id") or ""),
                     file_token=str(request.query_params.get("file_token") or ""),
                     file_name=str(request.query_params.get("file_name") or ""),
+                    upload_id=str(request.query_params.get("upload_id") or ""),
                 )
                 return self._json_ok(request, session, data)
             except Exception as exc:
