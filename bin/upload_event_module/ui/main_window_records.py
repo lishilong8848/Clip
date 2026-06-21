@@ -1409,18 +1409,41 @@ class MainWindowRecordsMixin:
             return True, record if isinstance(record, dict) else {}
         return False, str((result or {}).get("message") or "查询记录失败。")
 
+    @staticmethod
+    def _normalize_qt_command_result(result):
+        if not isinstance(result, dict):
+            return {}
+        data = result.get("data")
+        if bool(result.get("ok")) and isinstance(data, dict):
+            command_keys = {
+                "ok",
+                "message",
+                "error",
+                "record",
+                "items",
+                "job_id",
+                "active_item_id",
+                "record_id",
+                "today_in_progress_state",
+            }
+            if command_keys.intersection(data.keys()):
+                return dict(data)
+        return dict(result)
+
     def _submit_qt_command(self, command: str, payload: dict | None = None, *, timeout: float = 120.0):
         controller = getattr(self, "lan_template_portal_controller", None)
         if controller is None or not hasattr(controller, "submit_qt_command"):
             raise RuntimeError("本机后端未连接。")
         submit = controller.submit_qt_command
         try:
-            return submit(command, payload or {}, timeout=timeout)
+            return self._normalize_qt_command_result(
+                submit(command, payload or {}, timeout=timeout)
+            )
         except TypeError as exc:
             message = str(exc)
             if "timeout" not in message and "unexpected keyword" not in message:
                 raise
-            return submit(command, payload or {})
+            return self._normalize_qt_command_result(submit(command, payload or {}))
 
     def _run_record_binding_validation(self, local_data: dict | None):
         local_data = dict(local_data or {})
@@ -2221,11 +2244,22 @@ class MainWindowRecordsMixin:
                     },
                     timeout=30.0,
                 )
-                success = bool((result_payload or {}).get("ok"))
-                result = str((result_payload or {}).get("message") or "")
+                result_payload = result_payload if isinstance(result_payload, dict) else {}
+                success = bool(result_payload.get("ok"))
+                result = str(
+                    result_payload.get("message")
+                    or result_payload.get("error")
+                    or ""
+                )
+                confirmed_state = self._normalize_today_in_progress_state(
+                    result_payload.get("today_in_progress_state")
+                )
+                if confirmed_state == "unknown":
+                    confirmed_state = desired_state
             except Exception as exc:
                 success = False
                 result = str(exc)
+                confirmed_state = desired_state
 
             def apply_result():
                 self._today_in_progress_pending_record_ids.discard(record_id)
@@ -2244,7 +2278,7 @@ class MainWindowRecordsMixin:
                     )
                     self._apply_today_in_progress_state_to_active_item(
                         data_dict,
-                        desired_state,
+                        confirmed_state,
                         fallback_record_id=record_id,
                     )
                     self._mark_today_in_progress_error(

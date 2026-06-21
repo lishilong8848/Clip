@@ -5727,6 +5727,30 @@ class MaintenancePortalService:
             return record_month == label
         return record_month in set(self._recent_month_labels())
 
+    def _maintenance_record_matches_mop_month_window(
+        self, record: dict[str, Any], month: str = ""
+    ) -> bool:
+        if self._maintenance_record_matches_month_window(record, month):
+            return True
+        month_key = self._specific_recent_month_key(month)
+        if month_key is None:
+            return False
+        fields = record.get("display_fields") or {}
+        record_keys = self._year_month_keys_from_values(
+            fields.get("计划开始时间"),
+            fields.get("计划结束时间"),
+            fields.get("实际开始时间"),
+            fields.get("实际结束时间"),
+            fields.get("计划延迟开始日期"),
+            fields.get("计划延迟结束日期"),
+            fields.get("维护开始时间"),
+            fields.get("维护完成时间"),
+            fields.get("审核确认时间"),
+        )
+        if month_key:
+            return month_key in record_keys
+        return bool(record_keys & self._recent_month_keys())
+
     def _source_record_month_keys(self, record: dict[str, Any]) -> set[str]:
         fields = record.get("display_fields") or {}
         work_type = self._record_work_type(record)
@@ -8316,7 +8340,18 @@ class MaintenancePortalService:
         text = str(status or "").strip()
         if not text or any(token in text for token in ("未结束", "未完成", "未闭环")):
             return False
-        return any(token in text for token in ("已结束", "正常结束", "维修完成", "已完成", "闭环"))
+        return any(
+            token in text
+            for token in (
+                "已结束",
+                "正常结束",
+                "延迟结束",
+                "延期结束",
+                "维修完成",
+                "已完成",
+                "闭环",
+            )
+        )
 
     @classmethod
     def _engineer_maintenance_notice_sort_key(cls, item: dict[str, Any]) -> tuple[Any, ...]:
@@ -8377,7 +8412,7 @@ class MaintenancePortalService:
             record
             for record in list(self._records or [])
             if self._record_work_type(record) == WORK_TYPE_MAINTENANCE
-            and self._maintenance_record_matches_month_window(record, current_month)
+            and self._maintenance_record_matches_mop_month_window(record, current_month)
             and self._scope_matches_building(
                 scope,
                 (record.get("display_fields") or {}).get("楼栋"),
@@ -8388,7 +8423,7 @@ class MaintenancePortalService:
                 record
                 for record in (self._source_snapshot_records(scope) or [])
                 if self._record_work_type(record) == WORK_TYPE_MAINTENANCE
-                and self._maintenance_record_matches_month_window(record, current_month)
+                and self._maintenance_record_matches_mop_month_window(record, current_month)
             ]
         for record in source_records:
             notice = self._serialize_engineer_source_maintenance_notice(record)
@@ -9626,6 +9661,30 @@ class MaintenancePortalService:
             else int(getattr(config, "lan_template_portal_port", 18766) or 18766)
         )
         host = parsed_base.hostname if parsed_base and parsed_base.hostname else ""
+
+        configured_public_host = str(
+            getattr(config, "lan_template_public_host", "") or ""
+        ).strip().rstrip("/")
+        if configured_public_host:
+            public_text = configured_public_host
+            if "://" not in public_text:
+                public_text = f"{scheme}://{public_text}"
+            try:
+                parsed_public = urlparse(public_text)
+                public_host = str(parsed_public.hostname or "").strip()
+                if public_host and public_host not in {"0.0.0.0", "::"}:
+                    public_scheme = (
+                        parsed_public.scheme
+                        if parsed_public.scheme in {"http", "https"}
+                        else scheme
+                    )
+                    public_port = parsed_public.port or port
+                    return (
+                        f"{public_scheme}://"
+                        f"{self._url_host_for_display(public_host)}:{public_port}"
+                    )
+            except Exception:
+                pass
 
         normalized_scope = self._normalize_scope(scope or "ALL")
         handover_links = self.get_handover_links().get("links") or {}
@@ -11676,6 +11735,20 @@ class MaintenancePortalService:
             record_id=source_record_id,
             fields=update_fields,
         )
+        display_fields.update(update_fields)
+        for source_record in self._records:
+            if str(source_record.get("record_id") or "") == source_record_id:
+                source_fields = source_record.get("display_fields")
+                if not isinstance(source_fields, dict):
+                    source_fields = {}
+                    source_record["display_fields"] = source_fields
+                source_fields.update(update_fields)
+        with suppress(Exception):
+            self._state_store.patch_active_source_record_fields(
+                source_record_id=source_record_id,
+                work_type=WORK_TYPE_MAINTENANCE,
+                fields=update_fields,
+            )
         memory_warning = ""
         memory_key = self._mop_fill_memory_key(
             mop_title=mop_title,
@@ -14274,7 +14347,13 @@ class MaintenancePortalService:
         default_content = self._repair_first_field(
             fields, "标题/补充内容", "标题补充内容"
         )
-        content = request_text("content", default_content) or default_content
+        requested_content = (
+            request_text("content") if "content" in request_payload else ""
+        )
+        if default_content:
+            content = requested_content or default_content
+        else:
+            content = ""
         if content and title.endswith(content):
             title = title[: -len(content)].strip() or title
         title = self._normalize_110_station_notice_title(

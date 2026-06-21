@@ -57,6 +57,7 @@ DEFAULT_GROUP_NAME_EVENT_I3 = ""  # I3事件群名称
 DEFAULT_GROUP_NAME_EVENT_PROMPT = ""  # 事件提示群名称
 DEFAULT_LAN_TEMPLATE_PORTAL_HOST = "0.0.0.0"  # 局域网模板页面监听IP
 DEFAULT_LAN_TEMPLATE_PORTAL_PORT = 18766  # 局域网模板页面默认端口
+DEFAULT_LAN_TEMPLATE_PUBLIC_HOST = ""  # 手机签名等外部访问用局域网地址
 DEFAULT_LAN_LOW_PERFORMANCE_MODE = False  # 局域网通告降压模式
 
 CONFIG_FILE = get_data_file_path("config.json")
@@ -111,6 +112,7 @@ class ConfigManager:
         self.group_name_event_prompt = DEFAULT_GROUP_NAME_EVENT_PROMPT
         self.lan_template_portal_host = DEFAULT_LAN_TEMPLATE_PORTAL_HOST
         self.lan_template_portal_port = DEFAULT_LAN_TEMPLATE_PORTAL_PORT
+        self.lan_template_public_host = DEFAULT_LAN_TEMPLATE_PUBLIC_HOST
         self.lan_low_performance_mode = DEFAULT_LAN_LOW_PERFORMANCE_MODE
         migrate_legacy_data_file("config.json")
         self.load()
@@ -329,6 +331,13 @@ class ConfigManager:
                         )
                         or DEFAULT_LAN_TEMPLATE_PORTAL_HOST
                     ).strip()
+                    self.lan_template_public_host = str(
+                        config_data.get(
+                            "lan_template_public_host",
+                            DEFAULT_LAN_TEMPLATE_PUBLIC_HOST,
+                        )
+                        or DEFAULT_LAN_TEMPLATE_PUBLIC_HOST
+                    ).strip()
                     try:
                         self.lan_template_portal_port = int(
                             config_data.get(
@@ -371,6 +380,7 @@ class ConfigManager:
         group_name_event_prompt=None,
         lan_template_portal_host=None,
         lan_template_portal_port=None,
+        lan_template_public_host=None,
         lan_low_performance_mode=None,
         disable_hot_reload=None,
         disable_alerts=None,
@@ -468,6 +478,11 @@ class ConfigManager:
             )
             if not new_lan_template_portal_host:
                 new_lan_template_portal_host = DEFAULT_LAN_TEMPLATE_PORTAL_HOST
+            new_lan_template_public_host = (
+                str(lan_template_public_host).strip()
+                if lan_template_public_host is not None
+                else self.lan_template_public_host
+            )
             if lan_template_portal_port is not None:
                 try:
                     new_lan_template_portal_port = int(lan_template_portal_port)
@@ -616,6 +631,7 @@ class ConfigManager:
                 "group_name_event_prompt": new_group_name_event_prompt,
                 "lan_template_portal_host": new_lan_template_portal_host,
                 "lan_template_portal_port": new_lan_template_portal_port,
+                "lan_template_public_host": new_lan_template_public_host,
                 "lan_low_performance_mode": new_lan_low_performance_mode,
                 "disable_hot_reload": new_disable_hot_reload,
                 "disable_alerts": new_disable_alerts,
@@ -667,6 +683,7 @@ class ConfigManager:
             self.group_name_event_prompt = new_group_name_event_prompt
             self.lan_template_portal_host = new_lan_template_portal_host
             self.lan_template_portal_port = new_lan_template_portal_port
+            self.lan_template_public_host = new_lan_template_public_host
             self.lan_low_performance_mode = new_lan_low_performance_mode
             self.disable_hot_reload = new_disable_hot_reload
             self.disable_alerts = new_disable_alerts

@@ -2507,6 +2507,98 @@ class LanPortalStateStore:
             "zhihang_count": len(zhihang_records),
         }
 
+    def patch_active_source_record_fields(
+        self,
+        *,
+        source_record_id: str,
+        work_type: str = "",
+        fields: dict[str, Any] | None = None,
+    ) -> int:
+        source_record_id = self._text(source_record_id)
+        work_type = self._text(work_type)
+        patch_fields = dict(fields or {})
+        if not source_record_id or not patch_fields or not self.db_path.exists():
+            return 0
+        patched = 0
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                active_row = conn.execute(
+                    "SELECT value FROM meta WHERE key = 'active_source_snapshot_id'"
+                ).fetchone()
+                active_snapshot_id = (
+                    str(active_row["value"] or "").strip() if active_row else ""
+                )
+                if active_snapshot_id:
+                    rows = conn.execute(
+                        """
+                        SELECT snapshot_id, scope, record_key, payload_json
+                        FROM source_snapshot_records
+                        WHERE snapshot_id = ?
+                          AND source_record_id = ?
+                          AND (? = '' OR work_type = ?)
+                        """,
+                        (
+                            active_snapshot_id,
+                            source_record_id,
+                            work_type,
+                            work_type,
+                        ),
+                    ).fetchall()
+                    for row in rows:
+                        payload = self._loads(str(row["payload_json"] or ""), {})
+                        if not isinstance(payload, dict):
+                            continue
+                        display_fields = payload.get("display_fields")
+                        if not isinstance(display_fields, dict):
+                            display_fields = {}
+                        display_fields.update(patch_fields)
+                        payload["display_fields"] = display_fields
+                        conn.execute(
+                            """
+                            UPDATE source_snapshot_records
+                            SET payload_json = ?
+                            WHERE snapshot_id = ? AND scope = ? AND record_key = ?
+                            """,
+                            (
+                                self._json(payload),
+                                row["snapshot_id"],
+                                row["scope"],
+                                row["record_key"],
+                            ),
+                        )
+                        patched += 1
+                for _scope, table in SOURCE_SCOPE_TABLES.items():
+                    rows = conn.execute(
+                        f"""
+                        SELECT record_key, payload_json
+                        FROM {table}
+                        WHERE source_record_id = ?
+                          AND (? = '' OR work_type = ?)
+                        """,
+                        (source_record_id, work_type, work_type),
+                    ).fetchall()
+                    for row in rows:
+                        payload = self._loads(str(row["payload_json"] or ""), {})
+                        if not isinstance(payload, dict):
+                            continue
+                        display_fields = payload.get("display_fields")
+                        if not isinstance(display_fields, dict):
+                            display_fields = {}
+                        display_fields.update(patch_fields)
+                        payload["display_fields"] = display_fields
+                        conn.execute(
+                            f"""
+                            UPDATE {table}
+                            SET payload_json = ?, updated_at = ?
+                            WHERE record_key = ?
+                            """,
+                            (self._json(payload), time.time(), row["record_key"]),
+                        )
+                conn.commit()
+        return patched
+
     def source_snapshot_stats(self) -> dict[str, Any]:
         if not self.db_path.exists():
             return {}

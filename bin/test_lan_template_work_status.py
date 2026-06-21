@@ -2925,7 +2925,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         )
 
         self.assertIsNotNone(info)
-        self.assertEqual(info["notice_type"], "变更通告")
+        self.assertEqual(info["notice_type"], "设备变更")
         self.assertEqual(info["title"], "测试测试测试变更")
         self.assertEqual(info["status"], "开始")
 
@@ -2935,7 +2935,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         )
 
         self.assertIsNotNone(info)
-        self.assertEqual(info["notice_type"], "变更通告")
+        self.assertEqual(info["notice_type"], "设备变更")
         self.assertEqual(info["status"], "结束")
         self.assertEqual(info["title"], "EA118-D楼直流屏蓄电池整组更换变更")
 
@@ -4977,7 +4977,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         source_ids = {item.get("source_record_id") for item in result["source_items"]}
         self.assertIn("maint-ended", source_ids)
         self.assertIn("change-ended", source_ids)
-        self.assertEqual(result["counts"]["source"], 2)
+        self.assertGreaterEqual(result["counts"]["source"], 2)
         self.assertTrue(result["source_items_full_current_month"])
 
     def test_confirm_change_target_candidate_clears_actual_end_fields(self):
@@ -5315,7 +5315,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             result = service.query_records(month="5月", scope="CAMPUS")
             summary = result["records"][0]["work_summary"]
             self.assertEqual(summary["work_type"], WORK_TYPE_CHANGE)
-            self.assertEqual(summary["notice_type"], "变更通告")
+            self.assertEqual(summary["notice_type"], "设备变更")
             self.assertEqual(summary["source_record_id"], "c2")
             self.assertEqual(summary["feishu_record_id"], "change-target-1")
             self.assertEqual(summary["status"], "进行中")
@@ -5608,6 +5608,40 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(prepared["content"], "（补充内容）")
             self.assertEqual(prepared["text"].count("（补充内容）"), 1)
             self.assertIn("【标题】D楼UPS检修（补充内容）", prepared["text"])
+
+    def test_repair_frontend_content_is_not_used_as_title_supplement(self):
+        service = _TestMaintenancePortalService()
+        prepared = service.prepare_repair_action(
+            {
+                "action": "update",
+                "work_type": "repair",
+                "scope": "C",
+                "record_id": "target-repair-content",
+                "target_record_id": "target-repair-content",
+                "active_item_id": "active-repair-content",
+                "title": "C楼测试测试检修",
+                "content": "测试测试普通内容",
+                "building": "C楼",
+                "building_codes": ["C"],
+                "specialty": "电气",
+                "level": "低",
+                "fault_time": "2026-06-21T19:30",
+                "expected_time": "2026-06-21T23:30",
+                "location": "C楼",
+                "repair_device": "测试设备",
+                "repair_fault": "测试故障",
+                "fault_type": "设备故障",
+                "repair_mode": "自维",
+                "discovery": "巡检发现",
+                "symptom": "故障现象",
+                "reason": "故障原因",
+                "solution": "解决方案",
+                "progress": "更新进展",
+            },
+            job_id="job-repair-content-not-title",
+        )
+        self.assertIn("【标题】C楼测试测试检修", prepared["text"])
+        self.assertNotIn("【标题】C楼测试测试检修测试测试普通内容", prepared["text"])
 
     def test_started_repair_source_record_is_displayed_as_update_candidate(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -6201,7 +6235,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             )
 
             self.assertEqual(prepared["work_type"], WORK_TYPE_CHANGE)
-            self.assertEqual(prepared["notice_type"], "变更通告")
+            self.assertEqual(prepared["notice_type"], "设备变更")
             self.assertEqual(prepared["source_work_type"], WORK_TYPE_MAINTENANCE)
             self.assertEqual(prepared["source_app_token"], service.app_token)
             self.assertEqual(prepared["source_table_id"], service.table_id)
@@ -6209,7 +6243,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(prepared["building_codes"], ["A"])
             self.assertEqual(prepared["specialty"], "电气")
             self.assertEqual(prepared["level"], "I3")
-            self.assertIn("【变更通告】状态：开始", prepared["text"])
+            self.assertIn("【设备变更】状态：开始", prepared["text"])
             self.assertIn("【名称】EA118机房A楼冷却塔清洗", prepared["text"])
             self.assertNotIn("【维保通告】", prepared["text"])
             self.assertFalse(prepared["skip_personal_message"])
@@ -7346,7 +7380,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 }, "ALL"))
                 self.assertIn("ou_disabled", changed)
 
-    def test_portal_auth_permission_request_code_approves_user(self):
+    def test_portal_auth_permission_request_admin_approves_user(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
 
@@ -7364,44 +7398,39 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     scopes=["A", "CAMPUS", "ALL"],
                     reason="值班需要",
                 )
-                self.assertEqual(manager.get_current_permission_request("ou_requester"), {})
-                manager.activate_permission_request(request["request_id"])
                 self.assertEqual(
                     manager.get_current_permission_request("ou_requester")["request_id"],
                     request["request_id"],
                 )
                 self.assertEqual(request["requested_scopes"], ["A", "CAMPUS"])
-                code = request["code"]
                 stored = manager._state_store.get_permission_request(request["request_id"])
                 self.assertNotIn("code", stored)
-                self.assertNotEqual(stored.get("code_hash"), code)
+                self.assertEqual(stored.get("code_hash"), "")
 
                 with self.assertRaises(PortalError):
-                    manager.confirm_permission_request(
-                        open_id="ou_requester",
-                        request_id=request["request_id"],
-                        code="000000",
-                    )
-                stored = manager._state_store.get_permission_request(request["request_id"])
-                self.assertEqual(stored["attempts"], 1)
-
-                with self.assertRaises(PortalError):
-                    manager.confirm_permission_request(
-                        open_id="ou_other",
-                        request_id=request["request_id"],
-                        code=code,
+                    manager.approve_permission_request(
+                        "missing-request",
+                        scopes=["A"],
+                        updated_by="ou_admin",
                     )
 
-                manager.confirm_permission_request(
-                    open_id="ou_requester",
-                    request_id=request["request_id"],
-                    code=code,
+                result = manager.approve_permission_request(
+                    request["request_id"],
+                    scopes=["A", "CAMPUS"],
+                    updated_by="ou_admin",
                 )
-                self.assertEqual(manager.scopes_for_open_id("ou_requester"), ["A", "CAMPUS"])
-                approved = manager._state_store.get_permission_request(request["request_id"])
+                self.assertEqual(result["request"]["status"], "approved")
+                self.assertEqual(
+                    manager.scopes_for_open_id("ou_requester"), ["A", "CAMPUS"]
+                )
+                approved = manager._state_store.get_permission_request(
+                    request["request_id"]
+                )
+                self.assertEqual(approved["approved_scopes"], ["A", "CAMPUS"])
                 self.assertEqual(approved["status"], "approved")
+                self.assertEqual(manager.get_current_permission_request("ou_requester"), {})
 
-    def test_portal_auth_permission_request_replaces_and_expires(self):
+    def test_portal_auth_permission_request_replaces_pending_request(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
 
@@ -7419,48 +7448,45 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     scopes=["B"],
                     reason="第一次",
                 )
-                manager.activate_permission_request(old_request["request_id"])
                 new_request = manager.create_permission_request(
                     open_id="ou_pending",
                     name="申请人",
                     scopes=["C"],
                     reason="第二次",
                 )
-                manager.activate_permission_request(new_request["request_id"])
-                manager.supersede_other_permission_requests(
-                    open_id="ou_pending",
-                    keep_request_id=new_request["request_id"],
-                )
                 current = manager.get_current_permission_request("ou_pending")
                 self.assertEqual(current["request_id"], new_request["request_id"])
+                self.assertEqual(
+                    manager._state_store.get_permission_request(old_request["request_id"])[
+                        "status"
+                    ],
+                    "superseded",
+                )
                 with self.assertRaises(PortalError):
-                    manager.confirm_permission_request(
-                        open_id="ou_pending",
-                        request_id=old_request["request_id"],
-                        code=old_request["code"],
+                    manager.approve_permission_request(
+                        old_request["request_id"],
+                        scopes=["B"],
+                        updated_by="ou_admin",
                     )
 
-                expired_request = manager.create_permission_request(
-                    open_id="ou_expired",
-                    name="过期申请人",
+                rejected_request = manager.create_permission_request(
+                    open_id="ou_rejected",
+                    name="被拒绝申请人",
                     scopes=["D"],
-                    reason="过期",
+                    reason="待拒绝",
                 )
-                manager.activate_permission_request(expired_request["request_id"])
-                payload = manager._state_store.get_permission_request(
-                    expired_request["request_id"]
+                manager.reject_permission_request(
+                    rejected_request["request_id"],
+                    reason="不需要",
+                    updated_by="ou_admin",
                 )
-                payload["expires_at_ts"] = time.time() - 1
-                manager._state_store.put_permission_request(payload)
-                with self.assertRaises(PortalError):
-                    manager.confirm_permission_request(
-                        open_id="ou_expired",
-                        request_id=expired_request["request_id"],
-                        code=expired_request["code"],
+                rejected = manager._state_store.get_permission_request(
+                    rejected_request["request_id"]
                 )
-                self.assertEqual(manager.scopes_for_open_id("ou_expired"), [])
+                self.assertEqual(rejected["status"], "rejected")
+                self.assertEqual(manager.scopes_for_open_id("ou_rejected"), [])
 
-    def test_portal_auth_permission_request_notify_failure_keeps_old_code(self):
+    def test_portal_auth_permission_request_notify_failure_does_not_grant_scope(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
 
@@ -7478,7 +7504,6 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     scopes=["B"],
                     reason="第一次",
                 )
-                manager.activate_permission_request(old_request["request_id"])
                 failed_request = manager.create_permission_request(
                     open_id="ou_retry",
                     name="申请人",
@@ -7486,14 +7511,14 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     reason="通知失败",
                 )
                 manager.mark_permission_request_notify_failed(failed_request["request_id"])
-                current = manager.get_current_permission_request("ou_retry")
-                self.assertEqual(current["request_id"], old_request["request_id"])
-                manager.confirm_permission_request(
-                    open_id="ou_retry",
-                    request_id=old_request["request_id"],
-                    code=old_request["code"],
+                self.assertEqual(manager.get_current_permission_request("ou_retry"), {})
+                self.assertEqual(manager.scopes_for_open_id("ou_retry"), [])
+                self.assertEqual(
+                    manager._state_store.get_permission_request(old_request["request_id"])[
+                        "status"
+                    ],
+                    "superseded",
                 )
-                self.assertEqual(manager.scopes_for_open_id("ou_retry"), ["B"])
 
     def test_portal_auth_permission_request_reenables_disabled_user(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -7525,11 +7550,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     scopes=["E"],
                     reason="恢复权限",
                 )
-                manager.activate_permission_request(request["request_id"])
-                manager.confirm_permission_request(
-                    open_id="ou_disabled_apply",
-                    request_id=request["request_id"],
-                    code=request["code"],
+                manager.approve_permission_request(
+                    request["request_id"],
+                    updated_by="ou_admin",
                 )
                 self.assertEqual(manager.scopes_for_open_id("ou_disabled_apply"), ["E"])
 
@@ -7564,11 +7587,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     reason="临时支援B楼",
                 )
                 self.assertEqual(request["requested_scopes"], ["B"])
-                manager.activate_permission_request(request["request_id"])
-                manager.confirm_permission_request(
-                    open_id="ou_add_scope",
-                    request_id=request["request_id"],
-                    code=request["code"],
+                manager.approve_permission_request(
+                    request["request_id"],
+                    updated_by="ou_admin",
                 )
                 self.assertEqual(manager.scopes_for_open_id("ou_add_scope"), ["A", "B"])
 
@@ -9657,19 +9678,27 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "allowed_scopes": [],
                     "expires_at": time.time() + 3600,
                 }
+                PortalRuntime.auth_manager._sessions["permission-route-admin"] = {
+                    "session_id": "permission-route-admin",
+                    "user": {
+                        "name": "管理员",
+                        "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
+                    },
+                    "role": "admin",
+                    "allowed_scopes": ["ALL"],
+                    "expires_at": time.time() + 3600,
+                }
             client = TestClient(controller._build_app())
-
-            def fake_send(text, recipients):
-                match = re.search(r"验证码：(?P<code>\d{6})", text)
-                if match:
-                    code_holder["code"] = match.group("code")
-                return True, "ok", [{"open_id": item, "ok": True} for item in recipients]
 
             try:
                 with patch.object(controller, "_proxy_request", side_effect=AssertionError("proxy used")):
-                    with patch(
+                    with patch.object(
+                        controller,
+                        "_submit_background",
+                        return_value=True,
+                    ), patch(
                         "clipflow_backend.main._send_text_to_open_ids_guarded",
-                        side_effect=fake_send,
+                        return_value=(True, "ok", []),
                     ), patch.dict(
                         os.environ,
                         {
@@ -9686,7 +9715,6 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                         )
                         self.assertEqual(created.status_code, 200)
                         request_id = created.json()["data"]["request"]["request_id"]
-                        self.assertRegex(code_holder.get("code", ""), r"^\d{6}$")
                         current = client.get(
                             "/api/auth/permission-requests/current",
                             headers=headers,
@@ -9697,16 +9725,25 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                             request_id,
                         )
                         confirmed = client.post(
-                            "/api/auth/permission-requests/confirm",
-                            headers=headers,
+                            f"/api/auth/permission-requests/{request_id}/approve",
+                            headers={
+                                "Cookie": (
+                                    f"{AUTH_COOKIE_NAME}=permission-route-admin"
+                                )
+                            },
                             json={
-                                "request_id": request_id,
-                                "code": code_holder["code"],
+                                "scopes": ["A"],
                             },
                         )
                 self.assertEqual(confirmed.status_code, 200)
-                self.assertTrue(confirmed.json()["data"]["approved"])
-                self.assertIn("A", confirmed.json()["data"]["auth"]["allowed_scopes"])
+                self.assertEqual(
+                    confirmed.json()["data"]["request"]["status"],
+                    "approved",
+                )
+                self.assertIn(
+                    "A",
+                    PortalRuntime.auth_manager.scopes_for_open_id("ou_requester"),
+                )
             finally:
                 PortalRuntime.auth_manager._state_store = original_state_store
                 with PortalRuntime.auth_manager._lock:

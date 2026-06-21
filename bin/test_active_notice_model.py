@@ -655,7 +655,17 @@ class ActiveNoticeModelTests(unittest.TestCase):
         )
 
         model = harness._active_notice_model_for_list(harness.list_active_other)
+        deadline = time.time() + 2.0
         updated = model.record_by_active_item_id("aid-change")
+        while (
+            time.time() < deadline
+            and (updated or {}).get("today_in_progress_state") != "yes"
+        ):
+            app = QApplication.instance()
+            if app is not None:
+                app.processEvents()
+            time.sleep(0.01)
+            updated = model.record_by_active_item_id("aid-change")
         self.assertEqual(updated["today_in_progress_state"], "yes")
         self.assertEqual(
             harness.lan_template_portal_controller.calls[0][1]["record_id"],

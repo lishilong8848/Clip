@@ -2,6 +2,7 @@ import os
 import sys
 import tempfile
 import unittest
+import datetime as dt
 from pathlib import Path
 
 BIN_DIR = Path(__file__).resolve().parent
@@ -19,6 +20,7 @@ from lan_bitable_template_portal.portal_service import (  # noqa: E402
     WORK_TYPE_MAINTENANCE,
 )
 from lan_bitable_template_portal.state_store import LanPortalStateStore  # noqa: E402
+from upload_event_module.config import config  # noqa: E402
 
 
 class FakeMopUploadService(MaintenancePortalService):
@@ -115,6 +117,16 @@ class EngineerMopUploadTests(unittest.TestCase):
     def test_upload_signed_mop_overwrites_attachment_and_confirms(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             service = FakeMopUploadService(tmpdir)
+            service._records = [
+                {
+                    "record_id": "src-1",
+                    "work_type": WORK_TYPE_MAINTENANCE,
+                    "display_fields": {
+                        "楼栋": "A楼",
+                        "维护总项": "A楼测试维保",
+                    },
+                }
+            ]
             result = service.upload_signed_engineer_mop_file(
                 scope="A",
                 source_record_id="src-1",
@@ -142,6 +154,13 @@ class EngineerMopUploadTests(unittest.TestCase):
             )
             self.assertIs(patch["fields"][MOP_ENGINEER_CONFIRM_FIELD], True)
             self.assertIs(patch["fields"][MOP_SUPERVISOR_CONFIRM_FIELD], True)
+            local_fields = service._records[0]["display_fields"]
+            self.assertEqual(
+                local_fields[MOP_SIGNED_ATTACHMENT_FIELD],
+                [{"file_token": "file-token-1"}],
+            )
+            self.assertIs(local_fields[MOP_ENGINEER_CONFIRM_FIELD], True)
+            self.assertIs(local_fields[MOP_SUPERVISOR_CONFIRM_FIELD], True)
 
     def test_missing_required_signature_blocks_upload(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -254,13 +273,36 @@ class EngineerMopUploadTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             service = FakeMopUploadService(tmpdir)
             service.get_handover_links = lambda: {"links": {"A": "http://10.0.0.8:18766/audit"}}
-
-            base_url = service._signature_public_base_url(
-                scope="A",
-                request_base_url="http://192.168.224.130:18766",
-            )
+            old_public_host = getattr(config, "lan_template_public_host", "")
+            config.lan_template_public_host = ""
+            try:
+                base_url = service._signature_public_base_url(
+                    scope="A",
+                    request_base_url="http://192.168.224.130:18766",
+                )
+            finally:
+                config.lan_template_public_host = old_public_host
 
             self.assertEqual(base_url, "http://10.0.0.8:18766")
+
+    def test_signature_link_prefers_qt_public_lan_host(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = FakeMopUploadService(tmpdir)
+            service.get_handover_links = lambda: {"links": {"A": "http://10.0.0.8:18766/audit"}}
+            old_public_host = getattr(config, "lan_template_public_host", "")
+            old_bind_host = getattr(config, "lan_template_portal_host", "")
+            config.lan_template_public_host = "192.168.224.130"
+            config.lan_template_portal_host = "0.0.0.0"
+            try:
+                base_url = service._signature_public_base_url(
+                    scope="A",
+                    request_base_url="http://127.0.0.1:18766",
+                )
+            finally:
+                config.lan_template_public_host = old_public_host
+                config.lan_template_portal_host = old_bind_host
+
+            self.assertEqual(base_url, "http://192.168.224.130:18766")
 
     def test_signature_open_id_detection_accepts_nested_and_text_values(self):
         self.assertEqual(
@@ -363,6 +405,8 @@ class EngineerMopUploadTests(unittest.TestCase):
     def test_engineer_mop_bootstrap_includes_current_month_source_records_first(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             service = FakeMopUploadService(tmpdir)
+            previous_month = dt.datetime.now().replace(day=1) - dt.timedelta(days=1)
+            previous_month_label = f"{previous_month.month}月"
             service._records = [
                 {
                     "record_id": "src-bound",
@@ -401,6 +445,32 @@ class EngineerMopUploadTests(unittest.TestCase):
                         "维护总项": "未绑定未上传",
                     },
                 },
+                {
+                    "record_id": "src-delayed-ended",
+                    "work_type": WORK_TYPE_MAINTENANCE,
+                    "notice_type": "维保通告",
+                    "display_fields": {
+                        "楼栋": "A楼",
+                        "计划维护月份": previous_month_label,
+                        "计划延迟结束日期": dt.datetime.now().strftime("%Y-%m-%d 18:00"),
+                        "维护周期": "每月",
+                        "维护总项": "延迟结束本月完成",
+                        "维护实施状态": "延迟结束",
+                    },
+                },
+                {
+                    "record_id": "src-old-month-touched",
+                    "work_type": WORK_TYPE_MAINTENANCE,
+                    "notice_type": "维保通告",
+                    "last_modified_time": int(dt.datetime.now().timestamp() * 1000),
+                    "display_fields": {
+                        "楼栋": "A楼",
+                        "计划维护月份": previous_month_label,
+                        "维护周期": "每月",
+                        "维护总项": "上月计划但本月同步",
+                        "维护实施状态": "正常结束",
+                    },
+                },
             ]
             pending_notice = service._serialize_engineer_source_maintenance_notice(service._records[2])
             assert pending_notice is not None
@@ -419,14 +489,27 @@ class EngineerMopUploadTests(unittest.TestCase):
             notices = data["notices"]
 
             self.assertGreaterEqual(len(notices), 2)
-            self.assertEqual(notices[0]["source_record_id"], "src-ended")
-            self.assertEqual(notices[0]["status"], "正常结束")
-            self.assertFalse(notices[0]["mop_uploaded"])
-            self.assertEqual(notices[1]["source_record_id"], "src-pending")
+            ended = next(item for item in notices if item["source_record_id"] == "src-ended")
+            self.assertEqual(ended["status"], "正常结束")
+            self.assertFalse(ended["mop_uploaded"])
+            delayed = next(item for item in notices if item["source_record_id"] == "src-delayed-ended")
+            self.assertEqual(delayed["status"], "延迟结束")
+            self.assertFalse(delayed["mop_uploaded"])
+            pending = next(item for item in notices if item["source_record_id"] == "src-pending")
+            self.assertFalse(pending["mop_uploaded"])
+            self.assertFalse(
+                any(
+                    item["source_record_id"] == "src-old-month-touched"
+                    for item in notices
+                )
+            )
             uploaded = next(item for item in notices if item["source_record_id"] == "src-bound")
             self.assertTrue(uploaded["mop_uploaded"])
             self.assertEqual(uploaded["mop_attachment_count"], 1)
             self.assertTrue(uploaded["mop_binding"])
+            uploaded_index = notices.index(uploaded)
+            self.assertLess(notices.index(ended), uploaded_index)
+            self.assertLess(notices.index(delayed), uploaded_index)
 
 
 if __name__ == "__main__":

@@ -51,6 +51,7 @@ from ..config import (
     DEFAULT_GROUP_NAME_EVENT_PROMPT,
     DEFAULT_LAN_TEMPLATE_PORTAL_HOST,
     DEFAULT_LAN_TEMPLATE_PORTAL_PORT,
+    DEFAULT_LAN_TEMPLATE_PUBLIC_HOST,
     DEFAULT_LAN_LOW_PERFORMANCE_MODE,
     DEFAULT_DISABLE_HOT_RELOAD,
     DEFAULT_DISABLE_ALERTS,
@@ -371,9 +372,18 @@ class SettingsDialog(QDialog):
         lan_portal_layout.addWidget(lan_host_label)
         lan_portal_layout.addWidget(self.lan_template_portal_host_input)
 
+        lan_public_host_label = QLabel("签名链接局域网地址")
+        self.lan_template_public_host_input = QLineEdit()
+        self.lan_template_public_host_input.setPlaceholderText(
+            "例如 192.168.224.130；手机打开签名链接用"
+        )
+        self.lan_template_public_host_input.setMinimumHeight(34)
+        lan_portal_layout.addWidget(lan_public_host_label)
+        lan_portal_layout.addWidget(self.lan_template_public_host_input)
+
         lan_hint = QLabel(
             f"访问地址为 http://填写的IP:{DEFAULT_LAN_TEMPLATE_PORTAL_PORT}/；"
-            "如果填写 0.0.0.0，程序本机按钮会打开 127.0.0.1。"
+            "监听 IP 可填 0.0.0.0；签名链接局域网地址请填写手机能访问到的电脑 IP。"
         )
         lan_hint.setObjectName("LanPortalHint")
         lan_hint.setWordWrap(True)
@@ -547,6 +557,13 @@ class SettingsDialog(QDialog):
                 DEFAULT_LAN_TEMPLATE_PORTAL_HOST,
             )
         )
+        self.lan_template_public_host_input.setText(
+            getattr(
+                config,
+                "lan_template_public_host",
+                DEFAULT_LAN_TEMPLATE_PUBLIC_HOST,
+            )
+        )
         self.lan_low_performance_checkbox.setChecked(
             bool(getattr(config, "lan_low_performance_mode", False))
         )
@@ -565,6 +582,36 @@ class SettingsDialog(QDialog):
             return True
         except Exception:
             return False
+
+    @staticmethod
+    def _is_valid_lan_template_public_host(value: str) -> bool:
+        value = str(value or "").strip()
+        if not value:
+            return False
+        if value.startswith(("http://", "https://")):
+            try:
+                from urllib.parse import urlparse
+
+                parsed = urlparse(value)
+                value = parsed.hostname or ""
+            except Exception:
+                return False
+        if value.lower() == "localhost":
+            return True
+        try:
+            import ipaddress
+
+            ipaddress.ip_address(value)
+            return True
+        except Exception:
+            import re
+
+            return bool(
+                re.fullmatch(
+                    r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?",
+                    value,
+                )
+            )
 
     def _sync_relay_test_btn_state(self):
         webhook = self.relay_webhook_input.text().strip()
@@ -607,11 +654,21 @@ class SettingsDialog(QDialog):
             self.lan_template_portal_host_input.text().strip()
             or DEFAULT_LAN_TEMPLATE_PORTAL_HOST
         )
+        lan_template_public_host = self.lan_template_public_host_input.text().strip()
         lan_low_performance_mode = self.lan_low_performance_checkbox.isChecked()
         if not self._is_valid_lan_template_portal_host(lan_template_portal_host):
             show_toast_message(
                 self,
                 "❌ 局域网 IP 格式无效，请填写如 192.168.1.20 或 0.0.0.0",
+                duration_ms=2400,
+            )
+            return
+        if lan_template_public_host and not self._is_valid_lan_template_public_host(
+            lan_template_public_host
+        ):
+            show_toast_message(
+                self,
+                "❌ 签名链接局域网地址格式无效，请填写如 192.168.224.130",
                 duration_ms=2400,
             )
             return
@@ -670,6 +727,7 @@ group_name_change_i3=group_name_change_i3,
             group_name_event_prompt=group_name_event_prompt,
             lan_template_portal_host=lan_template_portal_host,
             lan_template_portal_port=DEFAULT_LAN_TEMPLATE_PORTAL_PORT,
+            lan_template_public_host=lan_template_public_host,
             lan_low_performance_mode=lan_low_performance_mode,
             disable_hot_reload=disable_hot_reload,
             disable_alerts=disable_alerts,
@@ -788,6 +846,7 @@ group_name_change_i3=group_name_change_i3,
 
         self.group_name_event_prompt_input.setText(DEFAULT_GROUP_NAME_EVENT_PROMPT)
         self.lan_template_portal_host_input.setText(DEFAULT_LAN_TEMPLATE_PORTAL_HOST)
+        self.lan_template_public_host_input.setText(DEFAULT_LAN_TEMPLATE_PUBLIC_HOST)
         self.lan_low_performance_checkbox.setChecked(DEFAULT_LAN_LOW_PERFORMANCE_MODE)
 
 

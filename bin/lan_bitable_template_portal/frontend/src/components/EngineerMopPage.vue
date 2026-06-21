@@ -536,7 +536,7 @@ function mopNoticeNeedsAction(notice: Dict): boolean {
 function noticeIsEnded(notice: Dict): boolean {
   const status = String(notice?.status || "").trim();
   if (!status || /未(结束|完成|闭环)/.test(status)) return false;
-  return /(已结束|正常结束|维修完成|已完成|闭环)/.test(status);
+  return /(已结束|正常结束|延迟结束|延期结束|维修完成|已完成|闭环)/.test(status);
 }
 
 const filteredNotices = computed(() => {
@@ -2688,6 +2688,18 @@ async function uploadSignedMop(): Promise<void> {
       }));
     filledMopResult.value = data.filled_file || filledMopResult.value;
     signedMopUploadedAt.value = String(data.uploaded_at || new Date().toISOString());
+    const sourceRecordId = String(data.source_record_id || selectedNoticeSourceRecordId.value || "").trim();
+    const noticeKey = String(data.notice_key || selectedNotice.value.notice_key || "").trim();
+    const notice = notices.value.find((item) => (
+      (noticeKey && String(item.notice_key || "") === noticeKey)
+      || (sourceRecordId && String(item.source_record_id || item.record_id || "") === sourceRecordId)
+    ));
+    if (notice) {
+      notice.mop_uploaded = true;
+      notice.mop_attachment_count = Math.max(1, Number(notice.mop_attachment_count || 0));
+      notice.mop_engineer_confirmed = true;
+      notice.mop_supervisor_confirmed = true;
+    }
     const warning = String(data.notification_warning || "").trim();
     const memoryWarning = String(data.memory_warning || "").trim();
     const warningsText = [warning, memoryWarning].filter(Boolean).join("；");
