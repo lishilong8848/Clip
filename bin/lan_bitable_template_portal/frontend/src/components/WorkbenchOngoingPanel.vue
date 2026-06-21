@@ -65,6 +65,7 @@
           :job-text="jobText"
           :job-class="jobClass"
           :copy-text="jobCopyText(ongoingLineKey(item), ongoingNoticePreviewText(item))"
+          :local-remove-allowed="localRemoveAllowed"
           @expand="emit('expand', item)"
           @toggle="emit('toggle', item)"
           @set-edit="(key, value) => emit('set-edit', item, key, value)"
@@ -75,6 +76,7 @@
           @send="(action) => emit('send', item, action)"
           @copy-notice="emit('copy-notice', item)"
           @delete="emit('delete', item)"
+          @remove-local="emit('remove-local', item)"
           @bind-target="emit('bind-target', item)"
           @apply-undo="emit('apply-undo', item)"
         />
@@ -160,6 +162,7 @@ const props = defineProps<{
   jobCopyText: (key: string, text: string) => string;
   jobText: (key: string) => string;
   jobClass: (key: string) => string;
+  localRemoveAllowed: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -175,6 +178,7 @@ const emit = defineEmits<{
   send: [item: Dict, action: string];
   "copy-notice": [item: Dict];
   delete: [item: Dict];
+  "remove-local": [item: Dict];
   "bind-target": [item: Dict];
   "apply-undo": [item: Dict];
 }>();

@@ -122,6 +122,15 @@
               <button v-if="copyText" class="btn ghost" type="button" @click.stop="emit('copy-notice')">复制通告</button>
               <button v-if="needsBinding" class="btn ghost" :disabled="busy" @click="emit('bind-target')">选择对应通告</button>
               <button v-if="item.undo_available" class="btn ghost" :disabled="undoBusy" @click="emit('apply-undo')">回退上一步</button>
+              <button
+                v-if="localRemoveAllowed"
+                class="btn ghost"
+                :disabled="busy"
+                title="只从前端和 Qt 进行中列表移除，不删除多维记录"
+                @click="emit('remove-local')"
+              >
+                移除显示
+              </button>
               <button class="btn danger" :disabled="busy" @click="emit('delete')">删除通告</button>
             </div>
           </details>
@@ -169,6 +178,7 @@ const props = defineProps<{
   jobText: (key: string) => string;
   jobClass: (key: string) => string;
   copyText: string;
+  localRemoveAllowed: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -182,6 +192,7 @@ const emit = defineEmits<{
   send: [action: string];
   "copy-notice": [];
   delete: [];
+  "remove-local": [];
   "bind-target": [];
   "apply-undo": [];
 }>();

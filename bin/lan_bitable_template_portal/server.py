@@ -2136,6 +2136,62 @@ class PortalRuntime:
                 return self._send_json(200, {"ok": True, "data": data})
             except (PortalError, ValueError, json.JSONDecodeError) as exc:
                 return self._send_json(403, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/ongoing-items/remove-local":
+            try:
+                payload = self._read_json_body()
+                if not self._require_admin_json(session):
+                    return
+                scope = self._authorized_scope_or_error(
+                    session, payload.get("scope") or "ALL"
+                )
+                payload["scope"] = scope
+                payload["_auth_open_id"] = str((session.get("user") or {}).get("open_id") or "")
+                payload["_auth_user_name"] = str(
+                    (session.get("user") or {}).get("name")
+                    or (session.get("user") or {}).get("en_name")
+                    or ""
+                )
+                self.service.validate_ongoing_delete_item(payload, scope=scope)
+                result = PortalRuntime.execute_local_remove_active_item(
+                    {"data_dict": payload}
+                )
+                if not bool((result or {}).get("ok")):
+                    return self._send_json(
+                        409,
+                        {"ok": False, "error": str((result or {}).get("message") or "本地移除失败。")},
+                    )
+                data = self.service.hide_ongoing_item(
+                    payload,
+                    scope=scope,
+                    deleted_by=payload["_auth_open_id"],
+                )
+                data.update(
+                    self.service.discard_deleted_ongoing_state(payload, scope=scope)
+                )
+                PortalRuntime.clear_payload_cache()
+                event_id = PortalRuntime.state_store.enqueue_outbox_event(
+                    "qt_action",
+                    {
+                        "kind": "active_delete",
+                        "payload": {
+                            "active_item_id": str(payload.get("active_item_id") or ""),
+                            "record_id": str(
+                                (result or {}).get("record_id")
+                                or payload.get("target_record_id")
+                                or ""
+                            ),
+                            "source_record_id": str(payload.get("source_record_id") or ""),
+                            "work_type": str(payload.get("work_type") or ""),
+                            "notice_type": str(payload.get("notice_type") or ""),
+                        },
+                    },
+                )
+                data["qt_deleted"] = bool(result.get("active_item_id") or result.get("record_id"))
+                data["qt_event_id"] = event_id
+                data["remote_deleted"] = False
+                return self._send_json(200, {"ok": True, "data": data})
+            except (PortalError, ValueError, json.JSONDecodeError) as exc:
+                return self._send_json(403, {"ok": False, "error": str(exc)})
         if parsed.path == "/api/handover-links":
             if not self._require_admin_json(session):
                 return
@@ -4883,6 +4939,74 @@ class PortalRuntime:
             "remote_deleted": remote_deleted,
             "undo_id": checkpoint_id,
             "undo_available": bool(checkpoint_id),
+        }
+
+    @classmethod
+    def execute_local_remove_active_item(cls, payload: dict) -> dict:
+        payload = dict(payload or {})
+        nested = payload.get("data_dict")
+        if isinstance(nested, dict):
+            payload = dict(nested)
+        elif isinstance(payload.get("data"), dict):
+            payload = dict(payload.get("data") or {})
+        payload = normalize_notice_identity_payload(payload)
+        target_record_id = canonical_target_record_id(payload)
+        source_record_id = str(payload.get("source_record_id") or "").strip()
+        active_item_id = str(payload.get("active_item_id") or "").strip()
+        work_type = str(payload.get("work_type") or "").strip()
+        if not target_record_id:
+            try:
+                identity = cls.state_store.resolve_notice_identity(
+                    work_type=work_type,
+                    active_item_id=active_item_id,
+                    source_record_id=source_record_id,
+                    target_record_id="",
+                )
+            except Exception:
+                identity = None
+            if isinstance(identity, dict):
+                target_record_id = str(identity.get("target_record_id") or "").strip()
+                active_item_id = active_item_id or str(identity.get("active_item_id") or "").strip()
+        elif not active_item_id:
+            try:
+                identity = cls.state_store.resolve_notice_identity(
+                    work_type=work_type,
+                    active_item_id="",
+                    source_record_id=source_record_id,
+                    target_record_id=target_record_id,
+                )
+            except Exception:
+                identity = None
+            if isinstance(identity, dict):
+                active_item_id = str(identity.get("active_item_id") or "").strip()
+        if not active_item_id and not target_record_id and not source_record_id:
+            return {"ok": False, "message": "缺少本地移除所需的通告标识。"}
+        qt_removed = False
+        try:
+            qt_removed = cls.state_store.delete_qt_active_item(
+                active_item_id=active_item_id,
+                record_id=target_record_id,
+            )
+        except Exception:
+            qt_removed = False
+        identity_removed = False
+        try:
+            identity_removed = cls.state_store.mark_notice_identity_deleted(
+                work_type=work_type,
+                active_item_id=active_item_id,
+                source_record_id=source_record_id,
+                target_record_id=target_record_id,
+            )
+        except Exception:
+            identity_removed = False
+        return {
+            "ok": True,
+            "message": "",
+            "record_id": target_record_id,
+            "active_item_id": active_item_id,
+            "qt_removed": bool(qt_removed),
+            "identity_removed": bool(identity_removed),
+            "remote_deleted": False,
         }
 
     @classmethod

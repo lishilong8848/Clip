@@ -2628,6 +2628,74 @@ class FastAPIPortalController:
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)
 
+        @app.post("/api/ongoing-items/remove-local")
+        async def ongoing_items_remove_local(request: Request):
+            admin_response, session = self._require_admin_response(request)
+            if admin_response is not None:
+                return admin_response
+            try:
+                payload = (
+                    await self._read_model_request(request, OngoingDeleteRequest)
+                ).to_payload()
+                payload = normalize_notice_identity_payload(payload)
+                scope = self._authorized_scope_or_error(
+                    session, payload.get("scope") or "ALL"
+                )
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                payload["scope"] = scope
+                payload["_auth_open_id"] = str(user.get("open_id") or "")
+                payload["_auth_user_name"] = str(
+                    user.get("name") or user.get("en_name") or ""
+                )
+                PortalRuntime.service.validate_ongoing_delete_item(payload, scope=scope)
+                remove_result = await asyncio.to_thread(
+                    PortalRuntime.execute_local_remove_active_item,
+                    {"data_dict": payload},
+                )
+                if not bool((remove_result or {}).get("ok")):
+                    return JSONResponse(
+                        {
+                            "ok": False,
+                            "error": str((remove_result or {}).get("message") or "本地移除失败。"),
+                        },
+                        status_code=409,
+                    )
+                data = PortalRuntime.service.hide_ongoing_item(
+                    payload,
+                    scope=scope,
+                    deleted_by=payload["_auth_open_id"],
+                )
+                data.update(
+                    PortalRuntime.service.discard_deleted_ongoing_state(
+                        payload, scope=scope
+                    )
+                )
+                PortalRuntime.clear_payload_cache()
+                self._clear_read_cache()
+                event_id = PortalRuntime.state_store.enqueue_outbox_event(
+                    "qt_action",
+                    {
+                        "kind": "active_delete",
+                        "payload": {
+                            "active_item_id": str(payload.get("active_item_id") or ""),
+                            "record_id": str(
+                                (remove_result or {}).get("record_id")
+                                or payload.get("target_record_id")
+                                or ""
+                            ),
+                            "source_record_id": str(payload.get("source_record_id") or ""),
+                            "work_type": str(payload.get("work_type") or ""),
+                            "notice_type": str(payload.get("notice_type") or ""),
+                        },
+                    },
+                )
+                data["qt_deleted"] = bool(remove_result.get("active_item_id") or remove_result.get("record_id"))
+                data["qt_event_id"] = event_id
+                data["remote_deleted"] = False
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
         @app.get("/api/notice-undo/available")
         async def notice_undo_available(request: Request):
             session = self._current_session(request)

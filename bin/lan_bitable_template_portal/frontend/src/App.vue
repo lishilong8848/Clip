@@ -271,6 +271,7 @@
           :job-copy-text="jobCopyText"
           :job-text="jobText"
           :job-class="jobClass"
+          :local-remove-allowed="isAdmin"
           @expand="expandOngoingCard"
           @toggle="toggleOngoingCard"
           @set-edit="setOngoingEdit"
@@ -281,6 +282,7 @@
           @send="sendOngoing"
           @copy-notice="copyOngoingNoticeText"
           @delete="deleteOngoing"
+          @remove-local="removeOngoingLocalOnly"
           @bind-target="bindOngoingTarget"
           @apply-undo="applyUndo"
         />
@@ -4005,6 +4007,49 @@ async function deleteOngoing(item: Dict): Promise<void> {
     await loadWorkbench();
   } catch (error: any) {
     rememberJob(key, { text: error?.message || "删除失败", status: "failed", phase: "failed" });
+  }
+}
+
+async function removeOngoingLocalOnly(item: Dict): Promise<void> {
+  if (!isAdmin.value) return;
+  const key = ongoingLineKey(item);
+  const targetRecordId = targetRecordIdForOngoing(item);
+  const sourceRecordId = sourceRecordIdForOngoing(item, targetRecordId);
+  const confirmed = await requestActionConfirm({
+    tone: "warning",
+    kicker: "仅移除显示",
+    title: ongoingTitle(item),
+    message: "只从前端和 Qt 的进行中列表移除这条通告？",
+    details: [
+      "不会删除或修改对应的多维记录。",
+      "用于清理旧版本遗留的已结束通告显示。",
+      "移除后如需恢复，需要管理员从诊断数据中核对。",
+    ],
+    confirmLabel: "确认移除显示",
+  });
+  if (!confirmed) return;
+  try {
+    rememberJob(key, { text: "正在移除显示", status: "busy", phase: "removing_local" });
+    await api("/api/ongoing-items/remove-local", {
+      method: "POST",
+      body: JSON.stringify({
+        scope: currentScope.value || "ALL",
+        work_type: item.work_type || "maintenance",
+        notice_type: item.notice_type || "",
+        active_item_id: item.active_item_id || "",
+        record_id: targetRecordId,
+        target_record_id: targetRecordId,
+        source_record_id: sourceRecordId,
+        title: item.title || item.content || "",
+        building: item.building || "",
+        building_codes: Array.isArray(item.building_codes) ? item.building_codes : [],
+      }),
+    });
+    removeOngoingLine(key);
+    rememberJob(key, { text: "已移除显示，未删除多维", status: "success", phase: "success" });
+    await loadWorkbench();
+  } catch (error: any) {
+    rememberJob(key, { text: error?.message || "移除显示失败", status: "failed", phase: "failed" });
   }
 }
 
