@@ -28,6 +28,26 @@ REQUIRED_IMPORTS_FOR_CHECK = {
     "lark_oapi": "lark-oapi",
 }
 
+
+def _candidate_site_packages() -> list[Path]:
+    candidates: list[Path] = []
+    venv_root = BIN_DIR / ".venv"
+    if os.name == "nt":
+        candidates.append(venv_root / "Lib" / "site-packages")
+    else:
+        candidates.extend((venv_root / "lib").glob("python*/site-packages"))
+    return [path for path in candidates if path.is_dir()]
+
+
+def _add_project_runtime_site_packages() -> None:
+    for path in _candidate_site_packages():
+        text = str(path)
+        if text not in sys.path:
+            sys.path.insert(0, text)
+
+
+_add_project_runtime_site_packages()
+
 _missing_for_check = [
     package
     for module, package in REQUIRED_IMPORTS_FOR_CHECK.items()
@@ -164,10 +184,34 @@ def check_frontend_dist() -> tuple[bool, str, bool]:
     missing = [name for name in sorted(referenced_assets) if not (dist_assets / name).is_file()]
     if missing:
         return False, "Vue dist 缺少入口引用资源: " + ", ".join(missing[:10]), False
+    reachable_assets = set(referenced_assets)
+    pending_assets = list(sorted(referenced_assets))
+    asset_ref_pattern = re.compile(r"(?:^|[\"'`(,])/?assets/([^\"'`),\s]+)")
+    while pending_assets:
+        name = pending_assets.pop()
+        path = dist_assets / name
+        if not path.is_file() or path.suffix.lower() not in {".js", ".css"}:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+        for match in asset_ref_pattern.findall(text):
+            asset_name = match.strip()
+            if not asset_name or asset_name in reachable_assets:
+                continue
+            reachable_assets.add(asset_name)
+            pending_assets.append(asset_name)
+    missing_reachable = [
+        name for name in sorted(reachable_assets)
+        if not (dist_assets / name).is_file()
+    ]
+    if missing_reachable:
+        return False, "Vue dist 缺少动态引用资源: " + ", ".join(missing_reachable[:10]), False
     extra_assets = [
         path.name
         for path in sorted(dist_assets.glob("*"))
-        if path.is_file() and path.name not in referenced_assets and path.suffix.lower() in {".js", ".css"}
+        if path.is_file() and path.name not in reachable_assets and path.suffix.lower() in {".js", ".css"}
     ]
     if extra_assets:
         return False, "Vue dist 存在入口未引用的旧资源: " + ", ".join(extra_assets[:10]), False
@@ -175,7 +219,7 @@ def check_frontend_dist() -> tuple[bool, str, bool]:
     forbidden_hits: list[str] = []
     syntax_failures: list[str] = []
     dist_text_by_suffix: dict[str, str] = {}
-    for name in sorted(referenced_assets):
+    for name in sorted(reachable_assets):
         path = dist_assets / name
         if path.suffix.lower() not in {".js", ".css"}:
             continue
@@ -312,6 +356,8 @@ def check_frontend_realtime_coordination() -> tuple[bool, list[str]]:
 def check_frontend_vnet_skin() -> tuple[bool, list[str]]:
     src_dir = BIN_DIR / "lan_bitable_template_portal" / "frontend" / "src"
     app_vue = src_dir / "App.vue"
+    app_topbar = src_dir / "components" / "AppTopbar.vue"
+    app_status_notices = src_dir / "components" / "AppStatusNotices.vue"
     auth_panels = src_dir / "components" / "AuthPanels.vue"
     admin_tools = src_dir / "components" / "AdminTools.vue"
     scope_home = src_dir / "components" / "ScopeHome.vue"
@@ -327,6 +373,8 @@ def check_frontend_vnet_skin() -> tuple[bool, list[str]]:
     files: dict[str, str] = {}
     for label, path in (
         ("App.vue", app_vue),
+        ("AppTopbar.vue", app_topbar),
+        ("AppStatusNotices.vue", app_status_notices),
         ("AdminTools.vue", admin_tools),
         ("AuthPanels.vue", auth_panels),
         ("ScopeHome.vue", scope_home),
@@ -350,19 +398,36 @@ def check_frontend_vnet_skin() -> tuple[bool, list[str]]:
         "VNET blue-white production skin",
         "const headerSubtitle = computed",
         "const pageStatusText = computed",
-        "后端服务暂未就绪，页面会在连接恢复后自动刷新。",
-        "<div v-if=\"pageStatusText\" class=\"page-status\">",
-        ".status-banner.warning",
-        ".status-banner.failed",
-        "linear-gradient(90deg, rgba(4, 46, 145",
-        ".topbar::after",
-        "filter: brightness(0) invert(1)",
+        "服务暂未就绪，页面会在连接恢复后自动刷新。",
+        "<AppStatusNotices",
+        ":page-status-text=\"pageStatusText\"",
     ]
     for marker in app_markers:
         if marker not in app_text:
             errors.append(f"App.vue 蓝白生产皮肤缺少 {marker}")
     if "}} · {{ syncText }}" in app_text:
         errors.append("App.vue 顶栏仍直接拼接 syncText，容易暴露 HTTP 技术错误")
+
+    topbar_text = files["AppTopbar.vue"]
+    for marker in (
+        "header.app-topbar",
+        "linear-gradient(115deg, #064fc5",
+        "header.app-topbar::after",
+        "filter: brightness(0) invert(1)",
+        "class=\"app-topbar\"",
+    ):
+        if marker not in topbar_text:
+            errors.append(f"AppTopbar.vue VNET 顶栏皮肤缺少 {marker}")
+
+    status_text = files["AppStatusNotices.vue"]
+    for marker in (
+        "<div v-if=\"pageStatusText\" class=\"page-status\">",
+        ".status-banner.warning",
+        ".status-banner.failed",
+        "overflow-wrap: anywhere",
+    ):
+        if marker not in status_text:
+            errors.append(f"AppStatusNotices.vue 状态提示组件缺少 {marker}")
 
     admin_text = files["AdminTools.vue"]
     for marker in (
@@ -439,7 +504,7 @@ def check_frontend_vnet_skin() -> tuple[bool, list[str]]:
         "handover link href mismatch",
         "home-after-return-from-workbench",
         "workbench-after-return",
-        "选择楼栋打开审核页",
+        "选择楼栋打开交接班审核页",
         "刷新检修",
         "刷新变更",
         "近三天可回退",

@@ -943,6 +943,7 @@ class MainWindowUiMixin:
             data_dict["_has_unuploaded_changes"] = False
             data_dict["_upload_in_progress"] = True
             data_dict["_upload_started_monotonic"] = time.monotonic()
+            data_dict.pop("_last_upload_error", None)
             item.setData(Qt.ItemDataRole.UserRole, data_dict)
             self._rebuild_active_item_widget(
                 list_widget,

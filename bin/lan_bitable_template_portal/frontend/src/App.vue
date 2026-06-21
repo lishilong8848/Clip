@@ -7,16 +7,19 @@
       :auth="auth"
       :is-workbench="isWorkbench"
       :is-engineer-mop-page="isEngineerMopPage"
+      :is-event-page="isEventPage"
       :visible-scope-options="normalizedVisibleScopeOptions"
       :current-scope="currentScope"
       :loading="loading"
       :refresh-menu-open="refreshMenuOpen"
       :repair-refreshing="repairRefreshing"
       :change-refreshing="changeRefreshing"
+      :event-refreshing="eventRefreshing"
       :refresh-cooldown="refreshCooldown"
       :workbench-refresh-title="refreshButtonTitle('workbench')"
       :repair-refresh-title="refreshButtonTitle('repair')"
       :change-refresh-title="refreshButtonTitle('change')"
+      :event-refresh-title="refreshButtonTitle('event')"
       :is-admin="isAdmin"
       @return-home="returnToHome"
       @switch-scope="switchScope"
@@ -24,24 +27,16 @@
       @refresh-workbench="manualRefreshWorkbench"
       @refresh-repair="refreshRepair"
       @refresh-change="refreshChange"
+      @refresh-event="refreshEvent"
       @open-admin="showAdminTools = true"
       @logout="logout"
     />
 
-    <div v-if="!signatureLinkMode && connectionNotice" class="status-banner" :class="connectionNotice.tone">
-      <span>{{ connectionNotice.text }}</span>
-      <button
-        v-if="connectionNotice.action"
-        class="btn ghost small"
-        type="button"
-        @click="connectionNotice.action"
-      >
-        {{ connectionNotice.actionLabel }}
-      </button>
-    </div>
-    <div v-if="pageStatusText" class="page-status">
-      {{ pageStatusText }}
-    </div>
+    <AppStatusNotices
+      v-if="!signatureLinkMode || pageStatusText"
+      :connection-notice="signatureLinkMode ? null : connectionNotice"
+      :page-status-text="pageStatusText"
+    />
 
     <AdminTools
       :open="showAdminTools"
@@ -89,6 +84,16 @@
       @back="closePermissionRequestPanel"
     />
 
+    <EventManagementPage
+      v-else-if="isEventPage"
+      :scope="currentScope"
+      :scope-options="visibleScopeOptions"
+      :refresh-nonce="eventRefreshNonce"
+      :is-admin="isAdmin"
+      @refreshing="eventRefreshing = $event"
+      @status="syncText = $event"
+    />
+
     <ScopeHome
       v-else-if="!isWorkbench"
       :scope-options="visibleScopeOptions"
@@ -96,6 +101,7 @@
       :handover-links="handoverLinks"
       :can-request-more-scopes="additionalRequestableScopes.length > 0"
       @enter="enterScope"
+      @event="enterEventManagement"
       @engineer="enterEngineerMop"
       @request-permission="openAdditionalPermissionRequest"
     />
@@ -104,326 +110,180 @@
       <div v-if="loading" class="loading-line">
         正在加载 {{ scopeLabel(currentScope) }} 数据...
       </div>
-      <div class="summary-strip">
-        <article>
-          <span>已发起</span>
-          <strong>{{ liveDailyStats.started || 0 }}</strong>
-        </article>
-        <article>
-          <span>有更新</span>
-          <strong>{{ liveDailyStats.updated || 0 }}</strong>
-        </article>
-        <article>
-          <span>已结束</span>
-          <strong>{{ liveDailyStats.ended || 0 }}</strong>
-        </article>
-        <article>
-          <span>进行中</span>
-          <strong>{{ liveOngoingCount }}</strong>
-        </article>
-      </div>
+      <WorkbenchSummaryStrip
+        :started="liveDailyStats.started || 0"
+        :updated="liveDailyStats.updated || 0"
+        :ended="liveDailyStats.ended || 0"
+        :ongoing="liveOngoingCount"
+      />
 
-      <div class="toolbar">
-        <div class="segmented">
-          <button
-            v-for="type in workTypes"
-            :key="type.value"
-            :class="{ active: workType === type.value }"
-            @click="selectWorkType(type.value)"
-          >
-            {{ type.label }} {{ recordTypeCounts[type.value] || 0 }}
-          </button>
-        </div>
-        <input v-model="searchText" class="search" placeholder="搜索标题、楼栋、专业" />
-        <label class="specialty-filter">
-          <span>专业</span>
-          <select v-model="specialtyFilter">
-            <option value="">全部</option>
-            <option v-for="item in specialtyFilterOptions" :key="item" :value="item">{{ item }}</option>
-          </select>
-        </label>
-        <ManualTypePicker
-          v-model:open="showManualTypePicker"
-          :work-types="workTypes"
-          :recent-types="manualRecentTypeOptions"
-          :prefill-types="manualPrefillTypeValues"
-          @select="addManualDraft"
-        />
-        <button class="btn ghost" @click="showPasteParser = !showPasteParser">解析粘贴通告</button>
-        <button v-if="isAdmin" class="btn ghost" @click="showMemoryImporter = !showMemoryImporter">导入历史记忆</button>
-        <span v-if="draftSaveText" class="draft-save-status" :class="{ failed: draftSaveFailed }">
-          {{ draftSaveText }}
-        </span>
-      </div>
+      <WorkbenchToolbar
+        v-model:search-text="searchText"
+        v-model:specialty-filter="specialtyFilter"
+        v-model:manual-picker-open="showManualTypePicker"
+        :work-types="workTypes"
+        :work-type="workType"
+        :record-type-counts="recordTypeCounts"
+        :specialty-filter-options="specialtyFilterOptions"
+        :manual-recent-types="manualRecentTypeOptions"
+        :manual-prefill-types="manualPrefillTypeValues"
+        :is-admin="isAdmin"
+        :draft-save-text="draftSaveText"
+        :draft-save-failed="draftSaveFailed"
+        @select-work-type="selectWorkType"
+        @manual-select="addManualDraft"
+        @toggle-paste="showPasteParser = !showPasteParser"
+        @toggle-memory="showMemoryImporter = !showMemoryImporter"
+        @clear-filters="clearWorkbenchFilters"
+      />
 
-      <section v-if="showPasteParser" class="paste-panel">
-        <textarea v-model="pasteText" placeholder="粘贴完整维保、变更、检修、上电、轮巡或调整通告文本"></textarea>
-        <div class="card-actions">
-          <span class="job-line" :class="{ failed: pasteParseStatus === 'failed', success: pasteParseStatus === 'success' }">
-            {{ pasteParseLine }}
+      <WorkbenchPastePanel
+        v-if="showPasteParser"
+        v-model:paste-text="pasteText"
+        v-model:change-target-search-text="changeTargetSearchText"
+        v-model:change-source-search-text="changeSourceSearchText"
+        v-model:selected-change-source-id="selectedChangeSourceId"
+        :paste-parse-status="pasteParseStatus"
+        :paste-parse-line="pasteParseLine"
+        :paste-parse-busy="pasteParseBusy"
+        :pending-change-target-selection="pendingChangeTargetSelection"
+        :filtered-change-target-candidates="filteredChangeTargetCandidates"
+        :change-source-candidates="changeSourceCandidates"
+        :filtered-change-source-candidates="filteredChangeSourceCandidates"
+        :visible-active-change-target-candidate="visibleActiveChangeTargetCandidate"
+        :selected-change-target-id="selectedChangeTargetId"
+        :change-target-confirming="changeTargetConfirming"
+        :selected-target-visible="selectedChangeTargetVisible"
+        :selected-source-visible="selectedChangeSourceVisible"
+        :work-type-label="workTypeLabel"
+        :target-candidate-id="changeTargetCandidateId"
+        :source-candidate-id="changeSourceCandidateId"
+        :detail-rows-for="changeTargetDetailRows"
+        @parse="parsePastedNotice"
+        @preview-target="previewChangeTarget"
+        @select-target="selectChangeTarget"
+        @confirm="confirmPastedChangeTarget"
+      />
+
+      <WorkbenchMemoryImportPanel
+        v-if="showMemoryImporter && isAdmin"
+        v-model:memory-import-text="memoryImportText"
+        :memory-import-line="memoryImportLine"
+        :memory-import-line-type="memoryImportLineType"
+        :memory-import-busy="memoryImportBusy"
+        @import="importHistoricalMemory"
+      />
+
+      <section class="workbench-flow-strip" aria-label="通告处理流程">
+        <article>
+          <b>1</b>
+          <span>
+            <strong>选事项</strong>
+            <small>{{ filteredRows.length }} 条可选</small>
           </span>
-          <button class="btn blue" :disabled="pasteParseBusy" @click="parsePastedNotice">
-            {{ pasteParseBusy ? "解析中" : "解析到待发起通告" }}
-          </button>
-        </div>
-        <div v-if="pendingChangeTargetSelection" class="target-choice-panel">
-          <div>
-            <strong>请选择要{{ pendingChangeTargetSelection.actionLabel }}的{{ workTypeLabel(pendingChangeTargetSelection.type) }}记录</strong>
-            <p>原文状态为“{{ pendingChangeTargetSelection.actionLabel }}”。可同时选择目标多维记录和源表记录；如果缺少主界面条目，也能用这两类记录继续上传。</p>
-            <p v-if="pendingChangeTargetSelection.totalMatched" class="target-count-line">
-              当前显示 {{ pendingChangeTargetSelection.returnedCount }} 条，目标表共匹配 {{ pendingChangeTargetSelection.totalMatched }} 条{{ pendingChangeTargetSelection.limited ? "，请结合匹配原因选择" : "" }}。
-            </p>
-          </div>
-          <div class="target-choice-layout">
-            <div class="target-choice-column">
-              <label class="candidate-search">
-                <span>搜索目标记录</span>
-                <input v-model="changeTargetSearchText" type="search" placeholder="标题、楼栋、时间、匹配原因、字段内容" />
-              </label>
-              <p class="candidate-count">当前显示 {{ filteredChangeTargetCandidates.length }} / {{ pendingChangeTargetSelection.candidates.length }} 条</p>
-              <div class="target-choice-list">
-              <p v-if="!pendingChangeTargetSelection.candidates.length" class="target-empty-line">未找到同名目标多维记录，可先选择源表记录继续尝试关联。</p>
-              <p v-else-if="!filteredChangeTargetCandidates.length" class="target-empty-line">没有匹配的目标记录，请调整搜索条件。</p>
-              <button
-                v-for="item in filteredChangeTargetCandidates"
-                :key="changeTargetCandidateId(item)"
-                class="target-choice"
-                :class="{ active: selectedChangeTargetId === changeTargetCandidateId(item) }"
-                @mouseenter="previewChangeTarget(item)"
-                @focus="previewChangeTarget(item)"
-                @click="selectChangeTarget(item)"
-              >
-                <strong>{{ item.title || item.record_id }}</strong>
-                <span>{{ item.building || "-" }} · {{ item.status || "未标记状态" }} · {{ item.start_time || "-" }} 至 {{ item.end_time || "-" }}</span>
-                <small>{{ item.match_reason || (item.date_matched ? "时间匹配" : "按名称匹配") }}</small>
-              </button>
-              </div>
-            </div>
-            <aside v-if="visibleActiveChangeTargetCandidate" class="target-detail-popover">
-              <div class="target-detail-head">
-                <strong>{{ visibleActiveChangeTargetCandidate.title || `${workTypeLabel(pendingChangeTargetSelection.type)}记录` }}</strong>
-                <span>{{ visibleActiveChangeTargetCandidate.building || "-" }} · {{ visibleActiveChangeTargetCandidate.status || "未标记状态" }}</span>
-                <small>{{ visibleActiveChangeTargetCandidate.match_reason || "" }}</small>
-              </div>
-              <dl class="target-detail-grid">
-                <template v-for="row in changeTargetDetailRows(visibleActiveChangeTargetCandidate)" :key="row.label">
-                  <dt>{{ row.label }}</dt>
-                  <dd>{{ row.value }}</dd>
-                </template>
-              </dl>
-              <button class="btn blue target-confirm" :disabled="changeTargetConfirming || !selectedChangeTargetVisible" @click="confirmPastedChangeTarget">
-                {{ changeTargetConfirming ? "确认中" : "确认关联这条记录" }}
-              </button>
-            </aside>
-          </div>
-          <div v-if="changeSourceCandidates.length" class="source-choice-panel">
-            <div>
-              <strong>对应源表记录</strong>
-              <p>选择源表记录后，后续状态、闭环和来源追踪会更准确；不选择也可用目标多维记录继续上传。</p>
-            </div>
-            <label class="candidate-search">
-              <span>搜索源表记录</span>
-              <input v-model="changeSourceSearchText" type="search" placeholder="标题、楼栋、状态、时间、字段内容" />
-            </label>
-            <p class="candidate-count">当前显示 {{ filteredChangeSourceCandidates.length }} / {{ changeSourceCandidates.length }} 条</p>
-            <div class="source-choice-list">
-              <p v-if="!filteredChangeSourceCandidates.length" class="target-empty-line">没有匹配的源表记录，请调整搜索条件。</p>
-              <button
-                v-for="item in filteredChangeSourceCandidates"
-                :key="changeSourceCandidateId(item)"
-                class="source-choice"
-                :class="{ active: selectedChangeSourceId === changeSourceCandidateId(item) }"
-                @click="selectedChangeSourceId = changeSourceCandidateId(item)"
-              >
-                <strong>{{ item.title || item.record_id }}</strong>
-                <span>{{ item.building || "-" }} · {{ item.status || "未标记状态" }} · {{ item.start_time || "-" }} 至 {{ item.end_time || "-" }}</span>
-              </button>
-            </div>
-            <button
-              v-if="!pendingChangeTargetSelection.candidates.length"
-              class="btn blue target-confirm"
-              :disabled="changeTargetConfirming || !selectedChangeSourceVisible"
-              @click="confirmPastedChangeTarget"
-            >
-              {{ changeTargetConfirming ? "确认中" : "确认关联源表记录" }}
-            </button>
-          </div>
-        </div>
-      </section>
-
-      <section v-if="showMemoryImporter && isAdmin" class="paste-panel">
-        <div class="panel-head compact-head">
-          <h2>导入历史通告记忆</h2>
-          <span>只写入记忆，不发送、不上传</span>
-        </div>
-        <textarea
-          v-model="memoryImportText"
-          placeholder="可一次粘贴多条历史维保、变更、检修通告。导入后，同楼栋同标题/同维护总项的本月事项会自动回填。"
-        ></textarea>
-        <div class="card-actions">
-          <span class="job-line" :class="{ success: memoryImportLineType === 'success', failed: memoryImportLineType === 'failed' }">
-            {{ memoryImportLine }}
+        </article>
+        <article :class="{ active: selectedDraftRows.length > 0 }">
+          <b>2</b>
+          <span>
+            <strong>核对发送</strong>
+            <small>{{ selectedDraftRows.length ? `${selectedDraftRows.length} 条草稿` : "先选左侧事项" }}</small>
           </span>
-          <button class="btn blue" :disabled="memoryImportBusy" @click="importHistoricalMemory">
-            {{ memoryImportBusy ? "导入中" : "导入到记忆库" }}
-          </button>
-        </div>
+        </article>
+        <article :class="{ active: filteredOngoing.length > 0 }">
+          <b>3</b>
+          <span>
+            <strong>处理进行中</strong>
+            <small>{{ filteredOngoing.length ? `${filteredOngoing.length} 条进行中` : "发送成功后出现" }}</small>
+          </span>
+        </article>
       </section>
 
       <section class="workspace">
-        <aside class="panel records-panel">
-          <div class="panel-head">
-            <h2>待发起事项</h2>
-            <span>{{ filteredRows.length }}</span>
-          </div>
-          <VirtualNoticeList
-            :rows="filteredRows"
-            :selected-id="activeDraftKey"
-            show-status
-            empty-text="当前筛选下没有待发起事项"
-            @select="toggleRecordSelection"
-          />
-        </aside>
+        <WorkbenchRecordsPanel
+          :rows="filteredRows"
+          :selected-id="activeDraftKey"
+          @select="toggleRecordSelection"
+        />
 
-        <section class="panel drafts-panel">
-          <div class="panel-head">
-            <h2>待发起通告</h2>
-            <span>{{ selectedDraftRows.length }}</span>
-          </div>
-          <div v-if="selectedDraftRows.length === 0" class="empty-block">
-            {{ specialtyFilter ? "当前专业下没有待发起通告，可切换专业或选择全部。" : "从左侧选择事项，或使用纯手填、解析粘贴通告。" }}
-          </div>
-          <div v-else ref="draftStackRef" class="draft-stack">
-            <DraftNoticeCard
-              v-for="row in selectedDraftRows"
-              :key="row.key"
-              :row-key="row.key"
-              :record="row.record"
-              :draft="row.draft"
-              :title="row.title"
-              :active="row.key === activeDraftKey"
-              :busy="isLineBusy(row.key)"
-              :meta="draftCardMeta(row.record, row.draft, row.key === activeDraftKey)"
-              :summary="draftSummary(row.record, row.draft)"
-              :warning-text="row.record.manual && !row.draft.validation_touched ? draftTypeConflictText(row.record, row.draft) : ''"
-              :missing-text="draftMissingText(row.record, row.draft)"
-              :work-type="draftWorkType(row.record, row.draft)"
-              :requestable-scopes="requestableScopes"
-              :maintenance-cycle-options="maintenanceCycleOptions"
-              :zhihang-records="zhihangRecords"
-              :upload-preview-rows="draftUploadPreviewRows(row.record, row.draft)"
-              :notice-preview-text="noticePreviewText(row.record, row.draft)"
-              :preview-visible="previewDraftKey === row.key"
-              :type-override-visible="canToggleWorkTypeOverride(row.record)"
-              :type-override-busy="typeOverrideBusyKey === row.key"
-              :type-override-label="workTypeOverrideButtonLabel(row.record)"
-              :sync-maintenance-visible="isConvertedMaintenanceChange(row.record, row.draft)"
-              :send-label="sendDraftButtonLabel(row.record, row.draft)"
-              :field-class="(field) => draftFieldClass(row.record, row.draft, field)"
-              :job-text="jobText"
-              :job-class="jobClass"
-              :copy-text="jobCopyText(row.key, noticePreviewText(row.record, row.draft))"
-              @activate="activeDraftKey = row.key"
-              @pin="pinDraftInMiddlePanel(row.key)"
-              @remove="removeDraft(row.key)"
-              @set-draft="(field, value) => setDraftField(row.draft, field, value)"
-              @manual-type-change="onManualDraftTypeChange(row.draft)"
-              @building-change="onDraftBuildingChange(row.draft)"
-              @bind-zhihang="bindZhihang(row.draft)"
-              @toggle-preview="previewDraftKey = previewDraftKey === row.key ? '' : row.key"
-              @copy-notice="copyJobNoticeText(row.key, noticePreviewText(row.record, row.draft))"
-              @send="sendStart(row.key)"
-              @toggle-work-type-override="toggleWorkTypeOverride(row.record)"
-            />
-          </div>
-        </section>
+        <WorkbenchDraftsPanel
+          ref="draftStackRef"
+          :rows="selectedDraftRows"
+          :active-draft-key="activeDraftKey"
+          :specialty-filter="specialtyFilter"
+          :requestable-scopes="requestableScopes"
+          :maintenance-cycle-options="maintenanceCycleOptions"
+          :zhihang-records="zhihangRecords"
+          :preview-draft-key="previewDraftKey"
+          :type-override-busy-key="typeOverrideBusyKey"
+          :is-line-busy="isLineBusy"
+          :draft-card-meta="draftCardMeta"
+          :draft-summary="draftSummary"
+          :draft-type-conflict-text="draftTypeConflictText"
+          :draft-missing-text="draftMissingText"
+          :draft-work-type="draftWorkType"
+          :draft-upload-preview-rows="draftUploadPreviewRows"
+          :notice-preview-text="noticePreviewText"
+          :can-toggle-work-type-override="canToggleWorkTypeOverride"
+          :work-type-override-button-label="workTypeOverrideButtonLabel"
+          :is-converted-maintenance-change="isConvertedMaintenanceChange"
+          :send-draft-button-label="sendDraftButtonLabel"
+          :draft-field-class="draftFieldClass"
+          :job-text="jobText"
+          :job-class="jobClass"
+          :job-copy-text="jobCopyText"
+          @activate="activeDraftKey = $event"
+          @pin="pinDraftInMiddlePanel"
+          @remove="removeDraft"
+          @set-draft="setDraftField"
+          @manual-type-change="onManualDraftTypeChange"
+          @building-change="onDraftBuildingChange"
+          @bind-zhihang="bindZhihang"
+          @toggle-preview="toggleDraftPreview"
+          @copy-notice="copyJobNoticeText"
+          @send="sendStart"
+          @toggle-work-type-override="toggleWorkTypeOverride"
+        />
 
-        <aside class="panel ongoing-panel">
-          <div class="panel-head">
-            <h2>已开始未结束</h2>
-            <div class="panel-head-actions">
-              <div class="ongoing-type-filter" aria-label="进行中通告显示范围">
-                <button
-                  type="button"
-                  :class="{ active: ongoingTypeFilter === 'all' }"
-                  @click="ongoingTypeFilter = 'all'"
-                >
-                  全部
-                </button>
-                <button
-                  type="button"
-                  :class="{ active: ongoingTypeFilter === 'current' }"
-                  @click="ongoingTypeFilter = 'current'"
-                >
-                  当前类型
-                </button>
-              </div>
-              <span>{{ ongoingCountLabel }}</span>
-            </div>
-          </div>
-          <div v-if="filteredOngoing.length === 0" class="empty-block">
-            {{ ongoingEmptyText }}
-          </div>
-          <div v-else class="ongoing-list">
-            <OngoingNoticeCard
-              v-for="item in filteredOngoing"
-              :key="ongoingLineKey(item)"
-              :item="item"
-              :draft="ongoingDraft(item)"
-              :title="ongoingTitle(item)"
-              :meta="ongoingMeta(item)"
-              :compact-summary="ongoingCompactSummary(item)"
-              :line-key="ongoingLineKey(item)"
-              :undo-line-key="undoLineKey(item)"
-              :expanded="isOngoingExpanded(item)"
-              :busy="isLineBusy(ongoingLineKey(item))"
-              :undo-busy="isLineBusy(undoLineKey(item))"
-              :needs-binding="ongoingNeedsBinding(item)"
-              :photo-count="ongoingPhotoCount(item)"
-              :site-photo-required="ongoingEndRequiresSitePhoto(item)"
-              :maintenance-cycle-options="maintenanceCycleOptions"
-              :zhihang-records="zhihangRecords"
-              :sync-maintenance-visible="sourceWorkTypeForRecord(item) === 'maintenance' && String(item.work_type || '') === 'change'"
-              :job-text="jobText"
-              :job-class="jobClass"
-              :copy-text="jobCopyText(ongoingLineKey(item), ongoingNoticePreviewText(item))"
-              @expand="expandOngoingCard(item)"
-              @toggle="toggleOngoingCard(item)"
-              @set-edit="(key, value) => setOngoingEdit(item, key, value)"
-              @bind-zhihang="(recordId) => bindOngoingZhihang(item, recordId)"
-              @photo-input="(event) => handleOngoingPhotoInput(item, event)"
-              @photo-paste="(event) => handleOngoingPhotoPaste(item, event)"
-              @remove-photo="(index) => removeOngoingPhoto(item, index)"
-              @send="(action) => sendOngoing(item, action)"
-              @copy-notice="copyJobNoticeText(ongoingLineKey(item), ongoingNoticePreviewText(item))"
-              @delete="deleteOngoing(item)"
-              @bind-target="bindOngoingTarget(item)"
-              @apply-undo="applyUndo(item)"
-            />
-          </div>
-          <RecentUndoPanel
-            v-model="undoFilter"
-            :items="recentUndoItems"
-            :job-text="jobText"
-            :job-class="jobClass"
-            :is-line-busy="isLineBusy"
-            @apply="applyUndo"
-          />
-          <div v-if="closedSummaryItems.length" class="closed-today">
-            <div class="panel-head compact">
-              <h3>今日结束通告</h3>
-              <span>{{ closedSummaryItems.length }}</span>
-            </div>
-            <article v-for="item in closedSummaryItems" :key="closedLineKey(item)" class="closed-card">
-              <div>
-                <strong>{{ item.title || "未命名通告" }}</strong>
-                <p>{{ workTypeLabel(item.work_type) }} · {{ item.building || "-" }} · {{ item.ended_at || item.updated_at || "-" }}</p>
-              </div>
-              <button v-if="item.undo_available" class="btn ghost" :disabled="isLineBusy(undoLineKey(item))" @click="applyUndo(item)">回退</button>
-              <span class="job-line" :class="jobClass(undoLineKey(item))">{{ jobText(undoLineKey(item)) }}</span>
-            </article>
-          </div>
-        </aside>
+        <WorkbenchOngoingPanel
+          v-model:ongoing-type-filter="ongoingTypeFilter"
+          v-model:undo-filter="undoFilter"
+          :filtered-ongoing="filteredOngoing"
+          :ongoing-count-label="ongoingCountLabel"
+          :ongoing-empty-text="ongoingEmptyText"
+          :recent-undo-items="recentUndoItems"
+          :closed-summary-items="closedSummaryItems"
+          :maintenance-cycle-options="maintenanceCycleOptions"
+          :zhihang-records="zhihangRecords"
+          :ongoing-line-key="ongoingLineKey"
+          :undo-line-key="undoLineKey"
+          :closed-line-key="closedLineKey"
+          :ongoing-draft="ongoingDraft"
+          :ongoing-title="ongoingTitle"
+          :ongoing-meta="ongoingMeta"
+          :ongoing-compact-summary="ongoingCompactSummary"
+          :is-ongoing-expanded="isOngoingExpanded"
+          :is-line-busy="isLineBusy"
+          :ongoing-needs-binding="ongoingNeedsBinding"
+          :ongoing-photo-count="ongoingPhotoCount"
+          :ongoing-end-requires-site-photo="ongoingEndRequiresSitePhoto"
+          :source-work-type-for-record="sourceWorkTypeForRecord"
+          :ongoing-notice-preview-text="ongoingNoticePreviewText"
+          :job-copy-text="jobCopyText"
+          :job-text="jobText"
+          :job-class="jobClass"
+          @expand="expandOngoingCard"
+          @toggle="toggleOngoingCard"
+          @set-edit="setOngoingEdit"
+          @bind-zhihang="bindOngoingZhihang"
+          @photo-input="handleOngoingPhotoInput"
+          @photo-paste="handleOngoingPhotoPaste"
+          @remove-photo="removeOngoingPhoto"
+          @send="sendOngoing"
+          @copy-notice="copyOngoingNoticeText"
+          @delete="deleteOngoing"
+          @bind-target="bindOngoingTarget"
+          @apply-undo="applyUndo"
+        />
       </section>
     </section>
 
@@ -439,51 +299,38 @@
       @preview="previewOngoingBindCandidate"
       @select="selectOngoingBindCandidate"
     />
-    <div v-if="actionConfirm.open" class="action-confirm-backdrop" @click.self="resolveActionConfirm(false)">
-      <section
-        class="action-confirm-modal"
-        :class="`tone-${actionConfirm.tone}`"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="action-confirm-title"
-      >
-        <header>
-          <div>
-            <span>{{ actionConfirm.kicker }}</span>
-            <strong id="action-confirm-title">{{ actionConfirm.title }}</strong>
-          </div>
-          <button class="icon-btn" type="button" aria-label="关闭确认弹窗" @click="resolveActionConfirm(false)">×</button>
-        </header>
-        <p>{{ actionConfirm.message }}</p>
-        <ul v-if="actionConfirm.details.length">
-          <li v-for="detail in actionConfirm.details" :key="detail">{{ detail }}</li>
-        </ul>
-        <footer>
-          <button class="btn ghost" type="button" @click="resolveActionConfirm(false)">{{ actionConfirm.cancelLabel }}</button>
-          <button class="btn" :class="actionConfirm.confirmClass" type="button" @click="resolveActionConfirm(true)">
-            {{ actionConfirm.confirmLabel }}
-          </button>
-        </footer>
-      </section>
-    </div>
+    <ConfirmDialog
+      :open="actionConfirm.open"
+      :tone="actionConfirm.tone"
+      :kicker="actionConfirm.kicker"
+      :title="actionConfirm.title"
+      :message="actionConfirm.message"
+      :details="actionConfirm.details"
+      :confirm-label="actionConfirm.confirmLabel"
+      :cancel-label="actionConfirm.cancelLabel"
+      :confirm-class="actionConfirm.confirmClass"
+      @resolve="resolveActionConfirm"
+    />
   </main>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
-import AdminTools from "./components/AdminTools.vue";
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import AppStatusNotices from "./components/AppStatusNotices.vue";
 import AppTopbar from "./components/AppTopbar.vue";
+import AsyncPageState from "./components/AsyncPageState.vue";
 import AuthPanels from "./components/AuthPanels.vue";
-import DraftNoticeCard from "./components/DraftNoticeCard.vue";
-import EngineerMopPage from "./components/EngineerMopPage.vue";
-import HistoryMemoryPage from "./components/HistoryMemoryPage.vue";
-import ManualTypePicker from "./components/ManualTypePicker.vue";
-import OngoingNoticeCard from "./components/OngoingNoticeCard.vue";
-import RecentUndoPanel from "./components/RecentUndoPanel.vue";
+import ConfirmDialog from "./components/ConfirmDialog.vue";
 import ScopeHome from "./components/ScopeHome.vue";
-import SignaturePage from "./components/SignaturePage.vue";
 import TargetRecordSelectionModal from "./components/TargetRecordSelectionModal.vue";
-import VirtualNoticeList, { type NoticeRow } from "./components/VirtualNoticeList.vue";
+import type { NoticeRow } from "./components/VirtualNoticeList.vue";
+import WorkbenchDraftsPanel from "./components/WorkbenchDraftsPanel.vue";
+import WorkbenchMemoryImportPanel from "./components/WorkbenchMemoryImportPanel.vue";
+import WorkbenchOngoingPanel from "./components/WorkbenchOngoingPanel.vue";
+import WorkbenchPastePanel from "./components/WorkbenchPastePanel.vue";
+import WorkbenchRecordsPanel from "./components/WorkbenchRecordsPanel.vue";
+import WorkbenchSummaryStrip from "./components/WorkbenchSummaryStrip.vue";
+import WorkbenchToolbar from "./components/WorkbenchToolbar.vue";
 import { AUTH_EXPIRED_EVENT, requestBinaryJson, requestJson } from "./api/client";
 import { filterCandidatesBySearch } from "./candidateSearch";
 import {
@@ -498,6 +345,7 @@ import { backendJobStatusPatch, friendlyFailureText, terminalPhase } from "./job
 import {
   isKnownWorkType,
   manualPrefillWorkTypes,
+  normalizeWorkTypeFilter,
   normalizeWorkType,
   noticeDurationError,
   noticeFieldLabel,
@@ -519,9 +367,26 @@ import {
   toDatetimeLocal,
 } from "./noticeParsing";
 import { createCrossTabStreamCoordinator, type CrossTabStreamCoordinator } from "./streamCoordinator";
-import type { LooseDict, ScopeOption, WorkTypeOption, WorkTypeValue } from "./types";
+import type { LooseDict, ScopeOption, WorkTypeFilterValue, WorkTypeOption, WorkTypeValue } from "./types";
+
+function asyncPage(loader: () => Promise<unknown>) {
+  return defineAsyncComponent({
+    loader: loader as () => Promise<never>,
+    loadingComponent: AsyncPageState,
+    errorComponent: AsyncPageState,
+    delay: 120,
+    timeout: 30000,
+  });
+}
+
+const AdminTools = asyncPage(() => import("./components/AdminTools.vue"));
+const EngineerMopPage = asyncPage(() => import("./components/EngineerMopPage.vue"));
+const EventManagementPage = asyncPage(() => import("./components/EventManagementPage.vue"));
+const HistoryMemoryPage = asyncPage(() => import("./components/HistoryMemoryPage.vue"));
+const SignaturePage = asyncPage(() => import("./components/SignaturePage.vue"));
 
 type Dict = LooseDict;
+type DraftsPanelExpose = { scrollToTop: () => void };
 type ActionConfirmTone = "danger" | "warning" | "primary";
 type ActionConfirmState = {
   open: boolean;
@@ -569,18 +434,27 @@ const loading = ref(false);
 const isHistoryMemoryPage = ref(window.location.pathname.replace(/\/$/, "") === "/admin/history-memory");
 const isEngineerMopPage = ref(window.location.pathname.replace(/\/$/, "") === "/engineer/mop");
 const isSignaturePage = ref(window.location.pathname.replace(/\/$/, "") === "/signature");
+const isEventPage = ref(
+  window.location.pathname.replace(/\/$/, "") === "/events"
+  || new URLSearchParams(window.location.search).get("mode") === "events",
+);
 const signatureLinkMode = computed(() => (
-  isSignaturePage.value && Boolean(new URLSearchParams(window.location.search).get("record_id"))
+  isSignaturePage.value && (() => {
+    const params = new URLSearchParams(window.location.search);
+    return Boolean(params.get("record_id") || params.get("temporary_id"));
+  })()
 ));
 const repairRefreshing = ref(false);
 const changeRefreshing = ref(false);
+const eventRefreshing = ref(false);
+const eventRefreshNonce = ref(0);
 const refreshMenuOpen = ref(false);
 const isWorkbench = ref(false);
 const initialUrlParams = new URLSearchParams(window.location.search);
-const initialWorkType = normalizeWorkType(initialUrlParams.get("work_type") || "maintenance");
+const initialWorkType = normalizeWorkTypeFilter(initialUrlParams.get("work_type") || "");
 const currentScope = ref(normalizeScopeValue(initialUrlParams.get("scope") || "", ""));
 const syncText = ref("准备中");
-const workType = ref(initialWorkType);
+const workType = ref<WorkTypeFilterValue>(initialWorkType);
 const userSelectedWorkType = ref(Boolean(initialUrlParams.get("work_type")));
 const searchText = ref("");
 const specialtyFilter = ref("");
@@ -619,6 +493,7 @@ const activeItemsEventSource = ref<EventSource | null>(null);
 const activeItemsConnected = ref(false);
 const sharedActiveItemsStreamAvailable = ref(false);
 const activeItemsUpdatePending = ref(false);
+const realtimeWarningVisible = ref(false);
 const pageVisible = ref(typeof document === "undefined" ? true : !document.hidden);
 const pendingHiddenRefresh = ref(false);
 const draftSavedAt = ref(0);
@@ -636,12 +511,15 @@ const permissionRequest = reactive({
   code: "",
   requestId: "",
   message: "",
+  status: "",
+  rejectReason: "",
 });
 const permissionBusy = ref(false);
 const refreshCooldown = reactive<Record<string, boolean>>({
   workbench: false,
   repair: false,
   change: false,
+  event: false,
 });
 const backendStatus = reactive({
   offline: false,
@@ -673,7 +551,7 @@ const actionConfirm = reactive<ActionConfirmState>({
   cancelLabel: "取消",
   confirmClass: "blue",
 });
-const draftStackRef = ref<HTMLElement | null>(null);
+const draftStackRef = ref<DraftsPanelExpose | null>(null);
 const fallbackPollTimers = new Map<string, number>();
 const pollingJobs = new Map<string, string>();
 let batchPollTimer: number | null = null;
@@ -699,6 +577,9 @@ let appDisposed = false;
 let resolveOngoingBindSelection: ((candidate: Dict | null) => void) | null = null;
 let jobStreamCoordinator: CrossTabStreamCoordinator<Dict> | null = null;
 let activeItemsStreamCoordinator: CrossTabStreamCoordinator<Dict> | null = null;
+let authRedirectInProgress = false;
+let sseAuthCheckTimer: number | null = null;
+let realtimeWarningTimer: number | null = null;
 
 const visibleScopeOptions = computed(() => auth.scopeOptions.length ? auth.scopeOptions : requestableScopes);
 const normalizedVisibleScopeOptions = computed<ScopeOption[]>(() => (
@@ -726,8 +607,8 @@ const permissionPanelTitle = computed(() => (
 ));
 const permissionPanelDescription = computed(() => (
   showPermissionRequestPanel.value && auth.scopeOptions.length
-    ? "选择还需要访问的楼栋或园区，管理员确认验证码后会追加到当前账号。"
-    : "请选择需要访问的楼栋或园区，提交后由管理员发放验证码。"
+    ? "选择还需要访问的楼栋或园区，管理员审批后会追加到当前账号。"
+    : "请选择需要访问的楼栋或园区，提交后由管理员在门户审批。"
 ));
 const permissionPanelEmptyText = computed(() => (
   showPermissionRequestPanel.value && auth.scopeOptions.length
@@ -738,6 +619,7 @@ const headerSubtitle = computed(() => {
   if (isHistoryMemoryPage.value) return "管理工具 · 历史通告记忆导入";
   if (isEngineerMopPage.value) return `${scopeLabel(currentScope.value)} · 工程师 MOP 填写`;
   if (isSignaturePage.value) return "线上签名 · 手机手写保存";
+  if (isEventPage.value) return `${scopeLabel(currentScope.value)} · 事件管理`;
   if (authChecking.value) return "功能选择 · 正在检查登录";
   if (!auth.loggedIn) return "功能选择 · 请先登录";
   if (!auth.scopeOptions.length) return "功能选择 · 申请访问权限";
@@ -748,7 +630,7 @@ const pageStatusText = computed(() => {
   if (signatureLinkMode.value) return "";
   const text = String(syncText.value || "").trim();
   if (!text || ["准备中", "请选择功能", "切换中"].includes(text)) return "";
-  if (/^HTTP\s+\d+/i.test(text)) return "后端服务暂未就绪，页面会在连接恢复后自动刷新。";
+  if (/^HTTP\s+\d+/i.test(text)) return "服务暂未就绪，页面会在连接恢复后自动刷新。";
   return text;
 });
 const hasActiveJobs = computed(() => {
@@ -768,7 +650,7 @@ const connectionNotice = computed(() => {
   if (backendStatus.offline) {
     return {
       tone: "failed",
-      text: backendStatus.message || "后端连接异常，页面会保留当前数据。",
+      text: backendStatus.message || "服务连接异常，页面会保留当前数据。",
       actionLabel: "重新连接",
       action: retryFrontendConnections,
     };
@@ -776,12 +658,12 @@ const connectionNotice = computed(() => {
   if (pendingHiddenRefresh.value) {
     return {
       tone: "info",
-      text: "后台有新数据，页面恢复可见后会自动刷新。",
+      text: "有新数据，页面恢复可见后会自动刷新。",
       actionLabel: "立即刷新",
       action: flushPendingHiddenRefresh,
     };
   }
-  if (jobRealtimeUnavailable.value) {
+  if (jobRealtimeUnavailable.value && realtimeWarningVisible.value) {
     return {
       tone: "warning",
       text: "任务实时状态正在重连，当前会自动轮询查询。",
@@ -791,6 +673,24 @@ const connectionNotice = computed(() => {
   }
   return null;
 });
+
+watch(jobRealtimeUnavailable, (unavailable) => {
+  if (realtimeWarningTimer !== null) {
+    window.clearTimeout(realtimeWarningTimer);
+    realtimeWarningTimer = null;
+  }
+  if (!unavailable) {
+    realtimeWarningVisible.value = false;
+    return;
+  }
+  realtimeWarningTimer = window.setTimeout(() => {
+    realtimeWarningTimer = null;
+    if (jobRealtimeUnavailable.value) {
+      realtimeWarningVisible.value = true;
+    }
+  }, 8000);
+}, { immediate: true });
+
 const dailyStats = computed(() => dailySummary.value?.stats || {});
 const closedSummaryItems = computed(() => {
   const items = Array.isArray(dailySummary.value?.items) ? dailySummary.value.items : [];
@@ -817,7 +717,8 @@ const draftSaveText = computed(() => {
   return `草稿已保存 ${formatTimeOfDay(draftSavedAt.value)}`;
 });
 const recordTypeCounts = computed(() => {
-  const counts: Record<string, number> = Object.fromEntries(workTypes.map((item) => [item.value, 0]));
+  const counts: Record<string, number> = Object.fromEntries([["", 0], ...workTypes.map((item) => [item.value, 0])]);
+  counts[""] = scopedRecords.value.length;
   for (const record of scopedRecords.value) {
     const type = record.work_type || "maintenance";
     if (Object.prototype.hasOwnProperty.call(counts, type)) counts[type] += 1;
@@ -827,7 +728,7 @@ const recordTypeCounts = computed(() => {
 const filteredRecords = computed(() => {
   const query = searchText.value.trim().toLowerCase();
   return scopedRecords.value.filter((record) => {
-    if ((record.work_type || "maintenance") !== workType.value) return false;
+    if (workType.value && (record.work_type || "maintenance") !== workType.value) return false;
     if (!matchesSpecialtyFilter(specialtyForRecord(record))) return false;
     if (!query) return true;
     return [recordCardTitle(record), buildingForRecord(record), specialtyForRecord(record), sourceProgressForRecord(record)]
@@ -869,6 +770,7 @@ const selectedDraftRowsAll = computed(() => {
 const selectedDraftRows = computed(() => selectedDraftRowsAll.value.filter((row) => matchesSpecialtyFilter(draftSpecialtyForRow(row))));
 const typeFilteredOngoing = computed(() => {
   if (ongoingTypeFilter.value !== "current") return ongoing.value;
+  if (!workType.value) return ongoing.value;
   return ongoing.value.filter((item) => String(item.work_type || "maintenance") === workType.value);
 });
 const filteredOngoing = computed(() => (
@@ -1037,9 +939,9 @@ function titleForRecord(record: Dict): string {
   const f = fieldsOf(record);
   const type = record.work_type || "maintenance";
   const rawTitle = type === "change"
-    ? (f["变更简述"] || record.title || record.record_id)
+    ? (f["变更简述"] || record.title || "未命名变更事项")
     : type === "repair"
-      ? (record.title || f["检修通告名称"] || f["维修名称"] || record.record_id)
+      ? (record.title || f["检修通告名称"] || f["维修名称"] || "未命名检修事项")
       : `EA118机房${f["楼栋"] || ""}${f["维护总项"] || ""}`;
   return normalize110StationNoticeTitle(rawTitle, buildingForRecord(record), record.building_codes || []);
 }
@@ -1237,7 +1139,7 @@ function targetRecordIdForOngoing(item: Dict): string {
 }
 
 function ongoingLineKey(item: Dict): string {
-  return String(item.active_item_id || item.target_record_id || item.feishu_record_id || item.raw_record_id || item.source_record_id || item.record_id || "").trim();
+  return String(item.active_item_id || item.identity_key || item.target_record_id || item.feishu_record_id || item.raw_record_id || item.source_record_id || item.record_id || "").trim();
 }
 
 function isOngoingExpanded(item: Dict): boolean {
@@ -1593,13 +1495,15 @@ function startRefreshCooldown(key: keyof typeof refreshCooldown): void {
 }
 
 function refreshButtonTitle(key: keyof typeof refreshCooldown): string {
-  if (refreshCooldown[key]) return "刚刷新过，稍后再试，避免重复读取源表。";
+  if (refreshCooldown[key]) return "刚刷新过，稍后再试，避免重复读取数据。";
   if (key === "workbench" && loading.value) return "正在刷新当前页面。";
-  if (key === "repair" && repairRefreshing.value) return "正在刷新检修源表，完成后全楼共享。";
-  if (key === "change" && changeRefreshing.value) return "正在刷新变更源表，完成后全楼共享。";
-  if (key === "workbench") return "重新读取当前楼栋的本地快照。";
-  if (key === "repair") return "读取最新检修源表，刷新全局快照。";
-  return "读取最新阿里变更和智航变更源表，刷新全局快照。";
+  if (key === "repair" && repairRefreshing.value) return "正在读取最新检修数据，完成后全楼可见。";
+  if (key === "change" && changeRefreshing.value) return "正在读取最新变更数据，完成后全楼可见。";
+  if (key === "event" && eventRefreshing.value) return "正在读取最新事件数据，完成后全楼可见。";
+  if (key === "workbench") return "重新读取当前楼栋页面数据。";
+  if (key === "repair") return "读取最新检修数据，完成后全楼可见。";
+  if (key === "change") return "读取最新阿里变更和智航变更数据，完成后全楼可见。";
+  return "读取最新事件数据，刷新当前月事件列表。";
 }
 
 function clearWorkbenchRetry(): void {
@@ -1658,6 +1562,10 @@ function stopJobSse(): void {
 function stopRealtimeConnections(): void {
   stopJobSse();
   stopActiveItemsSse();
+  if (sseAuthCheckTimer !== null) {
+    window.clearTimeout(sseAuthCheckTimer);
+    sseAuthCheckTimer = null;
+  }
 }
 
 function pauseJobStatusChecksForHiddenPage(): void {
@@ -1690,9 +1598,60 @@ function markAuthExpired(message = "登录已过期，请重新扫码登录。")
   syncText.value = message;
 }
 
+function currentLoginUrl(): string {
+  const next = `${window.location.pathname}${window.location.search}`;
+  return `/api/auth/login?next=${encodeURIComponent(next || "/")}`;
+}
+
+function shouldSuppressAuthRedirect(): boolean {
+  if (!isSignaturePage.value) return false;
+  const params = new URLSearchParams(window.location.search);
+  return Boolean(params.get("record_id") || params.get("temporary_id"));
+}
+
+function currentRouteNeedsAuth(): boolean {
+  if (shouldSuppressAuthRedirect()) return false;
+  const path = window.location.pathname.replace(/\/$/, "") || "/";
+  const params = new URLSearchParams(window.location.search);
+  if (path !== "/") return true;
+  return Boolean(params.get("scope") || params.get("mode") || params.get("work_type"));
+}
+
+function redirectToLogin(loginUrl = ""): void {
+  if (authRedirectInProgress || shouldSuppressAuthRedirect()) return;
+  authRedirectInProgress = true;
+  const target = String(loginUrl || auth.loginUrl || currentLoginUrl()).trim() || currentLoginUrl();
+  window.location.assign(target);
+}
+
+function handleSseAuthError(event: Event): boolean {
+  const data = String((event as MessageEvent).data || "").trim();
+  if (!data) return false;
+  try {
+    const payload = JSON.parse(data || "{}");
+    if (!payload?.auth_required) return false;
+    markAuthExpired(String(payload.error || "登录已过期，请重新扫码登录。"));
+    redirectToLogin(String(payload.login_url || payload.loginUrl || ""));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function scheduleSseAuthCheck(): void {
+  if (appDisposed || authRedirectInProgress || shouldSuppressAuthRedirect()) return;
+  if (sseAuthCheckTimer !== null) return;
+  sseAuthCheckTimer = window.setTimeout(() => {
+    sseAuthCheckTimer = null;
+    if (appDisposed || authRedirectInProgress) return;
+    void loadAuthStatus({ silent: true }).catch(() => null);
+  }, 250);
+}
+
 function handleGlobalAuthExpired(event: Event): void {
-  const detail = (event as CustomEvent<{ message?: string }>).detail || {};
+  const detail = (event as CustomEvent<{ message?: string; login_url?: string; loginUrl?: string }>).detail || {};
   markAuthExpired(detail.message || "登录已过期，请重新扫码登录。");
+  redirectToLogin(String(detail.login_url || detail.loginUrl || ""));
 }
 
 const api = (path: string, options: RequestInit = {}): Promise<Dict> =>
@@ -1708,6 +1667,7 @@ const api = (path: string, options: RequestInit = {}): Promise<Dict> =>
     },
     onAuthExpired: (message) => {
       markAuthExpired(message);
+      redirectToLogin();
     },
     onServerError: (message) => {
       backendStatus.offline = true;
@@ -1737,14 +1697,22 @@ function scheduleAuthKeepalive(delayMs = authKeepaliveMs): void {
 
 async function loadAuthStatus(options: { silent?: boolean } = {}): Promise<void> {
   if (!options.silent) authChecking.value = true;
+  const wasLoggedIn = auth.loggedIn;
   try {
     const data = await api(`/api/auth/status?next=${encodeURIComponent(window.location.pathname + window.location.search)}`);
-    auth.loggedIn = Boolean(data.logged_in);
+    const nextLoggedIn = Boolean(data.logged_in);
+    auth.loggedIn = nextLoggedIn;
     auth.user = data.user || {};
     auth.scopeOptions = data.scope_options || [];
     auth.loginUrl = data.login_url || "/api/auth/login";
-    if (auth.loggedIn) scheduleAuthKeepalive();
-    else clearAuthKeepalive();
+    if (nextLoggedIn) {
+      scheduleAuthKeepalive();
+    } else {
+      clearAuthKeepalive();
+      if ((wasLoggedIn || currentRouteNeedsAuth()) && !authRedirectInProgress && !shouldSuppressAuthRedirect()) {
+        redirectToLogin(String(auth.loginUrl || ""));
+      }
+    }
   } catch (error: any) {
     if (!options.silent) {
       syncText.value = error?.message || "登录状态检查失败";
@@ -1770,8 +1738,12 @@ async function loadCurrentPermissionRequest(): Promise<void> {
     const request = data.request || {};
     permissionRequest.requestId = request.request_id || "";
     permissionRequest.scopes = Array.isArray(request.requested_scopes) ? request.requested_scopes : permissionRequest.scopes;
+    permissionRequest.status = request.status || "";
+    permissionRequest.rejectReason = request.reject_reason || "";
     if (permissionRequest.requestId) {
-      permissionRequest.message = "已恢复待确认申请，请输入管理员提供的验证码。";
+      permissionRequest.message = permissionRequest.status === "rejected"
+        ? "最近一次申请未通过，可调整后重新提交。"
+        : "已恢复待审批申请，请等待管理员处理。";
     }
   } catch {
     // No permission request to restore.
@@ -1803,7 +1775,7 @@ async function loadWorkbench(): Promise<void> {
     resetLocalSummaryAdjustments();
     defaults.impact = data.defaults?.impact || defaults.impact;
     defaults.progress = data.defaults?.progress || defaults.progress;
-    if (!userSelectedWorkType.value) {
+    if (!userSelectedWorkType.value && workType.value) {
       workType.value = resolveInitialWorkType(data.default_work_type || workType.value);
     }
     syncText.value = workbenchSyncText(data);
@@ -1824,7 +1796,7 @@ async function loadWorkbench(): Promise<void> {
 }
 
 function workbenchSyncText(data: Dict): string {
-  if (data.source_snapshot_ready === false) return "后台正在准备数据";
+  if (data.source_snapshot_ready === false) return "正在准备数据";
   const ts = Number(data.last_loaded_ts || 0);
   if (ts > 0) {
     const ageSeconds = Math.max(0, Date.now() / 1000 - ts);
@@ -1864,17 +1836,24 @@ async function loadAvailableUndos(scope = currentScope.value, requestSeq = workb
   }
 }
 
-function resolveInitialWorkType(preferred: string): WorkTypeValue {
-  const preferredType = normalizeWorkType(preferred);
+function resolveInitialWorkType(preferred: string): WorkTypeFilterValue {
+  const preferredType = normalizeWorkTypeFilter(preferred);
+  if (!preferredType) return "";
   if (recordTypeCounts.value[preferredType] > 0) return preferredType;
   const fallback = workTypes.find((item) => recordTypeCounts.value[item.value] > 0);
   return fallback?.value || preferredType;
 }
 
 function selectWorkType(value: string): void {
-  workType.value = normalizeWorkType(value);
+  workType.value = normalizeWorkTypeFilter(value);
   userSelectedWorkType.value = true;
+  ongoingTypeFilter.value = "all";
   updateWorkbenchUrl(workType.value);
+}
+
+function clearWorkbenchFilters(): void {
+  searchText.value = "";
+  specialtyFilter.value = "";
 }
 
 async function toggleWorkTypeOverride(record: Dict): Promise<void> {
@@ -2017,7 +1996,7 @@ function scheduleWorkbenchReload(delay = 350): void {
     }
     if (isUserEditing()) {
       activeItemsUpdatePending.value = true;
-      syncText.value = "后台有更新，完成输入后自动刷新";
+      syncText.value = "有更新，完成输入后自动刷新";
       scheduleWorkbenchReload(3000);
       return;
     }
@@ -2101,6 +2080,33 @@ function enterScope(scope: string, nextWorkType = ""): void {
   switchScope(scope, nextWorkType);
 }
 
+function enterEventManagement(scope: string): void {
+  const nextScope = normalizeScopeValue(scope, "ALL");
+  if (!nextScope) return;
+  stopActiveItemsSse();
+  clearWorkbenchRetry();
+  if (currentScope.value) saveDrafts();
+  currentScope.value = nextScope;
+  isWorkbench.value = false;
+  isEventPage.value = true;
+  activeDraftKey.value = "";
+  activeOngoingKey.value = "";
+  selectedKeys.clear();
+  clearOngoingEdits();
+  records.value = [];
+  ongoing.value = [];
+  zhihangRecords.value = [];
+  dailySummary.value = { date: "", items: [], stats: {} };
+  availableUndoItems.value = [];
+  resetLocalSummaryAdjustments();
+  syncText.value = "正在读取事件数据";
+  const url = new URL(window.location.href);
+  url.searchParams.set("scope", currentScope.value);
+  url.searchParams.set("mode", "events");
+  url.searchParams.delete("work_type");
+  window.history.replaceState({}, "", url);
+}
+
 function enterEngineerMop(scope: string): void {
   const url = new URL("/engineer/mop", window.location.origin);
   url.searchParams.set("scope", normalizeScopeValue(scope, "ALL"));
@@ -2116,6 +2122,7 @@ function returnToHome(): void {
   stopActiveItemsSse();
   clearWorkbenchRetry();
   isWorkbench.value = false;
+  isEventPage.value = false;
   currentScope.value = "";
   activeDraftKey.value = "";
   activeOngoingKey.value = "";
@@ -2131,6 +2138,7 @@ function returnToHome(): void {
   const url = new URL(window.location.href);
   url.searchParams.delete("scope");
   url.searchParams.delete("work_type");
+  url.searchParams.delete("mode");
   window.history.replaceState({}, "", url);
 }
 
@@ -2138,20 +2146,37 @@ function updateWorkbenchUrl(nextWorkType = workType.value): void {
   if (!currentScope.value) return;
   const url = new URL(window.location.href);
   url.searchParams.set("scope", currentScope.value);
-  url.searchParams.set("work_type", normalizeWorkType(nextWorkType));
+  const normalizedType = normalizeWorkTypeFilter(nextWorkType);
+  if (normalizedType) {
+    url.searchParams.set("work_type", normalizedType);
+  } else {
+    url.searchParams.delete("work_type");
+  }
+  url.searchParams.delete("mode");
   window.history.replaceState({}, "", url);
 }
 
 function switchScope(scope: string, nextWorkType = ""): void {
   const nextScope = normalizeScopeValue(scope, "ALL");
   if (!nextScope) return;
+  if (isEventPage.value) {
+    currentScope.value = nextScope;
+    syncText.value = "正在读取事件数据";
+    const url = new URL(window.location.href);
+    url.searchParams.set("scope", currentScope.value);
+    url.searchParams.set("mode", "events");
+    url.searchParams.delete("work_type");
+    window.history.replaceState({}, "", url);
+    return;
+  }
   const nextSelectedWorkType = nextWorkType
-    ? normalizeWorkType(nextWorkType)
-    : (isWorkbench.value ? normalizeWorkType(workType.value) : "");
+    ? normalizeWorkTypeFilter(nextWorkType)
+    : (isWorkbench.value ? normalizeWorkTypeFilter(workType.value) : "");
   if (nextScope === currentScope.value && isWorkbench.value) {
     if (nextSelectedWorkType && nextSelectedWorkType !== workType.value) {
       workType.value = nextSelectedWorkType;
       userSelectedWorkType.value = true;
+      ongoingTypeFilter.value = "all";
       updateWorkbenchUrl(nextSelectedWorkType);
     }
     return;
@@ -2162,10 +2187,13 @@ function switchScope(scope: string, nextWorkType = ""): void {
   }
   currentScope.value = nextScope;
   isWorkbench.value = true;
+  isEventPage.value = false;
+  ongoingTypeFilter.value = "all";
   if (nextSelectedWorkType) {
     workType.value = nextSelectedWorkType;
     userSelectedWorkType.value = true;
   } else {
+    workType.value = "";
     userSelectedWorkType.value = false;
   }
   activeDraftKey.value = "";
@@ -2185,6 +2213,7 @@ function switchScope(scope: string, nextWorkType = ""): void {
   } else {
     url.searchParams.delete("work_type");
   }
+  url.searchParams.delete("mode");
   window.history.replaceState({}, "", url);
   loadDrafts();
   loadWorkbench();
@@ -2195,8 +2224,12 @@ function pinDraftInMiddlePanel(key: string): void {
   if (!key) return;
   activeDraftKey.value = key;
   nextTick(() => {
-    draftStackRef.value?.scrollTo({ top: 0, behavior: "smooth" });
+    draftStackRef.value?.scrollToTop();
   });
+}
+
+function toggleDraftPreview(key: string): void {
+  previewDraftKey.value = previewDraftKey.value === key ? "" : key;
 }
 
 function draftSummary(record: Dict, draft: Dict): string {
@@ -2211,7 +2244,7 @@ function draftSummary(record: Dict, draft: Dict): string {
 }
 
 function draftOriginLabel(record: Dict, draft: Dict): string {
-  if (!record.manual) return "源表事项";
+  if (!record.manual) return "计划事项";
   if (draft.manual_origin === "paste") return "解析粘贴";
   if (draft.prefilled_from_last) return "纯手填 · 已带入上次内容";
   return "纯手填";
@@ -2270,7 +2303,7 @@ function missingUploadFields(type: string, values: Dict): string[] {
 }
 
 function uploadFieldsMissingText(type: string, missing: string[]): string {
-  return missing.length ? `请补充多维上传字段：${missing.map((field) => noticeFieldLabel(type, field)).join("、")}` : "";
+  return missing.length ? `请补充归档字段：${missing.map((field) => noticeFieldLabel(type, field)).join("、")}` : "";
 }
 
 function draftMissingFields(record: Dict, draft: Dict): string[] {
@@ -2386,7 +2419,7 @@ function draftUploadPreviewRows(record: Dict, draft: Dict): Array<{ label: strin
     rows.push({ label: "变更等级", value: draft.level || levelForRecord(record) || "I3" });
     rows.push({ label: "涉及智航", value: draft.zhihang_involved ? (draft.zhihang_title || "是") : "" });
     if (isConvertedMaintenanceChange(record, draft)) {
-      rows.push({ label: "同步维保多维", value: syncMaintenanceTargetValue(record, draft) ? "是" : "否" });
+      rows.push({ label: "同时写入维保记录", value: syncMaintenanceTargetValue(record, draft) ? "是" : "否" });
       rows.push({ label: "维保原名称", value: draft.paired_maintenance_original_title || titleForRecord(record) });
     }
   }
@@ -2515,22 +2548,27 @@ function changeSourceCandidateId(item: Dict): string {
   return String(item?.source_record_id || item?.record_id || "").trim();
 }
 
-const filteredChangeTargetCandidates = computed(() => {
+const changeTargetCandidates = computed(() => {
   const pending = pendingChangeTargetSelection.value;
-  const candidates = Array.isArray(pending?.candidates) ? pending.candidates : [];
-  return filterCandidatesBySearch(candidates, changeTargetSearchText.value);
+  return Array.isArray(pending?.candidates) ? pending.candidates : [];
+});
+
+const filteredChangeTargetCandidates = computed(() => {
+  return filterCandidatesBySearch(changeTargetCandidates.value, changeTargetSearchText.value);
 });
 
 const selectedChangeTargetVisible = computed(() => {
   const selected = selectedChangeTargetId.value;
   if (!selected) return false;
-  return filteredChangeTargetCandidates.value.some((item: Dict) => changeTargetCandidateId(item) === selected);
+  return changeTargetCandidates.value.some((item: Dict) => changeTargetCandidateId(item) === selected);
 });
 
 const visibleActiveChangeTargetCandidate = computed(() => {
   const detailId = hoveredChangeTargetId.value || selectedChangeTargetId.value;
   if (detailId) {
-    const visible = filteredChangeTargetCandidates.value.find((item: Dict) => changeTargetCandidateId(item) === detailId);
+    const visible =
+      changeTargetCandidates.value.find((item: Dict) => changeTargetCandidateId(item) === detailId) ||
+      filteredChangeTargetCandidates.value.find((item: Dict) => changeTargetCandidateId(item) === detailId);
     if (visible) return visible;
   }
   return filteredChangeTargetCandidates.value[0] || null;
@@ -2548,7 +2586,7 @@ const filteredChangeSourceCandidates = computed(() => {
 const selectedChangeSourceVisible = computed(() => {
   const selected = selectedChangeSourceId.value;
   if (!selected) return false;
-  return filteredChangeSourceCandidates.value.some((item: Dict) => changeSourceCandidateId(item) === selected);
+  return changeSourceCandidates.value.some((item: Dict) => changeSourceCandidateId(item) === selected);
 });
 
 const selectedChangeSourceCandidate = computed(() => {
@@ -2812,12 +2850,12 @@ async function parsePastedNotice(): Promise<void> {
         hoveredChangeTargetId.value = selectedChangeTargetId.value;
         selectedChangeSourceId.value = sourceCandidates.length ? changeSourceCandidateId(sourceCandidates[0]) : "";
         pasteParseLine.value = candidates.length
-          ? `找到 ${Number(data.total_matched ?? candidates.length)} 条同名${workTypeLabel(type)}目标记录，当前显示 ${candidates.length} 条，请确认要${parsedActionLabel(action)}的记录。`
-          : `未找到同名目标记录，但找到 ${sourceCandidates.length} 条源表记录；可先关联源表记录后继续提交。`;
+          ? `找到 ${Number(data.total_matched ?? candidates.length)} 条同名${workTypeLabel(type)}已上传通告，当前显示 ${candidates.length} 条，请确认要${parsedActionLabel(action)}的通告。`
+          : `未找到同名已上传通告，但找到 ${sourceCandidates.length} 条原始事项；可先选择原始事项后继续提交。`;
         pasteParseStatus.value = "";
         return;
       }
-      throw new Error(`未在${workTypeLabel(type)}目标表或源表中找到同名记录，不能作为更新/结束通告发送。`);
+      throw new Error(`未找到同名${workTypeLabel(type)}通告，不能作为更新/结束通告发送。`);
     }
     completeParsedNoticeDraft(type, draft);
   } catch (error: any) {
@@ -2851,18 +2889,17 @@ function choosePastedChangeTarget(candidate: Dict): void {
 async function confirmPastedChangeTarget(): Promise<void> {
   const pending = pendingChangeTargetSelection.value;
   if (!pending || changeTargetConfirming.value) return;
-  const candidates = filteredChangeTargetCandidates.value;
   const candidate =
-    candidates.find((item: Dict) => changeTargetCandidateId(item) === selectedChangeTargetId.value) ||
+    changeTargetCandidates.value.find((item: Dict) => changeTargetCandidateId(item) === selectedChangeTargetId.value) ||
     visibleActiveChangeTargetCandidate.value;
   const sourceOnly = !candidate && selectedChangeSourceVisible.value && selectedChangeSourceCandidate.value;
   if (!candidate && !sourceOnly) {
-    pasteParseLine.value = "请先选择一条目标多维记录或源表记录。";
+    pasteParseLine.value = "请先选择一条已上传通告或原始事项。";
     pasteParseStatus.value = "failed";
     return;
   }
   changeTargetConfirming.value = true;
-  pasteParseLine.value = "正在确认目标记录...";
+  pasteParseLine.value = "正在确认对应通告...";
   pasteParseStatus.value = "";
   try {
     let selected = candidate || {};
@@ -2889,11 +2926,11 @@ async function confirmPastedChangeTarget(): Promise<void> {
         }
       }
       const cleared = data.clear_actual_end?.cleared;
-      pasteParseLine.value = cleared ? "已确认目标记录，并清空原实际结束时间。" : "已确认目标记录。";
+      pasteParseLine.value = cleared ? "已确认对应通告，并清空原实际结束时间。" : "已确认对应通告。";
     }
     choosePastedChangeTarget(selected || {});
   } catch (error: any) {
-    pasteParseLine.value = error?.message || "确认目标记录失败";
+    pasteParseLine.value = error?.message || "确认对应通告失败";
     pasteParseStatus.value = "failed";
   } finally {
     changeTargetConfirming.value = false;
@@ -3392,10 +3429,10 @@ async function bindOngoingTarget(item: Dict): Promise<void> {
   const workType = String(item.work_type || "maintenance");
   const title = draftValue(edit, "title", item.title || item.content || "");
   if (!title) {
-    rememberJob(lineKey, { text: "缺少标题，无法查找目标记录", status: "failed", phase: "failed" });
+    rememberJob(lineKey, { text: "缺少标题，无法查找对应通告", status: "failed", phase: "failed" });
     return;
   }
-  rememberJob(lineKey, { text: "正在查找目标记录", status: "busy", phase: "binding" });
+  rememberJob(lineKey, { text: "正在查找对应通告", status: "busy", phase: "binding" });
   try {
     const data = await api(workType === "change" ? "/api/change-target-candidates" : "/api/notice-target-candidates", {
       method: "POST",
@@ -3413,11 +3450,11 @@ async function bindOngoingTarget(item: Dict): Promise<void> {
     const selected = await chooseCandidateInModal(
       candidates,
       workTypeLabel(workType),
-      `找到 ${Number(data.total_matched ?? candidates.length)} 条同名目标记录，当前显示 ${candidates.length} 条，请选择要关联到当前进行中通告的一条。`,
+      `找到 ${Number(data.total_matched ?? candidates.length)} 条同名已上传通告，当前显示 ${candidates.length} 条，请选择要继续处理的一条。`,
     );
     if (!selected) {
       rememberJob(lineKey, {
-        text: candidates.length ? "已取消目标记录关联" : "未找到同名目标记录",
+        text: candidates.length ? "已取消对应通告选择" : "未找到同名已上传通告",
         status: candidates.length ? "" : "failed",
         phase: candidates.length ? "" : "failed",
       });
@@ -3445,9 +3482,9 @@ async function bindOngoingTarget(item: Dict): Promise<void> {
       next.source_record_id = source.source_record_id || source.record_id;
     }
     ongoingEdits.set(lineKey, next);
-    rememberJob(lineKey, { text: "已关联目标记录，可继续更新或结束", status: "success", phase: "bound" });
+    rememberJob(lineKey, { text: "已选择对应通告，可继续更新或结束", status: "success", phase: "bound" });
   } catch (error: any) {
-    rememberJob(lineKey, { text: error?.message || "关联目标记录失败", status: "failed", phase: "failed" });
+    rememberJob(lineKey, { text: error?.message || "选择对应通告失败", status: "failed", phase: "failed" });
   }
 }
 
@@ -3469,7 +3506,7 @@ async function sendOngoing(item: Dict, action: string): Promise<void> {
 
 async function sendAction(payload: Dict, lineKey: string): Promise<void> {
   try {
-    rememberJob(lineKey, { text: "已受理，正在进入后台任务", status: "busy", phase: "accepted" });
+    rememberJob(lineKey, { text: "已受理，正在处理", status: "busy", phase: "accepted" });
     const data = await api("/api/workbench-actions", { method: "POST", body: JSON.stringify(payload) });
     rememberJob(lineKey, {
       job_id: data.job_id,
@@ -3578,6 +3615,10 @@ async function copyJobNoticeText(key: string, fallback = ""): Promise<void> {
   }
 }
 
+function copyOngoingNoticeText(item: Dict): void {
+  copyJobNoticeText(ongoingLineKey(item), ongoingNoticePreviewText(item));
+}
+
 function isLineBusy(key: string): boolean {
   const phase = jobStates.get(key)?.phase || "";
   return Boolean(phase && !terminalPhase(phase));
@@ -3672,7 +3713,7 @@ async function pollJobsBatch(): Promise<void> {
       }
     } catch {
       for (const key of pollingJobs.keys()) {
-        rememberJob(key, { text: "后台处理中，等待状态同步", status: "busy" });
+        rememberJob(key, { text: "任务处理中，等待状态更新", status: "busy" });
       }
     }
   } finally {
@@ -3712,7 +3753,9 @@ function openDirectJobEventSource(coordinator: CrossTabStreamCoordinator<Dict> |
     };
     source.onmessage = handleJobEvent;
     source.addEventListener("job", handleJobEvent);
-    source.onerror = () => {
+    source.addEventListener("error", (event: Event) => {
+      if (handleSseAuthError(event)) return;
+      scheduleSseAuthCheck();
       sseConnected.value = false;
       coordinator?.broadcast({ kind: "status", connected: false });
       if (eventSource.value === source && source.readyState === EventSource.CLOSED) {
@@ -3724,7 +3767,7 @@ function openDirectJobEventSource(coordinator: CrossTabStreamCoordinator<Dict> |
           }, 5000);
         }
       }
-    };
+    });
     eventSource.value = source;
   } catch {
     eventSource.value = null;
@@ -3808,7 +3851,9 @@ function openDirectActiveItemsEventSource(
       applyActiveItemsStreamPayload(payload, scope);
       coordinator?.broadcast({ kind: "qt_active_items", payload, scope });
     });
-    source.addEventListener("error", () => {
+    source.addEventListener("error", (event: Event) => {
+      if (handleSseAuthError(event)) return;
+      scheduleSseAuthCheck();
       activeItemsConnected.value = false;
       coordinator?.broadcast({ kind: "status", connected: false, scope });
       if (activeItemsEventSource.value === source && source.readyState === EventSource.CLOSED) {
@@ -3932,7 +3977,7 @@ async function deleteOngoing(item: Dict): Promise<void> {
     message: "确认删除这条进行中通告？",
     details: [
       "会同步移除前端和 Qt 界面的进行中条目。",
-      targetRecordId ? "会尝试删除对应目标多维记录。" : "该条暂无目标多维记录，只删除本地显示状态。",
+      targetRecordId ? "会同步删除对应已上传记录。" : "该条暂未找到已上传记录，只移除页面显示。",
       "删除后可在近三天可回退中恢复。",
     ],
     confirmLabel: "确认删除",
@@ -3976,9 +4021,9 @@ async function applyUndo(item: Dict): Promise<void> {
     title,
     message: `确认执行${label}？`,
     details: [
-      "会同步恢复 SQLite 本地状态。",
+      "会同步恢复页面和桌面显示。",
       "会刷新前端和 Qt 展示。",
-      "会按回退记录恢复或重建目标多维记录。",
+      "会按回退记录恢复或重建对应已上传记录。",
     ],
     confirmLabel: label,
   });
@@ -4011,7 +4056,7 @@ function ongoingTitle(item: Dict): string {
 }
 
 function ongoingMeta(item: Dict): string {
-  const boundText = item.binding_status === "needs_binding" ? "待自动关联目标记录" : "";
+  const boundText = item.binding_status === "needs_binding" ? "待选择对应通告" : "";
   return [
     item.building,
     item.specialty,
@@ -4044,7 +4089,7 @@ async function refreshRepair(): Promise<void> {
   refreshMenuOpen.value = false;
   startRefreshCooldown("repair");
   repairRefreshing.value = true;
-  syncText.value = "正在刷新检修源表，完成后全楼同步";
+  syncText.value = "正在读取最新检修数据，完成后全楼可见";
   try {
     await api(`/api/repair-refresh?scope=${encodeURIComponent(currentScope.value || "ALL")}`);
     await loadWorkbench();
@@ -4061,7 +4106,7 @@ async function refreshChange(): Promise<void> {
   refreshMenuOpen.value = false;
   startRefreshCooldown("change");
   changeRefreshing.value = true;
-  syncText.value = "正在刷新变更源表，完成后全楼同步";
+  syncText.value = "正在读取最新变更数据，完成后全楼可见";
   try {
     await api(`/api/change-refresh?scope=${encodeURIComponent(currentScope.value || "ALL")}`);
     await loadWorkbench();
@@ -4071,6 +4116,13 @@ async function refreshChange(): Promise<void> {
   } finally {
     changeRefreshing.value = false;
   }
+}
+
+function refreshEvent(): void {
+  if (eventRefreshing.value || refreshCooldown.event) return;
+  refreshMenuOpen.value = false;
+  startRefreshCooldown("event");
+  eventRefreshNonce.value += 1;
 }
 
 async function logout(): Promise<void> {
@@ -4092,7 +4144,9 @@ async function submitPermissionRequest(): Promise<void> {
       body: JSON.stringify({ scopes: permissionRequest.scopes, reason: permissionRequest.reason }),
     });
     permissionRequest.requestId = data.request_id || data.request?.request_id || "";
-    permissionRequest.message = "申请已发送给管理员，请输入验证码。";
+    permissionRequest.status = data.status || data.request?.status || "pending";
+    permissionRequest.rejectReason = data.reject_reason || data.request?.reject_reason || "";
+    permissionRequest.message = "申请已提交，等待管理员审批。";
   } catch (error: any) {
     permissionRequest.message = error?.message || "提交失败";
   } finally {
@@ -4111,6 +4165,8 @@ async function openAdditionalPermissionRequest(): Promise<void> {
     code: "",
     requestId: "",
     message: "",
+    status: "",
+    rejectReason: "",
   });
   showPermissionRequestPanel.value = true;
   await loadCurrentPermissionRequest();
@@ -4124,6 +4180,8 @@ function closePermissionRequestPanel(): void {
     code: "",
     requestId: "",
     message: "",
+    status: "",
+    rejectReason: "",
   });
   syncText.value = "请选择功能";
 }
@@ -4140,12 +4198,12 @@ async function confirmPermissionRequest(): Promise<void> {
       await Promise.all([loadOverview(), loadHandoverLinks()]);
       isWorkbench.value = false;
       showPermissionRequestPanel.value = false;
-      Object.assign(permissionRequest, { scopes: [], reason: "", code: "", requestId: "", message: "" });
+      Object.assign(permissionRequest, { scopes: [], reason: "", code: "", requestId: "", message: "", status: "", rejectReason: "" });
       syncText.value = "请选择功能";
       if (!isJobStreamStarted()) startJobSse();
     }
   } catch (error: any) {
-    permissionRequest.message = error?.message || "验证码错误";
+    permissionRequest.message = error?.message || "授权确认失败";
   } finally {
     permissionBusy.value = false;
   }
@@ -4153,6 +4211,7 @@ async function confirmPermissionRequest(): Promise<void> {
 
 watch(workType, () => {
   activeDraftKey.value = "";
+  ongoingTypeFilter.value = "all";
 });
 
 onMounted(async () => {
@@ -4172,7 +4231,17 @@ onMounted(async () => {
   }
   if (auth.loggedIn && auth.scopeOptions.length) {
     await Promise.all([loadOverview(), loadHandoverLinks()]);
-    if (currentScope.value && !isEngineerMopPage.value && !isHistoryMemoryPage.value) {
+    if (isEventPage.value && !currentScope.value) {
+      currentScope.value = normalizeScopeValue(visibleScopeOptions.value[0]?.value || "ALL", "ALL");
+      const url = new URL(window.location.href);
+      url.searchParams.set("scope", currentScope.value);
+      url.searchParams.set("mode", "events");
+      window.history.replaceState({}, "", url);
+    }
+    if (currentScope.value && isEventPage.value) {
+      isWorkbench.value = false;
+      syncText.value = "正在读取事件数据";
+    } else if (currentScope.value && !isEngineerMopPage.value && !isHistoryMemoryPage.value) {
       isWorkbench.value = true;
       loadDrafts();
       await loadWorkbench();
@@ -4200,6 +4269,10 @@ onBeforeUnmount(() => {
     window.clearTimeout(batchPollTimer);
     batchPollTimer = null;
   }
+  if (realtimeWarningTimer !== null) {
+    window.clearTimeout(realtimeWarningTimer);
+    realtimeWarningTimer = null;
+  }
   pollingJobs.clear();
 });
 </script>
@@ -4221,191 +4294,17 @@ onBeforeUnmount(() => {
   overflow: hidden;
 }
 
-.topbar {
-  position: sticky;
-  top: 0;
-  z-index: 10;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px;
-  padding: 14px 20px;
-  border-bottom: 1px solid #dbe3ee;
-  background: rgba(255, 255, 255, 0.94);
-  backdrop-filter: blur(10px);
-}
-
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  min-width: 0;
-}
-
-.brand-logo {
-  width: 132px;
-  height: 42px;
-  flex: 0 0 auto;
-  object-fit: contain;
-}
-
-h1,
 h2,
 p {
   margin: 0;
 }
 
-h1 {
-  font-size: 22px;
-  line-height: 1.25;
-}
-
-.brand p,
-.hint {
-  color: #64748b;
-  font-size: 13px;
-}
-
-.topbar-actions,
 .row-actions,
-.card-actions,
-.toolbar {
+.card-actions {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-}
-
-.scope-switch {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  white-space: nowrap;
-  color: #475569;
-  font-size: 13px;
-}
-
-.scope-switch select {
-  width: auto;
-  min-width: 104px;
-  max-width: 148px;
-  padding: 7px 30px 7px 10px;
-  font-size: 14px;
-}
-
-.specialty-filter {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  min-height: 38px;
-  padding: 4px 6px 4px 12px;
-  border: 1px solid #cbd5e1;
-  border-radius: 999px;
-  background: #ffffff;
-  color: #475569;
-  font-size: 13px;
-  white-space: nowrap;
-}
-
-.specialty-filter span {
-  color: #64748b;
-  font-weight: 700;
-}
-
-.specialty-filter select {
-  width: auto;
-  min-width: 112px;
-  max-width: 168px;
-  padding: 7px 30px 7px 10px;
-  font-size: 14px;
-}
-
-.btn,
-button,
-a.btn {
-  border: 1px solid #cbd5e1;
-  border-radius: 6px;
-  padding: 8px 12px;
-  background: #ffffff;
-  color: #0f172a;
-  font-size: 14px;
-  line-height: 1;
-  text-decoration: none;
-  cursor: pointer;
-}
-
-.btn:disabled,
-button:disabled {
-  cursor: not-allowed;
-  opacity: 0.58;
-}
-
-.btn.small {
-  padding: 6px 9px;
-  font-size: 12px;
-}
-
-.btn.blue {
-  border-color: #2563eb;
-  background: #2563eb;
-  color: #ffffff;
-}
-
-.btn.green {
-  border-color: #16a34a;
-  background: #16a34a;
-  color: #ffffff;
-}
-
-.btn.danger {
-  border-color: #dc2626;
-  background: #dc2626;
-  color: #ffffff;
-}
-
-.danger-text {
-  color: #b91c1c;
-}
-
-.user-chip {
-  padding: 7px 10px;
-  border: 1px solid #cbd5e1;
-  border-radius: 999px;
-  background: #f8fafc;
-  color: #334155;
-  font-size: 13px;
-}
-
-.status-banner {
-  position: sticky;
-  top: 71px;
-  z-index: 9;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  min-height: 38px;
-  padding: 8px 16px;
-  border-bottom: 1px solid #dbe3ee;
-  background: #ffffff;
-  color: #334155;
-  font-size: 13px;
-}
-
-.status-banner.info {
-  background: #f8fafc;
-}
-
-.status-banner.warning {
-  border-color: #fde68a;
-  background: #fffbeb;
-  color: #92400e;
-}
-
-.status-banner.failed {
-  border-color: #fecaca;
-  background: #fef2f2;
-  color: #991b1b;
 }
 
 .center-state {
@@ -4433,33 +4332,6 @@ button:disabled {
   to { transform: rotate(360deg); }
 }
 
-.home-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-  gap: 14px;
-  padding: 24px;
-}
-
-.scope-card {
-  min-height: 112px;
-  display: grid;
-  align-content: center;
-  gap: 10px;
-  padding: 18px;
-  text-align: left;
-  border: 1px solid #dbe3ee;
-  background: #ffffff;
-}
-
-.scope-card strong {
-  font-size: 22px;
-}
-
-.scope-card span {
-  color: #64748b;
-  line-height: 1.5;
-}
-
 .workbench {
   padding: 16px;
 }
@@ -4474,14 +4346,6 @@ button:disabled {
   font-size: 13px;
 }
 
-.summary-strip {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px;
-  margin-bottom: 12px;
-}
-
-.summary-strip article,
 .panel,
 .paste-panel {
   border: 1px solid #dbe3ee;
@@ -4489,22 +4353,6 @@ button:disabled {
   background: #ffffff;
 }
 
-.summary-strip article {
-  padding: 10px 14px;
-}
-
-.summary-strip span {
-  color: #64748b;
-  font-size: 13px;
-}
-
-.summary-strip strong {
-  display: block;
-  margin-top: 3px;
-  font-size: 21px;
-}
-
-.toolbar,
 .paste-panel {
   margin-bottom: 12px;
   padding: 10px;
@@ -4527,325 +4375,84 @@ button:disabled {
   color: #991b1b;
 }
 
-.target-choice-panel {
-  display: grid;
-  gap: 8px;
-  margin-top: 10px;
-  padding: 10px;
-  border: 1px solid #bfdbfe;
-  border-radius: 8px;
-  background: #eff6ff;
-}
-
-.target-choice-panel p {
-  margin: 4px 0 0;
-  color: #475569;
-  font-size: 13px;
-}
-
-.target-choice-panel .target-count-line {
-  color: #2563eb;
-  font-size: 12px;
-}
-
-.target-choice-layout {
-  display: grid;
-  grid-template-columns: minmax(220px, 0.9fr) minmax(280px, 1.1fr);
-  gap: 10px;
-  align-items: start;
-}
-
-.target-choice-column {
-  display: grid;
-  gap: 8px;
-  min-width: 0;
-}
-
-.candidate-search {
-  display: grid;
-  gap: 5px;
-  color: #475569;
-  font-size: 12px;
-}
-
-.candidate-search input {
-  width: 100%;
-  min-width: 0;
-  border: 1px solid #dbe3ee;
-  border-radius: 7px;
-  padding: 8px 10px;
-  background: #ffffff;
-  color: #0f172a;
-  font-size: 13px;
-  outline: none;
-}
-
-.candidate-search input:focus {
-  border-color: #2563eb;
-  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.1);
-}
-
-.candidate-count {
-  margin: 0;
-  color: #64748b;
-  font-size: 12px;
-}
-
-.target-choice-list {
-  display: grid;
-  gap: 7px;
-  max-height: 360px;
-  overflow: auto;
-}
-
-.target-choice {
-  display: grid;
-  gap: 4px;
-  width: 100%;
-  padding: 9px 10px;
-  border: 1px solid #dbe3ee;
-  border-radius: 8px;
-  background: #ffffff;
-  color: #0f172a;
-  text-align: left;
-  cursor: pointer;
-}
-
-.target-choice:hover {
-  border-color: #2563eb;
-}
-
-.target-choice.active {
-  border-color: #2563eb;
-  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.12);
-}
-
-.target-choice span {
-  color: #64748b;
-  font-size: 12px;
-}
-
-.target-choice small {
-  color: #2563eb;
-  font-size: 12px;
-}
-
-.target-detail-popover {
-  position: sticky;
-  top: 10px;
-  padding: 10px;
-  border: 1px solid #bfdbfe;
-  border-radius: 8px;
-  background: #ffffff;
-  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.12);
-}
-
-.target-detail-head {
-  display: grid;
-  gap: 3px;
-  margin-bottom: 8px;
-}
-
-.target-detail-head span {
-  color: #64748b;
-  font-size: 12px;
-}
-
-.target-detail-head small {
-  color: #2563eb;
-  font-size: 12px;
-}
-
-.target-detail-grid {
-  display: grid;
-  grid-template-columns: 96px 1fr;
-  gap: 6px 10px;
-  max-height: 300px;
-  margin: 0;
-  overflow: auto;
-}
-
-.target-detail-grid dt {
-  color: #64748b;
-  font-size: 12px;
-}
-
-.target-detail-grid dd {
-  margin: 0;
-  color: #0f172a;
-  font-size: 13px;
-  line-height: 1.45;
-  word-break: break-word;
-}
-
-.target-confirm {
-  width: 100%;
-  margin-top: 10px;
-}
-
-.source-choice-panel {
-  display: grid;
-  gap: 8px;
-  padding-top: 10px;
-  border-top: 1px solid #bfdbfe;
-}
-
-.source-choice-panel p {
-  margin: 4px 0 0;
-  color: #475569;
-  font-size: 13px;
-}
-
-.source-choice-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 8px;
-}
-
-.source-choice {
-  display: grid;
-  gap: 4px;
-  padding: 8px 10px;
-  border: 1px solid #dbe3ee;
-  border-radius: 8px;
-  background: #ffffff;
-  color: #0f172a;
-  text-align: left;
-  cursor: pointer;
-}
-
-.source-choice.active {
-  border-color: #0f766e;
-  background: #f0fdfa;
-  box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.1);
-}
-
-.source-choice span {
-  color: #64748b;
-  font-size: 12px;
-}
-
-.segmented {
-  display: inline-flex;
-  gap: 4px;
-  padding: 4px;
-  border: 1px solid #cbd5e1;
-  border-radius: 8px;
-  background: #f8fafc;
-}
-
-.segmented button {
-  border: 0;
-  background: transparent;
-}
-
-.segmented button.active {
-  background: #2563eb;
-  color: #ffffff;
-}
-
-.manual-create {
-  position: relative;
-  display: inline-flex;
-}
-
-.manual-type-popover {
-  position: absolute;
-  top: calc(100% + 8px);
-  left: 0;
-  z-index: 30;
-  width: min(360px, calc(100vw - 32px));
-  padding: 12px;
-  border: 1px solid #cbd5e1;
-  border-radius: 8px;
-  background: #ffffff;
-  box-shadow: 0 14px 36px rgba(15, 23, 42, 0.14);
-  display: grid;
-  gap: 8px;
-}
-
-.manual-type-popover strong {
-  font-size: 14px;
-  color: #0f172a;
-}
-
-.manual-type-popover p {
-  margin: 0;
-  color: #64748b;
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.manual-recent {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-  padding: 8px;
-  border: 1px solid #dbeafe;
-  border-radius: 8px;
-  background: #eff6ff;
-}
-
-.manual-recent span {
-  color: #1d4ed8;
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.manual-recent button {
-  min-height: 32px;
-  padding: 6px 9px;
-  border-color: #bfdbfe;
-  background: #ffffff;
-  color: #1d4ed8;
-  font-size: 13px;
-}
-
-.manual-type-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.manual-type-grid button {
-  min-height: 52px;
-  padding: 9px 10px;
-  display: grid;
-  gap: 4px;
-  justify-items: start;
-  text-align: left;
-  border-color: #dbe3ee;
-  background: #f8fafc;
-}
-
-.manual-type-grid button:hover {
-  border-color: #2563eb;
-  background: #eff6ff;
-}
-
-.manual-type-grid span {
-  font-weight: 700;
-}
-
-.manual-type-grid small {
-  color: #64748b;
-  font-size: 12px;
-}
-
-.search {
-  flex: 1 1 260px;
-  min-width: 180px;
-  border: 1px solid #cbd5e1;
-  border-radius: 6px;
-  padding: 9px 11px;
-}
-
 .workspace {
   display: grid;
   grid-template-columns: minmax(280px, 0.88fr) minmax(430px, 1.35fr) minmax(320px, 0.95fr);
   gap: 12px;
   min-height: calc(100vh - 230px);
+}
+
+.workbench-flow-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  padding: 6px;
+  border: 1px solid rgba(216, 229, 247, 0.88);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.56);
+  box-shadow: 0 8px 18px rgba(0, 47, 135, 0.04);
+}
+
+.workbench-flow-strip article {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  padding: 6px 9px;
+  border: 1px solid rgba(216, 229, 247, 0.78);
+  border-radius: 13px;
+  background: rgba(248, 251, 255, 0.82);
+  color: #64748b;
+}
+
+.workbench-flow-strip article.active {
+  border-color: #9cc7ff;
+  background: linear-gradient(135deg, #ffffff, #eef6ff);
+  box-shadow: inset 0 0 0 1px rgba(30, 99, 255, 0.12);
+}
+
+.workbench-flow-strip b {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  background: #eaf3ff;
+  color: #1d4ed8;
+  font-size: 11px;
+  font-weight: 950;
+}
+
+.workbench-flow-strip article.active b {
+  background: linear-gradient(135deg, #1e63ff, #1554df);
+  color: #fff;
+}
+
+.workbench-flow-strip span {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.workbench-flow-strip strong,
+.workbench-flow-strip small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workbench-flow-strip strong {
+  color: #0b1f3f;
+  font-size: 12px;
+  font-weight: 950;
+}
+
+.workbench-flow-strip small {
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 800;
 }
 
 .panel {
@@ -4906,65 +4513,6 @@ button:disabled {
   min-width: 0;
 }
 
-.ongoing-type-filter {
-  display: inline-flex;
-  gap: 3px;
-  padding: 3px;
-  border: 1px solid #dbe7f5;
-  border-radius: 999px;
-  background: #f7fbff;
-}
-
-.ongoing-type-filter button {
-  min-height: 24px;
-  padding: 3px 8px;
-  border: 0;
-  border-radius: 999px;
-  background: transparent;
-  color: #60728d;
-  font-size: 12px;
-  font-weight: 900;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.ongoing-type-filter button.active {
-  color: #fff;
-  background: linear-gradient(135deg, #1678ff, #005bd8);
-  box-shadow: 0 8px 16px rgba(22, 120, 255, 0.2);
-}
-
-.draft-stack,
-.ongoing-list {
-  overflow: auto;
-  display: grid;
-  align-content: start;
-  gap: 10px;
-  scroll-behavior: smooth;
-}
-
-.closed-today {
-  display: grid;
-  gap: 8px;
-}
-
-.closed-card {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 8px;
-  padding: 9px 10px;
-  border: 1px solid #dbe3ee;
-  border-radius: 8px;
-  background: #fbfdff;
-}
-
-.closed-card p {
-  margin: 3px 0 0;
-  color: #64748b;
-  font-size: 12px;
-}
-
 label {
   display: grid;
   gap: 5px;
@@ -5023,23 +4571,15 @@ textarea {
   border-radius: 6px;
 }
 
-.paste-panel textarea,
-.request-panel textarea {
+.paste-panel textarea {
   min-height: 100px;
 }
 
-.scope-checks {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-}
-
-.verify-box {
-  display: grid;
-  gap: 8px;
-}
-
 @media (max-width: 1120px) {
+  .workbench-flow-strip {
+    grid-template-columns: 1fr;
+  }
+
   .workspace {
     grid-template-columns: 1fr;
   }
@@ -5049,284 +4589,9 @@ textarea {
   }
 }
 
-@media (max-width: 720px) {
-  .topbar {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-
-  .summary-strip {
-    grid-template-columns: 1fr;
-  }
-}
-
-/* VNET blue-white production skin */
-.app-shell {
-  --brand-blue: #0757d7;
-  --brand-blue-2: #0d7df2;
-  --brand-blue-dark: #06349a;
-  --brand-cyan: #21c6e7;
-  --ink: #071634;
-  --muted: #64748b;
-  --line: #d8e7f8;
-  --panel: rgba(255, 255, 255, 0.95);
-  --panel-soft: #f7fbff;
-  --shadow: 0 18px 42px rgba(22, 78, 151, 0.12);
-  --shadow-strong: 0 24px 68px rgba(8, 52, 132, 0.18);
-  --radius-panel: 20px;
-  --radius-card: 18px;
-  --radius-control: 12px;
-  --radius-popover: 22px;
-  background:
-    linear-gradient(180deg, #f4f9ff 0, #f8fbff 260px, #eef6ff 100%),
-    radial-gradient(circle at 18% 18%, rgba(31, 129, 255, 0.12), transparent 28%);
-  color: var(--ink);
-}
-
-.topbar {
-  min-height: 128px;
-  padding: 22px 38px;
-  border-bottom: 0;
-  flex-wrap: wrap;
-  background:
-    linear-gradient(90deg, rgba(4, 46, 145, 0.98), rgba(10, 103, 224, 0.98) 46%, rgba(0, 116, 236, 0.96)),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.12), transparent);
-  box-shadow: 0 16px 42px rgba(3, 55, 140, 0.18);
-  overflow: visible;
-  isolation: isolate;
-}
-
-.topbar::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background:
-    linear-gradient(90deg, transparent 0 18%, rgba(255, 255, 255, 0.18) 18.05% 18.14%, transparent 18.2%),
-    linear-gradient(135deg, transparent 0 58%, rgba(255, 255, 255, 0.18) 58.1% 58.25%, transparent 58.35%),
-    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.08) 0 1px, transparent 1px 56px),
-    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.06) 0 1px, transparent 1px 42px);
-  mask-image: linear-gradient(90deg, transparent, #000 22%, #000 86%, transparent);
-  opacity: 0.42;
-}
-
-.topbar::after {
-  content: "";
-  position: absolute;
-  left: 56%;
-  bottom: 8px;
-  width: 74px;
-  height: 96px;
-  pointer-events: none;
-  opacity: 0.34;
-  background:
-    linear-gradient(#fff, #fff) 34px 18px / 6px 56px no-repeat,
-    linear-gradient(#fff, #fff) 24px 74px / 26px 5px no-repeat,
-    linear-gradient(#fff, #fff) 20px 84px / 34px 5px no-repeat,
-    radial-gradient(circle at 37px 12px, transparent 13px, rgba(255, 255, 255, 0.95) 14px 15px, transparent 16px),
-    linear-gradient(135deg, transparent 36%, rgba(255, 255, 255, 0.95) 36.5% 41%, transparent 41.5%),
-    linear-gradient(45deg, transparent 36%, rgba(255, 255, 255, 0.95) 36.5% 41%, transparent 41.5%);
-}
-
-.brand {
-  position: relative;
-  z-index: 1;
-  flex: 0 0 auto;
-  gap: 26px;
-}
-
-.brand > div {
-  min-width: 0;
-}
-
-.brand-logo {
-  width: 146px;
-  height: 56px;
-  padding-right: 26px;
-  border-right: 1px solid rgba(255, 255, 255, 0.42);
-  filter: brightness(0) invert(1);
-}
-
-h1 {
-  color: #ffffff;
-  font-size: 28px;
-  font-weight: 800;
-  letter-spacing: 0;
-  white-space: nowrap;
-}
-
-.brand p,
-.hint {
-  margin-top: 8px;
-  color: rgba(255, 255, 255, 0.78);
-  font-size: 15px;
-}
-
-.topbar-actions {
-  position: relative;
-  z-index: 30;
-  flex: 1 1 560px;
-  min-width: 360px;
-  margin-left: auto;
-  justify-content: flex-end;
-}
-
-.refresh-menu {
-  position: relative;
-  display: inline-flex;
-  z-index: 60;
-}
-
-.refresh-menu-panel {
-  position: absolute;
-  top: calc(100% + 12px);
-  right: 0;
-  z-index: 120;
-  width: min(320px, calc(100vw - 32px));
-  max-height: min(420px, 70vh);
-  overflow: auto;
-  display: grid;
-  gap: 8px;
-  padding: 14px;
-  border: 1px solid #d8e7f8;
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.98);
-  box-shadow: 0 18px 40px rgba(9, 55, 120, 0.18);
-  white-space: normal;
-}
-
-.refresh-menu-panel::before {
-  content: "";
-  position: absolute;
-  top: -7px;
-  right: 24px;
-  width: 12px;
-  height: 12px;
-  transform: rotate(45deg);
-  border-left: 1px solid #d8e7f8;
-  border-top: 1px solid #d8e7f8;
-  background: #ffffff;
-}
-
-.refresh-menu-panel p {
-  color: #47617f;
-  font-size: 12px;
-  line-height: 1.55;
-}
-
-.topbar .refresh-menu-panel .btn {
-  width: 100%;
-  justify-content: center;
-  min-height: 38px;
-  border-color: #c5d9f2;
-  background: #f7fbff;
-  color: #0757d7;
-  box-shadow: none;
-}
-
-.topbar .refresh-menu-panel .btn:disabled {
-  color: #6b7f9f;
-  background: #eef5ff;
-}
-
-.topbar .btn,
-.topbar button,
-.topbar a.btn,
-.topbar .user-chip,
-.scope-switch {
-  min-height: 44px;
-  border-color: rgba(255, 255, 255, 0.35);
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.13);
-  color: #ffffff;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18);
-  backdrop-filter: blur(10px);
-}
-
-.topbar .btn:hover,
-.topbar button:hover,
-.topbar a.btn:hover {
-  background: rgba(255, 255, 255, 0.21);
-}
-
-.topbar .danger-text {
-  border-color: rgba(255, 255, 255, 0.88);
-  background: #ffffff;
-  color: #d03535;
-  font-weight: 700;
-}
-
-.scope-switch {
-  display: inline-flex;
-  padding: 4px 8px 4px 12px;
-}
-
-.scope-switch select {
-  border-color: rgba(255, 255, 255, 0.42);
-  background: rgba(255, 255, 255, 0.96);
-  color: var(--brand-blue-dark);
-  font-weight: 700;
-}
-
-.status-banner {
-  top: 128px;
-  border: 1px solid var(--line);
-  border-left: 0;
-  border-right: 0;
-  background:
-    linear-gradient(90deg, rgba(255, 255, 255, 0.96), rgba(247, 251, 255, 0.96)),
-    linear-gradient(90deg, rgba(7, 87, 215, 0.08), transparent 42%);
-  color: #24456f;
-  box-shadow: 0 8px 24px rgba(36, 86, 148, 0.08);
-}
-
-.status-banner.info {
-  background: #f5faff;
-}
-
-.status-banner.warning {
-  border-color: #d8e7f8;
-  background:
-    linear-gradient(90deg, rgba(255, 255, 255, 0.96), rgba(247, 251, 255, 0.96)),
-    linear-gradient(90deg, rgba(245, 158, 11, 0.14), transparent 42%);
-  color: #8a4b08;
-}
-
-.status-banner.failed {
-  border-color: #d8e7f8;
-  background:
-    linear-gradient(90deg, rgba(255, 255, 255, 0.96), rgba(247, 251, 255, 0.96)),
-    linear-gradient(90deg, rgba(220, 38, 38, 0.13), transparent 42%);
-  color: #9f1d1d;
-}
-
-.status-banner .btn {
-  min-height: 28px;
-  padding: 6px 12px;
-  border-color: #c5d9f2;
-  background: #ffffff;
-  color: #0757d7;
-  box-shadow: 0 6px 16px rgba(22, 78, 151, 0.1);
-}
-
-.page-status {
-  width: min(1180px, calc(100vw - 48px));
-  margin: 16px auto 0;
-  padding: 10px 14px;
-  border: 1px solid #d8e7f8;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.82);
-  color: #31577f;
-  font-size: 13px;
-  box-shadow: 0 10px 28px rgba(22, 78, 151, 0.08);
-}
-
 .center-state,
-.summary-strip article,
 .panel,
-.paste-panel,
-.target-detail-popover,
-.closed-card {
+.paste-panel {
   border: 1px solid var(--line);
   border-radius: 14px;
   background: var(--panel);
@@ -5338,78 +4603,6 @@ h1 {
   padding: 34px;
 }
 
-.workbench {
-  padding: 28px 34px 34px;
-}
-
-.summary-strip {
-  gap: 16px;
-  margin-bottom: 18px;
-}
-
-.summary-strip article {
-  position: relative;
-  min-height: 94px;
-  padding: 18px 18px 16px 78px;
-  overflow: hidden;
-  isolation: isolate;
-}
-
-.summary-strip article::before {
-  content: "";
-  position: absolute;
-  left: 18px;
-  top: 19px;
-  width: 42px;
-  height: 42px;
-  border-radius: 12px;
-  background: linear-gradient(135deg, var(--brand-blue), var(--brand-blue-2));
-  box-shadow: 0 10px 22px rgba(25, 105, 224, 0.26);
-}
-
-.summary-strip article::after {
-  content: "";
-  position: absolute;
-  right: -38px;
-  bottom: -54px;
-  z-index: 0;
-  width: 140px;
-  height: 104px;
-  opacity: 0.44;
-  background:
-    repeating-linear-gradient(0deg, rgba(22, 120, 255, 0.12) 0 1px, transparent 1px 15px),
-    repeating-linear-gradient(90deg, rgba(22, 120, 255, 0.08) 0 1px, transparent 1px 15px);
-  transform: rotate(-14deg);
-}
-
-.summary-strip article > * {
-  position: relative;
-  z-index: 1;
-}
-
-.summary-strip article:nth-child(2)::before {
-  background: linear-gradient(135deg, #11a8c9, #36d0e5);
-}
-
-.summary-strip article:nth-child(3)::before {
-  background: linear-gradient(135deg, #22b66b, #3dd887);
-}
-
-.summary-strip article:nth-child(4)::before {
-  background: linear-gradient(135deg, #6b78ff, #2f75ff);
-}
-
-.summary-strip span {
-  color: var(--muted);
-  font-size: 14px;
-}
-
-.summary-strip strong {
-  color: var(--brand-blue-dark);
-  font-size: 26px;
-}
-
-.toolbar,
 .paste-panel {
   margin-bottom: 16px;
   padding: 14px;
@@ -5463,199 +4656,26 @@ h1 {
   font-weight: 700;
 }
 
-.btn,
-button,
-a.btn {
-  min-height: 36px;
-  border-color: #c5d9f2;
-  border-radius: 9px;
-  background: #ffffff;
-  color: #09204a;
-  font-weight: 650;
-  transition: transform 0.12s ease, box-shadow 0.12s ease, border-color 0.12s ease, background 0.12s ease;
-}
-
-.btn:focus-visible,
-button:focus-visible,
-a.btn:focus-visible,
-input:focus-visible,
-select:focus-visible,
-textarea:focus-visible {
-  outline: 3px solid rgba(22, 120, 255, 0.22);
-  outline-offset: 2px;
-}
-
-.btn:hover:not(:disabled),
-button:hover:not(:disabled),
-a.btn:hover {
-  border-color: #8dbbfb;
-  box-shadow: 0 8px 20px rgba(27, 101, 213, 0.13);
-  transform: translateY(-1px);
-}
-
-.btn.blue,
-.segmented button.active {
-  border-color: transparent;
-  background: linear-gradient(135deg, var(--brand-blue), #1678ff);
-  color: #ffffff;
-  box-shadow: 0 12px 24px rgba(20, 103, 226, 0.24);
-}
-
-.btn.green {
-  border-color: transparent;
-  background: linear-gradient(135deg, #16a36d, #2fd083);
-}
-
-.btn.danger {
-  border-color: transparent;
-  background: linear-gradient(135deg, #dc2626, #f05656);
-}
-
-.segmented {
-  padding: 5px;
-  border-color: #cde0f6;
-  border-radius: 12px;
-  background: #edf5ff;
-}
-
-.segmented button {
-  border-radius: 9px;
-}
-
-input,
-select,
-textarea {
-  border-color: #c8dcf3;
-  border-radius: 9px;
-  background: #fbfdff;
-  transition: border-color 0.14s ease, box-shadow 0.14s ease, background-color 0.14s ease;
-}
-
-input:focus,
-select:focus,
-textarea:focus {
-  border-color: var(--brand-blue-2);
-  outline: none;
-  box-shadow: 0 0 0 3px rgba(22, 120, 255, 0.12);
-}
-
 .empty-block,
-.virtual-list,
-.target-choice-panel,
-.manual-type-popover,
-.closed-card {
+.virtual-list {
   background: #f7fbff;
-}
-
-.draft-stack,
-.ongoing-list {
-  padding-right: 2px;
-  scrollbar-color: #9cc7ff #eef6ff;
-  scrollbar-width: thin;
-}
-
-.draft-stack::-webkit-scrollbar,
-.ongoing-list::-webkit-scrollbar {
-  width: 8px;
-}
-
-.draft-stack::-webkit-scrollbar-track,
-.ongoing-list::-webkit-scrollbar-track {
-  background: #eef6ff;
-  border-radius: 999px;
-}
-
-.draft-stack::-webkit-scrollbar-thumb,
-.ongoing-list::-webkit-scrollbar-thumb {
-  background: linear-gradient(180deg, #9cc7ff, #1678ff);
-  border-radius: 999px;
-}
-
-.closed-card {
-  border-radius: 12px;
-  box-shadow: 0 8px 18px rgba(22, 78, 151, 0.06);
-  transition: border-color 0.14s ease, background-color 0.14s ease, box-shadow 0.14s ease;
-}
-
-.closed-card:hover {
-  border-color: #9cc7ff;
-  background: #f5faff;
-  box-shadow: 0 12px 26px rgba(22, 78, 151, 0.1);
-}
-
-.manual-type-popover,
-.target-choice-panel,
-.target-detail-popover {
-  border-color: var(--line);
-  border-radius: 14px;
-  box-shadow: var(--shadow-strong);
 }
 
 /* Rounded VNET polish pass */
 .center-state,
-.summary-strip article,
 .panel,
 .paste-panel,
-.toolbar,
-.page-status,
-.target-choice-panel,
-.manual-type-popover,
-.closed-card,
 .empty-block {
   border-radius: var(--radius-panel);
-}
-
-.target-detail-popover {
-  border-radius: var(--radius-popover);
 }
 
 .panel-head {
   border-radius: var(--radius-panel) var(--radius-panel) 0 0;
 }
 
-.topbar .btn,
-.topbar button,
-.topbar a.btn,
-.topbar .user-chip,
-.scope-switch,
-.scope-switch select,
-.btn,
-button,
-a.btn,
-input,
-select,
-textarea,
-.segmented button,
-.status-banner .btn {
-  border-radius: var(--radius-control);
-}
-
-.segmented {
-  border-radius: 16px;
-}
-
-.summary-strip article::before {
-  border-radius: 14px;
-}
-
 /* Softer text integration for graphic surfaces */
-.summary-strip span,
 .panel-head span,
-.card-title span,
-.status-banner,
-.page-status {
-  letter-spacing: 0;
-}
-
-.summary-strip span {
-  color: #5f7189;
-  font-weight: 650;
-}
-
-.summary-strip strong {
-  color: #0a4db8;
-  font-size: 25px;
-  font-weight: 820;
+.card-title span {
   letter-spacing: 0;
 }
 
@@ -5672,128 +4692,11 @@ textarea,
   font-weight: 720;
 }
 
-.btn,
-button,
-a.btn {
-  font-weight: 720;
-}
-
-/* Panorama construction-management polish: lighter slate canvas, softer cards, rounder controls */
-.app-shell {
-  --line: #dbe6f5;
-  --panel: rgba(255, 255, 255, 0.97);
-  --panel-soft: #f8fbff;
-  --shadow: 0 14px 34px rgba(20, 70, 138, 0.09);
-  --shadow-strong: 0 22px 58px rgba(15, 58, 128, 0.15);
-  --radius-panel: 24px;
-  --radius-card: 20px;
-  --radius-control: 14px;
-  background:
-    linear-gradient(180deg, #f7faff 0, #f9fbfd 280px, #eef5fc 100%),
-    radial-gradient(circle at 14% 12%, rgba(48, 128, 255, 0.12), transparent 30%),
-    radial-gradient(circle at 86% 16%, rgba(0, 183, 215, 0.08), transparent 26%);
-}
-
-.topbar {
-  min-height: 116px;
-  padding: 20px 40px;
-  border-bottom: 1px solid rgba(191, 219, 254, 0.25);
-  box-shadow: 0 14px 34px rgba(3, 55, 140, 0.16);
-}
-
-.topbar::before {
-  opacity: 0.34;
-}
-
-.topbar::after {
-  bottom: 5px;
-  opacity: 0.28;
-}
-
-.brand {
-  gap: 24px;
-}
-
-.brand-logo {
-  width: 142px;
-  height: 54px;
-}
-
-h1 {
-  font-size: 29px;
-  font-weight: 820;
-}
-
-.brand p,
-.hint {
-  color: rgba(255, 255, 255, 0.72);
-  font-size: 14px;
-}
-
-.topbar .btn,
-.topbar button,
-.topbar a.btn,
-.topbar .user-chip,
-.scope-switch {
-  min-height: 42px;
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.12);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.2),
-    0 10px 22px rgba(4, 46, 145, 0.08);
-}
-
-.topbar .danger-text {
-  border-radius: 16px;
-  box-shadow: 0 12px 24px rgba(4, 46, 145, 0.12);
-}
-
-.status-banner {
-  top: 116px;
-}
-
-.page-status {
-  border-radius: 18px;
-  background: rgba(255, 255, 255, 0.9);
-}
-
-.workbench {
-  padding: 30px 40px 46px;
-}
-
-.summary-strip {
-  gap: 18px;
-  margin-bottom: 20px;
-}
-
-.summary-strip article {
-  min-height: 88px;
-  padding: 18px 18px 16px 74px;
-  border-color: rgba(207, 224, 255, 0.9);
-  box-shadow: var(--shadow);
-}
-
-.summary-strip article::before {
-  width: 40px;
-  height: 40px;
-  border-radius: 16px;
-}
-
-.summary-strip strong {
-  font-size: 24px;
-}
-
-.toolbar,
 .paste-panel {
   border-color: rgba(207, 224, 255, 0.92);
   background: rgba(255, 255, 255, 0.9);
   box-shadow: var(--shadow);
   backdrop-filter: blur(10px);
-}
-
-.toolbar {
-  position: relative;
-  z-index: 20;
 }
 
 .panel {
@@ -5819,55 +4722,12 @@ h1 {
   color: #155dfc;
 }
 
-.segmented {
-  border-color: #d8e7f8;
-  background: rgba(239, 246, 255, 0.86);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9);
-}
-
-.btn,
-button,
-a.btn,
-input,
-select,
-textarea {
-  border-radius: var(--radius-control);
-}
-
-.btn,
-button,
-a.btn {
-  box-shadow: 0 8px 18px rgba(15, 86, 228, 0.06);
-}
-
-.btn.blue,
-.segmented button.active {
-  background: linear-gradient(135deg, #155dfc, #3080ff);
-  box-shadow: 0 12px 24px rgba(21, 93, 252, 0.24);
-}
-
-input,
-select,
-textarea {
-  background: rgba(255, 255, 255, 0.96);
-}
-
 .empty-block,
-.virtual-list,
-.target-choice-panel,
-.manual-type-popover,
-.closed-card {
+.virtual-list {
   background: rgba(248, 251, 255, 0.94);
 }
 
-.closed-card {
-  border-radius: 18px;
-}
-
-.manual-type-popover {
-  z-index: 80;
-}
-
+/* VNET blue-white production skin */
 /* Panorama construction-management command-center skin */
 .app-shell {
   --brand-blue: #1e63ff;
@@ -5887,104 +4747,18 @@ textarea {
   background: linear-gradient(180deg, #eef4ff 0, #f8fbff 44%, #eef5ff 100%);
 }
 
-.topbar {
-  min-height: 112px;
-  padding: 20px 40px;
-  background:
-    linear-gradient(115deg, #064fc5 0%, #00359b 52%, #012a7d 100%),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.14), transparent);
-  box-shadow: 0 18px 42px rgba(0, 47, 135, 0.28);
-}
-
-.topbar::before {
-  background:
-    linear-gradient(90deg, transparent 0 18%, rgba(255, 255, 255, 0.16) 18.05% 18.14%, transparent 18.2%),
-    linear-gradient(135deg, transparent 0 58%, rgba(255, 255, 255, 0.14) 58.1% 58.25%, transparent 58.35%),
-    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.07) 0 1px, transparent 1px 62px),
-    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.05) 0 1px, transparent 1px 46px);
-}
-
-.topbar::after {
-  opacity: 0.24;
-}
-
-h1 {
-  font-size: 28px;
-  font-weight: 650;
-}
-
-.brand p,
-.hint {
-  color: rgba(255, 255, 255, 0.7);
-}
-
-.topbar .btn,
-.topbar button,
-.topbar a.btn,
-.topbar .user-chip,
-.scope-switch {
-  border-color: rgba(255, 255, 255, 0.32);
-  background: rgba(255, 255, 255, 0.14);
-  color: #ffffff;
-  backdrop-filter: blur(10px);
-}
-
-.topbar .btn:hover,
-.topbar button:hover,
-.topbar a.btn:hover {
-  background: rgba(255, 255, 255, 0.2);
-}
-
-.topbar .danger-text {
-  background: #ffffff;
-  color: #d03535;
-}
-
-.status-banner {
-  top: 112px;
-  min-height: 34px;
-  background: rgba(255, 255, 255, 0.88);
-  backdrop-filter: blur(10px);
-}
-
 .workbench {
   width: min(1800px, 100%);
   margin: 0 auto;
   padding: 28px 32px 42px;
 }
 
-.summary-strip article,
 .panel,
-.paste-panel,
-.toolbar,
-.target-choice-panel,
-.manual-type-popover,
-.closed-card,
-.page-status {
+.paste-panel {
   border-color: #d8e5f7;
   background: rgba(255, 255, 255, 0.82);
   box-shadow: 0 12px 30px rgba(0, 47, 135, 0.08);
   backdrop-filter: blur(10px);
-}
-
-.summary-strip article {
-  min-height: 86px;
-}
-
-.summary-strip article::before {
-  background: linear-gradient(135deg, #1e63ff, #005bff);
-}
-
-.summary-strip article:nth-child(2)::before {
-  background: linear-gradient(135deg, #0ea5e9, #00b7d7);
-}
-
-.summary-strip article:nth-child(3)::before {
-  background: linear-gradient(135deg, #059669, #10b981);
-}
-
-.summary-strip article:nth-child(4)::before {
-  background: linear-gradient(135deg, #475569, #1e63ff);
 }
 
 .panel-head {
@@ -6008,178 +4782,92 @@ h1 {
   color: #005bff;
 }
 
-.segmented {
-  border-color: #d8e5f7;
-  background: rgba(255, 255, 255, 0.72);
-}
-
-.btn.blue,
-.segmented button.active {
-  background: linear-gradient(135deg, #1e63ff, #1554df);
-  box-shadow: 0 10px 22px rgba(30, 99, 255, 0.24);
-}
-
-.btn.blue:hover:not(:disabled),
-.segmented button.active:hover:not(:disabled) {
-  background: #1554df;
-}
-
-.action-confirm-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 90;
-  display: grid;
-  place-items: center;
-  padding: 24px;
-  background: rgba(9, 32, 74, 0.34);
-  backdrop-filter: blur(8px);
-}
-
-.action-confirm-modal {
-  width: min(520px, 100%);
-  overflow: hidden;
+/* Final VNET rounded controls: keep all operational controls visually consistent. */
+.btn,
+button,
+a.btn {
+  min-height: 42px;
   border: 1px solid #d8e5f7;
-  border-radius: 22px;
-  background: rgba(255, 255, 255, 0.96);
-  box-shadow: 0 28px 80px rgba(0, 47, 135, 0.22);
-}
-
-.action-confirm-modal header {
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 18px 20px;
-  border-bottom: 1px solid #edf3fb;
-  background: linear-gradient(135deg, #f8fbff, #ffffff);
-}
-
-.action-confirm-modal header span {
-  display: block;
-  color: #155dfc;
-  font-size: 12px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.94);
+  color: #0f4fb8;
   font-weight: 850;
+  letter-spacing: 0;
+  box-shadow: 0 8px 18px rgba(15, 86, 228, 0.06);
+  transition:
+    transform 0.16s ease,
+    box-shadow 0.16s ease,
+    border-color 0.16s ease,
+    background 0.16s ease;
 }
 
-.action-confirm-modal header strong {
-  display: block;
-  margin-top: 5px;
-  color: #09204a;
-  font-size: 18px;
-  line-height: 1.35;
+.btn:hover:not(:disabled),
+button:hover:not(:disabled),
+a.btn:hover {
+  border-color: #9cc7ff;
+  background: #f5faff;
+  color: #075bd8;
+  transform: translateY(-1px);
+  box-shadow: 0 12px 26px rgba(15, 86, 228, 0.1);
 }
 
-.action-confirm-modal.tone-danger header span {
-  color: #e11d48;
+.btn:disabled,
+button:disabled,
+.btn[aria-disabled="true"] {
+  cursor: not-allowed;
+  color: #8aa0ba;
+  background: #f3f7fc;
+  box-shadow: none;
+  transform: none;
 }
 
-.action-confirm-modal.tone-warning header span {
-  color: #b45309;
-}
-
-.action-confirm-modal p {
-  margin: 0;
-  padding: 18px 20px 8px;
-  color: #334155;
-  line-height: 1.65;
-}
-
-.action-confirm-modal ul {
-  display: grid;
-  gap: 8px;
-  margin: 0;
-  padding: 0 20px 18px 38px;
-  color: #64748b;
-  font-size: 14px;
-  line-height: 1.55;
-}
-
-.action-confirm-modal footer {
-  display: flex;
-  justify-content: flex-end;
-  gap: 10px;
-  padding: 14px 20px 18px;
-  border-top: 1px solid #edf3fb;
-  background: rgba(248, 251, 255, 0.72);
-}
-
-.icon-btn {
-  display: inline-grid;
-  width: 34px;
-  height: 34px;
-  place-items: center;
-  border: 1px solid #d8e5f7;
-  border-radius: 999px;
-  background: #ffffff;
-  color: #64748b;
-  font-size: 20px;
-  line-height: 1;
-  cursor: pointer;
+.btn.blue {
+  border-color: transparent;
+  background: linear-gradient(135deg, #1e63ff, #1554df);
+  color: #ffffff;
+  box-shadow: 0 12px 24px rgba(30, 99, 255, 0.24);
 }
 
 .btn.green {
-  background: #059669;
+  border-color: transparent;
+  background: linear-gradient(135deg, #12b981, #059669);
+  color: #ffffff;
 }
 
 .btn.danger {
-  background: #e11d48;
+  border-color: transparent;
+  background: linear-gradient(135deg, #f43f5e, #e11d48);
+  color: #ffffff;
 }
 
 input,
 select,
-textarea,
-.search {
-  border-color: #d8e5f7;
-  background: rgba(255, 255, 255, 0.86);
-}
-
-.specialty-filter {
-  border-color: #d8e5f7;
-  background: rgba(255, 255, 255, 0.78);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.82);
-}
-
-.specialty-filter span {
-  color: #64748b;
-}
-
-.specialty-filter select {
-  border-color: #d8e5f7;
-  background: rgba(255, 255, 255, 0.92);
+textarea {
+  min-height: 42px;
+  border: 1px solid #d8e5f7;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.96);
   color: #0f172a;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.92);
 }
 
-input:focus,
-select:focus,
-textarea:focus,
-.search:focus {
-  border-color: #005bff;
-  box-shadow: 0 0 0 3px rgba(0, 91, 255, 0.14);
+textarea {
+  min-height: 88px;
 }
 
-.topbar,
-.status-banner {
-  position: relative;
-  top: auto;
+select {
+  padding-right: 34px;
+  cursor: pointer;
 }
 
-@media (max-width: 920px) {
-  .topbar {
-    min-height: auto;
-    padding: 20px;
-  }
-
-  .brand-logo {
-    width: 118px;
-    height: 46px;
-    padding-right: 18px;
-  }
-
-  h1 {
-    font-size: 22px;
-  }
-
-  .status-banner {
-    top: 0;
-  }
+.paste-panel,
+.panel,
+.empty-block {
+  border-radius: 22px;
 }
+
+.panel-head {
+  border-radius: 22px 22px 0 0;
+}
+
 </style>

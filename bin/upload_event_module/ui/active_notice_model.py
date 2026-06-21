@@ -84,6 +84,12 @@ class ActiveNoticeModel(QAbstractListModel):
         return bool(record.get("_upload_in_progress"))
 
     @staticmethod
+    def has_upload_error(record: dict[str, Any] | None) -> bool:
+        if not isinstance(record, dict):
+            return False
+        return bool(str(record.get("_last_upload_error") or "").strip())
+
+    @staticmethod
     def is_today_progress_syncing(record: dict[str, Any] | None) -> bool:
         if not isinstance(record, dict):
             return False
@@ -109,6 +115,8 @@ class ActiveNoticeModel(QAbstractListModel):
     def action_label_for_record(cls, record: dict[str, Any] | None) -> str:
         if cls.is_uploading_record(record):
             return "上传中"
+        if cls.has_upload_error(record) and not cls.is_uploaded_record(record):
+            return "失败可重试"
         if cls.is_uploaded_record(record):
             return "已上传"
         action = cls.action_for_record(record)
@@ -147,6 +155,8 @@ class ActiveNoticeModel(QAbstractListModel):
     def today_progress_label(cls, record: dict[str, Any] | None) -> str:
         if cls.is_today_progress_syncing(record):
             return "同步中"
+        if isinstance(record, dict) and str(record.get("_today_in_progress_error") or "").strip():
+            return "重试同步"
         state = cls.normalize_today_progress_state(
             (record or {}).get("today_in_progress_state") if isinstance(record, dict) else ""
         )

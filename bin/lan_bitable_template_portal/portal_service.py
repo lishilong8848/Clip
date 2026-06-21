@@ -27,7 +27,7 @@ import xml.etree.ElementTree as ET
 import lark_oapi as lark
 from lark_oapi.api.drive.v1 import UploadAllMediaRequest, UploadAllMediaRequestBody
 
-from upload_event_module.config import config, get_field_config
+from upload_event_module.config import EVENT_NOTICE_FIELDS, config, get_field_config
 from upload_event_module.services.feishu_service import (
     ensure_feishu_token,
     refresh_feishu_token,
@@ -118,6 +118,8 @@ NOTICE_TYPE_POWER_UP = "上电通告"
 NOTICE_TYPE_POWER_DOWN = "下电通告"
 NOTICE_TYPE_POLLING = "设备轮巡"
 NOTICE_TYPE_ADJUST = "设备调整"
+WORK_TYPE_EVENT = "event"
+NOTICE_TYPE_EVENT = "事件通告"
 NOTICE_TIME_SEPARATOR = "~"
 NOTICE_TEXT_TEMPLATES = {
     WORK_TYPE_MAINTENANCE: {
@@ -320,6 +322,7 @@ def engineer_mop_fill_kwargs_from_payload(
         "local_file_path": str(payload.get("local_file_path") or ""),
         "mop_record_id": str(payload.get("mop_record_id") or ""),
         "mop_title": str(payload.get("mop_title") or ""),
+        "mop_file_name": str(payload.get("mop_file_name") or ""),
         "sheet_name": str(payload.get("sheet_name") or ""),
         "fields": _payload_list(payload, "fields"),
         "checkboxes": _payload_list(payload, "checkboxes"),
@@ -1262,6 +1265,267 @@ class MaintenancePortalService:
                 "change_count": len(self._change_records),
                 "zhihang_change_count": len(self._zhihang_change_records),
             }
+
+    @staticmethod
+    def _normalize_event_month(value: Any = None) -> str:
+        text = str(value or "").strip()
+        match = re.search(r"(\d{4})[-/年](\d{1,2})", text)
+        if match:
+            return f"{int(match.group(1)):04d}-{int(match.group(2)):02d}"
+        return dt.datetime.now().strftime("%Y-%m")
+
+    def _event_source_config(self) -> tuple[str, str, str]:
+        app_token = str(getattr(config, "app_token", "") or self.app_token or DEFAULT_APP_TOKEN).strip()
+        table_id = str(getattr(config, "table_id_shijian", "") or "").strip()
+        if not app_token or not table_id:
+            raise PortalError("未配置事件通告表，请先在 Qt 设置中填写事件通告 Table ID。")
+        return app_token, table_id, "event_notice"
+
+    def _load_event_table_fields(
+        self, *, app_token: str, table_id: str
+    ) -> tuple[list[FieldMeta], dict[str, FieldMeta]]:
+        payload = self._request_json(
+            "fields",
+            params={"page_size": 500},
+            app_token=app_token,
+            table_id=table_id,
+        )
+        metas = self._parse_field_metas(payload.get("data", {}).get("items") or [])
+        return metas, {meta.field_name: meta for meta in metas}
+
+    @classmethod
+    def _event_value(cls, fields: dict[str, Any], key: str) -> str:
+        field_name = EVENT_NOTICE_FIELDS.get(key, key)
+        return str(fields.get(field_name) or "").strip()
+
+    @classmethod
+    def _event_month_candidates(cls, item: dict[str, Any]) -> set[str]:
+        fields = item.get("display_fields") if isinstance(item.get("display_fields"), dict) else {}
+        candidates: set[str] = set()
+        for key in (
+            "occurrence_time",
+            "progress_update",
+            "recover_time",
+            "end_time",
+            "response_time",
+        ):
+            parsed = cls._parse_notice_datetime(cls._event_value(fields, key))
+            if parsed:
+                candidates.add(parsed.strftime("%Y-%m"))
+        for raw_key in ("created_time", "last_modified_time"):
+            raw_value = item.get(raw_key)
+            formatted = cls._format_source_datetime(raw_value)
+            parsed = cls._parse_notice_datetime(formatted)
+            if parsed:
+                candidates.add(parsed.strftime("%Y-%m"))
+        return candidates
+
+    @classmethod
+    def _event_status(cls, fields: dict[str, Any]) -> str:
+        if cls._event_value(fields, "end_time"):
+            return "已结束"
+        if cls._event_value(fields, "recover_time"):
+            return "已恢复待闭环"
+        return "处理中"
+
+    @staticmethod
+    def _event_high_level(level: Any) -> bool:
+        text = str(level or "").strip().upper()
+        return bool(re.search(r"\bI[123]\b|I1|I2|I3|升级", text))
+
+    @classmethod
+    def _event_building_codes_from_text(cls, value: Any) -> list[str]:
+        text = str(value or "").strip().upper()
+        codes: list[str] = []
+        if "110" in text:
+            codes.append("110")
+        for match in re.finditer(r"(?<![A-Z0-9])([ABCDEH])\s*(?:楼|栋|站|-|\d)", text):
+            code = match.group(1)
+            if code not in codes:
+                codes.append(code)
+        return [code for code in BUILDING_SCOPE_CODES if code in codes]
+
+    def _normalize_event_snapshot_record(
+        self,
+        normalized: dict[str, Any],
+        *,
+        month: str,
+        source_key: str,
+        app_token: str,
+        table_id: str,
+    ) -> dict[str, Any]:
+        fields = normalized.get("display_fields") if isinstance(normalized.get("display_fields"), dict) else {}
+        raw_fields = normalized.get("raw_fields") if isinstance(normalized.get("raw_fields"), dict) else {}
+        alarm_desc = self._event_value(fields, "alarm_desc")
+        title = alarm_desc
+        if not title:
+            title = str(fields.get("标题") or fields.get("名称") or "").strip()
+        if not title:
+            title = str(normalized.get("record_id") or "未命名事件").strip()
+        building = self._event_value(fields, "building")
+        if building:
+            building_codes = self._building_codes_from_value(building)
+        else:
+            building_codes = self._event_building_codes_from_text(f"{title}\n{alarm_desc}")
+        building_label = self._building_label_from_codes(building_codes) or str(building or "")
+        level = self._event_value(fields, "level")
+        event_item = {
+            "source_key": source_key,
+            "source_record_id": str(normalized.get("record_id") or ""),
+            "record_id": str(normalized.get("record_id") or ""),
+            "source_app_token": app_token,
+            "source_table_id": table_id,
+            "source_record_url": f"https://vnet.feishu.cn/base/{app_token}?table={table_id}",
+            "month": month,
+            "title": title,
+            "alarm_desc": alarm_desc,
+            "level": level,
+            "high_level": self._event_high_level(level),
+            "building": building_label,
+            "building_codes": building_codes,
+            "specialty": self._event_value(fields, "specialty"),
+            "source": self._event_value(fields, "source"),
+            "occurrence_time": self._event_value(fields, "occurrence_time"),
+            "response_time": self._event_value(fields, "response_time"),
+            "progress_update": self._event_value(fields, "progress_update"),
+            "recover_time": self._event_value(fields, "recover_time"),
+            "end_time": self._event_value(fields, "end_time"),
+            "transfer_to_overhaul": self._event_value(fields, "transfer_to_overhaul"),
+            "status": self._event_status(fields),
+            "display_fields": fields,
+            "raw_fields": raw_fields,
+            "created_time": normalized.get("created_time") or "",
+            "last_modified_time": normalized.get("last_modified_time") or "",
+        }
+        return event_item
+
+    def refresh_event_month_snapshot(self, month: str | None = None) -> dict[str, Any]:
+        month = self._normalize_event_month(month)
+        app_token, table_id, source_key = self._event_source_config()
+        meta: dict[str, Any] = {
+            "source_key": source_key,
+            "source_app_token": app_token,
+            "source_table_id": table_id,
+            "month": month,
+            "warnings": [],
+        }
+        try:
+            _metas, meta_by_name = self._load_event_table_fields(
+                app_token=app_token,
+                table_id=table_id,
+            )
+            all_records = self._load_table_records(
+                app_token=app_token,
+                table_id=table_id,
+                meta_by_name=meta_by_name,
+                work_type=WORK_TYPE_EVENT,
+                notice_type=NOTICE_TYPE_EVENT,
+            )
+            snapshot_records: list[dict[str, Any]] = []
+            for item in all_records:
+                candidate_months = self._event_month_candidates(item)
+                if candidate_months and month not in candidate_months:
+                    continue
+                if not candidate_months and month != dt.datetime.now().strftime("%Y-%m"):
+                    continue
+                snapshot_records.append(
+                    self._normalize_event_snapshot_record(
+                        item,
+                        month=month,
+                        source_key=source_key,
+                        app_token=app_token,
+                        table_id=table_id,
+                    )
+                )
+            snapshot_records.sort(
+                key=lambda item: (
+                    str(item.get("occurrence_time") or item.get("progress_update") or ""),
+                    str(item.get("source_record_id") or ""),
+                ),
+                reverse=True,
+            )
+            result = self._state_store.replace_event_month_snapshot(
+                month,
+                snapshot_records,
+                meta=meta,
+            )
+            self._touch_state_cache_version()
+            return {
+                **result,
+                "event_refreshed_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "event_count": len(snapshot_records),
+                "source_key": source_key,
+            }
+        except Exception as exc:
+            warning = f"事件通告表同步失败: {exc}"
+            self._state_store.record_failed_event_month_snapshot(
+                month,
+                meta={**meta, "warnings": [warning]},
+                error=warning,
+            )
+            if isinstance(exc, PortalError):
+                raise
+            raise PortalError(warning) from exc
+
+    def get_event_monthly_snapshot(
+        self,
+        *,
+        scope: str,
+        month: str | None = None,
+    ) -> dict[str, Any]:
+        month = self._normalize_event_month(month)
+        snapshot = self._state_store.get_event_month_snapshot(month)
+        records = [
+            dict(item)
+            for item in snapshot.get("records", [])
+            if isinstance(item, dict) and self._scope_matches_item(scope, item)
+        ]
+        statuses: dict[str, int] = {}
+        levels: dict[str, int] = {}
+        sources: dict[str, int] = {}
+        specialties: dict[str, int] = {}
+        high_level = 0
+        for item in records:
+            status = str(item.get("status") or "未知").strip() or "未知"
+            statuses[status] = int(statuses.get(status) or 0) + 1
+            level = str(item.get("level") or "未填写").strip() or "未填写"
+            levels[level] = int(levels.get(level) or 0) + 1
+            source = str(item.get("source") or "未填写").strip() or "未填写"
+            sources[source] = int(sources.get(source) or 0) + 1
+            specialty = str(item.get("specialty") or "未填写").strip() or "未填写"
+            specialties[specialty] = int(specialties.get(specialty) or 0) + 1
+            if bool(item.get("high_level")):
+                high_level += 1
+        stats = {
+            "total": len(records),
+            "processing": statuses.get("处理中", 0) + statuses.get("已恢复待闭环", 0),
+            "ended": statuses.get("已结束", 0),
+            "high_level": high_level,
+            "statuses": statuses,
+            "levels": levels,
+            "sources": sources,
+            "specialties": specialties,
+        }
+        config_missing = False
+        config_error = ""
+        try:
+            self._event_source_config()
+        except Exception as exc:
+            config_missing = True
+            config_error = str(exc)
+        return {
+            "scope": self._normalize_scope(scope),
+            "month": month,
+            "records": records,
+            "stats": stats,
+            "snapshot_exists": bool(snapshot.get("exists")),
+            "snapshot_id": snapshot.get("snapshot_id") or "",
+            "last_refreshed_at": float(snapshot.get("updated_at") or 0),
+            "last_failed": snapshot.get("last_failed") or {},
+            "source_meta": snapshot.get("meta") or {},
+            "config_missing": config_missing,
+            "config_error": config_error,
+        }
 
     def refresh_if_interval_elapsed(self, *, min_interval_seconds: int = 60) -> bool:
         min_interval = max(0, int(min_interval_seconds or 0))
@@ -3471,7 +3735,7 @@ class MaintenancePortalService:
             if has_scope_filter and scope not in requested_scopes:
                 continue
             records = self._workbench_records(month=default_month, scope=scope)
-            merged_ongoing = self._merge_ongoing_items(scope, ongoing_items or [])
+            merged_ongoing = self._project_ongoing_items(scope, ongoing_items or [])
             daily_summary = self.get_daily_summary(
                 scope=scope, ongoing_items=merged_ongoing
             )
@@ -4877,14 +5141,17 @@ class MaintenancePortalService:
 
         This intentionally does not reuse the workbench active snapshot because
         that snapshot is filtered for day-to-day issuing. The memory import page
-        needs all current-month maintenance/change source records, including
-        records that are already ended.
+        needs all current-month source records, including records that are
+        already ended.  The ``work_types`` argument controls which historical
+        target tables are scanned as candidates; it must not hide current-month
+        source items from the left side of the import page.
         """
         current_month = self._current_month_label()
+        source_work_types = [WORK_TYPE_MAINTENANCE, WORK_TYPE_CHANGE, WORK_TYPE_REPAIR]
         records: list[dict[str, Any]] = []
         warnings: list[str] = []
         with self._refresh_lock:
-            if WORK_TYPE_MAINTENANCE in work_types:
+            if WORK_TYPE_MAINTENANCE in source_work_types:
                 try:
                     self._load_fields()
                     app_token = str(self.app_token or DEFAULT_APP_TOKEN or "").strip()
@@ -4903,7 +5170,7 @@ class MaintenancePortalService:
                     )
                 except Exception as exc:
                     warnings.append(f"维保当前月源表全量读取失败: {exc}")
-            if WORK_TYPE_CHANGE in work_types:
+            if WORK_TYPE_CHANGE in source_work_types:
                 try:
                     self._load_change_fields()
                     loaded = self._load_table_records(
@@ -4920,7 +5187,7 @@ class MaintenancePortalService:
                     )
                 except Exception as exc:
                     warnings.append(f"变更当前月源表全量读取失败: {exc}")
-        if WORK_TYPE_REPAIR in work_types:
+        if WORK_TYPE_REPAIR in source_work_types:
             records.extend(
                 record
                 for record in (self._source_snapshot_records("ALL") or [])
@@ -7295,6 +7562,27 @@ class MaintenancePortalService:
                 index_by_key[key] = item_index
         return merged
 
+    def _project_ongoing_items(
+        self,
+        scope: str,
+        ongoing_items: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        """Project visible Qt active items to the browser without deduping."""
+        scope = self._normalize_scope(scope)
+        projected: list[dict[str, Any]] = []
+        for item in ongoing_items or []:
+            if not isinstance(item, dict):
+                continue
+            if not self._scope_matches_item(scope, item):
+                continue
+            copied = normalize_notice_identity_payload(copy.deepcopy(item))
+            copied.setdefault("work_type", WORK_TYPE_MAINTENANCE)
+            copied.setdefault("notice_type", NOTICE_TYPE_MAINTENANCE)
+            if self._is_ongoing_hidden(copied):
+                continue
+            projected.append(copied)
+        return projected
+
     def _ongoing_identity_conflicts(
         self, existing: dict[str, Any], incoming: dict[str, Any]
     ) -> bool:
@@ -7617,7 +7905,7 @@ class MaintenancePortalService:
         self.ensure_snapshot_loaded()
         default_month = RECENT_MONTH_FILTER_LABEL
         scope = self._normalize_scope(scope)
-        merged_ongoing = self._merge_ongoing_items(scope, ongoing_items or [])
+        merged_ongoing = self._project_ongoing_items(scope, ongoing_items or [])
         filtered_records = self._workbench_records(month=default_month, scope=scope)
         linked_zhihang_ids = self._linked_zhihang_record_ids(merged_ongoing)
         zhihang_records = self._filter_zhihang_change_records(
@@ -7705,7 +7993,7 @@ class MaintenancePortalService:
     ) -> dict[str, Any]:
         self.ensure_snapshot_loaded()
         scope = self._normalize_scope(scope)
-        merged_ongoing = self._merge_ongoing_items(scope, ongoing_items or [])
+        merged_ongoing = self._project_ongoing_items(scope, ongoing_items or [])
         filtered_records = self._workbench_records(
             month=month, specialty=specialty, scope=scope
         )
@@ -8601,9 +8889,10 @@ class MaintenancePortalService:
         except Exception as exc:
             raise PortalError("签名图片无法读取，请重新签名。") from exc
         gray = image.convert("L")
-        ink_alpha = gray.point(lambda p: 0 if p >= 246 else min(255, max(0, (246 - int(p)) * 5)))
+        ink_alpha = gray.point(lambda p: 0 if p >= 248 else min(255, max(0, (248 - int(p)) * 7)))
         source_alpha = image.getchannel("A")
         alpha = ImageChops.multiply(ink_alpha, source_alpha)
+        alpha = alpha.point(lambda p: min(255, int(p) * 2) if p > 0 else 0)
         transparent = Image.new("RGBA", image.size, (0, 0, 0, 0))
         transparent.putalpha(alpha)
         bbox = alpha.point(lambda p: 255 if p > 8 else 0).getbbox()
@@ -9089,6 +9378,8 @@ class MaintenancePortalService:
         signature_png: str,
         signer_name: str = "",
         link_token: str = "",
+        operator_open_id: str = "",
+        operator_name: str = "",
     ) -> dict[str, Any]:
         record_id = str(record_id or "").strip()
         if not record_id:
@@ -9121,6 +9412,38 @@ class MaintenancePortalService:
         with self._signature_people_cache_lock:
             self._signature_people_cache = None
         signature_version = hashlib.sha1(file_token.encode("utf-8")).hexdigest()[:12]
+        notification_warning = ""
+        notification_result: dict[str, Any] = {}
+        operator_open_id = str(operator_open_id or "").strip()
+        operator_name = str(operator_name or "").strip()
+        person_open_id = str(person.get("open_id") or "").strip()
+        if operator_open_id or operator_name:
+            if person_open_id:
+                lines = [
+                    "【MOP签名保存提醒】",
+                    "",
+                    f"签名人员：{person.get('name') or signer_name or record_id}",
+                    f"操作人：{operator_name or '未知'}"
+                    + (f"（{operator_open_id}）" if operator_open_id else ""),
+                    f"保存时间：{dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                    "说明：你的手写签名已由上述登录人通过门户网页保存到签名库。",
+                ]
+                if external_mock_enabled():
+                    ok, message, send_results = True, "mock external send skipped", [
+                        {"open_id": person_open_id, "ok": True, "message": "mock external send skipped"}
+                    ]
+                else:
+                    ok, message, send_results = send_text_to_open_ids("\n".join(lines), [person_open_id])
+                send_result = (send_results or [{}])[0] if send_results else {}
+                notification_result = {
+                    "open_id": person_open_id,
+                    "ok": bool(ok and send_result.get("ok", ok)),
+                    "message": str(send_result.get("message") or message or ""),
+                }
+                if not notification_result["ok"]:
+                    notification_warning = f"签名已保存，但通知签名人员失败：{notification_result['message'] or '发送失败'}"
+            else:
+                notification_warning = "签名已保存，但该人员缺少 openid，无法发送签名保存提醒。"
         return {
             "record_id": record_id,
             "name": str(person.get("name") or signer_name or ""),
@@ -9132,6 +9455,68 @@ class MaintenancePortalService:
                 link_token=link_token,
             ),
             "has_signature": True,
+            "saved_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "notification_result": notification_result,
+            "notification_warning": notification_warning,
+        }
+
+    def save_external_signature_for_person(
+        self,
+        *,
+        record_id: str,
+        signature_png: str,
+        signer_name: str = "",
+    ) -> dict[str, Any]:
+        record_id = str(record_id or "").strip()
+        if not record_id:
+            raise PortalError("请选择要保存签名的其他人员。")
+        signature_bytes = self._transparent_signature_png(
+            self._decode_signature_png(signature_png)
+        )
+        people = self._load_external_signature_people(force=True)
+        person = next(
+            (item for item in people if str(item.get("record_id") or "") == record_id),
+            None,
+        )
+        if not person:
+            raise PortalError("其他人员签名记录不存在。")
+        safe_name = self._safe_mop_path_part(
+            signer_name or str(person.get("name") or "external_signature"),
+            "external_signature",
+        )
+        file_name = f"{safe_name}_{dt.datetime.now().strftime('%Y%m%d%H%M%S')}.png"
+        file_token = self._upload_signature_image(
+            signature_bytes=signature_bytes,
+            file_name=file_name,
+        )
+        self._patch_record_fields(
+            app_token=SIGNATURE_APP_TOKEN,
+            table_id=TEMP_SIGNATURE_TABLE_ID,
+            record_id=record_id,
+            fields={TEMP_SIGNATURE_ATTACHMENT_FIELD: [{"file_token": file_token}]},
+        )
+        with self._external_signature_people_cache_lock:
+            self._external_signature_people_cache = None
+        signature_version = hashlib.sha1(file_token.encode("utf-8")).hexdigest()[:12]
+        name = str(person.get("name") or signer_name or "其他人员")
+        return {
+            "source": "external",
+            "record_id": record_id,
+            "name": name,
+            "display_name": name,
+            "file_token": file_token,
+            "signature_version": signature_version,
+            "signature_preview_url": self._external_signature_preview_url(
+                record_id=record_id,
+                signature_version=signature_version,
+            ),
+            "has_signature": True,
+            "signature_count": 1,
+            "building": str(person.get("building") or ""),
+            "scope_text": str(person.get("scope_text") or person.get("building") or ""),
+            "specialty": str(person.get("specialty") or ""),
+            "employee_no": str(person.get("employee_no") or ""),
+            "certificate": str(person.get("certificate") or ""),
             "saved_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
 
@@ -9220,23 +9605,16 @@ class MaintenancePortalService:
     ) -> str:
         """Build the public portal URL used in signature links.
 
-        A browser-origin URL from the current page has the highest priority,
-        because phones must open the same LAN address the operator is using.
-        Legacy callers without request context still fall back to configured
-        handover/portal host values.
+        The configured handover/portal LAN address has the highest priority,
+        because signature links are usually opened from another phone. A
+        browser-origin URL is only used as fallback when no public handover
+        address has been configured.
         """
 
         base_text = str(request_base_url or "").strip().rstrip("/")
         if base_text and "://" not in base_text:
             base_text = f"http://{base_text}"
         parsed_base = urlparse(base_text) if base_text else None
-        if (
-            parsed_base
-            and parsed_base.scheme in {"http", "https"}
-            and parsed_base.netloc
-            and str(parsed_base.hostname or "").strip() not in {"0.0.0.0", "::"}
-        ):
-            return f"{parsed_base.scheme}://{parsed_base.netloc}"
         scheme = (
             parsed_base.scheme
             if parsed_base and parsed_base.scheme in {"http", "https"}
@@ -9260,9 +9638,25 @@ class MaintenancePortalService:
             parsed_handover = urlparse(handover_url)
             handover_host = str(parsed_handover.hostname or "").strip()
             if handover_host and handover_host not in {"0.0.0.0", "::"}:
+                handover_scheme = (
+                    parsed_handover.scheme
+                    if parsed_handover.scheme in {"http", "https"}
+                    else scheme
+                )
+                if parsed_handover.netloc:
+                    return f"{handover_scheme}://{parsed_handover.netloc}"
                 host = handover_host
         except Exception:
             pass
+
+        if (
+            parsed_base
+            and parsed_base.scheme in {"http", "https"}
+            and parsed_base.netloc
+            and str(parsed_base.hostname or "").strip()
+            not in {"127.0.0.1", "localhost", "0.0.0.0", "::"}
+        ):
+            return f"{parsed_base.scheme}://{parsed_base.netloc}"
 
         configured_host = str(getattr(config, "lan_template_portal_host", "") or "").strip()
         if (
@@ -9370,10 +9764,12 @@ class MaintenancePortalService:
         *,
         scope: str,
         notice_key: str,
+        created_by: str = "",
     ) -> str:
         sessions = self._state_store.list_mop_temporary_signature_sessions(
             scope=scope,
             notice_key=notice_key,
+            created_by=created_by,
             include_expired=True,
         )
         return f"临时人员{len(sessions) + 1}"
@@ -9406,6 +9802,7 @@ class MaintenancePortalService:
         display_name = str(display_name or "").strip() or self._temporary_signature_display_name(
             scope=scope,
             notice_key=notice_key,
+            created_by=created_by,
         )
         session = self._state_store.create_mop_temporary_signature_session(
             scope=scope,
@@ -9447,6 +9844,103 @@ class MaintenancePortalService:
             "signature": self._public_temporary_signature_session(
                 session,
                 link_token=str(session.get("token") or ""),
+            ),
+        }
+
+    def create_temporary_signature_session(
+        self,
+        *,
+        scope: str,
+        notice_key: str,
+        role: str,
+        notice_title: str = "",
+        specialty: str = "",
+        display_name: str = "",
+        created_by: str = "",
+    ) -> dict[str, Any]:
+        scope = self._normalize_scope(scope)
+        notice_key = str(notice_key or "").strip()
+        if not notice_key:
+            raise PortalError("当前通告缺少记忆键，无法创建临时签名。")
+        role = str(role or "implementer").strip()
+        if role not in {"implementer", "auditor"}:
+            raise PortalError("临时签名角色无效。")
+        display_name = str(display_name or "").strip() or self._temporary_signature_display_name(
+            scope=scope,
+            notice_key=notice_key,
+            created_by=created_by,
+        )
+        session = self._state_store.create_mop_temporary_signature_session(
+            scope=scope,
+            notice_key=notice_key,
+            role=role,
+            display_name=display_name,
+            recipient_open_ids=[],
+            created_by=created_by,
+            ttl_seconds=SIGNATURE_LINK_TOKEN_TTL_SECONDS,
+            payload={
+                "notice_title": str(notice_title or ""),
+                "specialty": str(specialty or ""),
+            },
+        )
+        return self._public_temporary_signature_session(
+            session,
+            link_token=str(session.get("token") or ""),
+        )
+
+    def build_existing_temporary_signature_link_message(
+        self,
+        *,
+        temp_id: str,
+        request_base_url: str = "",
+    ) -> dict[str, Any]:
+        temp_id = str(temp_id or "").strip()
+        if not temp_id:
+            raise PortalError("请选择要重发链接的临时人员。")
+        session = self._state_store.refresh_mop_temporary_signature_session_token(
+            temp_id=temp_id,
+            ttl_seconds=SIGNATURE_LINK_TOKEN_TTL_SECONDS,
+        )
+        scope = self._normalize_scope(str(session.get("scope") or "ALL"))
+        token = str(session.get("token") or "")
+        link_url = self._temporary_signature_public_url(
+            temp_id=temp_id,
+            token=token,
+            scope=scope,
+            request_base_url=request_base_url,
+        )
+        role = str(session.get("role") or "implementer")
+        role_label = self._mop_role_label(role)
+        payload = session.get("payload") if isinstance(session.get("payload"), dict) else {}
+        display_name = str(session.get("display_name") or "临时人员").strip()
+        notice_title = str(payload.get("notice_title") or "").strip()
+        recipients = [
+            str(item or "").strip()
+            for item in (session.get("recipient_open_ids") or [])
+            if str(item or "").strip()
+        ]
+        if not recipients:
+            raise PortalError("该临时人员缺少接收人 openid，无法重发链接。")
+        text = "\n".join(
+            [
+                "【线上签名】请现场完成 MOP 其他人员签名",
+                "",
+                f"签名角色：{role_label}",
+                f"临时人员：{display_name}",
+                f"维护通告：{notice_title or '未命名维保通告'}",
+                f"签名链接：{link_url}",
+                "",
+                "请用手机打开链接，让现场人员在页面手写签名并保存。",
+            ]
+        )
+        return {
+            **{key: value for key, value in session.items() if key != "token"},
+            "link_url": link_url,
+            "open_ids": recipients,
+            "text": text,
+            "signature": self._public_temporary_signature_session(
+                session,
+                link_token=token,
             ),
         }
 
@@ -9504,11 +9998,13 @@ class MaintenancePortalService:
         *,
         scope: str = "ALL",
         notice_key: str = "",
+        created_by: str = "",
     ) -> dict[str, Any]:
         scope = self._normalize_scope(scope or "ALL")
         sessions = self._state_store.list_mop_temporary_signature_sessions(
             scope=scope,
             notice_key=str(notice_key or "").strip(),
+            created_by=str(created_by or "").strip(),
         )
         return {
             "items": [
@@ -9542,10 +10038,11 @@ class MaintenancePortalService:
         token: str,
         signature_png: str,
     ) -> dict[str, Any]:
+        require_token = bool(str(token or "").strip())
         session = self._state_store.get_mop_temporary_signature_session(
             temp_id=temp_id,
             token=token,
-            require_valid_token=True,
+            require_valid_token=require_token,
         )
         if not session:
             raise PortalError("临时签名链接无效或已过期。")
@@ -9676,6 +10173,27 @@ class MaintenancePortalService:
             index, remainder = divmod(index - 1, 26)
             label = chr(65 + remainder) + label
         return label
+
+    @staticmethod
+    def _excel_points_to_pixels(value: Any, *, fallback: float = 15.0) -> int:
+        try:
+            points = float(value)
+        except Exception:
+            points = float(fallback)
+        if points <= 0:
+            points = float(fallback)
+        return max(1, int(round(points * 96 / 72)))
+
+    @classmethod
+    def _mop_worksheet_row_height_px(cls, worksheet: Any, *, row: int) -> int:
+        row = max(1, int(row or 1))
+        default_height = getattr(getattr(worksheet, "sheet_format", None), "defaultRowHeight", None) or 15
+        row_height = getattr(getattr(worksheet, "row_dimensions", {}).get(row), "height", None)
+        return cls._excel_points_to_pixels(row_height or default_height, fallback=float(default_height or 15))
+
+    @classmethod
+    def _mop_signature_max_height_px(cls, worksheet: Any, *, row: int) -> int:
+        return max(1, int(round(cls._mop_worksheet_row_height_px(worksheet, row=row) * 1.5)))
 
     @classmethod
     def _mop_signature_target_column(cls, worksheet: Any, *, row: int, label_col: int) -> int:
@@ -10227,6 +10745,54 @@ class MaintenancePortalService:
         }
 
     @staticmethod
+    def _normalize_mop_fill_memory_name(
+        *, mop_title: str = "", mop_file_name: str = ""
+    ) -> str:
+        source = str(mop_file_name or mop_title or "").strip()
+        if mop_file_name:
+            source = Path(source).stem
+        source = re.sub(r"(_[0-9a-fA-F]{8,40})$", "", source)
+        source = re.sub(r"_已签名_\d{6}_[0-9a-fA-F]{6,16}$", "", source)
+        source = re.sub(r"\.(xlsx|xlsm|xls|csv)$", "", source, flags=re.IGNORECASE)
+        source = source.replace("　", " ")
+        source = re.sub(r"\s+", "", source)
+        source = re.sub(r"[^\w\u4e00-\u9fff]+", "", source, flags=re.UNICODE)
+        return source.lower()
+
+    def _mop_fill_memory_key(self, *, mop_title: str = "", mop_file_name: str = "") -> str:
+        normalized = self._normalize_mop_fill_memory_name(
+            mop_title=mop_title,
+            mop_file_name=mop_file_name,
+        )
+        if not normalized:
+            return ""
+        return "mop-fill:" + hashlib.sha1(normalized.encode("utf-8")).hexdigest()
+
+    def _build_mop_fill_memory_payload(
+        self,
+        *,
+        scope: str,
+        source_record_id: str = "",
+        notice_title: str = "",
+        notice_key: str = "",
+        sheet_name: str = "",
+        fields: list[dict[str, Any]] | None = None,
+        checkboxes: list[dict[str, Any]] | None = None,
+        cell_edits: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "scope": str(scope or "ALL"),
+            "source_record_id": str(source_record_id or ""),
+            "notice_title": str(notice_title or ""),
+            "notice_key": str(notice_key or ""),
+            "sheet_name": str(sheet_name or ""),
+            "fields": [item for item in (fields or []) if isinstance(item, dict)],
+            "checkboxes": [item for item in (checkboxes or []) if isinstance(item, dict)],
+            "cell_edits": [item for item in (cell_edits or []) if isinstance(item, dict)],
+            "saved_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    @staticmethod
     def _mop_editable_summary(sheets: list[dict[str, Any]]) -> dict[str, Any]:
         checkbox_count = 0
         maintenance_field_count = 0
@@ -10253,6 +10819,36 @@ class MaintenancePortalService:
             return ""
         return "".join(element.itertext()).strip()
 
+    @classmethod
+    def _mop_preview_row_heights(
+        cls,
+        sheet_root: ET.Element,
+        ns: dict[str, str],
+        *,
+        max_rows: int = 0,
+    ) -> tuple[int, dict[str, int]]:
+        default_height = 15.0
+        sheet_format = sheet_root.find("main:sheetFormatPr", ns)
+        if sheet_format is not None:
+            try:
+                default_height = float(sheet_format.attrib.get("defaultRowHeight") or default_height)
+            except Exception:
+                default_height = 15.0
+        default_height_px = cls._excel_points_to_pixels(default_height)
+        row_heights: dict[str, int] = {}
+        for row in sheet_root.findall("main:sheetData/main:row", ns):
+            try:
+                row_number = int(row.attrib.get("r") or 0)
+            except Exception:
+                row_number = 0
+            if row_number <= 0 or (max_rows and row_number > max_rows):
+                continue
+            height = row.attrib.get("ht")
+            if not height:
+                continue
+            row_heights[str(row_number - 1)] = cls._excel_points_to_pixels(height, fallback=default_height)
+        return default_height_px, row_heights
+
     def _parse_xlsx_preview(self, content: bytes, *, max_rows: int = 0, max_cols: int = 0) -> dict[str, Any]:
         ns = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
         rel_ns = {"rel": "http://schemas.openxmlformats.org/package/2006/relationships"}
@@ -10277,6 +10873,11 @@ class MaintenancePortalService:
                 if path not in archive.namelist():
                     continue
                 sheet_root = ET.fromstring(archive.read(path))
+                default_row_height_px, row_heights = self._mop_preview_row_heights(
+                    sheet_root,
+                    ns,
+                    max_rows=max_rows,
+                )
                 rows_out: list[list[str]] = []
                 max_width = 0
                 truncated = False
@@ -10351,6 +10952,8 @@ class MaintenancePortalService:
                             for index in range(min(target_width, max_cols) if max_cols else target_width)
                         ],
                         "merges": merges,
+                        "default_row_height_px": default_row_height_px,
+                        "row_heights": row_heights,
                         "truncated": truncated or bool(max_cols and target_width > max_cols),
                         **targets,
                     }
@@ -10392,6 +10995,8 @@ class MaintenancePortalService:
                     "column_count": max_width,
                     "columns": [self._column_label(index + 1) for index in range(max_width)],
                     "merges": [],
+                    "default_row_height_px": self._excel_points_to_pixels(15),
+                    "row_heights": {},
                     "truncated": False,
                     **targets,
                 }
@@ -10598,10 +11203,18 @@ class MaintenancePortalService:
             parsed = self._parse_xlsx_preview(content)
         else:
             raise PortalError("暂只支持预览 xlsx/csv 格式的 MOP 表格附件。")
+        memory_key = self._mop_fill_memory_key(
+            mop_title=str(record.get("title") or ""),
+            mop_file_name=resolved_name,
+        )
+        fill_memory = self._state_store.get_mop_fill_memory(memory_key) if memory_key else None
         parsed.update(
             {
                 "mop_record_id": record.get("record_id"),
                 "mop_title": record.get("title"),
+                "mop_file_name": resolved_name,
+                "mop_fill_memory_key": memory_key,
+                "fill_memory": fill_memory,
                 "attachment": attachment,
                 "local_file": local_file,
                 "editable_summary": self._mop_editable_summary(parsed.get("sheets") or []),
@@ -10617,6 +11230,7 @@ class MaintenancePortalService:
         local_file_path: str = "",
         mop_record_id: str = "",
         mop_title: str = "",
+        mop_file_name: str = "",
         sheet_name: str = "",
         fields: list[dict[str, Any]] | None = None,
         checkboxes: list[dict[str, Any]] | None = None,
@@ -10757,6 +11371,7 @@ class MaintenancePortalService:
                     row=base_row,
                     label_col=label_col,
                 )
+                max_signature_height = self._mop_signature_max_height_px(worksheet, row=base_row)
                 role_images = []
                 for signature in role_signatures:
                     source = str(signature.get("source") or "").strip()
@@ -10769,7 +11384,7 @@ class MaintenancePortalService:
                     else:
                         image_bytes, _content_type = self.signature_image_bytes(record_id=record_id)
                     image = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
-                    max_width, max_height = 150, 46
+                    max_width, max_height = 150, max_signature_height
                     ratio = min(max_width / max(1, image.width), max_height / max(1, image.height), 1.0)
                     if ratio < 1.0:
                         image = image.resize(
@@ -11012,6 +11627,7 @@ class MaintenancePortalService:
         local_file_path: str = "",
         mop_record_id: str = "",
         mop_title: str = "",
+        mop_file_name: str = "",
         sheet_name: str = "",
         fields: list[dict[str, Any]] | None = None,
         checkboxes: list[dict[str, Any]] | None = None,
@@ -11037,6 +11653,7 @@ class MaintenancePortalService:
             local_file_path=local_file_path,
             mop_record_id=mop_record_id,
             mop_title=mop_title,
+            mop_file_name=mop_file_name,
             sheet_name=sheet_name,
             fields=fields or [],
             checkboxes=checkboxes or [],
@@ -11059,6 +11676,34 @@ class MaintenancePortalService:
             record_id=source_record_id,
             fields=update_fields,
         )
+        memory_warning = ""
+        memory_key = self._mop_fill_memory_key(
+            mop_title=mop_title,
+            mop_file_name=mop_file_name or Path(str(local_file_path or "")).name,
+        )
+        if memory_key:
+            try:
+                self._state_store.upsert_mop_fill_memory(
+                    {
+                        "memory_key": memory_key,
+                        "mop_title": mop_title,
+                        "mop_file_name": mop_file_name or Path(str(local_file_path or "")).name,
+                        "sheet_name": sheet_name,
+                        "updated_by": operator_open_id or operator_name,
+                        "payload": self._build_mop_fill_memory_payload(
+                            scope=scope,
+                            source_record_id=source_record_id,
+                            notice_title=notice_title,
+                            notice_key=notice_key,
+                            sheet_name=sheet_name,
+                            fields=fields or [],
+                            checkboxes=checkboxes or [],
+                            cell_edits=cell_edits or [],
+                        ),
+                    }
+                )
+            except Exception as exc:
+                memory_warning = f"MOP填写记忆保存失败：{exc}"
         self._touch_state_cache_version()
         title = (
             str(notice_title or "").strip()
@@ -11087,6 +11732,8 @@ class MaintenancePortalService:
             "updated_fields": list(update_fields.keys()),
             "notification_results": notification_results,
             "notification_warning": notification_warning,
+            "memory_key": memory_key,
+            "memory_warning": memory_warning,
             "uploaded_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
 

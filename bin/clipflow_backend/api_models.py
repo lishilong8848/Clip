@@ -71,6 +71,17 @@ class PermissionRequestConfirm(APIModel):
     code: str = ""
 
 
+class PermissionRequestReviewRequest(APIModel):
+    scopes: list[str] = Field(default_factory=list)
+    reason: str = ""
+
+
+class PermissionRequestBulkReviewRequest(APIModel):
+    request_ids: list[str] = Field(default_factory=list)
+    scopes_by_request_id: dict[str, list[str]] = Field(default_factory=dict)
+    reason: str = ""
+
+
 class HandoverLinksSaveRequest(APIModel):
     links: dict[str, Any] = Field(default_factory=dict)
     password: str = ""
@@ -149,6 +160,7 @@ class SignatureSendLinkRequest(APIModel):
 
 
 class TemporarySignatureSendLinkRequest(APIModel):
+    temporary_id: str = ""
     scope: str = "ALL"
     notice_key: str = ""
     notice_title: str = ""
@@ -159,10 +171,25 @@ class TemporarySignatureSendLinkRequest(APIModel):
     request_base_url: str = ""
 
 
+class TemporarySignatureCreateRequest(APIModel):
+    scope: str = "ALL"
+    notice_key: str = ""
+    notice_title: str = ""
+    specialty: str = ""
+    display_name: str = ""
+    role: str = "implementer"
+
+
 class TemporarySignatureSaveRequest(APIModel):
     temporary_id: str = ""
     token: str = ""
     signature_png: str = ""
+
+
+class ExternalSignatureSaveRequest(APIModel):
+    record_id: str = ""
+    signature_png: str = ""
+    signer_name: str = ""
 
 
 class EngineerMopFillRequest(APIModel):
@@ -170,6 +197,7 @@ class EngineerMopFillRequest(APIModel):
     local_file_path: str = ""
     mop_record_id: str = ""
     mop_title: str = ""
+    mop_file_name: str = ""
     sheet_name: str = ""
     fields: list[dict[str, Any]] = Field(default_factory=list)
     checkboxes: list[dict[str, Any]] = Field(default_factory=list)

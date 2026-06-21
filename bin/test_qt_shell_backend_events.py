@@ -216,7 +216,7 @@ class QtShellBackendEventTests(unittest.TestCase):
                 self.assertIsNotNone(entry)
                 result = FastAPIPortalController._project_clipboard_entry_to_active(entry or {})
                 payload = result["item"]["payload"]
-                self.assertEqual(payload["notice_type"], "变更通告")
+                self.assertEqual(payload["notice_type"], "设备变更")
                 self.assertEqual(payload["work_type"], "change")
                 self.assertEqual(payload["location"], "A-245配电室")
                 self.assertEqual(payload["content"], "工程师对蓄电池进行测试")
@@ -264,7 +264,7 @@ class QtShellBackendEventTests(unittest.TestCase):
                 ongoing = FastAPIPortalController._get_ongoing("A")
                 self.assertEqual(len(ongoing), 1)
                 item = ongoing[0]
-                self.assertEqual(item["notice_type"], "变更通告")
+                self.assertEqual(item["notice_type"], "设备变更")
                 self.assertEqual(item["location"], "A-127冷站")
                 self.assertEqual(item["content"], "调整冷源设备")
                 self.assertEqual(item["reason"], "运行优化")

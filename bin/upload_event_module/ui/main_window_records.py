@@ -198,6 +198,15 @@ class MainWindowRecordsMixin:
                         data.get("feishu_record_id"),
                         data.get("raw_record_id"),
                     )
+                    mark_failed = getattr(self, "_mark_upload_state_failed_for_ids", None)
+                    if callable(mark_failed):
+                        mark_failed(
+                            "上传状态超时，后端仍以任务为准；请刷新核对后重试。",
+                            data.get("record_id"),
+                            data.get("target_record_id"),
+                            data.get("feishu_record_id"),
+                            data.get("raw_record_id"),
+                        )
                     recovered += 1
                     continue
             started_at = float(data.get("_upload_started_monotonic") or 0.0)
@@ -206,6 +215,8 @@ class MainWindowRecordsMixin:
             data = dict(data)
             data["_upload_in_progress"] = False
             data["_pending_upload_hash"] = None
+            data["_has_unuploaded_changes"] = True
+            data["_last_upload_error"] = "上传状态超时，已恢复按钮，可刷新核对后重试。"
             data.pop("_upload_started_monotonic", None)
             item.setData(Qt.ItemDataRole.UserRole, data)
             self._rebuild_active_item_widget(
@@ -215,7 +226,7 @@ class MainWindowRecordsMixin:
                 force_status=None,
                 upload_in_progress=False,
                 pending_upload_hash=None,
-                has_unuploaded_changes=data.get("_has_unuploaded_changes"),
+                has_unuploaded_changes=True,
             )
             recovered += 1
         if recovered:
@@ -1974,6 +1985,7 @@ class MainWindowRecordsMixin:
         updated = dict(current)
         if syncing:
             updated["_today_in_progress_syncing"] = True
+            updated.pop("_today_in_progress_error", None)
         else:
             updated.pop("_today_in_progress_syncing", None)
         try:
@@ -2235,6 +2247,11 @@ class MainWindowRecordsMixin:
                         desired_state,
                         fallback_record_id=record_id,
                     )
+                    self._mark_today_in_progress_error(
+                        data_dict,
+                        "",
+                        fallback_record_id=record_id,
+                    )
                     return
                 self._mark_today_in_progress_syncing(
                     data_dict,
@@ -2246,13 +2263,46 @@ class MainWindowRecordsMixin:
                     current_state,
                     fallback_record_id=record_id,
                 )
+                self._mark_today_in_progress_error(
+                    data_dict,
+                    f"多维同步失败，点击重试：{result}",
+                    fallback_record_id=record_id,
+                )
                 if widget_now and hasattr(widget_now, "set_today_progress_state"):
                     widget_now.set_today_progress_state(current_state, enabled=True)
-                self.show_message(f"更新“今日是否进行”失败\n{result}")
+                self.show_message(f"多维同步失败，点击重试\n{result}")
 
             self._enqueue_ui_mutation("today_in_progress_toggle", apply_result)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _mark_today_in_progress_error(
+        self,
+        data_dict: dict | None,
+        message: str,
+        *,
+        fallback_record_id: str = "",
+    ):
+        list_widget, item = self._find_today_in_progress_active_item(
+            data_dict,
+            fallback_record_id=fallback_record_id,
+        )
+        if not item or not list_widget:
+            return
+        current = item.data(Qt.ItemDataRole.UserRole) or {}
+        if not isinstance(current, dict):
+            return
+        updated = dict(current)
+        text = str(message or "").strip()
+        if text:
+            updated["_today_in_progress_error"] = text
+        else:
+            updated.pop("_today_in_progress_error", None)
+        try:
+            item.setData(Qt.ItemDataRole.UserRole, updated)
+        except Exception:
+            return
+        self._upsert_active_notice_model_item(list_widget, item, updated)
 
     def _load_record_from_cache(self, record_id: str) -> dict | None:
         rid = str(record_id or "").strip()
@@ -3560,8 +3610,10 @@ class MainWindowRecordsMixin:
                         )
                 if not success:
                     data["_has_unuploaded_changes"] = True
+                    data["_last_upload_error"] = f"{name or '上传'}失败，可重试。"
                 else:
                     data["_has_unuploaded_changes"] = False
+                    data.pop("_last_upload_error", None)
                 has_unuploaded_changes = data.get("_has_unuploaded_changes")
 
                 data["_pending_upload_hash"] = None
@@ -3594,6 +3646,49 @@ class MainWindowRecordsMixin:
             # 清除所有 pending 状态 (慎用，通常只在完全重置时)
             self._set_last_ui_op("restore_all_skipped")
             return
+
+    def _mark_upload_state_failed_for_ids(self, message: str, *record_ids):
+        error_text = str(message or "上传失败，可重试。").strip() or "上传失败，可重试。"
+        candidate_ids: list[str] = []
+        for record_id in record_ids:
+            text = str(record_id or "").strip()
+            if not text:
+                continue
+            try:
+                candidate_ids.extend(self._upload_completion_record_id_candidates(text))
+            except Exception:
+                candidate_ids.append(text)
+        seen: set[str] = set()
+        for record_id in candidate_ids:
+            if not record_id or record_id in seen:
+                continue
+            seen.add(record_id)
+            list_widget, item, _matched = self._find_active_item_by_upload_completion_id(
+                record_id
+            )
+            if item and not self._is_valid_list_item(item):
+                continue
+            if list_widget is None or item is None:
+                continue
+            data = item.data(Qt.ItemDataRole.UserRole) or {}
+            if not isinstance(data, dict):
+                continue
+            data = dict(data)
+            data["_upload_in_progress"] = False
+            data["_pending_upload_hash"] = None
+            data["_has_unuploaded_changes"] = True
+            data["_last_upload_error"] = error_text
+            data.pop("_upload_started_monotonic", None)
+            item.setData(Qt.ItemDataRole.UserRole, data)
+            self._rebuild_active_item_widget(
+                list_widget,
+                item,
+                data,
+                force_status=None,
+                upload_in_progress=False,
+                pending_upload_hash=None,
+                has_unuploaded_changes=True,
+            )
 
     def clear_upload_runtime_state_for_ids(self, *record_ids):
         """Clear Qt-local upload markers for all aliases of the given IDs.

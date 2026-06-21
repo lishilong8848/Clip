@@ -957,9 +957,24 @@ def _missing_runtime_modules(venv_python: Path) -> list[str]:
     return [line.strip() for line in output.splitlines() if line.strip()]
 
 
+def _project_runtime_site_packages() -> list[str]:
+    candidates: list[Path] = []
+    venv_root = BIN_DIR / ".venv"
+    if os.name == "nt":
+        candidates.append(venv_root / "Lib" / "site-packages")
+    else:
+        candidates.extend((venv_root / "lib").glob("python*/site-packages"))
+    return [str(path) for path in candidates if path.is_dir()]
+
+
 def _missing_selected_modules(venv_python: Path, modules: list[str]) -> list[str]:
+    runtime_site_packages = _project_runtime_site_packages()
     script_lines = [
         "import importlib",
+        "import sys",
+        "for path in " + repr(runtime_site_packages) + ":",
+        "    if path not in sys.path:",
+        "        sys.path.insert(0, path)",
         "mods = " + repr(modules),
         "missing = []",
         "for name in mods:",
@@ -1392,11 +1407,26 @@ def _cleanup_vue_dist_assets() -> None:
         for match in re.finditer(r"/assets/([^\"'>]+)", html_text)
         if match.group(1)
     }
+    reachable = set(referenced)
+    pending = list(sorted(referenced))
+    asset_ref_pattern = re.compile(r"(?:^|[\"'`(,])/?assets/([^\"'`),\s]+)")
+    while pending:
+        name = pending.pop()
+        path = assets_dir / name
+        if not path.is_file() or path.suffix.lower() not in {".js", ".css"}:
+            continue
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        for match in asset_ref_pattern.findall(text):
+            asset_name = match.strip()
+            if not asset_name or asset_name in reachable:
+                continue
+            reachable.add(asset_name)
+            pending.append(asset_name)
     removed = 0
     for path in assets_dir.glob("*"):
         if not path.is_file():
             continue
-        if path.name in referenced:
+        if path.name in reachable:
             continue
         if path.suffix.lower() not in {".js", ".css"}:
             continue

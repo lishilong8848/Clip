@@ -44,7 +44,19 @@ class _HistoryMemoryService(MaintenancePortalService):
     def _load_table_fields(self, *, app_token: str, table_id: str):
         return [], {}
 
+    def _load_fields(self):
+        self._field_meta_by_name = {}
+
+    def _load_change_fields(self):
+        self._change_field_meta_by_name = {}
+
     def _load_table_records(self, *, app_token: str, table_id: str, meta_by_name, work_type: str, notice_type: str):
+        if table_id != work_type:
+            return [
+                record
+                for record in self.source_records
+                if record.get("work_type") == work_type
+            ]
         return list(self.table_records.get(work_type, []))
 
     def _source_snapshot_records(self, scope: str):

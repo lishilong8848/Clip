@@ -117,10 +117,15 @@ class ActiveNoticeDelegate(QStyledItemDelegate):
                 record.get("today_in_progress_state")
             )
             syncing = ActiveNoticeModel.is_today_progress_syncing(record)
+            sync_error = bool(str(record.get("_today_in_progress_error") or "").strip())
             if syncing:
                 border = QColor("#2563EB")
                 text_color = QColor("#DBEAFE")
                 fill = QColor("#1E3A8A")
+            elif sync_error:
+                border = QColor("#DC2626")
+                text_color = QColor("#FFFFFF")
+                fill = QColor("#991B1B")
             elif state == "yes":
                 border = QColor("#15803D")
                 text_color = QColor("#FFFFFF")
@@ -147,10 +152,15 @@ class ActiveNoticeDelegate(QStyledItemDelegate):
         if "action" in buttons:
             uploading = ActiveNoticeModel.is_uploading_record(record)
             uploaded = ActiveNoticeModel.is_uploaded_record(record)
+            upload_error = ActiveNoticeModel.has_upload_error(record) and not uploaded
             if uploading:
                 border = QColor("#D97706")
                 text_color = QColor("#FDE68A")
                 fill = QColor("#451A03")
+            elif upload_error:
+                border = QColor("#DC2626")
+                text_color = QColor("#FEE2E2")
+                fill = QColor("#7F1D1D")
             elif uploaded:
                 border = QColor("#16A34A")
                 text_color = QColor("#BBF7D0")

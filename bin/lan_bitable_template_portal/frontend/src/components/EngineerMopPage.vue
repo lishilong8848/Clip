@@ -14,7 +14,9 @@
             </option>
           </select>
         </label>
-        <button class="btn ghost" type="button" :disabled="loading" @click="loadPage">刷新</button>
+        <button class="btn ghost refresh-mini" type="button" :disabled="loading" title="刷新本页数据" @click="loadPage">
+          {{ loading ? "…" : "刷新" }}
+        </button>
         <a class="btn ghost" href="/">功能选择</a>
       </div>
     </header>
@@ -26,460 +28,193 @@
     </div>
 
     <template v-else>
-      <div v-if="message" class="message" :class="{ failed: messageType === 'failed', success: messageType === 'success' }">
-        {{ message }}
-      </div>
-      <div v-if="warnings.length" class="warning-list">
-        <span v-for="warning in warnings" :key="warning">{{ warning }}</span>
-      </div>
+      <MessageBanner
+        v-if="message"
+        :tone="messageType === 'failed' ? 'failed' : messageType === 'success' ? 'success' : 'info'"
+        :text="message"
+      />
+      <MessageBanner
+        v-if="warnings.length"
+        tone="warning"
+        title="需要注意"
+        :items="warnings"
+      />
+
+      <section v-if="!previewMode" class="mop-flow-steps" aria-label="MOP填写流程">
+        <article
+          v-for="step in mopFlowSteps"
+          :key="step.key"
+          :class="[step.state]"
+        >
+          <b>{{ step.index }}</b>
+          <span>
+            <strong>{{ step.label }}</strong>
+            <small>{{ step.text }}</small>
+          </span>
+        </article>
+      </section>
 
       <section v-if="previewMode && preview" class="mop-preview-page">
-        <header class="preview-head">
-          <button class="btn ghost preview-back" type="button" @click="backToBinding">返回</button>
-          <div>
-            <strong>{{ previewTitle }}</strong>
-            <p>
-              <template v-if="selectedNotice">{{ selectedNotice.title }}</template>
-              <template v-if="activeSheet"> · {{ activeSheet.name }} · {{ activeSheet.row_count || 0 }} 行</template>
-            </p>
-          </div>
-          <div class="preview-head-status">
-            <span
-              v-for="item in mopCompletionItems"
-              :key="`head:${item.key}`"
-              :class="{ done: item.done, pending: !item.done }"
-            >
-              {{ item.label }}：{{ item.text }}
-            </span>
-          </div>
-        </header>
-        <div v-if="preview.local_file" class="mop-file-status">
-          <span>已下载到本机</span>
-          <strong>{{ preview.local_file.relative_path || preview.local_file.file_name }}</strong>
-          <small>{{ preview.local_file.path }}</small>
-        </div>
+        <MopPreviewHeader
+          :title="previewTitle"
+          :notice-title="selectedNotice?.title || ''"
+          :sheet-name="activeSheet?.name || ''"
+          :row-count="Number(activeSheet?.row_count || 0)"
+          :completion-items="mopCompletionItems"
+          @back="backToBinding"
+        />
+        <MopSheetStatusPanel
+          :local-file="preview.local_file || null"
+          :active-sheet="activeSheet || null"
+          :checkbox-count="activeSheetCheckboxCells.length"
+          :maintenance-field-count="activeSheetMaintenanceFields.length"
+          :filled-count="mopFilledCount"
+        />
         <div
-          v-if="activeSheet && (activeSheet.is_cover || (!activeSheetCheckboxCells.length && !activeSheetMaintenanceFields.length))"
-          class="mop-detect-panel"
+          v-if="signatureManagerOpen"
+          class="signature-manager-backdrop"
+          @click.self="closeSignatureManager"
+        ></div>
+        <section
+          v-if="activeSheet && !activeSheet.is_cover"
+          class="mop-sign-panel"
+          :class="{
+            'manager-open': signatureManagerOpen,
+            'signature-drawer-open': selectedSignatureDrawerOpen || temporarySignatureDrawerOpen
+          }"
         >
-          <div class="detect-summary">
-            <span :class="{ muted: !activeSheet.is_cover }">{{ activeSheet.is_cover ? "封面页" : "非封面页" }}</span>
-            <strong>选择项 {{ activeSheetCheckboxCells.length }} 个</strong>
-            <strong>日期/维护字段 {{ activeSheetMaintenanceFields.length }} 个</strong>
-            <em v-if="!activeSheet.is_cover && mopFilledCount">已填写 {{ mopFilledCount }} 项</em>
-          </div>
-          <div v-if="activeSheet.is_cover" class="detect-empty">当前 Sheet 识别为封面页，不提取填写项。</div>
-          <div v-else-if="!activeSheetCheckboxCells.length && !activeSheetMaintenanceFields.length" class="detect-empty">
-            当前 Sheet 暂未识别到选择项、日期占位或维护实施/审核字段；普通单元格仍可点击编辑。
-          </div>
-        </div>
-        <section v-if="activeSheet && !activeSheet.is_cover" class="mop-sign-panel">
           <div class="sign-panel-head">
             <div>
               <strong>维护人员签名</strong>
-              <p>选择签名表人员后手写保存，签名会写入该人员记录的“手写签名”附件字段。</p>
+              <p>{{ signatureManagerOpen ? "补齐公司或临时签名后即可写入、上传。" : "点实施人或审核人处理签名。" }}</p>
             </div>
-            <div class="sign-role-tabs">
-              <button
-                type="button"
-                :class="{ active: signatureRole === 'implementer' }"
-                @click="signatureRole = 'implementer'"
-              >
-                维护实施人
-              </button>
-              <button
-                type="button"
-                :class="{ active: signatureRole === 'auditor' }"
-                @click="signatureRole = 'auditor'"
-              >
-                维护审核人
-              </button>
-            </div>
-          </div>
-          <div class="mop-step-flow" aria-label="MOP签名流程">
-            <span
-              v-for="(item, index) in mopRequirementItems"
-              :key="`flow:${item.key}`"
-              :class="{ done: item.done, pending: !item.done }"
+            <button
+              v-if="signatureManagerOpen"
+              type="button"
+              class="sign-close-inline"
+              @click="closeSignatureManager"
             >
-              <b>{{ index + 1 }}</b>
-              <strong>{{ item.label }}</strong>
-              <em>{{ item.done ? "完成" : item.text }}</em>
-            </span>
+              关闭
+            </button>
           </div>
-          <div class="signature-role-summary">
-            <section :class="{ active: signatureRole === 'implementer' }" @click="signatureRole = 'implementer'">
-              <span>维护实施人</span>
-              <div v-if="selectedSignaturePeople('implementer').length" class="role-chip-row">
-                <em
-                  :class="{ ok: selectedSignatureUnsignedCount('implementer') === 0 }"
-                >
-                  已选 {{ selectedSignaturePeople('implementer').length }} 人
-                  <template v-if="selectedSignatureUnsignedCount('implementer')"> · {{ selectedSignatureUnsignedCount('implementer') }} 未签</template>
-                  <template v-else> · 全部已签</template>
-                </em>
-              </div>
-              <strong v-else>未选择</strong>
-            </section>
-            <section :class="{ active: signatureRole === 'auditor' }" @click="signatureRole = 'auditor'">
-              <span>维护审核人</span>
-              <div v-if="selectedSignaturePeople('auditor').length" class="role-chip-row">
-                <em
-                  :class="{ ok: selectedSignatureUnsignedCount('auditor') === 0 }"
-                >
-                  已选 {{ selectedSignaturePeople('auditor').length }} 人
-                  <template v-if="selectedSignatureUnsignedCount('auditor')"> · {{ selectedSignatureUnsignedCount('auditor') }} 未签</template>
-                  <template v-else> · 全部已签</template>
-                </em>
-              </div>
-              <strong v-else>未选择</strong>
-            </section>
+          <MopSignatureRoleSummary
+            :current-role="signatureRole"
+            :items="signatureRoleSummaryItems"
+            @select="openSignatureManager"
+          />
+          <div v-if="signatureManagerOpen" class="signature-guide-strip" aria-label="签名上传条件">
+            <component
+              :is="item.role ? 'button' : 'div'"
+              v-for="item in signatureGuideItems"
+              :key="item.key"
+              class="signature-guide-item"
+              :class="[{ ready: item.ready, actionable: Boolean(item.role) }, item.tone]"
+              type="button"
+              @click="item.role ? openSignatureManager(item.role) : undefined"
+            >
+              <span>{{ item.label }}</span>
+              <strong>{{ item.value }}</strong>
+              <small>{{ item.text }}</small>
+            </component>
           </div>
           <div class="sign-workspace">
-            <div class="sign-people">
-              <label class="field">
-                <span>搜索签名人员</span>
-                <div class="inline-search">
-                  <input
-                    v-model="signatureSearch"
-                    enterkeyhint="search"
-                    placeholder="姓名、工号、楼栋"
-                    @keyup.enter="loadSignaturePeople()"
-                  />
-                  <button
-                    class="btn ghost signature-refresh"
-                    type="button"
-                    :disabled="signatureLoading"
-                    title="重新读取签名人员"
-                    @click="loadSignaturePeople()"
-                  >
-                    {{ signatureLoading ? "读取中" : "刷新" }}
-                  </button>
-                </div>
-                <small class="search-inline-status">{{ signatureSearchStatus }}</small>
-              </label>
-              <div class="sign-person-list">
-                <button
-                  v-for="person in signaturePeople"
-                  :key="person.record_id"
-                  type="button"
-                  class="sign-person"
-                  :class="{
-                    active: (signatureSelectedRecords[signatureRole] || []).includes(person.record_id),
-                    current: person.record_id === activeSignatureRecordId
-                  }"
-                  @click="selectSignaturePerson(person.record_id)"
-                >
-                  <span>{{ personInitial(person) }}</span>
-                  <strong>{{ person.name || "未命名人员" }}</strong>
-                  <small>
-                    <template v-if="person.employee_no">{{ person.employee_no }} · </template>
-                    <template v-if="person.building">{{ person.building }} · </template>
-                    {{ person.position || person.team || "签名人员" }}
-                  </small>
-                  <em :class="{ ok: personHasUsableSignature(person) }">{{ personHasUsableSignature(person) ? "已有签名" : "待签名" }}</em>
-                </button>
-                <div v-if="!signatureLoading && !signaturePeople.length" class="empty-box compact">
-                  暂未找到签名人员。
-                </div>
+            <MopCompanySignaturePicker
+              v-model:search="signatureSearch"
+              :loading="signatureLoading"
+              :status-text="signatureSearchStatus"
+              :people="signaturePeople"
+              :selected-ids="signatureSelectedRecords[signatureRole] || []"
+              :active-record-id="activeSignatureRecordId"
+              compact
+              @refresh="loadSignaturePeople()"
+              @select="selectSignaturePerson"
+            />
+            <div class="sign-canvas-card signature-zone">
+              <div class="signature-zone-head">
+                <strong>{{ signatureRole === 'implementer' ? '维护实施人' : '维护审核人' }}</strong>
+                <small>{{ selectedRoleSignatureStatusText }}</small>
               </div>
-            </div>
-            <div class="sign-canvas-card">
-              <div class="selected-sign-person">
-                <span>{{ signatureRole === 'implementer' ? '维护实施人' : '维护审核人' }}</span>
-                <strong>{{ selectedRoleSignaturePeople.length ? `已选 ${selectedRoleSignaturePeople.length} 人` : "请选择人员" }}</strong>
-                <small>点击左侧人员会加入当前角色；已有签名会直接显示，可继续手写覆盖。</small>
-                <div v-if="selectedRoleSignaturePeople.length" class="selected-signatures">
-                  <span
-                    v-for="person in selectedRoleSignaturePreview"
-                    :key="`${signatureRole}:${signaturePersonKey(person)}`"
-                    class="selected-signature-chip"
-                    :class="{ active: person.record_id === activeSignatureRecordId && (!person.source || person.source === 'staff') }"
-                    @click="activateSelectedSignaturePerson(person)"
-                  >
-                    <img
-                      v-if="personHasUsableSignature(person)"
-                      :src="person.signature_preview_url"
-                      alt="已有签名"
-                      @error="handleSelectedSignatureImageError(person)"
-                    />
-                    <span v-else class="signature-chip-state">{{ person.source === 'temporary' ? '待签名' : '待签名' }}</span>
-                    <strong>{{ signaturePersonDisplayName(person) }}</strong>
-                  </span>
-                  <button
-                    class="selected-signature-open"
-                    type="button"
-                    @click="selectedSignatureDrawerOpen = !selectedSignatureDrawerOpen"
-                  >
-                    查看全部 {{ selectedRoleSignaturePeople.length }}
-                    <em v-if="unsignedSelectedSignaturePeople.length">{{ unsignedSelectedSignaturePeople.length }} 未签</em>
-                  </button>
-                  <div v-if="selectedSignatureDrawerOpen" class="selected-signature-drawer">
-                    <div class="drawer-head">
-                      <strong>{{ signatureRole === 'implementer' ? '维护实施人' : '维护审核人' }}签名</strong>
-                      <button type="button" @click="selectedSignatureDrawerOpen = false">收起</button>
-                    </div>
-                    <div class="drawer-signature-list">
-                      <article
-                        v-for="person in selectedRoleSignaturePeople"
-                        :key="`drawer:${signatureRole}:${signaturePersonKey(person)}`"
-                        :class="{ ready: personHasUsableSignature(person), pending: !personHasUsableSignature(person) }"
-                      >
-                        <img
-                          v-if="personHasUsableSignature(person)"
-                          :src="person.signature_preview_url"
-                          alt="已有签名"
-                          @error="handleSelectedSignatureImageError(person)"
-                        />
-                        <span v-else class="signature-chip-state">待签名</span>
-                        <div>
-                          <strong>{{ person.name || person.display_name || '未命名' }}</strong>
-                          <small>{{ person.source === 'temporary' ? '其他人员 · 临时' : (person.source === 'external' ? '其他人员 · 已保存' : '正式人员') }}</small>
-                        </div>
-                        <div class="drawer-actions">
-                          <button
-                            v-if="!person.source || person.source === 'staff'"
-                            class="drawer-action"
-                            type="button"
-                            :disabled="!person.record_id"
-                            :title="person.record_id ? '在当前网页手写并保存到该人员签名库' : '该人员记录缺少 ID，无法手写'"
-                            @click.stop="openSignaturePadForPerson(person)"
-                          >
-                            {{ personHasUsableSignature(person) ? "网页重签" : "网页手写" }}
-                          </button>
-                          <button
-                            v-if="!person.source || person.source === 'staff'"
-                            class="drawer-action link-action"
-                            type="button"
-                            :disabled="Boolean(signatureLinkSendingById[person.record_id]) || !person.record_id"
-                            :title="personSignatureLinkTitle(person)"
-                            @click.stop="sendSignatureLinkForPerson(person, personHasUsableSignature(person))"
-                          >
-                            {{ signatureLinkSendingById[person.record_id] ? "发送中" : (personHasUsableSignature(person) ? "重发链接" : "发链接") }}
-                          </button>
-                          <button class="drawer-remove" type="button" @click.stop="removeSignaturePerson(signatureRole, signaturePersonKey(person))">移除</button>
-                        </div>
-                      </article>
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <section class="other-signature-panel">
-                <div class="other-signature-head">
-                  <div>
-                    <strong>其他人员签名</strong>
-                    <small>{{ signatureRole === 'auditor' ? '当前加入维护审核人' : '当前加入维护实施人' }}</small>
-                  </div>
-                  <button
-                    class="btn ghost"
-                    type="button"
-                    :disabled="Boolean(addOtherSignatureDisabledReason)"
-                    :title="addOtherSignatureDisabledReason"
-                    @click="addOtherSignatureDraft"
-                  >
-                    添加其他人员
-                  </button>
-                </div>
-                <div v-if="currentRoleOtherSignaturePeople.length || currentRoleOtherSignatureDrafts.length" class="other-signature-list">
-                  <article
-                    v-for="person in currentRoleOtherSignaturePeople"
-                    :key="`other:${signatureRole}:${signaturePersonKey(person)}`"
-                    :class="['other-signature-row', personHasUsableSignature(person) ? 'signed' : 'pending']"
-                  >
-                    <img
-                      v-if="personHasUsableSignature(person)"
-                      :src="person.signature_preview_url"
-                      alt="其他人员签名"
-                      @error="handleSelectedSignatureImageError(person)"
-                    />
-                    <span v-else class="other-signature-state">待签名</span>
-                    <div>
-                      <strong>{{ person.name || person.display_name || '其他人员' }}</strong>
-                      <small>{{ person.source === 'external' ? '已保存签名' : (personHasUsableSignature(person) ? '已签名' : '链接已发送，等待手机签名') }}</small>
-                    </div>
-                    <button type="button" @click="removeSignaturePerson(signatureRole, signaturePersonKey(person))">移除</button>
-                  </article>
-                  <article
-                    v-for="draft in currentRoleOtherSignatureDrafts"
-                    :key="`draft:${draft.draft_id}`"
-                    :class="['other-signature-row', 'draft', String(draft.status || '')]"
-                  >
-                    <input
-                      v-model="draft.display_name"
-                      placeholder="姓名可不填，默认临时人员N"
-                      :disabled="Boolean(temporarySignatureSendingByDraft[String(draft.draft_id || '')])"
-                    />
-                    <span class="other-signature-state">{{ otherSignatureDraftStatusText(draft) }}</span>
-                    <button
-                      type="button"
-                      :disabled="Boolean(temporarySignatureRowDisabledReason(draft))"
-                      :title="temporarySignatureRowDisabledReason(draft)"
-                      @click="sendTemporarySignatureLinkForDraft(draft)"
-                    >
-                      {{ temporarySignatureSendingByDraft[String(draft.draft_id || '')] ? '发送中' : '发送链接' }}
-                    </button>
-                    <button type="button" @click="removeOtherSignatureDraft(String(draft.draft_id || ''))">移除</button>
-                    <small v-if="draft.error">{{ draft.error }}</small>
-                  </article>
-                </div>
-                <div v-else class="other-signature-empty">
-                  可添加现场其他人员，或从已保存的其他人员签名中选择。
-                </div>
-                <label class="field external-signature-search">
-                  <span>选择已有其他人员签名</span>
-                  <div class="inline-search">
-                    <input
-                      v-model="externalSignatureSearch"
-                      placeholder="姓名、楼栋、专业"
-                    />
-                    <button
-                      class="btn ghost signature-refresh"
-                      type="button"
-                      :disabled="externalSignatureLoading"
-                      title="重新读取其他人员签名"
-                      @click="loadExternalSignaturePeople()"
-                    >
-                      {{ externalSignatureLoading ? "读取中" : "刷新" }}
-                    </button>
-                  </div>
-                  <small class="search-inline-status">{{ externalSignatureSearchStatus }}</small>
-                </label>
-                <div v-if="externalSignaturePeople.length" class="external-signature-results">
-                  <button
-                    v-for="person in externalSignaturePeople"
-                    :key="person.record_id"
-                    type="button"
-                    @click="addExternalSignaturePerson(person)"
-                  >
-                    <img :src="person.signature_preview_url" alt="已有其他人员签名" @error="handleSelectedSignatureImageError(person)" />
-                    <span>
-                      <strong>{{ person.name || '其他人员' }}</strong>
-                      <small>
-                        <template v-if="person.building">{{ person.building }} · </template>
-                        <template v-if="person.specialty">{{ person.specialty }} · </template>
-                        已保存
-                      </small>
-                    </span>
-                    <em>加入</em>
-                  </button>
-                </div>
-              </section>
-              <div class="signature-launch-card" :class="{ disabled: !activeSignaturePerson }">
-                <div>
-                  <strong>{{ activeSignaturePerson ? signaturePersonDisplayName(activeSignaturePerson) : "请选择签名人员" }}</strong>
-                  <small>
-                    <template v-if="activeSignaturePerson">
-                      {{ personHasUsableSignature(activeSignaturePerson) ? "已有签名，可重新手写覆盖。" : "点击按钮打开大签名区手写。" }}
-                    </template>
-                    <template v-else>先在左侧选择维护实施人或维护审核人。</template>
-                  </small>
-                  <small v-if="selectedFormalSignaturePeople(signatureRole).length > 1">多人未签时，可点“查看全部”后对指定人员逐个网页手写。</small>
-                </div>
-                <img
-                  v-if="personHasUsableSignature(activeSignaturePerson)"
-                  :src="activeSignaturePerson?.signature_preview_url"
-                  alt="已有手写签名"
-                  @error="handleSignatureImageError(activeSignaturePerson?.record_id)"
-                />
-                <button
-                  class="btn blue"
-                  type="button"
-                  :disabled="Boolean(openSignaturePadDisabledReason)"
-                  :title="openSignaturePadDisabledReason"
-                  @click="openSignaturePad"
-                >
-                  {{ personHasUsableSignature(activeSignaturePerson) ? "重新手写签名" : "手写签名" }}
-                </button>
-              </div>
-              <div class="mop-completion-panel">
-                <span
-                  v-for="item in mopCompletionItems"
-                  :key="item.key"
-                  :class="{ done: item.done, pending: !item.done }"
-                >
-                  <strong>{{ item.label }}</strong>
-                  <em>{{ item.text }}</em>
-                </span>
-              </div>
-              <div class="mop-upload-readiness">
-                <strong>上传前检查</strong>
-                <span
-                  v-for="item in mopRequirementItems"
-                  :key="item.key"
-                  :class="{ done: item.done, pending: !item.done }"
-                >
-                  {{ item.label }}
-                  <em>{{ item.done ? "已满足" : item.text }}</em>
-                </span>
-              </div>
-              <div class="sign-actions">
-                <span class="sign-status" :class="{ failed: signatureMessageType === 'failed', success: signatureMessageType === 'success' }">
-                  {{ signatureMessage || signatureRoleHint }}
-                </span>
-                <div class="action-group">
-                  <strong>签名链接</strong>
-                  <div>
-                    <button
-                      class="btn ghost"
-                      type="button"
-                      :disabled="signatureLinkSending || Boolean(signatureBatchLinkDisabledReason)"
-                      :title="signatureBatchLinkDisabledReason"
-                      @click="sendPendingSignatureLinks"
-                    >
-                      {{ signatureLinkSending ? "发送中" : `发送待签名链接（${pendingSignatureLinkCount}人）` }}
-                    </button>
-                  </div>
-                  <small>网页手写请使用上方当前人员按钮；多人时点“查看全部”逐个处理。</small>
-                </div>
-                <div class="action-group file-action-group">
-                  <strong>当前 MOP 文件</strong>
-                  <div>
-                    <button
-                      class="btn blue upload-signed-mop"
-                      type="button"
-                      :disabled="mopUploadSaving || mopFillSaving || mopResetting || Boolean(uploadSignedMopDisabledReason)"
-                      :title="uploadSignedMopDisabledReason"
-                      @click="uploadSignedMop"
-                    >
-                      {{ mopUploadSaving ? "上传中" : "上传已签名MOP" }}
-                    </button>
-                    <button
-                      class="btn ghost local-fill"
-                      type="button"
-                      :disabled="mopFillSaving || mopUploadSaving || Boolean(fillMopDisabledReason)"
-                      :title="fillMopDisabledReason"
-                      @click="fillMopSignatures"
-                    >
-                      {{ mopFillSaving ? "写入中" : "仅写入本地文件" }}
-                    </button>
-                    <button
-                      v-if="filledMopResult"
-                      class="btn ghost reset-clean"
-                      type="button"
-                      :disabled="mopResetting || mopFillSaving || mopUploadSaving"
-                      title="会删除当前已签名文件，并重新下载一份干净 MOP"
-                      @click="resetMopSigning"
-                    >
-                      {{ mopResetting ? "重新下载中" : "重新下载干净 MOP" }}
-                    </button>
-                  </div>
-                  <small v-if="fillMopDisabledReason">{{ fillMopDisabledReason }}</small>
-                  <small v-else-if="uploadSignedMopDisabledReason">{{ uploadSignedMopDisabledReason }}</small>
-                  <small v-else-if="filledMopResult" class="warning-hint">重新下载会删除当前已签名文件。</small>
-                </div>
-              </div>
+              <MopCompanySelectedSignatures
+                :role="signatureRole"
+                :people="selectedFormalSignaturePeople(signatureRole)"
+                :active-record-id="activeSignatureRecordId"
+                :unsigned-count="selectedFormalSignatureUnsignedCount(signatureRole)"
+                :drawer-open="selectedSignatureDrawerOpen"
+                :link-sending-by-id="signatureLinkSendingById"
+                :link-sent-at-by-id="signatureLinkSentAtById"
+                :link-error-by-id="signatureLinkErrorById"
+                :has-usable-signature="personHasUsableSignature"
+                :person-key="signaturePersonKey"
+                :display-name="signaturePersonDisplayName"
+                :link-title="personSignatureLinkTitle"
+                @activate="activateSelectedSignaturePerson"
+                @toggle-drawer="toggleSelectedSignatureDrawer"
+                @close-drawer="setSelectedSignatureDrawerOpen(false)"
+                @image-error="handleSelectedSignatureImageError"
+                @web-sign="openSignaturePadForPerson"
+                @send-link="sendSignatureLinkForPerson"
+                @remove="removeSignaturePerson(signatureRole, $event)"
+              />
+              <MopOtherSignatureManager
+                :drawer-open="temporarySignatureDrawerOpen"
+                v-model:external-search="externalSignatureSearch"
+                :role="signatureRole"
+                :add-disabled-reason="addOtherSignatureDisabledReason"
+                :display-rows="currentRoleOtherSignatureDisplayRows"
+                :preview-row="currentRoleOtherSignaturePreviewRow"
+                :unsigned-count="currentRoleOtherSignatureUnsignedCount"
+                :temporary-link-sending-by-id="temporarySignatureLinkSendingById"
+                :temporary-link-sent-at-by-id="temporarySignatureLinkSentAtById"
+                :temporary-link-error-by-id="temporarySignatureLinkErrorById"
+                :draft-sending-by-id="temporarySignatureSendingByDraft"
+                :external-loading="externalSignatureLoading"
+                :external-status-text="externalSignatureSearchStatus"
+                :external-people="externalSignaturePeople"
+                :person-status-text="otherSignaturePersonStatusText"
+                :person-web-sign-disabled-reason="otherSignatureWebSignDisabledReason"
+                :draft-status-text="otherSignatureDraftStatusText"
+                :draft-disabled-reason="temporarySignatureRowDisabledReason"
+                @update:drawer-open="setTemporarySignatureDrawerOpen"
+                @add-other="addOtherSignatureDraft"
+                @image-error="handleSelectedSignatureImageError"
+                @web-sign-person="openSignaturePadForPerson"
+                @send-temp-person="sendTemporarySignatureLinkForPerson"
+                @remove-person="removeSignaturePerson(signatureRole, $event)"
+                @update-draft-name="updateOtherSignatureDraftName"
+                @ensure-draft-name="ensureOtherSignatureDraftName"
+                @web-sign-draft="openSignaturePadForDraft"
+                @send-draft-link="sendTemporarySignatureLinkForDraft"
+                @remove-draft="removeOtherSignatureDraft"
+                @refresh-external="loadExternalSignaturePeople()"
+                @add-external="addExternalSignaturePerson"
+              />
+              <MopFileActions
+                :message="signatureMessage"
+                :message-type="signatureMessageType"
+                :role-hint="signatureRoleHint"
+                :fill-saving="mopFillSaving"
+                :upload-saving="mopUploadSaving"
+                :reset-saving="mopResetting"
+                :fill-disabled-reason="fillMopDisabledReason"
+                :filled-mop-available="Boolean(filledMopResult)"
+                @fill="fillMopSignatures"
+                @reset="resetMopSigning"
+              />
             </div>
           </div>
         </section>
-        <div v-if="signaturePadOpen" class="signature-pad-backdrop" @click.self="closeSignaturePad">
-          <section class="signature-pad-modal" role="dialog" aria-modal="true" aria-label="手写签名">
-            <header>
-              <div>
-                <strong>{{ activeSignaturePerson?.name || "手写签名" }}</strong>
-                <p>{{ signatureRole === "auditor" ? "维护审核人" : "维护实施人" }} · 请在下方大签名区手写后保存。</p>
-              </div>
-              <button type="button" class="btn ghost" :disabled="signatureSaving" @click="closeSignaturePad">关闭</button>
-            </header>
+        <MopSignaturePadModal
+          :open="signaturePadOpen"
+          :title="activeSignaturePerson?.name || '手写签名'"
+          :role-label="signatureRole === 'auditor' ? '维护审核人' : '维护实施人'"
+          :saving="signatureSaving"
+          :message="signatureMessage"
+          :message-type="signatureMessageType"
+          :save-disabled-reason="saveSignatureDisabledReason"
+          @close="closeSignaturePad"
+          @clear="clearSignatureCanvas"
+          @save="saveMopSignature"
+        >
             <div class="mop-sign-canvas signature-pad-canvas" :class="{ disabled: !activeSignaturePerson }">
               <button
                 class="sign-clear-inline"
@@ -507,348 +242,112 @@
               ></canvas>
               <div v-if="!signatureHasInk && !personHasUsableSignature(activeSignaturePerson)" class="sign-placeholder">在此处手写签名</div>
             </div>
-            <footer>
-              <span class="sign-status" :class="{ failed: signatureMessageType === 'failed', success: signatureMessageType === 'success' }">
-                {{ signatureMessage || saveSignatureDisabledReason || "手写完成后点击保存签名。" }}
-              </span>
-              <button class="btn ghost" type="button" :disabled="signatureSaving" @click="clearSignatureCanvas">清空</button>
-              <button
-                class="btn blue"
-                type="button"
-                :disabled="signatureSaving || Boolean(saveSignatureDisabledReason)"
-                :title="saveSignatureDisabledReason"
-                @click="saveMopSignature"
-              >
-                {{ signatureSaving ? "保存中" : "保存签名" }}
-              </button>
-            </footer>
-          </section>
+        </MopSignaturePadModal>
+        <MopSheetTabs
+          v-model="activeSheetName"
+          :sheets="preview.sheets || []"
+          :active-sheet="activeSheet || null"
+        />
+        <div
+          ref="sheetScrollRef"
+          class="sheet-scroll preview-scroll"
+          tabindex="0"
+          @keydown="handleMopTableKeydown"
+          @mouseup="finishMopCellSelection"
+          @mouseleave="finishMopCellSelection"
+        >
+          <MopSheetPreviewTable
+            :active-sheet="activeSheet || null"
+            :column-indexes="activeSheetColumnIndexes"
+            :bulk-count="bulkFillCheckboxCells.length"
+            :filled-count="mopFilledCount"
+            :signature-manager-open="signatureManagerOpen"
+            :active-mop-cell-position="activeMopCellPosition"
+            :active-mop-cell-key="activeMopCellKey"
+            :date-time="mopFillDateTime"
+            :popover-mode="mopCellPopoverMode"
+            :overlay-style="activeMopCellOverlayStyle"
+            :popover-label="mopCellPopoverLabel"
+            :checkbox-options="mopCellPopoverOptions"
+            :checkbox-value="mopCellPopoverCheckboxValue"
+            :raw-value="activeMopCellEditableValue"
+            :selected-count="selectedMopCellKeys.length"
+            :column-label="columnLabel"
+            :cell-merge-span="cellMergeSpan"
+            :mop-cell-key="mopCellKey"
+            :checkbox-cell-at="checkboxCellAt"
+            :maintenance-field-at="maintenanceFieldAt"
+            :editable-cell-at="editableCellAt"
+            :mop-cell-has-override="mopCellHasOverride"
+            :is-mop-cell-selected="isMopCellSelected"
+            :signature-role-at-cell="signatureRoleAtCell"
+            :cell-signatures="cellSignatures"
+            :signature-cell-style="signatureCellStyle"
+            :signature-image-style="signatureImageStyle"
+            :signature-more-style="signatureMoreStyle"
+            :checkbox-state-label="checkboxStateLabel"
+            :cell-override-value="cellOverrideValue"
+            @mark-all-normal="markAllCheckboxes('normal')"
+            @cell-mousedown="startMopCellSelection"
+            @cell-enter="extendMopCellSelection"
+            @select-checkbox="setActiveCheckboxState"
+            @update:date-time="mopFillDateTime = $event"
+            @update:raw-value="setActiveEditableCellValue"
+            @fill-date="fillActiveMaintenanceDate"
+            @fill-completion="fillActiveMaintenanceCompletion"
+            @copy="copyActiveMopSelection"
+            @paste="pasteActiveMopSelection"
+            @restore="restoreActiveMopSelection"
+            @cancel="clearMopCellSelection"
+          />
         </div>
-        <div class="sheet-tabs preview-tabs">
-          <button
-            v-for="sheet in preview.sheets || []"
-            :key="sheet.name"
-            type="button"
-            :class="{ active: sheet.name === activeSheetName }"
-            @click="activeSheetName = sheet.name"
-          >
-            {{ sheet.name }}
-          </button>
-        </div>
-        <div v-if="activeSheet?.truncated" class="sheet-note">
-          表格较大，当前预览已限制显示前 {{ activeSheet.row_count }} 行 / {{ activeSheet.column_count }} 列。
-        </div>
-        <div class="sheet-scroll preview-scroll">
-          <div
-            v-if="activeSheet && !activeSheet.is_cover"
-            class="table-fill-toolbar"
-          >
-            <div class="table-fill-toolbar-row">
-              <span>点击单元格后在这里填写，避免遮挡表格内容</span>
-              <button v-if="bulkFillCheckboxCells.length" class="btn blue" type="button" @click="markAllCheckboxes('normal')">
-                第10行后全部正常/开启/已完成
-              </button>
-              <small v-if="bulkFillCheckboxCells.length">前9行不批量填写</small>
-              <em v-if="mopFilledCount">已填写 {{ mopFilledCount }} 项</em>
-            </div>
-            <div v-if="activeMopCellInfo" class="active-cell-toolbar">
-              <strong>{{ activeMopCellInfo.label }}</strong>
-              <template v-if="activeMopCellCheckbox">
-                <button
-                  v-for="option in checkboxOptions(activeMopCellCheckbox as Dict)"
-                  :key="`active:${option.key || option.label}`"
-                  type="button"
-                  :class="{ active: checkboxState(activeMopCellCheckbox as Dict) === checkboxOptionValue(option) }"
-                  @click.stop="setCheckboxState(activeMopCellCheckbox as Dict, checkboxOptionValue(option))"
-                >
-                  {{ option.label || option.key }}
-                </button>
-              </template>
-              <template v-else-if="activeMopCellMaintenanceField">
-                <template v-if="maintenanceFieldIsTime(activeMopCellMaintenanceField as Dict)">
-                  <input v-model="mopFillDateTime" type="datetime-local" step="3600" />
-                  <button type="button" @click.stop="fillMaintenanceField(activeMopCellMaintenanceField as Dict, formatMopDateTime(mopFillDateTime))">填入时间</button>
-                </template>
-                <template v-else-if="maintenanceFieldIsCompletion(activeMopCellMaintenanceField as Dict)">
-                  <button type="button" @click.stop="fillMaintenanceField(activeMopCellMaintenanceField as Dict, '已完成[√] 未完成[ ]')">已完成</button>
-                  <button type="button" @click.stop="fillMaintenanceField(activeMopCellMaintenanceField as Dict, '已完成[ ] 未完成[√]')">未完成</button>
-                </template>
-              </template>
-              <template v-else-if="activeMopCellEditable">
-                <textarea
-                  :value="activeMopCellEditableValue"
-                  @input="setActiveEditableCellValue(($event.target as HTMLTextAreaElement).value)"
-                ></textarea>
-                <button type="button" @click.stop="clearActiveEditableCell">还原</button>
-              </template>
-              <button class="ghost-mini" type="button" @click.stop="activeMopCellKey = ''">取消选中</button>
-            </div>
-          </div>
-          <table v-if="activeSheet">
-            <thead>
-              <tr>
-                <th class="corner-cell"></th>
-                <th
-                  v-for="colIndex in activeSheetColumnIndexes"
-                  :key="`head:${colIndex}`"
-                  class="column-head"
-                >
-                  {{ columnLabel(colIndex) }}
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="(row, rowIndex) in activeSheet.rows || []" :key="rowIndex">
-                <th class="row-head">{{ rowIndex + 1 }}</th>
-                <template
-                  v-for="colIndex in activeSheetColumnIndexes"
-                  :key="`${rowIndex}:${colIndex}`"
-                >
-                  <td
-                    v-if="!cellMergeSpan(rowIndex, colIndex).hidden"
-                    :rowspan="cellMergeSpan(rowIndex, colIndex).rowspan"
-                    :colspan="cellMergeSpan(rowIndex, colIndex).colspan"
-                    :class="{
-                      merged: cellMergeSpan(rowIndex, colIndex).rowspan > 1 || cellMergeSpan(rowIndex, colIndex).colspan > 1,
-                      fillable: Boolean(checkboxCellAt(rowIndex, colIndex)),
-                      'field-fillable': Boolean(maintenanceFieldAt(rowIndex, colIndex)),
-                      'raw-editable': Boolean(editableCellAt(rowIndex, colIndex)),
-                      'cell-modified': mopCellHasOverride(rowIndex, colIndex),
-                      'active-cell': activeMopCellKey === mopCellKey(rowIndex, colIndex),
-                      'signature-cell': Boolean(cellSignatures(rowIndex, colIndex).length),
-                      normal: checkboxCellAt(rowIndex, colIndex) ? checkboxStateLabel(checkboxCellAt(rowIndex, colIndex) as Dict).includes('正常') : false,
-                      abnormal: checkboxCellAt(rowIndex, colIndex) ? checkboxStateLabel(checkboxCellAt(rowIndex, colIndex) as Dict).includes('异常') : false
-                    }"
-                    @click.stop="activateMopCell(rowIndex, colIndex)"
-                  >
-                    <div v-if="cellSignatures(rowIndex, colIndex).length" class="sheet-cell-signatures">
-                      <img
-                        v-for="person in cellSignatures(rowIndex, colIndex)"
-                        :key="`${rowIndex}:${colIndex}:${person.record_id}`"
-                        :src="person.signature_preview_url"
-                        :alt="person.name || '签名'"
-                      />
-                    </div>
-                    <template v-else>{{ cellOverrideValue(rowIndex, colIndex) || row[colIndex] || "" }}</template>
-                    <div
-                      v-if="checkboxCellAt(rowIndex, colIndex)"
-                      class="cell-fill-popover"
-                      :class="{ pinned: activeMopCellKey === mopCellKey(rowIndex, colIndex) }"
-                    >
-                      <span>{{ checkboxCellAt(rowIndex, colIndex)?.cell_ref || columnLabel(colIndex) + (rowIndex + 1) }}</span>
-                      <button
-                        v-for="option in checkboxOptions(checkboxCellAt(rowIndex, colIndex) as Dict)"
-                        :key="option.key || option.label"
-                        type="button"
-                        :class="{ active: checkboxState(checkboxCellAt(rowIndex, colIndex) as Dict) === checkboxOptionValue(option) }"
-                        @click.stop="setCheckboxState(checkboxCellAt(rowIndex, colIndex) as Dict, checkboxOptionValue(option))"
-                      >
-                        {{ option.label || option.key }}
-                      </button>
-                    </div>
-                    <div
-                      v-if="maintenanceFieldAt(rowIndex, colIndex)"
-                      class="cell-field-popover"
-                      :class="{ pinned: activeMopCellKey === mopCellKey(rowIndex, colIndex) }"
-                    >
-                      <span>{{ maintenanceFieldAt(rowIndex, colIndex)?.label }}</span>
-                      <template v-if="maintenanceFieldIsTime(maintenanceFieldAt(rowIndex, colIndex) as Dict)">
-                        <input v-model="mopFillDateTime" type="datetime-local" step="3600" />
-                        <button type="button" @click.stop="fillMaintenanceField(maintenanceFieldAt(rowIndex, colIndex) as Dict, formatMopDateTime(mopFillDateTime))">填入</button>
-                      </template>
-                      <template v-else-if="maintenanceFieldIsCompletion(maintenanceFieldAt(rowIndex, colIndex) as Dict)">
-                        <button type="button" @click.stop="fillMaintenanceField(maintenanceFieldAt(rowIndex, colIndex) as Dict, '已完成[√] 未完成[ ]')">已完成</button>
-                        <button type="button" @click.stop="fillMaintenanceField(maintenanceFieldAt(rowIndex, colIndex) as Dict, '已完成[ ] 未完成[√]')">未完成</button>
-                      </template>
-                    </div>
-                    <div
-                      v-else-if="editableCellAt(rowIndex, colIndex) && activeMopCellKey === mopCellKey(rowIndex, colIndex)"
-                      class="cell-field-popover raw-cell-popover pinned"
-                      @click.stop
-                    >
-                      <span>{{ columnLabel(colIndex) }}{{ rowIndex + 1 }} 普通单元格</span>
-                      <textarea
-                        :value="editableCellValue(rowIndex, colIndex)"
-                        @input="setEditableCellValue(rowIndex, colIndex, ($event.target as HTMLTextAreaElement).value)"
-                      ></textarea>
-                      <button type="button" @click.stop="clearEditableCell(rowIndex, colIndex)">还原</button>
-                    </div>
-                  </td>
-                </template>
-              </tr>
-            </tbody>
-          </table>
-          <div v-else class="empty-box">该附件没有可显示的 Sheet。</div>
-        </div>
+        <MopUploadFooter
+          :items="mopUploadFooterItems"
+          :uploaded-at-text="signedMopUploadedAtText"
+          :saving="mopUploadSaving"
+          :disabled="mopUploadSaving || mopFillSaving || mopResetting || Boolean(uploadSignedMopDisabledReason)"
+          :disabled-reason="uploadSignedMopDisabledReason"
+          @upload="uploadSignedMop"
+        />
       </section>
 
       <template v-else>
-        <section class="mop-summary">
-          <article>
-            <span>本月维保</span>
-            <strong>{{ notices.length }}</strong>
-          </article>
-          <article>
-            <span>待关联/上传</span>
-            <strong>{{ pendingMopNoticeCount }}</strong>
-          </article>
-          <article>
-            <span>已绑定</span>
-            <strong>{{ boundNoticeCount }}</strong>
-          </article>
-          <article>
-            <span>已上传MOP</span>
-            <strong>{{ uploadedMopNoticeCount }}</strong>
-          </article>
-          <article>
-            <span>MOP 表格</span>
-            <strong>{{ mopCandidates.length }}</strong>
-          </article>
-        </section>
+        <MopSummaryStrip
+          :notices="notices.length"
+          :pending="pendingMopNoticeCount"
+          :bound="boundNoticeCount"
+          :uploaded="uploadedMopNoticeCount"
+          :mop-files="mopCandidates.length"
+        />
 
         <section class="mop-layout">
-          <aside class="panel notice-panel">
-            <div class="panel-head">
-              <div>
-                <h2>本月维保通告</h2>
-                <p>显示本月维保，未绑定或未上传维护保养单的优先显示。</p>
-              </div>
-              <span>{{ filteredNotices.length }}</span>
-            </div>
-            <div class="filters">
-              <input v-model="noticeSearch" placeholder="搜索通告、楼栋、专业" />
-              <select v-model="noticeStatusFilter">
-                <option value="">全部状态</option>
-                <option value="ongoing">未完成</option>
-                <option value="closed">已完成</option>
-                <option value="pending">待关联/上传</option>
-                <option value="bound">已绑定</option>
-                <option value="unbound">未绑定</option>
-                <option value="uploaded">已上传MOP</option>
-              </select>
-            </div>
-            <div class="list notice-list">
-              <button
-                v-for="notice in filteredNotices"
-                :key="notice.notice_key"
-                type="button"
-                class="notice-row"
-                :class="{ active: notice.notice_key === selectedNoticeKey, closed: noticeIsEnded(notice), pending: mopNoticeNeedsAction(notice) }"
-                @click="selectNotice(notice.notice_key)"
-              >
-                <span class="row-status" :class="{ closed: noticeIsEnded(notice) }">{{ notice.status || "进行中" }}</span>
-                <strong>{{ notice.title || "未命名维保通告" }}</strong>
-                <small>
-                  {{ notice.building || "未识别楼栋" }}
-                  <template v-if="notice.specialty"> · {{ notice.specialty }}</template>
-                  <template v-if="notice.maintenance_cycle"> · {{ notice.maintenance_cycle }}</template>
-                </small>
-                <span class="notice-mop-tags">
-                  <em :class="{ success: notice.mop_binding, warning: !notice.mop_binding }">
-                    <template v-if="notice.mop_binding">
-                      {{ notice.mop_binding.inherited ? "已继承绑定" : "已绑定" }}：{{ notice.mop_binding.mop_title || notice.mop_binding.mop_record_id }}
-                    </template>
-                    <template v-else>未绑定 MOP 表格</template>
-                  </em>
-                  <em :class="{ success: noticeMopUploaded(notice), warning: !noticeMopUploaded(notice) }">
-                    {{ noticeMopUploaded(notice) ? `已上传MOP${Number(notice.mop_attachment_count || 0) ? ` ${notice.mop_attachment_count}份` : ""}` : "未上传MOP" }}
-                  </em>
-                </span>
-              </button>
-            </div>
-          </aside>
+          <MopNoticeList
+            v-model:notice-search="noticeSearch"
+            v-model:notice-status-filter="noticeStatusFilter"
+            :items="filteredNotices"
+            :selected-notice-key="selectedNoticeKey"
+            @select="selectNotice"
+          />
 
-          <section class="panel binding-panel">
-            <div class="panel-head">
-              <div>
-                <h2>MOP 对应关系</h2>
-                <p>先选左侧通告，再选择现有 MOP 表格。</p>
-              </div>
-              <span>{{ filteredMopCandidates.length }}</span>
-            </div>
-
-            <div v-if="!selectedNotice" class="empty-box">请选择一条维保通告。</div>
-            <template v-else>
-              <article class="selected-notice">
-                <span>{{ selectedNotice.status || "进行中" }}</span>
-                <strong>{{ selectedNotice.title }}</strong>
-                <p>
-                  {{ selectedNotice.building || "-" }}
-                  <template v-if="selectedNotice.start_time || selectedNotice.end_time">
-                    · {{ selectedNotice.start_time || "未填开始" }} ~ {{ selectedNotice.end_time || "未填结束" }}
-                  </template>
-                </p>
-              </article>
-
-              <label class="field">
-                <span>选择 MOP 表格</span>
-                <input v-model="mopSearch" placeholder="搜索 MOP 名称、文件编号、专业" />
-              </label>
-              <div class="mop-candidate-list">
-                <button
-                  v-for="mop in filteredMopCandidates"
-                  :key="mop.record_id"
-                  type="button"
-                  class="mop-row"
-                  :class="{ active: mop.record_id === selectedMopRecordId }"
-                  @click="selectMop(mop.record_id)"
-                >
-                  <strong>{{ mop.title || "未命名 MOP" }}</strong>
-                  <em v-if="isRecommendedMop(mop)" class="mop-recommend">推荐</em>
-                  <small>
-                    <template v-if="mop.file_no">{{ mop.file_no }} · </template>
-                    <template v-if="mop.specialty">{{ mop.specialty }} · </template>
-                    <template v-if="mop.maintenance_type">{{ mop.maintenance_type }} · </template>
-                    <template v-if="mop.version">{{ mop.version }} · </template>
-                    <template v-if="mop.file_status">{{ mop.file_status }} · </template>
-                    附件 {{ mop.attachment_count || 0 }} 个
-                  </small>
-                </button>
-              </div>
-
-              <label v-if="selectedMopAttachments.length" class="field attachment-field">
-                <span>表格附件</span>
-                <select v-model="selectedAttachmentToken">
-                  <option
-                    v-for="attachment in selectedMopAttachments"
-                    :key="attachmentKey(attachment)"
-                    :value="attachment.file_token || attachment.url || attachment.name"
-                  >
-                    {{ attachment.name || "MOP表格" }}
-                  </option>
-                </select>
-              </label>
-              <div v-else-if="selectedMop" class="empty-box warning">
-                该 MOP 记录暂未识别到 xlsx/csv 附件。
-              </div>
-
-              <div v-if="selectedMop" class="selected-mop-strip">
-                <div>
-                  <span>已选 MOP 表格</span>
-                  <strong>{{ selectedMop.title || "未命名 MOP" }}</strong>
-                  <small>
-                    <template v-if="selectedAttachment?.name">{{ selectedAttachment.name }}</template>
-                    <template v-else-if="selectedMopAttachments.length">请选择表格附件</template>
-                    <template v-else>暂无可预览附件</template>
-                  </small>
-                  <em v-if="mopBindingStatus" class="mop-bind-status success">{{ mopBindingStatus }}</em>
-                  <em v-else-if="mopBindingError" class="mop-bind-status failed">{{ mopBindingError }}</em>
-                </div>
-                <div class="selected-mop-actions">
-                  <button
-                    class="btn blue"
-                    type="button"
-                    :disabled="!canPreview || openMopBusy"
-                    :title="openMopDisabledReason"
-                    @click="startMopPreview"
-                  >
-                    {{ openMopButtonText }}
-                  </button>
-                  <small v-if="openMopDisabledReason && !openMopBusy">{{ openMopDisabledReason }}</small>
-                </div>
-              </div>
-            </template>
-          </section>
+          <MopBindingPanel
+            v-model:selected-attachment-token="selectedAttachmentToken"
+            v-model:mop-search="mopSearch"
+            :selected-notice="selectedNotice"
+            :selected-mop="selectedMop"
+            :selected-mop-attachments="selectedMopAttachments"
+            :selected-attachment="selectedAttachment"
+            :binding-status="mopBindingStatus"
+            :binding-error="mopBindingError"
+            :can-preview="canPreview"
+            :busy="openMopBusy"
+            :disabled-reason="openMopDisabledReason"
+            :button-text="openMopButtonText"
+            :mop-candidates="filteredMopCandidates"
+            :selected-mop-record-id="selectedMopRecordId"
+            :is-recommended-mop="isRecommendedMop"
+            @open="startMopPreview"
+            @select-mop="selectMop"
+          />
         </section>
       </template>
     </template>
@@ -857,7 +356,75 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { requestJson, type Dict } from "../api/client";
+import type { Dict } from "../api/client";
+import {
+  bindEngineerMop,
+  fetchEngineerMopBootstrap,
+  fillEngineerMop,
+  previewEngineerMop,
+  resetEngineerMop,
+  uploadSignedEngineerMop,
+} from "../mopFileApi";
+import {
+  defaultMopDateTimeLocal,
+  formatMopDateTime,
+  formatMopUploadTime,
+  makeMopCellKey,
+  makeMopCheckboxKey,
+  makeMopMaintenanceKey,
+  makeRawMopCellKey,
+  mopCellOverlayStyle,
+  isMopMatrixClipboardText,
+  normalizeMopRequiredTimeText,
+  parseMopComparableDate,
+  parseMopClipboardMatrix,
+  parsePeopleCount,
+  roleForMopMaintenanceLabel,
+  selectedMopCellBounds as calculateSelectedMopCellBounds,
+} from "../mopSheetUtils";
+import {
+  mopPersonHasUsableSignature,
+  otherSignatureDraftPriority,
+  otherSignatureDraftStatusText,
+  otherSignaturePersonPriority,
+  otherSignaturePersonStatusText,
+  signaturePersonDisplayName,
+  signaturePersonKey,
+  temporarySignatureDisplayName,
+  temporarySignatureDisplayNumber,
+} from "../mopSignatureUtils";
+import {
+  createTemporarySignatureSession,
+  fetchExternalSignaturePeople,
+  fetchSignaturePeople,
+  fetchTemporarySignatures,
+  saveExternalSignature,
+  saveStaffSignature,
+  saveTemporarySignature,
+  sendStaffSignatureLink,
+  sendTemporarySignatureLink,
+} from "../mopSignatureApi";
+import { useMopSheetEditing } from "../useMopSheetEditing";
+import { useGuardedPolling } from "../useGuardedPolling";
+import MopBindingPanel from "./MopBindingPanel.vue";
+import MopCompanySelectedSignatures from "./MopCompanySelectedSignatures.vue";
+import type { MopCellPopoverMode } from "./MopCellPopover.vue";
+import MopCompanySignaturePicker from "./MopCompanySignaturePicker.vue";
+import MopFileActions from "./MopFileActions.vue";
+import MopNoticeList from "./MopNoticeList.vue";
+import MessageBanner from "./MessageBanner.vue";
+import MopOtherSignatureManager from "./MopOtherSignatureManager.vue";
+import MopPreviewHeader from "./MopPreviewHeader.vue";
+import MopSheetPreviewTable from "./MopSheetPreviewTable.vue";
+import MopSheetStatusPanel from "./MopSheetStatusPanel.vue";
+import MopSheetTabs from "./MopSheetTabs.vue";
+import MopSignaturePadModal from "./MopSignaturePadModal.vue";
+import MopSignatureRoleSummary, {
+  type MopSignatureRole,
+  type MopSignatureRoleSummaryItem,
+} from "./MopSignatureRoleSummary.vue";
+import MopSummaryStrip from "./MopSummaryStrip.vue";
+import MopUploadFooter from "./MopUploadFooter.vue";
 
 type ScopeOption = { value: string; label: string };
 
@@ -888,7 +455,7 @@ const mopSearch = ref("");
 const preview = ref<Dict | null>(null);
 const previewMode = ref(false);
 const activeSheetName = ref("");
-const signatureRole = ref<"implementer" | "auditor">("implementer");
+const signatureRole = ref<MopSignatureRole>("implementer");
 const signatureSearch = ref("");
 const signaturePeople = ref<Dict[]>([]);
 const signaturePeopleById = ref<Record<string, Dict>>({});
@@ -903,19 +470,35 @@ const externalSignatureLoading = ref(false);
 const signaturePeopleTotal = ref(0);
 const signatureLoading = ref(false);
 const signatureSaving = ref(false);
-const signatureLinkSending = ref(false);
 const signatureLinkSendingById = ref<Record<string, boolean>>({});
+const signatureLinkSentAtById = ref<Record<string, string>>({});
+const signatureLinkErrorById = ref<Record<string, string>>({});
+const temporarySignatureLinkSendingById = ref<Record<string, boolean>>({});
+const temporarySignatureLinkSentAtById = ref<Record<string, string>>({});
+const temporarySignatureLinkErrorById = ref<Record<string, string>>({});
+const signatureManagerOpen = ref(false);
 const signaturePadOpen = ref(false);
+const signaturePadTarget = ref<Dict | null>(null);
+const temporarySignatureDrawerOpen = ref(false);
 const temporarySignatureSendingByDraft = ref<Record<string, boolean>>({});
 const mopFillSaving = ref(false);
 const mopUploadSaving = ref(false);
 const mopResetting = ref(false);
-const filledMopResult = ref<Dict | null>(null);
-const mopCheckboxStates = ref<Record<string, string>>({});
-const mopMaintenanceValues = ref<Record<string, string>>({});
-const mopCellEdits = ref<Record<string, string>>({});
-const mopFillDateTime = ref(defaultDateTimeLocal());
+const mopEditing = useMopSheetEditing();
+const signedMopUploadedAt = mopEditing.uploadedAt;
+const filledMopResult = mopEditing.filledResult;
+const mopCheckboxStates = mopEditing.checkboxStates;
+const mopMaintenanceValues = mopEditing.maintenanceValues;
+const mopCellEdits = mopEditing.cellEdits;
+const mopClipboardCellText = mopEditing.clipboardCellText;
+const mopFillDateTime = ref(defaultMopDateTimeLocal());
 const activeMopCellKey = ref("");
+const selectedMopCellKeys = ref<string[]>([]);
+const mopSelectionAnchor = ref<{ row: number; col: number } | null>(null);
+const mopSelecting = ref(false);
+const mopSelectionDragging = ref(false);
+const activeMopCellOverlayStyle = ref<Record<string, string>>({});
+const sheetScrollRef = ref<HTMLElement | null>(null);
 const signatureMessage = ref("");
 const signatureMessageType = ref("");
 const signatureSelectedRecords = ref<Record<string, string[]>>({ implementer: [], auditor: [] });
@@ -925,10 +508,13 @@ let signatureDrawing = false;
 let signatureResizeObserver: ResizeObserver | null = null;
 let signatureSearchTimer: ReturnType<typeof setTimeout> | null = null;
 let externalSignatureSearchTimer: ReturnType<typeof setTimeout> | null = null;
-let temporarySignaturePollTimer: ReturnType<typeof setInterval> | null = null;
-let formalSignaturePollTimer: ReturnType<typeof setInterval> | null = null;
 let signatureSearchRequestSeq = 0;
 let externalSignatureSearchRequestSeq = 0;
+let mopSelectionStartPoint: { x: number; y: number } | null = null;
+const temporarySignaturePolling = useGuardedPolling(() => loadTemporarySignatures({ silent: true }), 5000);
+const formalSignaturePolling = useGuardedPolling(() => refreshSelectedFormalSignatures(), 8000);
+const mopEditSessionInstanceId = `mop-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+const activeMopEditSessionStorageKey = ref("");
 
 const scopeLabel = computed(() => {
   const found = props.scopeOptions.find((item) => normalizeScope(item.value) === scope.value);
@@ -955,7 +541,7 @@ function noticeIsEnded(notice: Dict): boolean {
 
 const filteredNotices = computed(() => {
   const query = compactText(noticeSearch.value);
-  return notices.value.filter((item) => {
+  const items = notices.value.filter((item) => {
     const ended = noticeIsEnded(item);
     if (noticeStatusFilter.value === "ongoing" && ended) return false;
     if (noticeStatusFilter.value === "closed" && !ended) return false;
@@ -974,6 +560,7 @@ const filteredNotices = computed(() => {
       item.reason,
     ].join(" ")).includes(query);
   });
+  return sortMopNoticesForAction(items);
 });
 
 const selectedNotice = computed(() => notices.value.find((item) => item.notice_key === selectedNoticeKey.value) || null);
@@ -1002,12 +589,13 @@ const selectedAttachment = computed(() => {
 });
 const filteredMopCandidates = computed(() => {
   const query = compactText(mopSearch.value);
-  if (!query) return mopCandidates.value;
-  return mopCandidates.value.filter((item) => compactText([
+  const items = query ? mopCandidates.value.filter((item) => compactText([
     item.title,
     ...Object.values(item.fields || {}),
-  ].join(" ")).includes(query));
+  ].join(" ")).includes(query)) : mopCandidates.value;
+  return sortRecommendedMopFirst(items);
 });
+const orderedMopCandidates = computed(() => sortRecommendedMopFirst(mopCandidates.value));
 const canBind = computed(() => Boolean(selectedNotice.value && selectedMop.value));
 const canPreview = computed(() => Boolean(selectedNotice.value && selectedMop.value && selectedAttachment.value));
 const openMopDisabledReason = computed(() => {
@@ -1022,6 +610,44 @@ const openMopButtonText = computed(() => {
   if (saving.value) return "自动绑定中";
   if (previewLoading.value) return "加载表格中";
   return "打开填写";
+});
+const mopFlowSteps = computed(() => {
+  const noticeReady = Boolean(selectedNotice.value);
+  const mopReady = Boolean(selectedMop.value && selectedAttachment.value);
+  const previewReady = Boolean(previewMode.value && preview.value?.local_file?.path && activeSheet.value);
+  const signaturesReady = Boolean(hasImplementerSignature.value && hasAuditorSignature.value && allSelectedSignaturesReady.value);
+  const uploadReady = Boolean(canUploadSignedMop.value);
+  const uploaded = Boolean(signedMopUploadedAt.value);
+  return [
+    {
+      key: "notice",
+      index: "1",
+      label: "选维保通告",
+      text: noticeReady ? "已选择本月维保事项" : "先在左侧选择本月维保",
+      state: noticeReady ? "done" : "active",
+    },
+    {
+      key: "mop",
+      index: "2",
+      label: "选 MOP 表格",
+      text: mopReady ? "已选择表格附件" : "选择推荐或搜索到的 MOP",
+      state: mopReady ? "done" : noticeReady ? "active" : "pending",
+    },
+    {
+      key: "fill",
+      index: "3",
+      label: "填写并签名",
+      text: signaturesReady ? "签名已满足上传要求" : previewReady ? "填写表格并补齐签名" : "打开填写后处理表格",
+      state: signaturesReady ? "done" : previewReady ? "active" : "pending",
+    },
+    {
+      key: "upload",
+      index: "4",
+      label: "上传归档",
+      text: uploaded ? signedMopUploadedAtText.value : uploadReady ? "可以上传已签名 MOP" : "等待前面步骤完成",
+      state: uploaded ? "done" : uploadReady ? "active" : "pending",
+    },
+  ];
 });
 const signatureSearchStatus = computed(() => {
   if (signatureLoading.value) return "搜索中";
@@ -1048,30 +674,122 @@ const activeSignatureRecordId = computed(() => {
   return records[records.length - 1] || "";
 });
 const selectedRoleSignaturePeople = computed(() => selectedSignaturePeople(signatureRole.value));
-const selectedRoleSignaturePreview = computed(() => selectedRoleSignaturePeople.value.slice(0, 1));
-const activeSignaturePerson = computed(() => selectedFormalSignaturePeople(signatureRole.value).find((item) => item.record_id === activeSignatureRecordId.value) || null);
+const selectedRoleUnsignedCount = computed(() => (
+  selectedRoleSignaturePeople.value.filter((person) => !personHasUsableSignature(person)).length
+));
+const selectedRoleSignatureStatusText = computed(() => {
+  const total = selectedRoleSignaturePeople.value.length;
+  if (!total) return "未选择人员";
+  const signed = Math.max(0, total - selectedRoleUnsignedCount.value);
+  return selectedRoleUnsignedCount.value ? `${signed}/${total} 已签` : "签名齐全";
+});
+const signatureRoleSummaryItems = computed<MopSignatureRoleSummaryItem[]>(() => (
+  ([
+    ["implementer", "维护实施人"],
+    ["auditor", "维护审核人"],
+  ] as Array<[MopSignatureRole, string]>).map(([role, label]) => ({
+    role,
+    label,
+    totalCount: selectedSignaturePeople(role).length,
+    companyCount: selectedFormalSignaturePeople(role).length,
+    companyUnsigned: selectedFormalSignatureUnsignedCount(role),
+    temporaryCount: selectedTemporarySignaturePeople(role).length,
+    temporaryUnsigned: selectedTemporarySignatureUnsignedCount(role),
+  }))
+));
+const signatureGuideItems = computed(() => [
+  {
+    key: "time",
+    label: "时间",
+    value: mopMaintenanceTimeValidationMessage.value ? "待补" : "已完成",
+    text: mopMaintenanceTimeValidationMessage.value || "开始、完成、审核时间已填写",
+    ready: !mopMaintenanceTimeValidationMessage.value,
+    tone: "time",
+    role: "" as MopSignatureRole | "",
+  },
+  {
+    key: "implementer",
+    label: "维护实施人",
+    value: `${implementerSignatureDisplayCount.value}/${requiredImplementerSignatureCount.value || 1}`,
+    text: implementerSignatureReady.value ? "签名满足要求" : "点击补齐实施人签名",
+    ready: implementerSignatureReady.value,
+    tone: "implementer",
+    role: "implementer" as MopSignatureRole,
+  },
+  {
+    key: "auditor",
+    label: "维护审核人",
+    value: `${auditorSignatureDisplayCount.value}/${requiredAuditorSignatureCount.value}`,
+    text: auditorSignatureReady.value ? "签名满足要求" : "点击补齐审核人签名",
+    ready: auditorSignatureReady.value,
+    tone: "auditor",
+    role: "auditor" as MopSignatureRole,
+  },
+  {
+    key: "upload",
+    label: "上传",
+    value: canUploadSignedMop.value ? "可上传" : "待完成",
+    text: canUploadSignedMop.value ? "可上传已签名 MOP" : uploadSignedMopDisabledReason.value,
+    ready: canUploadSignedMop.value,
+    tone: "upload",
+    role: "" as MopSignatureRole | "",
+  },
+]);
+const activeSignaturePerson = computed(() => (
+  signaturePadTarget.value
+  || selectedFormalSignaturePeople(signatureRole.value).find((item) => item.record_id === activeSignatureRecordId.value)
+  || null
+));
 const currentRoleOtherSignatureDrafts = computed(() => (
   otherSignatureDrafts.value.filter((item) => String(item.role || "") === signatureRole.value)
 ));
 const currentRoleOtherSignaturePeople = computed(() => (
   selectedTemporarySignaturePeople(signatureRole.value)
 ));
+const currentRoleOtherSignatureDisplayRows = computed(() => {
+  const peopleRows = currentRoleOtherSignaturePeople.value.map((person, index) => ({
+    kind: "person",
+    row_key: `person:${signaturePersonKey(person) || index}`,
+    person,
+    draft: {} as Dict,
+    signed: personHasUsableSignature(person),
+    display_name: temporarySignatureDisplayName(person, index),
+    priority: otherSignaturePersonPriority(person),
+    original_index: index,
+  }));
+  const draftRows = currentRoleOtherSignatureDrafts.value.map((draft, index) => ({
+    kind: "draft",
+    row_key: `draft:${String(draft.draft_id || index)}`,
+    person: {} as Dict,
+    draft,
+    signed: false,
+    display_name: temporarySignatureDisplayName(draft, index),
+    priority: otherSignatureDraftPriority(draft),
+    original_index: currentRoleOtherSignaturePeople.value.length + index,
+  }));
+  return [...peopleRows, ...draftRows].sort((left, right) => {
+    if (left.priority !== right.priority) return left.priority - right.priority;
+    const leftNo = temporarySignatureDisplayNumber(left.display_name);
+    const rightNo = temporarySignatureDisplayNumber(right.display_name);
+    if (leftNo !== rightNo) return leftNo - rightNo;
+    const nameCompare = left.display_name.localeCompare(right.display_name, "zh-Hans-CN");
+    if (nameCompare !== 0) return nameCompare;
+    return left.original_index - right.original_index;
+  });
+});
+const currentRoleOtherSignaturePreviewRow = computed(() => currentRoleOtherSignatureDisplayRows.value[0] || null);
+const currentRoleOtherSignatureUnsignedCount = computed(() => (
+  currentRoleOtherSignatureDisplayRows.value.filter((row) => !row.signed).length
+));
 const signatureRoleHint = computed(() => {
   const label = signatureRole.value === "implementer" ? "维护实施人" : "维护审核人";
-  return activeSignaturePerson.value ? `${label}已选择，可手写后保存。` : `请选择${label}。`;
+  return activeSignaturePerson.value ? `${label}可网页手写或发送链接。` : `请选择${label}。`;
 });
 const addOtherSignatureDisabledReason = computed(() => {
   if (!selectedNotice.value) return "请先选择左侧维保通告";
   if (!selectedNotice.value.notice_key) return "当前通告缺少记忆键，无法创建临时签名";
   return "";
 });
-const pendingSignatureLinkPeople = computed(() => (
-  selectedFormalSignaturePeople(signatureRole.value)
-    .filter((person) => !personHasUsableSignature(person))
-    .filter((person) => String(person.record_id || "").trim())
-));
-const pendingSignatureLinkCount = computed(() => pendingSignatureLinkPeople.value.length);
-const unsignedSelectedSignaturePeople = computed(() => selectedRoleSignaturePeople.value.filter((person) => !personHasUsableSignature(person)));
 const allSelectedSignaturePeople = computed(() => [
   ...selectedSignaturePeople("implementer"),
   ...selectedSignaturePeople("auditor"),
@@ -1080,24 +798,15 @@ const allSelectedSignaturesReady = computed(() => (
   allSelectedSignaturePeople.value.length > 0
   && allSelectedSignaturePeople.value.every((person) => personHasUsableSignature(person))
 ));
-const signatureBatchLinkDisabledReason = computed(() => {
-  if (signatureLinkSending.value) return "";
-  const selectedFormal = selectedFormalSignaturePeople(signatureRole.value);
-  if (!selectedFormal.length) return "当前角色还没有选择正式签名人员";
-  const unsigned = selectedFormal.filter((person) => !personHasUsableSignature(person));
-  if (!unsigned.length) return "当前角色已都有签名；如需覆盖，请点人员旁边的“重新签名”";
-  if (!pendingSignatureLinkPeople.value.length) return "当前角色没有可发送签名链接的待签名人员";
-  return "";
-});
-const signatureLinkDisabledReason = computed(() => {
-  if (!activeSignaturePerson.value) return "请先选择签名人员";
-  if (!activeSignaturePerson.value.record_id) return "该人员记录缺少 ID，无法发送链接";
-  return "";
-});
 const openSignaturePadDisabledReason = computed(() => {
   if (signatureSaving.value) return "";
   if (!activeSignaturePerson.value) return "请先选择签名人员";
-  if (!activeSignaturePerson.value.record_id) return "该人员记录缺少 ID，无法手写签名";
+  const source = String(activeSignaturePerson.value.source || "");
+  if (source === "temporary" || activeSignaturePerson.value.temp_id) {
+    if (!activeSignaturePerson.value.temp_id) return "该临时人员签名会话不完整，无法手写签名";
+    return "";
+  }
+  if (!activeSignaturePerson.value.record_id) return "该人员资料不完整，无法手写签名";
   return "";
 });
 const saveSignatureDisabledReason = computed(() => {
@@ -1111,9 +820,58 @@ const canFillMopSignatures = computed(() => {
 });
 const hasImplementerSignature = computed(() => selectedSignaturePeople("implementer").some((person) => personHasUsableSignature(person)));
 const hasAuditorSignature = computed(() => selectedSignaturePeople("auditor").some((person) => personHasUsableSignature(person)));
+const signedImplementerCount = computed(() => (
+  selectedSignaturePeople("implementer").filter((person) => personHasUsableSignature(person)).length
+));
+const signedAuditorCount = computed(() => (
+  selectedSignaturePeople("auditor").filter((person) => personHasUsableSignature(person)).length
+));
+const involvedPeopleRequirement = computed(() => detectInvolvedPeopleRequirement());
+const mopMaintenanceStartTimeText = computed(() => maintenanceFieldValueByLabel("维护开始时间"));
+const mopMaintenanceFinishTimeText = computed(() => maintenanceFieldValueByLabel("维护完成时间"));
+const mopAuditConfirmTimeText = computed(() => maintenanceFieldValueByLabel("审核确认时间"));
+const mopMaintenanceStartDate = computed(() => parseMopComparableDate(mopMaintenanceStartTimeText.value));
+const mopMaintenanceFinishDate = computed(() => parseMopComparableDate(mopMaintenanceFinishTimeText.value));
+const mopMaintenanceTimeOrderInvalid = computed(() => Boolean(
+  mopMaintenanceStartDate.value
+  && mopMaintenanceFinishDate.value
+  && mopMaintenanceStartDate.value.getTime() > mopMaintenanceFinishDate.value.getTime()
+));
+const mopMaintenanceStartTimeReady = computed(() => Boolean(mopMaintenanceStartTimeText.value) && !mopMaintenanceTimeOrderInvalid.value);
+const mopMaintenanceFinishTimeReady = computed(() => Boolean(mopMaintenanceFinishTimeText.value) && !mopMaintenanceTimeOrderInvalid.value);
+const mopAuditConfirmTimeReady = computed(() => Boolean(mopAuditConfirmTimeText.value));
+const mopMaintenanceTimeValidationMessage = computed(() => {
+  if (!mopMaintenanceStartTimeText.value) return "请填写维护开始时间";
+  if (!mopMaintenanceFinishTimeText.value) return "请填写维护完成时间";
+  if (!mopAuditConfirmTimeText.value) return "请填写审核确认时间";
+  if (mopMaintenanceTimeOrderInvalid.value) {
+    return "维护开始时间不能晚于维护完成时间";
+  }
+  return "";
+});
+const requiredImplementerSignatureCount = computed(() => (
+  involvedPeopleRequirement.value.count > 0
+    ? involvedPeopleRequirement.value.count
+    : selectedSignaturePeople("implementer").length
+));
+const requiredAuditorSignatureCount = computed(() => 1);
+const implementerSignatureReady = computed(() => (
+  requiredImplementerSignatureCount.value > 0
+  && signedImplementerCount.value >= requiredImplementerSignatureCount.value
+));
+const auditorSignatureReady = computed(() => signedAuditorCount.value >= requiredAuditorSignatureCount.value);
+const implementerSignatureDisplayCount = computed(() => (
+  requiredImplementerSignatureCount.value > 0
+    ? Math.min(signedImplementerCount.value, requiredImplementerSignatureCount.value)
+    : signedImplementerCount.value
+));
+const auditorSignatureDisplayCount = computed(() => (
+  Math.min(signedAuditorCount.value, requiredAuditorSignatureCount.value)
+));
 const fillMopDisabledReason = computed(() => {
   if (!preview.value?.local_file?.path) return "请先打开 MOP 表格";
   if (!activeSheet.value) return "请先选择需要填写的 Sheet";
+  if (mopMaintenanceTimeValidationMessage.value) return mopMaintenanceTimeValidationMessage.value;
   if (!allSelectedSignaturePeople.value.length) return "请至少选择一个签名人员";
   if (!allSelectedSignaturesReady.value) return `还有 ${allSelectedSignaturePeople.value.filter((person) => !personHasUsableSignature(person)).length} 个已选人员未签名`;
   return "";
@@ -1124,16 +882,32 @@ const canUploadSignedMop = computed(() => Boolean(
   && selectedNotice.value
   && selectedNoticeSourceRecordId.value
   && hasImplementerSignature.value
-  && hasAuditorSignature.value,
+  && hasAuditorSignature.value
+  && allSelectedSignaturesReady.value
+  && !mopMaintenanceTimeValidationMessage.value
+  && (
+    involvedPeopleRequirement.value.count <= 0
+    || signedImplementerCount.value >= involvedPeopleRequirement.value.count
+  )
+));
+const signedMopUploadedAtText = computed(() => (
+  signedMopUploadedAt.value ? `${formatMopUploadTime(signedMopUploadedAt.value)}已上传` : ""
 ));
 const uploadSignedMopDisabledReason = computed(() => {
   if (!preview.value?.local_file?.path) return "请先打开 MOP 表格";
   if (!activeSheet.value) return "请先选择需要填写的 Sheet";
   if (!selectedNotice.value) return "请先选择左侧通告";
-  if (!selectedNoticeSourceRecordId.value) return "当前通告缺少源表记录 ID，无法上传";
+  if (!selectedNoticeSourceRecordId.value) return "当前通告缺少可上传的维保事项，无法上传";
+  if (mopMaintenanceTimeValidationMessage.value) return mopMaintenanceTimeValidationMessage.value;
   if (!hasImplementerSignature.value) return "请至少选择一个维护实施人签名";
   if (!hasAuditorSignature.value) return "请至少选择一个维护审核人签名";
   if (!allSelectedSignaturesReady.value) return `还有 ${allSelectedSignaturePeople.value.filter((person) => !personHasUsableSignature(person)).length} 个已选人员未签名`;
+  if (
+    involvedPeopleRequirement.value.count > 0
+    && signedImplementerCount.value < involvedPeopleRequirement.value.count
+  ) {
+    return `${involvedPeopleRequirement.value.cell_ref || "涉及人数"}为 ${involvedPeopleRequirement.value.count} 人，维护实施人至少需要 ${involvedPeopleRequirement.value.count} 个已签名人员`;
+  }
   return "";
 });
 const activeSheet = computed(() => {
@@ -1251,11 +1025,45 @@ const mopRequirementItems = computed(() => [
   },
   {
     key: "upload",
-    label: "源表写入",
+    label: "维保单写入",
     text: uploadSignedMopDisabledReason.value || "可上传",
     done: canUploadSignedMop.value,
   },
 ]);
+
+const mopUploadFooterItems = computed(() => [
+  {
+    key: "start_time",
+    label: "开始时间",
+    text: mopMaintenanceStartTimeText.value || "未填",
+    ready: mopMaintenanceStartTimeReady.value,
+  },
+  {
+    key: "finish_time",
+    label: "完成时间",
+    text: mopMaintenanceFinishTimeText.value || "未填",
+    ready: mopMaintenanceFinishTimeReady.value,
+  },
+  {
+    key: "audit_time",
+    label: "审核时间",
+    text: mopAuditConfirmTimeText.value || "未填",
+    ready: mopAuditConfirmTimeReady.value,
+  },
+  {
+    key: "implementer",
+    label: "实施人",
+    text: `${implementerSignatureDisplayCount.value}/${requiredImplementerSignatureCount.value}`,
+    ready: implementerSignatureReady.value,
+  },
+  {
+    key: "auditor",
+    label: "审核人",
+    text: `${auditorSignatureDisplayCount.value}/${requiredAuditorSignatureCount.value}`,
+    ready: auditorSignatureReady.value,
+  },
+]);
+
 const activeSheetColumnIndexes = computed(() => {
   const count = Math.max(0, Number(activeSheet.value?.column_count || 0));
   return Array.from({ length: count }, (_value, index) => index);
@@ -1279,6 +1087,21 @@ const activeSheetSignatureCellMap = computed(() => {
   }
   return map;
 });
+const activeSheetSignatureRoleCellMap = computed(() => {
+  const map = new Map<string, "implementer" | "auditor">();
+  for (const field of activeSheetMaintenanceFields.value) {
+    const role = roleForMaintenanceLabel(field?.label);
+    if (!role) continue;
+    const row = Number(field.row);
+    const valueCol = Number(field.value_col);
+    const labelCol = Number(field.label_col);
+    const baseCol = Number.isFinite(valueCol)
+      ? valueCol
+      : (Number.isFinite(labelCol) ? labelCol + 1 : 0);
+    map.set(`${row}:${baseCol}`, role);
+  }
+  return map;
+});
 const activeMopCellPosition = computed(() => {
   const key = activeMopCellKey.value;
   if (!key) return null;
@@ -1288,6 +1111,17 @@ const activeMopCellPosition = computed(() => {
   if (!Number.isFinite(row) || !Number.isFinite(col)) return null;
   return { row, col };
 });
+const selectedMopCellPositions = computed(() => {
+  const positions: Array<{ row: number; col: number }> = [];
+  for (const key of selectedMopCellKeys.value) {
+    const parts = key.split(":");
+    const row = Number(parts[parts.length - 2]);
+    const col = Number(parts[parts.length - 1]);
+    if (Number.isFinite(row) && Number.isFinite(col)) positions.push({ row, col });
+  }
+  return positions;
+});
+const singleMopCellSelected = computed(() => selectedMopCellKeys.value.length <= 1);
 const activeMopCellCheckbox = computed(() => {
   const position = activeMopCellPosition.value;
   return position ? checkboxCellAt(position.row, position.col) : null;
@@ -1319,6 +1153,36 @@ const activeMopCellInfo = computed(() => {
   }
   return null;
 });
+const mopCellPopoverMode = computed<MopCellPopoverMode>(() => {
+  if (!activeMopCellPosition.value) return "none";
+  if (selectedMopCellKeys.value.length > 1) return "selection";
+  if (activeMopCellCheckbox.value && singleMopCellSelected.value) return "checkbox";
+  if (activeMopCellMaintenanceField.value && singleMopCellSelected.value) {
+    if (maintenanceFieldIsTime(activeMopCellMaintenanceField.value)) return "field-time";
+    if (maintenanceFieldIsCompletion(activeMopCellMaintenanceField.value)) return "field-completion";
+  }
+  if (activeMopCellEditable.value && singleMopCellSelected.value) return "raw";
+  return "none";
+});
+const mopCellPopoverLabel = computed(() => {
+  const position = activeMopCellPosition.value;
+  if (!position) return "";
+  if (mopCellPopoverMode.value === "selection") return `已选 ${selectedMopCellKeys.value.length} 个单元格`;
+  if (activeMopCellCheckbox.value) return String(activeMopCellCheckbox.value.cell_ref || `${columnLabel(position.col)}${position.row + 1}`);
+  if (activeMopCellMaintenanceField.value) return String(activeMopCellMaintenanceField.value.label || "");
+  return `${columnLabel(position.col)}${position.row + 1} 普通单元格`;
+});
+const mopCellPopoverOptions = computed(() => {
+  const cell = activeMopCellCheckbox.value;
+  if (!cell) return [];
+  return checkboxOptions(cell).map((option) => ({
+    label: String(option.label || option.key || ""),
+    value: checkboxOptionValue(option),
+  })).filter((option) => option.label || option.value);
+});
+const mopCellPopoverCheckboxValue = computed(() => (
+  activeMopCellCheckbox.value ? checkboxState(activeMopCellCheckbox.value) : ""
+));
 const activeSheetMergeMap = computed(() => {
   const map = new Map<string, { hidden: boolean; rowspan: number; colspan: number }>();
   const merges = Array.isArray(activeSheet.value?.merges) ? activeSheet.value?.merges : [];
@@ -1380,30 +1244,93 @@ function isRecommendedMop(mop: Dict): boolean {
   return Boolean(recommendedMopRecordId.value && String(mop?.record_id || "") === recommendedMopRecordId.value);
 }
 
-function pad2(value: number): string {
-  return String(value).padStart(2, "0");
+function sortRecommendedMopFirst(items: Dict[]): Dict[] {
+  const recommendedId = recommendedMopRecordId.value;
+  if (!recommendedId || items.length < 2) return items;
+  return [...items].sort((left, right) => {
+    const leftRecommended = String(left?.record_id || "") === recommendedId;
+    const rightRecommended = String(right?.record_id || "") === recommendedId;
+    if (leftRecommended === rightRecommended) return 0;
+    return leftRecommended ? -1 : 1;
+  });
 }
 
-function defaultDateTimeLocal(): string {
-  const now = new Date();
-  now.setMinutes(0, 0, 0);
-  return `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}T${pad2(now.getHours())}:00`;
+function mopNoticeActionScore(notice: Dict): number {
+  let score = 0;
+  if (mopNoticeNeedsAction(notice)) score += 80;
+  if (noticeIsEnded(notice)) score += 30;
+  if (!notice?.mop_binding) score += 20;
+  if (!noticeMopUploaded(notice)) score += 20;
+  return score;
 }
 
-function formatMopDateTime(value: string): string {
-  const text = String(value || "").trim();
-  if (!text) return "";
-  const date = new Date(text);
-  if (Number.isNaN(date.getTime())) return text.replace("T", " ");
-  return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日${pad2(date.getHours())}时`;
+function sortMopNoticesForAction(items: Dict[]): Dict[] {
+  return [...items].sort((left, right) => {
+    const scoreDiff = mopNoticeActionScore(right) - mopNoticeActionScore(left);
+    if (scoreDiff) return scoreDiff;
+    const leftTime = String(left?.end_time || left?.start_time || left?.updated_at || "").trim();
+    const rightTime = String(right?.end_time || right?.start_time || right?.updated_at || "").trim();
+    if (leftTime !== rightTime) return rightTime.localeCompare(leftTime);
+    return String(left?.title || "").localeCompare(String(right?.title || ""), "zh-Hans-CN");
+  });
+}
+
+function maintenanceFieldValueByLabel(labelText: string): string {
+  const fields = activeSheetMaintenanceFields.value.filter((item) => String(item.label || "").includes(labelText));
+  for (const field of fields) {
+    const row = Number(field.row);
+    const valueCol = Number(field.value_col ?? field.label_col ?? -1);
+    const rowValues = Array.isArray(activeSheet.value?.rows?.[row]) ? activeSheet.value?.rows?.[row] : [];
+    const candidates = [
+      mopMaintenanceValues.value[maintenanceKey(field)],
+      field.fill_value,
+      Object.prototype.hasOwnProperty.call(mopCellEdits.value, rawCellKey(row, valueCol))
+        ? mopCellEdits.value[rawCellKey(row, valueCol)]
+        : "",
+      field.value,
+      rowValues?.[valueCol],
+    ];
+    for (const candidate of candidates) {
+      const normalized = normalizeMopRequiredTimeText(candidate);
+      if (normalized) return normalized;
+    }
+  }
+  return "";
+}
+
+function sheetCellDisplayText(rowIndex: number, colIndex: number): string {
+  return String(cellOverrideValue(rowIndex, colIndex) || activeSheet.value?.rows?.[rowIndex]?.[colIndex] || "");
+}
+
+function detectInvolvedPeopleRequirement(): { count: number; cell_ref: string } {
+  const rows = Array.isArray(activeSheet.value?.rows) ? activeSheet.value?.rows : [];
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+    for (const colIndex of activeSheetColumnIndexes.value) {
+      const text = sheetCellDisplayText(rowIndex, colIndex);
+      if (!String(text || "").includes("涉及人数")) continue;
+      const inlineCount = parsePeopleCount(text);
+      if (inlineCount > 0) {
+        return { count: inlineCount, cell_ref: `${columnLabel(colIndex)}${rowIndex + 1}` };
+      }
+      for (const offset of [1, 2, 3]) {
+        const nextCol = colIndex + offset;
+        if (!activeSheetColumnIndexes.value.includes(nextCol)) continue;
+        const count = parsePeopleCount(sheetCellDisplayText(rowIndex, nextCol));
+        if (count > 0) {
+          return { count, cell_ref: `${columnLabel(nextCol)}${rowIndex + 1}` };
+        }
+      }
+    }
+  }
+  return { count: 0, cell_ref: "" };
 }
 
 function checkboxKey(cell: Dict): string {
-  return `${activeSheet.value?.name || ""}:${cell.cell_ref || `${cell.row}:${cell.col}`}`;
+  return makeMopCheckboxKey(String(activeSheet.value?.name || ""), cell);
 }
 
 function maintenanceKey(field: Dict): string {
-  return `${activeSheet.value?.name || ""}:${field.label || ""}:${field.value_cell_ref || field.label_cell_ref || `${field.row}:${field.value_col}`}`;
+  return makeMopMaintenanceKey(String(activeSheet.value?.name || ""), field);
 }
 
 function checkboxState(cell: Dict): string {
@@ -1430,20 +1357,132 @@ function checkboxStateLabel(cell: Dict): string {
 }
 
 function mopCellKey(rowIndex: number, colIndex: number): string {
-  return `${activeSheetName.value || activeSheet.value?.name || "sheet"}:${rowIndex}:${colIndex}`;
+  return makeMopCellKey(String(activeSheetName.value || activeSheet.value?.name || ""), rowIndex, colIndex);
+}
+
+function focusSheetWithoutScroll(): void {
+  const sheet = sheetScrollRef.value;
+  if (!sheet) return;
+  try {
+    sheet.focus({ preventScroll: true });
+  } catch {
+    sheet.focus();
+  }
+}
+
+function activeMopCellElement(): HTMLElement | null {
+  if (!activeMopCellKey.value || !sheetScrollRef.value) return null;
+  return sheetScrollRef.value.querySelector(`[data-mop-cell-key="${activeMopCellKey.value}"]`) as HTMLElement | null;
+}
+
+function updateActiveMopCellOverlayPosition(): void {
+  const cell = activeMopCellElement();
+  if (!cell) {
+    activeMopCellOverlayStyle.value = {};
+    return;
+  }
+  const rect = cell.getBoundingClientRect();
+  const mode = mopCellPopoverMode.value;
+  activeMopCellOverlayStyle.value = mopCellOverlayStyle(rect, mode, window.innerWidth, window.innerHeight);
+}
+
+function isMopCellSelected(rowIndex: number, colIndex: number): boolean {
+  return selectedMopCellKeys.value.includes(mopCellKey(rowIndex, colIndex));
+}
+
+function mopCellIsVisible(rowIndex: number, colIndex: number): boolean {
+  return Boolean(activeSheet.value) && !cellMergeSpan(rowIndex, colIndex).hidden;
+}
+
+function setMopCellSelectionRange(anchor: { row: number; col: number }, rowIndex: number, colIndex: number): void {
+  if (!activeSheet.value) return;
+  const minRow = Math.min(anchor.row, rowIndex);
+  const maxRow = Math.max(anchor.row, rowIndex);
+  const minCol = Math.min(anchor.col, colIndex);
+  const maxCol = Math.max(anchor.col, colIndex);
+  const keys: string[] = [];
+  for (let row = minRow; row <= maxRow; row += 1) {
+    for (const col of activeSheetColumnIndexes.value) {
+      if (col < minCol || col > maxCol) continue;
+      if (!mopCellIsVisible(row, col)) continue;
+      keys.push(mopCellKey(row, col));
+    }
+  }
+  selectedMopCellKeys.value = keys.length ? keys : [mopCellKey(anchor.row, anchor.col)];
+}
+
+function startMopCellSelection(rowIndex: number, colIndex: number, event: MouseEvent): void {
+  if (!mopCellIsVisible(rowIndex, colIndex)) return;
+  const key = mopCellKey(rowIndex, colIndex);
+  activeMopCellKey.value = key;
+  mopSelectionAnchor.value = { row: rowIndex, col: colIndex };
+  mopSelecting.value = true;
+  mopSelectionDragging.value = false;
+  mopSelectionStartPoint = { x: event.clientX, y: event.clientY };
+  selectedMopCellKeys.value = [key];
+  const signatureRoleForCell = signatureRoleAtCell(rowIndex, colIndex);
+  if (signatureRoleForCell) {
+    openSignatureManager(signatureRoleForCell);
+  }
+  nextTick(() => {
+    focusSheetWithoutScroll();
+    updateActiveMopCellOverlayPosition();
+  });
+}
+
+function extendMopCellSelection(rowIndex: number, colIndex: number, event: MouseEvent): void {
+  if (!mopSelecting.value || !mopSelectionAnchor.value) return;
+  if (!mopCellIsVisible(rowIndex, colIndex)) return;
+  if (!mopSelectionDragging.value) {
+    const start = mopSelectionStartPoint;
+    const moved = start ? Math.hypot(event.clientX - start.x, event.clientY - start.y) : 0;
+    const changedCell = rowIndex !== mopSelectionAnchor.value.row || colIndex !== mopSelectionAnchor.value.col;
+    if (!changedCell || moved < 8) return;
+    mopSelectionDragging.value = true;
+  }
+  setMopCellSelectionRange(mopSelectionAnchor.value, rowIndex, colIndex);
+}
+
+function finishMopCellSelection(): void {
+  mopSelecting.value = false;
+  mopSelectionDragging.value = false;
+  mopSelectionAnchor.value = null;
+  mopSelectionStartPoint = null;
+}
+
+function clearMopCellSelection(): void {
+  activeMopCellKey.value = "";
+  selectedMopCellKeys.value = [];
+  mopSelecting.value = false;
+  mopSelectionDragging.value = false;
+  mopSelectionAnchor.value = null;
+  mopSelectionStartPoint = null;
+  activeMopCellOverlayStyle.value = {};
 }
 
 function activateMopCell(rowIndex: number, colIndex: number): void {
+  const signatureRoleForCell = signatureRoleAtCell(rowIndex, colIndex);
+  if (signatureRoleForCell) {
+    activeMopCellKey.value = mopCellKey(rowIndex, colIndex);
+    selectedMopCellKeys.value = [mopCellKey(rowIndex, colIndex)];
+    openSignatureManager(signatureRoleForCell);
+    nextTick(() => {
+      focusSheetWithoutScroll();
+      updateActiveMopCellOverlayPosition();
+    });
+    return;
+  }
   if (!checkboxCellAt(rowIndex, colIndex) && !maintenanceFieldAt(rowIndex, colIndex) && !editableCellAt(rowIndex, colIndex)) return;
   activeMopCellKey.value = mopCellKey(rowIndex, colIndex);
+  selectedMopCellKeys.value = [mopCellKey(rowIndex, colIndex)];
+  nextTick(() => {
+    focusSheetWithoutScroll();
+    updateActiveMopCellOverlayPosition();
+  });
 }
 
 function setCheckboxState(cell: Dict, state: string): void {
-  mopCheckboxStates.value = {
-    ...mopCheckboxStates.value,
-    [checkboxKey(cell)]: state,
-  };
-  filledMopResult.value = null;
+  mopEditing.setCheckbox(checkboxKey(cell), state);
 }
 
 function checkboxCellAt(rowIndex: number, colIndex: number): Dict | null {
@@ -1455,7 +1494,7 @@ function maintenanceFieldAt(rowIndex: number, colIndex: number): Dict | null {
 }
 
 function rawCellKey(rowIndex: number, colIndex: number): string {
-  return `${activeSheet.value?.name || ""}:${rowIndex}:${colIndex}`;
+  return makeRawMopCellKey(String(activeSheet.value?.name || ""), rowIndex, colIndex);
 }
 
 function protectedMopCell(rowIndex: number, colIndex: number): boolean {
@@ -1463,7 +1502,7 @@ function protectedMopCell(rowIndex: number, colIndex: number): boolean {
   if (cellMergeSpan(rowIndex, colIndex).hidden) return true;
   if (checkboxCellAt(rowIndex, colIndex)) return true;
   if (activeSheetMaintenanceProtectedCellSet.value.has(`${rowIndex}:${colIndex}`)) return true;
-  if (cellSignatures(rowIndex, colIndex).length) return true;
+  if (signatureRoleAtCell(rowIndex, colIndex)) return true;
   return false;
 }
 
@@ -1482,18 +1521,53 @@ function editableCellValue(rowIndex: number, colIndex: number): string {
 
 function setEditableCellValue(rowIndex: number, colIndex: number, value: string): void {
   if (!editableCellAt(rowIndex, colIndex)) return;
-  mopCellEdits.value = {
-    ...mopCellEdits.value,
-    [rawCellKey(rowIndex, colIndex)]: String(value || ""),
-  };
-  filledMopResult.value = null;
+  mopEditing.setCellEdit(rawCellKey(rowIndex, colIndex), String(value || ""));
 }
 
 function clearEditableCell(rowIndex: number, colIndex: number): void {
-  const next = { ...mopCellEdits.value };
-  delete next[rawCellKey(rowIndex, colIndex)];
-  mopCellEdits.value = next;
-  filledMopResult.value = null;
+  mopEditing.clearCellEdit(rawCellKey(rowIndex, colIndex));
+}
+
+function clearSelectedMopCells(): void {
+  const editNext = { ...mopCellEdits.value };
+  const checkboxNext = { ...mopCheckboxStates.value };
+  const maintenanceNext = { ...mopMaintenanceValues.value };
+  let count = 0;
+  for (const position of selectedMopCellPositions.value) {
+    const rawKey = rawCellKey(position.row, position.col);
+    if (Object.prototype.hasOwnProperty.call(editNext, rawKey)) {
+      delete editNext[rawKey];
+      count += 1;
+    }
+    const checkbox = checkboxCellAt(position.row, position.col);
+    if (checkbox) {
+      const key = checkboxKey(checkbox);
+      if (Object.prototype.hasOwnProperty.call(checkboxNext, key)) {
+        delete checkboxNext[key];
+        count += 1;
+      }
+    }
+    const field = maintenanceFieldAt(position.row, position.col);
+    if (field) {
+      const key = maintenanceKey(field);
+      if (Object.prototype.hasOwnProperty.call(maintenanceNext, key)) {
+        delete maintenanceNext[key];
+        count += 1;
+      }
+    }
+  }
+  if (count) {
+    mopEditing.replaceSheetValues({
+      cellEdits: editNext,
+      checkboxStates: checkboxNext,
+      maintenanceValues: maintenanceNext,
+    });
+    signatureMessage.value = `已还原 ${count} 个填写项。`;
+    signatureMessageType.value = "success";
+  } else {
+    signatureMessage.value = "选中区域没有可还原的填写项。";
+    signatureMessageType.value = "failed";
+  }
 }
 
 function setActiveEditableCellValue(value: string): void {
@@ -1502,10 +1576,192 @@ function setActiveEditableCellValue(value: string): void {
   setEditableCellValue(position.row, position.col, value);
 }
 
+function setActiveCheckboxState(value: string): void {
+  const cell = activeMopCellCheckbox.value;
+  if (!cell) return;
+  setCheckboxState(cell, value);
+}
+
+function fillActiveMaintenanceDate(): void {
+  const field = activeMopCellMaintenanceField.value;
+  if (!field) return;
+  fillMaintenanceField(field, formatMopDateTime(mopFillDateTime.value));
+}
+
+function fillActiveMaintenanceCompletion(value: string): void {
+  const field = activeMopCellMaintenanceField.value;
+  if (!field) return;
+  fillMaintenanceField(field, value);
+}
+
 function clearActiveEditableCell(): void {
   const position = activeMopCellPosition.value;
   if (!position) return;
   clearEditableCell(position.row, position.col);
+}
+
+async function copyActiveMopSelection(): Promise<void> {
+  const position = activeMopCellPosition.value;
+  if (!position) return;
+  if (selectedMopCellKeys.value.length > 1) await copySelectedMopCells();
+  else await copyMopCell(position.row, position.col);
+}
+
+async function pasteActiveMopSelection(): Promise<void> {
+  const position = activeMopCellPosition.value;
+  if (!position) return;
+  await pasteMopClipboardAt(position.row, position.col);
+}
+
+function restoreActiveMopSelection(): void {
+  if (selectedMopCellKeys.value.length > 1) clearSelectedMopCells();
+  else clearActiveEditableCell();
+}
+
+function mopCellCurrentText(rowIndex: number, colIndex: number): string {
+  return String(cellOverrideValue(rowIndex, colIndex) || activeSheet.value?.rows?.[rowIndex]?.[colIndex] || "");
+}
+
+async function writeTextClipboard(text: string): Promise<void> {
+  try {
+    await navigator.clipboard?.writeText(text);
+  } catch {
+    // Browser clipboard can be blocked by permissions; keep the in-page clipboard.
+  }
+}
+
+async function readTextClipboard(): Promise<string> {
+  try {
+    const text = await navigator.clipboard?.readText();
+    if (typeof text === "string") return text;
+  } catch {
+    // Fall back to the in-page clipboard.
+  }
+  return mopClipboardCellText.value;
+}
+
+async function copyMopCell(rowIndex: number, colIndex: number): Promise<void> {
+  const text = mopCellCurrentText(rowIndex, colIndex);
+  mopEditing.setClipboardText(text);
+  await writeTextClipboard(text);
+  signatureMessage.value = `${columnLabel(colIndex)}${rowIndex + 1} 已复制。`;
+  signatureMessageType.value = "success";
+}
+
+function selectedMopCellBounds(): { minRow: number; maxRow: number; minCol: number; maxCol: number } | null {
+  return calculateSelectedMopCellBounds(selectedMopCellPositions.value);
+}
+
+async function copySelectedMopCells(): Promise<void> {
+  const bounds = selectedMopCellBounds();
+  if (!bounds) return;
+  const lines: string[] = [];
+  const selected = new Set(selectedMopCellKeys.value);
+  for (let row = bounds.minRow; row <= bounds.maxRow; row += 1) {
+    const values: string[] = [];
+    for (const col of activeSheetColumnIndexes.value) {
+      if (col < bounds.minCol || col > bounds.maxCol) continue;
+      values.push(selected.has(mopCellKey(row, col)) ? mopCellCurrentText(row, col) : "");
+    }
+    lines.push(values.join("\t"));
+  }
+  const text = lines.join("\n");
+  mopEditing.setClipboardText(text);
+  await writeTextClipboard(text);
+  signatureMessage.value = selectedMopCellKeys.value.length > 1
+    ? `已复制 ${selectedMopCellKeys.value.length} 个单元格。`
+    : "已复制 1 个单元格。";
+  signatureMessageType.value = "success";
+}
+
+function pasteTextToMopCells(startRow: number, startCol: number, text: string): number {
+  if (!editableCellAt(startRow, startCol)) return 0;
+  const rows = parseMopClipboardMatrix(text);
+  let count = 0;
+  const next = { ...mopCellEdits.value };
+  rows.forEach((rowValues, rowOffset) => {
+    rowValues.forEach((value, colOffset) => {
+      const rowIndex = startRow + rowOffset;
+      const colIndex = startCol + colOffset;
+      if (rowIndex < 0 || rowIndex >= (activeSheet.value?.rows || []).length) return;
+      if (!activeSheetColumnIndexes.value.includes(colIndex)) return;
+      if (!editableCellAt(rowIndex, colIndex)) return;
+      next[rawCellKey(rowIndex, colIndex)] = String(value || "");
+      count += 1;
+    });
+  });
+  if (count) {
+    mopEditing.replaceCellEdits(next);
+  }
+  return count;
+}
+
+function pasteSingleTextToSelectedMopCells(text: string): number {
+  if (selectedMopCellKeys.value.length <= 1) return 0;
+  const next = { ...mopCellEdits.value };
+  let count = 0;
+  for (const position of selectedMopCellPositions.value) {
+    if (!editableCellAt(position.row, position.col)) continue;
+    next[rawCellKey(position.row, position.col)] = String(text || "");
+    count += 1;
+  }
+  if (count) {
+    mopEditing.replaceCellEdits(next);
+  }
+  return count;
+}
+
+async function pasteMopClipboardAt(rowIndex: number, colIndex: number): Promise<void> {
+  const text = await readTextClipboard();
+  if (!text && !mopClipboardCellText.value) {
+    signatureMessage.value = "当前没有可粘贴的单元格内容。";
+    signatureMessageType.value = "failed";
+    return;
+  }
+  const content = text || mopClipboardCellText.value;
+  const isMatrixPaste = isMopMatrixClipboardText(content);
+  const count = !isMatrixPaste && selectedMopCellKeys.value.length > 1
+    ? pasteSingleTextToSelectedMopCells(content)
+    : pasteTextToMopCells(rowIndex, colIndex, content);
+  if (!count) {
+    signatureMessage.value = "当前选中的单元格不可粘贴。";
+    signatureMessageType.value = "failed";
+    return;
+  }
+  signatureMessage.value = count > 1 ? `已粘贴 ${count} 个单元格。` : `${columnLabel(colIndex)}${rowIndex + 1} 已粘贴。`;
+  signatureMessageType.value = "success";
+}
+
+function eventTargetIsTextInput(event: KeyboardEvent): boolean {
+  const target = event.target as HTMLElement | null;
+  if (!target) return false;
+  const tag = target.tagName.toLowerCase();
+  return tag === "input" || tag === "textarea" || target.isContentEditable;
+}
+
+async function handleMopTableKeydown(event: KeyboardEvent): Promise<void> {
+  if (!activeMopCellPosition.value || eventTargetIsTextInput(event)) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    clearMopCellSelection();
+    signatureMessage.value = "已取消单元格选择。";
+    signatureMessageType.value = "success";
+    return;
+  }
+  if (!(event.ctrlKey || event.metaKey)) return;
+  const key = event.key.toLowerCase();
+  if (key !== "c" && key !== "v") return;
+  event.preventDefault();
+  const { row, col } = activeMopCellPosition.value;
+  if (key === "c") {
+    if (selectedMopCellKeys.value.length > 1) {
+      await copySelectedMopCells();
+    } else {
+      await copyMopCell(row, col);
+    }
+  } else {
+    await pasteMopClipboardAt(row, col);
+  }
 }
 
 function maintenanceFieldIsTime(field: Dict): boolean {
@@ -1530,18 +1786,16 @@ function maintenanceFieldWritesValueOnly(field: Dict): boolean {
 function fillMaintenanceField(field: Dict, value: string): void {
   const text = String(value || "").trim();
   if (!text) return;
-  mopMaintenanceValues.value = {
-    ...mopMaintenanceValues.value,
-    [maintenanceKey(field)]: text,
-  };
-  filledMopResult.value = null;
+  mopEditing.setMaintenanceValue(maintenanceKey(field), text);
+}
+
+function clearMopOutputState(): void {
+  mopEditing.clearOutputState();
 }
 
 function clearMopFillState(options: { clearSignatures?: boolean } = {}): void {
-  mopCheckboxStates.value = {};
-  mopMaintenanceValues.value = {};
-  mopCellEdits.value = {};
-  filledMopResult.value = null;
+  closeMopTransientUi();
+  mopEditing.resetSheetValues();
   if (options.clearSignatures) {
     signatureSelectedRecords.value = { implementer: [], auditor: [] };
     temporarySignatures.value = [];
@@ -1554,6 +1808,92 @@ function clearMopFillState(options: { clearSignatures?: boolean } = {}): void {
   }
 }
 
+function mopPayloadList(value: unknown): Dict[] {
+  return Array.isArray(value) ? value.filter((item): item is Dict => Boolean(item && typeof item === "object")) : [];
+}
+
+function mopMemoryFieldKeys(field: Dict): string[] {
+  const label = String(field.label || "").trim();
+  const valueCellRef = String(field.value_cell_ref || "").trim();
+  const labelCellRef = String(field.label_cell_ref || "").trim();
+  const row = String(Number(field.row));
+  const valueCol = String(Number(field.value_col ?? field.label_col ?? -1));
+  const keys = [
+    valueCellRef ? `value:${valueCellRef}` : "",
+    labelCellRef ? `label-cell:${labelCellRef}` : "",
+    label && valueCellRef ? `label-value:${label}:${valueCellRef}` : "",
+    label ? `label-pos:${label}:${row}:${valueCol}` : "",
+    label ? `label:${label}` : "",
+  ];
+  return keys.filter(Boolean);
+}
+
+function applyMopFillMemory(memory: Dict | null | undefined): number {
+  const payload = memory?.payload && typeof memory.payload === "object" ? memory.payload as Dict : null;
+  if (!payload || !activeSheet.value) return 0;
+  let applied = 0;
+
+  const checkboxByPosition = new Map<string, Dict>();
+  for (const cell of activeSheetCheckboxCells.value) {
+    checkboxByPosition.set(`${Number(cell.row)}:${Number(cell.col)}`, cell);
+    if (cell.cell_ref) checkboxByPosition.set(`ref:${String(cell.cell_ref)}`, cell);
+  }
+  const nextCheckboxes = { ...mopCheckboxStates.value };
+  for (const item of mopPayloadList(payload.checkboxes)) {
+    const state = String(
+      item.selection
+      || item.selected_label
+      || item.selected_key
+      || item.state
+      || ""
+    ).trim();
+    if (!state) continue;
+    const cell = checkboxByPosition.get(`${Number(item.row)}:${Number(item.col)}`)
+      || checkboxByPosition.get(`ref:${String(item.cell_ref || "")}`);
+    if (!cell) continue;
+    nextCheckboxes[checkboxKey(cell)] = state;
+    applied += 1;
+  }
+
+  const fieldByKey = new Map<string, Dict>();
+  for (const field of activeSheetMaintenanceFields.value) {
+    for (const key of mopMemoryFieldKeys(field)) {
+      if (!fieldByKey.has(key)) fieldByKey.set(key, field);
+    }
+  }
+  const nextFields = { ...mopMaintenanceValues.value };
+  for (const item of mopPayloadList(payload.fields)) {
+    const fillValue = String(item.fill_value || "").trim();
+    if (!fillValue) continue;
+    const field = mopMemoryFieldKeys(item).map((key) => fieldByKey.get(key)).find(Boolean);
+    if (!field) continue;
+    nextFields[maintenanceKey(field)] = fillValue;
+    applied += 1;
+  }
+
+  const nextCellEdits = { ...mopCellEdits.value };
+  const currentSheet = String(activeSheetName.value || activeSheet.value?.name || "");
+  for (const item of mopPayloadList(payload.cell_edits)) {
+    const sheet = String(item.sheet || currentSheet);
+    if (sheet && sheet !== currentSheet) continue;
+    const row = Number(item.row);
+    const col = Number(item.col);
+    if (!Number.isFinite(row) || !Number.isFinite(col)) continue;
+    if (!editableCellAt(row, col)) continue;
+    nextCellEdits[rawCellKey(row, col)] = String(item.value ?? "");
+    applied += 1;
+  }
+
+  if (applied) {
+    mopEditing.replaceSheetValues({
+      checkboxStates: nextCheckboxes,
+      maintenanceValues: nextFields,
+      cellEdits: nextCellEdits,
+    });
+  }
+  return applied;
+}
+
 function markAllCheckboxes(state: string): void {
   const next = { ...mopCheckboxStates.value };
   for (const cell of bulkFillCheckboxCells.value) {
@@ -1564,8 +1904,7 @@ function markAllCheckboxes(state: string): void {
       || options[0];
     next[checkboxKey(cell)] = checkboxOptionValue(preferred) || state;
   }
-  mopCheckboxStates.value = next;
-  filledMopResult.value = null;
+  mopEditing.replaceCheckboxStates(next);
 }
 
 function checkboxDisplayValue(cell: Dict): string {
@@ -1676,6 +2015,7 @@ function buildMopRequestPayload(extra: Dict = {}): Dict {
     local_file_path: preview.value?.local_file?.path || "",
     mop_record_id: preview.value?.mop_record_id || selectedMop.value?.record_id || "",
     mop_title: preview.value?.mop_title || selectedMop.value?.title || "",
+    mop_file_name: preview.value?.mop_file_name || selectedAttachment.value?.name || preview.value?.local_file?.file_name || "",
     sheet_name: activeSheet.value?.name || "",
     fields: buildMopFieldPayload(),
     checkboxes: buildMopCheckboxPayload(),
@@ -1685,13 +2025,8 @@ function buildMopRequestPayload(extra: Dict = {}): Dict {
   };
 }
 
-function personInitial(person: Dict): string {
-  const text = String(person?.name || person?.employee_no || "?").trim();
-  return text.slice(0, 1).toUpperCase() || "?";
-}
-
 function personHasUsableSignature(person: Dict | null | undefined): boolean {
-  return Boolean(person?.has_signature && String(person?.signature_preview_url || "").trim());
+  return mopPersonHasUsableSignature(person);
 }
 
 function rememberSignaturePeople(items: Dict[]): void {
@@ -1760,7 +2095,7 @@ function signatureContext(): CanvasRenderingContext2D | null {
   ctx.lineWidth = 4;
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
-  ctx.strokeStyle = "#0f172a";
+  ctx.strokeStyle = "#000000";
   return ctx;
 }
 
@@ -1793,7 +2128,7 @@ function resizeSignatureCanvas(): void {
   ctx.lineWidth = 4;
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
-  ctx.strokeStyle = "#0f172a";
+  ctx.strokeStyle = "#000000";
   signatureHasInk.value = Boolean(previousHasInk);
 }
 
@@ -1814,6 +2149,7 @@ async function openSignaturePad(): Promise<void> {
   signatureMessage.value = "";
   signatureMessageType.value = "";
   signatureHasInk.value = false;
+  closeSignatureDrawers();
   signaturePadOpen.value = true;
   await nextTick();
   disconnectSignatureCanvasObserver();
@@ -1822,18 +2158,97 @@ async function openSignaturePad(): Promise<void> {
 }
 
 async function openSignaturePadForPerson(person: Dict): Promise<void> {
+  const source = String(person?.source || "");
+  const tempId = String(person?.temp_id || "").trim();
   const recordId = String(person?.record_id || "").trim();
-  if (!recordId || (person.source && person.source !== "staff")) return;
-  setActiveSignaturePerson(recordId);
+  if (source === "external") {
+    if (!recordId) return;
+    signaturePadTarget.value = person;
+  } else if (source === "temporary" || tempId) {
+    if (!tempId) return;
+    signaturePadTarget.value = person;
+  } else {
+    if (!recordId) return;
+    signaturePadTarget.value = null;
+    setActiveSignaturePerson(recordId);
+  }
   await nextTick();
   await openSignaturePad();
+}
+
+function otherSignatureWebSignDisabledReason(person: Dict): string {
+  const source = String(person?.source || "");
+  if (source === "external") {
+    return String(person?.record_id || "").trim() ? "" : "该外部人员资料不完整，无法网页手写";
+  }
+  return String(person?.temp_id || "").trim() ? "" : "该临时人员签名会话不完整，无法网页手写";
+}
+
+async function openSignaturePadForDraft(draft: Dict): Promise<void> {
+  const draftId = String(draft?.draft_id || "").trim();
+  if (!draftId) return;
+  const role = String(draft.role || signatureRole.value) === "auditor" ? "auditor" : "implementer";
+  const displayName = String(draft.display_name || "").trim() || nextOtherSignatureDisplayName(role);
+  temporarySignatureSendingByDraft.value = {
+    ...temporarySignatureSendingByDraft.value,
+    [draftId]: true,
+  };
+  otherSignatureDrafts.value = otherSignatureDrafts.value.map((item) => (
+    String(item.draft_id || "") === draftId
+      ? { ...item, display_name: displayName, status: "sending", error: "" }
+      : item
+  ));
+  try {
+    const data = await createTemporarySignatureSession({
+      scope: scope.value,
+      noticeKey: selectedNotice.value?.notice_key || "",
+      noticeTitle: selectedNotice.value?.title || "",
+      specialty: selectedNoticeSpecialty.value,
+      role,
+      displayName,
+    });
+    if (data) {
+      mergeTemporarySignatures([data]);
+      hiddenOtherSignatureKeys.value = hiddenOtherSignatureKeys.value.filter((key) => key !== signaturePersonKey(data));
+      otherSignatureDrafts.value = otherSignatureDrafts.value.filter((item) => String(item.draft_id || "") !== draftId);
+      signaturePadTarget.value = data;
+      updateTemporarySignaturePolling();
+      await nextTick();
+      await openSignaturePad();
+    }
+  } catch (error) {
+    otherSignatureDrafts.value = otherSignatureDrafts.value.map((item) => (
+      String(item.draft_id || "") === draftId
+        ? { ...item, status: "failed", error: error instanceof Error ? error.message : "创建临时签名失败" }
+        : item
+    ));
+    signatureMessage.value = error instanceof Error ? error.message : "创建临时签名失败";
+    signatureMessageType.value = "failed";
+  } finally {
+    const next = { ...temporarySignatureSendingByDraft.value };
+    delete next[draftId];
+    temporarySignatureSendingByDraft.value = next;
+  }
 }
 
 function closeSignaturePad(): void {
   signatureDrawing = false;
   signaturePadOpen.value = false;
   signatureHasInk.value = false;
+  signaturePadTarget.value = null;
   disconnectSignatureCanvasObserver();
+}
+
+function closeMopTransientUi(): void {
+  activeMopCellKey.value = "";
+  selectedMopCellKeys.value = [];
+  mopSelecting.value = false;
+  mopSelectionAnchor.value = null;
+  mopSelectionDragging.value = false;
+  mopSelectionStartPoint = null;
+  activeMopCellOverlayStyle.value = {};
+  closeSignatureManager();
+  if (signaturePadOpen.value) closeSignaturePad();
 }
 
 function signaturePointFromEvent(event: PointerEvent): { x: number; y: number } {
@@ -1898,6 +2313,7 @@ function selectSignaturePerson(recordId: string): void {
     ...signatureSelectedRecords.value,
     [signatureRole.value]: [...new Set(next)],
   };
+  clearMopOutputState();
   signatureMessage.value = "";
   signatureMessageType.value = "";
   clearSignatureCanvas();
@@ -1912,6 +2328,7 @@ function removeSignaturePerson(role: "implementer" | "auditor", recordId: string
   const recordText = String(recordId || "");
   if (recordText.startsWith("temp:") || recordText.startsWith("external:")) {
     hiddenOtherSignatureKeys.value = [...new Set([...hiddenOtherSignatureKeys.value, recordText])];
+    clearMopOutputState();
     clearSignatureCanvas();
     return;
   }
@@ -1919,8 +2336,32 @@ function removeSignaturePerson(role: "implementer" | "auditor", recordId: string
     ...signatureSelectedRecords.value,
     [role]: (signatureSelectedRecords.value[role] || []).filter((item) => item !== recordText),
   };
+  clearMopOutputState();
   clearSignatureCanvas();
   updateFormalSignaturePolling();
+}
+
+function closeSignatureDrawers(): void {
+  selectedSignatureDrawerOpen.value = false;
+  temporarySignatureDrawerOpen.value = false;
+}
+
+function setSelectedSignatureDrawerOpen(value: boolean): void {
+  selectedSignatureDrawerOpen.value = value;
+  if (value) temporarySignatureDrawerOpen.value = false;
+}
+
+function setTemporarySignatureDrawerOpen(value: boolean): void {
+  temporarySignatureDrawerOpen.value = value;
+  if (value) selectedSignatureDrawerOpen.value = false;
+}
+
+function toggleSelectedSignatureDrawer(): void {
+  setSelectedSignatureDrawerOpen(!selectedSignatureDrawerOpen.value);
+}
+
+function toggleTemporarySignatureDrawer(): void {
+  setTemporarySignatureDrawerOpen(!temporarySignatureDrawerOpen.value);
 }
 
 function selectedFormalSignaturePeople(role: "implementer" | "auditor"): Dict[] {
@@ -1930,10 +2371,17 @@ function selectedFormalSignaturePeople(role: "implementer" | "auditor"): Dict[] 
     .filter((item): item is Dict => Boolean(item));
 }
 
+function isOtherSignaturePerson(item: Dict): boolean {
+  const source = String(item?.source || "").trim();
+  if (source === "temporary" || source === "external") return true;
+  return Boolean(String(item?.temp_id || item?.temporary_id || "").trim());
+}
+
 function selectedTemporarySignaturePeople(role: "implementer" | "auditor"): Dict[] {
   const hidden = new Set(hiddenOtherSignatureKeys.value);
   return temporarySignatures.value
     .filter((item) => String(item.role || "") === role)
+    .filter((item) => isOtherSignaturePerson(item))
     .filter((item) => String(item.status || "") !== "failed")
     .filter((item) => !hidden.has(signaturePersonKey(item)));
 }
@@ -1949,28 +2397,43 @@ function selectedSignatureUnsignedCount(role: "implementer" | "auditor"): number
   return selectedSignaturePeople(role).filter((person) => !personHasUsableSignature(person)).length;
 }
 
-function signaturePersonKey(person: Dict): string {
-  const tempId = String(person?.temp_id || "").trim();
-  if (String(person?.source || "") === "temporary" || tempId) {
-    return `temp:${tempId}`;
-  }
-  if (String(person?.source || "") === "external") {
-    return `external:${String(person?.record_id || "").trim()}`;
-  }
-  return String(person?.record_id || "").trim();
+function selectedFormalSignatureUnsignedCount(role: "implementer" | "auditor"): number {
+  return selectedFormalSignaturePeople(role).filter((person) => !personHasUsableSignature(person)).length;
 }
 
-function signaturePersonDisplayName(person: Dict): string {
-  const name = String(person?.name || person?.display_name || "未命名").trim() || "未命名";
-  const source = String(person?.source || "");
-  const status = String(person?.status || "");
-  if (source === "temporary") {
-    return `${name} · ${personHasUsableSignature(person) || status === "signed" ? "已签名" : "待签名"}`;
-  }
-  if (source === "external") {
-    return `${name} · 已保存`;
-  }
-  return name;
+function selectedTemporarySignatureUnsignedCount(role: "implementer" | "auditor"): number {
+  return selectedTemporarySignaturePeople(role).filter((person) => !personHasUsableSignature(person)).length;
+}
+
+function nextOtherSignatureDisplayName(role: "implementer" | "auditor"): string {
+  const usedNumbers = [
+    ...selectedTemporarySignaturePeople(role).map((item) => String(item.name || item.display_name || "")),
+    ...otherSignatureDrafts.value
+      .filter((item) => String(item.role || "") === role)
+      .map((item) => String(item.display_name || "")),
+  ]
+    .map((name) => /^临时人员(\d+)$/.exec(name.trim())?.[1] || "")
+    .map((value) => Number(value || 0))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  return `临时人员${(usedNumbers.length ? Math.max(...usedNumbers) : 0) + 1}`;
+}
+
+function ensureOtherSignatureDraftName(draft: Dict): void {
+  const draftId = String(draft?.draft_id || "");
+  if (!draftId || String(draft.display_name || "").trim()) return;
+  const role = String(draft.role || signatureRole.value) === "auditor" ? "auditor" : "implementer";
+  const displayName = nextOtherSignatureDisplayName(role);
+  otherSignatureDrafts.value = otherSignatureDrafts.value.map((item) => (
+    String(item.draft_id || "") === draftId ? { ...item, display_name: displayName } : item
+  ));
+}
+
+function updateOtherSignatureDraftName(draftId: string, value: string): void {
+  const idText = String(draftId || "");
+  if (!idText) return;
+  otherSignatureDrafts.value = otherSignatureDrafts.value.map((item) => (
+    String(item.draft_id || "") === idText ? { ...item, display_name: value } : item
+  ));
 }
 
 function activateSelectedSignaturePerson(person: Dict): void {
@@ -1979,14 +2442,114 @@ function activateSelectedSignaturePerson(person: Dict): void {
 }
 
 function roleForMaintenanceLabel(label: unknown): "implementer" | "auditor" | "" {
-  const text = String(label || "");
-  if (text.includes("维护实施人")) return "implementer";
-  if (text.includes("维护审核人")) return "auditor";
-  return "";
+  return roleForMopMaintenanceLabel(label);
 }
 
 function cellSignatures(rowIndex: number, colIndex: number): Dict[] {
   return activeSheetSignatureCellMap.value.get(`${rowIndex}:${colIndex}`) || [];
+}
+
+function signatureRoleAtCell(rowIndex: number, colIndex: number): "implementer" | "auditor" | "" {
+  return activeSheetSignatureRoleCellMap.value.get(`${rowIndex}:${colIndex}`) || "";
+}
+
+function activeSheetRowHeightPx(rowIndex: number): number {
+  const rowHeights = activeSheet.value?.row_heights;
+  const explicit = rowHeights && typeof rowHeights === "object"
+    ? Number((rowHeights as Dict)[String(rowIndex)] ?? (rowHeights as Dict)[rowIndex])
+    : 0;
+  const fallback = Number(activeSheet.value?.default_row_height_px || 20);
+  if (Number.isFinite(explicit) && explicit > 0) return explicit;
+  return Number.isFinite(fallback) && fallback > 0 ? fallback : 20;
+}
+
+function signatureMaxHeightPx(rowIndex: number): number {
+  return Math.max(1, Math.round(activeSheetRowHeightPx(rowIndex) * 1.5));
+}
+
+function signatureCellStyle(rowIndex: number): Record<string, string> {
+  return {
+    minHeight: `${activeSheetRowHeightPx(rowIndex)}px`,
+    "--mop-signature-max-height": `${signatureMaxHeightPx(rowIndex)}px`,
+  };
+}
+
+function signatureImageStyle(rowIndex: number): Record<string, string> {
+  return {
+    maxHeight: `${signatureMaxHeightPx(rowIndex)}px`,
+    maxWidth: "150px",
+  };
+}
+
+function signatureMoreStyle(rowIndex: number): Record<string, string> {
+  const height = Math.max(18, Math.min(28, signatureMaxHeightPx(rowIndex)));
+  return {
+    height: `${height}px`,
+  };
+}
+
+function mopEditSessionStorageKey(): string {
+  const noticeId = selectedNoticeSourceRecordId.value || selectedNotice.value?.notice_key || selectedNoticeKey.value || "notice";
+  const mopId = selectedMop.value?.record_id || selectedMopRecordId.value || "mop";
+  const attachmentId = selectedAttachmentToken.value || "attachment";
+  return `clipflow:mop-edit:${scope.value}:${noticeId}:${mopId}:${attachmentId}`;
+}
+
+function releaseMopEditSession(): void {
+  const key = activeMopEditSessionStorageKey.value;
+  if (!key) return;
+  try {
+    const existing = JSON.parse(window.localStorage.getItem(key) || "{}");
+    if (existing?.instance_id === mopEditSessionInstanceId) {
+      window.localStorage.removeItem(key);
+    }
+  } catch {
+    window.localStorage.removeItem(key);
+  }
+  activeMopEditSessionStorageKey.value = "";
+}
+
+function claimMopEditSession(): void {
+  if (!selectedNotice.value || !selectedMop.value || !selectedAttachment.value) return;
+  const key = mopEditSessionStorageKey();
+  const now = Date.now();
+  try {
+    const existing = JSON.parse(window.localStorage.getItem(key) || "{}");
+    const existingAge = now - Number(existing?.updated_at || 0);
+    if (
+      existing?.instance_id
+      && existing.instance_id !== mopEditSessionInstanceId
+      && existingAge > 0
+      && existingAge < 30 * 60 * 1000
+    ) {
+      warnings.value = [...new Set([
+        ...warnings.value,
+        "同一个 MOP 填写页可能已在其他标签页打开，请避免两边同时修改后互相覆盖。",
+      ])];
+    }
+    window.localStorage.setItem(key, JSON.stringify({
+      instance_id: mopEditSessionInstanceId,
+      updated_at: now,
+      title: selectedNotice.value.title || "",
+      mop_title: selectedMop.value.title || "",
+    }));
+    activeMopEditSessionStorageKey.value = key;
+  } catch {
+    // localStorage can be disabled by browser policy; editing can continue.
+  }
+}
+
+function openSignatureManager(role: "implementer" | "auditor"): void {
+  if (signatureRole.value !== role) {
+    closeSignatureDrawers();
+  }
+  signatureRole.value = role;
+  signatureManagerOpen.value = true;
+}
+
+function closeSignatureManager(): void {
+  signatureManagerOpen.value = false;
+  closeSignatureDrawers();
 }
 
 function scheduleSignaturePeopleSearch(): void {
@@ -2007,12 +2570,12 @@ async function loadSignaturePeople(options: { silent?: boolean } = {}): Promise<
     signatureMessageType.value = "";
   }
   try {
-    const url = new URL("/api/signatures/people", window.location.origin);
-    url.searchParams.set("scope", scope.value);
-    if (signatureSearch.value.trim()) url.searchParams.set("q", signatureSearch.value.trim());
-    if (!options.silent) url.searchParams.set("refresh", "1");
-    url.searchParams.set("limit", "60");
-    const data = await requestJson(`${url.pathname}${url.search}`);
+    const data = await fetchSignaturePeople({
+      scope: scope.value,
+      q: signatureSearch.value,
+      refresh: !options.silent,
+      limit: 60,
+    });
     if (requestSeq !== signatureSearchRequestSeq) return;
     signaturePeople.value = Array.isArray(data.people) ? data.people : [];
     signaturePeopleTotal.value = Number(data.count || data.total || signaturePeople.value.length || 0);
@@ -2040,25 +2603,51 @@ async function saveMopSignature(): Promise<void> {
   signatureMessage.value = "";
   signatureMessageType.value = "";
   try {
-    const data = await requestJson("/api/signatures/save", {
-      method: "POST",
-      body: JSON.stringify({
-        record_id: activeSignaturePerson.value.record_id,
-        signer_name: activeSignaturePerson.value.name || "",
-        signature_png: signatureCanvasRef.value.toDataURL("image/png"),
-      }),
-    });
-    signatureMessage.value = `${data.name || activeSignaturePerson.value.name || "签名"} 已保存到签名库。`;
+    const target = activeSignaturePerson.value;
+    const source = String(target.source || "");
+    const tempId = String(target.temp_id || "").trim();
+    if (source === "temporary" || tempId) {
+      const data = await saveTemporarySignature(tempId, signatureCanvasRef.value.toDataURL("image/png"));
+      if (data) mergeTemporarySignatures([data]);
+      hiddenOtherSignatureKeys.value = hiddenOtherSignatureKeys.value.filter((key) => key !== signaturePersonKey(data || target));
+      signatureMessage.value = `${data?.display_name || data?.name || target.name || "临时人员"} 已保存签名。`;
+      updateTemporarySignaturePolling();
+    } else if (source === "external") {
+      const data = await saveExternalSignature(
+        String(target.record_id || ""),
+        String(target.name || target.display_name || ""),
+        signatureCanvasRef.value.toDataURL("image/png"),
+      );
+      const merged = { ...target, ...data, source: "external", role: target.role || signatureRole.value };
+      mergeTemporarySignatures([merged]);
+      hiddenOtherSignatureKeys.value = hiddenOtherSignatureKeys.value.filter((key) => key !== signaturePersonKey(merged));
+      externalSignaturePeople.value = externalSignaturePeople.value.map((item) => (
+        String(item.record_id || "") === String(target.record_id || "") ? { ...item, ...data, source: "external" } : item
+      ));
+      signatureMessage.value = `${data.name || data.display_name || target.name || "其他人员"} 已保存签名。`;
+    } else {
+      const data = await saveStaffSignature(
+        String(target.record_id || ""),
+        String(target.name || ""),
+        signatureCanvasRef.value.toDataURL("image/png"),
+      );
+      signatureMessage.value = `${data.name || target.name || "签名"} 已保存到签名库。`;
+      updateRememberedSignaturePerson(target.record_id, {
+        has_signature: true,
+        signature_count: 1,
+        signature_preview_url: data.signature_preview_url || target.signature_preview_url || "",
+        signature_version: data.signature_version || target.signature_version || "",
+      });
+      updateFormalSignaturePolling();
+      const notificationWarning = String(data.notification_warning || "").trim();
+      if (notificationWarning) {
+        warnings.value = [...new Set([...warnings.value, notificationWarning])];
+      }
+    }
+    clearMopOutputState();
     signatureMessageType.value = "success";
-    updateRememberedSignaturePerson(activeSignaturePerson.value.record_id, {
-      has_signature: true,
-      signature_count: 1,
-      signature_preview_url: data.signature_preview_url || activeSignaturePerson.value.signature_preview_url || "",
-      signature_version: data.signature_version || activeSignaturePerson.value.signature_version || "",
-    });
     clearSignatureCanvas();
     closeSignaturePad();
-    updateFormalSignaturePolling();
   } catch (error) {
     signatureMessage.value = error instanceof Error ? error.message : "保存签名失败";
     signatureMessageType.value = "failed";
@@ -2073,11 +2662,9 @@ async function fillMopSignatures(): Promise<void> {
   signatureMessage.value = "";
   signatureMessageType.value = "";
   try {
-    const data = await requestJson("/api/engineer/mop/fill", {
-      method: "POST",
-      body: JSON.stringify(buildMopRequestPayload()),
-    });
+    const data = await fillEngineerMop(buildMopRequestPayload());
     filledMopResult.value = data;
+    signedMopUploadedAt.value = "";
     signatureMessage.value = `已写入本地 MOP：${data.relative_path || data.file_name || "本地文件"}`;
     signatureMessageType.value = "success";
   } catch (error) {
@@ -2089,24 +2676,24 @@ async function fillMopSignatures(): Promise<void> {
 }
 
 async function uploadSignedMop(): Promise<void> {
-  if (!canUploadSignedMop.value || !preview.value?.local_file?.path || !selectedNotice.value) return;
+  if (uploadSignedMopDisabledReason.value || !preview.value?.local_file?.path || !selectedNotice.value) return;
   mopUploadSaving.value = true;
   signatureMessage.value = "";
   signatureMessageType.value = "";
   try {
-    const data = await requestJson("/api/engineer/mop/upload-signed", {
-      method: "POST",
-      body: JSON.stringify(buildMopRequestPayload({
+    const data = await uploadSignedEngineerMop(buildMopRequestPayload({
         source_record_id: selectedNoticeSourceRecordId.value,
         notice_title: selectedNotice.value.title || "",
         notice_key: selectedNotice.value.notice_key || "",
-      })),
-    });
+      }));
     filledMopResult.value = data.filled_file || filledMopResult.value;
+    signedMopUploadedAt.value = String(data.uploaded_at || new Date().toISOString());
     const warning = String(data.notification_warning || "").trim();
-    signatureMessage.value = warning
-      ? `已上传已签名 MOP，并已勾选确认项；${warning}`
-      : "已上传已签名 MOP，并已勾选工程师确认、主管确认。";
+    const memoryWarning = String(data.memory_warning || "").trim();
+    const warningsText = [warning, memoryWarning].filter(Boolean).join("；");
+    signatureMessage.value = warningsText
+      ? `已上传已签名 MOP，并已勾选确认项；${warningsText}`
+      : "已上传已签名 MOP，并已勾选工程师确认、主管确认；下次同名 MOP 会自动带出本次填写内容。";
     signatureMessageType.value = "success";
   } catch (error) {
     signatureMessage.value = error instanceof Error ? error.message : "上传已签名 MOP 失败";
@@ -2123,15 +2710,12 @@ async function resetMopSigning(): Promise<void> {
   signatureMessageType.value = "";
   try {
     const attachment = selectedAttachment.value || {};
-    const data = await requestJson("/api/engineer/mop/reset", {
-      method: "POST",
-      body: JSON.stringify({
-        scope: scope.value,
-        filled_file_path: filledMopResult.value.path || "",
-        mop_record_id: preview.value.mop_record_id || selectedMop.value.record_id || "",
-        file_token: attachmentKey(attachment),
-        file_name: attachment.name || "",
-      }),
+    const data = await resetEngineerMop({
+      scope: scope.value,
+      filledFilePath: String(filledMopResult.value.path || ""),
+      mopRecordId: String(preview.value.mop_record_id || selectedMop.value.record_id || ""),
+      fileToken: attachmentKey(attachment),
+      fileName: String(attachment.name || ""),
     });
     clearMopFillState({ clearSignatures: true });
     preview.value = data;
@@ -2151,10 +2735,20 @@ async function resetMopSigning(): Promise<void> {
 }
 
 function personSignatureLinkTitle(person: Dict): string {
-  if (!String(person?.record_id || "").trim()) return "该人员记录缺少 ID，无法发送链接";
+  if (!String(person?.record_id || "").trim()) return "该人员资料不完整，无法发送链接";
   return personHasUsableSignature(person)
     ? "重新发送签名链接；新签名保存前，原签名仍可继续使用"
     : "发送签名链接";
+}
+
+function shortClockText(date = new Date()): string {
+  const hour = String(date.getHours()).padStart(2, "0");
+  const minute = String(date.getMinutes()).padStart(2, "0");
+  return `${hour}:${minute}`;
+}
+
+function errorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error ? error.message : fallback;
 }
 
 async function sendSignatureLinkForPerson(person: Dict, forceResign = false): Promise<boolean> {
@@ -2167,16 +2761,15 @@ async function sendSignatureLinkForPerson(person: Dict, forceResign = false): Pr
   signatureMessage.value = "";
   signatureMessageType.value = "";
   try {
-    const data = await requestJson("/api/signatures/send-link", {
-      method: "POST",
-      body: JSON.stringify({
-        record_id: recordId,
-        signer_name: person.name || "",
-        scope: scope.value,
-        request_base_url: window.location.origin,
-      }),
-    });
+    const data = await sendStaffSignatureLink(recordId, String(person.name || ""), scope.value);
     const resultPerson = data.person || person;
+    signatureLinkSentAtById.value = {
+      ...signatureLinkSentAtById.value,
+      [recordId]: shortClockText(),
+    };
+    const errors = { ...signatureLinkErrorById.value };
+    delete errors[recordId];
+    signatureLinkErrorById.value = errors;
     signatureMessage.value = forceResign
       ? `已给 ${resultPerson.name || person.name || "该人员"} 发送重新签名链接；新签名前原签名仍有效。`
       : `签名链接已发送给 ${resultPerson.name || person.name || "该人员"}。`;
@@ -2184,7 +2777,12 @@ async function sendSignatureLinkForPerson(person: Dict, forceResign = false): Pr
     updateFormalSignaturePolling();
     return true;
   } catch (error) {
-    signatureMessage.value = error instanceof Error ? error.message : "发送签名链接失败";
+    const messageText = errorMessage(error, "发送签名链接失败");
+    signatureLinkErrorById.value = {
+      ...signatureLinkErrorById.value,
+      [recordId]: messageText,
+    };
+    signatureMessage.value = messageText;
     signatureMessageType.value = "failed";
     return false;
   } finally {
@@ -2194,31 +2792,49 @@ async function sendSignatureLinkForPerson(person: Dict, forceResign = false): Pr
   }
 }
 
-async function sendPendingSignatureLinks(): Promise<void> {
-  if (signatureBatchLinkDisabledReason.value) return;
-  signatureLinkSending.value = true;
+async function sendTemporarySignatureLinkForPerson(person: Dict): Promise<boolean> {
+  const tempId = String(person?.temp_id || "").trim();
+  if (!tempId) return false;
+  temporarySignatureLinkSendingById.value = {
+    ...temporarySignatureLinkSendingById.value,
+    [tempId]: true,
+  };
   signatureMessage.value = "";
   signatureMessageType.value = "";
-  let success = 0;
-  let failed = 0;
   try {
-    for (const person of pendingSignatureLinkPeople.value) {
-      const ok = await sendSignatureLinkForPerson(person, false);
-      if (ok) success += 1;
-      else failed += 1;
+    const data = await sendTemporarySignatureLink({
+      temporaryId: tempId,
+      scope: scope.value,
+    });
+    if (data.signature) {
+      mergeTemporarySignatures([data.signature]);
+      hiddenOtherSignatureKeys.value = hiddenOtherSignatureKeys.value.filter((key) => key !== signaturePersonKey(data.signature));
+      clearMopOutputState();
     }
-    if (success && !failed) {
-      signatureMessage.value = `已发送 ${success} 个待签名链接。`;
-      signatureMessageType.value = "success";
-    } else if (success && failed) {
-      signatureMessage.value = `已发送 ${success} 个，${failed} 个发送失败，请查看人员旁状态后重试。`;
-      signatureMessageType.value = "failed";
-    } else {
-      signatureMessage.value = "待签名链接发送失败，请稍后重试。";
-      signatureMessageType.value = "failed";
-    }
+    temporarySignatureLinkSentAtById.value = {
+      ...temporarySignatureLinkSentAtById.value,
+      [tempId]: shortClockText(),
+    };
+    const errors = { ...temporarySignatureLinkErrorById.value };
+    delete errors[tempId];
+    temporarySignatureLinkErrorById.value = errors;
+    updateTemporarySignaturePolling();
+    signatureMessage.value = `${temporarySignatureDisplayName(person)} 签名链接已发送。`;
+    signatureMessageType.value = "success";
+    return true;
+  } catch (error) {
+    const messageText = errorMessage(error, "发送临时人员签名链接失败");
+    temporarySignatureLinkErrorById.value = {
+      ...temporarySignatureLinkErrorById.value,
+      [tempId]: messageText,
+    };
+    signatureMessage.value = messageText;
+    signatureMessageType.value = "failed";
+    return false;
   } finally {
-    signatureLinkSending.value = false;
+    const next = { ...temporarySignatureLinkSendingById.value };
+    delete next[tempId];
+    temporarySignatureLinkSendingById.value = next;
   }
 }
 
@@ -2243,11 +2859,7 @@ async function loadTemporarySignatures(options: { silent?: boolean } = {}): Prom
     return;
   }
   try {
-    const params = new URLSearchParams({
-      scope: scope.value,
-      notice_key: noticeKey,
-    });
-    const data = await requestJson(`/api/signatures/temporary/list?${params.toString()}`);
+    const data = await fetchTemporarySignatures(scope.value, noticeKey);
     const items = Array.isArray(data.items) ? data.items : [];
     mergeTemporarySignatures(items);
     updateTemporarySignaturePolling();
@@ -2286,12 +2898,12 @@ async function loadExternalSignaturePeople(options: { silent?: boolean } = {}): 
     signatureMessageType.value = "";
   }
   try {
-    const url = new URL("/api/signatures/temporary/people", window.location.origin);
-    url.searchParams.set("scope", scope.value);
-    if (externalSignatureSearch.value.trim()) url.searchParams.set("q", externalSignatureSearch.value.trim());
-    if (!options.silent) url.searchParams.set("refresh", "1");
-    url.searchParams.set("limit", "60");
-    const data = await requestJson(`${url.pathname}${url.search}`);
+    const data = await fetchExternalSignaturePeople({
+      scope: scope.value,
+      q: externalSignatureSearch.value,
+      refresh: !options.silent,
+      limit: 60,
+    });
     if (requestSeq !== externalSignatureSearchRequestSeq) return;
     externalSignaturePeople.value = Array.isArray(data.people) ? data.people : [];
     externalSignaturePeopleTotal.value = Number(data.count || data.total || externalSignaturePeople.value.length || 0);
@@ -2319,35 +2931,32 @@ function addExternalSignaturePerson(person: Dict): void {
     },
   ]);
   hiddenOtherSignatureKeys.value = hiddenOtherSignatureKeys.value.filter((key) => key !== `external:${recordId}`);
+  clearMopOutputState();
   signatureMessage.value = `${person.name || person.display_name || "其他人员"} 已加入${signatureRole.value === "auditor" ? "维护审核人" : "维护实施人"}。`;
   signatureMessageType.value = "success";
-}
-
-function otherSignatureDraftStatusText(draft: Dict): string {
-  const status = String(draft.status || "draft");
-  if (status === "sending") return "发送中";
-  if (status === "sent") return "待签名";
-  if (status === "failed") return "发送失败";
-  return "待发送";
 }
 
 function addOtherSignatureDraft(): void {
   if (addOtherSignatureDisabledReason.value) return;
   const draftId = `other-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const role = signatureRole.value;
   otherSignatureDrafts.value = [
     ...otherSignatureDrafts.value,
     {
       draft_id: draftId,
-      role: signatureRole.value,
-      display_name: "",
+      role,
+      display_name: nextOtherSignatureDisplayName(role),
       status: "draft",
       error: "",
     },
   ];
+  clearMopOutputState();
+  setTemporarySignatureDrawerOpen(true);
 }
 
 function removeOtherSignatureDraft(draftId: string): void {
   otherSignatureDrafts.value = otherSignatureDrafts.value.filter((item) => String(item.draft_id || "") !== draftId);
+  clearMopOutputState();
 }
 
 function temporarySignatureRowDisabledReason(draft: Dict): string {
@@ -2355,7 +2964,7 @@ function temporarySignatureRowDisabledReason(draft: Dict): string {
   if (!selectedNotice.value) return "请先选择左侧维保通告";
   if (!selectedNotice.value.notice_key) return "当前通告缺少记忆键，无法创建临时签名";
   const recipients = selectedFormalSignaturePeople("implementer").filter((person) => String(person.open_id || "").trim());
-  if (!recipients.length) return "请先选择维护实施人，且该人员需要有 openid";
+  if (!recipients.length) return "请先选择带飞书身份的维护实施人";
   if (String(draft.status || "") === "sent") return "签名链接已发送";
   return "";
 }
@@ -2385,13 +2994,12 @@ async function refreshSelectedFormalSignatures(): Promise<void> {
     const recordId = String(person.record_id || "").trim();
     if (!recordId) continue;
     try {
-      const params = new URLSearchParams({
+      const data = await fetchSignaturePeople({
         scope: scope.value,
-        record_id: recordId,
-        refresh: "1",
-        limit: "1",
+        recordId,
+        refresh: true,
+        limit: 1,
       });
-      const data = await requestJson(`/api/signatures/people?${params.toString()}`);
       const found = Array.isArray(data.people) ? data.people[0] : null;
       if (found && String(found.record_id || "") === recordId) {
         updateRememberedSignaturePerson(recordId, found);
@@ -2404,32 +3012,18 @@ async function refreshSelectedFormalSignatures(): Promise<void> {
 }
 
 function updateFormalSignaturePolling(): void {
-  const shouldPoll = formalSignaturePollNeeded();
-  if (shouldPoll && !formalSignaturePollTimer) {
-    formalSignaturePollTimer = setInterval(() => {
-      void refreshSelectedFormalSignatures();
-    }, 8000);
-  } else if (!shouldPoll && formalSignaturePollTimer) {
-    clearInterval(formalSignaturePollTimer);
-    formalSignaturePollTimer = null;
-  }
+  formalSignaturePolling.update(formalSignaturePollNeeded());
 }
 
 function updateTemporarySignaturePolling(): void {
-  const shouldPoll = temporarySignaturePollNeeded();
-  if (shouldPoll && !temporarySignaturePollTimer) {
-    temporarySignaturePollTimer = setInterval(() => {
-      void loadTemporarySignatures({ silent: true });
-    }, 5000);
-  } else if (!shouldPoll && temporarySignaturePollTimer) {
-    clearInterval(temporarySignaturePollTimer);
-    temporarySignaturePollTimer = null;
-  }
+  temporarySignaturePolling.update(temporarySignaturePollNeeded());
 }
 
 async function sendTemporarySignatureLinkForDraft(draft: Dict): Promise<void> {
   const draftId = String(draft?.draft_id || "").trim();
   if (!draftId || temporarySignatureRowDisabledReason(draft)) return;
+  const role = String(draft.role || signatureRole.value) === "auditor" ? "auditor" : "implementer";
+  const displayName = String(draft.display_name || "").trim() || nextOtherSignatureDisplayName(role);
   const recipients = [
     ...new Set(
       selectedFormalSignaturePeople("implementer")
@@ -2443,40 +3037,47 @@ async function sendTemporarySignatureLinkForDraft(draft: Dict): Promise<void> {
   };
   otherSignatureDrafts.value = otherSignatureDrafts.value.map((item) => (
     String(item.draft_id || "") === draftId
-      ? { ...item, status: "sending", error: "" }
+      ? { ...item, display_name: displayName, status: "sending", error: "" }
       : item
   ));
   signatureMessage.value = "";
   signatureMessageType.value = "";
   try {
-    const data = await requestJson("/api/signatures/temporary/send-link", {
-      method: "POST",
-      body: JSON.stringify({
-        scope: scope.value,
-        notice_key: selectedNotice.value?.notice_key || "",
-        notice_title: selectedNotice.value?.title || "",
-        specialty: selectedNoticeSpecialty.value,
-        role: signatureRole.value,
-        display_name: String(draft.display_name || "").trim(),
-        recipient_open_ids: recipients,
-        request_base_url: window.location.origin,
-      }),
+    const data = await sendTemporarySignatureLink({
+      scope: scope.value,
+      noticeKey: selectedNotice.value?.notice_key || "",
+      noticeTitle: selectedNotice.value?.title || "",
+      specialty: selectedNoticeSpecialty.value,
+      role,
+      displayName,
+      recipientOpenIds: recipients,
     });
     if (data.signature) {
       mergeTemporarySignatures([data.signature]);
       hiddenOtherSignatureKeys.value = hiddenOtherSignatureKeys.value.filter((key) => key !== signaturePersonKey(data.signature));
+      const tempId = String(data.signature.temp_id || "").trim();
+      if (tempId) {
+        temporarySignatureLinkSentAtById.value = {
+          ...temporarySignatureLinkSentAtById.value,
+          [tempId]: shortClockText(),
+        };
+        const errors = { ...temporarySignatureLinkErrorById.value };
+        delete errors[tempId];
+        temporarySignatureLinkErrorById.value = errors;
+      }
     }
     otherSignatureDrafts.value = otherSignatureDrafts.value.filter((item) => String(item.draft_id || "") !== draftId);
     updateTemporarySignaturePolling();
-    signatureMessage.value = `${signatureRole.value === "auditor" ? "维护审核人" : "维护实施人"}其他人员签名链接已发送。`;
+    signatureMessage.value = `${role === "auditor" ? "维护审核人" : "维护实施人"}${displayName}签名链接已发送。`;
     signatureMessageType.value = "success";
   } catch (error) {
+    const messageText = errorMessage(error, "发送失败");
     otherSignatureDrafts.value = otherSignatureDrafts.value.map((item) => (
       String(item.draft_id || "") === draftId
-        ? { ...item, status: "failed", error: error instanceof Error ? error.message : "发送失败" }
+        ? { ...item, status: "failed", error: messageText }
         : item
     ));
-    signatureMessage.value = error instanceof Error ? error.message : "发送其他人员签名链接失败";
+    signatureMessage.value = errorMessage(error, "发送其他人员签名链接失败");
     signatureMessageType.value = "failed";
   } finally {
     const next = { ...temporarySignatureSendingByDraft.value };
@@ -2485,18 +3086,36 @@ async function sendTemporarySignatureLinkForDraft(draft: Dict): Promise<void> {
   }
 }
 
-function applyNoticeBinding(notice: Dict): void {
+function applyNoticeBinding(notice: Dict): boolean {
   const binding = notice?.mop_binding;
-  if (!binding) return;
+  if (!binding || !binding.mop_record_id) {
+    selectedMopRecordId.value = "";
+    selectedAttachmentToken.value = "";
+    activeSheetName.value = "";
+    return false;
+  }
   selectedMopRecordId.value = String(binding.mop_record_id || "");
   selectedAttachmentToken.value = String(binding.mop_attachment_token || "");
   activeSheetName.value = String(binding.selected_sheet || "");
+  return true;
+}
+
+function selectDefaultMopCandidate(): void {
+  const first = orderedMopCandidates.value[0];
+  if (!first?.record_id) {
+    selectedMopRecordId.value = "";
+    selectedAttachmentToken.value = "";
+    return;
+  }
+  selectMop(String(first.record_id || ""));
 }
 
 function selectNotice(noticeKey: string): void {
+  closeMopTransientUi();
+  releaseMopEditSession();
   selectedNoticeKey.value = noticeKey;
   preview.value = null;
-  filledMopResult.value = null;
+  clearMopOutputState();
   previewMode.value = false;
   mopBindingStatus.value = "";
   mopBindingError.value = "";
@@ -2505,14 +3124,17 @@ function selectNotice(noticeKey: string): void {
   hiddenOtherSignatureKeys.value = [];
   updateTemporarySignaturePolling();
   const notice = selectedNotice.value;
-  if (notice) applyNoticeBinding(notice);
+  const applied = notice ? applyNoticeBinding(notice) : false;
+  if (!applied || !selectedMop.value) selectDefaultMopCandidate();
   void loadTemporarySignatures({ silent: true });
 }
 
 function selectMop(recordId: string): void {
+  closeMopTransientUi();
+  releaseMopEditSession();
   selectedMopRecordId.value = recordId;
   preview.value = null;
-  filledMopResult.value = null;
+  clearMopOutputState();
   previewMode.value = false;
   mopBindingStatus.value = "";
   mopBindingError.value = "";
@@ -2521,6 +3143,8 @@ function selectMop(recordId: string): void {
 }
 
 function backToBinding(): void {
+  closeMopTransientUi();
+  releaseMopEditSession();
   previewMode.value = false;
 }
 
@@ -2530,16 +3154,16 @@ async function loadPage(): Promise<void> {
   message.value = "";
   messageType.value = "";
   try {
-    const data = await requestJson(`/api/engineer/mop/bootstrap?scope=${encodeURIComponent(scope.value)}`);
+    const data = await fetchEngineerMopBootstrap(scope.value);
     notices.value = Array.isArray(data.notices) ? data.notices : [];
     mopCandidates.value = Array.isArray(data.mop_candidates) ? data.mop_candidates : [];
     warnings.value = Array.isArray(data.warnings) ? data.warnings.map((item: unknown) => String(item)) : [];
     if (!selectedNoticeKey.value || !notices.value.some((item) => item.notice_key === selectedNoticeKey.value)) {
-      selectedNoticeKey.value = notices.value[0]?.notice_key || "";
+      selectedNoticeKey.value = filteredNotices.value[0]?.notice_key || notices.value[0]?.notice_key || "";
     }
-    if (selectedNotice.value) applyNoticeBinding(selectedNotice.value);
-    if (!selectedMopRecordId.value && mopCandidates.value.length) {
-      selectMop(mopCandidates.value[0].record_id);
+    const applied = selectedNotice.value ? applyNoticeBinding(selectedNotice.value) : false;
+    if (!applied || !selectedMop.value) {
+      selectDefaultMopCandidate();
     }
     void loadTemporarySignatures({ silent: true });
   } catch (error) {
@@ -2582,10 +3206,7 @@ async function saveBinding(options: { silent?: boolean } = {}): Promise<Dict | n
       mop_attachment_name: attachment.name || "",
       selected_sheet: activeSheetName.value,
     };
-    const data = await requestJson("/api/engineer/mop/bind", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
+    const data = await bindEngineerMop(payload);
     const binding = data.binding || {};
     const notice = selectedNotice.value;
     if (notice) notice.mop_binding = binding;
@@ -2617,20 +3238,28 @@ async function startMopPreview(): Promise<void> {
   messageType.value = "";
   try {
     const attachment = selectedAttachment.value || {};
-    const params = new URLSearchParams({
+    const data = await previewEngineerMop({
       scope: scope.value,
-      mop_record_id: String(selectedMop.value.record_id || ""),
-      file_token: attachmentKey(attachment),
-      file_name: String(attachment.name || ""),
+      mopRecordId: String(selectedMop.value.record_id || ""),
+      fileToken: attachmentKey(attachment),
+      fileName: String(attachment.name || ""),
     });
-    const data = await requestJson(`/api/engineer/mop/preview?${params.toString()}`);
     clearMopFillState({ clearSignatures: true });
     preview.value = data;
     const sheets = Array.isArray(data.sheets) ? data.sheets : [];
-    if (!sheets.some((sheet: Dict) => sheet.name === activeSheetName.value)) {
+    const memorySheet = String(data.fill_memory?.sheet_name || data.fill_memory?.payload?.sheet_name || "");
+    if (memorySheet && sheets.some((sheet: Dict) => sheet.name === memorySheet)) {
+      activeSheetName.value = memorySheet;
+    } else if (!sheets.some((sheet: Dict) => sheet.name === activeSheetName.value)) {
       activeSheetName.value = String(sheets[0]?.name || "");
     }
+    const appliedMemoryCount = applyMopFillMemory(data.fill_memory);
     previewMode.value = true;
+    claimMopEditSession();
+    if (appliedMemoryCount) {
+      signatureMessage.value = `已自动带出上次填写内容（${appliedMemoryCount} 项）。`;
+      signatureMessageType.value = "success";
+    }
     if (Array.isArray(data.warnings)) {
       warnings.value = [...new Set([...warnings.value, ...data.warnings.map((item: unknown) => String(item))])];
     }
@@ -2653,6 +3282,8 @@ async function startMopPreview(): Promise<void> {
 }
 
 watch(scope, () => {
+  closeMopTransientUi();
+  releaseMopEditSession();
   const url = new URL(window.location.href);
   url.searchParams.set("scope", scope.value);
   window.history.replaceState({}, "", url);
@@ -2677,11 +3308,13 @@ watch(selectedMopAttachments, (items) => {
 });
 
 watch(activeSheetName, () => {
-  activeMopCellKey.value = "";
+  closeMopTransientUi();
 });
 
 onMounted(() => {
   ensureSignatureCanvasObserver();
+  window.addEventListener("scroll", updateActiveMopCellOverlayPosition, true);
+  window.addEventListener("resize", updateActiveMopCellOverlayPosition);
   if (props.loggedIn) void loadPage();
 });
 
@@ -2694,21 +3327,18 @@ onBeforeUnmount(() => {
     clearTimeout(externalSignatureSearchTimer);
     externalSignatureSearchTimer = null;
   }
-  if (temporarySignaturePollTimer) {
-    clearInterval(temporarySignaturePollTimer);
-    temporarySignaturePollTimer = null;
-  }
-  if (formalSignaturePollTimer) {
-    clearInterval(formalSignaturePollTimer);
-    formalSignaturePollTimer = null;
-  }
+  temporarySignaturePolling.stop();
+  formalSignaturePolling.stop();
+  window.removeEventListener("scroll", updateActiveMopCellOverlayPosition, true);
+  window.removeEventListener("resize", updateActiveMopCellOverlayPosition);
   disconnectSignatureCanvasObserver();
+  releaseMopEditSession();
 });
 
 watch(signatureRole, () => {
   signatureMessage.value = "";
   signatureMessageType.value = "";
-  selectedSignatureDrawerOpen.value = false;
+  closeSignatureDrawers();
   clearSignatureCanvas();
   void nextTick(() => resizeSignatureCanvas());
 });
@@ -2749,13 +3379,11 @@ watch(() => props.scopeOptions, (items) => {
 
 .engineer-mop.preview-open {
   width: min(1920px, 100%);
-  padding: 18px 24px 28px;
+  padding: 14px 20px 28px;
   gap: 12px;
 }
 
 .mop-head,
-.mop-summary article,
-.panel,
 .notice-box,
 .message,
 .warning-list {
@@ -2781,16 +3409,13 @@ watch(() => props.scopeOptions, (items) => {
   font-weight: 700;
 }
 
-.mop-head p,
-.panel-head p,
-.selected-notice p {
+.mop-head p {
   margin: 6px 0 0;
   color: #64748b;
 }
 
 .head-actions,
-.actions,
-.filters {
+.actions {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -2847,27 +3472,13 @@ select:focus {
   box-shadow: 0 10px 22px rgba(30, 99, 255, 0.22);
 }
 
-.mop-summary {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 16px;
-}
-
-.mop-summary article {
-  padding: 18px 20px;
-}
-
-.mop-summary span {
-  color: #64748b;
-  font-size: 13px;
-}
-
-.mop-summary strong {
-  display: block;
-  margin-top: 8px;
-  color: #005bff;
-  font-size: 26px;
-  font-weight: 800;
+.refresh-mini {
+  min-width: 56px;
+  min-height: 32px;
+  border-radius: 999px;
+  padding: 6px 12px;
+  color: #1d4ed8;
+  background: #f8fbff;
 }
 
 .mop-layout {
@@ -2877,302 +3488,87 @@ select:focus {
   align-items: start;
 }
 
-.panel {
-  height: min(760px, calc(100vh - 300px));
-  min-height: min(560px, calc(100vh - 220px));
-  overflow: hidden;
-  padding: 18px;
+.mop-flow-steps {
   display: grid;
-  grid-template-rows: auto auto 1fr;
-  gap: 14px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid rgba(216, 229, 247, 0.92);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: 0 10px 24px rgba(0, 47, 135, 0.06);
 }
 
-.binding-panel {
-  min-height: min(720px, calc(100vh - 180px));
-  height: auto;
-  max-height: none;
-  overflow: visible;
-  grid-template-rows: auto auto auto minmax(120px, 1fr) auto auto;
-  align-content: stretch;
-}
-
-.panel-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 12px;
-}
-
-.panel-head h2 {
-  margin: 0;
-  color: #0f172a;
-  font-size: 18px;
-}
-
-.panel-head > span {
-  padding: 5px 10px;
-  border: 1px solid #cfe0ff;
-  border-radius: 999px;
-  color: #005bff;
-  background: #eff6ff;
-  font-weight: 800;
-}
-
-.list,
-.mop-candidate-list {
-  min-height: 0;
-  overflow: auto;
-  display: grid;
-  gap: 10px;
-  align-content: start;
-  padding-right: 4px;
-}
-
-.notice-row,
-.mop-row,
-.selected-notice {
-  width: 100%;
-  border: 1px solid #d8e5f7;
-  border-radius: 16px;
-  padding: 13px 14px;
-  text-align: left;
-  color: #0f172a;
-  background: #ffffff;
-  transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
-}
-
-.notice-row,
-.mop-row {
-  cursor: pointer;
-}
-
-.notice-row:hover,
-.mop-row:hover,
-.notice-row.active,
-.mop-row.active {
-  border-color: #1e63ff;
-  box-shadow: 0 10px 24px rgba(30, 99, 255, 0.13);
-  transform: translateY(-1px);
-}
-
-.notice-row.pending {
-  border-color: #bfdbfe;
-  background: linear-gradient(135deg, #ffffff 0%, #f8fbff 100%);
-}
-
-.notice-row strong,
-.mop-row strong,
-.selected-notice strong {
-  display: block;
-  margin-top: 8px;
-  line-height: 1.45;
-}
-
-.mop-row {
-  display: grid;
-  gap: 6px;
-  padding: 10px 12px;
-  border-radius: 14px;
-  line-height: 1.45;
-}
-
-.mop-row strong {
-  display: -webkit-box;
-  margin-top: 0;
-  overflow: hidden;
-  line-height: 1.45;
-  text-overflow: ellipsis;
-  white-space: normal;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-}
-
-.mop-recommend {
-  width: fit-content;
-  margin-top: -2px;
-  border: 1px solid #bbf7d0;
-  border-radius: 999px;
-  background: #ecfdf5;
-  padding: 3px 8px;
-  color: #047857;
-  font-size: 12px;
-  font-style: normal;
-  font-weight: 900;
-}
-
-.mop-candidate-list {
-  max-height: clamp(240px, 42vh, 480px);
-  min-height: 220px;
-  overflow: auto;
-}
-
-.selected-mop-strip {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 12px;
-  min-height: 92px;
-  padding: 12px;
-  border: 1px solid #cfe0ff;
-  border-radius: 16px;
-  background: linear-gradient(135deg, #f8fbff 0%, #eef6ff 100%);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9);
-}
-
-.selected-mop-strip > div {
+.mop-flow-steps article {
   min-width: 0;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+  border: 1px solid rgba(216, 229, 247, 0.78);
+  border-radius: 14px;
+  background: #f8fbff;
+  color: #64748b;
 }
 
-.selected-mop-strip .btn {
-  align-self: center;
+.mop-flow-steps article b {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  background: #eaf3ff;
+  color: #1d4ed8;
+  font-size: 13px;
+  font-weight: 950;
+}
+
+.mop-flow-steps article span {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.mop-flow-steps article strong,
+.mop-flow-steps article small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.selected-mop-actions {
-  display: grid;
-  justify-items: end;
-  gap: 7px;
-  min-width: 150px;
+.mop-flow-steps article strong {
+  color: #0b1f3f;
+  font-size: 13px;
+  font-weight: 950;
 }
 
-.selected-mop-actions small {
-  max-width: 210px;
-  color: #b45309;
-  text-align: right;
-}
-
-.selected-mop-strip span,
-.selected-mop-strip small {
-  display: block;
+.mop-flow-steps article small {
   color: #64748b;
-  font-size: 12px;
-  line-height: 1.55;
-  overflow-wrap: anywhere;
-}
-
-.selected-mop-strip strong {
-  display: block;
-  margin: 4px 0;
-  color: #0f172a;
-  font-size: 14px;
-  line-height: 1.45;
-  overflow-wrap: anywhere;
-  white-space: normal;
-}
-
-.mop-bind-status {
-  display: inline-flex;
-  align-items: center;
-  width: fit-content;
-  max-width: 100%;
-  margin-top: 8px;
-  padding: 4px 9px;
-  border-radius: 999px;
-  font-size: 12px;
-  font-style: normal;
+  font-size: 11px;
   font-weight: 800;
-  line-height: 1.35;
-  overflow-wrap: anywhere;
 }
 
-.mop-bind-status.success {
-  color: #047857;
-  background: #ecfdf5;
-  border: 1px solid #bbf7d0;
+.mop-flow-steps article.active {
+  border-color: #9cc2ff;
+  background: linear-gradient(135deg, #ffffff, #eef6ff);
+  box-shadow: inset 0 0 0 1px rgba(30, 99, 255, 0.12);
 }
 
-.mop-bind-status.failed {
-  color: #b45309;
-  background: #fffbeb;
-  border: 1px solid #fde68a;
+.mop-flow-steps article.active b {
+  background: linear-gradient(135deg, #1e63ff, #1554df);
+  color: #fff;
 }
 
-.binding-panel .actions {
-  position: sticky;
-  bottom: 0;
-  z-index: 2;
-  align-self: end;
-  padding-top: 10px;
-  border-top: 1px solid #e2ecfb;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.76), #ffffff 38%);
-}
-
-.binding-panel .actions .btn {
-  flex: 1 1 180px;
-  justify-content: center;
-}
-
-.notice-row small,
-.mop-row small,
-.notice-row em {
-  display: block;
-  margin-top: 7px;
-  color: #64748b;
-  font-size: 12px;
-  font-style: normal;
-}
-
-.notice-row em {
-  color: #2563eb;
-}
-
-.notice-mop-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 8px;
-}
-
-.notice-mop-tags em {
-  display: inline-flex;
-  align-items: center;
-  max-width: 100%;
-  min-height: 24px;
-  margin-top: 0;
-  padding: 4px 8px;
-  border-radius: 999px;
-  border: 1px solid #cfe0ff;
-  background: #eff6ff;
-  color: #1d4ed8;
-  line-height: 1.25;
-}
-
-.notice-mop-tags em.success {
+.mop-flow-steps article.done {
   border-color: #bbf7d0;
-  background: #ecfdf5;
-  color: #047857;
+  background: #f0fdf4;
 }
 
-.notice-mop-tags em.warning {
-  border-color: #fde68a;
-  background: #fffbeb;
-  color: #92400e;
-}
-
-.mop-row small {
-  margin-top: 0;
-  line-height: 1.5;
-  white-space: normal;
-  word-break: break-word;
-}
-
-.row-status,
-.selected-notice span {
-  display: inline-flex;
-  align-items: center;
-  min-height: 24px;
-  padding: 4px 9px;
-  border-radius: 999px;
-  color: #047857;
-  background: #ecfdf5;
-  font-size: 12px;
-  font-weight: 800;
-}
-
-.row-status.closed,
-.notice-row.closed .row-status {
-  color: #475569;
-  background: #f1f5f9;
+.mop-flow-steps article.done b {
+  background: #10b981;
+  color: #fff;
 }
 
 .field {
@@ -3236,90 +3632,257 @@ select:focus {
 }
 
 .mop-preview-page .mop-sign-panel {
-  grid-column: 2;
-  grid-row: 2 / span 5;
-  position: sticky;
-  z-index: 80;
-  top: 12px;
-  max-height: calc(100vh - 112px);
+  grid-column: 1;
+  grid-row: auto;
+  position: relative;
+  z-index: 1;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 16px;
+  border-color: rgba(191, 219, 254, 0.92);
+}
+
+.signature-manager-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--cf-z-modal-backdrop, 800);
+  background: rgba(7, 20, 48, 0.22);
+  backdrop-filter: blur(3px);
+}
+
+.mop-preview-page .mop-sign-panel.manager-open {
+  position: fixed;
+  z-index: var(--cf-z-modal, 840);
+  top: 18px;
+  right: 18px;
+  bottom: 18px;
+  left: auto;
+  width: min(980px, calc(100vw - 36px));
+  max-height: none;
+  display: grid;
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+  align-content: stretch;
+  gap: 8px;
+  padding: 0 7px 7px;
   overflow-x: hidden;
-  overflow-y: auto;
+  overflow-y: hidden;
+  transform: none;
+  border-radius: 22px;
+  border-color: rgba(191, 219, 254, 0.96);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.99), rgba(248, 251, 255, 0.96)),
+    #ffffff;
+  box-shadow: 0 26px 76px rgba(12, 46, 108, 0.28);
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
-  gap: 10px;
-  padding: 12px;
-  border-radius: 16px;
+}
+
+.mop-preview-page .mop-sign-panel.manager-open.signature-drawer-open {
+  overflow: hidden;
+}
+
+.mop-preview-page .mop-sign-panel.manager-open.signature-drawer-open .sign-workspace {
+  overflow: auto;
+}
+
+.mop-preview-page .mop-sign-panel.manager-open .sign-panel-head {
+  position: relative;
+  z-index: 4;
+  margin: 0 -7px;
+  min-height: 40px;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(216, 229, 247, 0.92);
+  border-radius: 22px 22px 0 0;
+  background:
+    linear-gradient(135deg, rgba(239, 246, 255, 0.99), rgba(255, 255, 255, 0.96)),
+    #ffffff;
+  backdrop-filter: blur(10px);
+}
+
+.mop-preview-page .mop-sign-panel:not(.manager-open) .sign-workspace,
+.mop-preview-page .mop-sign-panel:not(.manager-open) .other-signature-panel,
+.mop-preview-page .mop-sign-panel:not(.manager-open) .mop-completion-panel,
+.mop-preview-page .mop-sign-panel:not(.manager-open) .mop-upload-readiness {
+  display: none;
+}
+
+.mop-preview-page .mop-sign-panel:not(.manager-open) {
+  grid-template-columns: minmax(78px, auto) minmax(0, 1fr);
+  align-items: center;
+  padding: 5px 7px 5px 9px;
+  border-radius: 14px;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.97), rgba(248, 251, 255, 0.92)),
+    #ffffff;
+  box-shadow: 0 8px 18px rgba(0, 47, 135, 0.06);
+}
+
+.mop-preview-page .mop-sign-panel:not(.manager-open)::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #1e63ff, #00b7d7);
+}
+
+.mop-preview-page .mop-sign-panel:not(.manager-open) :deep(.signature-role-summary) {
+  gap: 5px;
+}
+
+.mop-preview-page .mop-sign-panel:not(.manager-open) :deep(.signature-role-summary button) {
+  min-height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  border-radius: 12px;
+  padding: 4px 7px;
+}
+
+.mop-preview-page .mop-sign-panel:not(.manager-open) :deep(.role-title-row) {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.mop-preview-page .mop-sign-panel:not(.manager-open) :deep(.role-title-row b) {
+  padding: 2px 6px;
+  font-size: 10px;
+}
+
+.mop-preview-page .mop-sign-panel:not(.manager-open) :deep(.role-chip-row) {
+  display: none;
+}
+
+.mop-preview-page .mop-sign-panel:not(.manager-open) :deep(.role-state-line) {
+  flex: 0 0 auto;
+  padding: 3px 6px;
+  font-size: 10px;
+}
+
+.mop-preview-page .mop-sign-panel.manager-open .signature-guide-strip {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.signature-guide-strip {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  min-width: 0;
+}
+
+.signature-guide-item {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  min-height: 44px;
+  border: 1px solid #fed7aa;
+  border-radius: 14px;
+  padding: 7px 9px;
+  color: #9a3412;
+  background:
+    linear-gradient(135deg, rgba(255, 247, 237, 0.98), rgba(255, 255, 255, 0.92)),
+    #ffffff;
+  box-shadow: 0 8px 18px rgba(249, 115, 22, 0.08);
+  text-align: left;
+}
+
+.mop-preview-page .mop-sign-panel.manager-open .signature-guide-item {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  min-height: 32px;
+  border-radius: 999px;
+  padding: 4px 8px;
+  box-shadow: none;
+}
+
+button.signature-guide-item {
+  cursor: pointer;
+}
+
+button.signature-guide-item:hover {
+  transform: translateY(-1px);
+  border-color: #fb923c;
+  box-shadow: 0 12px 24px rgba(249, 115, 22, 0.12);
+}
+
+.signature-guide-item.ready {
+  border-color: #bbf7d0;
+  color: #047857;
+  background:
+    linear-gradient(135deg, rgba(236, 253, 245, 0.98), rgba(255, 255, 255, 0.92)),
+    #ffffff;
+  box-shadow: 0 8px 18px rgba(4, 120, 87, 0.08);
+}
+
+.signature-guide-item.actionable.ready:hover {
+  border-color: #34d399;
+  box-shadow: 0 12px 24px rgba(4, 120, 87, 0.12);
+}
+
+.signature-guide-item span,
+.signature-guide-item small,
+.signature-guide-item strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.signature-guide-item span {
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 950;
+  white-space: nowrap;
+}
+
+.mop-preview-page .mop-sign-panel.manager-open .signature-guide-item span {
+  font-size: 11px;
+}
+
+.signature-guide-item strong {
+  color: currentColor;
+  font-size: 14px;
+  font-weight: 950;
+  line-height: 1.1;
+  white-space: nowrap;
+}
+
+.mop-preview-page .mop-sign-panel.manager-open .signature-guide-item strong {
+  font-size: 12px;
+  text-align: right;
+}
+
+.signature-guide-item small {
+  display: -webkit-box;
+  color: #52657f;
+  font-size: 11px;
+  font-weight: 850;
+  line-height: 1.28;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.mop-preview-page .mop-sign-panel.manager-open .signature-guide-item small {
+  display: none;
+}
+
+.signature-guide-item.ready small {
+  color: #047857;
 }
 
 .mop-preview-page .sign-panel-head {
   min-height: 32px;
 }
 
-.mop-preview-page .sign-panel-head p,
-.mop-preview-page .selected-sign-person small {
+.mop-preview-page .mop-sign-panel:not(.manager-open) .sign-panel-head {
+  min-height: 0;
+}
+
+.mop-preview-page .sign-panel-head p {
   display: none;
-}
-
-.mop-step-flow {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 6px;
-  padding: 8px;
-  border: 1px solid #dbe7f5;
-  border-radius: 14px;
-  background: #f8fbff;
-}
-
-.mop-step-flow span {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: 24px minmax(0, 1fr);
-  gap: 2px 6px;
-  align-items: center;
-  padding: 7px;
-  border-radius: 12px;
-  color: #667892;
-  background: #fff;
-}
-
-.mop-step-flow b {
-  grid-row: span 2;
-  width: 24px;
-  height: 24px;
-  display: inline-grid;
-  place-items: center;
-  border-radius: 50%;
-  color: #60728d;
-  background: #edf4ff;
-  font-size: 12px;
-}
-
-.mop-step-flow strong,
-.mop-step-flow em {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.mop-step-flow strong {
-  color: #12345f;
-  font-size: 12px;
-  font-weight: 950;
-}
-
-.mop-step-flow em {
-  font-size: 11px;
-  font-style: normal;
-}
-
-.mop-step-flow span.done b {
-  color: #fff;
-  background: #10b981;
-}
-
-.mop-step-flow span.done strong {
-  color: #087a58;
 }
 
 .mop-preview-page .sign-workspace {
@@ -3328,54 +3891,41 @@ select:focus {
   min-height: 0;
 }
 
-.mop-preview-page .sign-person-list {
-  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
-  max-height: 142px;
+.mop-preview-page .mop-sign-panel.manager-open .sign-workspace {
+  grid-template-columns: minmax(244px, 300px) minmax(0, 1fr);
+  align-items: start;
+  gap: 7px;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 1px 3px 0;
+  scrollbar-width: thin;
+  scrollbar-gutter: stable;
 }
 
-.mop-preview-page .sign-person {
-  min-height: 46px;
-  grid-template-columns: 30px minmax(0, 1fr) auto;
-  padding: 6px 8px;
+.mop-preview-page .mop-sign-panel.manager-open .sign-workspace::-webkit-scrollbar {
+  width: 8px;
 }
 
-.mop-preview-page .sign-person > span {
-  width: 30px;
-  height: 30px;
-  border-radius: 10px;
+.mop-preview-page .mop-sign-panel.manager-open .sign-workspace::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.42);
 }
 
-.mop-preview-page .sign-person small,
-.mop-preview-page .sign-person em {
-  font-size: 11px;
+.mop-preview-page .mop-sign-panel.manager-open :deep(.company-signature-picker.compact .sign-person-list) {
+  max-height: min(34vh, 256px);
 }
 
-.mop-preview-page .sign-person em {
-  min-height: 22px;
-  padding: 4px 7px;
+.mop-preview-page .mop-sign-panel.manager-open :deep(.company-signature-picker.compact .sign-person) {
+  min-height: 40px;
+  padding: 6px 7px;
 }
 
-.mop-preview-page .selected-sign-person {
-  position: relative;
-  z-index: 90;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: center;
+.mop-preview-page .mop-sign-panel.manager-open :deep(.external-signature-reuse-body) {
+  max-height: min(24vh, 188px);
 }
 
-.mop-preview-page .selected-sign-person > span {
-  grid-column: 1;
-}
-
-.mop-preview-page .selected-signatures {
-  grid-column: 1 / -1;
-  max-height: 46px;
-  overflow-x: auto;
-  overflow-y: hidden;
-  padding-bottom: 4px;
-}
-
-.mop-preview-page .selected-signature-chip {
-  width: 150px;
+.mop-preview-page .mop-sign-panel.manager-open :deep(.external-signature-results) {
+  max-height: min(16vh, 128px);
 }
 
 .mop-preview-page .mop-sign-canvas {
@@ -3386,70 +3936,8 @@ select:focus {
   height: 96px;
 }
 
-.mop-preview-page .sign-actions {
-  grid-template-columns: 1fr;
-}
-
-.mop-preview-page .action-group {
-  padding: 9px;
-}
-
-.mop-preview-page .action-group .btn {
-  flex: 1 1 150px;
-  min-width: 0;
-}
-
 .mop-preview-page .mop-completion-panel {
   grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.mop-preview-page .other-signature-list,
-.mop-preview-page .external-signature-results {
-  max-height: 132px;
-}
-
-.mop-preview-page .other-signature-row {
-  grid-template-columns: 62px minmax(0, 1fr) auto;
-}
-
-.mop-preview-page .other-signature-row img {
-  width: 60px;
-}
-
-.mop-preview-page .other-signature-row.draft {
-  grid-template-columns: minmax(0, 1fr) auto auto;
-}
-
-.mop-preview-page .other-signature-row.draft input {
-  grid-column: 1 / -1;
-}
-
-.mop-preview-page .other-signature-row.draft .other-signature-state {
-  justify-self: start;
-}
-
-.mop-preview-page .other-signature-row > button {
-  padding-inline: 8px;
-}
-
-.mop-preview-page .external-signature-results button {
-  grid-template-columns: 58px minmax(0, 1fr) auto;
-}
-
-.mop-preview-page .external-signature-results img {
-  width: 56px;
-}
-
-.mop-preview-page .inline-search {
-  grid-template-columns: minmax(0, 1fr);
-}
-
-.mop-preview-page .signature-refresh {
-  width: 100%;
-}
-
-.mop-preview-page .action-group small {
-  display: none;
 }
 
 .sign-panel-head {
@@ -3459,46 +3947,41 @@ select:focus {
   gap: 12px;
 }
 
-.sign-panel-head strong,
-.selected-sign-person strong {
+.sign-panel-head strong {
   display: block;
   color: #0f172a;
   font-size: 16px;
   font-weight: 850;
 }
 
-.sign-panel-head p,
-.selected-sign-person small {
+.mop-preview-page .mop-sign-panel:not(.manager-open) .sign-panel-head strong {
+  font-size: 12px;
+  font-weight: 950;
+}
+
+.sign-panel-head p {
   margin: 4px 0 0;
   color: #64748b;
   font-size: 13px;
   line-height: 1.55;
 }
 
-.sign-role-tabs {
-  display: inline-flex;
-  gap: 4px;
-  padding: 4px;
-  border: 1px solid #d8e5f7;
+.sign-close-inline {
+  flex: 0 0 auto;
+  min-height: 28px;
+  border: 1px solid #cfe0ff;
   border-radius: 999px;
-  background: #f8fbff;
-}
-
-.sign-role-tabs button {
-  min-height: 32px;
-  border: 0;
-  border-radius: 999px;
-  padding: 6px 12px;
-  background: transparent;
-  color: #475569;
-  font-weight: 800;
+  background: #ffffff;
+  color: #3156c9;
+  padding: 5px 12px;
+  font-size: 11px;
+  font-weight: 900;
   cursor: pointer;
 }
 
-.sign-role-tabs button.active {
-  color: #ffffff;
-  background: #1e63ff;
-  box-shadow: 0 8px 18px rgba(30, 99, 255, 0.2);
+.sign-close-inline:hover {
+  border-color: #8dbbfb;
+  background: #eff6ff;
 }
 
 .sign-workspace {
@@ -3507,712 +3990,52 @@ select:focus {
   gap: 12px;
 }
 
-.sign-people,
-.sign-canvas-card {
+.signature-zone {
   display: grid;
   align-content: start;
-  gap: 10px;
-  min-width: 0;
-}
-
-.inline-search {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
-}
-
-.inline-search input {
-  min-width: 0;
-}
-
-.signature-refresh {
-  min-width: 64px;
-  padding-inline: 12px;
-}
-
-.search-inline-status {
-  display: block;
-  margin-top: 7px;
-  color: #64748b;
-  font-size: 12px;
-  line-height: 1.4;
-}
-
-.sign-person-list {
-  display: grid;
-  gap: 8px;
-  max-height: 260px;
-  overflow: auto;
-  padding-right: 4px;
-}
-
-.sign-person {
-  display: grid;
-  grid-template-columns: 38px minmax(0, 1fr) auto;
-  gap: 8px;
-  align-items: center;
-  border: 1px solid #dbe7f6;
-  border-radius: 14px;
-  background: #ffffff;
-  padding: 9px 10px;
-  color: #0f172a;
-  text-align: left;
-  cursor: pointer;
-}
-
-.sign-person:hover,
-.sign-person.active {
-  border-color: #1e63ff;
-  box-shadow: 0 8px 18px rgba(30, 99, 255, 0.12);
-}
-
-.sign-person.current {
-  background: linear-gradient(135deg, #f8fbff, #eef6ff);
-}
-
-.sign-person > span {
-  grid-row: span 2;
-  display: grid;
-  width: 38px;
-  height: 38px;
-  place-items: center;
-  border-radius: 13px;
-  color: #ffffff;
-  background: linear-gradient(135deg, #1e63ff, #22c1dc);
-  font-weight: 900;
-}
-
-.sign-person strong,
-.sign-person small {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.sign-person strong {
-  align-self: end;
-  font-size: 14px;
-  line-height: 1.25;
-}
-
-.sign-person small {
-  align-self: start;
-  color: #64748b;
-  font-size: 12px;
-  line-height: 1.25;
-}
-
-.sign-person em {
-  grid-column: 3;
-  grid-row: 1 / 3;
-  align-self: center;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 24px;
-  border-radius: 999px;
-  background: #eef2ff;
-  padding: 5px 8px;
-  color: #3156c9;
-  font-size: 12px;
-  font-style: normal;
-  font-weight: 850;
-  line-height: 1;
-  white-space: nowrap;
-}
-
-.sign-person em.ok {
-  color: #047857;
-  background: #ecfdf5;
-}
-
-.selected-sign-person {
-  position: relative;
-  display: grid;
-  gap: 6px;
-}
-
-.selected-sign-person span {
-  color: #2563eb;
-  font-size: 12px;
-  font-weight: 850;
-}
-
-.signature-role-summary {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.signature-role-summary section {
-  display: grid;
   gap: 7px;
   min-width: 0;
   border: 1px solid #d8e5f7;
-  border-radius: 14px;
-  background: #ffffff;
-  padding: 9px 10px;
-  cursor: pointer;
-}
-
-.signature-role-summary section.active {
-  border-color: #1e63ff;
-  background: linear-gradient(135deg, #f8fbff, #eef6ff);
-  box-shadow: 0 8px 18px rgba(30, 99, 255, 0.12);
-}
-
-.signature-role-summary span {
-  color: #3156c9;
-  font-size: 12px;
-  font-weight: 900;
-}
-
-.signature-role-summary section > strong {
-  color: #94a3b8;
-  font-size: 12px;
-}
-
-.role-chip-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.role-chip-row em {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  max-width: 100%;
-  border: 1px solid #fde68a;
-  border-radius: 999px;
-  background: #fffbeb;
-  padding: 4px 7px;
-  color: #92400e;
-  font-size: 12px;
-  font-style: normal;
-  font-weight: 850;
-}
-
-.role-chip-row em.ok {
-  border-color: #bbf7d0;
-  background: #ecfdf5;
-  color: #047857;
-}
-
-.role-chip-row button {
-  border: 0;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.78);
-  color: inherit;
-  font-size: 12px;
-  font-weight: 850;
-  cursor: pointer;
-}
-
-.selected-signatures {
-  position: relative;
-  z-index: 1;
-  display: flex;
-  flex-wrap: nowrap;
-  gap: 8px;
-  min-height: 42px;
-  max-height: 42px;
-  margin-top: 4px;
-  overflow: visible;
-  padding-bottom: 2px;
-}
-
-.selected-signature-chip {
-  display: inline-grid;
-  grid-template-columns: 58px minmax(68px, 1fr);
-  align-items: center;
-  gap: 7px;
-  flex: 0 0 auto;
-  width: 168px;
-  height: 38px;
-  border: 1px solid #d8e5f7;
-  border-radius: 999px;
-  background: #ffffff;
-  padding: 5px 7px;
-  cursor: pointer;
-}
-
-.selected-signature-chip.active {
-  border-color: #1e63ff;
-  box-shadow: 0 8px 18px rgba(30, 99, 255, 0.13);
-}
-
-.selected-signature-chip img {
-  width: 56px;
-  height: 24px;
-  object-fit: contain;
-}
-
-.signature-chip-state {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 56px;
-  min-height: 24px;
-  border-radius: 999px;
-  background: #fff7ed;
-  color: #c2410c;
-  font-size: 11px;
-  font-weight: 850;
-}
-
-.selected-signature-chip strong {
-  overflow: hidden;
-  color: #0f172a;
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.selected-signature-chip button {
-  border: 0;
-  border-radius: 999px;
-  background: #eef2ff;
-  color: #3156c9;
-  font-size: 12px;
-  font-weight: 850;
-  cursor: pointer;
-}
-
-.selected-signature-chip .chip-action {
-  width: 64px;
-  background: #e0f2fe;
-  color: #0369a1;
-}
-
-.selected-signature-chip button:not(.chip-action) {
-  width: 42px;
-}
-
-.selected-signature-chip button:disabled {
-  cursor: not-allowed;
-  opacity: 0.55;
-}
-
-.selected-signature-open {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  flex: 0 0 auto;
-  height: 38px;
-  border: 1px solid #bfdbfe;
-  border-radius: 999px;
-  background: #eff6ff;
-  color: #1d4ed8;
-  padding: 0 12px;
-  font-size: 12px;
-  font-weight: 850;
-  cursor: pointer;
-}
-
-.selected-signature-open em {
-  border-radius: 999px;
-  background: #fff7ed;
-  color: #c2410c;
-  padding: 2px 6px;
-  font-style: normal;
-}
-
-.selected-signature-drawer {
-  position: absolute;
-  z-index: 220;
-  top: calc(100% + 8px);
-  right: 0;
-  width: min(520px, calc(100vw - 48px));
-  border: 1px solid #cfe0ff;
-  border-radius: 18px;
-  background: rgba(255, 255, 255, 0.98);
-  box-shadow: 0 22px 50px rgba(12, 46, 108, 0.22);
-  padding: 12px;
-}
-
-.mop-preview-page .selected-signature-drawer {
-  position: fixed;
-  top: 132px;
-  right: 24px;
-  width: min(520px, calc(100vw - 48px));
-  max-height: calc(100vh - 164px);
-  overflow: hidden;
-}
-
-.drawer-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 10px;
-}
-
-.drawer-head strong {
-  color: #0f172a;
-  font-size: 14px;
-  font-weight: 900;
-}
-
-.drawer-head button {
-  border: 0;
-  border-radius: 999px;
-  background: #eef2ff;
-  color: #3156c9;
-  padding: 6px 10px;
-  font-size: 12px;
-  font-weight: 850;
-  cursor: pointer;
-}
-
-.drawer-signature-list {
-  display: grid;
-  gap: 8px;
-  max-height: 320px;
-  overflow: auto;
-}
-
-.mop-preview-page .drawer-signature-list {
-  max-height: calc(100vh - 250px);
-}
-
-.drawer-signature-list article {
-  display: grid;
-  grid-template-columns: 78px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 8px;
-  min-height: 52px;
-  border: 1px solid #d8e5f7;
-  border-radius: 14px;
-  background: #f8fbff;
+  border-radius: 16px;
+  background: linear-gradient(135deg, rgba(248, 251, 255, 0.96), rgba(255, 255, 255, 0.98));
   padding: 8px;
 }
 
-.drawer-signature-list article.ready {
-  border-color: #bbf7d0;
-  background: #f0fdf4;
+.mop-preview-page .signature-zone {
+  min-height: 0;
+  border-color: rgba(191, 219, 254, 0.98);
+  border-radius: 18px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.99), rgba(248, 251, 255, 0.96)),
+    #ffffff;
+  box-shadow: 0 14px 30px rgba(30, 99, 255, 0.07);
 }
 
-.drawer-signature-list article.pending {
-  border-color: #fed7aa;
-  background: #fff7ed;
-}
-
-.drawer-signature-list img {
-  width: 74px;
-  height: 28px;
-  object-fit: contain;
-}
-
-.drawer-signature-list strong,
-.drawer-signature-list small {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.drawer-signature-list strong {
-  color: #0f172a;
-  font-size: 13px;
-  font-weight: 900;
-}
-
-.drawer-signature-list small {
-  margin-top: 2px;
-  color: #64748b;
-  font-size: 12px;
-}
-
-.drawer-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 6px;
-  flex-wrap: wrap;
-  max-width: 210px;
-}
-
-.drawer-action,
-.drawer-remove {
-  border: 0;
-  border-radius: 999px;
-  padding: 7px 10px;
-  font-size: 12px;
-  font-weight: 850;
-  cursor: pointer;
-}
-
-.drawer-action {
-  background: #dbeafe;
-  color: #1d4ed8;
-}
-
-.drawer-action.link-action {
-  background: #e0f2fe;
-  color: #0369a1;
-}
-
-.drawer-remove {
-  background: #eef2ff;
-  color: #3156c9;
-}
-
-.drawer-action:disabled,
-.drawer-remove:disabled {
-  cursor: not-allowed;
-  opacity: 0.55;
-}
-
-.other-signature-panel {
-  display: grid;
-  gap: 9px;
-  border: 1px solid #d8e5f7;
-  border-radius: 16px;
-  background: linear-gradient(135deg, rgba(248, 251, 255, 0.96), rgba(255, 255, 255, 0.92));
-  padding: 10px;
-}
-
-.other-signature-head {
+.signature-zone-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+  min-width: 0;
+  border-bottom: 1px solid rgba(216, 229, 247, 0.78);
+  padding-bottom: 6px;
 }
 
-.other-signature-head strong {
-  display: block;
+.signature-zone-head strong {
   color: #0f172a;
-  font-size: 14px;
-  font-weight: 900;
+  font-size: 15px;
+  font-weight: 950;
 }
 
-.other-signature-head small,
-.other-signature-empty {
-  color: #64748b;
-  font-size: 12px;
-  line-height: 1.45;
-}
-
-.other-signature-list {
-  display: grid;
-  gap: 7px;
-}
-
-.other-signature-row {
-  display: grid;
-  grid-template-columns: 76px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 8px;
-  min-height: 46px;
-  border: 1px solid #d8e5f7;
-  border-radius: 14px;
-  background: #ffffff;
-  padding: 7px;
-}
-
-.other-signature-row.signed {
-  border-color: #bbf7d0;
-  background: #f0fdf4;
-}
-
-.other-signature-row.pending,
-.other-signature-row.draft {
-  border-color: #fed7aa;
-  background: #fff7ed;
-}
-
-.other-signature-row.failed {
-  border-color: #fecaca;
-  background: #fef2f2;
-}
-
-.other-signature-row img {
-  width: 72px;
-  height: 26px;
-  object-fit: contain;
-}
-
-.other-signature-row strong,
-.other-signature-row small {
-  display: block;
+.signature-zone-head small {
   min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.other-signature-row strong {
-  color: #0f172a;
-  font-size: 13px;
-  font-weight: 900;
-}
-
-.other-signature-row small {
-  margin-top: 2px;
   color: #64748b;
   font-size: 12px;
-}
-
-.other-signature-row input {
-  grid-column: span 2;
-  min-width: 0;
-  height: 34px;
-  border: 1px solid #d8e5f7;
-  border-radius: 11px;
-  background: #ffffff;
-  padding: 0 10px;
-  color: #0f172a;
-  font-size: 13px;
-  outline: none;
-}
-
-.other-signature-row input:focus {
-  border-color: #1e63ff;
-  box-shadow: 0 0 0 3px rgba(30, 99, 255, 0.12);
-}
-
-.other-signature-row > button,
-.external-signature-results button > em {
-  border: 0;
-  border-radius: 999px;
-  background: #dbeafe;
-  color: #1d4ed8;
-  padding: 7px 10px;
-  font-size: 12px;
-  font-weight: 850;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.other-signature-row > button:disabled {
-  cursor: not-allowed;
-  opacity: 0.55;
-}
-
-.other-signature-row > small {
-  grid-column: 1 / -1;
-  color: #b91c1c;
-}
-
-.other-signature-state {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 24px;
-  border-radius: 999px;
-  background: #fff7ed;
-  color: #c2410c;
-  padding: 4px 8px;
-  font-size: 11px;
-  font-weight: 850;
-  white-space: nowrap;
-}
-
-.external-signature-search {
-  margin-top: 2px;
-}
-
-.external-signature-results {
-  display: grid;
-  gap: 7px;
-  max-height: 180px;
-  overflow: auto;
-  padding-right: 3px;
-}
-
-.external-signature-results button {
-  display: grid;
-  grid-template-columns: 72px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 8px;
-  border: 1px solid #d8e5f7;
-  border-radius: 14px;
-  background: #ffffff;
-  padding: 7px;
-  text-align: left;
-  cursor: pointer;
-}
-
-.external-signature-results button:hover {
-  border-color: #1e63ff;
-  box-shadow: 0 8px 18px rgba(30, 99, 255, 0.12);
-}
-
-.external-signature-results img {
-  width: 70px;
-  height: 26px;
-  object-fit: contain;
-}
-
-.external-signature-results strong,
-.external-signature-results small {
-  display: block;
-  min-width: 0;
-  overflow: hidden;
+  line-height: 1.4;
+  text-align: right;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.external-signature-results strong {
-  color: #0f172a;
-  font-size: 13px;
-  font-weight: 900;
-}
-
-.external-signature-results small {
-  margin-top: 2px;
-  color: #64748b;
-  font-size: 12px;
-}
-
-.signature-launch-card {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 10px;
-  border: 1px solid #d8e5f7;
-  border-radius: 16px;
-  background: linear-gradient(135deg, rgba(248, 251, 255, 0.96), rgba(255, 255, 255, 0.92));
-  padding: 10px;
-}
-
-.signature-launch-card.disabled {
-  opacity: 0.72;
-}
-
-.signature-launch-card strong,
-.signature-launch-card small {
-  display: block;
-  min-width: 0;
-}
-
-.signature-launch-card strong {
-  overflow: hidden;
-  color: #0f172a;
-  font-size: 14px;
-  font-weight: 900;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.signature-launch-card small {
-  margin-top: 3px;
-  color: #64748b;
-  font-size: 12px;
-  line-height: 1.45;
-}
-
-.signature-launch-card img {
-  width: 92px;
-  height: 34px;
-  object-fit: contain;
-}
-
-.signature-launch-card .btn {
-  grid-column: 1 / -1;
-  width: 100%;
 }
 
 .mop-sign-canvas {
@@ -4289,64 +4112,6 @@ select:focus {
   font-weight: 850;
 }
 
-.signature-pad-backdrop {
-  position: fixed;
-  z-index: 1200;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  background: rgba(15, 23, 42, 0.42);
-  padding: 24px;
-  backdrop-filter: blur(10px);
-}
-
-.signature-pad-modal {
-  display: grid;
-  grid-template-rows: auto minmax(360px, 1fr) auto;
-  gap: 14px;
-  width: min(1080px, calc(100vw - 48px));
-  max-height: calc(100vh - 48px);
-  border: 1px solid rgba(191, 219, 254, 0.9);
-  border-radius: 24px;
-  background: #ffffff;
-  box-shadow: 0 32px 88px rgba(12, 46, 108, 0.32);
-  padding: 18px;
-}
-
-.signature-pad-modal header,
-.signature-pad-modal footer {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.signature-pad-modal header {
-  justify-content: space-between;
-}
-
-.signature-pad-modal header strong {
-  display: block;
-  color: #0f172a;
-  font-size: 22px;
-  font-weight: 950;
-}
-
-.signature-pad-modal header p {
-  margin: 4px 0 0;
-  color: #64748b;
-  font-size: 14px;
-}
-
-.signature-pad-modal footer {
-  justify-content: flex-end;
-  border-top: 1px solid #e2e8f0;
-  padding-top: 12px;
-}
-
-.signature-pad-modal footer .sign-status {
-  margin-right: auto;
-}
-
 .signature-pad-canvas,
 .mop-preview-page .signature-pad-canvas {
   min-height: min(56vh, 520px);
@@ -4359,82 +4124,11 @@ select:focus {
   min-height: 360px;
 }
 
-.sheet-cell-signatures {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 32px;
-}
-
-.sheet-cell-signatures img {
-  width: 88px;
-  height: 30px;
-  object-fit: contain;
-}
-
-.sign-actions {
-  display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(240px, auto) minmax(260px, auto);
-  align-items: start;
-  gap: 10px;
-}
-
 .sign-status {
   min-width: 0;
   color: #64748b;
   font-size: 13px;
   line-height: 1.6;
-}
-
-.sign-actions .btn {
-  flex: 0 0 auto;
-}
-
-.action-group {
-  display: grid;
-  gap: 7px;
-  min-width: 0;
-  padding: 10px;
-  border: 1px solid #d8e5f7;
-  border-radius: 14px;
-  background: rgba(248, 251, 255, 0.72);
-}
-
-.action-group > strong {
-  color: #3156c9;
-  font-size: 12px;
-  font-weight: 900;
-}
-
-.action-group > div {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.action-group small {
-  color: #64748b;
-  font-size: 12px;
-  line-height: 1.4;
-}
-
-.file-action-group {
-  background: linear-gradient(135deg, rgba(239, 246, 255, 0.88), rgba(255, 255, 255, 0.86));
-}
-
-.local-fill {
-  color: #3156c9;
-  background: #f8fbff;
-}
-
-.reset-clean {
-  border-color: #fde68a;
-  color: #92400e;
-  background: #fffbeb;
-}
-
-.warning-hint {
-  color: #b45309 !important;
 }
 
 .sign-status.success {
@@ -4536,214 +4230,32 @@ select:focus {
   white-space: nowrap;
 }
 
-.sheet-tabs {
-  display: flex;
-  gap: 8px;
-  overflow-x: auto;
-  padding-bottom: 2px;
-}
-
-.sheet-tabs button {
-  flex: 0 0 auto;
-  min-height: 34px;
-  border: 1px solid #d8e5f7;
-  border-radius: 999px;
-  padding: 7px 12px;
-  background: #ffffff;
-  color: #475569;
-  font-weight: 750;
-  cursor: pointer;
-}
-
-.sheet-tabs button.active {
-  border-color: #1e63ff;
-  color: #ffffff;
-  background: #1e63ff;
-}
-
-.sheet-note {
-  padding: 10px 12px;
-  border: 1px solid #fde68a;
-  border-radius: 12px;
-  color: #92400e;
-  background: #fffbeb;
-  font-size: 13px;
-}
-
 .sheet-scroll {
   min-height: 0;
   max-height: none;
   overflow: visible;
   border: 1px solid #d8e5f7;
-  border-radius: 16px;
+  border-radius: 18px;
   background: #ffffff;
+  box-shadow:
+    0 14px 36px rgba(15, 73, 153, 0.08),
+    0 0 0 1px rgba(255, 255, 255, 0.78) inset;
 }
 
 .mop-preview-page {
+  --mop-upload-footer-safe-space: clamp(124px, 15vh, 176px);
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(360px, 430px);
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto auto auto auto auto;
   align-items: start;
   column-gap: 14px;
-  gap: 8px;
+  gap: 10px;
+  width: min(1800px, 100%);
+  margin: 0 auto;
   min-height: calc(100vh - 46px);
+  padding-bottom: var(--mop-upload-footer-safe-space);
+  scroll-padding-bottom: var(--mop-upload-footer-safe-space);
   overflow: visible;
-}
-
-.preview-head {
-  display: grid;
-  grid-column: 1 / -1;
-  grid-template-columns: auto minmax(0, 1fr) minmax(320px, auto);
-  align-items: center;
-  gap: 14px;
-  padding: 14px 16px;
-  border: 1px solid #d8e5f7;
-  border-radius: 18px;
-  background: rgba(255, 255, 255, 0.9);
-  box-shadow: 0 10px 24px rgba(0, 47, 135, 0.08);
-}
-
-.preview-head strong {
-  display: block;
-  overflow: hidden;
-  color: #0f172a;
-  font-size: 18px;
-  font-weight: 800;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.preview-head p {
-  margin: 4px 0 0;
-  overflow: hidden;
-  color: #64748b;
-  font-size: 13px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.preview-head-status {
-  display: flex;
-  justify-content: flex-end;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.preview-head-status span {
-  border: 1px solid #fde68a;
-  border-radius: 999px;
-  background: #fffbeb;
-  padding: 5px 8px;
-  color: #92400e;
-  font-size: 12px;
-  font-weight: 850;
-  white-space: nowrap;
-}
-
-.preview-head-status span.done {
-  border-color: #bbf7d0;
-  background: #ecfdf5;
-  color: #047857;
-}
-
-.mop-file-status,
-.mop-detect-panel {
-  grid-column: 1;
-  border: 1px solid #d8e5f7;
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.86);
-  box-shadow: 0 8px 22px rgba(0, 47, 135, 0.06);
-}
-
-.mop-file-status {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 34px;
-  padding: 7px 10px;
-}
-
-.mop-file-status span {
-  color: #2563eb;
-  font-size: 12px;
-  font-weight: 850;
-}
-
-.mop-file-status strong,
-.mop-file-status small {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.mop-file-status strong {
-  color: #0f172a;
-  font-size: 13px;
-}
-
-.mop-file-status small {
-  color: #64748b;
-  font-size: 12px;
-}
-
-.mop-detect-panel {
-  display: none;
-}
-
-.detect-summary {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.detect-summary span,
-.detect-summary strong,
-.detect-summary em {
-  border-radius: 999px;
-  padding: 6px 10px;
-  font-size: 12px;
-}
-
-.detect-summary span {
-  color: #92400e;
-  background: #fffbeb;
-  font-weight: 850;
-}
-
-.detect-summary span.muted {
-  color: #047857;
-  background: #ecfdf5;
-}
-
-.detect-summary strong {
-  color: #1d4ed8;
-  background: #eff6ff;
-}
-
-.detect-summary em {
-  color: #15803d;
-  background: #dcfce7;
-  font-style: normal;
-  font-weight: 850;
-}
-
-.detect-empty {
-  color: #64748b;
-  font-size: 13px;
-}
-
-.preview-back {
-  min-width: 76px;
-}
-
-.preview-tabs {
-  grid-column: 1;
-  padding: 3px;
-  border: 1px solid #d8e5f7;
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.72);
 }
 
 .preview-scroll {
@@ -4754,380 +4266,13 @@ select:focus {
   max-height: none;
   overflow: visible;
   border-radius: 18px;
-}
-
-.table-fill-toolbar {
-  position: sticky;
-  top: 0;
-  z-index: 8;
-  display: grid;
-  gap: 8px;
-  border-bottom: 1px solid #e2e8f0;
-  background: rgba(248, 251, 255, 0.96);
-  padding: 8px 10px;
-  backdrop-filter: blur(10px);
-}
-
-.table-fill-toolbar-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.table-fill-toolbar span {
-  color: #64748b;
-  font-size: 12px;
-  font-weight: 800;
-}
-
-.table-fill-toolbar em {
-  margin-left: auto;
-  border-radius: 999px;
-  background: #dcfce7;
-  padding: 5px 9px;
-  color: #15803d;
-  font-size: 12px;
-  font-style: normal;
-  font-weight: 850;
-}
-
-.table-fill-toolbar small {
-  color: #64748b;
-  font-size: 12px;
-  font-weight: 750;
-}
-
-.active-cell-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  border: 1px solid #cfe0ff;
-  border-radius: 14px;
-  background: #ffffff;
-  padding: 8px;
-  box-shadow: 0 10px 24px rgba(30, 99, 255, 0.1);
-}
-
-.active-cell-toolbar strong {
-  flex: 0 0 auto;
-  color: #1d4ed8;
-  font-size: 12px;
-  font-weight: 900;
-}
-
-.active-cell-toolbar button {
-  border: 0;
-  border-radius: 999px;
-  background: #eef2ff;
-  padding: 6px 10px;
-  color: #3156c9;
-  font-size: 12px;
-  font-weight: 850;
-  cursor: pointer;
-}
-
-.active-cell-toolbar button.active,
-.active-cell-toolbar button:hover {
-  background: #1e63ff;
-  color: #ffffff;
-}
-
-.active-cell-toolbar .ghost-mini {
-  margin-left: auto;
-  background: #f8fafc;
-  color: #64748b;
-}
-
-.active-cell-toolbar input {
-  min-height: 30px;
-  height: 30px;
-  border-radius: 999px;
-  font-size: 12px;
-}
-
-.active-cell-toolbar textarea {
-  flex: 1 1 320px;
-  min-height: 34px;
-  max-height: 86px;
-  resize: vertical;
-  border: 1px solid #d8e5f7;
-  border-radius: 12px;
-  padding: 7px 9px;
-  color: #0f172a;
-  font: inherit;
-  font-size: 12px;
-}
-
-table {
-  border-collapse: collapse;
-  min-width: 100%;
-  font-size: 13px;
-}
-
-th,
-td {
-  min-width: 96px;
-  max-width: 360px;
-  border: 1px solid #e2e8f0;
-  padding: 7px 9px;
-  vertical-align: top;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.row-head,
-.corner-cell,
-.column-head {
-  color: #64748b;
-  background: #f8fafc;
-  text-align: center;
-  font-weight: 750;
-}
-
-.row-head {
-  position: sticky;
-  left: 0;
-  z-index: 2;
-  min-width: 44px;
-  width: 44px;
-}
-
-.corner-cell {
-  position: sticky;
-  top: 0;
-  left: 0;
-  z-index: 4;
-  min-width: 44px;
-  width: 44px;
-}
-
-.column-head {
-  position: sticky;
-  top: 0;
-  z-index: 3;
-  min-width: 96px;
-}
-
-td.merged {
-  background: #fbfdff;
-}
-
-td.fillable,
-td.field-fillable,
-td.raw-editable {
-  position: relative;
-}
-
-td.fillable,
-td.field-fillable {
-  background: #f8fbff;
-}
-
-td.raw-editable {
-  cursor: text;
-}
-
-td.fillable.normal {
-  background: #ecfdf5;
-}
-
-td.fillable.abnormal {
-  background: #fff7ed;
-}
-
-td.cell-modified {
-  background: #fff7d6 !important;
-  box-shadow: inset 0 0 0 1px rgba(245, 158, 11, 0.42);
-}
-
-td.signature-cell {
-  background: #eef6ff !important;
-}
-
-td.active-cell {
-  position: relative;
-  background: #eff6ff !important;
-  outline: 2px solid #1e63ff;
-  outline-offset: -2px;
-  box-shadow:
-    inset 0 0 0 1px rgba(30, 99, 255, 0.5),
-    0 0 0 2px rgba(30, 99, 255, 0.08);
-}
-
-.cell-fill-popover {
-  position: absolute;
-  z-index: 6;
-  right: 6px;
-  bottom: 6px;
-  display: none;
-  align-items: center;
-  gap: 4px;
-  border: 1px solid rgba(37, 99, 235, 0.18);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.96);
-  padding: 4px;
-  box-shadow: 0 12px 24px rgba(15, 23, 42, 0.16);
-}
-
-td.fillable:hover .cell-fill-popover,
-td.fillable:focus-within .cell-fill-popover,
-.cell-fill-popover.pinned {
-  display: inline-flex;
-}
-
-.cell-fill-popover span {
-  padding: 0 5px;
-  color: #3156c9;
-  font-size: 12px;
-  font-weight: 900;
-}
-
-.cell-fill-popover button {
-  border: 0;
-  border-radius: 999px;
-  background: #eef2ff;
-  padding: 4px 8px;
-  color: #3156c9;
-  font-size: 12px;
-  font-weight: 850;
-  cursor: pointer;
-}
-
-.cell-fill-popover button.active {
-  background: #1e63ff;
-  color: #ffffff;
-}
-
-.cell-field-popover {
-  position: absolute;
-  z-index: 6;
-  right: 6px;
-  bottom: 6px;
-  display: none;
-  align-items: center;
-  gap: 4px;
-  max-width: min(520px, calc(100vw - 120px));
-  border: 1px solid rgba(37, 99, 235, 0.18);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.97);
-  padding: 4px;
-  box-shadow: 0 12px 24px rgba(15, 23, 42, 0.16);
-}
-
-td.field-fillable:hover .cell-field-popover,
-td.field-fillable:focus-within .cell-field-popover,
-.cell-field-popover.pinned {
-  display: inline-flex;
-}
-
-.cell-field-popover span {
-  padding: 0 5px;
-  color: #3156c9;
-  font-size: 12px;
-  font-weight: 900;
-  white-space: nowrap;
-}
-
-.cell-field-popover input {
-  height: 28px;
-  box-sizing: border-box;
-  border: 1px solid #dbe3ee;
-  border-radius: 999px;
-  padding: 0 8px;
-  color: #0f172a;
-  font: inherit;
-  font-size: 12px;
-  outline: none;
-}
-
-.cell-field-popover button {
-  border: 0;
-  border-radius: 999px;
-  background: #eef2ff;
-  padding: 5px 9px;
-  color: #3156c9;
-  font-size: 12px;
-  font-weight: 850;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.cell-field-popover button:hover {
-  background: #1e63ff;
-  color: #ffffff;
-}
-
-.raw-cell-popover {
-  z-index: 24;
-  top: calc(100% - 2px);
-  right: auto;
-  bottom: auto;
-  left: 6px;
-  display: none;
-  width: min(360px, calc(100vw - 96px));
-  min-width: 240px;
-  align-items: stretch;
-  border-radius: 14px;
-  padding: 8px;
-}
-
-.raw-cell-popover.pinned {
-  display: grid;
-  gap: 7px;
-}
-
-.raw-cell-popover textarea {
-  min-height: 86px;
-  resize: vertical;
-  box-sizing: border-box;
-  border: 1px solid #dbe3ee;
-  border-radius: 12px;
-  padding: 8px 10px;
-  color: #0f172a;
-  background: #ffffff;
-  font: inherit;
-  font-size: 13px;
-  line-height: 1.45;
-  outline: none;
-}
-
-.mop-preview-page .cell-fill-popover,
-.mop-preview-page .cell-field-popover {
-  display: none !important;
+  padding-bottom: var(--mop-upload-footer-safe-space);
+  scroll-padding-bottom: var(--mop-upload-footer-safe-space);
 }
 
 @media (max-width: 1180px) {
-  .mop-summary,
   .mop-layout {
     grid-template-columns: 1fr;
-  }
-
-  .panel {
-    height: auto;
-    min-height: auto;
-  }
-
-  .binding-panel {
-    min-height: 0;
-    overflow: visible;
-  }
-
-  .mop-candidate-list {
-    max-height: 420px;
-  }
-
-  .selected-mop-strip {
-    grid-template-columns: 1fr;
-  }
-
-  .selected-mop-actions {
-    justify-items: stretch;
-  }
-
-  .selected-mop-actions small {
-    max-width: none;
-    text-align: left;
   }
 
   .sign-panel-head {
@@ -5135,11 +4280,15 @@ td.field-fillable:focus-within .cell-field-popover,
     flex-direction: column;
   }
 
-  .sign-actions {
-    grid-template-columns: 1fr;
+  .mop-completion-panel {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .mop-completion-panel {
+  .signature-guide-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .mop-flow-steps {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -5147,12 +4296,12 @@ td.field-fillable:focus-within .cell-field-popover,
     grid-template-columns: 1fr;
   }
 
-  .sign-status {
-    margin-right: 0;
+  .mop-preview-page .mop-sign-panel.manager-open .sign-workspace {
+    grid-template-columns: 1fr;
   }
 
-  .sign-person-list {
-    max-height: 220px;
+  .sign-status {
+    margin-right: 0;
   }
 
   .engineer-mop.preview-open {
@@ -5161,12 +4310,10 @@ td.field-fillable:focus-within .cell-field-popover,
 
   .mop-preview-page {
     grid-template-columns: 1fr;
+    --mop-upload-footer-safe-space: clamp(150px, 22vh, 240px);
   }
 
   .mop-preview-page .mop-sign-panel,
-  .mop-file-status,
-  .mop-detect-panel,
-  .preview-tabs,
   .preview-scroll {
     grid-column: 1;
   }
@@ -5177,25 +4324,28 @@ td.field-fillable:focus-within .cell-field-popover,
     grid-row: auto;
   }
 
-  .preview-head {
-    grid-template-columns: 1fr;
-  }
-
-  .preview-head-status {
-    justify-content: flex-start;
-  }
-
-  .table-fill-toolbar-row,
-  .active-cell-toolbar {
-    flex-wrap: wrap;
-  }
-
-  .active-cell-toolbar .ghost-mini {
-    margin-left: 0;
+  .mop-preview-page .mop-sign-panel.manager-open {
+    inset: 12px;
+    width: auto;
   }
 
   .preview-scroll {
     max-height: none;
+  }
+}
+
+@media (max-width: 720px) {
+  .signature-guide-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .mop-flow-steps {
+    grid-template-columns: 1fr;
+  }
+
+  .mop-preview-page .mop-sign-panel.manager-open {
+    inset: 8px;
+    border-radius: 18px;
   }
 }
 </style>

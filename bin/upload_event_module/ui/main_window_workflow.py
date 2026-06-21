@@ -2057,6 +2057,7 @@ class MainWindowWorkflowMixin:
         data_dict["_has_unuploaded_changes"] = False
         data_dict["_upload_in_progress"] = True
         data_dict["_upload_started_monotonic"] = time.monotonic()
+        data_dict.pop("_last_upload_error", None)
         list_widget, item = self._find_active_item_by_record_id(record_id)
         if item and not self._is_valid_list_item(item):
             item = None
@@ -2229,6 +2230,7 @@ class MainWindowWorkflowMixin:
         if record_id:
             data_dict["_upload_in_progress"] = True
             data_dict["_upload_started_monotonic"] = time.monotonic()
+            data_dict.pop("_last_upload_error", None)
             list_widget, item = self._find_active_item_by_record_id(record_id)
             if item and not self._is_valid_list_item(item):
                 item = None
@@ -2237,6 +2239,7 @@ class MainWindowWorkflowMixin:
                 data = item.data(Qt.ItemDataRole.UserRole) or {}
                 data["_upload_in_progress"] = True
                 data["_upload_started_monotonic"] = time.monotonic()
+                data.pop("_last_upload_error", None)
                 item.setData(Qt.ItemDataRole.UserRole, data)
                 self._rebuild_active_item_widget(
                     list_widget,

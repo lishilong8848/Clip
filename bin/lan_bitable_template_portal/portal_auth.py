@@ -38,6 +38,7 @@ AUTH_STATE_TTL_SECONDS = 10 * 60
 AUTH_MAX_PENDING_STATES = 200
 AUTH_MAX_SESSIONS = 500
 PERMISSION_REQUEST_TTL_SECONDS = 15 * 60
+PERMISSION_REVIEW_TTL_SECONDS = 30 * 24 * 60 * 60
 PERMISSION_REQUEST_MAX_ATTEMPTS = 5
 FEISHU_AUTH_INDEX_URL = "https://open.feishu.cn/open-apis/authen/v1/index"
 REQUIRED_ADMIN_USERS = {
@@ -418,15 +419,22 @@ class PortalAuthManager:
         attempts = int(payload.get("attempts") or 0)
         max_attempts = int(payload.get("max_attempts") or PERMISSION_REQUEST_MAX_ATTEMPTS)
         scopes = self._permission_request_scopes_from_raw(payload.get("requested_scopes"))
+        current_scopes = self.scopes_for_open_id(str(payload.get("open_id") or ""))
         return {
             "request_id": str(payload.get("request_id") or ""),
             "open_id": str(payload.get("open_id") or ""),
             "name": str(payload.get("name") or ""),
             "requested_scopes": scopes,
             "requested_scope_labels": [self.scope_label(scope) for scope in scopes],
+            "current_scopes": current_scopes,
+            "current_scope_labels": [self.scope_label(scope) for scope in current_scopes],
             "reason": str(payload.get("reason") or ""),
+            "reject_reason": str(payload.get("reject_reason") or ""),
             "status": str(payload.get("status") or ""),
             "created_at": str(payload.get("created_at") or ""),
+            "updated_at": str(payload.get("updated_at") or ""),
+            "reviewed_at": str(payload.get("reviewed_at") or ""),
+            "reviewed_by": str(payload.get("reviewed_by") or ""),
             "expires_at": str(payload.get("expires_at") or ""),
             "attempts": attempts,
             "max_attempts": max_attempts,
@@ -439,6 +447,11 @@ class PortalAuthManager:
             return {}
         with self._lock:
             payload = self._state_store.get_active_permission_request(open_id)
+            if not isinstance(payload, dict):
+                payload = self._state_store.get_latest_permission_request(
+                    open_id,
+                    statuses=("pending", "rejected"),
+                )
         return self._public_permission_request(payload)
 
     def create_permission_request(
@@ -464,22 +477,20 @@ class PortalAuthManager:
         if not requested_scopes:
             raise PortalError("请选择尚未拥有权限的楼栋或园区。")
         reason = str(reason or "").strip()[:500]
-        code = f"{secrets.randbelow(1000000):06d}"
-        salt = secrets.token_urlsafe(18)
         request_id = secrets.token_urlsafe(18)
         now_ts = time.time()
-        expires_at_ts = now_ts + PERMISSION_REQUEST_TTL_SECONDS
+        expires_at_ts = now_ts + PERMISSION_REVIEW_TTL_SECONDS
         now = dt.datetime.now()
-        expires_at = now + dt.timedelta(seconds=PERMISSION_REQUEST_TTL_SECONDS)
+        expires_at = now + dt.timedelta(seconds=PERMISSION_REVIEW_TTL_SECONDS)
         payload = {
             "request_id": request_id,
             "open_id": open_id,
             "name": str(name or "飞书用户").strip()[:80] or "飞书用户",
             "requested_scopes": requested_scopes,
             "reason": reason,
-            "status": "notifying",
-            "code_hash": self._permission_code_hash(code, salt),
-            "code_salt": salt,
+            "status": "pending",
+            "code_hash": "",
+            "code_salt": "",
             "attempts": 0,
             "max_attempts": PERMISSION_REQUEST_MAX_ATTEMPTS,
             "created_at": now.strftime("%Y-%m-%d %H:%M:%S"),
@@ -491,9 +502,103 @@ class PortalAuthManager:
         }
         with self._lock:
             self._state_store.put_permission_request(payload)
+            self._state_store.mark_permission_requests_for_open_id(
+                open_id,
+                from_status="pending",
+                to_status="superseded",
+                exclude_request_id=request_id,
+            )
+            self._state_store.mark_permission_requests_for_open_id(
+                open_id,
+                from_status="notifying",
+                to_status="superseded",
+                exclude_request_id=request_id,
+            )
         result = self._public_permission_request(payload)
-        result["code"] = code
         return result
+
+    def list_permission_requests_for_admin(
+        self, *, status: str = "pending", limit: int = 100
+    ) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._state_store.list_permission_requests(status=status, limit=limit)
+        return [self._public_permission_request(row) for row in rows]
+
+    def approve_permission_request(
+        self,
+        request_id: str,
+        *,
+        scopes: Any = None,
+        updated_by: str = "",
+    ) -> dict[str, Any]:
+        request_id = str(request_id or "").strip()
+        if not request_id:
+            raise PortalError("权限申请编号为空。")
+        with self._lock:
+            payload = self._state_store.get_permission_request(request_id)
+            if not isinstance(payload, dict):
+                raise PortalError("权限申请不存在或已失效。")
+            if str(payload.get("status") or "") != "pending":
+                raise PortalError("该权限申请已处理。")
+            requested_scopes = self._permission_request_scopes_from_raw(scopes)
+            if not requested_scopes:
+                requested_scopes = self._permission_request_scopes_from_raw(
+                    payload.get("requested_scopes")
+                )
+            if not requested_scopes:
+                raise PortalError("审批楼栋为空。")
+            open_id = str(payload.get("open_id") or "").strip()
+            current_scopes = self.scopes_for_open_id(open_id)
+            merged_scopes = self._scopes_from_raw([*current_scopes, *requested_scopes])
+            now_ts = time.time()
+            now = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            payload["status"] = "approved"
+            payload["approved_at"] = now
+            payload["approved_at_ts"] = now_ts
+            payload["reviewed_at"] = now
+            payload["reviewed_at_ts"] = now_ts
+            payload["reviewed_by"] = str(updated_by or "")
+            payload["approved_scopes"] = requested_scopes
+            payload["updated_at"] = now
+            payload["updated_at_ts"] = now_ts
+            permissions = self.upsert_permission_user(
+                open_id=open_id,
+                name=str(payload.get("name") or open_id),
+                role="building",
+                scopes=merged_scopes,
+                enabled=True,
+                updated_by=updated_by,
+            )
+            self._state_store.put_permission_request(payload)
+        return {"request": self._public_permission_request(payload), "permissions": permissions}
+
+    def reject_permission_request(
+        self,
+        request_id: str,
+        *,
+        reason: str = "",
+        updated_by: str = "",
+    ) -> dict[str, Any]:
+        request_id = str(request_id or "").strip()
+        if not request_id:
+            raise PortalError("权限申请编号为空。")
+        with self._lock:
+            payload = self._state_store.get_permission_request(request_id)
+            if not isinstance(payload, dict):
+                raise PortalError("权限申请不存在或已失效。")
+            if str(payload.get("status") or "") != "pending":
+                raise PortalError("该权限申请已处理。")
+            now_ts = time.time()
+            now = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            payload["status"] = "rejected"
+            payload["reject_reason"] = str(reason or "管理员未通过该权限申请。").strip()[:500]
+            payload["reviewed_at"] = now
+            payload["reviewed_at_ts"] = now_ts
+            payload["reviewed_by"] = str(updated_by or "")
+            payload["updated_at"] = now
+            payload["updated_at_ts"] = now_ts
+            self._state_store.put_permission_request(payload)
+        return self._public_permission_request(payload)
 
     def supersede_other_permission_requests(self, *, open_id: str, keep_request_id: str) -> None:
         open_id = str(open_id or "").strip()

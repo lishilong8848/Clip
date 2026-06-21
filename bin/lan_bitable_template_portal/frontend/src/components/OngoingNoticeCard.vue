@@ -14,173 +14,33 @@
       <div class="card-actions compact-actions">
         <span class="job-line" :class="jobClass(lineKey)">{{ jobText(lineKey) }}</span>
         <button v-if="copyText" class="btn ghost" type="button" @click.stop="emit('copy-notice')">复制通告</button>
+        <button class="btn ghost compact-expand" type="button" title="展开后可更新、结束、删除或回退" @click.stop="emit('toggle')">展开处理</button>
       </div>
     </div>
     <template v-else>
       <div class="ongoing-expanded" @click.stop>
-        <div class="notice-completion-panel">
-          <span
-            v-for="item in completionItems"
-            :key="item.key"
-            :class="{ done: item.done, pending: !item.done }"
-          >
-            <strong>{{ item.label }}</strong>
-            <em>{{ item.text }}</em>
-          </span>
+        <div class="next-action-hint" :class="nextActionHint.tone" aria-live="polite">
+          <strong>{{ nextActionHint.title }}</strong>
+          <span>{{ nextActionHint.text }}</span>
         </div>
-        <div class="form-grid">
-          <label>
-            {{ noticeFieldLabel(workType, "title") }}
-            <input
-              :value="draft.title"
-              placeholder="通告标题"
-              @input="setEdit('title', ($event.target as HTMLInputElement).value)"
-            />
-          </label>
-          <label v-if="isNoticeMessageField(workType, 'specialty')">
-            {{ noticeFieldLabel(workType, "specialty") }}
-            <SpecialtyInput :list-id="`${lineKey}-message-specialty-options`" :model-value="draft.specialty || ''" @update:model-value="setEdit('specialty', $event)" />
-          </label>
-          <label v-if="isNoticeMessageField(workType, 'level')">
-            {{ noticeFieldLabel(workType, "level") }}
-            <input
-              :value="draft.level"
-              placeholder="等级"
-              @input="setEdit('level', ($event.target as HTMLInputElement).value)"
-            />
-          </label>
-          <label>
-            {{ noticeFieldLabel(workType, "start_time") }}
-            <input
-              :value="draft.start_time"
-              type="datetime-local"
-              @input="setEdit('start_time', ($event.target as HTMLInputElement).value)"
-            />
-          </label>
-          <label>
-            {{ noticeFieldLabel(workType, "end_time") }}
-            <input
-              :value="draft.end_time"
-              type="datetime-local"
-              @input="setEdit('end_time', ($event.target as HTMLInputElement).value)"
-            />
-          </label>
-          <label v-if="isNoticeMessageField(workType, 'location')" class="span-2">
-            {{ noticeFieldLabel(workType, "location") }}
-            <input
-              :value="draft.location"
-              placeholder="地点"
-              @input="setEdit('location', ($event.target as HTMLInputElement).value)"
-            />
-          </label>
-          <label v-if="isNoticeMessageField(workType, 'content')" class="span-2">
-            {{ noticeFieldLabel(workType, "content") }}
-            <textarea
-              :value="draft.content"
-              placeholder="内容"
-              @input="setEdit('content', ($event.target as HTMLTextAreaElement).value)"
-            ></textarea>
-          </label>
-          <label v-if="isNoticeMessageField(workType, 'reason')">
-            {{ noticeFieldLabel(workType, "reason") }}
-            <textarea
-              :value="draft.reason"
-              placeholder="原因"
-              @input="setEdit('reason', ($event.target as HTMLTextAreaElement).value)"
-            ></textarea>
-          </label>
-          <label v-if="isNoticeMessageField(workType, 'impact')">
-            {{ noticeFieldLabel(workType, "impact") }}
-            <textarea
-              :value="draft.impact"
-              placeholder="影响"
-              @input="setEdit('impact', ($event.target as HTMLTextAreaElement).value)"
-            ></textarea>
-          </label>
-          <label v-if="isNoticeMessageField(workType, 'progress')" class="span-2">
-            {{ noticeFieldLabel(workType, "progress") }}
-            <textarea
-              :value="draft.progress"
-              placeholder="进度"
-              @input="setEdit('progress', ($event.target as HTMLTextAreaElement).value)"
-            ></textarea>
-          </label>
-        </div>
-        <section v-if="workType === 'power'" class="repair-fields">
-          <h3>上电字段</h3>
-          <div class="form-grid">
-            <label><span>柜号</span><input :value="draft.cabinet" @input="setEdit('cabinet', ($event.target as HTMLInputElement).value)" /></label>
-            <label><span>数量</span><input :value="draft.quantity" @input="setEdit('quantity', ($event.target as HTMLInputElement).value)" /></label>
-          </div>
-        </section>
-        <section v-if="workType === 'polling'" class="repair-fields">
-          <h3>轮巡字段</h3>
-          <div class="form-grid">
-            <label class="span-2"><span>设备</span><input :value="draft.device" @input="setEdit('device', ($event.target as HTMLInputElement).value)" /></label>
-          </div>
-        </section>
-        <section v-if="workType === 'repair'" class="repair-fields">
-          <h3>检修字段</h3>
-          <div class="form-grid">
-            <label><span>维修设备</span><input :value="draft.repair_device" @input="setEdit('repair_device', ($event.target as HTMLInputElement).value)" /></label>
-            <label><span>维修故障</span><input :value="draft.repair_fault" @input="setEdit('repair_fault', ($event.target as HTMLInputElement).value)" /></label>
-            <label><span>故障类型</span><input :value="draft.fault_type" @input="setEdit('fault_type', ($event.target as HTMLInputElement).value)" /></label>
-            <label><span>维修方式</span><input :value="draft.repair_mode" @input="setEdit('repair_mode', ($event.target as HTMLInputElement).value)" /></label>
-            <label><span>故障发现方式</span><input :value="draft.discovery" @input="setEdit('discovery', ($event.target as HTMLInputElement).value)" /></label>
-            <label><span>故障现象</span><input :value="draft.symptom" @input="setEdit('symptom', ($event.target as HTMLInputElement).value)" /></label>
-            <label class="span-2"><span>解决方案</span><textarea :value="draft.solution" @input="setEdit('solution', ($event.target as HTMLTextAreaElement).value)"></textarea></label>
-            <label class="span-2"><span>备件更换情况</span><textarea :value="draft.spare_parts" @input="setEdit('spare_parts', ($event.target as HTMLTextAreaElement).value)"></textarea></label>
-          </div>
-        </section>
-        <section v-if="hasNoticeUploadFields(workType)" class="upload-fields required-upload-fields">
-          <h3>多维上传字段（必填）</h3>
-          <div class="form-grid">
-            <label v-if="isNoticeUploadField(workType, 'specialty')">
-              专业
-              <SpecialtyInput
-                :list-id="`${lineKey}-upload-specialty-options`"
-                :model-value="draft.specialty || ''"
-                placeholder="用于目标多维字段"
-                @update:model-value="setEdit('specialty', $event)"
-              />
-            </label>
-            <label v-if="isNoticeUploadField(workType, 'maintenance_cycle')">
-              维保周期
-              <select :value="draft.maintenance_cycle" @change="setEdit('maintenance_cycle', ($event.target as HTMLSelectElement).value)">
-                <option value="">请选择</option>
-                <option v-for="cycle in maintenanceCycleOptions" :key="cycle" :value="cycle">{{ cycle }}</option>
-              </select>
-            </label>
-            <label v-if="syncMaintenanceVisible" class="checkbox-field span-2">
-              <input
-                :checked="draft.sync_maintenance_target !== false"
-                type="checkbox"
-                @change="setEdit('sync_maintenance_target', ($event.target as HTMLInputElement).checked)"
-              />
-              <span>同时上传维保多维（只同步维保目标表，不发送维保通告）</span>
-            </label>
-            <div v-if="isNoticeUploadField(workType, 'zhihang')" class="zhihang-line span-2">
-              <label>
-                <input
-                  :checked="Boolean(draft.zhihang_involved)"
-                  type="checkbox"
-                  @change="setEdit('zhihang_involved', ($event.target as HTMLInputElement).checked)"
-                />
-                涉及智航
-              </label>
-              <select
-                v-if="draft.zhihang_involved"
-                :value="draft.zhihang_record_id"
-                @change="emit('bind-zhihang', ($event.target as HTMLSelectElement).value)"
-              >
-                <option value="">选择智航变更</option>
-                <option v-for="change in zhihangRecords" :key="change.record_id" :value="change.record_id">
-                  {{ change.title || change.record_id }}
-                </option>
-              </select>
-            </div>
-          </div>
-        </section>
+        <NoticeCompletionPanel :items="completionItems" />
+        <NoticeMessageFields
+          :work-type="workType"
+          :draft="draft"
+          :list-id-prefix="lineKey"
+          :disabled="busy"
+          @set-field="setEdit"
+        />
+        <NoticeUploadFields
+          :work-type="workType"
+          :draft="draft"
+          :line-key="lineKey"
+          :maintenance-cycle-options="maintenanceCycleOptions"
+          :zhihang-records="zhihangRecords"
+          :sync-maintenance-visible="syncMaintenanceVisible"
+          @set-field="setEdit"
+          @bind-zhihang="emit('bind-zhihang', $event)"
+        />
         <section
           class="site-photo-fields"
           :class="{ required: sitePhotoRequired, missing: sitePhotoRequired && photoCount === 0 }"
@@ -199,12 +59,17 @@
             <small>
               {{
                 sitePhotoRequired
-                  ? "结束通告前至少添加一张现场照片，支持截图后 Ctrl+V 粘贴或一次选择多张。"
-                  : "该通告类型结束不强制现场照片，可按需粘贴或添加。"
+                  ? "结束前必填，可粘贴截图或选择图片。"
+                  : "可粘贴截图或选择图片。"
               }}
             </small>
           </div>
           <div class="site-photo-paste-hint">复制图片后点击此区域，按 Ctrl+V 粘贴现场照片</div>
+          <DisabledReason
+            v-if="endDisabledReason"
+            :text="endDisabledReason"
+            tone="warning"
+          />
           <div v-if="photoCount" class="site-photo-list">
             <button
               v-for="(photo, index) in draft.extra_images || []"
@@ -222,21 +87,44 @@
         </section>
         <div class="card-actions action-clusters">
           <span class="job-line" :class="jobClass(lineKey)">{{ jobText(lineKey) }}</span>
-          <button v-if="copyText" class="btn ghost" type="button" @click.stop="emit('copy-notice')">复制通告</button>
+          <DisabledReason
+            v-if="busy"
+            text="当前通告正在处理，请等待任务完成。"
+            tone="warning"
+          />
           <div class="action-group primary-actions">
-            <strong>通告操作</strong>
-            <button class="btn blue" :disabled="busy" @click="emit('send', 'update')">发送{{ workTypeLabel(workType) }}更新</button>
-            <button class="btn green" :disabled="busy" @click="emit('send', 'end')">发送{{ workTypeLabel(workType) }}结束</button>
+            <strong>发送</strong>
+            <DisabledReason
+              v-if="updateDisabledReason"
+              :text="updateDisabledReason"
+              tone="warning"
+            />
+            <button
+              class="btn blue"
+              :disabled="Boolean(updateDisabledReason)"
+              :title="updateDisabledReason"
+              @click="emit('send', 'update')"
+            >
+              发送{{ workTypeLabel(workType) }}更新
+            </button>
+            <button
+              class="btn green"
+              :disabled="Boolean(endDisabledReason)"
+              :title="endDisabledReason"
+              @click="emit('send', 'end')"
+            >
+              发送{{ workTypeLabel(workType) }}结束
+            </button>
           </div>
-          <div v-if="needsBinding" class="action-group fix-actions">
-            <strong>异常修复</strong>
-            <button class="btn ghost" :disabled="busy" @click="emit('bind-target')">关联目标记录</button>
-          </div>
-          <div class="action-group danger-actions">
-            <strong>危险操作</strong>
-            <button class="btn danger" :disabled="busy" @click="emit('delete')">删除</button>
-            <button v-if="item.undo_available" class="btn ghost" :disabled="undoBusy" @click="emit('apply-undo')">回退</button>
-          </div>
+          <details class="more-actions">
+            <summary>更多操作</summary>
+            <div class="more-action-grid">
+              <button v-if="copyText" class="btn ghost" type="button" @click.stop="emit('copy-notice')">复制通告</button>
+              <button v-if="needsBinding" class="btn ghost" :disabled="busy" @click="emit('bind-target')">选择对应通告</button>
+              <button v-if="item.undo_available" class="btn ghost" :disabled="undoBusy" @click="emit('apply-undo')">回退上一步</button>
+              <button class="btn danger" :disabled="busy" @click="emit('delete')">删除通告</button>
+            </div>
+          </details>
         </div>
         <div v-if="item.undo_available" class="undo-line">
           {{ item.undo_label || "可回退上一步" }}
@@ -250,14 +138,14 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import {
-  hasNoticeUploadFields,
-  isNoticeMessageField,
   isNoticeUploadField,
-  noticeFieldLabel,
   noticeTemplate,
   workTypeLabel,
 } from "../noticeTemplates";
-import SpecialtyInput from "./SpecialtyInput.vue";
+import DisabledReason from "./DisabledReason.vue";
+import NoticeCompletionPanel from "./NoticeCompletionPanel.vue";
+import NoticeMessageFields from "./NoticeMessageFields.vue";
+import NoticeUploadFields from "./NoticeUploadFields.vue";
 
 type Dict = Record<string, any>;
 
@@ -347,6 +235,44 @@ const completionItems = computed(() => {
       done: zhihangStatus.value.done,
     },
   ];
+});
+const nextActionHint = computed(() => {
+  if (props.busy) {
+    return {
+      tone: "warning",
+      title: "后台处理中",
+      text: "这条通告正在发送或上传，完成前不要重复操作。",
+    };
+  }
+  if (props.needsBinding) {
+    return {
+      tone: "warning",
+      title: "先选择对应通告",
+      text: "当前记录缺少可更新的多维记录，先在更多操作中选择对应通告。",
+    };
+  }
+  if (props.sitePhotoRequired && props.photoCount === 0) {
+    return {
+      tone: "danger",
+      title: "结束前补现场照片",
+      text: "维保、变更、检修结束前需要至少一张现场照片；更新不受影响。",
+    };
+  }
+  return {
+    tone: "ready",
+    title: "可以发送",
+    text: "核对字段后，可发送更新；确认闭环时再发送结束。",
+  };
+});
+const updateDisabledReason = computed(() => {
+  if (props.busy) return "当前通告正在处理，请等待任务完成。";
+  if (props.needsBinding) return "当前通告缺少对应多维记录，请先在更多操作中选择对应通告。";
+  return "";
+});
+const endDisabledReason = computed(() => {
+  if (updateDisabledReason.value) return updateDisabledReason.value;
+  if (props.sitePhotoRequired && props.photoCount === 0) return "结束通告前需要至少添加一张现场照片。";
+  return "";
 });
 
 function setEdit(key: string, value: any): void {
@@ -447,6 +373,53 @@ function photoPreviewUrl(photo: Dict): string {
 .ongoing-expanded {
   display: grid;
   gap: 8px;
+}
+
+.next-action-hint {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #cfe0ff;
+  border-radius: 16px;
+  padding: 9px 11px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.next-action-hint strong {
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: rgba(255, 255, 255, 0.82);
+  color: inherit;
+  font-weight: 950;
+  white-space: nowrap;
+}
+
+.next-action-hint span {
+  min-width: 0;
+  color: #31506f;
+  font-weight: 850;
+}
+
+.next-action-hint.ready {
+  border-color: #bbf7d0;
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.next-action-hint.warning {
+  border-color: #fed7aa;
+  background: #fff7ed;
+  color: #c2410c;
+}
+
+.next-action-hint.danger {
+  border-color: #fecaca;
+  background: #fef2f2;
+  color: #b91c1c;
 }
 
 .form-grid {
@@ -954,47 +927,6 @@ textarea:focus {
   background: #e11d48;
 }
 
-.notice-completion-panel {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.notice-completion-panel span {
-  display: grid;
-  gap: 3px;
-  min-width: 0;
-  padding: 8px 9px;
-  border: 1px solid #d8e5f7;
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.86);
-}
-
-.notice-completion-panel span.done {
-  border-color: #bbf7d0;
-  background: #f0fdf4;
-}
-
-.notice-completion-panel span.pending {
-  border-color: #fde68a;
-  background: #fffbeb;
-}
-
-.notice-completion-panel strong {
-  color: #09204a;
-  font-size: 12px;
-  font-weight: 820;
-}
-
-.notice-completion-panel em {
-  overflow: hidden;
-  color: #64748b;
-  font-size: 12px;
-  font-style: normal;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .site-photo-fields.required {
   border-color: #bfdbfe;
 }
@@ -1054,15 +986,258 @@ textarea:focus {
 }
 
 @media (max-width: 720px) {
-  .notice-completion-panel {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
   .action-clusters {
     grid-template-columns: 1fr;
   }
 
   .primary-actions {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Final VNET production card pass */
+.ongoing-card {
+  padding: 12px;
+  border-color: rgba(207, 224, 255, 0.96);
+  border-radius: 20px;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.98), rgba(248, 251, 255, 0.92)),
+    #fff;
+  box-shadow: 0 12px 28px rgba(0, 47, 135, 0.08);
+}
+
+.ongoing-card.collapsed {
+  padding: 11px 12px;
+}
+
+.ongoing-card.collapsed:hover {
+  border-color: #bdd2f4;
+  background: #ffffff;
+  box-shadow: 0 16px 34px rgba(0, 47, 135, 0.11);
+}
+
+.ongoing-card.active {
+  border-color: #1e63ff;
+  box-shadow:
+    inset 4px 0 0 #1e63ff,
+    0 16px 36px rgba(30, 99, 255, 0.13);
+}
+
+.card-title {
+  min-width: 0;
+}
+
+.card-title strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #0f172a;
+  font-size: 15px;
+  font-weight: 900;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.card-title span {
+  border-color: #cfe0ff;
+  border-radius: 999px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.repair-fields,
+.upload-fields,
+.site-photo-fields,
+.action-group {
+  border-radius: 16px;
+}
+
+input,
+select,
+textarea {
+  border-color: #d8e5f7;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.94);
+}
+
+.btn {
+  min-height: 38px;
+  border-radius: 14px;
+  font-weight: 850;
+}
+
+.btn.blue {
+  background: linear-gradient(135deg, #1e63ff, #1554df);
+  box-shadow: 0 12px 26px rgba(30, 99, 255, 0.22);
+}
+
+.btn.green {
+  background: #059669;
+  box-shadow: 0 12px 24px rgba(5, 150, 105, 0.16);
+}
+
+.btn.danger {
+  background: #e11d48;
+  box-shadow: 0 12px 24px rgba(225, 29, 72, 0.14);
+}
+
+/* Final action-area density pass: keep the expanded card stable in the right rail. */
+.action-clusters {
+  grid-template-columns: 1fr;
+  align-items: stretch;
+  gap: 9px;
+  padding-top: 4px;
+  border-top: 1px solid rgba(216, 229, 247, 0.82);
+}
+
+.action-clusters > .job-line {
+  min-height: 30px;
+  display: flex;
+  align-items: center;
+}
+
+.job-line {
+  max-width: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  border: 1px solid #d8e5f7;
+  border-radius: 999px;
+  padding: 5px 10px;
+  background: #f8fbff;
+  color: #48627f;
+  font-size: 12px;
+  font-weight: 850;
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.job-line.busy {
+  border-color: #bfdbfe;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.job-line.success {
+  border-color: #bbf7d0;
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.job-line.failed {
+  border-color: #fecaca;
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+.action-clusters > .btn.ghost {
+  justify-self: start;
+}
+
+.primary-actions {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.primary-actions > strong,
+.primary-actions :deep(.disabled-reason) {
+  grid-column: 1 / -1;
+}
+
+.primary-actions :deep(.disabled-reason) {
+  margin: 0;
+}
+
+.primary-actions .btn,
+.fix-actions .btn,
+.danger-actions .btn {
+  min-width: 0;
+}
+
+.more-actions {
+  border: 1px solid #d8e5f7;
+  border-radius: 16px;
+  background: rgba(248, 251, 255, 0.82);
+  overflow: hidden;
+}
+
+.more-actions summary {
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 12px;
+  color: #48627f;
+  font-size: 13px;
+  font-weight: 900;
+  cursor: pointer;
+  user-select: none;
+}
+
+.more-actions summary::after {
+  content: "展开";
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: #eff6ff;
+  color: #0757d7;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.more-actions[open] summary {
+  border-bottom: 1px solid #e5eefb;
+  background: #ffffff;
+}
+
+.more-actions[open] summary::after {
+  content: "收起";
+}
+
+.more-action-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  padding: 8px;
+}
+
+.more-action-grid .btn {
+  min-width: 0;
+}
+
+.fix-actions {
+  border-color: #bfdbfe;
+  background: #eff6ff;
+}
+
+.danger-actions {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border-color: #fecaca;
+  background: #fff7f7;
+}
+
+.fix-actions > strong,
+.danger-actions > strong {
+  grid-column: 1 / -1;
+}
+
+.undo-line {
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid #fde68a;
+  border-radius: 14px;
+  background: #fffbeb;
+  color: #92400e;
+  font-weight: 850;
+}
+
+@media (max-width: 720px) {
+  .primary-actions,
+  .danger-actions,
+  .more-action-grid {
     grid-template-columns: 1fr;
   }
 }

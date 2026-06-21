@@ -3,40 +3,78 @@
     <button
       class="btn ghost"
       type="button"
+      aria-haspopup="menu"
       :aria-expanded="open"
+      title="刷新当前页面或查找新记录，失败不会清空当前页面"
       @click.stop="emit('update:open', !open)"
     >
       刷新数据
     </button>
-    <div v-if="open" class="refresh-menu-panel" @click.stop>
-      <p>低频使用。刷新失败时不会清空页面，会继续显示上次成功数据。</p>
-      <button
-        class="btn ghost"
-        type="button"
-        :disabled="loading || cooldownWorkbench"
-        :title="workbenchTitle"
-        @click="emitRefresh('refresh-workbench')"
-      >
-        {{ loading ? "刷新中" : cooldownWorkbench ? "刚刷新过，稍后再试" : "刷新本页" }}
-      </button>
-      <button
-        class="btn ghost"
-        type="button"
-        :disabled="repairRefreshing || cooldownRepair"
-        :title="repairTitle"
-        @click="emitRefresh('refresh-repair')"
-      >
-        {{ repairRefreshing ? "检修刷新中" : cooldownRepair ? "刚刷新过，稍后再试" : "刷新检修" }}
-      </button>
-      <button
-        class="btn ghost"
-        type="button"
-        :disabled="changeRefreshing || cooldownChange"
-        :title="changeTitle"
-        @click="emitRefresh('refresh-change')"
-      >
-        {{ changeRefreshing ? "变更刷新中" : cooldownChange ? "刚刷新过，稍后再试" : "刷新变更" }}
-      </button>
+    <div v-if="open" class="refresh-menu-panel" role="menu" @click.stop>
+      <div class="refresh-menu-head">
+        <strong>低频刷新数据</strong>
+        <small>只读取最新快照，不发送通告；失败不会清空页面。</small>
+      </div>
+      <template v-if="eventMode">
+        <button
+          class="refresh-option"
+          type="button"
+          role="menuitem"
+          :disabled="eventRefreshing || cooldownEvent"
+          :title="eventTitle"
+          @click="emitRefresh('refresh-event')"
+        >
+          <span>
+            <strong>刷新事件</strong>
+            <small>{{ optionHint("查找本月最新事件记录", eventRefreshing, cooldownEvent, eventTitle) }}</small>
+          </span>
+          <b>{{ eventRefreshing ? "读取中" : cooldownEvent ? "稍后再试" : "读取" }}</b>
+        </button>
+      </template>
+      <template v-else>
+        <button
+          class="refresh-option"
+          type="button"
+          role="menuitem"
+          :disabled="loading || cooldownWorkbench"
+          :title="workbenchTitle"
+          @click="emitRefresh('refresh-workbench')"
+        >
+          <span>
+            <strong>刷新本页</strong>
+            <small>{{ optionHint("重新显示当前楼栋数据", loading, cooldownWorkbench, workbenchTitle) }}</small>
+          </span>
+          <b>{{ loading ? "刷新中" : cooldownWorkbench ? "稍后再试" : "刷新" }}</b>
+        </button>
+        <button
+          class="refresh-option"
+          type="button"
+          role="menuitem"
+          :disabled="repairRefreshing || cooldownRepair"
+          :title="repairTitle"
+          @click="emitRefresh('refresh-repair')"
+        >
+          <span>
+            <strong>刷新检修</strong>
+            <small>{{ optionHint("刚新建的检修没出现时使用", repairRefreshing, cooldownRepair, repairTitle) }}</small>
+          </span>
+          <b>{{ repairRefreshing ? "读取中" : cooldownRepair ? "稍后再试" : "读取" }}</b>
+        </button>
+        <button
+          class="refresh-option"
+          type="button"
+          role="menuitem"
+          :disabled="changeRefreshing || cooldownChange"
+          :title="changeTitle"
+          @click="emitRefresh('refresh-change')"
+        >
+          <span>
+            <strong>刷新变更</strong>
+            <small>{{ optionHint("刚新建的变更没出现时使用", changeRefreshing, cooldownChange, changeTitle) }}</small>
+          </span>
+          <b>{{ changeRefreshing ? "读取中" : cooldownChange ? "稍后再试" : "读取" }}</b>
+        </button>
+      </template>
     </div>
   </div>
 </template>
@@ -49,12 +87,16 @@ const props = defineProps<{
   loading?: boolean;
   repairRefreshing?: boolean;
   changeRefreshing?: boolean;
+  eventRefreshing?: boolean;
+  eventMode?: boolean;
   cooldownWorkbench?: boolean;
   cooldownRepair?: boolean;
   cooldownChange?: boolean;
+  cooldownEvent?: boolean;
   workbenchTitle?: string;
   repairTitle?: string;
   changeTitle?: string;
+  eventTitle?: string;
 }>();
 
 const emit = defineEmits<{
@@ -62,15 +104,23 @@ const emit = defineEmits<{
   "refresh-workbench": [];
   "refresh-repair": [];
   "refresh-change": [];
+  "refresh-event": [];
 }>();
 
 const rootRef = ref<HTMLElement | null>(null);
+let listenersAttached = false;
 
-function emitRefresh(eventName: "refresh-workbench" | "refresh-repair" | "refresh-change"): void {
+function emitRefresh(eventName: "refresh-workbench" | "refresh-repair" | "refresh-change" | "refresh-event"): void {
   if (eventName === "refresh-workbench") emit("refresh-workbench");
   else if (eventName === "refresh-repair") emit("refresh-repair");
-  else emit("refresh-change");
+  else if (eventName === "refresh-change") emit("refresh-change");
+  else emit("refresh-event");
   emit("update:open", false);
+}
+
+function optionHint(defaultText: string, busy?: boolean, cooldown?: boolean, title?: string): string {
+  if (busy || cooldown) return String(title || (busy ? "正在刷新，请稍后。" : "刚刷新过，稍后再试。"));
+  return defaultText;
 }
 
 function handlePointerDown(event: MouseEvent): void {
@@ -85,11 +135,15 @@ function handleKeydown(event: KeyboardEvent): void {
 
 function setListeners(enabled: boolean): void {
   if (enabled) {
+    if (listenersAttached) return;
     document.addEventListener("mousedown", handlePointerDown, true);
     document.addEventListener("keydown", handleKeydown, true);
+    listenersAttached = true;
   } else {
+    if (!listenersAttached) return;
     document.removeEventListener("mousedown", handlePointerDown, true);
     document.removeEventListener("keydown", handleKeydown, true);
+    listenersAttached = false;
   }
 }
 
@@ -105,21 +159,65 @@ onBeforeUnmount(() => setListeners(false));
 <style scoped>
 .refresh-menu {
   position: relative;
+  isolation: isolate;
+}
+
+.refresh-menu > .btn {
+  min-height: 42px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 16px;
+  border: 1px solid rgba(255, 255, 255, 0.34);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.14);
+  color: #ffffff;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 900;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.2),
+    0 10px 22px rgba(4, 46, 145, 0.08);
+  backdrop-filter: blur(10px);
+  transition:
+    transform 0.16s ease,
+    background 0.16s ease,
+    border-color 0.16s ease;
+}
+
+.refresh-menu > .btn:hover {
+  border-color: rgba(255, 255, 255, 0.52);
+  background: rgba(255, 255, 255, 0.22);
+  transform: translateY(-1px);
+}
+
+.refresh-menu > .btn:focus-visible {
+  outline: none;
+  box-shadow:
+    0 0 0 3px rgba(255, 255, 255, 0.24),
+    0 0 0 5px rgba(48, 128, 255, 0.28);
 }
 
 .refresh-menu-panel {
   position: absolute;
   top: calc(100% + 10px);
   right: 0;
-  z-index: 180;
-  width: min(330px, calc(100vw - 36px));
+  z-index: var(--cf-z-dropdown, 720);
+  width: min(316px, calc(100vw - 36px));
+  max-height: min(390px, calc(100vh - 132px));
   display: grid;
-  gap: 10px;
-  padding: 14px;
-  border: 1px solid rgba(255, 255, 255, 0.42);
-  border-radius: 18px;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #d8e5f7;
+  border-radius: 20px;
   background: rgba(255, 255, 255, 0.98);
   box-shadow: 0 20px 44px rgba(7, 37, 86, 0.24);
+  overflow: auto;
+  overscroll-behavior: contain;
+  isolation: isolate;
 }
 
 .refresh-menu-panel::before {
@@ -135,27 +233,108 @@ onBeforeUnmount(() => setListeners(false));
   transform: rotate(45deg);
 }
 
-.refresh-menu-panel p {
+.refresh-menu-head {
   position: relative;
   z-index: 1;
-  margin: 0;
-  color: #48627f;
+  display: grid;
+  gap: 3px;
+  border: 1px solid rgba(191, 219, 254, 0.82);
+  border-radius: 15px;
+  background:
+    linear-gradient(135deg, rgba(239, 246, 255, 0.96), rgba(255, 255, 255, 0.86)),
+    #f8fbff;
+  padding: 9px 11px;
+}
+
+.refresh-menu-head strong {
+  color: #071a39;
+  font-size: 14px;
+  font-weight: 950;
+}
+
+.refresh-menu-head small {
+  color: #1d4ed8;
   font-size: 12px;
-  line-height: 1.6;
+  font-weight: 850;
+  line-height: 1.35;
 }
 
-.refresh-menu-panel .btn {
+.refresh-option {
   position: relative;
   z-index: 1;
-  justify-content: flex-start;
   width: 100%;
-  border-color: #dbe7f5;
+  min-height: 48px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid #dbe7f5;
+  border-radius: 16px;
   color: #0e4fb2;
+  background: linear-gradient(135deg, #ffffff, #f7fbff);
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  box-shadow: 0 8px 18px rgba(15, 86, 228, 0.07);
+  transition:
+    transform 0.16s ease,
+    border-color 0.16s ease,
+    box-shadow 0.16s ease,
+    background 0.16s ease;
 }
 
-.refresh-menu-panel .btn:disabled {
+.refresh-option:hover:not(:disabled) {
+  border-color: #a7c7ff;
+  background: #ffffff;
+  box-shadow: 0 12px 24px rgba(15, 86, 228, 0.12);
+  transform: translateY(-1px);
+}
+
+.refresh-option span {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.refresh-option strong {
+  color: #071a39;
+  font-size: 13px;
+  font-weight: 950;
+}
+
+.refresh-option small {
+  color: #5d7391;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.3;
+}
+
+.refresh-option b {
+  min-width: 56px;
+  border-radius: 999px;
+  padding: 6px 9px;
+  background: #eff6ff;
+  color: #075bd8;
+  font-size: 12px;
+  font-weight: 950;
+  text-align: center;
+}
+
+.refresh-option:disabled {
   cursor: not-allowed;
   color: #8193aa;
   background: #f4f7fb;
+  box-shadow: none;
+}
+
+.refresh-option:disabled strong,
+.refresh-option:disabled small {
+  color: #8193aa;
+}
+
+.refresh-option:disabled b {
+  background: #e8eef6;
+  color: #687b92;
 }
 </style>

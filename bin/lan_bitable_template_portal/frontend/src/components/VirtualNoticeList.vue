@@ -1,6 +1,10 @@
 <template>
   <div ref="parentRef" class="virtual-list">
-    <div v-if="rows.length === 0" class="virtual-list__empty">{{ emptyText }}</div>
+    <div v-if="rows.length === 0" class="virtual-list__empty">
+      <strong>{{ emptyTitle || "暂无可显示事项" }}</strong>
+      <p>{{ emptyText || emptyHint || "当前筛选条件下没有数据。" }}</p>
+      <small v-if="emptyHint && emptyText">{{ emptyHint }}</small>
+    </div>
     <div class="virtual-list__spacer" :style="{ height: `${totalSize}px` }">
       <article
         v-for="virtualRow in virtualRows"
@@ -9,7 +13,11 @@
         :class="{ selected: rows[virtualRow.index]?.id === selectedId, queued: rows[virtualRow.index]?.selected, disabled: rows[virtualRow.index]?.disabled, compact }"
         :style="{ transform: `translateY(${virtualRow.start}px)` }"
         :title="rows[virtualRow.index]?.disabledReason || ''"
+        :aria-disabled="rows[virtualRow.index]?.disabled ? 'true' : 'false'"
+        :tabindex="rows[virtualRow.index]?.disabled ? -1 : 0"
         @click="handleSelect(rows[virtualRow.index])"
+        @keydown.enter.prevent="handleSelect(rows[virtualRow.index])"
+        @keydown.space.prevent="handleSelect(rows[virtualRow.index])"
       >
         <div class="notice-row__main">
           <span class="notice-row__type">{{ rows[virtualRow.index]?.type || "通告" }}</span>
@@ -51,7 +59,9 @@ export interface NoticeRow {
 const props = defineProps<{
   rows: NoticeRow[];
   selectedId?: string;
+  emptyTitle?: string;
   emptyText?: string;
+  emptyHint?: string;
   compact?: boolean;
   showStatus?: boolean;
 }>();
@@ -76,7 +86,8 @@ function rowKey(virtualRow: { index: number; key: unknown }): string {
 }
 
 function handleSelect(row: NoticeRow | undefined): void {
-  if (!row || row.disabled) return;
+  if (!row) return;
+  if (row.disabled) return;
   emit("select", row);
 }
 </script>
@@ -87,19 +98,48 @@ function handleSelect(row: NoticeRow | undefined): void {
   height: 100%;
   min-height: 180px;
   overflow: auto;
-  border-radius: 6px;
-  background: #f8fafc;
+  border-radius: 16px;
+  background: rgba(248, 251, 255, 0.82);
 }
 
 .virtual-list__empty {
   position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
+  inset: 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border: 1px dashed #cfe0ff;
+  border-radius: 18px;
+  background:
+    linear-gradient(135deg, rgba(248, 251, 255, 0.96), rgba(255, 255, 255, 0.88)),
+    #f8fbff;
   padding: 18px;
-  color: #64748b;
+  color: #5f7189;
+  font-size: 13px;
+  font-weight: 800;
   text-align: center;
   line-height: 1.6;
+}
+
+.virtual-list__empty strong {
+  color: #0f2f6a;
+  font-size: 14px;
+  font-weight: 950;
+}
+
+.virtual-list__empty p,
+.virtual-list__empty small {
+  max-width: 260px;
+  margin: 0;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.virtual-list__empty small {
+  color: #1d4ed8;
 }
 
 .virtual-list__spacer {
@@ -121,11 +161,16 @@ function handleSelect(row: NoticeRow | undefined): void {
   min-height: 66px;
   padding: 8px 10px 8px 12px;
   border: 1px solid #dbe3ee;
-  border-radius: 8px;
+  border-radius: 14px;
   background: #ffffff;
   cursor: pointer;
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
   transition: border-color 0.14s ease, background-color 0.14s ease, box-shadow 0.14s ease;
+}
+
+.notice-row:focus-visible {
+  outline: 3px solid rgba(30, 99, 255, 0.18);
+  outline-offset: 2px;
 }
 
 .notice-row.compact {
@@ -459,5 +504,59 @@ function handleSelect(row: NoticeRow | undefined): void {
   border-color: #fecaca;
   background: #fef2f2;
   color: #b91c1c;
+}
+
+/* Final density and overflow guard for workbench source list */
+.notice-row {
+  height: 94px;
+  padding: 9px 11px 9px 13px;
+  gap: 12px;
+}
+
+.notice-row.compact {
+  height: 58px;
+  min-height: 58px;
+}
+
+.notice-row__main {
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+.notice-row__main strong {
+  min-height: 0;
+}
+
+.notice-row.compact .notice-row__main {
+  gap: 1px;
+}
+
+.notice-row.compact .notice-row__main strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notice-row.compact .notice-row__main small:not(.notice-row__disabled-reason) {
+  display: none;
+}
+
+.notice-row__status {
+  max-width: 136px;
+  min-width: 66px;
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.notice-row__disabled-reason {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  max-width: min(100%, 260px);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 </style>

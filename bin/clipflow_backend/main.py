@@ -59,8 +59,10 @@ from clipflow_backend.api_models import (
     NoticeUndoApplyRequest,
     NoticeWorkTypeOverrideRequest,
     OngoingDeleteRequest,
+    PermissionRequestBulkReviewRequest,
     PermissionRequestConfirm,
     PermissionRequestCreate,
+    PermissionRequestReviewRequest,
     QtClipboardAckRequest,
     QtClipboardEventRequest,
     QtActiveItemsDeltaRequest,
@@ -73,8 +75,10 @@ from clipflow_backend.api_models import (
     QtLocalHeartbeatRequest,
     QtOngoingSnapshotRequest,
     SendGeneratedRequest,
+    ExternalSignatureSaveRequest,
     SignatureSendLinkRequest,
     SignatureSaveRequest,
+    TemporarySignatureCreateRequest,
     TemporarySignatureSaveRequest,
     TemporarySignatureSendLinkRequest,
     WorkbenchActionRequest,
@@ -315,6 +319,41 @@ class FastAPIPortalController:
             log_warning(f"后端后台任务提交失败: {name}: {exc}")
             return False
 
+    @staticmethod
+    def _permission_scope_text(permission_request: dict) -> str:
+        labels = permission_request.get("requested_scope_labels")
+        if isinstance(labels, list) and labels:
+            return "、".join(str(item) for item in labels if item)
+        scopes = permission_request.get("requested_scopes")
+        if isinstance(scopes, list) and scopes:
+            return "、".join(str(item) for item in scopes if item)
+        return "未选择"
+
+    def _notify_permission_review_result(
+        self,
+        permission_request: dict,
+        *,
+        approved: bool,
+        actor_name: str,
+        reason: str = "",
+    ) -> dict:
+        open_id = str(permission_request.get("open_id") or "").strip()
+        if not open_id:
+            return {"ok": False, "message": "申请人 openid 为空，无法通知。"}
+        status_text = "已通过" if approved else "未通过"
+        reason_text = str(reason or permission_request.get("reject_reason") or "").strip()
+        text = (
+            "南通基地-运维灯塔工作台权限申请处理结果。\n"
+            f"处理结果：{status_text}\n"
+            f"申请范围：{self._permission_scope_text(permission_request)}\n"
+            f"处理人：{actor_name or '管理员'}\n"
+        )
+        if reason_text and not approved:
+            text += f"拒绝原因：{reason_text}\n"
+        text += "请重新进入门户或刷新页面查看最新权限。"
+        ok, message, _ = _send_text_to_open_ids_guarded(text, [open_id])
+        return {"ok": bool(ok), "message": str(message or ""), "recipient": open_id}
+
     def _submit_notice_undo_job(self, job_id: str, *, name: str = "") -> bool:
         job_id = str(job_id or "").strip()
         if not job_id:
@@ -537,6 +576,7 @@ class FastAPIPortalController:
             )
             sqlite_stats: dict = {}
             source_snapshot_stats: dict = {}
+            event_snapshot_stats: dict = {}
             source_type_stats: dict = {}
             schema_status: dict = {}
             runtime_health: dict = {}
@@ -546,6 +586,8 @@ class FastAPIPortalController:
                 sqlite_stats = PortalRuntime.state_store.get_database_stats()
             with suppress(Exception):
                 source_snapshot_stats = PortalRuntime.state_store.source_snapshot_stats()
+            with suppress(Exception):
+                event_snapshot_stats = PortalRuntime.state_store.event_month_snapshot_stats()
             with suppress(Exception):
                 source_type_stats = PortalRuntime.state_store.source_snapshot_work_type_stats()
             with suppress(Exception):
@@ -655,6 +697,7 @@ class FastAPIPortalController:
                     "schema": schema_status if isinstance(schema_status, dict) else {},
                     "runtime_health": runtime_health if isinstance(runtime_health, dict) else {},
                     "source_snapshot": source_snapshot_stats if isinstance(source_snapshot_stats, dict) else {},
+                    "event_snapshot": event_snapshot_stats if isinstance(event_snapshot_stats, dict) else {},
                     "source_type_summary": source_type_stats if isinstance(source_type_stats, dict) else {},
                     "upload_attachments": upload_attachment_stats if isinstance(upload_attachment_stats, dict) else {},
                     "job_batch": self._job_batch_snapshot(),
@@ -692,6 +735,7 @@ class FastAPIPortalController:
                     "job_phase_counts": job_phase_counts,
                     "schema": PortalRuntime.state_store.schema_health(),
                     "source_snapshot": PortalRuntime.state_store.source_snapshot_stats(),
+                    "event_snapshot": PortalRuntime.state_store.event_month_snapshot_stats(),
                     "qt_active_items": PortalRuntime.state_store.qt_active_items_stats(),
                     "time": time.time(),
                 },
@@ -1607,6 +1651,8 @@ class FastAPIPortalController:
                     signature_png=str(payload.get("signature_png") or ""),
                     signer_name=str(payload.get("signer_name") or ""),
                     link_token=link_token if session is None else "",
+                    operator_open_id=str((session or {}).get("open_id") or ""),
+                    operator_name=str((session or {}).get("name") or ""),
                 )
                 if session is None:
                     await asyncio.to_thread(
@@ -1614,6 +1660,61 @@ class FastAPIPortalController:
                         record_id=record_id,
                         token=link_token,
                     )
+                return {"ok": True, "data": data}
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.post("/api/signatures/external/save")
+        async def external_signatures_save(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                payload = (
+                    await self._read_model_request(
+                        request,
+                        ExternalSignatureSaveRequest,
+                        max_bytes=4 * 1024 * 1024,
+                    )
+                ).to_payload()
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.save_external_signature_for_person,
+                    record_id=str(payload.get("record_id") or ""),
+                    signature_png=str(payload.get("signature_png") or ""),
+                    signer_name=str(payload.get("signer_name") or ""),
+                )
+                return {"ok": True, "data": data}
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.post("/api/signatures/temporary/create")
+        async def temporary_signature_create(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                payload = (
+                    await self._read_model_request(
+                        request,
+                        TemporarySignatureCreateRequest,
+                        max_bytes=64 * 1024,
+                    )
+                ).to_payload()
+                scope = self._authorized_scope_or_error(
+                    session,
+                    str(payload.get("scope") or "ALL"),
+                )
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.create_temporary_signature_session,
+                    scope=scope,
+                    notice_key=str(payload.get("notice_key") or ""),
+                    role=str(payload.get("role") or "implementer"),
+                    notice_title=str(payload.get("notice_title") or ""),
+                    specialty=str(payload.get("specialty") or ""),
+                    display_name=str(payload.get("display_name") or ""),
+                    created_by=str(user.get("open_id") or ""),
+                )
                 return {"ok": True, "data": data}
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
@@ -1628,10 +1729,25 @@ class FastAPIPortalController:
                         max_bytes=4 * 1024 * 1024,
                     )
                 ).to_payload()
+                temp_id = str(payload.get("temporary_id") or "")
+                token = str(payload.get("token") or "")
+                if not token:
+                    session = self._current_session(request)
+                    if session is None:
+                        return self._auth_required_response()
+                    temp_session = PortalRuntime.state_store.get_mop_temporary_signature_session(
+                        temp_id=temp_id,
+                    )
+                    if not temp_session:
+                        raise PortalError("临时签名记录不存在。")
+                    self._authorized_scope_or_error(
+                        session,
+                        str(temp_session.get("scope") or "ALL"),
+                    )
                 data = await asyncio.to_thread(
                     PortalRuntime.service.save_temporary_signature,
-                    temp_id=str(payload.get("temporary_id") or ""),
-                    token=str(payload.get("token") or ""),
+                    temp_id=temp_id,
+                    token=token,
                     signature_png=str(payload.get("signature_png") or ""),
                 )
                 return {"ok": True, "data": data}
@@ -1704,10 +1820,12 @@ class FastAPIPortalController:
                     session,
                     str(request.query_params.get("scope") or "ALL"),
                 )
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
                 data = await asyncio.to_thread(
                     PortalRuntime.service.list_temporary_signatures,
                     scope=scope,
                     notice_key=str(request.query_params.get("notice_key") or ""),
+                    created_by=str(user.get("open_id") or ""),
                 )
                 return self._json_ok(request, session, data)
             except Exception as exc:
@@ -1752,19 +1870,37 @@ class FastAPIPortalController:
                     str(payload.get("scope") or "ALL"),
                 )
                 user = session.get("user") if isinstance(session.get("user"), dict) else {}
-                data = await asyncio.to_thread(
-                    PortalRuntime.service.build_temporary_signature_link_message,
-                    scope=scope,
-                    notice_key=str(payload.get("notice_key") or ""),
-                    role=str(payload.get("role") or "implementer"),
-                    recipient_open_ids=list(payload.get("recipient_open_ids") or []),
-                    notice_title=str(payload.get("notice_title") or ""),
-                    specialty=str(payload.get("specialty") or ""),
-                    display_name=str(payload.get("display_name") or ""),
-                    request_base_url=str(payload.get("request_base_url") or "")
-                    or self._request_base_url(request),
-                    created_by=str(user.get("open_id") or ""),
-                )
+                temporary_id = str(payload.get("temporary_id") or "").strip()
+                if temporary_id:
+                    temp_session = PortalRuntime.state_store.get_mop_temporary_signature_session(
+                        temp_id=temporary_id,
+                    )
+                    if not temp_session:
+                        raise PortalError("临时签名记录不存在。")
+                    self._authorized_scope_or_error(
+                        session,
+                        str(temp_session.get("scope") or scope or "ALL"),
+                    )
+                    data = await asyncio.to_thread(
+                        PortalRuntime.service.build_existing_temporary_signature_link_message,
+                        temp_id=temporary_id,
+                        request_base_url=str(payload.get("request_base_url") or "")
+                        or self._request_base_url(request),
+                    )
+                else:
+                    data = await asyncio.to_thread(
+                        PortalRuntime.service.build_temporary_signature_link_message,
+                        scope=scope,
+                        notice_key=str(payload.get("notice_key") or ""),
+                        role=str(payload.get("role") or "implementer"),
+                        recipient_open_ids=list(payload.get("recipient_open_ids") or []),
+                        notice_title=str(payload.get("notice_title") or ""),
+                        specialty=str(payload.get("specialty") or ""),
+                        display_name=str(payload.get("display_name") or ""),
+                        request_base_url=str(payload.get("request_base_url") or "")
+                        or self._request_base_url(request),
+                        created_by=str(user.get("open_id") or ""),
+                    )
                 open_ids = [
                     str(item or "").strip()
                     for item in (data.get("open_ids") or [])
@@ -2009,6 +2145,50 @@ class FastAPIPortalController:
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)
 
+        @app.get("/api/events/monthly")
+        async def events_monthly(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_scope_or_error(
+                    session, request.query_params.get("scope") or "ALL"
+                )
+                month = str(request.query_params.get("month") or "").strip()
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.get_event_monthly_snapshot,
+                    scope=scope,
+                    month=month,
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
+        @app.post("/api/events/refresh")
+        async def events_refresh(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_scope_or_error(
+                    session, request.query_params.get("scope") or "ALL"
+                )
+                month = str(request.query_params.get("month") or "").strip()
+                refresh_result = await asyncio.to_thread(
+                    PortalRuntime.request_event_month_refresh,
+                    month,
+                )
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.get_event_monthly_snapshot,
+                    scope=scope,
+                    month=month,
+                )
+                data.update(refresh_result)
+                data["event_source_refreshed"] = True
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
         @app.get("/api/handover-links")
         async def handover_links(request: Request):
             session = self._current_session(request)
@@ -2043,6 +2223,186 @@ class FastAPIPortalController:
                 str(user.get("open_id") or "")
             )
             return self._json_ok(request, session, {"request": permission_request or None})
+
+        @app.get("/api/auth/permission-requests/admin")
+        async def admin_permission_requests(
+            request: Request,
+            status: str = "pending",
+            limit: int = 100,
+        ):
+            admin_response, session = self._require_admin_response(request)
+            if admin_response is not None:
+                return admin_response
+            try:
+                items = PortalRuntime.auth_manager.list_permission_requests_for_admin(
+                    status=status,
+                    limit=limit,
+                )
+                return self._json_ok(request, session, {"items": items})
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=500)
+
+        @app.post("/api/auth/permission-requests/bulk-approve")
+        async def bulk_approve_permission_requests(request: Request):
+            admin_response, session = self._require_admin_response(request)
+            if admin_response is not None:
+                return admin_response
+            try:
+                payload = (
+                    await self._read_model_request(
+                        request, PermissionRequestBulkReviewRequest
+                    )
+                ).to_payload()
+                actor = session.get("user") if isinstance(session.get("user"), dict) else {}
+                actor_open_id = str(actor.get("open_id") or "")
+                actor_name = str(actor.get("name") or actor.get("en_name") or "管理员")
+                request_ids = [
+                    str(item or "").strip()
+                    for item in (payload.get("request_ids") or [])
+                    if str(item or "").strip()
+                ]
+                scopes_by_request_id = payload.get("scopes_by_request_id") or {}
+                items: list[dict] = []
+                failed: list[dict] = []
+                for request_id in dict.fromkeys(request_ids):
+                    try:
+                        result = PortalRuntime.auth_manager.approve_permission_request(
+                            request_id,
+                            scopes=scopes_by_request_id.get(request_id) or [],
+                            updated_by=actor_open_id,
+                        )
+                        notice = self._notify_permission_review_result(
+                            result.get("request") or {},
+                            approved=True,
+                            actor_name=actor_name,
+                        )
+                        item = dict(result.get("request") or {})
+                        item["notification"] = notice
+                        items.append(item)
+                    except Exception as exc:
+                        failed.append({"request_id": request_id, "error": str(exc)})
+                self._clear_read_cache(("auth_status",))
+                return self._json_ok(
+                    request,
+                    session,
+                    {"items": items, "failed": failed},
+                )
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.post("/api/auth/permission-requests/bulk-reject")
+        async def bulk_reject_permission_requests(request: Request):
+            admin_response, session = self._require_admin_response(request)
+            if admin_response is not None:
+                return admin_response
+            try:
+                payload = (
+                    await self._read_model_request(
+                        request, PermissionRequestBulkReviewRequest
+                    )
+                ).to_payload()
+                actor = session.get("user") if isinstance(session.get("user"), dict) else {}
+                actor_open_id = str(actor.get("open_id") or "")
+                actor_name = str(actor.get("name") or actor.get("en_name") or "管理员")
+                request_ids = [
+                    str(item or "").strip()
+                    for item in (payload.get("request_ids") or [])
+                    if str(item or "").strip()
+                ]
+                items: list[dict] = []
+                failed: list[dict] = []
+                reason = str(payload.get("reason") or "").strip()
+                for request_id in dict.fromkeys(request_ids):
+                    try:
+                        item = PortalRuntime.auth_manager.reject_permission_request(
+                            request_id,
+                            reason=reason,
+                            updated_by=actor_open_id,
+                        )
+                        notice = self._notify_permission_review_result(
+                            item,
+                            approved=False,
+                            actor_name=actor_name,
+                            reason=reason,
+                        )
+                        item = dict(item)
+                        item["notification"] = notice
+                        items.append(item)
+                    except Exception as exc:
+                        failed.append({"request_id": request_id, "error": str(exc)})
+                self._clear_read_cache(("auth_status",))
+                return self._json_ok(
+                    request,
+                    session,
+                    {"items": items, "failed": failed},
+                )
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.post("/api/auth/permission-requests/{request_id}/approve")
+        async def approve_permission_request(request_id: str, request: Request):
+            admin_response, session = self._require_admin_response(request)
+            if admin_response is not None:
+                return admin_response
+            try:
+                payload = (
+                    await self._read_model_request(request, PermissionRequestReviewRequest)
+                ).to_payload()
+                actor = session.get("user") if isinstance(session.get("user"), dict) else {}
+                actor_name = str(actor.get("name") or actor.get("en_name") or "管理员")
+                result = PortalRuntime.auth_manager.approve_permission_request(
+                    request_id,
+                    scopes=payload.get("scopes") or [],
+                    updated_by=str(actor.get("open_id") or ""),
+                )
+                notice = self._notify_permission_review_result(
+                    result.get("request") or {},
+                    approved=True,
+                    actor_name=actor_name,
+                )
+                self._clear_read_cache(("auth_status",))
+                return self._json_ok(
+                    request,
+                    session,
+                    {
+                        "request": result.get("request") or {},
+                        "permissions": result.get("permissions") or {},
+                        "notification": notice,
+                    },
+                )
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.post("/api/auth/permission-requests/{request_id}/reject")
+        async def reject_permission_request(request_id: str, request: Request):
+            admin_response, session = self._require_admin_response(request)
+            if admin_response is not None:
+                return admin_response
+            try:
+                payload = (
+                    await self._read_model_request(request, PermissionRequestReviewRequest)
+                ).to_payload()
+                actor = session.get("user") if isinstance(session.get("user"), dict) else {}
+                actor_name = str(actor.get("name") or actor.get("en_name") or "管理员")
+                item = PortalRuntime.auth_manager.reject_permission_request(
+                    request_id,
+                    reason=str(payload.get("reason") or ""),
+                    updated_by=str(actor.get("open_id") or ""),
+                )
+                notice = self._notify_permission_review_result(
+                    item,
+                    approved=False,
+                    actor_name=actor_name,
+                    reason=str(payload.get("reason") or ""),
+                )
+                self._clear_read_cache(("auth_status",))
+                return self._json_ok(
+                    request,
+                    session,
+                    {"request": item, "notification": notice},
+                )
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
 
         @app.post("/api/maintenance-actions")
         @app.post("/api/workbench-actions")
@@ -2493,40 +2853,29 @@ class FastAPIPortalController:
                     scopes=payload.get("scopes") or [],
                     reason=str(payload.get("reason") or ""),
                 )
-                code = str(data.pop("code") or "")
                 recipients = PortalRuntime.auth_manager.admin_open_ids()
                 labels = "、".join(data.get("requested_scope_labels") or [])
                 reason = str(data.get("reason") or "").strip() or "未填写"
                 text = (
-                    "南通基地-运维灯塔工作台权限申请。\n"
+                    "南通基地-运维灯塔工作台有新的权限申请待审批。\n"
                     f"申请人：{data.get('name') or '飞书用户'}\n"
                     f"openid：{data.get('open_id') or ''}\n"
                     f"申请范围：{labels}\n"
                     f"申请原因：{reason}\n"
                     f"申请编号：{data.get('request_id') or ''}\n"
-                    f"验证码：{code}\n"
-                    f"有效期至：{data.get('expires_at') or ''}\n"
-                    "请管理员确认申请人身份和申请范围后，再将验证码告知申请人。"
+                    "请管理员进入门户 管理/诊断 -> 权限 -> 权限申请 进行审批。"
                 )
-                ok, message, _ = _send_text_to_open_ids_guarded(text, recipients)
-                if not ok:
-                    PortalRuntime.auth_manager.mark_permission_request_notify_failed(
-                        str(data.get("request_id") or "")
-                    )
-                    raise PortalError(f"通知管理员失败: {message}")
-                activated = PortalRuntime.auth_manager.activate_permission_request(
-                    str(data.get("request_id") or "")
-                )
-                data.update(activated)
-                PortalRuntime.auth_manager.supersede_other_permission_requests(
-                    open_id=str(data.get("open_id") or ""),
-                    keep_request_id=str(data.get("request_id") or ""),
+                self._submit_background(
+                    "LANPortalPermissionRequestNotify",
+                    _send_text_to_open_ids_guarded,
+                    text,
+                    recipients,
                 )
                 self._clear_read_cache(("auth_status",))
                 data["notification"] = {
                     "ok": True,
                     "recipients_count": len(recipients),
-                    "message": "已发送给管理员",
+                    "message": "已提交，等待管理员审批",
                 }
                 return self._json_ok(request, session, {"request": data})
             except Exception as exc:

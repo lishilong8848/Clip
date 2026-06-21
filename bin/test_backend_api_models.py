@@ -11,7 +11,9 @@ if str(BIN_DIR) not in sys.path:
 from clipflow_backend.api_models import (  # noqa: E402
     OngoingDeleteRequest,
     JobMarkStuckFailedRequest,
+    PermissionRequestBulkReviewRequest,
     PermissionRequestCreate,
+    PermissionRequestReviewRequest,
     QtClipboardAckRequest,
     QtActiveItemsDeltaRequest,
     QtCommandRequest,
@@ -44,6 +46,14 @@ class BackendApiModelTests(unittest.TestCase):
     def test_permission_request_requires_scope_list_shape(self):
         with self.assertRaises(ValueError):
             parse_api_model(PermissionRequestCreate, {"scopes": "A"})
+
+    def test_permission_review_models_keep_safe_defaults(self):
+        review = parse_api_model(PermissionRequestReviewRequest, {}).to_payload()
+        bulk = parse_api_model(PermissionRequestBulkReviewRequest, {}).to_payload()
+        self.assertEqual(review["scopes"], [])
+        self.assertEqual(review["reason"], "")
+        self.assertEqual(bulk["request_ids"], [])
+        self.assertEqual(bulk["scopes_by_request_id"], {})
 
     def test_ongoing_delete_defaults_are_stable(self):
         payload = parse_api_model(OngoingDeleteRequest, {}).to_payload()

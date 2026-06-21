@@ -4,8 +4,8 @@ from ..utils import WHITESPACE_TRANSLATOR
 # 通告类型常量
 
 NOTICE_TYPE_WEIBAO = "维保通告"  # 维保通告
-NOTICE_TYPE_BIANGENG = "变更通告"  # 变更通告（用户可见 canonical 标题）
-NOTICE_TYPE_BIANGENG_LEGACY = "设备变更"  # 历史标题，仅作为兼容输入
+NOTICE_TYPE_BIANGENG = "设备变更"  # 设备变更（用户可见 canonical 标题）
+NOTICE_TYPE_BIANGENG_LEGACY = "变更通告"  # 历史标题，仅作为兼容输入
 NOTICE_TYPE_TIAOZHENG = "设备调整"  # 设备调整
 NOTICE_TYPE_SHIJIAN = "事件通告"  # 事件通告
 NOTICE_TYPE_POWER = "上下电通告"  # 上下电通告

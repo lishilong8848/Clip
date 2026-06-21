@@ -6,9 +6,14 @@ export type ScopeOption = {
 };
 
 export type WorkTypeValue = "maintenance" | "change" | "repair" | "power" | "polling" | "adjust";
+export type WorkTypeFilterValue = "" | WorkTypeValue;
 
 export type WorkTypeOption = {
   value: WorkTypeValue;
   label: string;
 };
 
+export type WorkTypeFilterOption = {
+  value: WorkTypeFilterValue;
+  label: string;
+};

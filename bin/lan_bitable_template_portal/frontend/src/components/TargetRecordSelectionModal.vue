@@ -1,10 +1,10 @@
 <template>
   <div v-if="selection" class="modal-backdrop" @click.self="emit('cancel')">
-    <section class="candidate-modal" role="dialog" aria-modal="true" aria-label="选择目标记录">
+    <section class="candidate-modal" role="dialog" aria-modal="true" aria-label="选择对应通告">
       <div class="candidate-modal-head">
         <div>
-          <strong>选择{{ selection.label || "通告" }}目标记录</strong>
-          <p>{{ selection.title || "找到多条同名目标记录，请选择要关联的一条。" }}</p>
+          <strong>选择{{ selection.label || "通告" }}对应通告</strong>
+          <p>{{ selection.title || "找到多条相近通告，请选择要继续处理的一条。" }}</p>
         </div>
         <button class="btn ghost" type="button" @click="emit('cancel')">关闭</button>
       </div>
@@ -12,14 +12,14 @@
         <div class="target-choice-column">
           <label class="candidate-search">
             <span>搜索候选</span>
-            <input v-model="searchText" type="search" placeholder="标题、楼栋、时间、字段内容" />
+            <input v-model="searchText" type="search" placeholder="标题、楼栋、时间、内容" />
           </label>
           <p class="candidate-count">
             当前显示 {{ filteredCandidates.length }} / {{ candidates.length }} 条
           </p>
           <div class="target-choice-list modal-choice-list">
             <p v-if="!filteredCandidates.length" class="candidate-empty">
-              没有匹配的候选记录，请调整搜索条件。
+              没有匹配的通告，请调整搜索条件。
             </p>
           <button
             v-for="item in filteredCandidates"
@@ -27,10 +27,12 @@
             class="target-choice"
             :class="{ active: selectedId === candidateId(item) }"
             type="button"
+            :aria-pressed="selectedId === candidateId(item)"
             @mouseenter="emit('preview', item)"
             @focus="emit('preview', item)"
-            @click="emit('select', item)"
+            @click="chooseCandidate(item)"
           >
+            <span v-if="selectedId === candidateId(item)" class="selected-marker">已选</span>
             <strong>{{ item.title || "未命名通告" }}</strong>
             <span>{{ item.building || "-" }} · {{ item.status || "未标记状态" }} · {{ item.start_time || "-" }} 至 {{ item.end_time || "-" }}</span>
             <small>{{ item.match_reason || (item.date_matched ? "时间匹配" : "按名称匹配") }}</small>
@@ -39,7 +41,7 @@
         </div>
         <aside v-if="visibleActiveCandidate" class="target-detail-popover modal-detail-popover">
           <div class="target-detail-head">
-            <strong>{{ visibleActiveCandidate.title || "目标记录" }}</strong>
+            <strong>{{ visibleActiveCandidate.title || "对应通告" }}</strong>
             <span>{{ visibleActiveCandidate.building || "-" }} · {{ visibleActiveCandidate.status || "未标记状态" }}</span>
             <small>{{ visibleActiveCandidate.match_reason || "" }}</small>
           </div>
@@ -52,12 +54,18 @@
         </aside>
       </div>
       <div class="candidate-modal-actions">
-        <span class="job-line">
-          <template v-if="confirmDisabledReason">{{ confirmDisabledReason }}</template>
-          <template v-else>只关联当前通告；确认后会把目标记录字段回填到空白项中。</template>
+        <DisabledReason
+          v-if="confirmDisabledReason"
+          :text="confirmDisabledReason"
+          tone="warning"
+        />
+        <span v-else class="job-line">
+          已选择：{{ selectedSummary }}。确认后只关联当前通告，并继续后续上传/更新。
         </span>
-        <button class="btn ghost" type="button" @click="emit('cancel')">取消</button>
-        <button class="btn blue" type="button" :disabled="!canConfirm" :title="confirmDisabledReason" @click="emit('confirm')">确认关联</button>
+        <div class="candidate-action-buttons">
+          <button class="btn ghost" type="button" @click="emit('cancel')">取消</button>
+          <button class="btn blue" type="button" :disabled="!canConfirm" :title="confirmDisabledReason" @click="emit('confirm')">确认关联并继续</button>
+        </div>
       </div>
     </section>
   </div>
@@ -66,6 +74,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { filterCandidatesBySearch } from "../candidateSearch";
+import DisabledReason from "./DisabledReason.vue";
 
 type Dict = Record<string, any>;
 
@@ -98,13 +107,8 @@ const filteredCandidates = computed(() => {
   return filterCandidatesBySearch(props.candidates, searchText.value);
 });
 
-const selectedVisible = computed(() => {
-  const selected = String(props.selectedId || "").trim();
-  if (!selected) return false;
-  return filteredCandidates.value.some((item) => props.candidateId(item) === selected);
-});
-
 const visibleActiveCandidate = computed(() => {
+  if (selectedCandidate.value) return selectedCandidate.value;
   const activeId = props.activeCandidate ? props.candidateId(props.activeCandidate) : "";
   if (activeId) {
     const visible = filteredCandidates.value.find((item) => props.candidateId(item) === activeId);
@@ -114,21 +118,39 @@ const visibleActiveCandidate = computed(() => {
 });
 
 const detailRows = computed(() => props.detailRowsFor(visibleActiveCandidate.value));
+const selectedCandidate = computed(() => {
+  const selected = String(props.selectedId || "").trim();
+  if (!selected) return null;
+  return props.candidates.find((item) => props.candidateId(item) === selected) || null;
+});
+const selectedSummary = computed(() => {
+  const item = selectedCandidate.value;
+  if (!item) return "未选择";
+  const title = String(item.title || "未命名通告").trim();
+  const building = String(item.building || "-").trim();
+  const time = [item.start_time, item.end_time].filter(Boolean).join("~");
+  return time ? `${title}（${building} · ${time}）` : `${title}（${building}）`;
+});
 
-const canConfirm = computed(() => selectedVisible.value);
+const canConfirm = computed(() => Boolean(selectedCandidate.value));
 const confirmDisabledReason = computed(() => {
   if (canConfirm.value) return "";
-  if (!props.candidates.length) return "暂未找到可关联的目标记录。";
-  if (!filteredCandidates.value.length) return "当前搜索条件下没有候选记录，请调整搜索。";
-  return "请先在左侧选择一条目标记录。";
+  if (!props.candidates.length) return "暂未找到可选择的对应通告。";
+  if (!filteredCandidates.value.length) return "当前搜索条件下没有候选通告，请调整搜索。";
+  return "请先在左侧选择一条对应通告。";
 });
+
+function chooseCandidate(item: Dict): void {
+  emit("preview", item);
+  emit("select", item);
+}
 </script>
 
 <style scoped>
 .modal-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 80;
+  z-index: var(--cf-z-modal-backdrop, 800);
   display: grid;
   place-items: center;
   padding: 24px;
@@ -136,6 +158,8 @@ const confirmDisabledReason = computed(() => {
 }
 
 .candidate-modal {
+  position: relative;
+  z-index: var(--cf-z-modal, 840);
   display: grid;
   width: min(980px, 100%);
   max-height: min(760px, calc(100vh - 48px));
@@ -159,6 +183,14 @@ const confirmDisabledReason = computed(() => {
 .candidate-modal-actions {
   border-top: 1px solid #e2e8f0;
   border-bottom: 0;
+}
+
+.candidate-action-buttons {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
 }
 
 .candidate-modal-head p {
@@ -239,10 +271,11 @@ const confirmDisabledReason = computed(() => {
 }
 
 .target-choice {
+  position: relative;
   display: grid;
   gap: 4px;
   width: 100%;
-  padding: 9px 10px;
+  padding: 10px 52px 10px 12px;
   border: 1px solid #dbe3ee;
   border-radius: 8px;
   background: #ffffff;
@@ -268,6 +301,22 @@ const confirmDisabledReason = computed(() => {
 .target-choice small {
   color: #2563eb;
   font-size: 12px;
+}
+
+.selected-marker {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  border: 1px solid #bfdbfe;
+  border-radius: 999px;
+  padding: 0 8px;
+  background: #eff6ff;
+  color: #155dfc;
+  font-size: 12px;
+  font-weight: 900;
 }
 
 .target-detail-popover {
@@ -337,8 +386,11 @@ const confirmDisabledReason = computed(() => {
 
 .job-line {
   flex: 1 1 auto;
+  min-width: 0;
   color: #64748b;
   font-size: 13px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
 }
 
 @media (max-width: 720px) {
@@ -350,6 +402,14 @@ const confirmDisabledReason = computed(() => {
   .candidate-modal-actions {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .candidate-action-buttons {
+    justify-content: stretch;
+  }
+
+  .candidate-action-buttons .btn {
+    flex: 1 1 0;
   }
 
   .modal-choice-layout {
@@ -415,6 +475,13 @@ const confirmDisabledReason = computed(() => {
   box-shadow: inset 4px 0 0 #1678ff, 0 12px 26px rgba(22, 120, 255, 0.12);
 }
 
+.target-choice.active .selected-marker {
+  border-color: transparent;
+  background: linear-gradient(135deg, #1e63ff, #1554df);
+  color: #ffffff;
+  box-shadow: 0 8px 16px rgba(30, 99, 255, 0.16);
+}
+
 .target-choice strong,
 .target-detail-head strong {
   color: #09204a;
@@ -436,20 +503,25 @@ const confirmDisabledReason = computed(() => {
   box-shadow: 0 12px 24px rgba(20, 103, 226, 0.22);
 }
 
-/* Softer rounded VNET modal polish */
+/* Final VNET modal skin */
 .candidate-modal {
-  border-radius: 24px;
+  border-color: #d8e5f7;
+  border-radius: 28px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 24px 64px rgba(0, 47, 135, 0.18);
 }
 
 .target-choice,
 .target-detail-popover,
 .candidate-empty {
-  border-radius: 16px;
+  border-color: #d8e5f7;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.9);
 }
 
 .candidate-search input,
 .btn {
-  border-radius: 12px;
+  border-radius: 14px;
 }
 
 .candidate-modal-head strong,
@@ -470,53 +542,6 @@ const confirmDisabledReason = computed(() => {
 
 .btn {
   font-weight: 720;
-}
-
-/* Panorama construction-management polish */
-.candidate-modal {
-  border-color: rgba(207, 224, 255, 0.96);
-  border-radius: 28px;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.99), rgba(250, 253, 255, 0.98));
-  box-shadow: 0 30px 90px rgba(4, 43, 116, 0.22);
-}
-
-.target-choice,
-.target-detail-popover,
-.candidate-empty {
-  border-color: rgba(216, 231, 248, 0.95);
-  border-radius: 18px;
-  background: rgba(255, 255, 255, 0.97);
-}
-
-.target-choice.active {
-  border-color: #3080ff;
-  background: #eff6ff;
-  box-shadow: inset 4px 0 0 #3080ff, 0 12px 28px rgba(21, 93, 252, 0.12);
-}
-
-.candidate-search input,
-.btn {
-  border-radius: 14px;
-}
-
-.btn.blue {
-  background: linear-gradient(135deg, #155dfc, #3080ff);
-  box-shadow: 0 12px 24px rgba(21, 93, 252, 0.22);
-}
-
-/* Panorama construction-management modal skin */
-.candidate-modal {
-  border-color: #d8e5f7;
-  background: rgba(255, 255, 255, 0.94);
-  box-shadow: 0 24px 64px rgba(0, 47, 135, 0.18);
-}
-
-.target-choice,
-.target-detail-popover,
-.candidate-empty {
-  border-color: #d8e5f7;
-  background: rgba(255, 255, 255, 0.9);
 }
 
 .target-choice:hover {

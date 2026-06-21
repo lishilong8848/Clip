@@ -6,16 +6,38 @@
 
   <section v-else-if="!loggedIn" class="center-state">
     <strong>请先使用飞书登录</strong>
-    <p>登录后会根据 openid 显示可访问楼栋。</p>
+    <p>登录后会根据飞书身份显示可访问楼栋。</p>
+    <span class="login-hint">登录过期后会自动回到这里重新授权</span>
     <a class="btn blue" :href="loginUrl || '/api/auth/login'">飞书扫码登录</a>
   </section>
 
   <section v-else class="center-state request-panel">
     <button v-if="showBack" class="back-link" type="button" @click="$emit('back')">返回功能选择</button>
     <strong>{{ title || "当前账号暂无门户权限" }}</strong>
-    <p>{{ description || "请选择需要访问的楼栋或园区，提交后由管理员发放验证码。" }}</p>
-    <p class="user-line">{{ user?.name || "" }} {{ user?.open_id || "" }}</p>
+    <p>{{ description || "请选择需要访问的楼栋或园区，提交后由管理员在门户审批。" }}</p>
+    <p class="user-line" :title="userOpenId ? `飞书身份：${userOpenId}` : ''">{{ userLineText }}</p>
+    <div class="request-steps" aria-label="权限申请流程">
+      <span class="active">
+        <b>1</b>
+        <strong>选择楼栋</strong>
+        <small>{{ request.scopes.length ? `已选 ${request.scopes.length} 个` : "至少选择 1 个" }}</small>
+      </span>
+      <span :class="{ active: request.scopes.length > 0 }">
+        <b>2</b>
+        <strong>提交申请</strong>
+        <small>管理员门户审批</small>
+      </span>
+      <span :class="{ active: Boolean(request.requestId), rejected: request.status === 'rejected' }">
+        <b>3</b>
+        <strong>{{ request.status === "rejected" ? "调整重提" : "等待生效" }}</strong>
+        <small>{{ request.requestId ? requestStatusTitle : "通过后自动追加" }}</small>
+      </span>
+    </div>
     <div v-if="requestableScopes.length" class="scope-checks">
+      <div class="scope-checks-head">
+        <strong>选择申请楼栋</strong>
+        <span>{{ request.scopes.length ? `已选 ${request.scopes.length} 个` : "至少选择 1 个" }}</span>
+      </div>
       <label
         v-for="scope in requestableScopes"
         :key="scope.value"
@@ -34,26 +56,25 @@
     <p v-else class="hint">{{ emptyText || "当前没有可继续申请的楼栋权限。" }}</p>
     <textarea
       :value="request.reason"
-      placeholder="申请原因"
+      placeholder="申请原因（可选，便于管理员判断）"
+      :disabled="busy || !requestableScopes.length"
       @input="$emit('update-request', { reason: ($event.target as HTMLTextAreaElement).value })"
     ></textarea>
     <div class="row-actions">
-      <button class="btn blue" :disabled="busy || !requestableScopes.length" @click="$emit('submit')">提交申请</button>
+      <button class="btn blue" :disabled="!canSubmit" :title="submitTitle" @click="$emit('submit')">提交给管理员</button>
+      <span v-if="!canSubmit" class="submit-hint">{{ submitTitle }}</span>
     </div>
-    <div v-if="request.requestId" class="verify-box">
-      <span>申请已发送给管理员，请输入验证码。</span>
-      <input
-        :value="request.code"
-        placeholder="6位验证码"
-        @input="$emit('update-request', { code: ($event.target as HTMLInputElement).value })"
-      />
-      <button class="btn green" :disabled="busy" @click="$emit('confirm')">确认授权</button>
+    <div v-if="request.requestId" class="verify-box" :class="`status-${request.status || 'pending'}`">
+      <strong>{{ requestStatusTitle }}</strong>
+      <span>{{ requestStatusDescription }}</span>
     </div>
     <p v-if="request.message" class="hint">{{ request.message }}</p>
   </section>
 </template>
 
 <script setup lang="ts">
+import { computed } from "vue";
+
 type Dict = Record<string, any>;
 
 const props = defineProps<{
@@ -68,6 +89,8 @@ const props = defineProps<{
     code: string;
     requestId: string;
     message: string;
+    status?: string;
+    rejectReason?: string;
   };
   requestableScopes: Array<{ value: string; label: string }>;
   title?: string;
@@ -89,28 +112,94 @@ function toggleScope(scope: string, checked: boolean): void {
   else next.delete(scope);
   emit("update-request", { scopes: Array.from(next) });
 }
+
+const requestStatusTitle = computed(() => {
+  if (props.request.status === "rejected") return "申请未通过";
+  return "申请已提交，等待管理员审批";
+});
+
+const requestStatusDescription = computed(() => {
+  if (props.request.status === "rejected") {
+    const reason = String(props.request.rejectReason || "").trim();
+    return reason ? `拒绝原因：${reason}。可调整楼栋或原因后重新提交。` : "管理员未通过该申请，可调整楼栋或原因后重新提交。";
+  }
+  return "管理员审批通过后，系统会更新可访问楼栋；如长时间未变化，可重新打开功能选择确认。";
+});
+
+const submitTitle = computed(() => {
+  if (props.busy) return "正在提交申请";
+  if (!props.requestableScopes.length) return props.emptyText || "当前没有可继续申请的楼栋权限";
+  if (!props.request.scopes.length) return "请先选择要申请的楼栋";
+  return "提交权限申请，等待管理员审批";
+});
+
+const canSubmit = computed(() => {
+  return !props.busy && props.requestableScopes.length > 0 && props.request.scopes.length > 0;
+});
+
+const userOpenId = computed(() => String(props.user?.open_id || "").trim());
+
+const userLineText = computed(() => {
+  const name = String(props.user?.name || "").trim();
+  return `当前登录：${name || "已完成飞书登录"}`;
+});
 </script>
 
 <style scoped>
 .center-state {
+  position: relative;
+  z-index: 0;
+  overflow: hidden;
   width: min(720px, calc(100vw - 32px));
   margin: 58px auto;
   display: grid;
-  gap: 16px;
+  gap: 14px;
   justify-items: start;
-  padding: 36px;
-  border: 1px solid #d8e7f8;
-  border-radius: 16px;
+  padding: 32px;
+  border: 1px solid #d8e5f7;
+  border-radius: 24px;
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 251, 255, 0.96)),
-    radial-gradient(circle at 12% 16%, rgba(28, 126, 255, 0.12), transparent 30%);
-  box-shadow: 0 24px 62px rgba(22, 78, 151, 0.14);
+    linear-gradient(135deg, rgba(255, 255, 255, 0.98), rgba(248, 251, 255, 0.94)),
+    #ffffff;
+  box-shadow: 0 18px 42px rgba(0, 47, 135, 0.12);
+  backdrop-filter: blur(10px);
+}
+
+.center-state::after {
+  content: "";
+  position: absolute;
+  right: -70px;
+  bottom: -96px;
+  z-index: -1;
+  width: 260px;
+  height: 180px;
+  pointer-events: none;
+  opacity: 0.5;
+  background:
+    repeating-linear-gradient(0deg, rgba(22, 120, 255, 0.1) 0 1px, transparent 1px 18px),
+    repeating-linear-gradient(90deg, rgba(22, 120, 255, 0.08) 0 1px, transparent 1px 18px);
+  transform: rotate(-12deg);
+}
+
+.center-state:not(:has(.spinner))::before {
+  content: "";
+  width: 58px;
+  height: 58px;
+  border-radius: 18px;
+  background:
+    linear-gradient(#ffffff, #ffffff) 18px 15px / 22px 5px no-repeat,
+    linear-gradient(#ffffff, #ffffff) 18px 26px / 22px 5px no-repeat,
+    linear-gradient(#ffffff, #ffffff) 18px 37px / 22px 5px no-repeat,
+    linear-gradient(135deg, #0757d7, #1681ff);
+  box-shadow: 0 14px 30px rgba(20, 103, 226, 0.26);
 }
 
 .center-state > strong {
-  color: #071634;
+  color: #071a39;
   font-size: 24px;
-  font-weight: 900;
+  line-height: 1.25;
+  font-weight: 950;
+  letter-spacing: 0;
 }
 
 .back-link {
@@ -140,13 +229,13 @@ function toggleScope(scope: string, checked: boolean): void {
 .btn,
 a.btn {
   min-height: 40px;
-  border: 1px solid #c5d9f2;
-  border-radius: 10px;
+  border: 1px solid #c8dcf3;
+  border-radius: 16px;
   padding: 10px 16px;
   background: #ffffff;
   color: #09204a;
   font-size: 14px;
-  font-weight: 800;
+  font-weight: 900;
   line-height: 1;
   text-decoration: none;
   cursor: pointer;
@@ -160,27 +249,128 @@ a.btn {
 
 .btn.blue {
   border-color: transparent;
-  background: linear-gradient(135deg, #0757d7, #1678ff);
+  background: linear-gradient(135deg, #1e63ff, #1554df);
   color: #ffffff;
-  box-shadow: 0 14px 30px rgba(20, 103, 226, 0.26);
+  box-shadow: 0 14px 28px rgba(21, 93, 252, 0.24);
 }
 
-.btn.green {
-  border-color: transparent;
-  background: linear-gradient(135deg, #16a36d, #2fd083);
-  color: #ffffff;
+.btn.blue:hover:not(:disabled) {
+  background: #1554df;
 }
 
 p,
 .hint {
   margin: 0;
-  color: #64748b;
+  color: #5f7189;
   font-size: 13px;
 }
 
 .user-line {
+  display: inline-flex;
+  max-width: 100%;
+  border: 1px solid #d8e5f7;
+  border-radius: 999px;
+  background: #f8fbff;
+  padding: 7px 11px;
   color: #31445f;
-  font-weight: 700;
+  font-size: 12px;
+  font-weight: 850;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.login-hint {
+  display: inline-flex;
+  border: 1px solid #cfe0ff;
+  border-radius: 999px;
+  padding: 6px 10px;
+  background: #eff6ff;
+  color: #0757d7;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.request-steps {
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.request-steps span {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  grid-template-areas:
+    "num title"
+    "num hint";
+  align-items: center;
+  column-gap: 8px;
+  min-height: 54px;
+  border: 1px solid #d8e5f7;
+  border-radius: 16px;
+  padding: 8px 10px;
+  background: rgba(248, 251, 255, 0.86);
+  color: #64748b;
+}
+
+.request-steps b {
+  grid-area: num;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 10px;
+  background: #e2e8f0;
+  color: #52657f;
+  font-size: 12px;
+  font-weight: 950;
+}
+
+.request-steps strong,
+.request-steps small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.request-steps strong {
+  grid-area: title;
+  color: #31445f;
+  font-size: 12px;
+  font-weight: 950;
+}
+
+.request-steps small {
+  grid-area: hint;
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.request-steps span.active {
+  border-color: #bdd7ff;
+  background: #eff6ff;
+}
+
+.request-steps span.active b {
+  background: linear-gradient(135deg, #1e63ff, #1554df);
+  color: #ffffff;
+}
+
+.request-steps span.active strong {
+  color: #0f2f6a;
+}
+
+.request-steps span.rejected {
+  border-color: #fecaca;
+  background: #fff1f2;
+}
+
+.request-steps span.rejected b {
+  background: #e11d48;
 }
 
 .scope-checks,
@@ -192,20 +382,50 @@ p,
 
 .scope-checks {
   width: 100%;
+  border: 1px solid #d8e5f7;
+  border-radius: 18px;
+  background: rgba(248, 251, 255, 0.82);
+  padding: 10px;
+}
+
+.scope-checks-head {
+  flex: 1 0 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 2px 2px;
+}
+
+.scope-checks-head strong {
+  color: #0f2f6a;
+  font-size: 13px;
+  font-weight: 950;
+}
+
+.scope-checks-head span,
+.submit-hint {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.submit-hint {
+  align-self: center;
 }
 
 .scope-pill {
-  min-height: 38px;
+  min-height: 34px;
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px;
-  border: 1px solid #c8dcf3;
+  padding: 7px 11px;
+  border: 1px solid #d8e5f7;
   border-radius: 999px;
-  background: #fbfdff;
+  background: rgba(255, 255, 255, 0.9);
   color: #37536f;
   font-size: 13px;
-  font-weight: 700;
+  font-weight: 850;
   cursor: pointer;
   transition: border-color 0.14s ease, background-color 0.14s ease, color 0.14s ease, box-shadow 0.14s ease;
 }
@@ -216,6 +436,7 @@ p,
   box-shadow: 0 8px 20px rgba(22, 78, 151, 0.08);
 }
 
+/* VNET auth access skin */
 .scope-pill.selected {
   border-color: transparent;
   background: linear-gradient(135deg, #0757d7, #1678ff);
@@ -241,135 +462,71 @@ p,
 input,
 textarea {
   width: 100%;
-  border: 1px solid #c8dcf3;
-  border-radius: 10px;
+  border: 1px solid #d8e5f7;
+  border-radius: 18px;
   padding: 10px 12px;
-  background: #fbfdff;
+  background: rgba(255, 255, 255, 0.9);
   color: #071634;
   font: inherit;
 }
 
 input:focus,
 textarea:focus {
-  border-color: #1678ff;
-  outline: none;
-  box-shadow: 0 0 0 3px rgba(22, 120, 255, 0.12);
-}
-
-textarea {
-  min-height: 100px;
-  resize: vertical;
-}
-
-.scope-pill input[type="checkbox"] {
-  width: 15px;
-  min-width: 15px;
-  height: 15px;
-  border: 0;
-  padding: 0;
-  background: transparent;
-  box-shadow: none;
-}
-
-.verify-box {
-  display: grid;
-  gap: 8px;
-}
-
-/* VNET auth access skin */
-.center-state {
-  position: relative;
-  overflow: hidden;
-}
-
-/* Panorama construction-management polish */
-.center-state {
-  border-color: rgba(207, 224, 255, 0.94);
-  border-radius: 26px;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.99), rgba(250, 253, 255, 0.97)),
-    radial-gradient(circle at 12% 16%, rgba(48, 128, 255, 0.09), transparent 30%);
-  box-shadow: 0 18px 42px rgba(20, 70, 138, 0.11);
-}
-
-.center-state > strong {
-  font-weight: 820;
-  letter-spacing: 0;
-}
-
-.scope-pill,
-input,
-textarea,
-.btn,
-a.btn {
-  border-radius: 15px;
-}
-
-.btn.blue {
-  background: linear-gradient(135deg, #155dfc, #3080ff);
-  box-shadow: 0 14px 28px rgba(21, 93, 252, 0.24);
-}
-
-/* Panorama construction-management auth skin */
-.center-state {
-  border-color: #d8e5f7;
-  background: rgba(255, 255, 255, 0.86);
-  box-shadow: 0 18px 42px rgba(0, 47, 135, 0.12);
-  backdrop-filter: blur(10px);
-}
-
-.scope-pill,
-input,
-textarea {
-  border-color: #d8e5f7;
-  background: rgba(255, 255, 255, 0.9);
-}
-
-.scope-pill.selected,
-.btn.blue {
-  background: linear-gradient(135deg, #1e63ff, #1554df);
-}
-
-.btn.blue:hover:not(:disabled) {
-  background: #1554df;
-}
-
-.btn.green {
-  background: #059669;
-}
-
-input:focus,
-textarea:focus {
   border-color: #005bff;
+  outline: none;
   box-shadow: 0 0 0 3px rgba(0, 91, 255, 0.14);
 }
 
-.center-state::after {
-  content: "";
-  position: absolute;
-  right: -70px;
-  bottom: -96px;
-  width: 260px;
-  height: 180px;
-  pointer-events: none;
-  opacity: 0.52;
-  background:
-    repeating-linear-gradient(0deg, rgba(22, 120, 255, 0.1) 0 1px, transparent 1px 18px),
-    repeating-linear-gradient(90deg, rgba(22, 120, 255, 0.08) 0 1px, transparent 1px 18px);
-  transform: rotate(-12deg);
+textarea {
+  min-height: 66px;
+  line-height: 1.55;
+  resize: vertical;
 }
 
-.center-state:not(:has(.spinner))::before {
-  content: "";
-  width: 58px;
-  height: 58px;
-  border-radius: 14px;
+.verify-box {
+  width: 100%;
+  display: grid;
+  gap: 8px;
+  border: 1px solid #bfdbfe;
+  border-radius: 18px;
+  padding: 12px;
   background:
-    linear-gradient(#ffffff, #ffffff) 18px 15px / 22px 5px no-repeat,
-    linear-gradient(#ffffff, #ffffff) 18px 26px / 22px 5px no-repeat,
-    linear-gradient(#ffffff, #ffffff) 18px 37px / 22px 5px no-repeat,
-    linear-gradient(135deg, #0757d7, #1681ff);
-  box-shadow: 0 14px 30px rgba(20, 103, 226, 0.26);
+    linear-gradient(135deg, rgba(239, 246, 255, 0.96), rgba(255, 255, 255, 0.92)),
+    #ffffff;
+  box-shadow: inset 4px 0 0 #1e63ff, 0 10px 22px rgba(15, 86, 228, 0.07);
+}
+
+.row-actions {
+  width: 100%;
+  justify-content: flex-start;
+}
+
+.row-actions .btn {
+  min-width: 136px;
+  min-height: 42px;
+  border-radius: 16px;
+  font-weight: 950;
+}
+
+.verify-box strong {
+  color: #071a39;
+  font-size: 14px;
+  font-weight: 950;
+}
+
+.verify-box span {
+  color: #516a88;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.55;
+}
+
+.verify-box.status-rejected {
+  border-color: #fecaca;
+  background:
+    linear-gradient(135deg, rgba(254, 242, 242, 0.97), rgba(255, 255, 255, 0.92)),
+    #ffffff;
+  box-shadow: inset 4px 0 0 #e11d48, 0 10px 22px rgba(225, 29, 72, 0.07);
 }
 
 .center-state > * {
@@ -377,48 +534,19 @@ textarea:focus {
   z-index: 1;
 }
 
-.verify-box {
-  width: 100%;
-  border: 1px solid #d8e7f8;
-  border-radius: 12px;
-  padding: 12px;
-  background: #f7fbff;
-  box-shadow: inset 4px 0 0 #1678ff;
-}
+@media (max-width: 640px) {
+  .center-state {
+    margin-block: 28px;
+    padding: 24px;
+  }
 
-/* Softer rounded VNET auth polish */
-.center-state {
-  border-radius: 24px;
-}
+  .scope-pill {
+    flex: 1 1 136px;
+    justify-content: center;
+  }
 
-.center-state:not(:has(.spinner))::before {
-  border-radius: 18px;
-}
-
-.btn,
-a.btn,
-input,
-textarea {
-  border-radius: 13px;
-}
-
-.verify-box {
-  border-radius: 18px;
-}
-
-.center-state > strong {
-  font-weight: 820;
-  letter-spacing: 0;
-}
-
-p,
-.hint {
-  color: #5f7189;
-}
-
-.scope-pill,
-.btn,
-a.btn {
-  font-weight: 720;
+  .request-steps {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

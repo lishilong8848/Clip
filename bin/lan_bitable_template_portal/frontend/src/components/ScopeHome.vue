@@ -7,7 +7,7 @@
           <strong>业务模块</strong>
           <p>统一业务导航</p>
         </div>
-        <b>4 个模块</b>
+        <b>已开放 {{ enabledModuleCount }} / {{ moduleCards.length }}</b>
       </article>
       <article>
         <span class="metric-icon work" aria-hidden="true"></span>
@@ -39,7 +39,7 @@
       <div>
         <span class="section-kicker">权限申请</span>
         <strong>需要访问其他楼栋？</strong>
-        <p>提交申请后，管理员会收到验证码，确认后即可追加楼栋权限。</p>
+        <p>提交申请后，管理员会在门户审批，通过后自动追加楼栋权限。</p>
       </div>
       <button class="secondary" @click="$emit('request-permission')">申请其他楼权限</button>
     </div>
@@ -48,9 +48,9 @@
       <div class="module-heading">
         <div>
           <h2>业务工作台</h2>
-          <p>按维护、变更、检修和辅助工具进入对应工作模块</p>
+          <p>按事件、维护、变更、演练、容量、风险和其他业务域统一进入</p>
         </div>
-        <span>共 4 个业务模块</span>
+        <span>已开放 {{ enabledModuleCount }} / 共 {{ moduleCards.length }} 个模块</span>
       </div>
 
       <div class="module-grid">
@@ -58,12 +58,8 @@
           v-for="module in moduleCards"
           :key="module.key"
           class="module-card"
-          :class="module.tone"
-          role="button"
-          tabindex="0"
-          @click="selectPrimaryModuleAction(module)"
-          @keydown.enter.prevent="selectPrimaryModuleAction(module)"
-          @keydown.space.prevent="selectPrimaryModuleAction(module)"
+          :class="[module.tone, module.size || 'compact', { disabled: module.disabled }]"
+          :title="module.disabled ? '该模块建设中，当前无需操作' : ''"
         >
           <div class="module-card__head">
             <span class="module-icon" :class="module.icon" aria-hidden="true"></span>
@@ -72,6 +68,7 @@
           <div class="module-card__body">
             <strong>{{ module.title }}</strong>
             <p>{{ module.description }}</p>
+            <span v-if="module.disabled" class="module-disabled-note">暂未开放，不影响当前工作</span>
             <div class="module-tags">
               <span v-for="tag in module.tags" :key="tag">{{ tag }}</span>
             </div>
@@ -80,11 +77,14 @@
             <button
               v-for="action in module.actions"
               :key="action.key"
+              type="button"
               :class="action.primary ? 'primary' : 'secondary'"
-              @click.stop="selectEntry(action.key)"
+              :disabled="module.disabled || action.disabled"
+              :title="module.disabled || action.disabled ? '该模块建设中，当前无需操作' : ''"
+              @click.stop="selectModuleAction(action, module.disabled)"
             >
               {{ action.label }}
-              <span aria-hidden="true">›</span>
+              <span v-if="!module.disabled && !action.disabled" aria-hidden="true">›</span>
             </button>
           </div>
         </article>
@@ -134,7 +134,14 @@
           </div>
           <div class="scope-actions">
             <button
-              v-if="activeMode === 'maintenance_mop'"
+              v-if="activeMode === 'event'"
+              class="primary"
+              @click="$emit('event', scope.value)"
+            >
+              进入事件管理
+            </button>
+            <button
+              v-else-if="activeMode === 'maintenance_mop'"
               class="primary"
               @click="$emit('engineer', scope.value)"
             >
@@ -175,7 +182,8 @@
 import { computed, ref } from "vue";
 
 type Dict = Record<string, any>;
-type EntryKey = "" | "maintenance" | "maintenance_mop" | "change" | "repair" | "tools" | "power" | "polling" | "adjust" | "handover";
+type EntryKey = "" | "event" | "maintenance" | "maintenance_mop" | "change" | "repair" | "tools" | "power" | "polling" | "adjust" | "handover";
+type ModuleAction = { key: EntryKey; label: string; primary?: boolean; disabled?: boolean };
 
 const props = defineProps<{
   scopeOptions: Array<{ value: string; label: string }>;
@@ -186,6 +194,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   enter: [scope: string, workType?: string];
+  event: [scope: string];
   engineer: [scope: string];
   "request-permission": [];
 }>();
@@ -200,8 +209,21 @@ const moduleCards: Array<{
   title: string;
   description: string;
   tags: string[];
-  actions: Array<{ key: EntryKey; label: string; primary?: boolean }>;
+  size?: "main" | "compact";
+  disabled?: boolean;
+  actions: ModuleAction[];
 }> = [
+  {
+    key: "event",
+    tone: "orange",
+    icon: "event",
+    badge: "全流程",
+    title: "事件管理",
+    description: "覆盖事件发现、分级响应、处置升级与复盘归档",
+    tags: ["事件上报", "处置跟踪", "复盘归档"],
+    size: "main",
+    actions: [{ key: "event", label: "进入事件管理", primary: true }],
+  },
   {
     key: "maintenance",
     tone: "blue",
@@ -210,9 +232,10 @@ const moduleCards: Array<{
     title: "维护管理",
     description: "统一管理维保计划、MOP 执行、签名与维护单归档",
     tags: ["维保计划", "MOP 执行", "工单归档"],
+    size: "main",
     actions: [
       { key: "maintenance", label: "进入维护管理", primary: true },
-      { key: "maintenance_mop", label: "进入维护单管理" },
+      { key: "maintenance_mop", label: "维护单管理" },
     ],
   },
   {
@@ -223,17 +246,41 @@ const moduleCards: Array<{
     title: "变更管理",
     description: "进入变更通告，处理风险评估、实施更新与回退确认",
     tags: ["变更申请", "风险评估", "回退确认"],
+    size: "main",
     actions: [{ key: "change", label: "进入变更管理", primary: true }],
   },
   {
-    key: "repair",
+    key: "drill",
     tone: "cyan",
-    icon: "repair",
-    badge: "故障处理",
-    title: "检修管理",
-    description: "进入检修通告，处理故障发现、解决方案和完成情况",
-    tags: ["故障检修", "过程跟踪", "闭环确认"],
-    actions: [{ key: "repair", label: "进入检修管理", primary: true }],
+    icon: "drill",
+    badge: "计划管理",
+    title: "演练管理",
+    description: "沉淀演练计划、场景脚本和评估改进",
+    tags: ["演练计划", "场景脚本", "评估改进"],
+    disabled: true,
+    actions: [{ key: "", label: "建设中", disabled: true }],
+  },
+  {
+    key: "capacity",
+    tone: "emerald",
+    icon: "capacity",
+    badge: "数据洞察",
+    title: "容量管理",
+    description: "管理电力、制冷、空间及端口容量",
+    tags: ["容量台账", "趋势预测", "阈值预警"],
+    disabled: true,
+    actions: [{ key: "", label: "建设中", disabled: true }],
+  },
+  {
+    key: "risk",
+    tone: "rose",
+    icon: "risk",
+    badge: "闭环管理",
+    title: "风险管理",
+    description: "风险识别、分级管控、整改跟踪与闭环验收",
+    tags: ["风险识别", "整改跟踪", "闭环验收"],
+    disabled: true,
+    actions: [{ key: "", label: "建设中", disabled: true }],
   },
   {
     key: "tools",
@@ -241,10 +288,11 @@ const moduleCards: Array<{
     icon: "more",
     badge: "辅助入口",
     title: "其他工具",
-    description: "汇总上电、轮巡、调整、交接班审核页等辅助入口",
-    tags: ["上电", "轮巡", "调整", "交接班"],
+    description: "汇总检修、上电、轮巡、调整、交接班等辅助入口",
+    tags: ["检修", "上电", "轮巡", "交接班"],
     actions: [
-      { key: "power", label: "上电", primary: true },
+      { key: "repair", label: "检修", primary: true },
+      { key: "power", label: "上电" },
       { key: "polling", label: "轮巡" },
       { key: "adjust", label: "调整" },
       { key: "handover", label: "交接班" },
@@ -259,6 +307,12 @@ const entryConfigs: Record<Exclude<EntryKey, "">, {
   actionLabel: string;
   workType?: string;
 }> = {
+  event: {
+    kicker: "事件管理",
+    title: "选择楼栋进入事件管理",
+    description: "查看本月事件、筛选状态等级并打开完整详情。",
+    actionLabel: "进入事件管理",
+  },
   maintenance: {
     kicker: "维护管理",
     title: "选择楼栋进入维护管理",
@@ -329,6 +383,7 @@ const toolEntries: Array<{
   icon: string;
   tone: string;
 }> = [
+  { key: "repair", title: "检修通告", description: "故障发现、检修过程和闭环确认", badge: "通告", icon: "repair", tone: "blue" },
   { key: "power", title: "上电通告", description: "机柜上电、数量和进度确认", badge: "通告", icon: "power", tone: "blue" },
   { key: "polling", title: "设备轮巡", description: "设备轮巡切换和影响确认", badge: "通告", icon: "polling", tone: "cyan" },
   { key: "adjust", title: "设备调整", description: "设备运行模式调整与现场进度", badge: "通告", icon: "adjust", tone: "emerald" },
@@ -339,16 +394,18 @@ const configuredHandoverCount = computed(() => {
   return Object.values(props.handoverLinks || {}).filter((value) => String(value || "").trim()).length;
 });
 
+const enabledModuleCount = computed(() => moduleCards.filter((item) => !item.disabled).length);
 const activeConfig = computed(() => entryConfigs[activeMode.value || "tools"]);
-const isToolScopeMode = computed(() => ["power", "polling", "adjust", "handover"].includes(activeMode.value));
+const isToolScopeMode = computed(() => ["repair", "power", "polling", "adjust", "handover"].includes(activeMode.value));
 
 function selectEntry(key: EntryKey): void {
+  if (!key) return;
   activeMode.value = key;
 }
 
-function selectPrimaryModuleAction(module: { actions: Array<{ key: EntryKey; primary?: boolean }> }): void {
-  const action = module.actions.find((item) => item.primary) || module.actions[0];
-  if (action) selectEntry(action.key);
+function selectModuleAction(action: ModuleAction, disabled?: boolean): void {
+  if (disabled || action.disabled || !action.key) return;
+  selectEntry(action.key);
 }
 
 function normalizeScopeValue(value: string, fallback = "ALL"): string {
@@ -372,6 +429,7 @@ function countText(scope: string, workType: string): string {
 }
 
 function scopeMetricText(scope: string): string {
+  if (activeMode.value === "event") return "本月事件 / 处理中 / 已结束";
   if (activeMode.value === "maintenance") return countText(scope, "maintenance");
   if (activeMode.value === "change") return countText(scope, "change");
   if (activeMode.value === "repair") return countText(scope, "repair");
@@ -384,9 +442,9 @@ function scopeMetricText(scope: string): string {
 
 <style scoped>
 .home-shell {
-  padding: 34px 38px 42px;
+  padding: 20px 26px 28px;
   display: grid;
-  gap: 24px;
+  gap: 12px;
 }
 
 .home-metrics,
@@ -394,7 +452,7 @@ function scopeMetricText(scope: string): string {
 .scope-grid,
 .tool-grid {
   display: grid;
-  gap: 22px;
+  gap: 14px;
 }
 
 .home-metrics {
@@ -415,13 +473,13 @@ function scopeMetricText(scope: string): string {
 .home-metrics article {
   position: relative;
   overflow: hidden;
-  min-height: 112px;
+  min-height: 76px;
   display: grid;
-  grid-template-columns: 58px minmax(0, 1fr) auto;
+  grid-template-columns: 46px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 16px;
-  padding: 20px 22px;
-  border-radius: 16px;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: 17px;
 }
 
 .home-metrics article::after,
@@ -462,15 +520,15 @@ function scopeMetricText(scope: string): string {
 }
 
 .home-metrics p {
-  margin-top: 4px;
-  font-size: 13px;
+  margin-top: 2px;
+  font-size: 12px;
 }
 
 .home-metrics b {
   position: relative;
   z-index: 1;
   color: #075bd8;
-  font-size: 16px;
+  font-size: 15px;
   white-space: nowrap;
 }
 
@@ -485,8 +543,8 @@ function scopeMetricText(scope: string): string {
 }
 
 .metric-icon {
-  width: 58px;
-  height: 58px;
+  width: 46px;
+  height: 46px;
   background: linear-gradient(135deg, #2a77ff, #004fc4);
 }
 
@@ -545,15 +603,15 @@ function scopeMetricText(scope: string): string {
   align-items: center;
   justify-content: space-between;
   gap: 18px;
-  padding: 20px 22px;
+  padding: 16px 18px;
   border-radius: 18px;
 }
 
 .permission-more-card strong {
   display: block;
-  margin-top: 6px;
+  margin-top: 4px;
   color: #071a39;
-  font-size: 19px;
+  font-size: 17px;
   font-weight: 900;
 }
 
@@ -561,19 +619,20 @@ function scopeMetricText(scope: string): string {
   display: flex;
   align-items: end;
   justify-content: space-between;
-  gap: 18px;
+  gap: 16px;
+  margin-top: 2px;
 }
 
 .module-heading h2 {
   margin: 0;
   color: #071a39;
-  font-size: 22px;
+  font-size: 20px;
   font-weight: 950;
 }
 
 .module-heading span {
   align-self: center;
-  padding: 9px 18px;
+  padding: 7px 14px;
   border: 1px solid #d8e5f7;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.7);
@@ -583,20 +642,78 @@ function scopeMetricText(scope: string): string {
 }
 
 .module-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  align-items: stretch;
 }
 
 .module-card {
   position: relative;
   overflow: hidden;
-  min-height: 260px;
+  grid-column: span 3;
+  min-height: 142px;
   display: flex;
   flex-direction: column;
-  gap: 22px;
-  padding: 30px;
+  gap: 8px;
+  padding: 15px 16px;
   border-radius: 18px;
-  cursor: pointer;
+  cursor: default;
   transition: transform 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease;
+}
+
+.module-card.main {
+  grid-column: span 4;
+  min-height: 174px;
+  padding: 18px 20px;
+  gap: 10px;
+}
+
+.module-card.disabled {
+  cursor: default;
+  border-color: rgba(216, 229, 247, 0.7);
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.72), rgba(241, 245, 249, 0.82)),
+    #f8fafc;
+  box-shadow: 0 8px 22px rgba(71, 85, 105, 0.06);
+  opacity: 0.88;
+}
+
+.module-card.disabled .module-icon {
+  filter: grayscale(0.45);
+  opacity: 0.72;
+}
+
+.module-card.disabled .module-badge,
+.module-card.disabled .module-tags span {
+  color: #64748b;
+  background: rgba(241, 245, 249, 0.88);
+}
+
+.module-card.disabled .module-card__body strong,
+.module-card.disabled .module-card__body p {
+  color: #64748b;
+}
+
+.module-card.disabled::before {
+  background: #cbd5e1;
+}
+
+.module-card.disabled .module-actions {
+  display: none;
+}
+
+.module-card.disabled .module-tags {
+  opacity: 0.72;
+}
+
+.module-disabled-note {
+  width: fit-content;
+  padding: 5px 9px;
+  border: 1px solid rgba(203, 213, 225, 0.86);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.78);
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 900;
 }
 
 .module-card:focus-visible {
@@ -610,7 +727,7 @@ function scopeMetricText(scope: string): string {
   top: 0;
   left: 0;
   right: 0;
-  height: 5px;
+  height: 4px;
   background: #1e63ff;
 }
 
@@ -618,8 +735,20 @@ function scopeMetricText(scope: string): string {
   background: #7657e6;
 }
 
+.module-card.orange::before {
+  background: #ff8a3d;
+}
+
 .module-card.cyan::before {
   background: #11b7ca;
+}
+
+.module-card.emerald::before {
+  background: #22b981;
+}
+
+.module-card.rose::before {
+  background: #ef5260;
 }
 
 .module-card.slate::before {
@@ -635,9 +764,18 @@ function scopeMetricText(scope: string): string {
 
 .module-icon,
 .tool-icon {
-  width: 72px;
-  height: 72px;
+  width: 46px;
+  height: 46px;
   background: linear-gradient(135deg, #2a77ff, #004fc4);
+}
+
+.module-card.main .module-icon {
+  width: 54px;
+  height: 54px;
+}
+
+.module-card.orange .module-icon {
+  background: linear-gradient(135deg, #ff984d, #f36a32);
 }
 
 .module-card.violet .module-icon {
@@ -646,6 +784,14 @@ function scopeMetricText(scope: string): string {
 
 .module-card.cyan .module-icon {
   background: linear-gradient(135deg, #27d1df, #0a8fb8);
+}
+
+.module-card.emerald .module-icon {
+  background: linear-gradient(135deg, #29cd8d, #07945f);
+}
+
+.module-card.rose .module-icon {
+  background: linear-gradient(135deg, #ff6871, #dd3447);
 }
 
 .module-card.slate .module-icon {
@@ -659,8 +805,21 @@ function scopeMetricText(scope: string): string {
 }
 
 .module-icon.repair::before,
+.module-icon.drill::before,
+.module-icon.capacity::before,
+.module-icon.risk::before,
 .tool-icon.adjust::before {
   border-radius: 50%;
+}
+
+.module-icon.event::before {
+  width: 30px;
+  height: 14px;
+  border: 0;
+  border-radius: 999px;
+  background:
+    linear-gradient(currentColor, currentColor) 0 50% / 100% 3px no-repeat,
+    linear-gradient(115deg, transparent 0 40%, currentColor 41% 52%, transparent 53%);
 }
 
 .module-icon.more::before,
@@ -675,12 +834,12 @@ function scopeMetricText(scope: string): string {
 }
 
 .module-badge {
-  padding: 8px 16px;
+  padding: 6px 11px;
   border: 1px solid #dce8f8;
   border-radius: 999px;
   background: #f6faff;
   color: #1763d7;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 900;
 }
 
@@ -688,29 +847,44 @@ function scopeMetricText(scope: string): string {
   position: relative;
   z-index: 1;
   display: grid;
-  gap: 14px;
+  gap: 6px;
   flex: 1;
 }
 
 .module-card__body strong {
-  font-size: 28px;
+  font-size: 20px;
   line-height: 1.15;
+}
+
+.module-card.main .module-card__body strong {
+  font-size: 23px;
+}
+
+.module-card__body p {
+  min-height: 30px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.module-card.compact .module-card__body p {
+  min-height: 28px;
+  font-size: 12px;
 }
 
 .module-tags {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
-  margin-top: 8px;
+  gap: 6px;
+  margin-top: 2px;
 }
 
 .module-tags span {
-  padding: 8px 14px;
+  padding: 4px 8px;
   border: 1px solid #e0e9f6;
   border-radius: 999px;
   background: #f7fbff;
   color: #4e6381;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 800;
 }
 
@@ -719,14 +893,33 @@ function scopeMetricText(scope: string): string {
   z-index: 1;
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
-  padding-top: 16px;
+  gap: 6px;
+  padding-top: 7px;
   border-top: 1px solid #e8eef7;
+}
+
+.module-actions button {
+  cursor: pointer;
+}
+
+.module-actions button:disabled {
+  cursor: not-allowed;
+}
+
+.module-actions .primary {
+  min-width: 124px;
+}
+
+.module-actions .secondary {
+  min-height: 34px;
+  padding: 0 12px;
+  border-radius: 999px;
+  box-shadow: none;
 }
 
 .feature-section {
   padding: 28px;
-  border-radius: 18px;
+  border-radius: 22px;
   display: grid;
   gap: 22px;
 }
@@ -776,7 +969,7 @@ function scopeMetricText(scope: string): string {
   justify-content: space-between;
   gap: 18px;
   padding: 22px;
-  border-radius: 16px;
+  border-radius: 20px;
 }
 
 .scope-card strong {
@@ -796,7 +989,7 @@ function scopeMetricText(scope: string): string {
 }
 
 .tool-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .tool-card {
@@ -807,16 +1000,27 @@ function scopeMetricText(scope: string): string {
   align-items: center;
   gap: 16px;
   padding: 20px;
-  border-radius: 16px;
+  border-radius: 20px;
   text-align: left;
   cursor: pointer;
 }
 
 .tool-card:hover,
-.module-card:hover,
 .scope-card:hover {
   border-color: #b7d0f5;
   box-shadow: 0 22px 54px rgba(15, 73, 153, 0.16);
+}
+
+.module-card:not(.disabled):focus-within,
+.module-card:not(.disabled):hover {
+  border-color: #b7d0f5;
+  box-shadow: 0 22px 54px rgba(15, 73, 153, 0.14);
+}
+
+.module-card.disabled:hover {
+  border-color: rgba(216, 229, 247, 0.7);
+  box-shadow: 0 8px 22px rgba(71, 85, 105, 0.06);
+  transform: none;
 }
 
 .tool-card small {
@@ -864,10 +1068,10 @@ a.secondary {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  min-height: 42px;
-  padding: 10px 18px;
-  border-radius: 12px;
-  font-size: 14px;
+  min-height: 35px;
+  padding: 7px 12px;
+  border-radius: 14px;
+  font-size: 13px;
   font-weight: 900;
   cursor: pointer;
   transition: transform 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease, background 0.16s ease;
@@ -899,9 +1103,17 @@ a.secondary {
 }
 
 @media (max-width: 1280px) {
-  .home-metrics,
+  .home-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .module-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .module-card,
+  .module-card.main {
+    grid-column: auto;
   }
 
   .scope-grid {
@@ -942,6 +1154,7 @@ a.secondary {
   .module-card {
     min-height: auto;
     padding: 24px;
+    grid-column: auto;
   }
 }
 </style>

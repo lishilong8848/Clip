@@ -1,0 +1,159 @@
+:root {
+  --cf-brand-blue: #1e63ff;
+  --cf-brand-blue-hover: #1554df;
+  --cf-brand-blue-dark: #012a7d;
+  --cf-brand-cyan: #00b7d7;
+  --cf-canvas-top: #eef4ff;
+  --cf-canvas-mid: #f8fbff;
+  --cf-canvas-bottom: #eef5ff;
+  --cf-surface: rgba(255, 255, 255, 0.96);
+  --cf-surface-soft: rgba(255, 255, 255, 0.82);
+  --cf-border: #d8e5f7;
+  --cf-border-strong: #cfe0ff;
+  --cf-text: #0f172a;
+  --cf-muted: #64748b;
+  --cf-success: #047857;
+  --cf-warning: #92400e;
+  --cf-danger: #991b1b;
+  --cf-radius-panel: 22px;
+  --cf-radius-card: 18px;
+  --cf-radius-control: 16px;
+  --cf-shadow-card: 0 12px 30px rgba(0, 47, 135, 0.08);
+  --cf-shadow-popover: 0 20px 44px rgba(7, 37, 86, 0.24);
+  --cf-z-topbar: 40;
+  --cf-z-dropdown: 720;
+  --cf-z-floating-action: 640;
+  --cf-z-cell-popover: 760;
+  --cf-z-drawer-backdrop: 780;
+  --cf-z-drawer: 790;
+  --cf-z-modal-backdrop: 800;
+  --cf-z-modal: 840;
+  --cf-z-signature-drawer-backdrop: 850;
+  --cf-z-signature-drawer: 860;
+  --cf-z-confirm: 900;
+  --cf-z-signature-pad: 920;
+}
+
+.app-shell :is(.btn, a.btn, .primary, .secondary) {
+  box-sizing: border-box;
+  max-width: 100%;
+  min-height: 42px;
+  border-radius: var(--cf-radius-control);
+  font-weight: 850;
+  letter-spacing: 0;
+  line-height: 1.15;
+  transition:
+    transform 0.16s ease,
+    box-shadow 0.16s ease,
+    border-color 0.16s ease,
+    background 0.16s ease,
+    color 0.16s ease;
+}
+
+.app-shell :is(.btn, a.btn, .primary, .secondary):hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.app-shell button {
+  box-sizing: border-box;
+  max-width: 100%;
+  border-radius: calc(var(--cf-radius-control) - 2px);
+  letter-spacing: 0;
+  line-height: 1.15;
+}
+
+.app-shell :is(.btn, a.btn, button, input, select, textarea, .search):focus-visible {
+  outline: none;
+  box-shadow:
+    0 0 0 3px rgba(21, 93, 252, 0.14),
+    0 10px 22px rgba(15, 86, 228, 0.08);
+}
+
+.app-shell :is(input, select, textarea, .search) {
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
+  border-color: var(--cf-border);
+  border-radius: var(--cf-radius-control);
+  background-color: rgba(255, 255, 255, 0.96);
+  color: var(--cf-text);
+  letter-spacing: 0;
+}
+
+.app-shell select {
+  min-height: 40px;
+  color: #083d92;
+  font-weight: 850;
+  cursor: pointer;
+}
+
+.app-shell textarea {
+  line-height: 1.55;
+}
+
+.app-shell :is(.btn, a.btn, button, select, input, textarea) {
+  font-family: inherit;
+}
+
+.app-shell :is(input, select, textarea, .search):focus {
+  border-color: #155dfc;
+  box-shadow: 0 0 0 3px rgba(21, 93, 252, 0.14);
+}
+
+.app-shell :is(.segmented, .tabs, .specialty-filter, .ongoing-type-filter) {
+  border-radius: var(--cf-radius-card);
+}
+
+.app-shell :is(.segmented button, .tabs button, .ongoing-type-filter button) {
+  border-radius: 14px;
+}
+
+.app-shell :is(.panel, .toolbar, .paste-panel, .summary-strip article, .page-status, .status-banner, .empty-block) {
+  border-radius: var(--cf-radius-panel);
+}
+
+.app-shell :is(.virtual-list, .draft-card, .ongoing-card, .closed-card, .recent-undo-panel, .target-choice-panel, .target-detail-popover) {
+  border-radius: var(--cf-radius-card);
+}
+
+.app-shell :is(.icon-btn, .avatar, .metric-icon, .module-icon, .tool-icon) {
+  border-radius: 999px;
+}
+
+.app-shell .control-disabled-reason {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  border: 1px solid var(--cf-border);
+  border-radius: 999px;
+  padding: 5px 10px;
+  color: #48627f;
+  background: #f8fbff;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.app-shell .control-disabled-reason.warning {
+  border-color: #fde68a;
+  color: var(--cf-warning);
+  background: #fffbeb;
+}
+
+.app-shell .control-disabled-reason.danger {
+  border-color: #fecaca;
+  color: var(--cf-danger);
+  background: #fef2f2;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-shell *,
+  .app-shell *::before,
+  .app-shell *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

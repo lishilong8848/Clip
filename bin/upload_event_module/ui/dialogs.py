@@ -6004,7 +6004,7 @@ class ScreenshotConfirmDialog(QDialog):
         message = "结束通告前必须添加至少一张现场照片。"
         self.hint_label.setText(message)
         try:
-            QMessageBox.warning(self, "需要现场照片", message)
+            show_simple_message(self, message, self.theme)
         except Exception:
             pass
         return False

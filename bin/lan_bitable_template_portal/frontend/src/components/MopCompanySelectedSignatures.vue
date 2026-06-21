@@ -1,0 +1,462 @@
+<template>
+  <div class="selected-sign-person company-selected-panel">
+    <div class="signature-subsection-title company-title">
+      <span>公司人员签名</span>
+      <em :class="statusTone">{{ statusText }}</em>
+    </div>
+    <div v-if="people.length" class="selected-signatures">
+      <span
+        v-for="person in people.slice(0, 1)"
+        :key="`${role}:${personKey(person)}`"
+        class="selected-signature-chip"
+        :class="{ active: person.record_id === activeRecordId && (!person.source || person.source === 'staff') }"
+        @click="emit('activate', person)"
+      >
+        <img
+          v-if="hasUsableSignature(person)"
+          :src="person.signature_preview_url"
+          alt="已有签名"
+          @error="emit('image-error', person)"
+        />
+        <span v-else class="signature-chip-state">待签名</span>
+        <strong>{{ displayName(person) }}</strong>
+      </span>
+      <button
+        class="selected-signature-open"
+        :class="{ ready: people.length > 0 && !unsignedCount, pending: unsignedCount > 0 }"
+        type="button"
+        :aria-expanded="drawerOpen"
+        :title="unsignedCount ? `${unsignedCount} 人未签名，点击查看处理` : '签名已齐全，点击查看人员'"
+        @click.stop="emit('toggle-drawer')"
+      >
+        {{ drawerButtonText }}
+        <em v-if="unsignedCount">{{ unsignedCount }} 未签</em>
+      </button>
+      <MopSignatureDrawer
+        :open="drawerOpen"
+        :title="`${roleLabel} · 公司人员`"
+        @close="emit('close-drawer')"
+      >
+        <div class="drawer-filter-bar">
+          <div class="drawer-progress">
+            <strong>{{ signedCount }}/{{ people.length }}</strong>
+            <span>{{ unsignedCount ? `待签 ${unsignedCount} 人` : "签名已齐" }}</span>
+          </div>
+          <input
+            v-model="drawerSearch"
+            type="search"
+            placeholder="搜索已选人员"
+          />
+          <div class="drawer-filter-tabs" aria-label="公司人员签名筛选">
+            <button type="button" :class="{ active: drawerFilter === 'all' }" @click="drawerFilter = 'all'">全部</button>
+            <button type="button" :class="{ active: drawerFilter === 'unsigned' }" @click="drawerFilter = 'unsigned'">未签</button>
+            <button type="button" :class="{ active: drawerFilter === 'signed' }" @click="drawerFilter = 'signed'">已签</button>
+          </div>
+        </div>
+        <article
+          v-for="person in drawerVisiblePeople"
+          :key="`drawer:${role}:${personKey(person)}`"
+          :class="{ ready: hasUsableSignature(person), pending: !hasUsableSignature(person) }"
+        >
+          <img
+            v-if="hasUsableSignature(person)"
+            :src="person.signature_preview_url"
+            alt="已有签名"
+            @error="emit('image-error', person)"
+          />
+          <span v-else class="signature-chip-state">待签名</span>
+          <div>
+            <strong>{{ person.name || person.display_name || "未命名" }}</strong>
+            <small :class="{ failed: Boolean(linkErrorById[person.record_id]) }">{{ drawerPersonStatus(person) }}</small>
+          </div>
+          <div class="drawer-actions">
+            <button
+              v-if="!person.source || person.source === 'staff'"
+              class="drawer-action"
+              type="button"
+              :disabled="!person.record_id"
+              :title="person.record_id ? '在当前网页手写并保存到该人员签名库' : '该人员资料不完整，无法手写'"
+              @click.stop="emit('web-sign', person)"
+            >
+              {{ hasUsableSignature(person) ? "网页重签" : "网页手写" }}
+            </button>
+            <button
+              v-if="!person.source || person.source === 'staff'"
+              class="drawer-action link-action"
+              type="button"
+              :disabled="Boolean(linkSendingById[person.record_id]) || !person.record_id"
+              :title="linkTitle(person)"
+              @click.stop="emit('send-link', person, hasUsableSignature(person))"
+            >
+              {{ linkSendingById[person.record_id] ? "发送中" : (hasUsableSignature(person) ? "重发链接" : "发链接") }}
+            </button>
+            <button class="drawer-remove" type="button" @click.stop="emit('remove', personKey(person))">移除</button>
+          </div>
+        </article>
+        <div v-if="!drawerVisiblePeople.length" class="drawer-empty">当前筛选下没有人员。</div>
+      </MopSignatureDrawer>
+    </div>
+    <div v-else class="company-empty">
+      未选择公司人员。
+    </div>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { computed, ref } from "vue";
+import MopSignatureDrawer from "./MopSignatureDrawer.vue";
+
+type Dict = Record<string, any>;
+type SignatureRole = "implementer" | "auditor";
+
+const props = defineProps<{
+  role: SignatureRole;
+  people: Dict[];
+  activeRecordId: string;
+  unsignedCount: number;
+  drawerOpen: boolean;
+  linkSendingById: Record<string, boolean>;
+  linkSentAtById: Record<string, string>;
+  linkErrorById: Record<string, string>;
+  hasUsableSignature: (person: Dict | null | undefined) => boolean;
+  personKey: (person: Dict) => string;
+  displayName: (person: Dict) => string;
+  linkTitle: (person: Dict) => string;
+}>();
+
+const emit = defineEmits<{
+  activate: [person: Dict];
+  "toggle-drawer": [];
+  "close-drawer": [];
+  "image-error": [person: Dict];
+  "web-sign": [person: Dict];
+  "send-link": [person: Dict, forceResign: boolean];
+  remove: [personKey: string];
+}>();
+
+const roleLabel = computed(() => props.role === "implementer" ? "维护实施人" : "维护审核人");
+const signedCount = computed(() => Math.max(0, props.people.length - props.unsignedCount));
+const drawerSearch = ref("");
+const drawerFilter = ref<"all" | "unsigned" | "signed">("all");
+const drawerVisiblePeople = computed(() => {
+  const query = drawerSearch.value.trim().toLowerCase();
+  return props.people.filter((person) => {
+    const signed = props.hasUsableSignature(person);
+    if (drawerFilter.value === "unsigned" && signed) return false;
+    if (drawerFilter.value === "signed" && !signed) return false;
+    if (!query) return true;
+    return [
+      person.name,
+      person.display_name,
+      person.employee_no,
+      person.open_id,
+      person.position,
+      person.team,
+    ].some((value) => String(value || "").toLowerCase().includes(query));
+  });
+});
+const statusText = computed(() => {
+  if (!props.people.length) return "未选择";
+  if (!props.unsignedCount) return "签名齐全";
+  return `${signedCount.value}/${props.people.length} 已签`;
+});
+const statusTone = computed(() => ({
+  ready: props.people.length > 0 && props.unsignedCount === 0,
+  pending: props.unsignedCount > 0,
+  empty: props.people.length === 0,
+}));
+const drawerButtonText = computed(() => {
+  return `查看公司 ${props.people.length}`;
+});
+
+function drawerPersonStatus(person: Dict): string {
+  const recordId = String(person?.record_id || "");
+  if (props.linkErrorById[recordId]) return `链接失败：${props.linkErrorById[recordId]}`;
+  if (props.linkSentAtById[recordId]) return `链接已发送 ${props.linkSentAtById[recordId]}`;
+  return props.hasUsableSignature(person) ? "已签名，可重签" : "待签名";
+}
+</script>
+
+<style scoped>
+.company-selected-panel {
+  border-color: #b8d7ff;
+  background: linear-gradient(135deg, rgba(239, 246, 255, 0.98), rgba(255, 255, 255, 0.98));
+  box-shadow: inset 4px 0 0 #1e63ff;
+}
+
+.selected-sign-person {
+  position: relative;
+  display: grid;
+  gap: 5px;
+  border: 1px solid #bfdbfe;
+  border-radius: 16px;
+  padding: 8px;
+}
+
+.company-empty {
+  min-height: 30px;
+  display: flex;
+  align-items: center;
+  border: 1px dashed #bfdbfe;
+  border-radius: 14px;
+  padding: 6px 8px;
+  background: rgba(239, 246, 255, 0.72);
+  color: #1d4ed8;
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.signature-subsection-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.signature-subsection-title span {
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 950;
+}
+
+.signature-subsection-title em {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: #dbeafe;
+  padding: 2px 6px;
+  color: #1d4ed8;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 900;
+}
+
+.signature-subsection-title em.ready {
+  background: #dcfce7;
+  color: #047857;
+}
+
+.signature-subsection-title em.pending {
+  background: #fff7ed;
+  color: #c2410c;
+}
+
+.signature-subsection-title em.empty {
+  background: #eff6ff;
+  color: #3156c9;
+}
+
+.selected-signatures {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(92px, auto);
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  margin-top: 2px;
+  overflow: visible;
+  padding-bottom: 2px;
+  isolation: isolate;
+}
+
+.selected-signature-chip {
+  display: inline-grid;
+  grid-template-columns: 52px minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  width: 100%;
+  height: 32px;
+  border: 1px solid #d8e5f7;
+  border-radius: 999px;
+  background: #ffffff;
+  padding: 4px 6px;
+  cursor: pointer;
+}
+
+.selected-signature-chip.active {
+  border-color: #1e63ff;
+  box-shadow: 0 8px 18px rgba(30, 99, 255, 0.13);
+}
+
+.selected-signature-chip img {
+  width: 50px;
+  height: 22px;
+  object-fit: contain;
+}
+
+.signature-chip-state {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 50px;
+  min-height: 22px;
+  border-radius: 999px;
+  background: #fff7ed;
+  color: #c2410c;
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.selected-signature-chip strong {
+  overflow: hidden;
+  color: #0f172a;
+  font-size: 12px;
+  font-weight: 900;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.selected-signature-open {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 30px;
+  border: 1px solid #bfdbfe;
+  border-radius: 999px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  padding: 0 9px;
+  font-size: 11px;
+  font-weight: 900;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.selected-signature-open.ready {
+  border-color: #bbf7d0;
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.selected-signature-open.pending {
+  border-color: #fed7aa;
+  background: #fff7ed;
+  color: #c2410c;
+}
+
+.selected-signature-open em {
+  border-radius: 999px;
+  background: #fff7ed;
+  color: #c2410c;
+  padding: 2px 6px;
+  font-style: normal;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.drawer-filter-bar {
+  display: grid;
+  grid-template-columns: minmax(104px, auto) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  border: 1px solid #d8e5f7;
+  border-radius: 14px;
+  background: rgba(248, 251, 255, 0.96);
+  padding: 8px;
+  backdrop-filter: blur(10px);
+}
+
+.drawer-progress {
+  display: grid;
+  gap: 2px;
+  color: #1d4ed8;
+}
+
+.drawer-progress strong {
+  font-size: 13px;
+  font-weight: 950;
+}
+
+.drawer-progress span {
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.drawer-filter-bar input {
+  min-width: 0;
+  height: 30px;
+  border: 1px solid #cfe0ff;
+  border-radius: 999px;
+  padding: 0 11px;
+  color: #0f172a;
+  background: #ffffff;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 850;
+  outline: none;
+}
+
+.drawer-filter-bar input:focus {
+  border-color: #1e63ff;
+  box-shadow: 0 0 0 3px rgba(30, 99, 255, 0.12);
+}
+
+.drawer-filter-tabs {
+  display: inline-flex;
+  gap: 4px;
+  border: 1px solid #d8e5f7;
+  border-radius: 999px;
+  background: #ffffff;
+  padding: 3px;
+}
+
+.drawer-filter-tabs button {
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: #64748b;
+  padding: 5px 9px;
+  font-size: 11px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.drawer-filter-tabs button.active {
+  background: #1e63ff;
+  color: #ffffff;
+}
+
+.drawer-empty {
+  border: 1px dashed #bfdbfe;
+  border-radius: 14px;
+  padding: 14px;
+  background: #f8fbff;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 850;
+  text-align: center;
+}
+
+:deep(small.failed) {
+  color: #b91c1c !important;
+}
+
+@media (max-width: 760px) {
+  .selected-signatures {
+    display: grid;
+    grid-template-columns: 1fr;
+    max-height: none;
+  }
+
+  .selected-signature-chip {
+    width: auto;
+  }
+
+  .selected-signature-open {
+    padding: 0 10px;
+  }
+
+  .drawer-filter-bar {
+    grid-template-columns: 1fr;
+  }
+}
+</style>

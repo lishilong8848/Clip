@@ -4,217 +4,89 @@
       <header>
         <div>
           <strong>管理员工具</strong>
-          <p>查看后台状态、权限、交接班链接和 mock 压测，不触发真实飞书或多维写入。</p>
+          <p>审批权限、查看后台状态、维护配置和运行预检。</p>
         </div>
         <button class="btn ghost" @click="$emit('close')">关闭</button>
       </header>
 
-      <nav class="tabs">
-        <button :class="{ active: tab === 'status' }" @click="tab = 'status'; loadStatus()">状态</button>
-        <button :class="{ active: tab === 'permissions' }" @click="tab = 'permissions'; loadPermissions()">权限</button>
-        <button :class="{ active: tab === 'handover' }" @click="tab = 'handover'; loadHandover()">交接班链接</button>
-        <button :class="{ active: tab === 'mop' }" @click="tab = 'mop'; loadMopSettings()">MOP配置</button>
-        <button :class="{ active: tab === 'pressure' }" @click="tab = 'pressure'">mock 压测</button>
+      <section class="admin-overview" aria-label="管理员概览">
+        <button
+          v-for="item in adminOverviewItems"
+          :key="item.key"
+          type="button"
+          :class="item.tone"
+          :aria-label="item.ariaLabel"
+          :title="`打开${item.targetLabel}`"
+          @click="selectAdminTab(item.target)"
+        >
+          <span>{{ item.label }}</span>
+          <strong>{{ item.value }}</strong>
+          <small>{{ item.hint }}</small>
+        </button>
+      </section>
+
+      <nav class="tabs admin-workspace-tabs" aria-label="管理员工作区">
+        <button
+          v-for="item in adminTabs"
+          :key="item.key"
+          :class="{ active: tab === item.key }"
+          type="button"
+          @click="selectAdminTab(item.key)"
+        >
+          <strong>{{ item.label }}</strong>
+          <small>{{ item.description }}</small>
+          <b v-if="item.badge">{{ item.badge }}</b>
+        </button>
       </nav>
 
-      <section v-if="message" class="message">{{ message }}</section>
-      <div v-if="confirmDialog.open" class="admin-confirm-backdrop" @click.self="resolveConfirm(false)">
-        <section class="admin-confirm-modal" :class="`tone-${confirmDialog.tone}`" role="dialog" aria-modal="true">
-          <div class="confirm-icon">{{ confirmDialog.tone === "danger" ? "!" : "i" }}</div>
-          <div>
-            <span>{{ confirmDialog.kicker }}</span>
-            <h3>{{ confirmDialog.title }}</h3>
-            <p>{{ confirmDialog.message }}</p>
-            <ul v-if="confirmDialog.details.length">
-              <li v-for="item in confirmDialog.details" :key="item">{{ item }}</li>
-            </ul>
-            <div class="confirm-actions">
-              <button class="btn ghost" type="button" @click="resolveConfirm(false)">
-                {{ confirmDialog.cancelLabel }}
-              </button>
-              <button class="btn" :class="confirmDialog.confirmClass" type="button" @click="resolveConfirm(true)">
-                {{ confirmDialog.confirmLabel }}
-              </button>
-            </div>
-          </div>
-        </section>
+      <div class="admin-advanced-toggle">
+        <span>低频工具默认收起，避免误触离线压测。</span>
+        <button
+          class="btn ghost"
+          type="button"
+          @click="toggleAdvancedDiagnostics"
+        >
+          {{ advancedDiagnosticsVisible ? "收起高级诊断" : "显示高级诊断" }}
+        </button>
       </div>
 
-      <section v-if="tab === 'status'" class="pane">
-        <div class="actions">
-          <button class="btn blue" @click="loadStatus">刷新状态</button>
-          <button class="btn green" @click="openHistoryMemory">历史记忆导入</button>
-          <button class="btn ghost" @click="runPreflight">真实联调预检</button>
-          <button class="btn ghost" @click="cleanupJobs">清理终态任务</button>
+      <section class="admin-current-guide" :class="tab" aria-live="polite">
+        <div>
+          <strong>{{ activeAdminGuide.title }}</strong>
+          <p>{{ activeAdminGuide.text }}</p>
         </div>
-        <div class="metric-grid">
-          <article>
-            <span>消息队列</span>
-            <strong>{{ stats.message_queue_size ?? "-" }}</strong>
-          </article>
-          <article>
-            <span>Qt 队列</span>
-            <strong>{{ stats.qt_queue_size ?? stats.qt_outbox_pending ?? "-" }}</strong>
-          </article>
-          <article>
-            <span>上传等待</span>
-            <strong>{{ stats.upload_wait_size ?? "-" }}</strong>
-          </article>
-          <article>
-            <span>SSE 连接</span>
-            <strong>{{ stats.sse_connections?.connections ?? "-" }}</strong>
-          </article>
-        </div>
-        <div class="status-grid">
-          <article :class="['status-card', qtBridgeTone]">
-            <div>
-              <span>Qt 连接</span>
-              <strong>{{ stats.qt_bridge?.connected ? "已连接" : "未连接" }}</strong>
-            </div>
-            <p>心跳延迟 {{ formatSeconds(stats.qt_bridge?.age_seconds) }}</p>
-          </article>
-          <article :class="['status-card', sourceSnapshotTone]">
-            <div>
-              <span>源表快照</span>
-              <strong>{{ stats.source_snapshot?.active?.status || "未知" }}</strong>
-            </div>
-            <p>最近成功 {{ formatTime(stats.source_snapshot?.active?.finished_at) }}</p>
-            <p v-if="stats.source_snapshot?.last_failed?.error" class="danger-text">
-              最近失败：{{ stats.source_snapshot.last_failed.error }}
-            </p>
-          </article>
-          <article :class="['status-card', attachmentTone]">
-            <div>
-              <span>附件暂存</span>
-              <strong>{{ formatBytes(stats.upload_attachments?.total_bytes) }}</strong>
-            </div>
-            <p>
-              {{ stats.upload_attachments?.pending ?? 0 }} 个待使用 /
-              上限 {{ formatBytes(stats.upload_attachments?.max_pending_bytes) }}
-            </p>
-            <div class="bar"><i :style="{ width: attachmentUsagePercent + '%' }"></i></div>
-          </article>
-          <article class="status-card">
-            <div>
-              <span>批量任务轮询</span>
-              <strong>{{ stats.job_batch?.requests ?? 0 }}</strong>
-            </div>
-            <p>
-              平均 {{ stats.job_batch?.avg_request_size ?? 0 }} 个/次，
-              拒绝 {{ stats.job_batch?.denied_jobs ?? 0 }}，
-              丢失 {{ stats.job_batch?.missing_jobs ?? 0 }}
-            </p>
-          </article>
-        </div>
-        <section class="diagnostic-section">
-          <div class="section-title">
-            <strong>后台维护</strong>
-            <span>最近清理 {{ formatTime(stats.job_cleanup?.cleaned_at) }}</span>
-          </div>
-          <div class="source-type-grid">
-            <article>
-              <span>终态任务</span>
-              <strong>{{ stats.job_cleanup?.deleted ?? 0 }}</strong>
-            </article>
-            <article>
-              <span>运行队列</span>
-              <strong>{{ stats.job_cleanup?.runtime_queue_removed ?? 0 }}</strong>
-            </article>
-            <article>
-              <span>Qt 事件</span>
-              <strong>{{ stats.job_cleanup?.outbox_removed ?? 0 }}</strong>
-            </article>
-            <article>
-              <span>附件暂存</span>
-              <strong>{{ stats.job_cleanup?.attachment_removed ?? 0 }}</strong>
-            </article>
-            <article>
-              <span>剪贴板候选</span>
-              <strong>{{ stats.job_cleanup?.clipboard_removed ?? 0 }}</strong>
-            </article>
-            <article>
-              <span>弹窗会话</span>
-              <strong>{{ stats.job_cleanup?.dialog_removed ?? 0 }}</strong>
-            </article>
-            <article>
-              <span>回退记录</span>
-              <strong>{{ stats.job_cleanup?.undo_removed ?? 0 }}</strong>
-            </article>
-            <article>
-              <span>事件日志</span>
-              <strong>{{ stats.job_cleanup?.append_events_removed ?? 0 }}</strong>
-            </article>
-          </div>
-          <p class="muted-line">
-            SQLite 维护：{{ sqliteMaintenanceText }}
-          </p>
-        </section>
-        <section class="diagnostic-section">
-          <div class="section-title">
-            <strong>源表分类</strong>
-            <span>当前 active snapshot</span>
-          </div>
-          <div class="source-type-grid">
-            <article v-for="item in sourceTypeCards" :key="item.key">
-              <span>{{ item.label }}</span>
-              <strong>{{ item.count }}</strong>
-            </article>
-          </div>
-        </section>
-        <section v-if="slowJobs.length" class="diagnostic-section">
-          <div class="section-title">
-            <strong>慢任务 TOP</strong>
-            <span>按受理后耗时排序</span>
-          </div>
-          <div class="slow-job-list">
-            <article v-for="job in slowJobs" :key="job.job_id">
-              <div>
-                <strong>{{ job.title || job.job_id }}</strong>
-                <span>{{ workTypeLabel(job.work_type) }} · {{ actionLabel(job.action) }} · {{ job.phase }}</span>
-              </div>
-              <b>{{ formatSeconds(job.elapsed_seconds) }}</b>
-            </article>
-          </div>
-        </section>
-        <section v-if="recentJobItems.length" class="diagnostic-section">
-          <div class="section-title">
-            <strong>最近任务</strong>
-            <span>卡住任务可先标记失败，再按需重试</span>
-          </div>
-          <div class="job-list">
-            <article v-for="job in recentJobItems" :key="job.job_id" class="job-row">
-              <div class="job-main">
-                <strong>{{ workTypeLabel(job.work_type) }} · {{ actionLabel(job.action) }}</strong>
-                <span>{{ shortId(job.job_id) }} · {{ job.phase || "未知" }} · {{ formatMaybeTime(job.updated_at) }}</span>
-                <p v-if="job.error" class="danger-text">{{ job.error }}</p>
-              </div>
-              <div class="job-actions">
-                <button
-                  class="btn ghost"
-                  :disabled="busy || !job.can_mark_stuck_failed"
-                  @click="markStuckFailed(job)"
-                >
-                  标记卡住
-                </button>
-                <button class="btn blue" :disabled="busy || !job.can_retry" @click="retryJob(job)">
-                  重试
-                </button>
-                <button class="btn danger" :disabled="busy || !job.can_clear" @click="clearJob(job)">
-                  清理
-                </button>
-              </div>
-            </article>
-          </div>
-        </section>
-        <section v-if="statusWarnings.length" class="warning-list">
-          <strong>需要关注</strong>
-          <p v-for="item in statusWarnings" :key="item">{{ item }}</p>
-        </section>
-        <details class="raw-diagnostic">
-          <summary>查看原始诊断数据</summary>
-          <pre>{{ pretty({ stats, perf, queues, recentJobs }) }}</pre>
-        </details>
+        <span>{{ activeAdminGuide.badge }}</span>
       </section>
+
+      <MessageBanner v-if="message" :text="message" />
+      <ConfirmDialog
+        :open="confirmDialog.open"
+        :tone="confirmDialog.tone"
+        :kicker="confirmDialog.kicker"
+        :title="confirmDialog.title"
+        :message="confirmDialog.message"
+        :details="confirmDialog.details"
+        :confirm-label="confirmDialog.confirmLabel"
+        :cancel-label="confirmDialog.cancelLabel"
+        :confirm-class="confirmDialog.confirmClass"
+        @resolve="resolveConfirm"
+      />
+
+      <AdminStatusPane
+        v-if="tab === 'status'"
+        :stats="stats"
+        :perf="perf"
+        :queues="queues"
+        :recent-jobs="recentJobs"
+        :busy="busy"
+        @refresh="loadStatus"
+        @open-history-memory="openHistoryMemory"
+        @preflight="runPreflight"
+        @cleanup="cleanupJobs"
+        @mark-stuck-failed="markStuckFailed"
+        @retry-job="retryJob"
+        @clear-job="clearJob"
+      />
 
       <section v-else-if="tab === 'permissions'" class="pane">
         <div class="actions">
@@ -222,27 +94,88 @@
           <button class="btn green" @click="savePermissions">保存权限</button>
           <button class="btn ghost" @click="addPermissionUser">添加用户</button>
         </div>
-        <div class="permission-list">
-          <article v-for="user in permissions.users" :key="user.open_id" class="permission-row">
-            <input v-model="user.name" placeholder="姓名" :disabled="user.locked" />
-            <input v-model="user.open_id" placeholder="openid" :disabled="user.locked" />
-            <select v-model="user.role" :disabled="user.locked">
-              <option value="building">用户</option>
+        <AdminPermissionRequests
+          v-model:search="permissionRequestSearch"
+          v-model:status="permissionRequestStatus"
+          v-model:reject-reason="permissionRejectReason"
+          :items="filteredPermissionRequests"
+          :scope-options="scopeOptions"
+          :busy="busy"
+          :selected-ids="selectedRequestIds"
+          :all-filtered-pending-selected="allFilteredPendingSelected"
+          :selected-pending-count="selectedPendingRequestIds.length"
+          :status-label="permissionRequestStatusLabel"
+          :request-scope-labels="requestScopeLabels"
+          :current-scope-labels="currentScopeLabels"
+          :review-scopes="reviewScopes"
+          @load="loadPermissionRequests"
+          @approve-selected="approveSelectedPermissionRequests"
+          @reject-selected="rejectSelectedPermissionRequests"
+          @toggle-all="toggleAllFilteredPermissionRequests"
+          @toggle-selection="togglePermissionRequestSelection"
+          @toggle-review-scope="toggleReviewScope"
+          @approve="approvePermissionRequest"
+          @reject="rejectPermissionRequest"
+        />
+        <section class="permission-user-tools">
+          <div>
+            <strong>已授权用户</strong>
+            <span>{{ filteredPermissionUsers.length }} / {{ permissions.users.length }} 人</span>
+          </div>
+          <label class="permission-user-search">
+            <span>搜索用户</span>
+            <input v-model="permissionUserSearch" placeholder="姓名、openid、楼栋" />
+          </label>
+          <label class="permission-user-filter">
+            <span>筛选</span>
+            <select v-model="permissionUserFilter">
+              <option value="all">全部用户</option>
               <option value="admin">管理员</option>
+              <option value="building">普通用户</option>
+              <option value="disabled">已禁用</option>
+              <option value="locked">固定管理员</option>
             </select>
-            <label><input v-model="user.enabled" type="checkbox" :disabled="user.locked" /> 启用</label>
+          </label>
+        </section>
+        <div class="permission-list">
+          <div v-if="!filteredPermissionUsers.length" class="permission-empty">
+            没有符合当前筛选条件的用户。
+          </div>
+          <article v-for="user in filteredPermissionUsers" :key="user.open_id" class="permission-row" :class="{ locked: user.locked, disabled: !user.enabled }">
+            <label class="permission-field">
+              <span>姓名</span>
+              <input v-model="user.name" placeholder="姓名" :disabled="user.locked" />
+            </label>
+            <label class="permission-field openid-field">
+              <span>openid</span>
+              <input v-model="user.open_id" placeholder="openid" :disabled="user.locked" />
+            </label>
+            <label class="permission-field role-field">
+              <span>角色</span>
+              <select v-model="user.role" :disabled="user.locked">
+                <option value="building">用户</option>
+                <option value="admin">管理员</option>
+              </select>
+            </label>
+            <label class="permission-enable"><input v-model="user.enabled" type="checkbox" :disabled="user.locked" /> 启用</label>
             <button class="btn danger" :disabled="user.locked" @click="removePermissionUser(user)">删除</button>
-            <div class="scope-checks">
-              <label v-for="scope in scopeOptions" :key="scope.value">
-                <input
-                  type="checkbox"
-                  :checked="user.scopes?.includes(scope.value)"
-                  :disabled="user.locked || user.role === 'admin'"
-                  @change="toggleUserScope(user, scope.value, ($event.target as HTMLInputElement).checked)"
-                />
-                {{ scope.label }}
-              </label>
-            </div>
+            <details class="scope-checks-wrap">
+              <summary>
+                <span>楼栋权限</span>
+                <b>{{ permissionUserScopeSummary(user) }}</b>
+              </summary>
+              <div class="scope-checks">
+                <label v-for="scope in scopeOptions" :key="scope.value">
+                  <input
+                    type="checkbox"
+                    :checked="user.scopes?.includes(scope.value)"
+                    :disabled="user.locked || user.role === 'admin'"
+                    @change="toggleUserScope(user, scope.value, ($event.target as HTMLInputElement).checked)"
+                  />
+                  {{ scope.label }}
+                </label>
+              </div>
+            </details>
           </article>
         </div>
       </section>
@@ -312,13 +245,13 @@
           <label>
             场景
             <select v-model="pressure.scenario">
-              <option value="accepted">accepted</option>
-              <option value="mixed">mixed</option>
-              <option value="failed-network">failed-network</option>
-              <option value="failed-remote-missing">failed-remote-missing</option>
+              <option value="accepted">全部正常受理</option>
+              <option value="mixed">成功和失败混合</option>
+              <option value="failed-network">模拟网络失败</option>
+              <option value="failed-remote-missing">模拟远端记录缺失</option>
             </select>
           </label>
-          <button class="btn blue" :disabled="busy" @click="runMockPressure">运行 mock 压测</button>
+          <button class="btn blue" :disabled="busy" @click="runMockPressure">运行离线压测</button>
         </div>
         <section
           v-if="pressureResult.assessment"
@@ -358,7 +291,7 @@
           </article>
         </div>
         <details class="raw-diagnostic" :open="Boolean(pressureResult.assessment)">
-          <summary>查看原始压测结果</summary>
+          <summary>查看详细压测数据</summary>
           <pre>{{ pretty(pressureResult) }}</pre>
         </details>
       </section>
@@ -369,8 +302,13 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from "vue";
 import { requestJson } from "../api/client";
+import AdminPermissionRequests from "./AdminPermissionRequests.vue";
+import AdminStatusPane from "./AdminStatusPane.vue";
+import ConfirmDialog from "./ConfirmDialog.vue";
+import MessageBanner from "./MessageBanner.vue";
 
 type Dict = Record<string, any>;
+type AdminTabKey = "status" | "permissions" | "handover" | "mop" | "pressure";
 
 const props = defineProps<{
   open: boolean;
@@ -391,7 +329,7 @@ const buildingScopes = [
   { value: "H", label: "H楼" },
 ];
 
-const tab = ref<"status" | "permissions" | "handover" | "mop" | "pressure">("status");
+const tab = ref<AdminTabKey>("status");
 const busy = ref(false);
 const message = ref("");
 const stats = ref<Dict>({});
@@ -399,6 +337,15 @@ const perf = ref<Dict>({});
 const queues = ref<Dict>({});
 const recentJobs = ref<Dict>({});
 const permissions = reactive<{ users: Dict[]; scope_options: Dict[] }>({ users: [], scope_options: [] });
+const permissionRequests = ref<Dict[]>([]);
+const permissionRequestStatus = ref("pending");
+const permissionRequestSearch = ref("");
+const permissionRejectReason = ref("");
+const permissionUserSearch = ref("");
+const permissionUserFilter = ref("all");
+const selectedRequestIds = reactive(new Set<string>());
+const permissionOriginalRoles = new Map<string, string>();
+const advancedDiagnosticsVisible = ref(false);
 const handoverLinks = reactive<Record<string, string>>({});
 const handoverPassword = ref("");
 const mopSettings = reactive({
@@ -408,6 +355,7 @@ const mopSettings = reactive({
   mop_title_field: "文件名",
   mop_attachment_field: "文件",
 });
+const mopSettingsLoaded = ref(false);
 const pressure = reactive({
   count: 60,
   concurrency: 10,
@@ -433,75 +381,219 @@ const confirmDialog = reactive({
   resolve: undefined as undefined | ((confirmed: boolean) => void),
 });
 
-const attachmentUsagePercent = computed(() => {
-  const used = Number(stats.value.upload_attachments?.total_bytes || 0);
-  const limit = Number(stats.value.upload_attachments?.max_pending_bytes || 0);
-  if (!limit) return 0;
-  return Math.max(0, Math.min(100, Math.round((used / limit) * 100)));
+const filteredPermissionRequests = computed(() => {
+  const query = permissionRequestSearch.value.trim().toLowerCase();
+  const items = permissionRequests.value || [];
+  if (!query) return items;
+  return items.filter((item) => {
+    const haystack = [
+      item.name,
+      item.open_id,
+      item.reason,
+      item.status,
+      ...(Array.isArray(item.requested_scope_labels) ? item.requested_scope_labels : []),
+      ...(Array.isArray(item.current_scope_labels) ? item.current_scope_labels : []),
+    ].join(" ").toLowerCase();
+    return haystack.includes(query);
+  });
 });
-
-const attachmentTone = computed(() => {
-  if (attachmentUsagePercent.value >= 90) return "bad";
-  if (attachmentUsagePercent.value >= 70) return "warn";
-  return "good";
-});
-
-const qtBridgeTone = computed(() => {
-  return stats.value.qt_bridge?.connected ? "good" : "warn";
-});
-
-const sourceSnapshotTone = computed(() => {
-  const active = stats.value.source_snapshot?.active || {};
-  if (!active.status) return "warn";
-  if (String(active.status) !== "active") return "warn";
-  if (stats.value.source_snapshot?.last_failed?.error) return "warn";
-  return "good";
-});
-
-const statusWarnings = computed(() => {
-  const result: string[] = [];
-  for (const item of stats.value.capacity_warnings || []) {
-    if (item) result.push(String(item));
+const pendingPermissionRequestCount = computed(() => (
+  permissionRequests.value.filter((item) => item.status === "pending").length
+));
+const enabledPermissionUserCount = computed(() => (
+  permissions.users.filter((user) => user.enabled !== false).length
+));
+const adminPermissionUserCount = computed(() => (
+  permissions.users.filter((user) => String(user.role || "building") === "admin").length
+));
+const backendQueueTotal = computed(() => {
+  const directKeys = ["message_queue_length", "qt_queue_length", "upload_queue_length", "source_refresh_queue_length"];
+  let total = directKeys.reduce((sum, key) => sum + Number(queues.value?.[key] || 0), 0);
+  const nested = queues.value?.queues;
+  if (nested && typeof nested === "object") {
+    total += Object.values(nested).reduce((sum: number, value: any) => {
+      if (typeof value === "number") return sum + value;
+      if (value && typeof value === "object") {
+        return sum + Number(value.length || value.pending || value.ready || value.waiting || 0);
+      }
+      return sum;
+    }, 0);
   }
-  if (!stats.value.qt_bridge?.connected) result.push("Qt 展示壳未连接，桌面界面不会实时同步。");
-  if (attachmentUsagePercent.value >= 90) result.push("附件暂存空间接近上限，建议等待后台清理或减少现场照片并发。");
-  const snapshotError = stats.value.source_snapshot?.last_failed?.error;
-  if (snapshotError) result.push(`源表最近刷新失败：${snapshotError}`);
-  return Array.from(new Set(result)).slice(0, 8);
+  return total;
 });
-
-const sourceTypeCards = computed(() => {
-  const totals = stats.value.source_type_summary?.totals || {};
-  const labels: Record<string, string> = {
-    maintenance: "维保",
-    change: "变更",
-    repair: "检修",
-    power: "上电",
-    polling: "轮巡",
-    adjust: "调整",
-    unknown: "未知",
+const mopConfigured = computed(() => Boolean(
+  String(mopSettings.mop_app_token || "").trim()
+  && String(mopSettings.mop_table_id || "").trim()
+));
+const adminOverviewItems = computed(() => [
+  {
+    key: "requests",
+    label: "权限申请",
+    value: `${pendingPermissionRequestCount.value} 待审批`,
+    hint: pendingPermissionRequestCount.value ? "需要管理员处理" : "暂无待处理申请",
+    tone: pendingPermissionRequestCount.value ? "warn" : "good",
+    target: "permissions" as AdminTabKey,
+    targetLabel: "权限管理",
+    ariaLabel: "打开申请审批",
+  },
+  {
+    key: "users",
+    label: "授权用户",
+    value: `${enabledPermissionUserCount.value} 人`,
+    hint: `管理员 ${adminPermissionUserCount.value} 人`,
+    tone: "blue",
+    target: "permissions" as AdminTabKey,
+    targetLabel: "权限管理",
+    ariaLabel: "打开用户授权列表",
+  },
+  {
+    key: "queues",
+    label: "后台队列",
+    value: `${backendQueueTotal.value} 条`,
+    hint: backendQueueTotal.value ? "有任务正在排队" : "队列空闲",
+    tone: backendQueueTotal.value ? "warn" : "good",
+    target: "status" as AdminTabKey,
+    targetLabel: "后台状态",
+    ariaLabel: "打开后台队列概览",
+  },
+  {
+    key: "mop",
+    label: "MOP 配置",
+    value: !mopSettingsLoaded.value ? "未读取" : mopConfigured.value ? "已配置" : "待配置",
+    hint: !mopSettingsLoaded.value ? "进入配置页后读取" : mopConfigured.value ? "维护单页面可用" : "需填写 app_token/table_id",
+    tone: !mopSettingsLoaded.value ? "blue" : mopConfigured.value ? "good" : "warn",
+    target: "mop" as AdminTabKey,
+    targetLabel: "MOP 配置",
+    ariaLabel: "打开维护单配置",
+  },
+]);
+const adminTabs = computed(() => {
+  const tabs = [
+    {
+      key: "status" as AdminTabKey,
+      label: "后台状态",
+      description: "队列、错误、预检",
+      badge: backendQueueTotal.value ? `${backendQueueTotal.value}` : "",
+    },
+    {
+      key: "permissions" as AdminTabKey,
+      label: "权限管理",
+      description: "审批申请和用户",
+      badge: pendingPermissionRequestCount.value ? `${pendingPermissionRequestCount.value}` : "",
+    },
+    {
+      key: "handover" as AdminTabKey,
+      label: "交接班链接",
+      description: "楼栋审核入口",
+      badge: "",
+    },
+    {
+      key: "mop" as AdminTabKey,
+      label: "MOP 配置",
+      description: "维护单来源表",
+      badge: mopSettingsLoaded.value && !mopConfigured.value ? "待配置" : "",
+    },
+  ];
+  if (advancedDiagnosticsVisible.value) {
+    tabs.push({
+      key: "pressure" as AdminTabKey,
+      label: "高级诊断",
+      description: "离线压测",
+      badge: "",
+    });
+  }
+  return tabs;
+});
+const activeAdminGuide = computed(() => {
+  const guides: Record<AdminTabKey, { title: string; text: string; badge: string }> = {
+    status: {
+      title: "后台状态",
+      text: "先看队列、失败任务和预检结果；异常任务可在这里重试或清理。",
+      badge: backendQueueTotal.value ? `${backendQueueTotal.value} 条排队` : "队列空闲",
+    },
+    permissions: {
+      title: "权限管理",
+      text: "先处理权限申请，再维护已授权用户；管理员身份只在用户列表中设置。",
+      badge: pendingPermissionRequestCount.value ? `${pendingPermissionRequestCount.value} 待审批` : "暂无申请",
+    },
+    handover: {
+      title: "交接班链接",
+      text: "配置各楼交接班审核页链接，保存后普通用户可从功能页打开。",
+      badge: "楼栋链接",
+    },
+    mop: {
+      title: "MOP 配置",
+      text: "配置维护单候选表格来源；这里只影响工程师 MOP 页面。",
+      badge: mopConfigured.value ? "已配置" : "待配置",
+    },
+    pressure: {
+      title: "高级诊断",
+      text: "只做离线链路验证，不发送飞书消息，也不写真实多维记录。",
+      badge: "离线测试",
+    },
   };
-  return Object.keys(labels).map((key) => ({
-    key,
-    label: labels[key],
-    count: Number(totals[key] || 0),
-  })).filter((item) => item.count > 0 || ["maintenance", "change", "repair"].includes(item.key));
+  return guides[tab.value];
 });
-
-const slowJobs = computed(() => {
-  return Array.isArray(stats.value.slow_jobs) ? stats.value.slow_jobs.slice(0, 10) : [];
+const selectedPendingRequestIds = computed(() => (
+  Array.from(selectedRequestIds).filter((id) => {
+    const item = permissionRequests.value.find((row) => row.request_id === id);
+    return item?.status === "pending";
+  })
+));
+const allFilteredPendingSelected = computed(() => {
+  const pending = filteredPermissionRequests.value.filter((item) => item.status === "pending");
+  return pending.length > 0 && pending.every((item) => selectedRequestIds.has(String(item.request_id || "")));
 });
-
-const recentJobItems = computed(() => {
-  const items = recentJobs.value?.items;
-  return Array.isArray(items) ? items.slice(0, 20) : [];
+const filteredPermissionUsers = computed(() => {
+  const query = permissionUserSearch.value.trim().toLowerCase();
+  return permissions.users.filter((user) => {
+    const role = String(user.role || "building");
+    const enabled = user.enabled !== false;
+    if (permissionUserFilter.value === "admin" && role !== "admin") return false;
+    if (permissionUserFilter.value === "building" && role === "admin") return false;
+    if (permissionUserFilter.value === "disabled" && enabled) return false;
+    if (permissionUserFilter.value === "locked" && !user.locked) return false;
+    if (!query) return true;
+    const scopeText = (Array.isArray(user.scopes) ? user.scopes : [])
+      .map((scope) => scopeOptionLabel(scope))
+      .join(" ");
+    const haystack = [
+      user.name,
+      user.open_id,
+      role === "admin" ? "管理员" : "普通用户",
+      enabled ? "启用" : "禁用",
+      scopeText,
+    ].join(" ").toLowerCase();
+    return haystack.includes(query);
+  });
 });
 
 watch(() => props.open, (open) => {
-  if (open) void loadStatus();
+  if (open) {
+    void loadStatus();
+    void loadPermissionRequests(false);
+  }
 });
 
 const api = requestJson;
+
+function selectAdminTab(next: AdminTabKey): void {
+  if (next === "pressure" && !advancedDiagnosticsVisible.value) {
+    advancedDiagnosticsVisible.value = true;
+  }
+  tab.value = next;
+  if (next === "status") void loadStatus();
+  else if (next === "permissions") void loadPermissions();
+  else if (next === "handover") void loadHandover();
+  else if (next === "mop") void loadMopSettings();
+}
+
+function toggleAdvancedDiagnostics(): void {
+  advancedDiagnosticsVisible.value = !advancedDiagnosticsVisible.value;
+  if (!advancedDiagnosticsVisible.value && tab.value === "pressure") {
+    selectAdminTab("status");
+  }
+}
 
 function pretty(value: unknown): string {
   return JSON.stringify(value || {}, null, 2);
@@ -528,52 +620,17 @@ function formatTime(value: unknown): string {
   return date.toLocaleString("zh-CN", { hour12: false });
 }
 
-function formatMaybeTime(value: unknown): string {
-  const text = String(value || "").trim();
-  return text || "暂无时间";
-}
-
 function shortId(value: unknown): string {
   const text = String(value || "").trim();
   if (!text) return "-";
   return text.length > 12 ? `${text.slice(0, 8)}...${text.slice(-4)}` : text;
 }
 
-function formatSeconds(value: unknown): string {
-  const seconds = Number(value || 0);
-  if (!Number.isFinite(seconds) || seconds <= 0) return "暂无";
-  return `${Math.round(seconds)} 秒`;
+function scopeOptionLabel(value: unknown): string {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  return props.scopeOptions.find((item) => String(item.value) === text)?.label || text;
 }
-
-function workTypeLabel(value: unknown): string {
-  const labels: Record<string, string> = {
-    maintenance: "维保",
-    change: "变更",
-    repair: "检修",
-    power: "上电",
-    polling: "轮巡",
-    adjust: "调整",
-  };
-  return labels[String(value || "")] || String(value || "通告");
-}
-
-function actionLabel(value: unknown): string {
-  const labels: Record<string, string> = {
-    start: "开始",
-    update: "更新",
-    end: "结束",
-    delete: "删除",
-  };
-  return labels[String(value || "")] || String(value || "任务");
-}
-
-const sqliteMaintenanceText = computed(() => {
-  const item = stats.value.sqlite_maintenance || {};
-  if (item.skipped_at) return `运行繁忙，已跳过 ${formatTime(item.skipped_at)}`;
-  if (item.checked_at && item.checkpointed) return `已整理 ${formatTime(item.checked_at)}`;
-  if (item.checked_at) return `无需整理 ${formatTime(item.checked_at)}`;
-  return "暂无";
-});
 
 function cleanupRemovedTotal(value: Dict): number {
   const keys = [
@@ -711,11 +768,214 @@ async function loadPermissions(): Promise<void> {
   message.value = "";
   busy.value = true;
   try {
-    const data = await api("/api/auth/permissions");
+    const [data] = await Promise.all([
+      api("/api/auth/permissions"),
+      loadPermissionRequests(false),
+    ]);
     permissions.users.splice(0, permissions.users.length, ...(data.users || []));
     permissions.scope_options.splice(0, permissions.scope_options.length, ...(data.scope_options || []));
+    permissionOriginalRoles.clear();
+    for (const user of permissions.users) {
+      const openId = String(user.open_id || "").trim();
+      if (openId) permissionOriginalRoles.set(openId, String(user.role || "building"));
+    }
   } catch (error: any) {
     message.value = error?.message || "权限加载失败";
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function loadPermissionRequests(showBusy = true): Promise<void> {
+  if (showBusy) {
+    message.value = "";
+    busy.value = true;
+  }
+  try {
+    const data = await api(
+      `/api/auth/permission-requests/admin?status=${encodeURIComponent(permissionRequestStatus.value)}&limit=200`
+    );
+    const items = (Array.isArray(data.items) ? data.items : []).map((item: Dict) => ({
+      ...item,
+      review_scopes: Array.isArray(item.approved_scopes)
+        ? [...item.approved_scopes]
+        : (Array.isArray(item.requested_scopes) ? [...item.requested_scopes] : []),
+    }));
+    permissionRequests.value = items;
+    for (const id of Array.from(selectedRequestIds)) {
+      if (!items.some((item: Dict) => item.request_id === id && item.status === "pending")) {
+        selectedRequestIds.delete(id);
+      }
+    }
+  } catch (error: any) {
+    message.value = error?.message || "权限申请加载失败";
+  } finally {
+    if (showBusy) busy.value = false;
+  }
+}
+
+function permissionRequestStatusLabel(value: unknown): string {
+  const labels: Record<string, string> = {
+    pending: "待审批",
+    approved: "已通过",
+    rejected: "已拒绝",
+    superseded: "已替换",
+    expired: "已过期",
+    failed: "已失败",
+    notify_failed: "通知失败",
+  };
+  return labels[String(value || "")] || String(value || "未知");
+}
+
+function requestScopeLabels(item: Dict): string {
+  const labels = Array.isArray(item.requested_scope_labels) ? item.requested_scope_labels : [];
+  return labels.length ? labels.join("、") : "未选择";
+}
+
+function currentScopeLabels(item: Dict): string {
+  const labels = Array.isArray(item.current_scope_labels) ? item.current_scope_labels : [];
+  return labels.length ? labels.join("、") : "暂无";
+}
+
+function reviewScopes(item: Dict): string[] {
+  if (!Array.isArray(item.review_scopes)) {
+    item.review_scopes = Array.isArray(item.requested_scopes) ? [...item.requested_scopes] : [];
+  }
+  return item.review_scopes;
+}
+
+function toggleReviewScope(item: Dict, scope: string, checked: boolean): void {
+  const next = new Set(reviewScopes(item));
+  if (checked) next.add(scope);
+  else next.delete(scope);
+  item.review_scopes = Array.from(next);
+}
+
+function togglePermissionRequestSelection(requestId: string, checked: boolean): void {
+  const id = String(requestId || "").trim();
+  if (!id) return;
+  if (checked) selectedRequestIds.add(id);
+  else selectedRequestIds.delete(id);
+}
+
+function toggleAllFilteredPermissionRequests(checked: boolean): void {
+  for (const item of filteredPermissionRequests.value) {
+    const id = String(item.request_id || "").trim();
+    if (!id || item.status !== "pending") continue;
+    if (checked) selectedRequestIds.add(id);
+    else selectedRequestIds.delete(id);
+  }
+}
+
+function scopesByRequestIds(ids: string[]): Record<string, string[]> {
+  const result: Record<string, string[]> = {};
+  for (const id of ids) {
+    const item = permissionRequests.value.find((row) => row.request_id === id);
+    result[id] = item ? reviewScopes(item) : [];
+  }
+  return result;
+}
+
+function notificationMessage(notification: Dict | undefined): string {
+  if (!notification || notification.ok !== false) return "";
+  return `，但通知用户失败：${notification.message || "未知原因"}`;
+}
+
+async function approvePermissionRequest(item: Dict): Promise<void> {
+  const requestId = String(item.request_id || "").trim();
+  if (!requestId || item.status !== "pending") return;
+  if (!reviewScopes(item).length) {
+    message.value = "请至少选择一个审批楼栋。";
+    return;
+  }
+  busy.value = true;
+  try {
+    const data = await api(`/api/auth/permission-requests/${encodeURIComponent(requestId)}/approve`, {
+      method: "POST",
+      body: JSON.stringify({ scopes: reviewScopes(item) }),
+    });
+    message.value = `权限申请已通过${notificationMessage(data.notification)}`;
+    await loadPermissions();
+  } catch (error: any) {
+    message.value = error?.message || "审批失败";
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function rejectPermissionRequest(item: Dict): Promise<void> {
+  const requestId = String(item.request_id || "").trim();
+  if (!requestId || item.status !== "pending") return;
+  const confirmed = await requestConfirm({
+    tone: "warning",
+    kicker: "权限申请拒绝",
+    title: `拒绝「${item.name || item.open_id || "该用户"}」的申请`,
+    message: permissionRejectReason.value || "将拒绝该权限申请，申请人不会获得新楼栋权限。",
+    confirmLabel: "确认拒绝",
+    confirmClass: "danger",
+  });
+  if (!confirmed) return;
+  busy.value = true;
+  try {
+    const data = await api(`/api/auth/permission-requests/${encodeURIComponent(requestId)}/reject`, {
+      method: "POST",
+      body: JSON.stringify({ reason: permissionRejectReason.value }),
+    });
+    message.value = `权限申请已拒绝${notificationMessage(data.notification)}`;
+    await loadPermissionRequests(false);
+  } catch (error: any) {
+    message.value = error?.message || "拒绝失败";
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function approveSelectedPermissionRequests(): Promise<void> {
+  const ids = selectedPendingRequestIds.value;
+  if (!ids.length) return;
+  busy.value = true;
+  try {
+    const data = await api("/api/auth/permission-requests/bulk-approve", {
+      method: "POST",
+      body: JSON.stringify({ request_ids: ids, scopes_by_request_id: scopesByRequestIds(ids) }),
+    });
+    const okCount = Array.isArray(data.items) ? data.items.length : 0;
+    const failCount = Array.isArray(data.failed) ? data.failed.length : 0;
+    message.value = `批量通过完成：成功 ${okCount} 条，失败 ${failCount} 条`;
+    selectedRequestIds.clear();
+    await loadPermissions();
+  } catch (error: any) {
+    message.value = error?.message || "批量通过失败";
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function rejectSelectedPermissionRequests(): Promise<void> {
+  const ids = selectedPendingRequestIds.value;
+  if (!ids.length) return;
+  const confirmed = await requestConfirm({
+    tone: "warning",
+    kicker: "批量拒绝",
+    title: `拒绝 ${ids.length} 条权限申请`,
+    message: permissionRejectReason.value || "将拒绝选中的权限申请，申请人不会获得新楼栋权限。",
+    confirmLabel: "确认拒绝",
+    confirmClass: "danger",
+  });
+  if (!confirmed) return;
+  busy.value = true;
+  try {
+    const data = await api("/api/auth/permission-requests/bulk-reject", {
+      method: "POST",
+      body: JSON.stringify({ request_ids: ids, reason: permissionRejectReason.value }),
+    });
+    const okCount = Array.isArray(data.items) ? data.items.length : 0;
+    const failCount = Array.isArray(data.failed) ? data.failed.length : 0;
+    message.value = `批量拒绝完成：成功 ${okCount} 条，失败 ${failCount} 条`;
+    selectedRequestIds.clear();
+    await loadPermissionRequests(false);
+  } catch (error: any) {
+    message.value = error?.message || "批量拒绝失败";
   } finally {
     busy.value = false;
   }
@@ -782,7 +1042,36 @@ function toggleUserScope(user: Dict, scope: string, checked: boolean): void {
   user.scopes = Array.from(next);
 }
 
+function permissionUserScopeSummary(user: Dict): string {
+  if (String(user.role || "") === "admin") return "管理员 · 全部楼栋";
+  const values = Array.isArray(user.scopes) ? user.scopes.map((item: unknown) => String(item || "").trim()).filter(Boolean) : [];
+  if (!values.length) return "未选择楼栋";
+  const labels = values.map(scopeOptionLabel).filter(Boolean);
+  if (labels.length <= 3) return labels.join("、");
+  return `${labels.slice(0, 3).join("、")} 等 ${labels.length} 个`;
+}
+
 async function savePermissions(): Promise<void> {
+  const roleChanges = permissions.users
+    .filter((user) => {
+      const openId = String(user.open_id || "").trim();
+      const oldRole = permissionOriginalRoles.get(openId) || "building";
+      const nextRole = String(user.role || "building");
+      return openId && oldRole !== nextRole && (oldRole === "admin" || nextRole === "admin");
+    })
+    .map((user) => `${user.name || user.open_id}: ${permissionOriginalRoles.get(String(user.open_id || "").trim()) || "building"} -> ${user.role || "building"}`);
+  if (roleChanges.length) {
+    const confirmed = await requestConfirm({
+      tone: "warning",
+      kicker: "管理员身份变更",
+      title: "确认修改管理员身份",
+      message: "管理员拥有全部楼栋和管理权限，请确认这些角色变更是预期操作。",
+      details: roleChanges.slice(0, 8),
+      confirmLabel: "确认保存",
+      confirmClass: "blue",
+    });
+    if (!confirmed) return;
+  }
   busy.value = true;
   try {
     await api("/api/auth/permissions", { method: "POST", body: JSON.stringify({ users: permissions.users }) });
@@ -833,6 +1122,7 @@ async function loadMopSettings(): Promise<void> {
     mopSettings.mop_view_id = String(data.mop_view_id || "");
     mopSettings.mop_title_field = String(data.mop_title_field || "文件名");
     mopSettings.mop_attachment_field = String(data.mop_attachment_field || "文件");
+    mopSettingsLoaded.value = true;
   } catch (error: any) {
     message.value = error?.message || "MOP 配置加载失败";
   } finally {
@@ -852,6 +1142,7 @@ async function saveMopSettings(): Promise<void> {
     mopSettings.mop_view_id = String(data.mop_view_id || "");
     mopSettings.mop_title_field = String(data.mop_title_field || "文件名");
     mopSettings.mop_attachment_field = String(data.mop_attachment_field || "文件");
+    mopSettingsLoaded.value = true;
     message.value = "MOP 配置已保存";
   } catch (error: any) {
     message.value = error?.message || "MOP 配置保存失败";
@@ -868,9 +1159,9 @@ async function runMockPressure(): Promise<void> {
       method: "POST",
       body: JSON.stringify(pressure),
     });
-    message.value = "mock 压测完成";
+    message.value = "离线压测完成";
   } catch (error: any) {
-    message.value = error?.message || "mock 压测失败";
+    message.value = error?.message || "离线压测失败";
   } finally {
     busy.value = false;
   }
@@ -881,7 +1172,7 @@ async function runMockPressure(): Promise<void> {
 .admin-shell {
   position: fixed;
   inset: 0;
-  z-index: 100;
+  z-index: var(--cf-z-modal-backdrop, 800);
   display: grid;
   place-items: center;
   padding: 24px;
@@ -893,11 +1184,14 @@ async function runMockPressure(): Promise<void> {
   max-height: calc(100vh - 48px);
   overflow: auto;
   display: grid;
-  gap: 12px;
+  gap: 14px;
   padding: 18px;
-  border-radius: 8px;
-  background: #ffffff;
-  box-shadow: 0 20px 50px rgba(15, 23, 42, 0.22);
+  border: 1px solid var(--cf-border, #d8e5f7);
+  border-radius: var(--cf-radius-panel, 22px);
+  background:
+    linear-gradient(180deg, rgba(239, 246, 255, 0.96), rgba(255, 255, 255, 0.98) 130px),
+    var(--cf-surface, #ffffff);
+  box-shadow: var(--cf-shadow-popover, 0 20px 50px rgba(15, 23, 42, 0.22));
 }
 
 header,
@@ -924,6 +1218,16 @@ header,
 
 header {
   justify-content: space-between;
+  padding: 12px 14px;
+  border: 1px solid rgba(191, 219, 254, 0.82);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.82);
+}
+
+header strong {
+  color: #071a39;
+  font-size: 20px;
+  font-weight: 950;
 }
 
 p {
@@ -935,13 +1239,88 @@ p {
 .btn,
 button {
   border: 1px solid #cbd5e1;
-  border-radius: 6px;
+  border-radius: 14px;
   padding: 8px 12px;
   background: #ffffff;
   color: #0f172a;
   font-size: 14px;
   line-height: 1;
   cursor: pointer;
+}
+
+.admin-overview {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.admin-overview button {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid #d8e5f7;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.86);
+  box-shadow: 0 10px 24px rgba(15, 73, 153, 0.07);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 0.16s ease,
+    box-shadow 0.16s ease,
+    transform 0.16s ease;
+}
+
+.admin-overview button:hover {
+  border-color: #a7c7ff;
+  box-shadow: 0 14px 30px rgba(15, 73, 153, 0.12);
+  transform: translateY(-1px);
+}
+
+.admin-overview button:focus-visible {
+  outline: 3px solid rgba(30, 99, 255, 0.18);
+  outline-offset: 2px;
+}
+
+.admin-overview button span,
+.admin-overview button small {
+  min-width: 0;
+  overflow: hidden;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 850;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-overview button strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #075bd8;
+  font-size: 20px;
+  font-weight: 950;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-overview button.good {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+}
+
+.admin-overview button.good strong {
+  color: #047857;
+}
+
+.admin-overview button.warn {
+  border-color: #fde68a;
+  background: #fffbeb;
+}
+
+.admin-overview button.warn strong {
+  color: #b45309;
 }
 
 .btn.blue,
@@ -969,15 +1348,84 @@ button:disabled {
 }
 
 .tabs {
-  padding: 4px;
-  border: 1px solid #cbd5e1;
-  border-radius: 8px;
-  background: #f8fafc;
+  padding: 6px;
+  border: 1px solid #d8e5f7;
+  border-radius: 18px;
+  background: rgba(248, 251, 255, 0.88);
 }
 
 .tabs button {
-  border: 0;
+  border: 1px solid transparent;
   background: transparent;
+}
+
+.admin-workspace-tabs {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.admin-workspace-tabs button {
+  position: relative;
+  min-width: 0;
+  min-height: 62px;
+  display: grid;
+  gap: 4px;
+  align-content: center;
+  justify-items: start;
+  padding: 10px 12px;
+  border-radius: 14px;
+  color: #475569;
+  text-align: left;
+}
+
+.admin-workspace-tabs button.active {
+  border-color: #1e63ff;
+  background: linear-gradient(135deg, #1e63ff, #1554df);
+  color: #fff;
+  box-shadow: 0 12px 24px rgba(30, 99, 255, 0.2);
+}
+
+.admin-workspace-tabs strong,
+.admin-workspace-tabs small {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-workspace-tabs strong {
+  font-size: 14px;
+  font-weight: 950;
+}
+
+.admin-workspace-tabs small {
+  color: inherit;
+  font-size: 12px;
+  font-weight: 750;
+  opacity: 0.82;
+}
+
+.admin-workspace-tabs b {
+  position: absolute;
+  top: 6px;
+  right: 7px;
+  min-width: 22px;
+  height: 22px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: #fff7ed;
+  color: #c2410c;
+  font-size: 11px;
+  font-weight: 950;
+}
+
+.admin-workspace-tabs button.active b {
+  background: rgba(255, 255, 255, 0.92);
+  color: #075bd8;
 }
 
 .pane {
@@ -1059,10 +1507,6 @@ button:disabled {
 
 .status-card p {
   margin: 0;
-}
-
-.danger-text {
-  color: #b91c1c;
 }
 
 .bar {
@@ -1637,6 +2081,55 @@ button {
   padding-top: 2px;
 }
 
+.scope-checks-wrap {
+  grid-column: 1 / -1;
+  border: 1px solid #d8e7f8;
+  border-radius: 16px;
+  background: rgba(248, 251, 255, 0.86);
+  overflow: hidden;
+}
+
+.scope-checks-wrap summary {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 12px;
+  color: #37536f;
+  font-size: 13px;
+  font-weight: 900;
+  cursor: pointer;
+  user-select: none;
+}
+
+.scope-checks-wrap summary span {
+  white-space: nowrap;
+}
+
+.scope-checks-wrap summary b {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid #cfe0ff;
+  border-radius: 999px;
+  padding: 5px 9px;
+  background: #ffffff;
+  color: #0757d7;
+  font-size: 12px;
+  font-weight: 950;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scope-checks-wrap[open] summary {
+  border-bottom: 1px solid #e5eefb;
+  background: #ffffff;
+}
+
+.scope-checks-wrap .scope-checks {
+  padding: 10px;
+}
+
 .scope-checks label {
   min-height: 34px;
   display: inline-flex;
@@ -1803,79 +2296,6 @@ select:focus {
   background: linear-gradient(135deg, #1e63ff, #1554df);
 }
 
-.admin-confirm-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 70;
-  display: grid;
-  place-items: center;
-  padding: 24px;
-  background: rgba(9, 32, 74, 0.46);
-  backdrop-filter: blur(8px);
-}
-
-.admin-confirm-modal {
-  display: grid;
-  grid-template-columns: 48px minmax(0, 1fr);
-  gap: 16px;
-  width: min(520px, calc(100vw - 40px));
-  border: 1px solid #d8e5f7;
-  border-radius: 24px;
-  background: rgba(255, 255, 255, 0.98);
-  padding: 20px;
-  box-shadow: 0 28px 80px rgba(0, 47, 135, 0.24);
-}
-
-.confirm-icon {
-  display: grid;
-  width: 48px;
-  height: 48px;
-  place-items: center;
-  border-radius: 16px;
-  background: linear-gradient(135deg, #1e63ff, #1554df);
-  color: #ffffff;
-  font-size: 22px;
-  font-weight: 900;
-}
-
-.admin-confirm-modal.tone-danger .confirm-icon {
-  background: linear-gradient(135deg, #ef4444, #be123c);
-}
-
-.admin-confirm-modal.tone-warning .confirm-icon {
-  background: linear-gradient(135deg, #f59e0b, #d97706);
-}
-
-.admin-confirm-modal span {
-  color: #1e63ff;
-  font-size: 12px;
-  font-weight: 900;
-}
-
-.admin-confirm-modal h3 {
-  margin: 4px 0 8px;
-  color: #09204a;
-  font-size: 20px;
-}
-
-.admin-confirm-modal p,
-.admin-confirm-modal li {
-  color: #52677f;
-  line-height: 1.65;
-}
-
-.admin-confirm-modal ul {
-  margin: 10px 0 0;
-  padding-left: 18px;
-}
-
-.confirm-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 10px;
-  margin-top: 18px;
-}
-
 @media (max-width: 1120px) {
   .permission-row {
     grid-template-columns: 1fr 1fr;
@@ -1883,6 +2303,436 @@ select:focus {
 
   .permission-row .scope-checks {
     grid-column: 1 / -1;
+  }
+}
+
+/* Final admin usability pass: compact command area and bounded long lists */
+.admin-card {
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+  overscroll-behavior: contain;
+}
+
+.admin-card > header {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  margin: -18px -18px 0;
+  padding: 16px 18px 14px;
+  border-bottom: 1px solid rgba(216, 229, 247, 0.92);
+  border-radius: 28px 28px 0 0;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 251, 255, 0.94)),
+    #ffffff;
+  backdrop-filter: blur(12px);
+}
+
+.tabs {
+  position: sticky;
+  top: 72px;
+  z-index: 2;
+  width: 100%;
+  box-sizing: border-box;
+  justify-content: flex-start;
+  overflow-x: auto;
+  padding: 6px;
+  overscroll-behavior-x: contain;
+}
+
+.tabs button {
+  flex: 0 0 auto;
+  min-width: 88px;
+  min-height: 38px;
+  white-space: nowrap;
+}
+
+.pane > .actions {
+  position: sticky;
+  top: 126px;
+  z-index: 1;
+  border: 1px solid rgba(216, 229, 247, 0.92);
+  border-radius: 18px;
+  padding: 9px;
+  background:
+    linear-gradient(135deg, rgba(239, 246, 255, 0.96), rgba(255, 255, 255, 0.9)),
+    #ffffff;
+  box-shadow: 0 10px 24px rgba(0, 47, 135, 0.07);
+}
+
+.permission-list {
+  max-height: min(54vh, 620px);
+  overflow: auto;
+  padding-right: 4px;
+  overscroll-behavior: contain;
+}
+
+.permission-user-tools {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(220px, 1.2fr) minmax(160px, auto);
+  align-items: end;
+  gap: 10px;
+  border: 1px solid rgba(216, 229, 247, 0.92);
+  border-radius: 20px;
+  padding: 12px;
+  background:
+    linear-gradient(135deg, rgba(239, 246, 255, 0.9), rgba(255, 255, 255, 0.94)),
+    #ffffff;
+  box-shadow: 0 10px 24px rgba(0, 47, 135, 0.07);
+}
+
+.permission-user-tools > div {
+  display: grid;
+  gap: 4px;
+}
+
+.permission-user-tools strong {
+  color: #071a39;
+  font-size: 15px;
+  font-weight: 950;
+}
+
+.permission-user-tools span {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.permission-user-search,
+.permission-user-filter {
+  display: grid;
+  gap: 6px;
+}
+
+.permission-user-search input,
+.permission-user-filter select {
+  min-height: 38px;
+}
+
+.permission-empty {
+  border: 1px dashed #cfe0ff;
+  border-radius: 18px;
+  padding: 16px;
+  background: #f8fbff;
+  color: #48627f;
+  font-size: 13px;
+  font-weight: 850;
+  text-align: center;
+}
+
+.permission-row {
+  align-items: stretch;
+}
+
+.permission-row input,
+.permission-row select {
+  min-height: 40px;
+}
+
+.mop-settings-grid,
+.handover-grid,
+.pressure-form {
+  border: 1px solid rgba(216, 229, 247, 0.9);
+  border-radius: 20px;
+  padding: 12px;
+  background: rgba(248, 251, 255, 0.76);
+}
+
+.pressure-form label {
+  min-width: 160px;
+}
+
+/* Final density pass: keep admin controls readable without taking over the modal. */
+.admin-card > header p {
+  max-width: 720px;
+}
+
+.pane > .actions {
+  gap: 7px;
+  min-height: 50px;
+}
+
+.pane > .actions .btn {
+  min-height: 34px;
+  padding: 7px 12px;
+  border-radius: 999px;
+  font-size: 13px;
+}
+
+.permission-row {
+  grid-template-columns: minmax(140px, 0.75fr) minmax(200px, 1fr) 104px 82px auto;
+  gap: 7px;
+  padding: 9px;
+}
+
+.permission-row.locked {
+  border-color: #cfe0ff;
+  background:
+    linear-gradient(180deg, rgba(248, 251, 255, 0.96), rgba(255, 255, 255, 0.92)),
+    #ffffff;
+}
+
+.permission-row.disabled {
+  opacity: 0.72;
+}
+
+.permission-row input,
+.permission-row select {
+  min-height: 36px;
+  padding: 7px 10px;
+}
+
+.permission-row > .permission-field {
+  min-height: auto;
+  display: grid;
+  align-items: stretch;
+  gap: 4px;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  background: transparent;
+  color: #37536f;
+  font-weight: 850;
+}
+
+.permission-row > .permission-field span {
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 950;
+  line-height: 1.1;
+}
+
+.permission-row > .permission-field input,
+.permission-row > .permission-field select {
+  width: 100%;
+  min-width: 0;
+}
+
+.permission-row > .permission-field.openid-field input {
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+}
+
+.permission-row > .permission-enable {
+  justify-content: center;
+  align-self: end;
+  min-height: 36px;
+  white-space: nowrap;
+}
+
+.permission-row > .btn.danger {
+  align-self: end;
+  min-height: 36px;
+  padding: 7px 12px;
+  border-radius: 999px;
+  font-size: 13px;
+}
+
+.scope-checks {
+  max-height: 82px;
+  overflow: auto;
+  padding: 3px 2px 0;
+  overscroll-behavior: contain;
+}
+
+.scope-checks-wrap {
+  grid-column: 1 / -1;
+}
+
+.scope-checks-wrap .scope-checks {
+  max-height: 112px;
+  padding: 9px;
+}
+
+.scope-checks label {
+  min-height: 30px;
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+@media (max-width: 820px) {
+  .admin-shell {
+    padding: 12px;
+  }
+
+  .admin-card {
+    max-height: calc(100vh - 24px);
+    padding: 14px;
+  }
+
+  .admin-card > header {
+    margin: -14px -14px 0;
+    padding: 14px;
+  }
+
+  .tabs,
+  .pane > .actions {
+    position: static;
+  }
+
+  .permission-list {
+    max-height: none;
+  }
+
+  .permission-user-tools {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Final admin workspace navigation pass */
+.admin-card .btn,
+.admin-card button {
+  min-height: 38px;
+  border-radius: 16px;
+  font-weight: 900;
+}
+
+.admin-card .btn.ghost,
+.admin-card button:not(.blue):not(.green):not(.danger):not(.active) {
+  border-color: #cfe0ff;
+  background: rgba(255, 255, 255, 0.88);
+  color: #0f2f6a;
+}
+
+.admin-card .btn:hover:not(:disabled),
+.admin-card button:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.admin-card > .admin-overview {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.admin-card > .admin-workspace-tabs {
+  position: sticky;
+  top: 72px;
+  z-index: 2;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 6px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.76);
+  overflow: visible;
+}
+
+.admin-advanced-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  min-width: 0;
+  margin-top: -4px;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.admin-advanced-toggle span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-advanced-toggle .btn {
+  min-height: 32px;
+  border-radius: 999px;
+  padding: 6px 12px;
+  color: #3156c9;
+  background: rgba(248, 251, 255, 0.86);
+  font-size: 12px;
+}
+
+.admin-card > .admin-workspace-tabs button {
+  min-width: 0;
+  min-height: 58px;
+  border-radius: 16px;
+  padding: 9px 12px;
+  white-space: normal;
+}
+
+.admin-card > .admin-workspace-tabs button:not(.active) {
+  border-color: transparent;
+  background: rgba(248, 251, 255, 0.72);
+}
+
+.admin-card > .admin-workspace-tabs button.active {
+  border-color: #1e63ff;
+  background: linear-gradient(135deg, #1e63ff, #1554df);
+  box-shadow: 0 12px 26px rgba(30, 99, 255, 0.22);
+}
+
+.admin-current-guide {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  border: 1px solid rgba(191, 219, 254, 0.86);
+  border-radius: 18px;
+  padding: 12px 14px;
+  background:
+    linear-gradient(135deg, rgba(239, 246, 255, 0.96), rgba(255, 255, 255, 0.92)),
+    #ffffff;
+  box-shadow: 0 10px 22px rgba(0, 47, 135, 0.06);
+}
+
+.admin-current-guide strong {
+  display: block;
+  color: #071a39;
+  font-size: 15px;
+  font-weight: 950;
+}
+
+.admin-current-guide p {
+  margin: 4px 0 0;
+  color: #52657f;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.45;
+}
+
+.admin-current-guide span {
+  flex: 0 0 auto;
+  border: 1px solid #cfe0ff;
+  border-radius: 999px;
+  padding: 6px 10px;
+  background: #eff6ff;
+  color: #075bd8;
+  font-size: 12px;
+  font-weight: 950;
+  white-space: nowrap;
+}
+
+.admin-current-guide.permissions span {
+  border-color: #fed7aa;
+  background: #fff7ed;
+  color: #9a3412;
+}
+
+.admin-current-guide.mop span {
+  border-color: #bbf7d0;
+  background: #ecfdf5;
+  color: #047857;
+}
+
+@media (max-width: 980px) {
+  .admin-card > .admin-overview {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .admin-card > .admin-workspace-tabs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    position: static;
+  }
+
+  .admin-current-guide {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
+@media (max-width: 560px) {
+  .admin-card > .admin-overview,
+  .admin-card > .admin-workspace-tabs {
+    grid-template-columns: 1fr;
   }
 }
 </style>

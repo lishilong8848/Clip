@@ -3,7 +3,7 @@
     <header class="page-head">
       <div>
         <strong>历史通告记忆导入</strong>
-        <p>扫描近 3 个月目标多维表，匹配当前月源表事项；确认后只写入本地记忆。</p>
+        <p>扫描近 3 个月历史通告，匹配当前月事项；确认后只保存为本地记忆。</p>
       </div>
       <div class="head-actions">
         <button class="btn ghost" @click="goHome">返回工作台</button>
@@ -33,64 +33,79 @@
         </article>
       </section>
       <section class="scan-bar">
-        <label>
-          范围
-          <select v-model.number="months">
-            <option :value="3">近 3 个月</option>
-            <option :value="6">近 6 个月</option>
-          </select>
-        </label>
-        <label v-for="type in workTypes" :key="type.value" class="check">
-          <input v-model="selectedWorkTypes" type="checkbox" :value="type.value" />
-          {{ type.label }}
-        </label>
-        <button class="btn blue" :disabled="busy || selectedWorkTypes.length === 0" @click="scanHistory">
-          {{ busy ? "扫描中" : "扫描历史通告" }}
-        </button>
-        <button class="btn green" :disabled="busy || recommendedMatchCount === 0" @click="fillCandidatesAndConfirmSave">
-          一键填充推荐并保存 {{ recommendedMatchCount }}
-        </button>
-        <button class="btn ghost" :disabled="busy || selectedCount === 0" @click="saveSelected">
-          保存已勾选 {{ selectedCount }}
-        </button>
+        <div class="scan-fields">
+          <label>
+            范围
+            <select v-model.number="months">
+              <option :value="3">近 3 个月</option>
+              <option :value="6">近 6 个月</option>
+            </select>
+          </label>
+          <label v-for="type in workTypes" :key="type.value" class="check">
+            <input v-model="selectedWorkTypes" type="checkbox" :value="type.value" />
+            {{ type.label }}
+          </label>
+        </div>
+        <div class="scan-actions">
+          <button class="btn blue" :disabled="Boolean(scanDisabledReason)" :title="scanDisabledReason" @click="scanHistory">
+            {{ busy ? "扫描中" : "扫描历史通告" }}
+          </button>
+          <DisabledReason v-if="scanDisabledReason && !busy" :text="scanDisabledReason" />
+        </div>
       </section>
 
-      <section v-if="message" class="message" :class="{ failed: messageType === 'failed', success: messageType === 'success' }">
-        {{ message }}
-      </section>
-      <section v-if="warnings.length" class="warning-list">
-        <span v-for="warning in warnings" :key="warning">{{ warning }}</span>
-      </section>
+      <MessageBanner
+        v-if="message"
+        :tone="messageType === 'failed' ? 'failed' : messageType === 'success' ? 'success' : 'info'"
+        :text="message"
+      />
+      <MessageBanner
+        v-if="warnings.length"
+        tone="warning"
+        title="需要注意"
+        :items="warnings"
+      />
 
       <section class="filters">
-        <label>
-          类型
-          <select v-model="filterType">
-            <option value="">全部</option>
-            <option v-for="type in workTypes" :key="type.value" :value="type.value">{{ type.label }}</option>
-          </select>
-        </label>
-        <label>
-          楼栋
-          <select v-model="filterBuilding">
-            <option value="">全部</option>
-            <option v-for="building in buildingOptions" :key="building" :value="building">{{ building }}</option>
-          </select>
-        </label>
-        <label>
-          匹配
-          <select v-model="filterMatch">
-            <option value="">全部</option>
-            <option value="selected">已勾选保存</option>
-            <option value="matched">有候选</option>
-            <option value="unmatched">未匹配</option>
-          </select>
-        </label>
-        <input v-model="query" placeholder="搜索标题、楼栋、专业" />
+        <div class="filters-head">
+          <div>
+            <strong>筛选当前月事项</strong>
+            <span>{{ filteredSources.length }} / {{ sourceItems.length }} 条</span>
+          </div>
+          <button v-if="historyFilterCount" class="btn ghost compact-btn" type="button" @click="clearHistoryFilters">
+            清空筛选 {{ historyFilterCount }}
+          </button>
+        </div>
+        <div class="filters-fields">
+          <label>
+            类型
+            <select v-model="filterType">
+              <option value="">全部</option>
+              <option v-for="type in workTypes" :key="type.value" :value="type.value">{{ type.label }}</option>
+            </select>
+          </label>
+          <label>
+            楼栋
+            <select v-model="filterBuilding">
+              <option value="">全部</option>
+              <option v-for="building in buildingOptions" :key="building" :value="building">{{ building }}</option>
+            </select>
+          </label>
+          <label>
+            匹配
+            <select v-model="filterMatch">
+              <option value="">全部</option>
+              <option value="selected">已勾选保存</option>
+              <option value="matched">有候选</option>
+              <option value="unmatched">未匹配</option>
+            </select>
+          </label>
+          <input v-model="query" placeholder="搜索标题、楼栋、专业" />
+        </div>
       </section>
 
       <section class="summary-grid">
-        <article><span>当前源表事项</span><strong>{{ sourceItems.length }}</strong></article>
+        <article><span>当前月事项</span><strong>{{ sourceItems.length }}</strong></article>
         <article><span>历史候选</span><strong>{{ candidates.length }}</strong></article>
         <article><span>已勾选</span><strong>{{ selectedCount }}</strong></article>
         <article><span>可一键填充</span><strong>{{ recommendedMatchCount }}</strong></article>
@@ -100,7 +115,7 @@
       <section class="match-layout">
         <aside class="panel source-panel">
           <div class="panel-head">
-            <h2>当前月源表事项</h2>
+            <h2>当前月事项</h2>
             <span>{{ filteredSources.length }}</span>
           </div>
           <div class="list">
@@ -125,6 +140,9 @@
                 保存
               </label>
             </article>
+            <div v-if="!filteredSources.length" class="panel-empty">
+              当前筛选下没有事项。可清空筛选或重新扫描历史通告。
+            </div>
           </div>
         </aside>
 
@@ -225,48 +243,41 @@
                 <small>{{ candidate.business_time || "-" }}{{ candidate.maintenance_cycle ? ` · ${candidate.maintenance_cycle}` : "" }}</small>
               </div>
             </article>
+            <div v-if="!candidateOptions.length" class="panel-empty">
+              当前事项没有可用历史候选。可切换左侧事项或扩大扫描月份。
+            </div>
           </div>
         </aside>
       </section>
 
-      <div v-if="saveConfirmOpen" class="modal-backdrop" @click.self="cancelSaveConfirm">
-        <section class="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="history-save-title">
-          <header>
-            <div>
-              <strong id="history-save-title">{{ saveConfirmTitle }}</strong>
-              <p>{{ saveConfirmSubtitle }}</p>
-            </div>
-            <button class="icon-btn" type="button" aria-label="关闭" @click="cancelSaveConfirm">×</button>
-          </header>
+      <section v-if="sourceItems.length || candidates.length" class="history-save-footer">
+        <div class="footer-summary">
+          <strong>保存历史记忆</strong>
+          <span>已勾选 {{ selectedCount }} 条 · 推荐可填充 {{ recommendedMatchCount }} 条 · 覆盖 {{ overwriteHint }}</span>
+        </div>
+        <div class="footer-actions">
+          <button class="btn green" :disabled="Boolean(fillRecommendedDisabledReason)" :title="fillRecommendedDisabledReason" @click="fillCandidatesAndConfirmSave">
+            填充推荐并保存 {{ recommendedMatchCount }}
+          </button>
+          <button class="btn blue" :disabled="Boolean(saveSelectedDisabledReason)" :title="saveSelectedDisabledReason" @click="saveSelected">
+            保存已勾选 {{ selectedCount }}
+          </button>
+          <DisabledReason v-if="historySaveDisabledReason && !busy" :text="historySaveDisabledReason" />
+        </div>
+      </section>
 
-          <div class="confirm-metrics">
-            <article><span>保存数量</span><strong>{{ saveSummary.total }}</strong></article>
-            <article><span>历史候选填充</span><strong>{{ saveSummary.candidate }}</strong></article>
-            <article><span>会覆盖旧记忆</span><strong>{{ saveSummary.overwrite }}</strong></article>
-          </div>
-
-          <div class="confirm-detail">
-            <strong>即将保存的事项</strong>
-            <ul>
-              <li v-for="item in savePreviewItems" :key="item.key">
-                <span>{{ item.type }} · {{ item.building || "-" }}</span>
-                <strong>{{ item.title }}</strong>
-                <small>{{ item.origin }}</small>
-              </li>
-            </ul>
-            <p v-if="saveSummary.total > savePreviewItems.length">
-              还有 {{ saveSummary.total - savePreviewItems.length }} 条未展示，确认后会一起保存。
-            </p>
-          </div>
-
-          <footer>
-            <button class="btn ghost" type="button" :disabled="busy" @click="cancelSaveConfirm">取消</button>
-            <button class="btn green" type="button" :disabled="busy || pendingSavePayload.length === 0" @click="confirmSaveSelected">
-              {{ busy ? "保存中" : "确认批量保存" }}
-            </button>
-          </footer>
-        </section>
-      </div>
+      <ConfirmDialog
+        :open="saveConfirmOpen"
+        tone="primary"
+        kicker="历史记忆保存"
+        :title="saveConfirmTitle"
+        :message="saveConfirmSubtitle"
+        :details="saveConfirmDetails"
+        :confirm-label="busy ? '保存中' : '确认批量保存'"
+        cancel-label="取消"
+        confirm-class="green"
+        @resolve="resolveSaveConfirm"
+      />
     </template>
   </section>
 </template>
@@ -274,6 +285,9 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from "vue";
 import { requestJson } from "../api/client";
+import ConfirmDialog from "./ConfirmDialog.vue";
+import DisabledReason from "./DisabledReason.vue";
+import MessageBanner from "./MessageBanner.vue";
 
 type Dict = Record<string, any>;
 
@@ -306,7 +320,7 @@ const editableFieldDefs = [
   { key: "symptom", label: "故障现象", multi: true },
   { key: "solution", label: "解决方案", multi: true },
   { key: "zhihang_title", label: "智航关联标题" },
-  { key: "zhihang_record_id", label: "智航记录 ID" },
+  { key: "zhihang_record_id", label: "智航关联记录" },
   { key: "zhihang_progress", label: "智航进展" },
 ] as Array<{ key: string; label: string; multi?: boolean }>;
 
@@ -390,6 +404,25 @@ const recommendedMatches = computed(() => {
 const recommendedMatchCount = computed(() => recommendedMatches.value.length);
 const overwriteHint = computed(() => selectedCount.value ? `${selectedOverwriteCount.value} 条` : "-");
 const selectedOverwriteCount = computed(() => sourceItems.value.filter((source) => isSelected(source.id) && sourceHasMemory(source)).length);
+const scanDisabledReason = computed(() => {
+  if (busy.value) return "正在处理历史记忆，请等待当前操作完成。";
+  if (!selectedWorkTypes.value.length) return "请至少选择一种通告类型后再扫描。";
+  return "";
+});
+const fillRecommendedDisabledReason = computed(() => {
+  if (busy.value) return "正在处理历史记忆，请等待当前操作完成。";
+  if (!recommendedMatchCount.value) return "当前没有可自动填充的推荐候选。";
+  return "";
+});
+const saveSelectedDisabledReason = computed(() => {
+  if (busy.value) return "正在处理历史记忆，请等待当前操作完成。";
+  if (!selectedCount.value) return "请先勾选至少一条要保存的当前月事项。";
+  return "";
+});
+const historySaveDisabledReason = computed(() => {
+  if (selectedCount.value || recommendedMatchCount.value) return "";
+  return "暂无可保存内容：可先扫描历史通告，或在左侧勾选事项。";
+});
 const saveSummary = computed(() => {
   const payload = pendingSavePayload.value;
   return {
@@ -401,7 +434,7 @@ const saveSummary = computed(() => {
 const saveConfirmTitle = computed(() => saveConfirmMode.value === "filled" ? "确认一键填充并保存" : "确认保存已勾选记忆");
 const saveConfirmSubtitle = computed(() => {
   if (saveConfirmMode.value === "filled") {
-    return "系统会把所有已匹配历史候选的字段填入当前月源表事项，并批量写入本地记忆。";
+    return "系统会把所有已匹配历史候选的字段填入当前月事项，并批量保存本地记忆。";
   }
   return "系统会保存当前已勾选事项的字段内容，同键旧记忆会被覆盖。";
 });
@@ -415,6 +448,22 @@ const savePreviewItems = computed(() => pendingSavePayload.value.slice(0, 6).map
     origin: item.field_origin === "candidate" ? "使用历史候选字段" : sourceFieldOriginLabel(source.id || ""),
   };
 }));
+const saveConfirmDetails = computed(() => {
+  const summary = saveSummary.value;
+  const rows = [
+    `保存数量：${summary.total}`,
+    `历史候选填充：${summary.candidate}`,
+    `会覆盖旧记忆：${summary.overwrite}`,
+  ];
+  for (const item of savePreviewItems.value) {
+    rows.push(`${item.type} · ${item.building || "-"} · ${item.title}（${item.origin}）`);
+  }
+  const hiddenCount = summary.total - savePreviewItems.value.length;
+  if (hiddenCount > 0) {
+    rows.push(`还有 ${hiddenCount} 条未展示，确认后会一起保存。`);
+  }
+  return rows;
+});
 const historyStep = computed(() => {
   if (!sourceItems.value.length && !candidates.value.length) return "scan";
   if (selectedCount.value > 0 || recommendedMatchCount.value > 0) return "confirm";
@@ -425,7 +474,7 @@ const historySteps = computed(() => [
     key: "scan",
     index: "1",
     title: "扫描历史",
-    text: sourceItems.value.length ? `已识别 ${sourceItems.value.length} 条源表事项` : "先读取近三个月历史记录",
+    text: sourceItems.value.length ? `已识别 ${sourceItems.value.length} 条当前月事项` : "先读取近三个月历史记录",
     done: sourceItems.value.length > 0 || candidates.value.length > 0,
   },
   {
@@ -439,7 +488,7 @@ const historySteps = computed(() => [
     key: "confirm",
     index: "3",
     title: "保存记忆",
-    text: selectedCount.value ? `准备保存 ${selectedCount.value} 条` : "确认后写入 SQLite 记忆",
+    text: selectedCount.value ? `准备保存 ${selectedCount.value} 条` : "确认后保存本地记忆",
     done: false,
   },
 ]);
@@ -467,6 +516,10 @@ const candidateOptions = computed(() => {
     for (const code of sourceCodes) if (candidateCodes.has(code)) return true;
     return false;
   });
+});
+const historyFilterCount = computed(() => {
+  return [filterType.value, filterBuilding.value, filterMatch.value, query.value]
+    .filter((value) => String(value || "").trim()).length;
 });
 
 watch(filteredSources, (items) => {
@@ -518,7 +571,7 @@ function sourceFieldOriginLabel(sourceId: string): string {
   const origin = fieldOriginMap[sourceId] || "";
   if (origin === "candidate") return "当前显示：历史候选";
   if (origin === "memory") return "当前显示：已有记忆";
-  if (origin === "current") return "当前显示：当前源表";
+  if (origin === "current") return "当前显示：当前事项";
   return "当前显示：未初始化";
 }
 
@@ -563,6 +616,13 @@ function applyScanPayload(data: Dict): void {
   activeSourceId.value = sourceItems.value[0]?.id || "";
 }
 
+function clearHistoryFilters(): void {
+  filterType.value = "";
+  filterBuilding.value = "";
+  filterMatch.value = "";
+  query.value = "";
+}
+
 async function scanHistory(): Promise<void> {
   busy.value = true;
   message.value = "正在扫描历史多维记录...";
@@ -574,7 +634,7 @@ async function scanHistory(): Promise<void> {
     });
     applyScanPayload(data);
     const counts = data.counts || {};
-    message.value = `扫描完成：源表事项 ${counts.source || 0}，历史候选 ${counts.candidates || 0}，推荐 ${counts.recommended || 0}。`;
+    message.value = `扫描完成：当前月事项 ${counts.source || 0}，历史候选 ${counts.candidates || 0}，推荐 ${counts.recommended || 0}。`;
     messageType.value = "success";
   } catch (error: any) {
     message.value = error?.message || "扫描失败";
@@ -655,7 +715,16 @@ function cancelSaveConfirm(): void {
   pendingSavePayload.value = [];
 }
 
+function resolveSaveConfirm(confirmed: boolean): void {
+  if (!confirmed) {
+    cancelSaveConfirm();
+    return;
+  }
+  void confirmSaveSelected();
+}
+
 async function confirmSaveSelected(): Promise<void> {
+  if (busy.value) return;
   const payload = pendingSavePayload.value;
   if (!payload.length) return;
   busy.value = true;
@@ -688,6 +757,7 @@ function goHome(): void {
   display: grid;
   gap: 14px;
   padding: 18px;
+  padding-bottom: 118px;
 }
 
 .page-head,
@@ -783,7 +853,7 @@ function goHome(): void {
 
 .head-actions,
 .scan-bar,
-.filters {
+.filters-fields {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -795,8 +865,66 @@ function goHome(): void {
   padding: 12px;
 }
 
+.filters {
+  display: grid;
+  gap: 10px;
+}
+
+.filters-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.filters-head strong,
+.footer-summary strong {
+  display: block;
+  color: #09204a;
+  font-size: 14px;
+  font-weight: 900;
+}
+
+.filters-head span,
+.footer-summary span {
+  display: block;
+  margin-top: 2px;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 780;
+}
+
+.filters-fields {
+  min-width: 0;
+}
+
+.scan-fields,
+.scan-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.scan-fields {
+  flex: 1 1 420px;
+  min-width: 0;
+}
+
+.scan-actions {
+  flex: 0 1 auto;
+  justify-content: flex-end;
+  margin-left: auto;
+}
+
+.scan-actions :deep(.disabled-reason) {
+  margin: 0;
+  max-width: 360px;
+}
+
 .scan-bar label,
-.filters label {
+.filters-fields label {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -973,6 +1101,17 @@ textarea {
   color: #64748b;
 }
 
+.panel-empty {
+  border: 1px dashed #cfe0ff;
+  border-radius: 16px;
+  background: rgba(248, 251, 255, 0.84);
+  padding: 16px;
+  color: #64748b;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.55;
+}
+
 .match-note {
   display: grid;
   gap: 4px;
@@ -1091,119 +1230,53 @@ textarea {
   background: #f8fafc;
 }
 
-.icon-btn {
-  width: 34px;
-  height: 34px;
-  border: 1px solid #cbd5e1;
-  border-radius: 6px;
-  background: #ffffff;
-  color: #334155;
-  cursor: pointer;
-  font-size: 20px;
-  line-height: 1;
+.compact-btn {
+  min-height: 32px;
+  padding: 5px 10px;
+  font-size: 12px;
 }
 
-.modal-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 50;
-  display: grid;
-  place-items: center;
-  padding: 18px;
-  background: rgba(15, 23, 42, 0.32);
-}
-
-.confirm-modal {
-  width: min(720px, 100%);
-  max-height: calc(100vh - 36px);
-  overflow: auto;
-  border: 1px solid #dbe3ee;
-  border-radius: 10px;
-  background: #ffffff;
-  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.18);
-}
-
-.confirm-modal header,
-.confirm-modal footer {
+.history-save-footer {
+  position: sticky;
+  bottom: 18px;
+  z-index: 8;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 14px 16px;
+  gap: 14px;
+  width: min(980px, calc(100% - 28px));
+  margin: 0 auto;
+  border: 1px solid rgba(191, 219, 254, 0.9);
+  border-radius: 20px;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.98), rgba(248, 251, 255, 0.94)),
+    #ffffff;
+  box-shadow: 0 20px 48px rgba(15, 73, 153, 0.16);
+  padding: 12px 14px;
+  backdrop-filter: blur(14px);
 }
 
-.confirm-modal header {
-  border-bottom: 1px solid #e2e8f0;
+.footer-summary {
+  min-width: 0;
 }
 
-.confirm-modal header strong {
-  font-size: 18px;
+.footer-summary span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.confirm-modal header p,
-.confirm-detail p,
-.confirm-detail small {
-  color: #64748b;
-}
-
-.confirm-modal footer {
-  border-top: 1px solid #e2e8f0;
+.footer-actions {
+  display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
-}
-
-.confirm-metrics {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  border-bottom: 1px solid #e2e8f0;
-}
-
-.confirm-metrics article {
-  padding: 12px 16px;
-  border-right: 1px solid #e2e8f0;
-}
-
-.confirm-metrics article:last-child {
-  border-right: 0;
-}
-
-.confirm-metrics span {
-  display: block;
-  color: #64748b;
-  font-size: 12px;
-}
-
-.confirm-metrics strong {
-  display: block;
-  margin-top: 4px;
-  font-size: 24px;
-}
-
-.confirm-detail {
-  display: grid;
-  gap: 10px;
-  padding: 14px 16px;
-}
-
-.confirm-detail ul {
-  display: grid;
   gap: 8px;
+}
+
+.footer-actions :deep(.disabled-reason) {
+  flex: 1 1 100%;
+  justify-content: flex-start;
   margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.confirm-detail li {
-  display: grid;
-  gap: 3px;
-  padding: 10px;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  background: #f8fafc;
-}
-
-.confirm-detail li span {
-  color: #64748b;
-  font-size: 12px;
 }
 
 @media (max-width: 1100px) {
@@ -1217,16 +1290,6 @@ textarea {
   }
   .summary-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-  .confirm-metrics {
-    grid-template-columns: 1fr;
-  }
-  .confirm-metrics article {
-    border-right: 0;
-    border-bottom: 1px solid #e2e8f0;
-  }
-  .confirm-metrics article:last-child {
-    border-bottom: 0;
   }
 }
 
@@ -1305,8 +1368,7 @@ textarea {
 }
 
 .source-row,
-.candidate-row,
-.confirm-detail li {
+.candidate-row {
   border-color: #d8e7f8;
   border-radius: 12px;
   background: #ffffff;
@@ -1315,8 +1377,7 @@ textarea {
 }
 
 .source-row:hover,
-.candidate-row:hover,
-.confirm-detail li:hover {
+.candidate-row:hover {
   border-color: #9cc7ff;
   background: #f5faff;
   box-shadow: 0 12px 26px rgba(22, 78, 151, 0.1);
@@ -1342,8 +1403,7 @@ textarea {
 }
 
 .field-toggle,
-.btn,
-.icon-btn {
+.btn {
   min-height: 36px;
   border-color: #c5d9f2;
   border-radius: 9px;
@@ -1353,7 +1413,6 @@ textarea {
 }
 
 .btn:hover:not(:disabled),
-.icon-btn:hover:not(:disabled),
 .field-toggle:hover:not(:disabled) {
   border-color: #8dbbfb;
   box-shadow: 0 8px 20px rgba(27, 101, 213, 0.12);
@@ -1385,16 +1444,6 @@ textarea:focus {
   border-color: #1678ff;
   outline: none;
   box-shadow: 0 0 0 3px rgba(22, 120, 255, 0.12);
-}
-
-.confirm-modal {
-  border-color: #d8e7f8;
-  border-radius: 16px;
-  box-shadow: 0 30px 90px rgba(4, 43, 116, 0.26);
-}
-
-.confirm-metrics strong {
-  color: #0757d7;
 }
 
 .field-scroll {
@@ -1432,7 +1481,6 @@ textarea:focus {
 .panel,
 .source-row,
 .candidate-row,
-.confirm-detail li,
 .match-note,
 .field-summary,
 .extra-field-section,
@@ -1440,13 +1488,8 @@ textarea:focus {
   border-radius: 18px;
 }
 
-.confirm-modal {
-  border-radius: 24px;
-}
-
 .field-toggle,
 .btn,
-.icon-btn,
 select,
 input,
 textarea {
@@ -1518,7 +1561,6 @@ textarea {
 .panel,
 .source-row,
 .candidate-row,
-.confirm-detail li,
 .match-note,
 .field-summary,
 .extra-field-section,
@@ -1541,7 +1583,6 @@ textarea {
 }
 
 .btn,
-.icon-btn,
 .field-toggle,
 select,
 input,
@@ -1552,6 +1593,53 @@ textarea {
 /* Panorama construction-management history-memory skin */
 .history-memory {
   background: linear-gradient(180deg, #eef4ff 0, #f8fbff 44%, #eef5ff 100%);
+}
+
+.scan-bar {
+  justify-content: space-between;
+  border-radius: 20px;
+  padding: 12px 14px;
+}
+
+.scan-fields {
+  border-right: 1px solid rgba(216, 229, 247, 0.9);
+  padding-right: 14px;
+}
+
+.scan-actions .btn {
+  min-height: 40px;
+  border-radius: 15px;
+}
+
+@media (max-width: 980px) {
+  .scan-fields {
+    flex-basis: 100%;
+    border-right: 0;
+    border-bottom: 1px solid rgba(216, 229, 247, 0.9);
+    padding-right: 0;
+    padding-bottom: 10px;
+  }
+
+  .scan-actions {
+    width: 100%;
+    justify-content: flex-start;
+    margin-left: 0;
+  }
+
+  .history-save-footer {
+    align-items: stretch;
+    flex-direction: column;
+    width: calc(100% - 24px);
+    bottom: 12px;
+  }
+
+  .footer-actions {
+    justify-content: stretch;
+  }
+
+  .footer-actions .btn {
+    flex: 1 1 180px;
+  }
 }
 
 .page-head,
@@ -1565,7 +1653,6 @@ textarea {
 .panel,
 .source-row,
 .candidate-row,
-.confirm-detail li,
 .match-note,
 .field-summary,
 .extra-field-section,
@@ -1607,5 +1694,15 @@ input:focus,
 textarea:focus {
   border-color: #005bff;
   box-shadow: 0 0 0 3px rgba(0, 91, 255, 0.14);
+}
+
+.history-memory {
+  padding-bottom: 136px;
+}
+
+@media (max-width: 980px) {
+  .history-memory {
+    padding-bottom: 190px;
+  }
 }
 </style>

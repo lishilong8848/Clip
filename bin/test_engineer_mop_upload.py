@@ -250,7 +250,7 @@ class EngineerMopUploadTests(unittest.TestCase):
             self.assertEqual(data["signature"]["display_name"], "张三")
             self.assertIn("临时人员：张三", data["text"])
 
-    def test_signature_link_prefers_current_page_origin(self):
+    def test_signature_link_prefers_configured_handover_origin(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             service = FakeMopUploadService(tmpdir)
             service.get_handover_links = lambda: {"links": {"A": "http://10.0.0.8:18766/audit"}}
@@ -260,7 +260,7 @@ class EngineerMopUploadTests(unittest.TestCase):
                 request_base_url="http://192.168.224.130:18766",
             )
 
-            self.assertEqual(base_url, "http://192.168.224.130:18766")
+            self.assertEqual(base_url, "http://10.0.0.8:18766")
 
     def test_signature_open_id_detection_accepts_nested_and_text_values(self):
         self.assertEqual(
@@ -324,6 +324,41 @@ class EngineerMopUploadTests(unittest.TestCase):
             }
             self.assertEqual(fields["维护实施人"]["value_cell_ref"], "C1")
             self.assertEqual(fields["维护审核人"]["value_cell_ref"], "F1")
+
+    def test_mop_signature_height_uses_row_height_limit(self):
+        try:
+            from openpyxl import Workbook
+        except Exception as exc:
+            self.skipTest(f"openpyxl unavailable: {exc}")
+
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.row_dimensions[1].height = 15
+        sheet.row_dimensions[2].height = 24
+
+        self.assertEqual(MaintenancePortalService._mop_signature_max_height_px(sheet, row=1), 30)
+        self.assertEqual(MaintenancePortalService._mop_signature_max_height_px(sheet, row=2), 48)
+
+    def test_mop_preview_includes_row_heights_for_signature_preview(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = FakeMopUploadService(tmpdir)
+            try:
+                from openpyxl import Workbook
+            except Exception as exc:
+                self.skipTest(f"openpyxl unavailable: {exc}")
+
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.title = "MOP"
+            sheet.row_dimensions[1].height = 15
+            sheet["A1"] = "维护实施人："
+            path = Path(tmpdir) / "mop.xlsx"
+            workbook.save(path)
+
+            parsed = service._parse_xlsx_preview(path.read_bytes())
+            sheet_data = parsed["sheets"][0]
+            self.assertEqual(sheet_data["default_row_height_px"], 20)
+            self.assertEqual(sheet_data["row_heights"]["0"], 20)
 
     def test_engineer_mop_bootstrap_includes_current_month_source_records_first(self):
         with tempfile.TemporaryDirectory() as tmpdir:

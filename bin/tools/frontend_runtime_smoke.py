@@ -298,10 +298,10 @@ def _build_playwright_script(url: str, session_id: str) -> str:
                 if (image && image !== 'none') return image;
                 return styleText(node, 'backgroundColor');
               }};
-              const topbar = document.querySelector('.topbar');
+              const topbar = document.querySelector('.app-topbar, .topbar');
               const logo = document.querySelector('.brand-logo');
-              const card = document.querySelector('.center-state, .feature-card, .panel, .permission-row, .match-layout');
-              const primaryButton = document.querySelector('.btn.blue, .primary, button.primary');
+              const card = document.querySelector('.center-state, .feature-card, .panel, .permission-row, .match-layout, .module-card, .home-metrics article');
+              const primaryButton = document.querySelector('.btn.blue, button.primary, a.primary, .module-actions button.primary, .scope-actions .primary');
               const topbarBackground = backgroundText(topbar);
               const cardRadius = styleText(card, 'borderRadius');
               const cardBackground = backgroundText(card);
@@ -372,7 +372,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             throw new Error(`no-scope page load failed: ${{noScopeResponse && noScopeResponse.status()}}`);
           }}
           await noScopePage.waitForSelector('text=当前账号暂无门户权限', {{ timeout: 10000 }});
-          await noScopePage.waitForSelector('text=提交申请', {{ timeout: 10000 }});
+          await noScopePage.waitForSelector('text=提交给管理员', {{ timeout: 10000 }});
           await assertHeaderSubtitle(noScopePage, '功能选择 · 申请访问权限', 'no-scope');
           const scopePillCount = await noScopePage.locator('.scope-pill').count();
           if (scopePillCount < 8) throw new Error(`permission request scope pills too few: ${{scopePillCount}}`);
@@ -425,7 +425,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await assertHeaderSubtitle(page, '功能选择 · 请选择功能', 'home');
           await assertVnetSkin(page, 'home');
           const bodyText = await page.locator('body').innerText({{ timeout: 10000 }});
-          const required = ['功能选择', '交接班审核页', '维保 / 变更 / 检修'];
+          const required = ['功能选择', '事件管理', '维护管理', '变更管理', '其他工具'];
           for (const marker of required) {{
             if (!bodyText.includes(marker)) throw new Error(`missing marker: ${{marker}}`);
           }}
@@ -434,8 +434,13 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             if (bodyText.includes(marker)) throw new Error(`legacy marker visible: ${{marker}}`);
           }}
           await assertLayout(page, 'home');
-          await page.getByRole('button', {{ name: '查看链接' }}).click();
-          await page.waitForSelector('text=选择楼栋打开审核页', {{ timeout: 10000 }});
+          await page.locator('.module-card.slate').getByRole('button', {{ name: '交接班', exact: true }}).click();
+          try {{
+            await page.waitForFunction(() => document.body.innerText.includes('选择楼栋打开交接班审核页'), null, {{ timeout: 10000 }});
+          }} catch (err) {{
+            const currentText = await page.locator('body').innerText({{ timeout: 10000 }});
+            throw new Error(`handover entry did not open. Current page text: ${{currentText.slice(0, 800)}}`);
+          }}
           const handoverScopeCard = page.locator('article.scope-card').filter({{ hasText: 'A楼' }}).first();
           await handoverScopeCard.getByRole('link', {{ name: '打开审核页' }}).waitFor({{ timeout: 10000 }});
           const handoverHref = await handoverScopeCard.getByRole('link', {{ name: '打开审核页' }}).getAttribute('href');
@@ -444,21 +449,24 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           }}
           await assertLayout(page, 'handover-feature');
           await page.getByRole('button', {{ name: '返回功能选择' }}).click();
-          await page.waitForSelector('text=维保 / 变更 / 检修', {{ timeout: 10000 }});
+          await page.waitForSelector('text=业务工作台', {{ timeout: 10000 }});
           await assertHeaderSubtitle(page, '功能选择 · 请选择功能', 'home-after-handover');
-          await page.getByRole('button', {{ name: '选择楼栋' }}).click();
-          await page.waitForSelector('text=选择楼栋进入工作台', {{ timeout: 10000 }});
+          await page.getByRole('button', {{ name: '进入维护管理', exact: true }}).click();
+          await page.waitForSelector('text=选择楼栋进入维护管理', {{ timeout: 10000 }});
           const scopeCard = page.locator('article.scope-card').filter({{ hasText: 'A楼' }}).first();
-          await scopeCard.getByRole('button', {{ name: '进入工作台' }}).click();
+          await scopeCard.getByRole('button', {{ name: '进入维护管理' }}).click();
           await page.waitForSelector('text=待发起事项', {{ timeout: 10000 }});
           await page.waitForSelector('text=冷机月度巡检', {{ timeout: 10000 }});
           await page.waitForSelector('text=已开始未结束', {{ timeout: 10000 }});
           await page.waitForSelector('text=A楼UPS旁路切换变更测试', {{ timeout: 10000 }});
+          await page.getByRole('button', {{ name: '刷新数据' }}).click();
           await page.waitForSelector('text=刷新检修', {{ timeout: 10000 }});
           await page.waitForSelector('text=刷新变更', {{ timeout: 10000 }});
+          await page.keyboard.press('Escape');
           await page.waitForSelector('text=纯手填', {{ timeout: 10000 }});
           await page.waitForSelector('text=解析粘贴通告', {{ timeout: 10000 }});
           await page.waitForSelector('text=近三天可回退', {{ timeout: 10000 }});
+          await page.locator('.recent-undo-panel').getByRole('button', {{ name: /展开/ }}).click();
           await page.waitForSelector('text=回退删除', {{ timeout: 10000 }});
           await page.getByRole('button', {{ name: '纯手填' }}).click();
           await page.waitForSelector('text=选择纯手填通告类型', {{ timeout: 10000 }});
@@ -471,7 +479,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           if (!draftPanelText.includes('通告类型') || !draftPanelText.includes('调整')) {{
             throw new Error(`manual adjust draft not visible: ${{draftPanelText}}`);
           }}
-          await page.getByRole('button', {{ name: '解析粘贴通告' }}).click();
+          await page.getByRole('button', {{ name: '解析粘贴' }}).click();
           await page.waitForSelector('text=解析到待发起通告', {{ timeout: 10000 }});
           const pastePanel = page.locator('.paste-panel');
           const pasteTextarea = pastePanel.locator('textarea[placeholder*="粘贴完整"]');
@@ -498,13 +506,13 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await assertLayout(page, 'workbench');
           await assertVnetSkin(page, 'workbench');
           await page.getByRole('button', {{ name: '功能选择' }}).click();
-          await page.waitForSelector('text=维保 / 变更 / 检修', {{ timeout: 10000 }});
+          await page.waitForSelector('text=业务工作台', {{ timeout: 10000 }});
           await assertHeaderSubtitle(page, '功能选择 · 请选择功能', 'home-after-return-from-workbench');
           await assertVnetSkin(page, 'home-after-return-from-workbench');
-          await page.getByRole('button', {{ name: '选择楼栋' }}).click();
-          await page.waitForSelector('text=选择楼栋进入工作台', {{ timeout: 10000 }});
+          await page.getByRole('button', {{ name: '进入维护管理', exact: true }}).click();
+          await page.waitForSelector('text=选择楼栋进入维护管理', {{ timeout: 10000 }});
           const returnScopeCard = page.locator('article.scope-card').filter({{ hasText: 'A楼' }}).first();
-          await returnScopeCard.getByRole('button', {{ name: '进入工作台' }}).click();
+          await returnScopeCard.getByRole('button', {{ name: '进入维护管理' }}).click();
           await page.waitForSelector('text=待发起事项', {{ timeout: 10000 }});
           await page.waitForSelector('text=A楼UPS旁路切换变更测试', {{ timeout: 10000 }});
           await assertHeaderSubtitle(page, 'A楼 · 通告工作台', 'workbench-after-return');
@@ -515,6 +523,13 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             timeout: 20000,
           }});
           await secondPage.waitForSelector('text=待发起事项', {{ timeout: 10000 }});
+          const allSegment = secondPage.locator('.segmented button').filter({{ hasText: '全部' }});
+          if (await allSegment.count() !== 1) throw new Error('all work type segment missing or ambiguous');
+          const allSegmentClass = await allSegment.first().getAttribute('class');
+          if (!String(allSegmentClass || '').includes('active')) {{
+            throw new Error(`all work type segment is not active by default: ${{allSegmentClass}}`);
+          }}
+          await secondPage.waitForSelector('text=冷机月度巡检', {{ timeout: 10000 }});
           await secondPage.waitForSelector('text=A楼UPS旁路切换变更测试', {{ timeout: 10000 }});
           await assertLayout(secondPage, 'second-tab-workbench');
           await page.waitForTimeout(1000);
@@ -537,7 +552,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await page.waitForSelector('text=结束', {{ timeout: 10000 }});
           await page.getByRole('button', {{ name: '管理/诊断' }}).click();
           await page.waitForSelector('text=管理员工具', {{ timeout: 10000 }});
-          await page.waitForSelector('text=查看原始诊断数据', {{ timeout: 10000 }});
+          await page.waitForSelector('text=查看详细诊断数据', {{ timeout: 10000 }});
           const rawDiagnosticOpen = await page.evaluate(() => {{
             const node = document.querySelector('.raw-diagnostic');
             return Boolean(node && node.hasAttribute('open'));
@@ -590,7 +605,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             throw new Error(`admin permission VNET skin missing: ${{JSON.stringify(permissionSkin)}}`);
           }}
           await page.getByRole('button', {{ name: '状态' }}).click();
-          await page.waitForSelector('text=查看原始诊断数据', {{ timeout: 10000 }});
+          await page.waitForSelector('text=查看详细诊断数据', {{ timeout: 10000 }});
           await assertLayout(page, 'admin');
           await assertVnetSkin(page, 'admin');
           await page.goto(new URL('/admin/history-memory', cfg.url).toString(), {{
@@ -599,7 +614,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           }});
           await page.waitForSelector('text=历史通告记忆导入', {{ timeout: 10000 }});
           await page.waitForSelector('text=扫描历史通告', {{ timeout: 10000 }});
-          await page.waitForSelector('text=当前月源表事项', {{ timeout: 10000 }});
+          await page.waitForSelector('text=当前月事项', {{ timeout: 10000 }});
           await assertHeaderSubtitle(page, '管理工具 · 历史通告记忆导入', 'history-memory');
           await assertLayout(page, 'history-memory');
           await assertVnetSkin(page, 'history-memory');

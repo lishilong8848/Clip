@@ -51,7 +51,7 @@ class LanPortalStateStore:
     are migration inputs only and are never deleted or overwritten here.
     """
 
-    SCHEMA_VERSION = 19
+    SCHEMA_VERSION = 21
     SOURCE_SCOPE_TABLES = {
         "110": "source_records_110",
         "A": "source_records_a",
@@ -86,11 +86,14 @@ class LanPortalStateStore:
         "repair_link_tasks",
         "source_snapshot_manifest",
         "source_snapshot_records",
+        "event_month_snapshot_manifest",
+        "event_month_snapshot_records",
         "notice_undo_actions",
         "notice_identity_map",
         "notice_work_type_overrides",
         "notice_upload_attachments",
         "mop_notice_bindings",
+        "mop_fill_memory",
         "signature_link_tokens",
         "mop_temporary_signature_sessions",
         "schema_migrations",
@@ -100,6 +103,8 @@ class LanPortalStateStore:
         "idx_qt_active_items_record_id",
         "idx_source_snapshot_manifest_status_time",
         "idx_source_snapshot_records_scope_order",
+        "idx_event_month_snapshot_manifest_month_status",
+        "idx_event_month_snapshot_records_month_order",
         "idx_notice_undo_status_scope",
         "idx_notice_identity_active",
         "idx_notice_identity_source",
@@ -111,6 +116,7 @@ class LanPortalStateStore:
         "idx_mop_notice_bindings_notice",
         "idx_mop_notice_bindings_template",
         "idx_mop_notice_bindings_mop",
+        "idx_mop_fill_memory_updated",
         "idx_signature_link_tokens_record",
         "idx_signature_link_tokens_expiry",
         "idx_mop_temp_signature_notice",
@@ -492,6 +498,26 @@ class LanPortalStateStore:
             """
             CREATE INDEX IF NOT EXISTS idx_mop_notice_bindings_mop
             ON mop_notice_bindings(mop_record_id, mop_attachment_token, deleted_at)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mop_fill_memory (
+                memory_key TEXT PRIMARY KEY,
+                mop_title TEXT,
+                mop_file_name TEXT,
+                sheet_name TEXT,
+                payload_json TEXT NOT NULL,
+                updated_by TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_mop_fill_memory_updated
+            ON mop_fill_memory(updated_at)
             """
         )
         conn.execute(
@@ -920,6 +946,48 @@ class LanPortalStateStore:
             """
             CREATE INDEX IF NOT EXISTS idx_source_snapshot_records_work_source
             ON source_snapshot_records(snapshot_id, work_type, source_record_id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS event_month_snapshot_manifest (
+                snapshot_id TEXT PRIMARY KEY,
+                month TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at REAL NOT NULL,
+                finished_at REAL,
+                counts_json TEXT NOT NULL,
+                meta_json TEXT NOT NULL,
+                error TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_event_month_snapshot_manifest_month_status
+            ON event_month_snapshot_manifest(month, status, updated_at)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS event_month_snapshot_records (
+                snapshot_id TEXT NOT NULL,
+                month TEXT NOT NULL,
+                source_key TEXT NOT NULL,
+                source_record_id TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                sort_order INTEGER NOT NULL,
+                created_at REAL NOT NULL,
+                PRIMARY KEY(snapshot_id, source_key, source_record_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_event_month_snapshot_records_month_order
+            ON event_month_snapshot_records(snapshot_id, month, sort_order)
             """
         )
         for table in self.SOURCE_SCOPE_TABLES.values():
@@ -2618,6 +2686,389 @@ class LanPortalStateStore:
                         deleted_records += int(cur.rowcount or 0)
                         cur = conn.execute(
                             "DELETE FROM source_snapshot_manifest WHERE snapshot_id = ?",
+                            (snapshot_id,),
+                        )
+                        deleted_manifests += int(cur.rowcount or 0)
+                    conn.commit()
+        return {
+            "deleted_manifests": deleted_manifests,
+            "deleted_records": deleted_records,
+        }
+
+    @staticmethod
+    def _normalize_event_month(value: Any) -> str:
+        text = str(value or "").strip()
+        match = re.search(r"(\d{4})[-/年](\d{1,2})", text)
+        if match:
+            return f"{int(match.group(1)):04d}-{int(match.group(2)):02d}"
+        return time.strftime("%Y-%m")
+
+    @staticmethod
+    def _active_event_month_snapshot_key(month: str) -> str:
+        return f"active_event_month_snapshot_id:{month}"
+
+    def replace_event_month_snapshot(
+        self,
+        month: str,
+        records: list[dict[str, Any]],
+        *,
+        meta: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        month = self._normalize_event_month(month)
+        snapshot_id = uuid.uuid4().hex
+        started_at = time.time()
+        meta_payload = dict(meta or {})
+        normalized_records = [
+            dict(item)
+            for item in (records or [])
+            if isinstance(item, dict)
+        ]
+        counts = {
+            "records": len(normalized_records),
+            "by_scope": {},
+            "by_status": {},
+            "high_level": 0,
+        }
+        for item in normalized_records:
+            item_codes = item.get("building_codes")
+            if not isinstance(item_codes, list):
+                item_codes = []
+            for code in item_codes:
+                scope_counts = counts["by_scope"]
+                scope_counts[code] = int(scope_counts.get(code) or 0) + 1
+            status = str(item.get("status") or "未知").strip() or "未知"
+            status_counts = counts["by_status"]
+            status_counts[status] = int(status_counts.get(status) or 0) + 1
+            if bool(item.get("high_level")):
+                counts["high_level"] = int(counts.get("high_level") or 0) + 1
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                now = time.time()
+                conn.execute(
+                    """
+                    INSERT INTO event_month_snapshot_manifest(
+                        snapshot_id,
+                        month,
+                        status,
+                        started_at,
+                        finished_at,
+                        counts_json,
+                        meta_json,
+                        error,
+                        created_at,
+                        updated_at
+                    ) VALUES (?, ?, 'building', ?, NULL, ?, ?, '', ?, ?)
+                    """,
+                    (
+                        snapshot_id,
+                        month,
+                        started_at,
+                        self._json(counts),
+                        self._json(meta_payload),
+                        now,
+                        now,
+                    ),
+                )
+                for index, item in enumerate(normalized_records):
+                    source_key = self._text(item.get("source_key") or "event_notice")
+                    source_record_id = self._text(
+                        item.get("source_record_id")
+                        or item.get("record_id")
+                        or item.get("target_record_id")
+                    )
+                    if not source_record_id:
+                        source_record_id = hashlib.sha1(
+                            self._stable_json(item).encode("utf-8")
+                        ).hexdigest()
+                    conn.execute(
+                        """
+                        INSERT OR REPLACE INTO event_month_snapshot_records(
+                            snapshot_id,
+                            month,
+                            source_key,
+                            source_record_id,
+                            payload_json,
+                            sort_order,
+                            created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            snapshot_id,
+                            month,
+                            source_key,
+                            source_record_id,
+                            self._json(item),
+                            index,
+                            now,
+                        ),
+                    )
+                conn.execute(
+                    """
+                    UPDATE event_month_snapshot_manifest
+                    SET status = 'retained', updated_at = ?
+                    WHERE month = ? AND status = 'active'
+                    """,
+                    (now, month),
+                )
+                conn.execute(
+                    """
+                    UPDATE event_month_snapshot_manifest
+                    SET status = 'active', finished_at = ?, updated_at = ?
+                    WHERE snapshot_id = ?
+                    """,
+                    (now, now, snapshot_id),
+                )
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
+                    (self._active_event_month_snapshot_key(month), snapshot_id),
+                )
+                conn.commit()
+        self.cleanup_event_month_snapshots()
+        return {
+            "snapshot_id": snapshot_id,
+            "status": "active",
+            "month": month,
+            "counts": counts,
+            "updated_at": now,
+        }
+
+    def record_failed_event_month_snapshot(
+        self,
+        month: str,
+        *,
+        meta: dict[str, Any] | None = None,
+        error: str = "",
+    ) -> dict[str, Any]:
+        month = self._normalize_event_month(month)
+        snapshot_id = uuid.uuid4().hex
+        now = time.time()
+        meta_payload = dict(meta or {})
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO event_month_snapshot_manifest(
+                        snapshot_id,
+                        month,
+                        status,
+                        started_at,
+                        finished_at,
+                        counts_json,
+                        meta_json,
+                        error,
+                        created_at,
+                        updated_at
+                    ) VALUES (?, ?, 'failed', ?, ?, '{}', ?, ?, ?, ?)
+                    """,
+                    (
+                        snapshot_id,
+                        month,
+                        now,
+                        now,
+                        self._json(meta_payload),
+                        self._text(error),
+                        now,
+                        now,
+                    ),
+                )
+                conn.commit()
+        self.cleanup_event_month_snapshots()
+        return {
+            "snapshot_id": snapshot_id,
+            "status": "failed",
+            "month": month,
+            "updated_at": now,
+        }
+
+    def get_event_month_snapshot(self, month: str) -> dict[str, Any]:
+        month = self._normalize_event_month(month)
+        if not self.db_path.exists():
+            return {
+                "exists": False,
+                "month": month,
+                "records": [],
+                "meta": {},
+                "updated_at": 0.0,
+                "last_failed": {},
+            }
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                active_key = self._active_event_month_snapshot_key(month)
+                active_row = conn.execute(
+                    "SELECT value FROM meta WHERE key = ?",
+                    (active_key,),
+                ).fetchone()
+                active_snapshot_id = (
+                    str(active_row["value"] or "").strip() if active_row else ""
+                )
+                manifest_row = None
+                records_rows: list[sqlite3.Row] = []
+                if active_snapshot_id:
+                    manifest_row = conn.execute(
+                        """
+                        SELECT *
+                        FROM event_month_snapshot_manifest
+                        WHERE snapshot_id = ? AND month = ? AND status = 'active'
+                        """,
+                        (active_snapshot_id, month),
+                    ).fetchone()
+                    if manifest_row:
+                        records_rows = conn.execute(
+                            """
+                            SELECT payload_json
+                            FROM event_month_snapshot_records
+                            WHERE snapshot_id = ? AND month = ?
+                            ORDER BY sort_order ASC, source_key ASC, source_record_id ASC
+                            """,
+                            (active_snapshot_id, month),
+                        ).fetchall()
+                failed_row = conn.execute(
+                    """
+                    SELECT *
+                    FROM event_month_snapshot_manifest
+                    WHERE month = ? AND status = 'failed'
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                    """,
+                    (month,),
+                ).fetchone()
+        records: list[dict[str, Any]] = []
+        for row in records_rows:
+            payload = self._loads(str(row["payload_json"] or ""), {})
+            if isinstance(payload, dict):
+                records.append(payload)
+
+        def manifest_payload(row: sqlite3.Row | None) -> dict[str, Any]:
+            if not row:
+                return {}
+            meta = self._loads(str(row["meta_json"] or ""), {})
+            counts = self._loads(str(row["counts_json"] or ""), {})
+            return {
+                "snapshot_id": str(row["snapshot_id"] or ""),
+                "month": str(row["month"] or ""),
+                "status": str(row["status"] or ""),
+                "started_at": float(row["started_at"] or 0),
+                "finished_at": float(row["finished_at"] or 0),
+                "updated_at": float(row["updated_at"] or 0),
+                "counts": counts if isinstance(counts, dict) else {},
+                "meta": meta if isinstance(meta, dict) else {},
+                "error": str(row["error"] or ""),
+            }
+
+        manifest = manifest_payload(manifest_row)
+        return {
+            "exists": bool(manifest_row),
+            "month": month,
+            "records": records,
+            "meta": manifest.get("meta") or {},
+            "updated_at": float(manifest.get("finished_at") or manifest.get("updated_at") or 0),
+            "snapshot_id": manifest.get("snapshot_id") or "",
+            "count": len(records),
+            "manifest": manifest,
+            "last_failed": manifest_payload(failed_row),
+        }
+
+    def event_month_snapshot_stats(self) -> dict[str, Any]:
+        if not self.db_path.exists():
+            return {}
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                active_rows = conn.execute(
+                    """
+                    SELECT month, snapshot_id, status, started_at, finished_at,
+                           counts_json, meta_json, error, updated_at
+                    FROM event_month_snapshot_manifest
+                    WHERE status = 'active'
+                    ORDER BY month DESC, updated_at DESC
+                    LIMIT 12
+                    """
+                ).fetchall()
+                failed = conn.execute(
+                    """
+                    SELECT month, snapshot_id, status, started_at, finished_at,
+                           counts_json, meta_json, error, updated_at
+                    FROM event_month_snapshot_manifest
+                    WHERE status = 'failed'
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
+                total = conn.execute(
+                    "SELECT count(*) AS c FROM event_month_snapshot_manifest"
+                ).fetchone()
+
+        def row_payload(row: sqlite3.Row | None) -> dict[str, Any]:
+            if not row:
+                return {}
+            meta = self._loads(str(row["meta_json"] or ""), {})
+            counts = self._loads(str(row["counts_json"] or ""), {})
+            return {
+                "month": str(row["month"] or ""),
+                "snapshot_id": str(row["snapshot_id"] or ""),
+                "status": str(row["status"] or ""),
+                "started_at": float(row["started_at"] or 0),
+                "finished_at": float(row["finished_at"] or 0),
+                "updated_at": float(row["updated_at"] or 0),
+                "counts": counts if isinstance(counts, dict) else {},
+                "meta": meta if isinstance(meta, dict) else {},
+                "error": str(row["error"] or ""),
+            }
+
+        return {
+            "active_months": [row_payload(row) for row in active_rows],
+            "last_failed": row_payload(failed),
+            "manifest_count": int(total["c"] or 0) if total else 0,
+        }
+
+    def cleanup_event_month_snapshots(
+        self, *, keep_success: int = 3, keep_failed: int = 5
+    ) -> dict[str, int]:
+        if not self.db_path.exists():
+            return {"deleted_manifests": 0, "deleted_records": 0}
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                rows = conn.execute(
+                    """
+                    SELECT snapshot_id, month, status
+                    FROM event_month_snapshot_manifest
+                    ORDER BY month DESC, updated_at DESC
+                    """
+                ).fetchall()
+                success_seen: dict[str, int] = {}
+                failed_seen = 0
+                delete_ids: list[str] = []
+                for row in rows:
+                    snapshot_id = str(row["snapshot_id"] or "")
+                    month = str(row["month"] or "")
+                    status = str(row["status"] or "")
+                    if status in {"active", "retained"}:
+                        success_seen[month] = int(success_seen.get(month) or 0) + 1
+                        if success_seen[month] > max(1, int(keep_success or 3)):
+                            delete_ids.append(snapshot_id)
+                    elif status == "failed":
+                        failed_seen += 1
+                        if failed_seen > max(0, int(keep_failed or 5)):
+                            delete_ids.append(snapshot_id)
+                    elif status != "building":
+                        delete_ids.append(snapshot_id)
+                deleted_records = 0
+                deleted_manifests = 0
+                if delete_ids:
+                    conn.execute("BEGIN IMMEDIATE")
+                    for snapshot_id in delete_ids:
+                        cur = conn.execute(
+                            "DELETE FROM event_month_snapshot_records WHERE snapshot_id = ?",
+                            (snapshot_id,),
+                        )
+                        deleted_records += int(cur.rowcount or 0)
+                        cur = conn.execute(
+                            "DELETE FROM event_month_snapshot_manifest WHERE snapshot_id = ?",
                             (snapshot_id,),
                         )
                         deleted_manifests += int(cur.rowcount or 0)
@@ -4726,11 +5177,49 @@ class LanPortalStateStore:
                 return None
         return self._mop_temp_signature_from_row(row)
 
+    def refresh_mop_temporary_signature_session_token(
+        self,
+        *,
+        temp_id: str,
+        ttl_seconds: int = 3600,
+    ) -> dict[str, Any]:
+        temp_id = self._text(temp_id)
+        if not temp_id:
+            raise ValueError("临时签名记录缺少 ID。")
+        ttl_seconds = max(300, min(int(ttl_seconds or 3600), 24 * 3600))
+        token = secrets.token_urlsafe(32)
+        token_hash = self._signature_link_token_hash(token)
+        now = time.time()
+        expires_at = now + ttl_seconds
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    "SELECT * FROM mop_temporary_signature_sessions WHERE temp_id = ?",
+                    (temp_id,),
+                ).fetchone()
+                if not row:
+                    raise ValueError("临时签名记录不存在。")
+                conn.execute(
+                    """
+                    UPDATE mop_temporary_signature_sessions
+                    SET token_hash = ?,
+                        expires_at = ?,
+                        updated_at = ?
+                    WHERE temp_id = ?
+                    """,
+                    (token_hash, expires_at, now, temp_id),
+                )
+                conn.commit()
+        session = self.get_mop_temporary_signature_session(temp_id=temp_id) or {}
+        return {**session, "token": token}
+
     def list_mop_temporary_signature_sessions(
         self,
         *,
         scope: str = "",
         notice_key: str = "",
+        created_by: str = "",
         include_expired: bool = False,
     ) -> list[dict[str, Any]]:
         now = time.time()
@@ -4738,12 +5227,16 @@ class LanPortalStateStore:
         params: list[Any] = []
         scope = self._text(scope)
         notice_key = self._text(notice_key)
+        created_by = self._text(created_by)
         if scope:
             clauses.append("scope = ?")
             params.append(scope)
         if notice_key:
             clauses.append("notice_key = ?")
             params.append(notice_key)
+        if created_by:
+            clauses.append("(created_by = ? OR created_by = '')")
+            params.append(created_by)
         if not include_expired:
             clauses.append("(expires_at >= ? OR status = 'signed')")
             params.append(now)
@@ -4948,6 +5441,76 @@ class LanPortalStateStore:
                 ).fetchall()
         return [self._mop_binding_from_row(row) for row in rows]
 
+    def _mop_fill_memory_from_row(self, row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if not row:
+            return None
+        payload = self._loads(str(row["payload_json"] or "{}"), {})
+        if not isinstance(payload, dict):
+            payload = {}
+        return {
+            "memory_key": str(row["memory_key"] or ""),
+            "mop_title": str(row["mop_title"] or ""),
+            "mop_file_name": str(row["mop_file_name"] or ""),
+            "sheet_name": str(row["sheet_name"] or ""),
+            "payload": payload,
+            "updated_by": str(row["updated_by"] or ""),
+            "created_at": float(row["created_at"] or 0),
+            "updated_at": float(row["updated_at"] or 0),
+        }
+
+    def upsert_mop_fill_memory(self, payload: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(payload or {})
+        memory_key = self._text(payload.get("memory_key"))
+        if not memory_key:
+            raise ValueError("MOP填写记忆缺少 memory_key。")
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                existing = conn.execute(
+                    "SELECT created_at FROM mop_fill_memory WHERE memory_key = ?",
+                    (memory_key,),
+                ).fetchone()
+                created_at = float(existing["created_at"] or now) if existing else now
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO mop_fill_memory(
+                        memory_key, mop_title, mop_file_name, sheet_name,
+                        payload_json, updated_by, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        memory_key,
+                        self._text(payload.get("mop_title")),
+                        self._text(payload.get("mop_file_name")),
+                        self._text(payload.get("sheet_name")),
+                        self._json(payload.get("payload") if isinstance(payload.get("payload"), dict) else {}),
+                        self._text(payload.get("updated_by")),
+                        created_at,
+                        now,
+                    ),
+                )
+                conn.commit()
+                row = conn.execute(
+                    "SELECT * FROM mop_fill_memory WHERE memory_key = ?",
+                    (memory_key,),
+                ).fetchone()
+        return self._mop_fill_memory_from_row(row) or {}
+
+    def get_mop_fill_memory(self, memory_key: str) -> dict[str, Any] | None:
+        memory_key = self._text(memory_key)
+        if not memory_key or not self.db_path.exists():
+            return None
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    "SELECT * FROM mop_fill_memory WHERE memory_key = ?",
+                    (memory_key,),
+                ).fetchone()
+        return self._mop_fill_memory_from_row(row)
+
     def get_auth_permissions(self) -> dict[str, Any] | None:
         if not self.db_path.exists():
             return None
@@ -5094,6 +5657,69 @@ class LanPortalStateStore:
             return None
         payload = self._loads(str(row["payload_json"] or ""), {})
         return payload if isinstance(payload, dict) else None
+
+    def get_latest_permission_request(
+        self,
+        open_id: str,
+        *,
+        statuses: list[str] | tuple[str, ...] = ("pending", "rejected"),
+    ) -> dict[str, Any] | None:
+        open_id = self._text(open_id)
+        clean_statuses = [self._text(item) for item in statuses if self._text(item)]
+        if not open_id or not clean_statuses or not self.db_path.exists():
+            return None
+        placeholders = ",".join("?" for _ in clean_statuses)
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    f"""
+                    SELECT payload_json
+                    FROM permission_requests
+                    WHERE open_id = ?
+                      AND status IN ({placeholders})
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (open_id, *clean_statuses),
+                ).fetchone()
+        if not row:
+            return None
+        payload = self._loads(str(row["payload_json"] or ""), {})
+        return payload if isinstance(payload, dict) else None
+
+    def list_permission_requests(
+        self, *, status: str = "pending", limit: int = 100
+    ) -> list[dict[str, Any]]:
+        if not self.db_path.exists():
+            return []
+        status = self._text(status)
+        limit = max(1, min(int(limit or 100), 500))
+        params: list[Any] = []
+        where = ""
+        if status and status.lower() != "all":
+            where = "WHERE status = ?"
+            params.append(status)
+        params.append(limit)
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                rows = conn.execute(
+                    f"""
+                    SELECT payload_json
+                    FROM permission_requests
+                    {where}
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    tuple(params),
+                ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            payload = self._loads(str(row["payload_json"] or ""), {})
+            if isinstance(payload, dict):
+                result.append(payload)
+        return result
 
     def put_permission_request(self, payload: dict[str, Any]) -> None:
         if not isinstance(payload, dict):

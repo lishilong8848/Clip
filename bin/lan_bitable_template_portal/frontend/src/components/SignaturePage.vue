@@ -110,10 +110,13 @@
         </div>
 
         <div class="signature-actions">
-          <button class="btn blue" type="button" :disabled="saving || !selectedPerson || !hasInk" @click="saveSignature">
+          <button class="btn blue" type="button" :disabled="Boolean(saveDisabledReason)" :title="saveDisabledReason" @click="saveSignature">
             {{ saving ? "保存中" : (temporaryMode ? "保存临时签名" : "保存到签名表") }}
           </button>
-          <span v-if="signaturePreviewUrl && !hasInk" class="saved-inline">{{ temporaryMode ? "临时签名已保存，可重新手写覆盖。" : "已有签名已加载，可直接复用或重新手写覆盖。" }}</span>
+          <span v-if="saveDisabledReason && !signaturePreviewUrl" class="signature-action-hint">{{ saveDisabledReason }}</span>
+          <span v-if="signaturePreviewUrl && !hasInk" class="saved-inline">
+            {{ linkMode ? "签名已保存并显示在上方，可关闭页面。" : temporaryMode ? "临时签名已保存，可重新手写覆盖。" : "已有签名已加载，可直接复用或重新手写覆盖。" }}
+          </span>
         </div>
 
         <div v-if="!linkMode" class="signature-note">
@@ -171,6 +174,12 @@ const searchStatusText = computed(() => {
       : `已找到 ${people.value.length} 人`;
   }
   return query.value.trim() ? "暂未找到人员" : "输入姓名、工号或楼栋自动搜索";
+});
+const saveDisabledReason = computed(() => {
+  if (saving.value) return "正在保存签名，请稍候。";
+  if (!selectedPerson.value) return "请先选择签名人员。";
+  if (!hasInk.value) return "请先在签名区手写签名。";
+  return "";
 });
 
 function setMessage(text: string, type: "success" | "failed" | "info" = "info"): void {
@@ -272,10 +281,13 @@ function canvasContext(): CanvasRenderingContext2D | null {
   if (!canvas) return null;
   const ctx = canvas.getContext("2d");
   if (!ctx) return null;
-  ctx.lineWidth = 4;
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = "source-over";
+  ctx.imageSmoothingEnabled = true;
+  ctx.lineWidth = 5;
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
-  ctx.strokeStyle = "#0f172a";
+  ctx.strokeStyle = "#000000";
   return ctx;
 }
 
@@ -307,10 +319,13 @@ function resizeCanvas(): void {
     ctx.drawImage(previous, 0, 0, previous.width, previous.height, 0, 0, width, height);
   }
   ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-  ctx.lineWidth = 4;
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = "source-over";
+  ctx.imageSmoothingEnabled = true;
+  ctx.lineWidth = 5;
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
-  ctx.strokeStyle = "#0f172a";
+  ctx.strokeStyle = "#000000";
   hasInk.value = Boolean(previousHasInk);
 }
 
@@ -414,6 +429,9 @@ async function saveSignature(): Promise<void> {
 }
 
 onMounted(async () => {
+  if (linkMode.value) {
+    document.body.classList.add("signature-link-active");
+  }
   await nextTick();
   resizeCanvas();
   if (canvasRef.value && "ResizeObserver" in window) {
@@ -424,6 +442,7 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  document.body.classList.remove("signature-link-active");
   if (searchTimer) {
     clearTimeout(searchTimer);
     searchTimer = null;
@@ -438,6 +457,14 @@ watch(query, () => {
 </script>
 
 <style scoped>
+:global(body.signature-link-active) {
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+  overscroll-behavior: none;
+  touch-action: none;
+}
+
 .signature-page {
   display: grid;
   gap: 18px;
@@ -800,6 +827,19 @@ watch(query, () => {
 
 .signature-actions .saved-inline {
   flex: 1 1 220px;
+  text-align: right;
+}
+
+.signature-action-hint {
+  flex: 1 1 220px;
+  border: 1px solid #d8e5f7;
+  border-radius: 999px;
+  background: #f8fbff;
+  padding: 7px 10px;
+  color: #48627f;
+  font-size: 12px;
+  font-weight: 850;
+  line-height: 1.35;
   text-align: right;
 }
 

@@ -3,10 +3,16 @@
     <div class="panel-head compact">
       <div>
         <h3>近三天可回退</h3>
-        <small>删除、结束、更新可在这里恢复最近一次状态</small>
+        <small>{{ panelSubtitle }}</small>
       </div>
-      <button class="undo-toggle" type="button" @click="expanded = !expanded">
-        {{ expanded ? "收起" : `展开 ${items.length}` }}
+      <span v-if="deleteCount" class="undo-delete-count">删除 {{ deleteCount }}</span>
+      <button
+        class="undo-toggle"
+        type="button"
+        :title="deleteCount ? '查看近三天删除、结束、更新的可回退记录' : '查看近三天可回退记录'"
+        @click="expanded = !expanded"
+      >
+        {{ expanded ? "收起" : `展开查看 ${items.length} 条` }}
       </button>
     </div>
     <template v-if="expanded">
@@ -29,11 +35,19 @@
             {{ workTypeLabel(item.work_type) }} · {{ item.building || "-" }} · {{ formatUndoTime(item.undo_created_at) }}
           </p>
         </div>
-        <button class="btn ghost" :disabled="isLineBusy(undoLineKey(item))" @click="emit('apply', item)">
-          {{ undoButtonLabel(item) }}
+        <button
+          class="btn ghost"
+          :disabled="isLineBusy(undoLineKey(item))"
+          :title="isLineBusy(undoLineKey(item)) ? '正在回退当前通告，请等待后台完成' : undoButtonTitle(item)"
+          @click="emit('apply', item)"
+        >
+          {{ isLineBusy(undoLineKey(item)) ? "回退中" : undoButtonLabel(item) }}
         </button>
-        <span class="job-line" :class="jobClass(undoLineKey(item))">{{ jobText(undoLineKey(item)) }}</span>
+        <span v-if="jobText(undoLineKey(item))" class="job-line" :class="jobClass(undoLineKey(item))">{{ jobText(undoLineKey(item)) }}</span>
       </article>
+      <div v-if="!filteredItems.length" class="undo-empty">
+        当前筛选下没有可回退记录。
+      </div>
     </template>
   </section>
 </template>
@@ -75,6 +89,8 @@ const filterCounts = computed(() => {
   return counts;
 });
 
+const deleteCount = computed(() => filterCounts.value.delete || 0);
+const panelSubtitle = computed(() => deleteCount.value ? "误删后在这里恢复对应通告" : "恢复近三天更新、结束等误操作");
 const filteredItems = computed(() => {
   if (props.modelValue === "all") return props.items;
   return props.items.filter((item) => undoActionType(item) === props.modelValue);
@@ -106,6 +122,10 @@ function undoActionLabel(item: Dict): string {
 function undoButtonLabel(item: Dict): string {
   return `回退${undoActionLabel(item)}`;
 }
+
+function undoButtonTitle(item: Dict): string {
+  return `回退这条通告的${undoActionLabel(item)}操作`;
+}
 </script>
 
 <style scoped>
@@ -126,6 +146,7 @@ function undoButtonLabel(item: Dict): string {
 }
 
 .panel-head.compact {
+  grid-template-columns: minmax(0, 1fr) auto auto;
   padding: 0 0 4px;
 }
 
@@ -143,6 +164,19 @@ function undoButtonLabel(item: Dict): string {
   color: #64748b;
   font-size: 12px;
   line-height: 1.4;
+}
+
+.undo-delete-count {
+  flex: 0 0 auto;
+  border: 1px solid #fed7aa;
+  border-radius: 999px;
+  padding: 5px 9px;
+  background: #fff7ed;
+  color: #9a3412;
+  font-size: 12px;
+  font-weight: 900;
+  line-height: 1;
+  white-space: nowrap;
 }
 
 .undo-toggle {
@@ -211,6 +245,18 @@ function undoButtonLabel(item: Dict): string {
   margin: 3px 0 0;
   color: #64748b;
   font-size: 12px;
+  line-height: 1.55;
+}
+
+.undo-empty {
+  border: 1px dashed #cfe0ff;
+  border-radius: 16px;
+  padding: 12px;
+  background: rgba(248, 251, 255, 0.88);
+  color: #5f7189;
+  font-size: 12px;
+  font-weight: 850;
+  text-align: center;
 }
 
 .undo-action-chip {
@@ -226,6 +272,8 @@ function undoButtonLabel(item: Dict): string {
   grid-column: 1 / -1;
   color: #64748b;
   font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .job-line.busy {
@@ -304,6 +352,7 @@ function undoButtonLabel(item: Dict): string {
   border-color: transparent;
   background: linear-gradient(135deg, #ffffff, #edf6ff);
   color: #0757d7;
+  white-space: nowrap;
 }
 
 .undo-card .btn:hover:not(:disabled) {
@@ -311,18 +360,38 @@ function undoButtonLabel(item: Dict): string {
   box-shadow: 0 8px 20px rgba(27, 101, 213, 0.13);
 }
 
-/* Softer rounded VNET undo polish */
+/* Final VNET undo skin */
 .recent-undo-panel {
-  border-radius: 18px;
+  border-color: #d8e5f7;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: 0 10px 22px rgba(0, 47, 135, 0.07);
+}
+
+.recent-undo-panel::before {
+  background: linear-gradient(90deg, #1e63ff, #005bff);
 }
 
 .undo-card {
-  border-radius: 16px;
+  border-color: #d8e5f7;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 8px 20px rgba(20, 70, 138, 0.06);
+}
+
+.undo-card:hover {
+  border-color: #bdd2f4;
+  background: #ffffff;
+  box-shadow: 0 12px 28px rgba(20, 70, 138, 0.1);
+}
+
+.undo-filter button.active {
+  background: linear-gradient(135deg, #1e63ff, #1554df);
 }
 
 .undo-filter button,
 .btn {
-  border-radius: 12px;
+  border-radius: 14px;
 }
 
 .panel-head.compact h3,
@@ -337,65 +406,29 @@ function undoButtonLabel(item: Dict): string {
 
 .panel-head span,
 .undo-action-chip {
-  background: rgba(234, 243, 255, 0.78);
-  color: #0b5ed8;
-  font-weight: 720;
-}
-
-/* Panorama construction-management polish */
-.recent-undo-panel {
-  border-color: rgba(207, 224, 255, 0.94);
-  border-radius: 20px;
-  background: rgba(248, 251, 255, 0.94);
-  box-shadow: 0 10px 26px rgba(20, 70, 138, 0.08);
-}
-
-.undo-card {
-  border-color: rgba(216, 231, 248, 0.95);
-  border-radius: 18px;
-  background: rgba(255, 255, 255, 0.97);
-  box-shadow: 0 8px 20px rgba(20, 70, 138, 0.06);
-}
-
-.undo-card:hover {
-  box-shadow: 0 12px 28px rgba(20, 70, 138, 0.1);
-}
-
-.undo-filter button,
-.btn {
-  border-radius: 14px;
-}
-
-/* Panorama construction-management undo skin */
-.recent-undo-panel {
-  border-color: #d8e5f7;
-  background: rgba(255, 255, 255, 0.72);
-  box-shadow: 0 10px 22px rgba(0, 47, 135, 0.07);
-}
-
-.recent-undo-panel::before {
-  background: linear-gradient(90deg, #1e63ff, #005bff);
-}
-
-.undo-card {
-  border-color: #d8e5f7;
-  background: rgba(255, 255, 255, 0.9);
-}
-
-.undo-card:hover {
-  border-color: #bdd2f4;
-  background: #ffffff;
-}
-
-.undo-filter button.active {
-  background: linear-gradient(135deg, #1e63ff, #1554df);
-}
-
-.panel-head span,
-.undo-action-chip {
   border-color: #cfe0ff;
   background: #eff6ff;
   color: #005bff;
+  font-weight: 720;
+}
+
+.panel-head .undo-delete-count {
+  border-color: #fed7aa;
+  background: #fff7ed;
+  color: #9a3412;
+}
+
+@media (max-width: 760px) {
+  .panel-head.compact {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .undo-delete-count,
+  .undo-toggle {
+    justify-content: center;
+    width: 100%;
+  }
 }
 </style>
 

@@ -5,7 +5,7 @@ export type NoticeTemplate = {
   uploadFields: string[];
 };
 
-import type { WorkTypeOption, WorkTypeValue } from "./types";
+import type { WorkTypeFilterValue, WorkTypeOption, WorkTypeValue } from "./types";
 
 export const workTypes: WorkTypeOption[] = [
   { value: "maintenance", label: "维保" },
@@ -15,6 +15,11 @@ export const workTypes: WorkTypeOption[] = [
   { value: "polling", label: "轮巡" },
   { value: "adjust", label: "调整" },
 ];
+
+export function normalizeWorkTypeFilter(value: string, fallback: WorkTypeFilterValue = ""): WorkTypeFilterValue {
+  if (!String(value || "").trim()) return "";
+  return isKnownWorkType(value) ? value : fallback;
+}
 
 export const manualPrefillWorkTypes = new Set<WorkTypeValue>(["repair", "power", "polling", "adjust"]);
 
@@ -91,13 +96,13 @@ const commonLabels: Record<string, string> = {
   quantity: "数量",
   device: "设备",
   repair_device: "维修设备",
-    repair_fault: "维修故障",
-    fault_type: "故障类型",
-    repair_mode: "维修方式",
-    solution: "解决方案",
-    discovery: "故障发现方式",
-    symptom: "故障现象",
-    zhihang_record_id: "智航变更记录",
+  repair_fault: "维修故障",
+  fault_type: "故障类型",
+  repair_mode: "维修方式",
+  solution: "解决方案",
+  discovery: "故障发现方式",
+  symptom: "故障现象",
+  zhihang_record_id: "智航变更记录",
 };
 
 const noticeFieldLabels: Record<string, Record<string, string>> = {

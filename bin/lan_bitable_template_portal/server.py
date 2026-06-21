@@ -177,6 +177,14 @@ class PortalRuntime:
     change_refresh_last_error = ""
     change_refresh_last_finished = 0.0
     change_refresh_reuse_window_s = 10.0
+    event_refresh_lock = threading.RLock()
+    event_refresh_inflight = False
+    event_refresh_event = threading.Event()
+    event_refresh_last_result: dict = {}
+    event_refresh_last_error = ""
+    event_refresh_last_finished = 0.0
+    event_refresh_last_month = ""
+    event_refresh_reuse_window_s = 10.0
     qt_action_interval_ms = 250
     source_refresh_defer_when_busy = True
 
@@ -974,6 +982,83 @@ class PortalRuntime:
                 cls.change_refresh_inflight = False
                 event.set()
 
+    @classmethod
+    def request_event_month_refresh(cls, month: str = "") -> dict:
+        """Refresh event monthly snapshot with singleflight."""
+        if os.environ.get("CLIPFLOW_BACKEND_MOCK_EXTERNAL") == "1":
+            return {
+                "event_refresh_started": False,
+                "event_refresh_inflight": False,
+                "event_refresh_reused": False,
+                "mock_external": True,
+            }
+        month_key = cls.service._normalize_event_month(month)
+        now = time.monotonic()
+        with cls.event_refresh_lock:
+            if (
+                cls.event_refresh_last_result
+                and cls.event_refresh_last_month == month_key
+                and now - float(cls.event_refresh_last_finished or 0)
+                <= float(cls.event_refresh_reuse_window_s)
+            ):
+                result = copy.deepcopy(cls.event_refresh_last_result)
+                result["event_refresh_started"] = False
+                result["event_refresh_inflight"] = False
+                result["event_refresh_reused"] = True
+                return result
+            if cls.event_refresh_inflight and cls.event_refresh_last_month == month_key:
+                event = cls.event_refresh_event
+                owner = False
+            else:
+                event = threading.Event()
+                cls.event_refresh_event = event
+                cls.event_refresh_inflight = True
+                cls.event_refresh_last_error = ""
+                cls.event_refresh_last_month = month_key
+                owner = True
+
+        if not owner:
+            if not event.wait(timeout=120):
+                raise PortalError("事件表刷新仍在进行，请稍后查看。")
+            with cls.event_refresh_lock:
+                if cls.event_refresh_last_error:
+                    raise PortalError(cls.event_refresh_last_error)
+                if not cls.event_refresh_last_result:
+                    raise PortalError("事件表刷新未返回结果，请稍后重试。")
+                result = copy.deepcopy(cls.event_refresh_last_result)
+                result["event_refresh_started"] = False
+                result["event_refresh_inflight"] = False
+                result["event_refresh_reused"] = True
+                return result
+
+        try:
+            result = cls.service.refresh_event_month_snapshot(month_key)
+            if not isinstance(result, dict):
+                result = {}
+            result = copy.deepcopy(result)
+            result["event_refresh_started"] = True
+            result["event_refresh_inflight"] = False
+            result["event_refresh_reused"] = False
+            with cls.event_refresh_lock:
+                cls.event_refresh_last_result = copy.deepcopy(result)
+                cls.event_refresh_last_error = ""
+                cls.event_refresh_last_finished = time.monotonic()
+                cls.event_refresh_last_month = month_key
+            return result
+        except Exception as exc:
+            error = str(exc)
+            with cls.event_refresh_lock:
+                cls.event_refresh_last_error = error
+                cls.event_refresh_last_finished = time.monotonic()
+                cls.event_refresh_last_month = month_key
+            if isinstance(exc, PortalError):
+                raise
+            raise PortalError(error) from exc
+        finally:
+            with cls.event_refresh_lock:
+                cls.event_refresh_inflight = False
+                event.set()
+
     def _reconcile_orphan_started_items(
         self, scope: str, ongoing: list[dict] | None, *, force: bool = False
     ) -> None:
@@ -1196,6 +1281,11 @@ class PortalRuntime:
                 data = self.service.list_temporary_signatures(
                     scope=scope,
                     notice_key=(qs.get("notice_key") or [""])[0],
+                    created_by=str(
+                        (session.get("user") or {}).get("open_id")
+                        if isinstance(session.get("user"), dict)
+                        else ""
+                    ),
                 )
                 return self._send_json(
                     200,
@@ -1374,6 +1464,23 @@ class PortalRuntime:
                 )
             except PortalError as exc:
                 return self._send_json(500, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/events/monthly":
+            qs = parse_qs(parsed.query)
+            try:
+                scope = self._authorized_scope_or_error(
+                    session, (qs.get("scope") or ["ALL"])[0]
+                )
+                month = (qs.get("month") or [""])[0]
+                data = PortalRuntime.service.get_event_monthly_snapshot(
+                    scope=scope,
+                    month=month,
+                )
+                return self._send_json(
+                    200,
+                    {"ok": True, "data": self._with_auth_context(data, session)},
+                )
+            except PortalError as exc:
+                return self._send_json(403, {"ok": False, "error": str(exc)})
         if parsed.path == "/api/auth/permissions":
             if not self._require_admin_json(session):
                 return
@@ -1573,6 +1680,29 @@ class PortalRuntime:
                 },
                 body,
             )
+        if parsed.path == "/api/events/refresh":
+            session = self._require_auth_json()
+            if session is None:
+                return
+            qs = parse_qs(parsed.query)
+            try:
+                scope = self._authorized_scope_or_error(
+                    session, (qs.get("scope") or ["ALL"])[0]
+                )
+                month = (qs.get("month") or [""])[0]
+                refresh_result = PortalRuntime.request_event_month_refresh(month)
+                data = PortalRuntime.service.get_event_monthly_snapshot(
+                    scope=scope,
+                    month=month,
+                )
+                data.update(refresh_result)
+                data["event_source_refreshed"] = True
+                return self._send_json(
+                    200,
+                    {"ok": True, "data": self._with_auth_context(data, session)},
+                )
+            except PortalError as exc:
+                return self._send_json(403, {"ok": False, "error": str(exc)})
         if parsed.path == "/api/signatures/save":
             try:
                 session = self._current_session()
@@ -1589,6 +1719,8 @@ class PortalRuntime:
                     signature_png=str(payload.get("signature_png") or ""),
                     signer_name=str(payload.get("signer_name") or ""),
                     link_token=link_token if session is None else "",
+                    operator_open_id=str((session or {}).get("open_id") or ""),
+                    operator_name=str((session or {}).get("name") or ""),
                 )
                 if session is None:
                     self.service.mark_signature_link_token_used(
@@ -1598,12 +1730,64 @@ class PortalRuntime:
                 return self._send_json(200, {"ok": True, "data": data})
             except (PortalError, ValueError, json.JSONDecodeError) as exc:
                 return self._send_json(400, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/signatures/external/save":
+            session = self._require_auth_json()
+            if session is None:
+                return
+            try:
+                payload = self._read_json_body(max_bytes=4 * 1024 * 1024)
+                data = self.service.save_external_signature_for_person(
+                    record_id=str(payload.get("record_id") or ""),
+                    signature_png=str(payload.get("signature_png") or ""),
+                    signer_name=str(payload.get("signer_name") or ""),
+                )
+                return self._send_json(200, {"ok": True, "data": data})
+            except (PortalError, ValueError, json.JSONDecodeError) as exc:
+                return self._send_json(400, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/signatures/temporary/create":
+            session = self._require_auth_json()
+            if session is None:
+                return
+            try:
+                payload = self._read_json_body(max_bytes=64 * 1024)
+                scope = self._authorized_scope_or_error(
+                    session,
+                    str(payload.get("scope") or "ALL"),
+                )
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                data = self.service.create_temporary_signature_session(
+                    scope=scope,
+                    notice_key=str(payload.get("notice_key") or ""),
+                    role=str(payload.get("role") or "implementer"),
+                    notice_title=str(payload.get("notice_title") or ""),
+                    specialty=str(payload.get("specialty") or ""),
+                    display_name=str(payload.get("display_name") or ""),
+                    created_by=str(user.get("open_id") or ""),
+                )
+                return self._send_json(200, {"ok": True, "data": data})
+            except (PortalError, ValueError, json.JSONDecodeError) as exc:
+                return self._send_json(400, {"ok": False, "error": str(exc)})
         if parsed.path == "/api/signatures/temporary/save":
             try:
                 payload = self._read_json_body(max_bytes=4 * 1024 * 1024)
+                temp_id = str(payload.get("temporary_id") or "")
+                token = str(payload.get("token") or "")
+                if not token:
+                    session = self._require_auth_json()
+                    if session is None:
+                        return
+                    temp_session = PortalRuntime.state_store.get_mop_temporary_signature_session(
+                        temp_id=temp_id,
+                    )
+                    if not temp_session:
+                        raise PortalError("临时签名记录不存在。")
+                    self._authorized_scope_or_error(
+                        session,
+                        str(temp_session.get("scope") or "ALL"),
+                    )
                 data = self.service.save_temporary_signature(
-                    temp_id=str(payload.get("temporary_id") or ""),
-                    token=str(payload.get("token") or ""),
+                    temp_id=temp_id,
+                    token=token,
                     signature_png=str(payload.get("signature_png") or ""),
                 )
                 return self._send_json(200, {"ok": True, "data": data})
@@ -1669,18 +1853,35 @@ class PortalRuntime:
                     str(payload.get("scope") or "ALL"),
                 )
                 user = session.get("user") if isinstance(session.get("user"), dict) else {}
-                data = self.service.build_temporary_signature_link_message(
-                    scope=scope,
-                    notice_key=str(payload.get("notice_key") or ""),
-                    role=str(payload.get("role") or "implementer"),
-                    recipient_open_ids=list(payload.get("recipient_open_ids") or []),
-                    notice_title=str(payload.get("notice_title") or ""),
-                    specialty=str(payload.get("specialty") or ""),
-                    display_name=str(payload.get("display_name") or ""),
-                    request_base_url=str(payload.get("request_base_url") or "")
-                    or self._request_base_url(),
-                    created_by=str(user.get("open_id") or ""),
-                )
+                temporary_id = str(payload.get("temporary_id") or "").strip()
+                if temporary_id:
+                    temp_session = PortalRuntime.state_store.get_mop_temporary_signature_session(
+                        temp_id=temporary_id,
+                    )
+                    if not temp_session:
+                        raise PortalError("临时签名记录不存在。")
+                    self._authorized_scope_or_error(
+                        session,
+                        str(temp_session.get("scope") or scope or "ALL"),
+                    )
+                    data = self.service.build_existing_temporary_signature_link_message(
+                        temp_id=temporary_id,
+                        request_base_url=str(payload.get("request_base_url") or "")
+                        or self._request_base_url(),
+                    )
+                else:
+                    data = self.service.build_temporary_signature_link_message(
+                        scope=scope,
+                        notice_key=str(payload.get("notice_key") or ""),
+                        role=str(payload.get("role") or "implementer"),
+                        recipient_open_ids=list(payload.get("recipient_open_ids") or []),
+                        notice_title=str(payload.get("notice_title") or ""),
+                        specialty=str(payload.get("specialty") or ""),
+                        display_name=str(payload.get("display_name") or ""),
+                        request_base_url=str(payload.get("request_base_url") or "")
+                        or self._request_base_url(),
+                        created_by=str(user.get("open_id") or ""),
+                    )
                 open_ids = [
                     str(item or "").strip()
                     for item in (data.get("open_ids") or [])
@@ -2343,6 +2544,12 @@ class PortalRuntime:
                             warnings.append(service_warning)
                 if refreshed:
                     cls.clear_payload_cache()
+                    try:
+                        cls.service.refresh_event_month_snapshot()
+                    except Exception as exc:
+                        warning = f"事件通告表后台同步失败: {exc}"
+                        warnings.append(warning)
+                        logging.warning(warning)
             except Exception as exc:
                 warning = f"源表后台同步失败: {exc}"
                 warnings.append(warning)
