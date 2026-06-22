@@ -22,6 +22,7 @@ REQUIRED_IMPORTS_FOR_CHECK = {
     "httpx": "httpx",
     "fastapi": "fastapi",
     "starlette": "starlette",
+    "multipart": "python-multipart",
     "pydantic": "pydantic",
     "uvicorn": "uvicorn",
     "apscheduler": "APScheduler",
@@ -1549,6 +1550,15 @@ def check_fastapi_backend_entry() -> tuple[bool, str]:
         return False, "生产入口仍可能直接启动旧 ThreadingHTTPServer 门户。"
     if "from http.server import" in server_text or "ThreadingHTTPServer(" in server_text:
         return False, "旧 ThreadingHTTPServer 门户实现仍未物理移除。"
+    try:
+        from clipflow_backend.main import FastAPIPortalController
+
+        app = FastAPIPortalController(host="127.0.0.1", port=18766)._build_app()
+        route_paths = {getattr(route, "path", "") for route in app.routes}
+        if "/api/engineer/mop/upload-local" not in route_paths:
+            return False, "FastAPI 后端缺少 MOP 本地上传路由。"
+    except Exception as exc:
+        return False, f"FastAPI 后端路由构建失败: {exc}"
     return True, "生产入口固定拉起 FastAPI 后端子进程。"
 
 

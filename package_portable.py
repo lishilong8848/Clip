@@ -188,6 +188,8 @@ RUNTIME_MODULE_TO_PACKAGE = {
 
     "starlette": "starlette",
 
+    "multipart": "python-multipart",
+
     "lark_oapi": "lark-oapi",
 
     "winocr": "winocr",
@@ -231,6 +233,8 @@ RUNTIME_PACKAGE_INSTALL_ORDER = [
     "pydantic",
 
     "starlette",
+
+    "multipart",
 
     "fastapi",
 
@@ -276,6 +280,7 @@ PACKAGING_PREFLIGHT_MODULES = [
     "apscheduler",
     "pydantic",
     "starlette",
+    "multipart",
     "fastapi",
     "uvicorn",
     "lark_oapi",

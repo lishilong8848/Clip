@@ -18,6 +18,7 @@ DEFAULT_MODULE_TO_PACKAGE = {
     "anyio": "anyio",
     "pydantic": "pydantic",
     "starlette": "starlette",
+    "multipart": "python-multipart",
     "apscheduler": "APScheduler",
     "fastapi": "fastapi",
     "uvicorn": "uvicorn",
