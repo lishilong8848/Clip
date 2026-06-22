@@ -293,6 +293,12 @@ function handleSelect(row: NoticeRow | undefined): void {
   color: #b91c1c;
 }
 
+.notice-row__status--closed {
+  border-color: #d7e2ee;
+  background: #f2f6fb;
+  color: #64748b;
+}
+
 /* VNET list skin */
 .virtual-list {
   border: 1px solid #d8e7f8;

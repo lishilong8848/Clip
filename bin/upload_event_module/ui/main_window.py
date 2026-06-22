@@ -338,6 +338,16 @@ class ClipboardTool(
         self._active_notice_store_obj = None
         self.clipboard_paused = False
         self._deferred_events = []
+        try:
+            configured_deferred_max = int(
+                os.environ.get("CLIPFLOW_DEFERRED_CLIPBOARD_MAX", "50") or 50
+            )
+            self._deferred_events_max = max(
+                10,
+                min(configured_deferred_max, 200),
+            )
+        except Exception:
+            self._deferred_events_max = 50
         self._manual_add_hot_reload_paused = False
         self.update_state_path = get_user_data_dir() / "update_overlay_state.json"
         self.restart_overlay_state_path = (

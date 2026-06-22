@@ -89,11 +89,33 @@
       />
 
       <section v-else-if="tab === 'permissions'" class="pane">
-        <div class="actions">
-          <button class="btn blue" @click="loadPermissions">刷新权限</button>
-          <button class="btn green" @click="savePermissions">保存权限</button>
-          <button class="btn ghost" @click="addPermissionUser">添加用户</button>
+        <div class="actions permission-command-bar">
+          <div class="command-copy">
+            <strong>权限管理</strong>
+            <span>先处理申请，再维护已有用户；保存后立即影响门户访问。</span>
+          </div>
+          <button class="btn ghost" :disabled="busy" @click="loadPermissions">刷新权限</button>
+          <button class="btn ghost" :disabled="busy" @click="addPermissionUser">添加用户</button>
+          <button class="btn green" :disabled="busy" @click="savePermissions">保存权限</button>
         </div>
+        <section class="permission-metrics" aria-label="权限概览">
+          <article>
+            <span>待审批</span>
+            <strong>{{ pendingPermissionRequestCount }}</strong>
+          </article>
+          <article>
+            <span>已启用用户</span>
+            <strong>{{ enabledPermissionUserCount }}</strong>
+          </article>
+          <article>
+            <span>管理员</span>
+            <strong>{{ adminPermissionUserCount }}</strong>
+          </article>
+          <article>
+            <span>当前筛选</span>
+            <strong>{{ filteredPermissionUsers.length }}</strong>
+          </article>
+        </section>
         <AdminPermissionRequests
           v-model:search="permissionRequestSearch"
           v-model:status="permissionRequestStatus"
@@ -120,7 +142,7 @@
         <section class="permission-user-tools">
           <div>
             <strong>已授权用户</strong>
-            <span>{{ filteredPermissionUsers.length }} / {{ permissions.users.length }} 人</span>
+            <span>共 {{ permissions.users.length }} 人，当前显示 {{ filteredPermissionUsers.length }} 人</span>
           </div>
           <label class="permission-user-search">
             <span>搜索用户</span>
@@ -142,6 +164,18 @@
             没有符合当前筛选条件的用户。
           </div>
           <article v-for="user in filteredPermissionUsers" :key="user.open_id" class="permission-row" :class="{ locked: user.locked, disabled: !user.enabled }">
+            <div class="permission-row-head">
+              <div>
+                <strong>{{ user.name || "未命名用户" }}</strong>
+                <span>{{ user.open_id || "未填写 openid" }}</span>
+              </div>
+              <div class="permission-badges">
+                <b v-if="user.locked" class="locked">固定管理员</b>
+                <b v-else-if="String(user.role || 'building') === 'admin'" class="admin">管理员</b>
+                <b v-else class="user">普通用户</b>
+                <b :class="user.enabled === false ? 'disabled' : 'enabled'">{{ user.enabled === false ? "已禁用" : "已启用" }}</b>
+              </div>
+            </div>
             <label class="permission-field">
               <span>姓名</span>
               <input v-model="user.name" placeholder="姓名" :disabled="user.locked" />
@@ -2463,6 +2497,141 @@ select:focus {
   padding: 9px;
 }
 
+.permission-command-bar {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) repeat(3, max-content);
+  align-items: center;
+}
+
+.command-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.command-copy strong {
+  color: #071a39;
+  font-size: 15px;
+  font-weight: 950;
+}
+
+.command-copy span {
+  min-width: 0;
+  overflow: hidden;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.permission-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.permission-metrics article {
+  min-height: 72px;
+  display: grid;
+  align-content: center;
+  gap: 4px;
+  border: 1px solid rgba(216, 229, 247, 0.95);
+  border-radius: 18px;
+  padding: 11px 13px;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.98), rgba(239, 246, 255, 0.82)),
+    #ffffff;
+  box-shadow: 0 8px 18px rgba(0, 47, 135, 0.06);
+}
+
+.permission-metrics span {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.permission-metrics strong {
+  color: #075bd8;
+  font-size: 24px;
+  font-weight: 950;
+}
+
+.permission-row-head {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px solid rgba(216, 229, 247, 0.75);
+  padding: 0 1px 8px;
+}
+
+.permission-row-head > div:first-child {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.permission-row-head strong {
+  overflow: hidden;
+  color: #071a39;
+  font-size: 14px;
+  font-weight: 950;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.permission-row-head span {
+  overflow: hidden;
+  color: #64748b;
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+  font-weight: 760;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.permission-badges {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.permission-badges b {
+  border: 1px solid #d8e5f7;
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: #ffffff;
+  color: #48627f;
+  font-size: 11px;
+  font-weight: 950;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.permission-badges b.admin,
+.permission-badges b.locked {
+  border-color: #bfdbfe;
+  background: #eff6ff;
+  color: #075bd8;
+}
+
+.permission-badges b.enabled {
+  border-color: #bbf7d0;
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.permission-badges b.disabled {
+  border-color: #fecaca;
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
 .permission-row.locked {
   border-color: #cfe0ff;
   background:
@@ -2574,6 +2743,20 @@ select:focus {
 
   .permission-user-tools {
     grid-template-columns: 1fr;
+  }
+
+  .permission-command-bar,
+  .permission-metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .command-copy span {
+    white-space: normal;
+  }
+
+  .permission-row-head {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }
 

@@ -1,8 +1,14 @@
 <template>
   <section class="permission-review-panel">
     <div class="section-title">
-      <strong>权限申请审批</strong>
-      <span>用户提交申请后，管理员在这里集中通过或拒绝</span>
+      <div>
+        <strong>权限申请审批</strong>
+        <span>用户提交申请后，管理员在这里集中通过或拒绝</span>
+      </div>
+      <div class="section-title-stats" aria-label="权限申请数量">
+        <b>{{ pendingCount }}</b>
+        <small>待审批 / 共 {{ items.length }}</small>
+      </div>
     </div>
     <div class="permission-review-toolbar">
       <div class="review-filter-main">
@@ -72,7 +78,7 @@
           <div class="request-title">
             <strong>{{ item.name || "飞书用户" }}</strong>
             <span>{{ item.open_id }}</span>
-            <b>{{ statusLabel(item.status) }}</b>
+            <b class="request-status" :class="`status-${item.status || 'unknown'}`">{{ statusLabel(item.status) }}</b>
           </div>
           <p>申请范围：{{ requestScopeLabels(item) }}</p>
           <p>已有权限：{{ currentScopeLabels(item) }}</p>
@@ -197,9 +203,15 @@ function rowActionTitle(item: Dict): string {
 
 .section-title {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
+}
+
+.section-title > div:first-child {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
 }
 
 .section-title strong {
@@ -212,6 +224,31 @@ function rowActionTitle(item: Dict): string {
 .muted-line {
   color: #64748b;
   font-size: 12px;
+}
+
+.section-title-stats {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid #cfe0ff;
+  border-radius: 999px;
+  padding: 6px 10px;
+  background: #eff6ff;
+  color: #0757d7;
+}
+
+.section-title-stats b {
+  font-size: 18px;
+  font-weight: 950;
+  line-height: 1;
+}
+
+.section-title-stats small {
+  color: #315a8a;
+  font-size: 12px;
+  font-weight: 900;
+  white-space: nowrap;
 }
 
 .permission-review-toolbar {
@@ -396,12 +433,27 @@ function rowActionTitle(item: Dict): string {
   white-space: nowrap;
 }
 
-.request-title b {
+.request-title .request-status {
   padding: 4px 8px;
   border-radius: 999px;
   background: #eff6ff;
   color: #0757d7;
   font-size: 12px;
+}
+
+.request-title .request-status.status-approved {
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.request-title .request-status.status-rejected {
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+.request-title .request-status.status-pending {
+  background: #fff7ed;
+  color: #9a3412;
 }
 
 .request-main p,
@@ -515,6 +567,11 @@ function rowActionTitle(item: Dict): string {
 
   .request-actions {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .section-title {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }
 </style>

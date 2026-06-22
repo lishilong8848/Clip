@@ -747,8 +747,8 @@ const filteredRows = computed<NoticeRow[]>(() => filteredRecords.value.map((reco
   status: recordStatusLabel(record),
   statusTone: recordStatusTone(record),
   selected: selectedKeys.has(recordKey(record)),
-  disabled: isRecordOngoing(record),
-  disabledReason: "已在进行中，请在右侧更新、结束或删除",
+  disabled: recordIsDisabled(record),
+  disabledReason: recordDisabledReason(record),
   raw: record,
 })));
 const selectedDraftRowsAll = computed(() => {
@@ -1048,8 +1048,28 @@ function sourceProgressForRecord(record: Dict): string {
   return fieldsOf(record)["维护实施状态"] || "";
 }
 
+function maintenanceStatusIsCompleted(status: unknown): boolean {
+  const text = String(status || "").trim();
+  if (!text) return false;
+  if (text.includes("未完成") || text.includes("未结束")) return false;
+  return ["正常结束", "延期结束", "延迟结束", "已结束", "已完成", "维修完成", "闭环"]
+    .some((token) => text.includes(token));
+}
+
+function sourceRecordIsCompleted(record: Dict): boolean {
+  if (record.manual) return false;
+  const type = record.work_type || "maintenance";
+  if (type === "maintenance") return maintenanceStatusIsCompleted(sourceProgressForRecord(record));
+  return false;
+}
+
+function sourceRecordIsStartable(record: Dict): boolean {
+  const progress = sourceProgressForRecord(record);
+  return !progress || progress.includes("未开始");
+}
+
 function sourceActionForRecord(record: Dict): string {
-  return sourceProgressForRecord(record) === "未开始" ? "start" : "update";
+  return sourceRecordIsStartable(record) ? "start" : "update";
 }
 
 function sourceActionLabel(record: Dict): string {
@@ -1079,8 +1099,9 @@ function recordStatusLabel(record: Dict): string {
   if (job?.phase === "success") return "已提交";
   if (selectedKeys.has(key)) return "已加入待发起";
   if (isRecordOngoing(record)) return "已在右侧进行中，请在右侧处理";
+  if (sourceRecordIsCompleted(record)) return `${sourceProgressForRecord(record) || "已完成"}，不可发起`;
   const progress = sourceProgressForRecord(record);
-  if (!progress || progress === "未开始") return "未开始，可发起";
+  if (sourceRecordIsStartable(record)) return `${progress || "未开始"}，可发起`;
   return `${progress}，可更新`;
 }
 
@@ -1092,9 +1113,20 @@ function recordStatusTone(record: Dict): string {
   if (job?.phase === "success") return "queued";
   if (selectedKeys.has(key)) return "queued";
   if (isRecordOngoing(record)) return "ongoing";
+  if (sourceRecordIsCompleted(record)) return "closed";
   const progress = sourceProgressForRecord(record);
-  if (!progress || progress === "未开始") return "pending";
+  if (sourceRecordIsStartable(record)) return "pending";
   return "update";
+}
+
+function recordIsDisabled(record: Dict): boolean {
+  return isRecordOngoing(record) || sourceRecordIsCompleted(record);
+}
+
+function recordDisabledReason(record: Dict): string {
+  if (isRecordOngoing(record)) return "已在进行中，请在右侧更新、结束或删除";
+  if (sourceRecordIsCompleted(record)) return "该事项已完成，仅展示，不可发起";
+  return "";
 }
 
 function sourceWorkTypeForRecord(record: Dict): string {
@@ -1931,7 +1963,7 @@ function pruneSelection(): void {
       continue;
     }
     const record = records.value.find((item) => recordKey(item) === key);
-    if (record && isRecordOngoing(record)) selectedKeys.delete(key);
+    if (record && recordIsDisabled(record)) selectedKeys.delete(key);
   }
   saveDrafts();
   pruneRuntimeState();
@@ -2497,8 +2529,8 @@ function toggleRecordSelection(row: NoticeRow | undefined): void {
   const key = row?.id || "";
   if (!key) return;
   const record = draftRecordForKey(key);
-  if (row?.disabled || (record && isRecordOngoing(record))) {
-    syncText.value = "该事项已在进行中，请在右侧卡片更新、结束或删除";
+  if (row?.disabled || (record && recordIsDisabled(record))) {
+    syncText.value = record ? recordDisabledReason(record) : (row?.disabledReason || "该事项不可操作");
     return;
   }
   selectedKeys.add(key);
@@ -3063,6 +3095,16 @@ async function sendStart(key: string): Promise<void> {
   const draft = drafts.get(key);
   const record = draftRecordForKey(key);
   if (record && draft) {
+    if (sourceRecordIsCompleted(record)) {
+      rememberJob(key, {
+        text: "该维保事项已完成，仅展示，不可发起",
+        status: "failed",
+        phase: "failed",
+      });
+      selectedKeys.delete(key);
+      saveDrafts();
+      return;
+    }
     draft.validation_touched = true;
     const typeConflict = draftTypeConflictText(record, draft);
     if (typeConflict) {

@@ -986,8 +986,13 @@ class MainWindowWorkflowMixin:
             "entry_id": entry_id,
         }
         self._deferred_events.append(entry)
-        if len(self._deferred_events) > 5:
+        max_deferred = max(1, int(getattr(self, "_deferred_events_max", 50) or 50))
+        if len(self._deferred_events) > max_deferred:
             self._deferred_events.pop(0)
+            log_warning(
+                "截图期间延迟剪贴板事件超过上限，已丢弃最早一条: "
+                f"max={max_deferred}"
+            )
 
     def _try_process_deferred_events(self):
         if self._ui_update_in_progress:
