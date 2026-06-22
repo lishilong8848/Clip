@@ -263,6 +263,11 @@ def main():
                     window.apply_qt_shell_bootstrap(bootstrap_payload)
                 except Exception as exc:
                     print(f"[ClipFlow] Qt shell bootstrap 加载失败: {exc}")
+            if hasattr(window, "refresh_clipboard_backend_url"):
+                try:
+                    window.refresh_clipboard_backend_url()
+                except Exception as exc:
+                    print(f"[ClipFlow] 剪贴板后端地址刷新失败: {exc}")
             window.refresh_lan_template_portal_link()
             print(f"[ClipFlow] 局域网模板门户已随主程序启动: {controller.get_url()}")
         except Exception as exc:

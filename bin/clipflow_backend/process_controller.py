@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -16,6 +17,7 @@ from typing import Any
 
 from lan_bitable_template_portal.server import DEFAULT_HOST, DEFAULT_PORT
 from upload_event_module.logger import log_error, log_info, log_warning
+from upload_event_module.utils import get_data_file_path
 
 
 def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
@@ -60,6 +62,7 @@ class BackendProcessPortalController:
         self.table_id = str(table_id or "").strip()
         self.bound_port = self.preferred_port
         self._process: subprocess.Popen | None = None
+        self._process_log_file = None
         self._owns_process = False
         self._stop_event = threading.Event()
         self._event_thread: threading.Thread | None = None
@@ -83,6 +86,7 @@ class BackendProcessPortalController:
         self._event_stream_last_event_at = 0.0
         self._event_stream_last_error = ""
         self._event_poll_fallback_count = 0
+        self._last_backend_active_sync_at = 0.0
         self._active_delta_lock = threading.Lock()
         self._active_delta_upserts: list[dict[str, Any]] = []
         self._active_delta_deletes: list[dict[str, Any]] = []
@@ -114,6 +118,12 @@ class BackendProcessPortalController:
             45,
             minimum=15,
             maximum=180,
+        )
+        self._port_retry_count = _env_int(
+            "CLIPFLOW_BACKEND_PORT_RETRY_COUNT",
+            8,
+            minimum=0,
+            maximum=50,
         )
 
     def get_url(self) -> str:
@@ -177,6 +187,79 @@ class BackendProcessPortalController:
             return bool(result.get("ok"))
         except Exception:
             return False
+
+    @staticmethod
+    def _backend_log_path() -> Path:
+        return Path(get_data_file_path("backend_process.log"))
+
+    def _open_backend_log_file(self):
+        self._close_backend_log_file()
+        path = self._backend_log_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._process_log_file = open(path, "a", encoding="utf-8", errors="ignore")
+            self._process_log_file.write(
+                "\n"
+                + "=" * 72
+                + f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] start backend process\n"
+            )
+            self._process_log_file.flush()
+            return self._process_log_file
+        except Exception as exc:
+            log_warning(f"后端进程日志文件打开失败: {exc}")
+            self._process_log_file = None
+            return subprocess.DEVNULL
+
+    def _close_backend_log_file(self) -> None:
+        handle = self._process_log_file
+        self._process_log_file = None
+        if handle is None:
+            return
+        try:
+            handle.flush()
+        except Exception:
+            pass
+        try:
+            handle.close()
+        except Exception:
+            pass
+
+    @classmethod
+    def _backend_log_tail(cls, *, max_chars: int = 2400) -> str:
+        path = cls._backend_log_path()
+        try:
+            if not path.exists():
+                return ""
+            data = path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            return ""
+        return data[-max(200, int(max_chars or 0)):].strip()
+
+    @staticmethod
+    def _port_is_available(host: str, port: int) -> tuple[bool, str]:
+        bind_host = str(host or DEFAULT_HOST).strip() or DEFAULT_HOST
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.bind((bind_host, int(port)))
+                return True, ""
+        except OSError as exc:
+            return False, str(exc)
+        except Exception as exc:
+            return False, str(exc)
+
+    @staticmethod
+    def _is_specific_bind_host(host: str) -> bool:
+        text = str(host or "").strip()
+        return bool(text and text not in {"0.0.0.0", "::", "127.0.0.1", "localhost"})
+
+    def _candidate_ports(self) -> list[int]:
+        start = max(1, int(self.preferred_port or DEFAULT_PORT))
+        ports: list[int] = []
+        for offset in range(0, max(0, self._port_retry_count) + 1):
+            port = start + offset
+            if port <= 65535:
+                ports.append(port)
+        return ports
 
     def _shutdown_existing_backend(self) -> bool:
         try:
@@ -278,25 +361,79 @@ class BackendProcessPortalController:
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             startupinfo.wShowWindow = 0  # SW_HIDE
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        self._process = subprocess.Popen(
-            args,
-            cwd=cwd,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            startupinfo=startupinfo,
-            creationflags=creationflags,
-        )
-        self._owns_process = True
-        self._stop_event.clear()
-        if not self._wait_for_health(timeout_s=float(self._startup_timeout_s)):
-            code = self._process.poll() if self._process else None
-            self.stop()
-            raise RuntimeError(f"局域网后端进程启动失败，退出码={code}")
-        self._ensure_bridge_threads()
-        log_info(f"局域网后端子进程已启动: {self.get_url()}")
-        return self.get_url()
+        errors: list[str] = []
+        original_host = self.host
+        host_candidates = [original_host]
+        if self._is_specific_bind_host(original_host):
+            host_candidates.append(DEFAULT_HOST)
+        for bind_host in host_candidates:
+            self.host = str(bind_host or DEFAULT_HOST).strip() or DEFAULT_HOST
+            if bind_host != original_host:
+                log_warning(
+                    f"配置的局域网监听 IP {original_host} 不可用，"
+                    f"已改用 {self.host} 监听。签名链接仍按签名链接局域网地址生成。"
+                )
+            for port in self._candidate_ports():
+                self.bound_port = int(port)
+                if self._health_ok():
+                    self._owns_process = False
+                    self._stop_event.clear()
+                    self._ensure_bridge_threads()
+                    return self.get_url()
+                available, bind_error = self._port_is_available(self.host, self.bound_port)
+                if not available:
+                    message = (
+                        f"监听 {self.host}:{self.bound_port} 不可用"
+                        + (f"({bind_error})" if bind_error else "")
+                        + "，尝试下一个地址或端口。"
+                    )
+                    errors.append(message)
+                    log_warning(message)
+                    continue
+                launch_args = list(args)
+                launch_args[launch_args.index("--host") + 1] = self.host
+                launch_args[-1] = str(self.bound_port)
+                log_handle = self._open_backend_log_file()
+                self._process = subprocess.Popen(
+                    launch_args,
+                    cwd=cwd,
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log_handle,
+                    stderr=log_handle,
+                    startupinfo=startupinfo,
+                    creationflags=creationflags,
+                )
+                self._owns_process = True
+                self._stop_event.clear()
+                if self._wait_for_health(timeout_s=float(self._startup_timeout_s)):
+                    self._ensure_bridge_threads()
+                    log_info(f"局域网后端子进程已启动: {self.get_url()}")
+                    return self.get_url()
+                code = self._process.poll() if self._process else None
+                tail = self._backend_log_tail()
+                errors.append(
+                    f"监听 {self.host}:{self.bound_port} 启动失败，退出码={code}"
+                    + (f"，日志尾部={tail}" if tail else "")
+                )
+                process = self._process
+                if process is not None and process.poll() is None:
+                    try:
+                        process.terminate()
+                        process.wait(timeout=2)
+                    except Exception:
+                        try:
+                            process.kill()
+                        except Exception:
+                            pass
+                self._process = None
+                self._owns_process = False
+                self._close_backend_log_file()
+        self.host = original_host
+        self.stop()
+        detail = "；".join(errors[-3:]) if errors else "未找到可用端口"
+        log_path = self._backend_log_path()
+        raise RuntimeError(f"局域网后端进程启动失败: {detail}。日志={log_path}")
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -327,6 +464,7 @@ class BackendProcessPortalController:
                     process.kill()
         self._process = None
         self._owns_process = False
+        self._close_backend_log_file()
 
     def _ensure_bridge_threads(self) -> None:
         if self._event_thread is None or not self._event_thread.is_alive():
@@ -345,6 +483,40 @@ class BackendProcessPortalController:
             self._snapshot_thread.start()
         self._post_bridge_heartbeat(force=True)
 
+    def _sync_backend_active_items_once(self, *, force: bool = False) -> None:
+        callback = self.shell_event_callback
+        if callback is None:
+            return
+        now = time.monotonic()
+        interval = max(15.0, min(float(self._snapshot_interval_s or 300), 600.0))
+        if not force and now - float(self._last_backend_active_sync_at or 0.0) < interval:
+            return
+        self._last_backend_active_sync_at = now
+        try:
+            payload = self.get_qt_shell_bootstrap()
+        except Exception as exc:
+            log_warning(f"Qt 后端活动条目补齐失败: {exc}")
+            return
+        items = payload.get("active_items") if isinstance(payload, dict) else []
+        if not isinstance(items, list):
+            return
+        for row in items[:500]:
+            if not isinstance(row, dict):
+                continue
+            try:
+                accepted = callback(
+                    "active_upsert",
+                    {"item": row, "source": "backend_active_sync"},
+                )
+                if isinstance(accepted, dict) and not accepted.get("ok", True):
+                    log_warning(
+                        "Qt 后端活动条目补齐被拒绝: "
+                        f"{accepted.get('error') or accepted}"
+                    )
+            except Exception as exc:
+                log_warning(f"Qt 后端活动条目补齐执行失败: {exc}")
+                break
+
     def _event_loop(self) -> None:
         delay = 0.25
         next_sse_attempt = 0.0
@@ -357,6 +529,7 @@ class BackendProcessPortalController:
             ):
                 delay = 1.0
                 continue
+            self._sync_backend_active_items_once()
             now = time.monotonic()
             if now >= next_sse_attempt:
                 if self._event_stream_once():
@@ -667,6 +840,14 @@ class BackendProcessPortalController:
     def set_shell_event_callback(self, callback) -> None:
         self.shell_event_callback = callback
         self._ensure_bridge_threads()
+        try:
+            threading.Thread(
+                target=lambda: self._sync_backend_active_items_once(force=True),
+                name="ClipFlowBackendActiveInitialSync",
+                daemon=True,
+            ).start()
+        except Exception:
+            pass
 
     def mark_job_upload_result(self, job_id: str, **kwargs) -> None:
         job_id = str(job_id or "").strip()

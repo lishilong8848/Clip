@@ -501,6 +501,10 @@ class MainWindowRuntimeMixin:
             data.get("active_item_id") or item_payload.get("active_item_id") or ""
         ).strip()
         record_id = str(data.get("record_id") or item_payload.get("record_id") or "").strip()
+        if active_item_id and not data.get("active_item_id"):
+            data["active_item_id"] = active_item_id
+        if record_id and not data.get("record_id"):
+            data["record_id"] = record_id
         list_widget = None
         item = None
         if active_item_id:
@@ -2197,6 +2201,8 @@ class MainWindowRuntimeMixin:
                     "局域网模板页面服务已按设置重启: "
                     f"{self.lan_template_portal_url}"
                 )
+                if hasattr(self, "refresh_clipboard_backend_url"):
+                    self.refresh_clipboard_backend_url()
             else:
                 self.lan_template_portal_url = controller.get_url()
             self.refresh_lan_template_portal_link()

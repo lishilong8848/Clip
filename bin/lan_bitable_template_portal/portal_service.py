@@ -8940,7 +8940,7 @@ class MaintenancePortalService:
         """Normalize a canvas/image signature to black ink on transparent background."""
 
         try:
-            from PIL import Image, ImageChops
+            from PIL import Image, ImageChops, ImageFilter
         except Exception as exc:  # pragma: no cover - dependency bootstrap should provide Pillow.
             raise PortalError("缺少 Pillow 依赖，无法处理透明签名图片。") from exc
 
@@ -8952,7 +8952,13 @@ class MaintenancePortalService:
         ink_alpha = gray.point(lambda p: 0 if p >= 248 else min(255, max(0, (248 - int(p)) * 7)))
         source_alpha = image.getchannel("A")
         alpha = ImageChops.multiply(ink_alpha, source_alpha)
-        alpha = alpha.point(lambda p: min(255, int(p) * 2) if p > 0 else 0)
+        alpha = alpha.point(
+            lambda p: 0
+            if p <= 3
+            else min(255, max(160, int(p) * 4))
+        )
+        alpha = alpha.filter(ImageFilter.MaxFilter(3))
+        alpha = alpha.point(lambda p: 0 if p <= 6 else min(255, int(p) * 2))
         transparent = Image.new("RGBA", image.size, (0, 0, 0, 0))
         transparent.putalpha(alpha)
         bbox = alpha.point(lambda p: 255 if p > 8 else 0).getbbox()

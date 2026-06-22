@@ -614,6 +614,21 @@ class MainWindowClipboardMixin:
             and callable(getattr(controller, "_local_url", None))
         )
 
+    def refresh_clipboard_backend_url(self):
+        """Restart the local clipboard watcher so it posts to the current backend URL."""
+
+        if self._closing or self._is_clipboard_listener_disabled():
+            return
+        timer = getattr(self, "clipboard_file_timer", None)
+        if timer is not None:
+            try:
+                timer.start(self._clipboard_file_poll_interval_ms())
+            except Exception:
+                pass
+        self._stop_clipboard_process(wait_ms=800)
+        QTimer.singleShot(0, self._poll_clipboard_event_file)
+        QTimer.singleShot(150, self._start_clipboard_listener)
+
     def _clipboard_file_poll_interval_ms(self) -> int:
         raw = os.environ.get("CLIPFLOW_CLIPBOARD_POLL_MS", "").strip()
         if raw:

@@ -2102,7 +2102,7 @@ function signatureContext(): CanvasRenderingContext2D | null {
   if (!canvas) return null;
   const ctx = canvas.getContext("2d");
   if (!ctx) return null;
-  ctx.lineWidth = 4;
+  ctx.lineWidth = 5.5;
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
   ctx.strokeStyle = "#000000";
@@ -2135,7 +2135,7 @@ function resizeSignatureCanvas(): void {
     ctx.drawImage(previous, 0, 0, previous.width, previous.height, 0, 0, width, height);
   }
   ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-  ctx.lineWidth = 4;
+  ctx.lineWidth = 5.5;
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
   ctx.strokeStyle = "#000000";

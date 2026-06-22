@@ -284,7 +284,7 @@ function canvasContext(): CanvasRenderingContext2D | null {
   ctx.globalAlpha = 1;
   ctx.globalCompositeOperation = "source-over";
   ctx.imageSmoothingEnabled = true;
-  ctx.lineWidth = 5;
+  ctx.lineWidth = 5.5;
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
   ctx.strokeStyle = "#000000";
@@ -322,7 +322,7 @@ function resizeCanvas(): void {
   ctx.globalAlpha = 1;
   ctx.globalCompositeOperation = "source-over";
   ctx.imageSmoothingEnabled = true;
-  ctx.lineWidth = 5;
+  ctx.lineWidth = 5.5;
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
   ctx.strokeStyle = "#000000";

@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve
 from PyQt6.QtGui import QColor
 
-from ..logger import log_error, log_info
+from ..logger import log_error, log_info, log_warning
 from ..utils import BASE_DIR
 from .styles import get_stylesheet
 from ..hot_reload.state_store import (
@@ -148,7 +148,7 @@ class PatchUpdateMixin:
                     status_text = "远程更新: 发现可更新(非UI)"
         except Exception as exc:
             status_text = "远程更新: 检查失败"
-            log_error(f"远程更新检查失败: {exc}")
+            log_warning(f"远程更新检查失败(不影响程序启动): {exc}")
 
         self.remote_update_checked.emit(status_text, ui_manifest, non_ui_manifest)
 
