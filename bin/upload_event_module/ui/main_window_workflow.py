@@ -178,6 +178,18 @@ class MainWindowWorkflowMixin:
             else "上传"
         )
 
+    @staticmethod
+    def _mark_notice_content_dirty(data: dict | None) -> dict:
+        if not isinstance(data, dict):
+            data = {}
+        data["_has_unuploaded_changes"] = True
+        data["_pending_upload_hash"] = None
+        data["_upload_in_progress"] = False
+        data.pop("_upload_pending_dialog", None)
+        data.pop("_upload_started_monotonic", None)
+        data.pop("_last_upload_error", None)
+        return data
+
     def _target_candidate_dialog_stylesheet(self) -> str:
         theme = str(getattr(self, "current_theme", "dark") or "dark")
         if theme == "light":
@@ -642,7 +654,9 @@ class MainWindowWorkflowMixin:
             return True
         name = str(result.get("name") or "").strip()
         success = bool(result.get("ok"))
-        record_id = str((data_snapshot or {}).get("record_id") or "")
+        record_id = str(
+            result.get("record_id") or (data_snapshot or {}).get("record_id") or ""
+        )
         message = str(result.get("message") or "")
         if result.get("needs_target_selection"):
             if not allow_target_selection:
@@ -884,7 +898,7 @@ class MainWindowWorkflowMixin:
         robot_group_choice: str = "auto",
     ):
         choice = str(robot_group_choice or "auto").strip().lower() or "auto"
-        if notice_type in ("设备变更", "变更通告"):
+        if notice_type == "变更通告":
             if choice == "i3":
                 return "i3"
             if choice in {"i2", "skip"}:
@@ -1103,7 +1117,7 @@ class MainWindowWorkflowMixin:
             dialog_level = ""
             if notice_type == "事件通告":
                 dialog_level = str(request.get("event_level") or "").strip()
-            elif notice_type in ("设备变更", "变更通告"):
+            elif notice_type == "变更通告":
                 dialog_level = self._normalize_change_upload_level(
                     payload_data if isinstance(payload_data, dict) else {},
                     str(request.get("change_level") or "").strip(),
@@ -1128,7 +1142,7 @@ class MainWindowWorkflowMixin:
                     payload_data if isinstance(payload_data, dict) else {},
                     resolved_level or dialog_level,
                 )
-                if notice_type in ("设备变更", "变更通告")
+                if notice_type == "变更通告"
                 else ""
             )
             pending_event_level = resolved_level if notice_type == "事件通告" else ""
@@ -1234,9 +1248,7 @@ class MainWindowWorkflowMixin:
                 item = None
                 list_widget = None
         if item:
-            data["_has_unuploaded_changes"] = True
-            data["_pending_upload_hash"] = None
-            data["_upload_in_progress"] = False
+            data = self._mark_notice_content_dirty(data)
             self._commit_active_record(
                 data,
                 refresh_detail=not self._should_defer_ui_refresh(),
@@ -1249,9 +1261,7 @@ class MainWindowWorkflowMixin:
                 self._pin_item_to_top(list_widget, item)
             self.request_active_cache_save()
         else:
-            data["_has_unuploaded_changes"] = True
-            data["_pending_upload_hash"] = None
-            data["_upload_in_progress"] = False
+            data = self._mark_notice_content_dirty(data)
             added_item, added_widget = self.add_active_item(data)
             if added_item:
                 log_info(
@@ -1332,9 +1342,7 @@ class MainWindowWorkflowMixin:
                             "time_str"
                         )
                     old_data.pop("need_upload_first", None)
-                    old_data["_has_unuploaded_changes"] = True
-                    old_data["_pending_upload_hash"] = None
-                    old_data["_upload_in_progress"] = False
+                    old_data = self._mark_notice_content_dirty(old_data)
                     self._auto_replace_content(
                         content,
                         old_data,
@@ -1380,9 +1388,7 @@ class MainWindowWorkflowMixin:
 
                 # 设置按钮状态
                 if old_data:
-                    old_data["_has_unuploaded_changes"] = True
-                    old_data["_pending_upload_hash"] = None
-                    old_data["_upload_in_progress"] = False
+                    old_data = self._mark_notice_content_dirty(old_data)
 
                 # 直接替换并闪烁，无需确认
                 self._auto_replace_content(
@@ -1548,9 +1554,7 @@ class MainWindowWorkflowMixin:
             "time_str": time_str,  # 保存时间字段
             "buildings": prefilled_buildings,
         }
-        data["_has_unuploaded_changes"] = True
-        data["_pending_upload_hash"] = None
-        data["_upload_in_progress"] = False
+        data = self._mark_notice_content_dirty(data)
         if entry:
             self._ensure_payload_for_data(data, entry=entry)
         else:
@@ -1583,9 +1587,7 @@ class MainWindowWorkflowMixin:
                     existing_data.get("buildings"),
                     data.get("buildings"),
                 )
-                routed_data["_has_unuploaded_changes"] = True
-                routed_data["_pending_upload_hash"] = None
-                routed_data["_upload_in_progress"] = False
+                routed_data = self._mark_notice_content_dirty(routed_data)
                 routed_data = self._ensure_active_item_identity(routed_data)
                 committed = self._commit_active_record(
                     routed_data,
@@ -1717,10 +1719,8 @@ class MainWindowWorkflowMixin:
             if not allow_placeholder_update:
                 self.restore_button_state(record_id=new_data.get("record_id"))
                 return
+        new_data = self._mark_notice_content_dirty(new_data)
         item_ref.setData(Qt.ItemDataRole.UserRole, new_data)
-        new_data["_pending_upload_hash"] = None
-        new_data["_has_unuploaded_changes"] = True
-        new_data["_upload_in_progress"] = False
         committed = self._commit_active_record(
             new_data,
             refresh_detail=not defer_ui,
@@ -2121,7 +2121,7 @@ class MainWindowWorkflowMixin:
             self._ensure_payload_for_data(new_data, entry=entry)
 
             # 上传中收到新内容：立即替换，但保持上传中标记
-            new_data["_has_unuploaded_changes"] = True
+            new_data = self._mark_notice_content_dirty(new_data)
             if not new_data.get("_pending_upload_hash"):
                 base_text = old_data.get("text", "")
                 new_data["_pending_upload_hash"] = self._calc_text_hash(base_text)
@@ -2182,7 +2182,7 @@ class MainWindowWorkflowMixin:
         dialog_level = ""
         if notice_type == "事件通告":
             dialog_level = event_level
-        elif notice_type in ("设备变更", "变更通告"):
+        elif notice_type == "变更通告":
             change_level = self._normalize_change_upload_level(data_dict, change_level)
             dialog_level = change_level
         resolved_fields = self._resolve_upload_fields_from_cache(
@@ -2224,7 +2224,7 @@ class MainWindowWorkflowMixin:
         self._resume_clipboard_timer()
         if notice_type == "事件通告":
             event_level = resolved_level
-        elif notice_type in ("设备变更", "变更通告"):
+        elif notice_type == "变更通告":
             change_level = self._normalize_change_upload_level(
                 data_dict,
                 resolved_level or change_level,
@@ -2234,6 +2234,7 @@ class MainWindowWorkflowMixin:
         record_id = data_dict.get("record_id")
         if record_id:
             data_dict["_upload_in_progress"] = True
+            data_dict.pop("_upload_pending_dialog", None)
             data_dict["_upload_started_monotonic"] = time.monotonic()
             data_dict.pop("_last_upload_error", None)
             list_widget, item = self._find_active_item_by_record_id(record_id)
@@ -2243,6 +2244,7 @@ class MainWindowWorkflowMixin:
             if list_widget is not None and item is not None:
                 data = item.data(Qt.ItemDataRole.UserRole) or {}
                 data["_upload_in_progress"] = True
+                data.pop("_upload_pending_dialog", None)
                 data["_upload_started_monotonic"] = time.monotonic()
                 data.pop("_last_upload_error", None)
                 item.setData(Qt.ItemDataRole.UserRole, data)
@@ -2260,7 +2262,7 @@ class MainWindowWorkflowMixin:
             data_dict["specialty"] = specialty
         else:
             data_dict.pop("specialty", None)
-        if notice_type in ("设备变更", "变更通告"):
+        if notice_type == "变更通告":
             if change_level:
                 data_dict["level"] = change_level
             else:
@@ -2437,9 +2439,7 @@ class MainWindowWorkflowMixin:
                 entry = {"content": new_data.get("text", "")}
             self._ensure_payload_for_data(new_data, entry=entry)
 
-            new_data["_pending_upload_hash"] = None
-            new_data["_has_unuploaded_changes"] = True
-            new_data["_upload_in_progress"] = False
+            new_data = self._mark_notice_content_dirty(new_data)
             committed = self._commit_active_record(
                 new_data,
                 refresh_detail=True,
@@ -2473,9 +2473,7 @@ class MainWindowWorkflowMixin:
         if not entry:
             entry = {"content": old_data.get("text", "")}
         self._ensure_payload_for_data(old_data, entry=entry)
-        old_data["_pending_upload_hash"] = None
-        old_data["_has_unuploaded_changes"] = True
-        old_data["_upload_in_progress"] = False
+        old_data = self._mark_notice_content_dirty(old_data)
         committed = self._commit_active_record(
             old_data,
             refresh_detail=True,
@@ -2513,9 +2511,7 @@ class MainWindowWorkflowMixin:
             item_ref, _ = self.add_active_item(data, insert_top=True, skip_cache=True)
             list_widget = item_ref.listWidget() if item_ref else None
         if item_ref and list_widget:
-            data["_pending_upload_hash"] = None
-            data["_has_unuploaded_changes"] = True
-            data["_upload_in_progress"] = False
+            data = self._mark_notice_content_dirty(data)
             item_ref.setData(Qt.ItemDataRole.UserRole, data)
             self._rebuild_active_item_widget(
                 list_widget,
@@ -2750,7 +2746,7 @@ class MainWindowWorkflowMixin:
                                 self, "clear_upload_runtime_state_for_ids", None
                             )
                             if callable(clear_state):
-                                clear_state(record_id, real_record_id)
+                                clear_state(record_id, real_record_id, mark_uploaded=True)
                         if real_record_id:
                             changed = self._replace_record_id_everywhere(
                                 record_id, real_record_id
@@ -2762,6 +2758,13 @@ class MainWindowWorkflowMixin:
                                 self.request_active_cache_save()
                             if self.pending_update_after_upload:
                                 self._schedule_pending_update_after_upload()
+
+                    if name in ["更新", "结束"] and record_id:
+                        clear_state = getattr(
+                            self, "clear_upload_runtime_state_for_ids", None
+                        )
+                        if callable(clear_state):
+                            clear_state(record_id, mark_uploaded=True)
 
                     # 成功触发"更新"动作后，重置计时器（触发下一阶段倒计时）
                     if name == "更新" and record_id:
@@ -2838,9 +2841,7 @@ class MainWindowWorkflowMixin:
                                 old_data = item_ref.data(Qt.ItemDataRole.UserRole)
                                 if new_status:
                                     old_data = dict(old_data) if old_data else {}
-                                    old_data["_has_unuploaded_changes"] = True
-                                    old_data["_pending_upload_hash"] = None
-                                    old_data["_upload_in_progress"] = False
+                                    old_data = self._mark_notice_content_dirty(old_data)
                                 self._auto_replace_content(
                                     new_content, old_data, item_ref
                                 )

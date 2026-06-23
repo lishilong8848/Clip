@@ -1235,7 +1235,7 @@ def check_event_relay_stop_clears_thread_state() -> tuple[bool, list[str]]:
 def check_notice_type_mappings() -> tuple[bool, list[str]]:
     expected = {
         "maintenance": "维保通告",
-        "change": "设备变更",
+        "change": "变更通告",
         "repair": "设备检修",
         "power": "上下电通告",
         "polling": "设备轮巡",

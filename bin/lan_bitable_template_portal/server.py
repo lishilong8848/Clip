@@ -1482,6 +1482,17 @@ class PortalRuntime:
                 )
             except PortalError as exc:
                 return self._send_json(403, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/events/overview":
+            qs = parse_qs(parsed.query)
+            try:
+                month = (qs.get("month") or [""])[0]
+                data = PortalRuntime.service.get_event_monthly_overview(month=month)
+                return self._send_json(
+                    200,
+                    {"ok": True, "data": self._with_auth_context(data, session)},
+                )
+            except PortalError as exc:
+                return self._send_json(500, {"ok": False, "error": str(exc)})
         if parsed.path == "/api/auth/permissions":
             if not self._require_admin_json(session):
                 return
@@ -3428,7 +3439,7 @@ class PortalRuntime:
             for item in fields.get("过程现场图片", []) or []:
                 if "file_token" in item:
                     existing_extra_tokens.append(item["file_token"])
-        elif notice_type in ("设备变更", "变更通告"):
+        elif notice_type == "变更通告":
             for item in fields.get("过程更新钉钉截图", []) or []:
                 if "file_token" in item:
                     existing_tokens.append(item["file_token"])
@@ -3443,7 +3454,7 @@ class PortalRuntime:
             for item in fields.get("截图", []) or []:
                 if "file_token" in item:
                     existing_tokens.append(item["file_token"])
-        if notice_type in ("设备变更", "变更通告"):
+        if notice_type == "变更通告":
             existing_response_time = fields.get("过程更新时间", "")
         else:
             existing_response_time = fields.get("进展更新时间", "")
@@ -3462,7 +3473,7 @@ class PortalRuntime:
         prepared = prepared if isinstance(prepared, dict) else {}
         notice_type = str(prepared.get("notice_type") or "").strip()
         level = str(prepared.get("level") or "").strip()
-        if notice_type in ("设备变更", "变更通告"):
+        if notice_type == "变更通告":
             level = PortalRuntime._normalize_change_notice_level(
                 text=str(prepared.get("text") or ""),
                 level=level,
@@ -3619,7 +3630,6 @@ class PortalRuntime:
         return {
             "事件通告": "event",
             "维保通告": "maintenance",
-            "设备变更": "change",
             "变更通告": "change",
             "设备检修": "repair",
         }.get(notice_type, "")
@@ -4349,7 +4359,7 @@ class PortalRuntime:
             raise PortalError("只有更新通告需要确认目标变更记录。")
         record_id = str(record_id or "").strip()
         if not record_id:
-            raise PortalError("请选择要关联的设备变更记录。")
+            raise PortalError("请选择要关联的变更通告记录。")
         result = cls.service.lookup_change_target_candidates(
             scope=scope,
             title=title,
@@ -4365,10 +4375,10 @@ class PortalRuntime:
             == record_id
         ]
         if not candidates:
-            raise PortalError("选择的设备变更记录不在当前入口可关联范围内。")
+            raise PortalError("选择的变更通告记录不在当前入口可关联范围内。")
         candidate = candidates[0]
         fields = candidate.get("fields") if isinstance(candidate.get("fields"), dict) else {}
-        field_config = get_field_config("设备变更")
+        field_config = get_field_config("变更通告")
         clear_field_names: list[str] = []
         for field_name in (
             "实际结束时间",
@@ -4398,11 +4408,11 @@ class PortalRuntime:
             else:
                 ok, update_result = update_bitable_record_fields(
                     record_id,
-                    "设备变更",
+                    "变更通告",
                     {field_name: None for field_name in clear_field_names},
                 )
                 if not ok:
-                    raise PortalError(f"清空设备变更实际结束时间失败：{update_result}")
+                    raise PortalError(f"清空变更通告实际结束时间失败：{update_result}")
                 cls.service.clear_target_record_cache()
                 clear_result = {
                     "cleared": True,

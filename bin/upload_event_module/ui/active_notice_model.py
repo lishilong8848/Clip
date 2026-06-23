@@ -135,7 +135,7 @@ class ActiveNoticeModel(QAbstractListModel):
         notice_type = str(record.get("notice_type") or "").strip()
         record_id = canonical_target_record_id(record)
         return (
-            notice_type in ("设备变更", "变更通告")
+            notice_type == "变更通告"
             and bool(record_id)
             and not cls.is_placeholder_record(record)
         )

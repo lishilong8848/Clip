@@ -705,7 +705,7 @@ class ActiveCacheStore:
                     notice_type,
                     data.get("text", ""),
                 )
-                if notice_type in ("设备变更", "变更通告"):
+                if notice_type == "变更通告":
                     if bool(data.get("level_locked")):
                         continue
                     if not detected_level or detected_level == current_level:

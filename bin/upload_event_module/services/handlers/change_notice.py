@@ -25,9 +25,9 @@ from .base import BaseNoticeHandler, NoticePayload
 
 
 class ChangeNoticeHandler(BaseNoticeHandler):
-    """设备变更/变更通告处理"""
+    """变更通告处理"""
 
-    notice_types = ("设备变更", "变更通告")
+    notice_types = ("变更通告",)
     table_id_attr = "table_id_biangeng"
 
     ALI_LEVEL_OPTIONS = tuple(CHANGE_ALI_LEVEL_OPTIONS)

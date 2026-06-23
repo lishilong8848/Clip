@@ -40,7 +40,7 @@ def test_add_record():
     # 2. 准备测试数据
     test_uuid = str(uuid.uuid4())
     data_source_text = f"测试数据源内容 - {test_uuid}"
-    notice_type = "事件通告"  # 可以改为 "设备变更" 或 "设备调整"
+    notice_type = "事件通告"  # 可以改为 "变更通告" 或 "设备调整"
 
     print(f"准备创建记录: Type={notice_type}, UUID={test_uuid}")
 

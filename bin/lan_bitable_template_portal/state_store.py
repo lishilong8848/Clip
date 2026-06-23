@@ -42,6 +42,8 @@ except ImportError:
 
 
 DEFAULT_STATE_DB_NAME = "lan_portal_state.sqlite3"
+LEGACY_CHANGE_NOTICE_TYPE = "设备变更"
+CANONICAL_CHANGE_NOTICE_TYPE = "变更通告"
 
 
 class LanPortalStateStore:
@@ -1079,6 +1081,7 @@ class LanPortalStateStore:
         )
         run_schema_migrations(conn, target_version=self.SCHEMA_VERSION)
         self._migrate_legacy_source_snapshot_locked(conn)
+        self._migrate_legacy_change_notice_labels_locked(conn)
         self._repair_notice_identity_map_locked(conn)
         conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
@@ -1223,6 +1226,167 @@ class LanPortalStateStore:
             "INSERT OR REPLACE INTO meta(key, value) VALUES('active_source_snapshot_at', ?)",
             (str(now),),
         )
+
+    @classmethod
+    def _canonicalize_legacy_change_notice_text(cls, value: str) -> tuple[str, bool]:
+        if value.strip() == LEGACY_CHANGE_NOTICE_TYPE:
+            return CANONICAL_CHANGE_NOTICE_TYPE, True
+        legacy_header = f"【{LEGACY_CHANGE_NOTICE_TYPE}】"
+        if legacy_header in value:
+            return (
+                value.replace(legacy_header, f"【{CANONICAL_CHANGE_NOTICE_TYPE}】"),
+                True,
+            )
+        return value, False
+
+    @classmethod
+    def _canonicalize_legacy_change_notice_payload(
+        cls, value: Any
+    ) -> tuple[Any, bool]:
+        if isinstance(value, dict):
+            changed = False
+            result: dict[str, Any] = {}
+            for key, item in value.items():
+                normalized, item_changed = cls._canonicalize_legacy_change_notice_payload(
+                    item
+                )
+                result[key] = normalized
+                changed = changed or item_changed
+            return result, changed
+        if isinstance(value, list):
+            changed = False
+            result: list[Any] = []
+            for item in value:
+                normalized, item_changed = cls._canonicalize_legacy_change_notice_payload(
+                    item
+                )
+                result.append(normalized)
+                changed = changed or item_changed
+            return result, changed
+        if isinstance(value, str):
+            return cls._canonicalize_legacy_change_notice_text(value)
+        return value, False
+
+    def _migrate_legacy_change_notice_labels_locked(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        """Canonicalize old local change-notice labels without accepting new old input.
+
+        Previous versions persisted "设备变更" in SQLite/legacy JSON payloads.
+        Runtime code now only understands "变更通告", so existing local rows must
+        be normalized during startup. Business titles such as "网络设备变更" are not
+        changed because only exact field values and bracketed notice headers are
+        replaced.
+        """
+
+        def table_columns(table: str) -> set[str]:
+            try:
+                return {
+                    str(row[1] or "")
+                    for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+                }
+            except sqlite3.OperationalError:
+                return set()
+
+        def update_json_table(
+            table: str,
+            *,
+            payload_column: str = "payload_json",
+            exact_columns: tuple[str, ...] = (),
+            text_columns: tuple[str, ...] = (),
+        ) -> int:
+            columns = table_columns(table)
+            if payload_column not in columns and not exact_columns and not text_columns:
+                return 0
+            selected_columns = ["rowid AS __rowid"]
+            for column in (payload_column, *exact_columns, *text_columns):
+                if column in columns:
+                    selected_columns.append(column)
+            if len(selected_columns) == 1:
+                return 0
+            try:
+                rows = conn.execute(
+                    f"SELECT {', '.join(selected_columns)} FROM {table}"
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return 0
+            changed_rows = 0
+            for row in rows:
+                assignments: list[str] = []
+                params: list[Any] = []
+                if payload_column in columns:
+                    payload = self._loads(str(row[payload_column] or ""), None)
+                    normalized, changed = self._canonicalize_legacy_change_notice_payload(
+                        payload
+                    )
+                    if changed:
+                        assignments.append(f"{payload_column} = ?")
+                        params.append(self._json(normalized))
+                for column in exact_columns:
+                    if column not in columns:
+                        continue
+                    raw = str(row[column] or "")
+                    normalized, changed = self._canonicalize_legacy_change_notice_text(raw)
+                    if changed:
+                        assignments.append(f"{column} = ?")
+                        params.append(normalized)
+                for column in text_columns:
+                    if column not in columns:
+                        continue
+                    raw = str(row[column] or "")
+                    normalized, changed = self._canonicalize_legacy_change_notice_text(raw)
+                    if changed:
+                        assignments.append(f"{column} = ?")
+                        params.append(normalized)
+                if not assignments:
+                    continue
+                if "updated_at" in columns:
+                    assignments.append("updated_at = ?")
+                    params.append(time.time())
+                params.append(row["__rowid"])
+                conn.execute(
+                    f"UPDATE {table} SET {', '.join(assignments)} WHERE rowid = ?",
+                    tuple(params),
+                )
+                changed_rows += 1
+            return changed_rows
+
+        changed = 0
+        changed += update_json_table(
+            "qt_active_items",
+            exact_columns=("notice_type",),
+        )
+        changed += update_json_table(
+            "ongoing_items",
+            exact_columns=("notice_type",),
+        )
+        changed += update_json_table(
+            "notice_identity_map",
+            exact_columns=("notice_type",),
+        )
+        changed += update_json_table(
+            "notice_undo_actions",
+            exact_columns=("notice_type",),
+        )
+        changed += update_json_table("runtime_task_queue")
+        changed += update_json_table("event_outbox")
+        changed += update_json_table("dialog_sessions")
+        changed += update_json_table(
+            "clipboard_candidates",
+            text_columns=("content",),
+        )
+        for table in sorted(
+            set(self.DOCUMENT_NAMESPACE_TABLES.values()) | {"json_documents"}
+        ):
+            changed += update_json_table(table)
+        if changed:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO meta(key, value)
+                VALUES('legacy_change_notice_label_migration_v1', ?)
+                """,
+                (self._json({"changed_rows": changed, "at": time.time()}),),
+            )
 
     def _notice_identity_candidate_payloads(self, payload: Any) -> list[dict[str, Any]]:
         if not isinstance(payload, dict):
@@ -1819,7 +1983,8 @@ class LanPortalStateStore:
         return str(fallback or "").strip()
 
     def _enrich_notice_payload_from_text(self, payload: dict[str, Any]) -> dict[str, Any]:
-        payload = dict(payload or {})
+        payload, _ = self._canonicalize_legacy_change_notice_payload(dict(payload or {}))
+        payload = payload if isinstance(payload, dict) else {}
         sections = self._notice_sections_from_text(payload.get("text") or "")
         if not sections:
             return payload
@@ -3885,6 +4050,8 @@ class LanPortalStateStore:
     ) -> bool:
         if not isinstance(payload, dict):
             return False
+        payload, _ = self._canonicalize_legacy_change_notice_payload(payload)
+        payload = payload if isinstance(payload, dict) else {}
         normalized = normalize_notice_identity_payload(
             self._enrich_notice_payload_from_text(payload or {})
         )
@@ -4086,6 +4253,8 @@ class LanPortalStateStore:
     ) -> dict[str, Any] | None:
         if not isinstance(payload, dict):
             return None
+        payload, _ = self._canonicalize_legacy_change_notice_payload(payload)
+        payload = payload if isinstance(payload, dict) else {}
         payload = normalize_notice_identity_payload(payload)
         notice_type = self._text(payload.get("notice_type"))
         if notice_type == "事件通告":
@@ -4498,6 +4667,8 @@ class LanPortalStateStore:
                 data = entry.get("data")
                 if not isinstance(data, dict):
                     continue
+                data, _ = self._canonicalize_legacy_change_notice_payload(data)
+                data = data if isinstance(data, dict) else {}
                 normalized = normalize_notice_identity_payload(data)
                 active_item_id = self._qt_active_item_key(normalized)
                 if not active_item_id:

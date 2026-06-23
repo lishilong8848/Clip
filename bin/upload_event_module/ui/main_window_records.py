@@ -209,6 +209,50 @@ class MainWindowRecordsMixin:
                         )
                     recovered += 1
                     continue
+            if bool(data.get("_upload_pending_dialog")):
+                data = dict(data)
+                data["_upload_in_progress"] = False
+                data["_pending_upload_hash"] = None
+                data["_has_unuploaded_changes"] = True
+                data.pop("_upload_pending_dialog", None)
+                data.pop("_last_upload_error", None)
+                data.pop("_upload_started_monotonic", None)
+                item.setData(Qt.ItemDataRole.UserRole, data)
+                self._rebuild_active_item_widget(
+                    list_widget,
+                    item,
+                    data,
+                    force_status=None,
+                    upload_in_progress=False,
+                    pending_upload_hash=None,
+                    has_unuploaded_changes=True,
+                )
+                recovered += 1
+                continue
+            has_record_identity = any(
+                str(data.get(key) or "").strip()
+                for key in ("record_id", "target_record_id", "feishu_record_id", "raw_record_id")
+            )
+            if not has_record_identity:
+                data = dict(data)
+                data["_upload_in_progress"] = False
+                data["_pending_upload_hash"] = None
+                data["_has_unuploaded_changes"] = True
+                data.pop("_upload_pending_dialog", None)
+                data.pop("_last_upload_error", None)
+                data.pop("_upload_started_monotonic", None)
+                item.setData(Qt.ItemDataRole.UserRole, data)
+                self._rebuild_active_item_widget(
+                    list_widget,
+                    item,
+                    data,
+                    force_status=None,
+                    upload_in_progress=False,
+                    pending_upload_hash=None,
+                    has_unuploaded_changes=True,
+                )
+                recovered += 1
+                continue
             started_at = float(data.get("_upload_started_monotonic") or 0.0)
             if started_at and now - started_at < 5.0:
                 continue
@@ -1841,7 +1885,7 @@ class MainWindowRecordsMixin:
         notice_type = str(data_dict.get("notice_type") or "").strip()
         record_id = self._today_in_progress_target_record_id(data_dict)
         return (
-            notice_type in ("设备变更", "变更通告")
+            notice_type == "变更通告"
             and bool(record_id)
             and not self._is_placeholder_record(data_dict)
         )
@@ -2931,7 +2975,7 @@ class MainWindowRecordsMixin:
         if not isinstance(data_dict, dict):
             return current_level
         notice_type = str(data_dict.get("notice_type") or "").strip()
-        if notice_type not in ("设备变更", "变更通告") or level_locked:
+        if notice_type != "变更通告" or level_locked:
             return current_level
         detected_level = str(
             detect_level_from_notice_text(notice_type, data_dict.get("text", "")) or ""
@@ -3031,12 +3075,15 @@ class MainWindowRecordsMixin:
 
     @classmethod
     def _infer_buildings_from_notice_text(cls, text: str) -> list[str]:
+        title_text = cls._extract_section_text(text, ("标题", "名称"))
+        title_buildings = cls._infer_buildings_from_text(title_text)
+        if "110站" in title_buildings:
+            return ["110站"]
         location_text = cls._extract_section_text(text, ("位置", "地点"))
         buildings = cls._infer_buildings_from_text(location_text)
         if buildings:
             return buildings
-        title_text = cls._extract_section_text(text, ("标题", "名称"))
-        return cls._infer_buildings_from_text(title_text)
+        return title_buildings
 
     def _resolve_prefilled_buildings(
         cls,
@@ -3044,9 +3091,12 @@ class MainWindowRecordsMixin:
         inferred_value,
     ) -> list[str]:
         existing_buildings = cls._normalize_buildings_value(existing_value)
+        inferred_buildings = cls._normalize_buildings_value(inferred_value)
+        if "110站" in inferred_buildings and "110站" not in existing_buildings:
+            return ["110站"]
         if existing_buildings:
             return existing_buildings
-        return cls._normalize_buildings_value(inferred_value)
+        return inferred_buildings
 
     def _validate_cache_record_ids_on_startup(self) -> dict:
         result = {
@@ -3578,9 +3628,14 @@ class MainWindowRecordsMixin:
                 new_data = merged
             if isinstance(new_data, dict) and old_data:
                 new_data["active_item_id"] = old_data.get("active_item_id")
-            new_data["_has_unuploaded_changes"] = True
-            new_data["_pending_upload_hash"] = None
-            new_data["_upload_in_progress"] = False
+            if hasattr(self, "_mark_notice_content_dirty"):
+                new_data = self._mark_notice_content_dirty(new_data)
+            else:
+                new_data["_has_unuploaded_changes"] = True
+                new_data["_pending_upload_hash"] = None
+                new_data["_upload_in_progress"] = False
+                new_data.pop("_upload_started_monotonic", None)
+                new_data.pop("_last_upload_error", None)
             self._commit_active_record(
                 new_data,
                 refresh_detail=True,
@@ -3592,12 +3647,13 @@ class MainWindowRecordsMixin:
         except Exception:
             return
 
-    def restore_button_state(self, success=False, name=None, record_id=None):
+    def restore_button_state(self, success=False, name=None, record_id=None, mark_failed=True):
         self._set_last_ui_op(
             "restore_button_state",
             success=success,
             name=name,
             record_id=record_id,
+            mark_failed=mark_failed,
         )
         if self._closing:
             return
@@ -3644,7 +3700,10 @@ class MainWindowRecordsMixin:
                         )
                 if not success:
                     data["_has_unuploaded_changes"] = True
-                    data["_last_upload_error"] = f"{name or '上传'}失败，可重试。"
+                    if mark_failed:
+                        data["_last_upload_error"] = f"{name or '上传'}失败，可重试。"
+                    else:
+                        data.pop("_last_upload_error", None)
                 else:
                     data["_has_unuploaded_changes"] = False
                     data.pop("_last_upload_error", None)
@@ -3652,6 +3711,7 @@ class MainWindowRecordsMixin:
 
                 data["_pending_upload_hash"] = None
                 data["_upload_in_progress"] = False
+                data.pop("_upload_pending_dialog", None)
                 data.pop("_upload_started_monotonic", None)
                 item.setData(Qt.ItemDataRole.UserRole, data)
                 if hasattr(self, "_upsert_active_notice_model_item"):
@@ -3724,7 +3784,7 @@ class MainWindowRecordsMixin:
                 has_unuploaded_changes=True,
             )
 
-    def clear_upload_runtime_state_for_ids(self, *record_ids):
+    def clear_upload_runtime_state_for_ids(self, *record_ids, mark_uploaded: bool = False):
         """Clear Qt-local upload markers for all aliases of the given IDs.
 
         The backend is the business owner now.  Qt may still temporarily mark a
@@ -3780,11 +3840,16 @@ class MainWindowRecordsMixin:
                 data.get("_upload_in_progress")
                 or data.get("_pending_upload_hash") is not None
                 or data.get("_upload_started_monotonic") is not None
+                or (mark_uploaded and data.get("_has_unuploaded_changes"))
+                or (mark_uploaded and str(data.get("_last_upload_error") or "").strip())
             ):
                 data = dict(data)
                 data["_upload_in_progress"] = False
                 data["_pending_upload_hash"] = None
                 data.pop("_upload_started_monotonic", None)
+                if mark_uploaded:
+                    data["_has_unuploaded_changes"] = False
+                    data.pop("_last_upload_error", None)
                 item.setData(Qt.ItemDataRole.UserRole, data)
                 self._rebuild_active_item_widget(
                     list_widget,

@@ -68,7 +68,7 @@ class NoticeTemplateTests(unittest.TestCase):
         self._assert_lines(
             text,
             [
-                "【设备变更】状态：更新",
+                "【变更通告】状态：更新",
                 "【名称】EA118机房C楼蓄电池放电变更",
                 "【等级】I3",
                 "【时间】2026-06-12 09:00~2026-06-12 18:00",
@@ -81,7 +81,7 @@ class NoticeTemplateTests(unittest.TestCase):
         )
         info = extract_event_info(text)
         self.assertIsNotNone(info)
-        self.assertEqual(info["notice_type"], "设备变更")
+        self.assertEqual(info["notice_type"], "变更通告")
         self.assertEqual(info["title"], "EA118机房C楼蓄电池放电变更")
 
     def test_repair_notice_text_contract(self):

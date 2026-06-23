@@ -2897,7 +2897,7 @@ class ScreenshotConfirmDialog(QDialog):
 
 
 
-        # 变更等级单选（设备变更专用，智航等级）
+        # 变更等级单选（变更通告专用，智航等级）
 
         self.change_level_options = list(CHANGE_ZHIHANG_LEVEL_OPTIONS)
 
@@ -3281,7 +3281,6 @@ class ScreenshotConfirmDialog(QDialog):
 
         self.enable_specialty_select = self.notice_type in (
 
-            "设备变更",
 
             "变更通告",
 
@@ -3307,7 +3306,7 @@ class ScreenshotConfirmDialog(QDialog):
 
         self.enable_maintenance_cycle_select = self.notice_type == "维保通告"
 
-        self.enable_change_level_select = self.notice_type in ("设备变更", "变更通告")
+        self.enable_change_level_select = self.notice_type == "变更通告"
 
         self.enable_event_level_select = self.notice_type == "事件通告"
 
@@ -3672,7 +3671,9 @@ class ScreenshotConfirmDialog(QDialog):
 
             selected_buildings = []
 
-            if cached_buildings:
+            if BUILDING_110 in detected_buildings and BUILDING_110 not in cached_buildings:
+                selected_buildings = [BUILDING_110]
+            elif cached_buildings:
 
                 selected_buildings = cached_buildings
             elif saved_buildings:
@@ -5988,7 +5989,6 @@ class ScreenshotConfirmDialog(QDialog):
         return notice_type in (
             "维保通告",
             "维护通告",
-            "设备变更",
             "变更通告",
             "设备检修",
             "检修通告",

@@ -2200,6 +2200,21 @@ class FastAPIPortalController:
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)
 
+        @app.get("/api/events/overview")
+        async def events_overview(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                month = str(request.query_params.get("month") or "").strip()
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.get_event_monthly_overview,
+                    month=month,
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=500)
+
         @app.post("/api/events/refresh")
         async def events_refresh(request: Request):
             session = self._current_session(request)
@@ -4986,7 +5001,7 @@ class FastAPIPortalController:
     ) -> str:
         notice_type = str(notice_type or "").strip()
         work_type = str(work_type or "").strip()
-        if notice_type in {"设备变更", "变更通告"}:
+        if notice_type == NOTICE_TYPE_CHANGE:
             return NOTICE_TYPE_CHANGE
         if notice_type:
             return notice_type
@@ -5148,12 +5163,17 @@ class FastAPIPortalController:
                 ):
                     merged[key] = list(value)
                 continue
-            if key == "notice_type" and merged.get(key) == "设备变更" and value == NOTICE_TYPE_CHANGE:
-                merged[key] = value
-                continue
             if overwrite or merged.get(key) in (None, "", [], {}):
                 merged[key] = value
         return merged
+
+    @staticmethod
+    def _reset_projected_upload_state(data: dict) -> None:
+        data["_has_unuploaded_changes"] = True
+        data["_pending_upload_hash"] = None
+        data["_upload_in_progress"] = False
+        data.pop("_last_upload_error", None)
+        data.pop("_upload_started_monotonic", None)
 
     @classmethod
     def _project_clipboard_entry_to_active(cls, entry: dict) -> dict:
@@ -5197,7 +5217,7 @@ class FastAPIPortalController:
         if not work_type:
             if notice_type == "维保通告":
                 work_type = "maintenance"
-            elif notice_type in {"设备变更", "变更通告"}:
+            elif notice_type == NOTICE_TYPE_CHANGE:
                 work_type = "change"
             elif notice_type == "设备检修":
                 work_type = "repair"
@@ -5214,15 +5234,13 @@ class FastAPIPortalController:
                 "source": entry.get("source") or data.get("source", ""),
                 "time_str": data.get("time_str") or entry.get("time_str") or "",
                 "reason": data.get("reason") or entry.get("reason") or "",
-                "_has_unuploaded_changes": True,
-                "_pending_upload_hash": None,
-                "_upload_in_progress": False,
                 "origin": data.get("origin") or "clipboard",
                 "building_codes": building_codes,
                 "work_type": work_type,
                 "lan_work_type": work_type,
             }
         )
+        cls._reset_projected_upload_state(data)
         section = "event" if notice_type == "事件通告" else "other"
         projected_item = {
             "active_item_id": active_item_id,

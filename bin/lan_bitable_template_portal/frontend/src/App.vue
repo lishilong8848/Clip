@@ -92,6 +92,7 @@
       :is-admin="isAdmin"
       @refreshing="eventRefreshing = $event"
       @status="syncText = $event"
+      @switch-scope="enterEventManagement"
     />
 
     <ScopeHome
@@ -424,6 +425,7 @@ const requestableScopes: ScopeOption[] = [
 ];
 
 const placeholderFieldValues = new Set(["", "-", "--", "—", "——", "/", "无", "暂无"]);
+const defaultSpecialtyOptions = ["电气", "暖通", "消防", "弱电"];
 const repairSpecialtyOptionFallback: Record<string, string> = {
   optAssNaw3: "电气",
   opt3jdJJb7: "暖通",
@@ -795,7 +797,7 @@ const ongoingEmptyText = computed(() => {
   return "当前没有进行中通告";
 });
 const specialtyFilterOptions = computed(() => {
-  const values = new Set<string>();
+  const values = new Set<string>(defaultSpecialtyOptions.map((item) => normalizeSpecialtyValue(item)).filter(Boolean));
   for (const record of scopedRecords.value) {
     const value = normalizeSpecialtyValue(specialtyForRecord(record));
     if (value) values.add(value);
@@ -815,6 +817,8 @@ function normalizeScopeValue(value: string, fallback = "ALL"): string {
   const text = String(value || "").trim().toUpperCase();
   if (!text) return fallback;
   if (["ALL", "CAMPUS", "110"].includes(text)) return text;
+  if (text.includes("园区") || text.includes("PARK")) return "CAMPUS";
+  if (text.includes("110")) return "110";
   const match = text.match(/[ABCDEH]/);
   return match ? match[0] : fallback;
 }
@@ -850,15 +854,65 @@ function defaultBuildingForCurrentScope(): string {
   return scopeLabel(scope);
 }
 
+function normalizeBuildingCodes(values: unknown): string[] {
+  const rawValues = Array.isArray(values) ? values : [values];
+  const codes: string[] = [];
+  const pushCode = (code: string) => {
+    const normalized = String(code || "").trim().toUpperCase();
+    if (buildingScopeCodes.includes(normalized) && !codes.includes(normalized)) codes.push(normalized);
+  };
+  for (const raw of rawValues) {
+    const text = String(raw ?? "").trim();
+    if (!text) continue;
+    const upper = text.toUpperCase();
+    if (upper === "CAMPUS" || text.includes("园区")) {
+      for (const code of ["A", "B", "C"]) if (!codes.includes(code)) codes.push(code);
+      continue;
+    }
+    if (/^110\s*(?:站|楼|机房|数据中心|DC)?$/i.test(text)) {
+      pushCode("110");
+      continue;
+    }
+    const exact = upper.match(/^([ABCDEH])\s*(?:楼|栋|座|区|机房|数据中心|DC)?$/);
+    if (exact) {
+      pushCode(exact[1]);
+      continue;
+    }
+    if (/110\s*(?:站|楼|机房|数据中心|DC)/i.test(text)) pushCode("110");
+    for (const code of ["A", "B", "C", "D", "E", "H"]) {
+      const patterns = [
+        new RegExp(`(?<![A-Z0-9])${code}\\s*(?:楼|栋|座|区|机房|数据中心|DC)`, "i"),
+        new RegExp(`(?:楼栋|楼宇|数据中心)\\s*${code}(?![A-Z0-9])`, "i"),
+        new RegExp(`(?<![A-Z0-9])${code}[-－]\\d`, "i"),
+      ];
+      if (patterns.some((pattern) => pattern.test(upper))) pushCode(code);
+    }
+  }
+  return buildingScopeCodes.filter((code) => codes.includes(code));
+}
+
 function buildingCodesFromText(value: string): string[] {
-  const code = normalizeScopeValue(value, "");
-  if (buildingScopeCodes.includes(code)) return [code];
-  if (code === "CAMPUS") return ["A", "B", "C"];
-  return [];
+  return normalizeBuildingCodes(value);
+}
+
+function buildingLabelFromCodes(codes: unknown): string {
+  const values = normalizeBuildingCodes(codes);
+  return values.map((code) => scopeLabel(code)).join("、");
+}
+
+function normalizeDraftBuilding(draft: Dict): { building: string; building_codes: string[] } {
+  let codes = normalizeBuildingCodes(draft.building_codes);
+  if (!codes.length) codes = buildingCodesFromText(draft.building || "");
+  const scope = normalizeScopeValue(currentScope.value || "", "");
+  if (!codes.length && buildingScopeCodes.includes(scope)) codes = [scope];
+  const building = buildingLabelFromCodes(codes) || String(draft.building || "").trim();
+  draft.building_codes = codes;
+  draft.building = building;
+  return { building, building_codes: codes };
 }
 
 function onDraftBuildingChange(draft: Dict): void {
-  draft.building_codes = buildingCodesFromText(draft.building || "");
+  normalizeDraftBuilding(draft);
   saveDrafts();
 }
 
@@ -1324,18 +1378,16 @@ function manualDraftDefaults(type: string): Dict {
 function manualRecordFromDraft(key: string, draft: Dict): Dict {
   const type = inferManualNoticeWorkType(draft, draft.work_type || "maintenance");
   if (draft.work_type !== type) draft.work_type = type;
+  const normalizedBuilding = normalizeDraftBuilding(draft);
   const title = manualDraftTitle(draft, type);
   const noticeTypeMap: Record<string, string> = {
     maintenance: "维保通告",
-    change: "设备变更",
+    change: "变更通告",
     repair: "设备检修",
     power: draft.notice_type === "下电通告" ? "下电通告" : "上电通告",
     polling: "设备轮巡",
     adjust: "设备调整",
   };
-  const buildingCodes = Array.isArray(draft.building_codes) && draft.building_codes.length
-    ? draft.building_codes
-    : buildingCodesFromText(draft.building || "");
   return {
     manual: true,
     manual_key: key,
@@ -1346,9 +1398,9 @@ function manualRecordFromDraft(key: string, draft: Dict): Dict {
     title: title || `手动${workTypeLabel(type)}通告`,
     display_fields: {
       "手动标题": title,
-      "楼栋": draft.building || "",
-      "变更楼栋": draft.building || "",
-      "所属数据中心/楼栋-使用": draft.building || "",
+      "楼栋": normalizedBuilding.building,
+      "变更楼栋": normalizedBuilding.building,
+      "所属数据中心/楼栋-使用": normalizedBuilding.building,
       "专业类别": draft.specialty || "",
       "专业": draft.specialty || "",
       "所属专业": draft.specialty || "",
@@ -1360,7 +1412,7 @@ function manualRecordFromDraft(key: string, draft: Dict): Dict {
       "备件更换情况": draft.spare_parts || "",
     },
     target_record_id: draft.target_record_id || draft.feishu_record_id || draft.raw_record_id || "",
-    building_codes: buildingCodes,
+    building_codes: normalizedBuilding.building_codes,
   };
 }
 
@@ -1507,6 +1559,7 @@ function saveDrafts(): void {
 
 function setDraftField(draft: Dict, field: string, value: unknown): void {
   draft[field] = value;
+  if (field === "building" || field === "building_codes") normalizeDraftBuilding(draft);
   saveDrafts();
 }
 
@@ -2268,7 +2321,11 @@ function toggleDraftPreview(key: string): void {
 
 function draftSummary(record: Dict, draft: Dict): string {
   const timeRange = [draft.start_time, draft.end_time].filter(Boolean).join("~");
+  const buildingText = record.manual
+    ? (buildingLabelFromCodes(draft.building_codes) || draft.building)
+    : (buildingLabelFromCodes(record.building_codes) || buildingForRecord(record));
   return [
+    buildingText,
     draft.specialty || specialtyForRecord(record),
     draft.maintenance_cycle || fieldsOf(record)["维护周期"],
     draft.non_plan ? "非计划性" : "",
@@ -2316,6 +2373,10 @@ function requiredDraftFields(record: Dict, draft: Dict): string[] {
 
 function draftFieldValue(record: Dict, draft: Dict, field: string): string {
   if (field === "title") return manualDraftTitle(draft, draftWorkType(record, draft));
+  if (field === "building") {
+    const normalized = normalizeDraftBuilding(draft);
+    return normalized.building_codes.length ? normalized.building : "";
+  }
   return String(draft[field] ?? "").trim();
 }
 
@@ -2440,9 +2501,12 @@ function ongoingNoticePreviewText(item: Dict): string {
 
 function draftUploadPreviewRows(record: Dict, draft: Dict): Array<{ label: string; value: string }> {
   const type = draftWorkType(record, draft);
+  const buildingText = record.manual
+    ? (buildingLabelFromCodes(draft.building_codes) || draft.building)
+    : (buildingLabelFromCodes(record.building_codes) || buildingForRecord(record));
   const rows: Array<{ label: string; value: string }> = [
     { label: "通告类型", value: workTypeLabel(type) },
-    { label: "楼栋/范围", value: record.manual ? draft.building : buildingForRecord(record) },
+    { label: "楼栋/范围", value: buildingText },
     { label: "专业", value: draft.specialty || specialtyForRecord(record) },
   ];
   if (type === "maintenance") {
@@ -2551,10 +2615,9 @@ function addManualDraft(type = workType.value): void {
       prefilled_from_last: true,
     });
     if (!draft.building) draft.building = defaultBuildingForCurrentScope();
-    if (!Array.isArray(draft.building_codes) || !draft.building_codes.length) {
-      draft.building_codes = buildingCodesFromText(draft.building || "");
-    }
+    normalizeDraftBuilding(draft);
   }
+  normalizeDraftBuilding(draft);
   draft.manual_origin = "manual";
   drafts.set(key, draft);
   selectedKeys.add(key);
@@ -2824,7 +2887,7 @@ async function parsePastedNotice(): Promise<void> {
     draft.building = sectionValue(sections, ["楼栋", "变更楼栋", "所属楼栋"])
       || inferBuildingText(draft.title, draft.location, text)
       || defaultBuildingForCurrentScope();
-    draft.building_codes = buildingCodesFromText(draft.building);
+    normalizeDraftBuilding(draft);
     draft.content = type === "repair"
       ? sectionValue(sections, ["标题/补充内容", "标题补充内容", "补充内容", "内容"])
       : sectionValue(sections, ["内容"], draft.title);
@@ -2909,14 +2972,18 @@ function choosePastedChangeTarget(candidate: Dict): void {
     applyChangeTargetCandidateDefaults({ ...(pending.draft || {}) }, candidate),
     source,
   );
+  const candidateBuildingCodes = normalizeBuildingCodes(source.building_codes).length
+    ? normalizeBuildingCodes(source.building_codes)
+    : normalizeBuildingCodes(candidate.building_codes || candidate.building || draft.building);
+  const candidateBuilding = buildingLabelFromCodes(candidateBuildingCodes) || draft.building || candidate.building || "";
   completeParsedNoticeDraft(String(pending.type || "change"), draft, {
     target_record_id: targetId,
     record_id: targetId || source.source_record_id || source.record_id || "",
     source_record_id: source.source_record_id || source.record_id || "",
     source_app_token: source.source_app_token || "",
     source_table_id: source.source_table_id || "",
-    building: draft.building || candidate.building || "",
-    building_codes: source.building_codes || candidate.building_codes || [],
+    building: candidateBuilding,
+    building_codes: candidateBuildingCodes,
   });
 }
 
@@ -3035,6 +3102,14 @@ function buildStartPayload(key: string): Dict | null {
   const action = record.manual ? draftActionForRecord(record, draft) : sourceActionForRecord(record);
   const targetRecordId = record.manual ? String(draft.target_record_id || draft.feishu_record_id || draft.raw_record_id || "").trim() : targetRecordIdForRecord(record);
   const syncMaintenanceTarget = syncMaintenanceTargetValue(record, draft);
+  const submitBuilding = record.manual
+    ? normalizeDraftBuilding(draft)
+    : {
+        building: buildingLabelFromCodes(record.building_codes) || buildingForRecord(record),
+        building_codes: normalizeBuildingCodes(record.building_codes).length
+          ? normalizeBuildingCodes(record.building_codes)
+          : buildingCodesFromText(buildingForRecord(record)),
+      };
   return {
     action,
     scope: currentScope.value || "ALL",
@@ -3056,8 +3131,8 @@ function buildStartPayload(key: string): Dict | null {
     paired_maintenance_actual_start_time: syncMaintenanceTarget ? (draft.paired_maintenance_actual_start_time || record.paired_maintenance_actual_start_time || "") : "",
     target_record_id: action !== "start" ? targetRecordId : "",
     source_progress: sourceProgressForRecord(record),
-    building_codes: record.manual ? (draft.building_codes || []) : (record.building_codes || []),
-    building: record.manual ? (draft.building || "") : buildingForRecord(record),
+    building_codes: submitBuilding.building_codes,
+    building: submitBuilding.building,
     title: payloadTitleForDraft(record, draft, type),
     non_plan: record.manual && type === "maintenance" ? Boolean(draft.non_plan) : false,
     level: record.manual ? (draft.level || (type === "change" ? "I3" : "")) : (type === "repair" ? (draft.level || "") : (type === "change" ? (levelForRecord(record) || "I3") : "")),
@@ -3397,6 +3472,10 @@ function buildOngoingPayload(item: Dict, action: string): Dict {
   const syncMaintenanceTarget = sourceWorkTypeForRecord(item) === "maintenance"
     && workType === "change"
     && edit.sync_maintenance_target !== false;
+  const buildingCodes = normalizeBuildingCodes(item.building_codes).length
+    ? normalizeBuildingCodes(item.building_codes)
+    : normalizeBuildingCodes(item.building || item.title || item.location);
+  const building = buildingLabelFromCodes(buildingCodes) || item.building || "";
   return {
     action,
     scope: currentScope.value || "ALL",
@@ -3416,8 +3495,8 @@ function buildOngoingPayload(item: Dict, action: string): Dict {
     paired_maintenance_actual_start_time: syncMaintenanceTarget ? draftValue(edit, "paired_maintenance_actual_start_time", item.paired_maintenance_actual_start_time || "") : "",
     title: draftValue(edit, "title", item.title || item.content || ""),
     specialty: cleanDisplayText(draftValue(edit, "specialty", item.specialty || "")),
-    building: item.building || "",
-    building_codes: Array.isArray(item.building_codes) ? item.building_codes : [],
+    building,
+    building_codes: buildingCodes,
     maintenance_cycle: draftValue(edit, "maintenance_cycle", item.maintenance_cycle || ""),
     level: draftValue(edit, "level", item.level || ""),
     start_time: startTime,
@@ -4014,6 +4093,10 @@ async function deleteOngoing(item: Dict): Promise<void> {
   const key = ongoingLineKey(item);
   const targetRecordId = targetRecordIdForOngoing(item);
   const sourceRecordId = sourceRecordIdForOngoing(item, targetRecordId);
+  const buildingCodes = normalizeBuildingCodes(item.building_codes).length
+    ? normalizeBuildingCodes(item.building_codes)
+    : normalizeBuildingCodes(item.building || item.title || item.location);
+  const building = buildingLabelFromCodes(buildingCodes) || item.building || "";
   const confirmed = await requestActionConfirm({
     tone: "danger",
     kicker: "删除进行中通告",
@@ -4040,8 +4123,8 @@ async function deleteOngoing(item: Dict): Promise<void> {
         target_record_id: targetRecordId,
         source_record_id: sourceRecordId,
         title: item.title || item.content || "",
-        building: item.building || "",
-        building_codes: Array.isArray(item.building_codes) ? item.building_codes : [],
+        building,
+        building_codes: buildingCodes,
       }),
     });
     removeOngoingLine(key);
@@ -4057,6 +4140,10 @@ async function removeOngoingLocalOnly(item: Dict): Promise<void> {
   const key = ongoingLineKey(item);
   const targetRecordId = targetRecordIdForOngoing(item);
   const sourceRecordId = sourceRecordIdForOngoing(item, targetRecordId);
+  const buildingCodes = normalizeBuildingCodes(item.building_codes).length
+    ? normalizeBuildingCodes(item.building_codes)
+    : normalizeBuildingCodes(item.building || item.title || item.location);
+  const building = buildingLabelFromCodes(buildingCodes) || item.building || "";
   const confirmed = await requestActionConfirm({
     tone: "warning",
     kicker: "仅移除显示",
@@ -4083,8 +4170,8 @@ async function removeOngoingLocalOnly(item: Dict): Promise<void> {
         target_record_id: targetRecordId,
         source_record_id: sourceRecordId,
         title: item.title || item.content || "",
-        building: item.building || "",
-        building_codes: Array.isArray(item.building_codes) ? item.building_codes : [],
+        building,
+        building_codes: buildingCodes,
       }),
     });
     removeOngoingLine(key);
@@ -4157,7 +4244,7 @@ function ongoingMeta(item: Dict): string {
 function todayProgressTextForOngoing(item: Dict): string {
   const noticeType = String(item.notice_type || "").trim();
   const work = String(item.work_type || "").trim();
-  if (work !== "change" && !["设备变更", "变更通告"].includes(noticeType)) return "";
+  if (work !== "change" && noticeType !== "变更通告") return "";
   const value = String(item.today_in_progress_state || item["今日是否进行"] || "").trim().toLowerCase();
   if (["yes", "是", "在进行"].includes(value)) return "今日：在进行";
   if (["no", "否", "未进行"].includes(value)) return "今日：未进行";

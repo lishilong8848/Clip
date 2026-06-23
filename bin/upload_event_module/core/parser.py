@@ -4,8 +4,7 @@ from ..utils import WHITESPACE_TRANSLATOR
 # 通告类型常量
 
 NOTICE_TYPE_WEIBAO = "维保通告"  # 维保通告
-NOTICE_TYPE_BIANGENG = "设备变更"  # 设备变更（用户可见 canonical 标题）
-NOTICE_TYPE_BIANGENG_LEGACY = "变更通告"  # 历史标题，仅作为兼容输入
+NOTICE_TYPE_BIANGENG = "变更通告"  # 变更通告
 NOTICE_TYPE_TIAOZHENG = "设备调整"  # 设备调整
 NOTICE_TYPE_SHIJIAN = "事件通告"  # 事件通告
 NOTICE_TYPE_POWER = "上下电通告"  # 上下电通告
@@ -18,7 +17,6 @@ NOTICE_TYPE_OVERHAUL = "设备检修"  # 设备检修
 SUPPORTED_NOTICE_TYPES = [
     NOTICE_TYPE_WEIBAO,
     NOTICE_TYPE_BIANGENG,
-    NOTICE_TYPE_BIANGENG_LEGACY,
     NOTICE_TYPE_TIAOZHENG,
     NOTICE_TYPE_SHIJIAN,
     NOTICE_TYPE_POWER,
@@ -27,10 +25,6 @@ SUPPORTED_NOTICE_TYPES = [
     NOTICE_TYPE_POLLING_ALT,
     NOTICE_TYPE_OVERHAUL,
 ]
-
-NOTICE_TYPE_ALIASES = {
-    NOTICE_TYPE_BIANGENG_LEGACY: NOTICE_TYPE_BIANGENG,
-}
 
 SUPPORTED_NOTICE_MARKERS = tuple(f"【{notice_type}】" for notice_type in SUPPORTED_NOTICE_TYPES)
 
@@ -92,7 +86,7 @@ def extract_notice_info(content):
     for nt in SUPPORTED_NOTICE_TYPES:
         marker = f"【{nt}】"
         if marker in raw_content:
-            notice_type = NOTICE_TYPE_ALIASES.get(nt, nt)
+            notice_type = nt
             break
 
     if not notice_type:

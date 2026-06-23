@@ -44,7 +44,7 @@ DEFAULT_DEPENDENCY_BOOTSTRAP_ALLOW_GET_PIP = True
 
 # 3个表格ID配置（根据通告类型使用不同表格）
 DEFAULT_TABLE_ID_WEIBAO = ""  # 维保通告表格ID
-DEFAULT_TABLE_ID_BIANGENG = ""  # 设备变更表格ID
+DEFAULT_TABLE_ID_BIANGENG = ""  # 变更通告表格ID
 DEFAULT_TABLE_ID_TIAOZHENG = ""  # 设备调整表格ID
 DEFAULT_TABLE_ID_SHIJIAN = ""  # 事件通告表格ID
 DEFAULT_TABLE_ID_POWER = ""  # 上下电通告表格ID
@@ -129,10 +129,8 @@ class ConfigManager:
         table_map = {
             NOTICE_TYPE_WEIBAO: self.table_id_weibao,
             NOTICE_TYPE_BIANGENG: self.table_id_biangeng,
-            "设备变更": self.table_id_biangeng,
             NOTICE_TYPE_TIAOZHENG: self.table_id_tiaozheng,
             NOTICE_TYPE_SHIJIAN: self.table_id_shijian,
-            "变更通告": self.table_id_biangeng,
             "上下电通告": self.table_id_power,
             "设备轮巡": self.table_id_polling,
             "设备检修": self.table_id_overhaul,
@@ -1106,8 +1104,6 @@ def get_field_config(notice_type: str) -> dict[str, str]:
         NOTICE_TYPE_SHIJIAN: EVENT_NOTICE_FIELDS,
         "事件通告": EVENT_NOTICE_FIELDS,
         NOTICE_TYPE_BIANGENG: CHANGE_NOTICE_FIELDS,
-        "设备变更": CHANGE_NOTICE_FIELDS,
-        "变更通告": CHANGE_NOTICE_FIELDS,
         NOTICE_TYPE_WEIBAO: MAINTENANCE_NOTICE_FIELDS,
         "维保通告": MAINTENANCE_NOTICE_FIELDS,
         NOTICE_TYPE_TIAOZHENG: ADJUST_NOTICE_FIELDS,

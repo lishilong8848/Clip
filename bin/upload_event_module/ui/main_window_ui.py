@@ -899,7 +899,10 @@ class MainWindowUiMixin:
             self.current_screenshot_record_id
             and self.current_screenshot_record_id != data["record_id"]
         ):
-            self.restore_button_state(record_id=self.current_screenshot_record_id)
+            self.restore_button_state(
+                record_id=self.current_screenshot_record_id,
+                mark_failed=False,
+            )
 
         self.current_screenshot_record_id = data["record_id"]
         self.current_screenshot_action_type = action_type
@@ -942,6 +945,7 @@ class MainWindowUiMixin:
                 data_dict["_pending_upload_hash"] = pending_hash
             data_dict["_has_unuploaded_changes"] = False
             data_dict["_upload_in_progress"] = True
+            data_dict["_upload_pending_dialog"] = True
             data_dict["_upload_started_monotonic"] = time.monotonic()
             data_dict.pop("_last_upload_error", None)
             item.setData(Qt.ItemDataRole.UserRole, data_dict)
@@ -1009,7 +1013,7 @@ class MainWindowUiMixin:
         self._resume_clipboard_timer()
         if record_id:
             self.restore_button_state(
-                success=False, record_id=record_id
+                success=False, record_id=record_id, mark_failed=False
             )
             self.pending_new_by_record_id.pop(record_id, None)
         self.current_screenshot_record_id = None

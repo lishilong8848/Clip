@@ -114,11 +114,11 @@ export function pastedNoticeWorkType(text: string, sections: NoticeSections = {}
   if (/上电通告|上下电通告|下电通告/.test(headText)) return "power";
   if (/设备轮巡|轮巡通告/.test(headText)) return "polling";
   if (/设备调整|调整通告/.test(headText)) return "adjust";
-  if (/设备变更|变更通告/.test(headText)) return "change";
+  if (/变更通告/.test(headText)) return "change";
   if (/设备检修|检修通告/.test(rawHead)) return "repair";
   if (/上电通告|上下电通告|下电通告/.test(rawHead)) return "power";
   if (/设备轮巡|轮巡通告/.test(rawHead)) return "polling";
   if (/设备调整|调整通告/.test(rawHead)) return "adjust";
-  if (/设备变更|变更通告/.test(rawHead)) return "change";
+  if (/变更通告/.test(rawHead)) return "change";
   return "maintenance";
 }

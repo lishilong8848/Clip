@@ -210,8 +210,8 @@ class ActiveNoticeModelTests(unittest.TestCase):
                     "record_id": "src-old",
                     "source_record_id": "src-old",
                     "target_record_id": "target-real",
-                    "notice_type": "设备变更",
-                    "text": "【设备变更】状态：更新\n\n【名称】A楼变更",
+                    "notice_type": "变更通告",
+                    "text": "【变更通告】状态：更新\n\n【名称】A楼变更",
                     "_is_placeholder_record": False,
                 }
             ]
@@ -233,8 +233,8 @@ class ActiveNoticeModelTests(unittest.TestCase):
                     "source_record_id": "source-old",
                     "target_record_id": "target-old",
                     "record_id": "target-old",
-                    "notice_type": "设备变更",
-                    "text": "【设备变更】状态：更新\n\n【名称】A楼变更",
+                    "notice_type": "变更通告",
+                    "text": "【变更通告】状态：更新\n\n【名称】A楼变更",
                 }
             ]
         )
@@ -249,8 +249,8 @@ class ActiveNoticeModelTests(unittest.TestCase):
                 "source_record_id": "source-new",
                 "target_record_id": "target-new",
                 "record_id": "target-new",
-                "notice_type": "设备变更",
-                "text": "【设备变更】状态：更新\n\n【名称】A楼变更",
+                "notice_type": "变更通告",
+                "text": "【变更通告】状态：更新\n\n【名称】A楼变更",
             }
         )
 
@@ -306,7 +306,7 @@ class ActiveNoticeModelTests(unittest.TestCase):
 
     def test_today_progress_helpers(self):
         change = {
-            "notice_type": "设备变更",
+            "notice_type": "变更通告",
             "record_id": "rid-1",
             "_is_placeholder_record": False,
             "today_in_progress_state": "yes",
@@ -320,7 +320,7 @@ class ActiveNoticeModelTests(unittest.TestCase):
 
     def test_today_progress_supports_target_record_id(self):
         change = {
-            "notice_type": "设备变更",
+            "notice_type": "变更通告",
             "record_id": "",
             "target_record_id": "target-1",
             "_is_placeholder_record": False,
@@ -416,11 +416,11 @@ class ActiveNoticeModelTests(unittest.TestCase):
         record = {
             "active_item_id": "aid-1",
             "record_id": "rid-1",
-            "notice_type": "设备变更",
+            "notice_type": "变更通告",
             "_is_placeholder_record": False,
             "_has_unuploaded_changes": True,
             "today_in_progress_state": "yes",
-            "text": "【设备变更】状态：开始\n\n【标题】A楼变更\n\n【时间】2026-01-01",
+            "text": "【变更通告】状态：开始\n\n【标题】A楼变更\n\n【时间】2026-01-01",
         }
         model.replace_records([record])
         index = model.index(0, 0)
@@ -640,11 +640,11 @@ class ActiveNoticeModelTests(unittest.TestCase):
                 "active_item_id": "aid-change",
                 "record_id": "source-1",
                 "target_record_id": "target-1",
-                "notice_type": "设备变更",
+                "notice_type": "变更通告",
                 "today_in_progress_state": "unknown",
                 "_is_placeholder_record": False,
                 "_has_unuploaded_changes": False,
-                "text": "【设备变更】状态：开始\n\n【标题】A楼变更\n\n【时间】2026-01-01",
+                "text": "【变更通告】状态：开始\n\n【标题】A楼变更\n\n【时间】2026-01-01",
             },
             skip_cache=True,
         )

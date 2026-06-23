@@ -214,11 +214,11 @@ class SettingsDialog(QDialog):
 
 
 
-        # 设备变更 Table ID
-        biangeng_label = QLabel("设备变更 Table ID：")
+        # 变更通告 Table ID
+        biangeng_label = QLabel("变更通告 Table ID：")
         self.table_id_biangeng_input = QLineEdit()
 
-        self.table_id_biangeng_input.setPlaceholderText("输入设备变更表格 ID")
+        self.table_id_biangeng_input.setPlaceholderText("输入变更通告表格 ID")
         form_layout.addWidget(biangeng_label)
 
         form_layout.addWidget(self.table_id_biangeng_input)

@@ -216,7 +216,7 @@ class QtShellBackendEventTests(unittest.TestCase):
                 self.assertIsNotNone(entry)
                 result = FastAPIPortalController._project_clipboard_entry_to_active(entry or {})
                 payload = result["item"]["payload"]
-                self.assertEqual(payload["notice_type"], "设备变更")
+                self.assertEqual(payload["notice_type"], "变更通告")
                 self.assertEqual(payload["work_type"], "change")
                 self.assertEqual(payload["location"], "A-245配电室")
                 self.assertEqual(payload["content"], "工程师对蓄电池进行测试")
@@ -237,7 +237,7 @@ class QtShellBackendEventTests(unittest.TestCase):
 
     def test_sparse_qt_active_payload_is_backfilled_from_notice_text(self):
         text = (
-            "【设备变更】状态：开始\n"
+            "【变更通告】状态：开始\n"
             "【名称】EA118机房A楼冷源设备变更\n"
             "【时间】2026-06-18 09:00~2026-06-18 18:00\n"
             "【位置】A-127冷站\n"
@@ -254,7 +254,7 @@ class QtShellBackendEventTests(unittest.TestCase):
                     {
                         "active_item_id": "sparse-change-1",
                         "record_id": "local_sparse-change-1",
-                        "notice_type": "设备变更",
+                        "notice_type": "变更通告",
                         "work_type": "change",
                         "title": "EA118机房A楼冷源设备变更",
                         "text": text,
@@ -264,7 +264,7 @@ class QtShellBackendEventTests(unittest.TestCase):
                 ongoing = FastAPIPortalController._get_ongoing("A")
                 self.assertEqual(len(ongoing), 1)
                 item = ongoing[0]
-                self.assertEqual(item["notice_type"], "设备变更")
+                self.assertEqual(item["notice_type"], "变更通告")
                 self.assertEqual(item["location"], "A-127冷站")
                 self.assertEqual(item["content"], "调整冷源设备")
                 self.assertEqual(item["reason"], "运行优化")

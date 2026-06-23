@@ -22,7 +22,7 @@ _TITLE_PATTERNS = (
     re.compile(r"【名称】(.*?)(?=【|$)", re.DOTALL),
 )
 _SECTION_PATTERN_TEMPLATE = r"【{label}】(.*?)(?=【|$)"
-_LEVEL_LOCK_NOTICE_TYPES = {"设备变更", "变更通告", "事件通告"}
+_LEVEL_LOCK_NOTICE_TYPES = {"变更通告", "事件通告"}
 
 
 def _clean_text(value) -> str:
@@ -88,7 +88,7 @@ def detect_level_from_notice_text(notice_type: str, text: str) -> str:
     if not raw_text or not notice_supports_level_lock(notice_type):
         return ""
 
-    if notice_type in ("设备变更", "变更通告"):
+    if notice_type == "变更通告":
         raw = _extract_section(raw_text, "等级")
         if ALI_LEVEL_ULTRA_LOW in raw:
             return LEVEL_I3

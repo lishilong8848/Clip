@@ -817,7 +817,6 @@ class MainWindowRuntimeMixin:
         text = str(notice_type or "").strip()
         mapping = {
             "维保通告": "maintenance",
-            "设备变更": "change",
             "变更通告": "change",
             "设备检修": "repair",
             "上下电通告": "power",

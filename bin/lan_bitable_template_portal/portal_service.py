@@ -121,7 +121,7 @@ WORK_TYPE_POWER = "power"
 WORK_TYPE_POLLING = "polling"
 WORK_TYPE_ADJUST = "adjust"
 NOTICE_TYPE_MAINTENANCE = "维保通告"
-NOTICE_TYPE_CHANGE = "设备变更"
+NOTICE_TYPE_CHANGE = "变更通告"
 NOTICE_HEADING_CHANGE = NOTICE_TYPE_CHANGE
 NOTICE_TYPE_REPAIR = "设备检修"
 NOTICE_TYPE_POWER = "上下电通告"
@@ -262,7 +262,6 @@ END_SITE_PHOTO_REQUIRED_NOTICE_TYPES = {
     NOTICE_TYPE_MAINTENANCE,
     NOTICE_TYPE_CHANGE,
     NOTICE_HEADING_CHANGE,
-    "设备变更",
     NOTICE_TYPE_REPAIR,
 }
 CHANGE_PROGRESS_NOT_STARTED = "未开始"
@@ -1538,6 +1537,85 @@ class MaintenancePortalService:
             "config_error": config_error,
         }
 
+    @staticmethod
+    def _event_stats_for_records(records: list[dict[str, Any]]) -> dict[str, Any]:
+        statuses: dict[str, int] = {}
+        levels: dict[str, int] = {}
+        sources: dict[str, int] = {}
+        specialties: dict[str, int] = {}
+        high_level = 0
+        for item in records:
+            status = str(item.get("status") or "未知").strip() or "未知"
+            statuses[status] = int(statuses.get(status) or 0) + 1
+            level = str(item.get("level") or "未填写").strip() or "未填写"
+            levels[level] = int(levels.get(level) or 0) + 1
+            source = str(item.get("source") or "未填写").strip() or "未填写"
+            sources[source] = int(sources.get(source) or 0) + 1
+            specialty = str(item.get("specialty") or "未填写").strip() or "未填写"
+            specialties[specialty] = int(specialties.get(specialty) or 0) + 1
+            if bool(item.get("high_level")):
+                high_level += 1
+        return {
+            "total": len(records),
+            "processing": statuses.get("处理中", 0) + statuses.get("已恢复待闭环", 0),
+            "pending": statuses.get("已恢复待闭环", 0),
+            "ended": statuses.get("已结束", 0),
+            "high_level": high_level,
+            "statuses": statuses,
+            "levels": levels,
+            "sources": sources,
+            "specialties": specialties,
+        }
+
+    def get_event_monthly_overview(self, *, month: str | None = None) -> dict[str, Any]:
+        month = self._normalize_event_month(month)
+        snapshot = self._state_store.get_event_month_snapshot(month)
+        records = [
+            dict(item)
+            for item in snapshot.get("records", [])
+            if isinstance(item, dict)
+        ]
+        by_code: dict[str, list[dict[str, Any]]] = {code: [] for code in BUILDING_SCOPE_CODES}
+        for item in records:
+            codes = item.get("building_codes")
+            if not isinstance(codes, list):
+                codes = []
+            clean_codes = self._clean_building_codes(codes)
+            if not clean_codes:
+                clean_codes = self._building_codes_from_value(item.get("building"))
+            for code in clean_codes:
+                if code in by_code:
+                    by_code[code].append(item)
+        building_stats = []
+        for code in BUILDING_SCOPE_CODES:
+            code_records = by_code.get(code) or []
+            code_stats = self._event_stats_for_records(code_records)
+            building_stats.append({
+                "code": code,
+                "label": self._scope_label(code),
+                **code_stats,
+            })
+        config_missing = False
+        config_error = ""
+        try:
+            self._event_source_config()
+        except Exception as exc:
+            config_missing = True
+            config_error = str(exc)
+        return {
+            "scope": "ALL",
+            "month": month,
+            "stats": self._event_stats_for_records(records),
+            "building_stats": building_stats,
+            "snapshot_exists": bool(snapshot.get("exists")),
+            "snapshot_id": snapshot.get("snapshot_id") or "",
+            "last_refreshed_at": float(snapshot.get("updated_at") or 0),
+            "last_failed": snapshot.get("last_failed") or {},
+            "source_meta": snapshot.get("meta") or {},
+            "config_missing": config_missing,
+            "config_error": config_error,
+        }
+
     def refresh_if_interval_elapsed(self, *, min_interval_seconds: int = 60) -> bool:
         min_interval = max(0, int(min_interval_seconds or 0))
         with self._refresh_lock:
@@ -2115,6 +2193,85 @@ class MaintenancePortalService:
             return codes
         return self._building_codes_from_value(request_payload.get("building"))
 
+    def _notice_scope_mismatch_message(
+        self, *, scope: Any, building: str, building_codes: list[str], work_type_label: str = "通告"
+    ) -> str:
+        building_label = (
+            str(building or "").strip()
+            or self._building_label_from_codes(building_codes)
+        )
+        if not building_codes:
+            return f"{work_type_label}未识别到楼栋，请在“楼栋/范围”中选择楼栋后再发送。"
+        return (
+            f"当前入口是{self._scope_label(scope)}，但{work_type_label}属于"
+            f"{building_label or '-'}，请切换到对应楼栋或园区后再发送。"
+        )
+
+    def _resolve_notice_submit_building(
+        self,
+        *,
+        scope: Any,
+        request_payload: dict[str, Any],
+        building: Any = "",
+        building_codes: Any = None,
+        title: Any = "",
+        location: Any = "",
+        content: Any = "",
+        work_type_label: str = "通告",
+        allow_scope_fallback: bool = False,
+    ) -> tuple[str, list[str]]:
+        codes = self._clean_building_codes(building_codes)
+        title_codes = self._building_codes_from_notice_text(
+            title,
+            request_payload.get("title"),
+        )
+        if title_codes == ["110"]:
+            codes = ["110"]
+        payload_codes = self._building_codes_from_request_payload(request_payload)
+        if not codes:
+            codes = payload_codes
+
+        building_text = (
+            str(building or "").strip()
+            or str(request_payload.get("building") or "").strip()
+        )
+        if not codes and building_text:
+            codes = self._building_codes_from_value(building_text)
+        if not codes:
+            codes = self._building_codes_from_notice_text(
+                title,
+                location,
+                request_payload.get("title"),
+                request_payload.get("location"),
+            )
+        normalized_scope = self._normalize_scope(scope)
+        if (
+            not codes
+            and allow_scope_fallback
+            and normalized_scope in BUILDING_SCOPE_CODES
+        ):
+            codes = [normalized_scope]
+        building_text = building_text or self._building_label_from_codes(codes)
+        if not codes:
+            raise PortalError(
+                self._notice_scope_mismatch_message(
+                    scope=scope,
+                    building=building_text,
+                    building_codes=codes,
+                    work_type_label=work_type_label,
+                )
+            )
+        if not self._scope_matches_buildings(scope, codes):
+            raise PortalError(
+                self._notice_scope_mismatch_message(
+                    scope=scope,
+                    building=building_text,
+                    building_codes=codes,
+                    work_type_label=work_type_label,
+                )
+            )
+        return building_text or self._building_label_from_codes(codes), codes
+
     def _source_record_in_scope_snapshot(
         self, *, record_id: str, work_type: str, scope: str
     ) -> dict[str, Any] | None:
@@ -2256,6 +2413,10 @@ class MaintenancePortalService:
     def _maintenance_status_allows_workbench(self, record: dict[str, Any]) -> bool:
         # 维保源表按当前月份全量展示；已完成/结束类状态由前端禁用点击。
         return True
+
+    def _maintenance_status_is_startable(self, record: dict[str, Any]) -> bool:
+        status = self._maintenance_status_value(record)
+        return not status or "未开始" in status
 
     def _maintenance_status_is_completed(self, record: dict[str, Any]) -> bool:
         status = self._maintenance_status_value(record)
@@ -4490,7 +4651,7 @@ class MaintenancePortalService:
         if not text:
             return []
         pattern = re.compile(
-            r"(?=【(?:维保通告|设备变更|变更通告|设备检修|上电通告|上下电通告|设备轮巡|设备调整)】\s*状态[:：])"
+            r"(?=【(?:维保通告|变更通告|设备检修|上电通告|上下电通告|设备轮巡|设备调整)】\s*状态[:：])"
         )
         parts = [part.strip() for part in pattern.split(text) if part.strip()]
         if len(parts) > 1:
@@ -4546,7 +4707,7 @@ class MaintenancePortalService:
             return WORK_TYPE_POLLING
         if "【设备调整】" in raw:
             return WORK_TYPE_ADJUST
-        if "【设备变更】" in raw or "【变更通告】" in raw or cls._notice_section_value(
+        if "【变更通告】" in raw or cls._notice_section_value(
             sections, ["变更等级", "变更楼栋"]
         ):
             return WORK_TYPE_CHANGE
@@ -4557,7 +4718,12 @@ class MaintenancePortalService:
         codes: list[str] = []
         text = "\n".join(str(value or "") for value in values if str(value or "").strip())
         upper = text.upper()
-        if re.search(r"110\s*(?:站|楼|机房|数据中心|DC)?", upper):
+        for label in ("标题", "名称"):
+            match = re.search(rf"【{label}】(.*?)(?=【|$)", text, re.S)
+            section = str(match.group(1) if match else "").upper()
+            if section and re.search(r"110\s*(?:站|楼|机房|数据中心|DC|KV)?", section):
+                return ["110"]
+        if re.search(r"110\s*(?:站|楼|机房|数据中心|DC|KV)?", upper):
             codes.append("110")
         for code in ("A", "B", "C", "D", "E", "H"):
             patterns = (
@@ -4833,7 +4999,7 @@ class MaintenancePortalService:
             "维保通告": WORK_TYPE_MAINTENANCE,
             "change": WORK_TYPE_CHANGE,
             "变更": WORK_TYPE_CHANGE,
-            "设备变更": WORK_TYPE_CHANGE,
+            "变更通告": WORK_TYPE_CHANGE,
             "repair": WORK_TYPE_REPAIR,
             "检修": WORK_TYPE_REPAIR,
             "设备检修": WORK_TYPE_REPAIR,
@@ -6828,7 +6994,7 @@ class MaintenancePortalService:
                 force_refresh=True,
             )
         except Exception as exc:
-            raise PortalError(f"查询设备变更目标表失败：{exc}") from exc
+            raise PortalError(f"查询变更通告目标表失败：{exc}") from exc
         candidates: list[dict[str, Any]] = []
         for target in target_records:
             fields = target.get("display_fields") or {}
@@ -6943,7 +7109,7 @@ class MaintenancePortalService:
             "维保通告": WORK_TYPE_MAINTENANCE,
             "change": WORK_TYPE_CHANGE,
             "变更": WORK_TYPE_CHANGE,
-            "设备变更": WORK_TYPE_CHANGE,
+            "变更通告": WORK_TYPE_CHANGE,
             "repair": WORK_TYPE_REPAIR,
             "检修": WORK_TYPE_REPAIR,
             "设备检修": WORK_TYPE_REPAIR,
@@ -12509,7 +12675,7 @@ class MaintenancePortalService:
             return WORK_TYPE_POLLING
         if re.search(r"设备调整|调整通告", head_text):
             return WORK_TYPE_ADJUST
-        if re.search(r"设备变更|变更通告", head_text):
+        if re.search(r"变更通告", head_text):
             return WORK_TYPE_CHANGE
         return work_type
 
@@ -13380,17 +13546,6 @@ class MaintenancePortalService:
         title = str(request_payload.get("title") or request_payload.get("content") or "").strip()
         if not title:
             raise PortalError(f"{self._history_work_type_label(work_type)}通告缺少标题。")
-        building_codes = self._building_codes_from_request_payload(request_payload)
-        if not building_codes:
-            building_codes = self._building_codes_from_value(request_payload.get("building"))
-        building = (
-            str(request_payload.get("building") or "").strip()
-            or self._building_label_from_codes(building_codes)
-        )
-        if not building_codes:
-            raise PortalError(f"{self._history_work_type_label(work_type)}通告缺少楼栋。")
-        if not self._scope_matches_buildings(scope, building_codes):
-            raise PortalError(f"当前入口与通告楼栋不匹配: {building or '-'}")
         start_time = self._format_input_datetime(request_payload.get("start_time"))
         end_time = self._format_input_datetime(request_payload.get("end_time"))
         if not start_time or not end_time:
@@ -13411,6 +13566,16 @@ class MaintenancePortalService:
         device = str(request_payload.get("device") or "").strip()
         cabinet = str(request_payload.get("cabinet") or "").strip()
         quantity = str(request_payload.get("quantity") or "").strip()
+        building, building_codes = self._resolve_notice_submit_building(
+            scope=scope,
+            request_payload=request_payload,
+            building=request_payload.get("building"),
+            title=title,
+            location=location,
+            content=content,
+            work_type_label=f"{self._history_work_type_label(work_type)}通告",
+            allow_scope_fallback=manual,
+        )
         title = self._normalize_110_station_notice_title(
             title,
             building=building,
@@ -13517,8 +13682,6 @@ class MaintenancePortalService:
                 title = str(request_payload.get("title") or "").strip()
                 if not title:
                     raise PortalError("纯手填维保通告缺少名称。")
-                if not building:
-                    raise PortalError("纯手填维保通告缺少楼栋。")
                 if not specialty or specialty == "全部":
                     raise PortalError("纯手填维保通告缺少专业。")
                 if not maintenance_cycle:
@@ -13527,7 +13690,7 @@ class MaintenancePortalService:
                 record = self._find_record_by_id(record_id)
                 fields = record.get("display_fields") or {}
                 current_status = str(fields.get("维护实施状态") or "").strip()
-                if current_status != DEFAULT_MAINTENANCE_STATUS:
+                if not self._maintenance_status_is_startable(record):
                     raise PortalError(
                         f"该计划维护项当前状态不是{DEFAULT_MAINTENANCE_STATUS}: {current_status or '-'}"
                     )
@@ -13609,14 +13772,6 @@ class MaintenancePortalService:
                     "该维保源记录未找到目标维保通告表 record_id，不能更新/结束。"
                 )
 
-        if not self._scope_matches_building(scope, building):
-            raise PortalError(f"当前楼栋入口与通告楼栋不匹配: {building or '-'}")
-        title = self._normalize_110_station_notice_title(
-            title,
-            building=building,
-            building_codes=self._building_codes_from_value(building),
-        )
-
         start_time = self._format_input_datetime(request_payload.get("start_time"))
         end_time = self._format_input_datetime(request_payload.get("end_time"))
         if not start_time or not end_time:
@@ -13635,6 +13790,21 @@ class MaintenancePortalService:
         progress = (
             str(request_payload.get("progress") or "").strip()
             or (DEFAULT_PROGRESS_TEXT if action == "start" else "")
+        )
+        building, building_codes = self._resolve_notice_submit_building(
+            scope=scope,
+            request_payload=request_payload,
+            building=building,
+            title=title,
+            location=location,
+            content=content,
+            work_type_label="维保通告",
+            allow_scope_fallback=manual,
+        )
+        title = self._normalize_110_station_notice_title(
+            title,
+            building=building,
+            building_codes=building_codes,
         )
         if action == "start":
             memory_total = (
@@ -13664,8 +13834,9 @@ class MaintenancePortalService:
             impact=impact,
             progress=progress,
         )
-        building_code, recipients, recipient_error = self._recipients_for_building(
-            building
+        building_code, recipients, recipient_error = self._recipients_for_building_codes(
+            building_codes,
+            fallback_building=building,
         )
         if recipient_error:
             raise PortalError(recipient_error)
@@ -13690,8 +13861,8 @@ class MaintenancePortalService:
             "title": title,
             "building": building,
             "building_code": building_code,
-            "building_codes": [building_code] if building_code else [],
-            "target_building": self._scope_label(building_code),
+            "building_codes": building_codes,
+            "target_building": self._building_label_from_codes(building_codes),
             "specialty": specialty,
             "plan_month": plan_month,
             "maintenance_total": maintenance_total,
@@ -13927,7 +14098,7 @@ class MaintenancePortalService:
                 source_record_id = record_id
                 fields = record.get("display_fields") or {}
                 source_progress = self._maintenance_status_value(record)
-                if source_progress != DEFAULT_MAINTENANCE_STATUS:
+                if not self._maintenance_status_is_startable(record):
                     raise PortalError(
                         f"该维保源记录当前状态不是{DEFAULT_MAINTENANCE_STATUS}: {source_progress or '-'}"
                     )
@@ -14112,12 +14283,19 @@ class MaintenancePortalService:
                     source_record_id=source_record_id,
                 )
 
-        if not self._scope_matches_buildings(scope, building_codes):
-            raise PortalError(f"当前入口与通告楼栋不匹配: {building or '-'}")
+        building, building_codes = self._resolve_notice_submit_building(
+            scope=scope,
+            request_payload=request_payload,
+            building=building,
+            building_codes=building_codes,
+            title=title,
+            work_type_label="变更通告",
+            allow_scope_fallback=manual,
+        )
         if action != "start" and source_progress == CHANGE_PROGRESS_ENDED:
             raise PortalError("该变更当前源进度已结束，不能更新/结束。")
         if action != "start" and not target_record_id:
-            raise PortalError("该变更缺少目标设备变更表 record_id，不能更新/结束。")
+            raise PortalError("该变更缺少目标变更通告表 record_id，不能更新/结束。")
         title = self._normalize_110_station_notice_title(
             title,
             building=building,
@@ -14652,8 +14830,17 @@ class MaintenancePortalService:
             if not fault_time and source_record is not None:
                 fault_time = self._repair_first_field(fields, "故障发生时间", "发现故障时间")
 
-        if not self._scope_matches_buildings(scope, building_codes):
-            raise PortalError(f"当前入口与通告楼栋不匹配: {building or '-'}")
+        building, building_codes = self._resolve_notice_submit_building(
+            scope=scope,
+            request_payload=request_payload,
+            building=building,
+            building_codes=building_codes,
+            title=title,
+            location=request_payload.get("location"),
+            content=request_payload.get("content"),
+            work_type_label="检修通告",
+            allow_scope_fallback=manual,
+        )
         if action != "start" and source_record is not None and self._repair_has_ended(source_record):
             raise PortalError("该检修当前源状态已结束，不能更新/结束。")
         if action != "start" and not target_record_id:

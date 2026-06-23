@@ -400,6 +400,11 @@ const isToolScopeMode = computed(() => ["repair", "power", "polling", "adjust", 
 
 function selectEntry(key: EntryKey): void {
   if (!key) return;
+  if (key === "event") {
+    const scope = defaultEventScope();
+    if (scope) emit("event", scope);
+    return;
+  }
   activeMode.value = key;
 }
 
@@ -419,6 +424,14 @@ function normalizeScopeValue(value: string, fallback = "ALL"): string {
 function enterWorkbench(scope: string): void {
   const workType = activeConfig.value.workType || "maintenance";
   emit("enter", scope, workType);
+}
+
+function defaultEventScope(): string {
+  const values = props.scopeOptions.map((item) => normalizeScopeValue(item.value, "")).filter(Boolean);
+  return values.find((value) => value === "ALL")
+    || values.find((value) => value === "CAMPUS")
+    || values[0]
+    || "";
 }
 
 function countText(scope: string, workType: string): string {

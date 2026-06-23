@@ -1220,7 +1220,7 @@ class ClipboardItemWidget(QWidget):
             self.data.get("target_record_id") or self.data.get("record_id") or ""
         ).strip()
         return (
-            notice_type in ("设备变更", "变更通告")
+            notice_type == "变更通告"
             and bool(record_id)
             and not bool(self.data.get("_is_placeholder_record"))
         )

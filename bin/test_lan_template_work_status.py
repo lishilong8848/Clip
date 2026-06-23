@@ -383,7 +383,7 @@ def _build_change_record(
         "record_id": record_id,
         "raw_fields": {},
         "work_type": "change",
-        "notice_type": "设备变更",
+        "notice_type": "变更通告",
         "source_app_token": "JhiVwgfoIimAqEk8YwEc09sknGd",
         "source_table_id": "tblBvg6wCYSX3hcg",
         "display_fields": {
@@ -466,7 +466,7 @@ def _build_zhihang_change_record(
         "record_id": record_id,
         "raw_fields": {},
         "work_type": "change",
-        "notice_type": "设备变更",
+        "notice_type": "变更通告",
         "source_app_token": "IrIibPkUOa6udGsMhu2cbOqhnWg",
         "source_table_id": "tblqMJvYW5dxFFfU",
         "display_fields": {
@@ -538,7 +538,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         )
         self.assertTrue(
             MaintenancePortalService._end_site_photo_required(
-                notice_type="设备变更",
+                notice_type="变更通告",
             )
         )
         self.assertTrue(
@@ -574,12 +574,12 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             MaintenancePortalService._require_end_site_photo(
                 {},
                 "end",
-                notice_type="设备变更",
+                notice_type="变更通告",
                 work_type="change",
             )
 
     def test_portal_runtime_routes_change_site_photos_to_site_field(self):
-        self.assertTrue(PortalRuntime._notice_supports_site_image_field("设备变更"))
+        self.assertTrue(PortalRuntime._notice_supports_site_image_field("变更通告"))
         self.assertTrue(PortalRuntime._notice_supports_site_image_field("变更通告"))
         self.assertTrue(PortalRuntime._end_site_photo_required("维护通告"))
         self.assertTrue(PortalRuntime._end_site_photo_required("检修通告"))
@@ -589,7 +589,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
     def test_portal_runtime_reads_existing_change_site_photos(self):
         _, existing_extra_tokens, _ = PortalRuntime._existing_tokens_for_notice_type(
-            "设备变更",
+            "变更通告",
             {
                 "过程更新钉钉截图": [{"file_token": "notice_token"}],
                 "过程现场图片": [{"file_token": "site_token"}],
@@ -783,10 +783,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(len(merged), 1)
 
     def test_change_handler_maps_extra_tokens_to_site_images(self):
-        handler = ChangeNoticeHandler("设备变更")
+        handler = ChangeNoticeHandler("变更通告")
         payload = NoticePayload(
             text=(
-                "【设备变更】状态：结束\n"
+                "【变更通告】状态：结束\n"
                 "【名称】测试变更\n"
                 "【等级】低风险\n"
                 "【时间】2026-06-12 09:30~2026-06-12 18:30\n"
@@ -808,7 +808,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         )
 
     def test_change_handler_writes_planned_end_before_end_state(self):
-        handler = ChangeNoticeHandler("设备变更")
+        handler = ChangeNoticeHandler("变更通告")
         payload = NoticePayload(
             text=(
                 "【变更通告】状态：开始\n"
@@ -839,7 +839,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         )
 
     def test_change_handler_end_state_overwrites_end_time_with_response_time(self):
-        handler = ChangeNoticeHandler("设备变更")
+        handler = ChangeNoticeHandler("变更通告")
         payload = NoticePayload(
             text=(
                 "【变更通告】状态：结束\n"
@@ -961,7 +961,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "record_id": "target-1",
                 "source_record_id": "source-1",
                 "work_type": "change",
-                "notice_type": "设备变更",
+                "notice_type": "变更通告",
                 "title": "A楼变更",
                 "building": "A楼",
                 "building_codes": ["A"],
@@ -2503,6 +2503,65 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             finally:
                 PortalRuntime.state_store = previous_store
 
+    def test_backend_clipboard_projection_clears_stale_upload_failure_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            previous_store = PortalRuntime.state_store
+            PortalRuntime.state_store = LanPortalStateStore(
+                Path(tmp) / "lan_portal_state.sqlite3"
+            )
+            try:
+                controller = FastAPIPortalController()
+                old_text = (
+                    "【维保通告】状态：开始\n"
+                    "【名称】EA118机房C楼消防排烟系统维护\n"
+                    "【时间】2026-06-18 09:30~2026-06-18 18:30\n"
+                    "【位置】C栋\n"
+                    "【原因】厂家对C栋消防月度维护\n"
+                    "【进度】旧进度"
+                )
+                PortalRuntime.state_store.upsert_qt_active_item(
+                    {
+                        "active_item_id": "active-stale-upload-error",
+                        "record_id": "local_active_stale_upload_error",
+                        "notice_type": "维保通告",
+                        "work_type": "maintenance",
+                        "title": "EA118机房C楼消防排烟系统维护",
+                        "text": old_text,
+                        "reason": "厂家对C栋消防月度维护",
+                        "_has_unuploaded_changes": True,
+                        "_upload_in_progress": False,
+                        "_pending_upload_hash": None,
+                        "_last_upload_error": "上一条上传失败，可重试。",
+                        "_upload_started_monotonic": 123.0,
+                    },
+                    section="other",
+                    origin="qt",
+                )
+                entry = controller._clipboard_entry_from_content(
+                    "【维保通告】状态：开始\n"
+                    "【名称】EA118机房C楼消防排烟系统维护\n"
+                    "【时间】2026-06-18 09:30~2026-06-18 18:30\n"
+                    "【位置】C栋\n"
+                    "【原因】厂家对C栋消防月度维护\n"
+                    "【进度】准备工作已完成"
+                )
+
+                result = controller._project_clipboard_entry_to_active(entry)
+                qt_items = PortalRuntime.state_store.list_qt_active_items()
+                payload = qt_items[0]["payload"]
+
+                self.assertTrue(result["ok"])
+                self.assertEqual(len(qt_items), 1)
+                self.assertEqual(payload["active_item_id"], "active-stale-upload-error")
+                self.assertIn("准备工作已完成", payload["text"])
+                self.assertTrue(payload["_has_unuploaded_changes"])
+                self.assertFalse(payload["_upload_in_progress"])
+                self.assertIsNone(payload["_pending_upload_hash"])
+                self.assertNotIn("_last_upload_error", payload)
+                self.assertNotIn("_upload_started_monotonic", payload)
+            finally:
+                PortalRuntime.state_store = previous_store
+
     def test_backend_uploaded_notice_projects_to_active_upsert_event(self):
         with tempfile.TemporaryDirectory() as tmp:
             previous_store = PortalRuntime.state_store
@@ -2789,21 +2848,21 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                             "active_item_id": "active-ended-change",
                             "record_id": "rec-ended-change",
                             "target_record_id": "rec-ended-change",
-                            "notice_type": "设备变更",
+                            "notice_type": "变更通告",
                             "work_type": "change",
                             "title": "D楼已结束变更",
                             "building_codes": ["D"],
-                            "text": "【设备变更】状态:结束【名称】D楼已结束变更",
+                            "text": "【变更通告】状态:结束【名称】D楼已结束变更",
                         },
                         {
                             "active_item_id": "active-running-change",
                             "record_id": "rec-running-change",
                             "target_record_id": "rec-running-change",
-                            "notice_type": "设备变更",
+                            "notice_type": "变更通告",
                             "work_type": "change",
                             "title": "D楼进行中变更",
                             "building_codes": ["D"],
-                            "text": "【设备变更】状态:更新【名称】D楼进行中变更",
+                            "text": "【变更通告】状态:更新【名称】D楼进行中变更",
                         },
                     ]
                 )
@@ -2892,12 +2951,12 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             {
                 "active_item_id": "active-ended-bootstrap",
                 "record_id": "rec-ended-bootstrap",
-                "notice_type": "设备变更",
+                "notice_type": "变更通告",
                 "work_type": "change",
                 "title": "D楼已结束变更",
                 "building_codes": ["D"],
                 "status": "结束",
-                "text": "【设备变更】状态:结束【名称】D楼已结束变更",
+                "text": "【变更通告】状态:结束【名称】D楼已结束变更",
             },
             section="other",
             origin="qt",
@@ -2925,17 +2984,17 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         )
 
         self.assertIsNotNone(info)
-        self.assertEqual(info["notice_type"], "设备变更")
+        self.assertEqual(info["notice_type"], "变更通告")
         self.assertEqual(info["title"], "测试测试测试变更")
         self.assertEqual(info["status"], "开始")
 
     def test_parser_accepts_compact_ended_change_notice(self):
         info = extract_event_info(
-            "【设备变更】状态:结束【名称】EA118-D楼直流屏蓄电池整组更换变更"
+            "【变更通告】状态:结束【名称】EA118-D楼直流屏蓄电池整组更换变更"
         )
 
         self.assertIsNotNone(info)
-        self.assertEqual(info["notice_type"], "设备变更")
+        self.assertEqual(info["notice_type"], "变更通告")
         self.assertEqual(info["status"], "结束")
         self.assertEqual(info["title"], "EA118-D楼直流屏蓄电池整组更换变更")
 
@@ -2950,8 +3009,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     {
                         "active_item_id": "active-change-1",
                         "record_id": "rec-same-id",
-                        "notice_type": "设备变更",
-                        "text": "【设备变更】状态：开始\n\n【名称】原变更",
+                        "notice_type": "变更通告",
+                        "text": "【变更通告】状态：开始\n\n【名称】原变更",
                     },
                     section="other",
                     origin="qt",
@@ -2966,9 +3025,118 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
                 self.assertTrue(result["ignored"])
                 self.assertEqual(len(qt_items), 1)
-                self.assertEqual(qt_items[0]["payload"]["notice_type"], "设备变更")
+                self.assertEqual(qt_items[0]["payload"]["notice_type"], "变更通告")
             finally:
                 PortalRuntime.state_store = previous_store
+
+    def test_state_store_migrates_legacy_change_notice_labels(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "lan_portal_state.sqlite3"
+            store = LanPortalStateStore(db_path)
+            store.schema_health()
+            now = time.time()
+            legacy_payload = {
+                "active_item_id": "legacy-change-active",
+                "record_id": "target-legacy-change",
+                "target_record_id": "target-legacy-change",
+                "work_type": "change",
+                "notice_type": "设备变更",
+                "title": "A楼网络设备变更测试",
+                "text": "【设备变更】状态：开始\n【名称】A楼网络设备变更测试",
+            }
+            with sqlite3.connect(str(db_path)) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO qt_active_items(
+                        active_item_id, record_id, notice_type, section, sort_order,
+                        origin, payload_json, updated_at, deleted_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                    """,
+                    (
+                        "legacy-change-active",
+                        "target-legacy-change",
+                        "设备变更",
+                        "other",
+                        0,
+                        "qt",
+                        json.dumps(legacy_payload, ensure_ascii=False),
+                        now,
+                    ),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO notice_identity_map(
+                        identity_id, work_type, notice_type, active_item_id,
+                        target_record_id, title, building_codes_json, payload_json,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "change:target:target-legacy-change",
+                        "change",
+                        "设备变更",
+                        "legacy-change-active",
+                        "target-legacy-change",
+                        "A楼网络设备变更测试",
+                        "[]",
+                        json.dumps(legacy_payload, ensure_ascii=False),
+                        now,
+                        now,
+                    ),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO notice_actions(key, payload_json, updated_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    (
+                        "legacy-job",
+                        json.dumps({"prepared": legacy_payload}, ensure_ascii=False),
+                        now,
+                    ),
+                )
+                conn.commit()
+
+            migrated = LanPortalStateStore(db_path)
+            items = migrated.list_qt_active_items()
+            identity = migrated.resolve_notice_identity(
+                work_type="change",
+                target_record_id="target-legacy-change",
+            )
+            job_doc = migrated.get_document("notice_action_job", "legacy-job")
+
+            self.assertEqual(items[0]["notice_type"], "变更通告")
+            self.assertEqual(items[0]["payload"]["notice_type"], "变更通告")
+            self.assertIn("【变更通告】状态：开始", items[0]["payload"]["text"])
+            self.assertNotIn("【设备变更】", items[0]["payload"]["text"])
+            self.assertIn("网络设备变更测试", items[0]["payload"]["title"])
+            self.assertIn("设备变更测试", items[0]["payload"]["title"])
+            self.assertEqual(identity["notice_type"], "变更通告")
+            self.assertEqual(identity["payload"]["notice_type"], "变更通告")
+            self.assertEqual(job_doc["prepared"]["notice_type"], "变更通告")
+            self.assertIn("【变更通告】状态：开始", job_doc["prepared"]["text"])
+            self.assertNotIn("【设备变更】", job_doc["prepared"]["text"])
+
+    def test_state_store_canonicalizes_legacy_change_notice_on_upsert(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            store.upsert_qt_active_item(
+                {
+                    "active_item_id": "legacy-change-upsert",
+                    "record_id": "target-legacy-upsert",
+                    "work_type": "change",
+                    "notice_type": "设备变更",
+                    "text": "【设备变更】状态：开始\n【名称】A楼网络设备变更测试",
+                },
+                section="other",
+                origin="qt",
+            )
+            item = store.list_qt_active_items()[0]
+
+            self.assertEqual(item["notice_type"], "变更通告")
+            self.assertEqual(item["payload"]["notice_type"], "变更通告")
+            self.assertIn("【变更通告】状态：开始", item["payload"]["text"])
+            self.assertNotIn("【设备变更】", item["payload"]["text"])
 
     def test_history_payload_imports_legacy_file_to_sqlite(self):
         self.assertFalse(hasattr(MainWindowUiMixin, "_load_history_payload"))
@@ -3317,20 +3485,20 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     {
                         "active_item_id": "active-ended",
                         "work_type": "change",
-                        "notice_type": "设备变更",
+                        "notice_type": "变更通告",
                         "title": "A楼已结束变更",
                         "building": "A楼",
                         "building_codes": ["A"],
-                        "text": "【设备变更】状态:结束【名称】A楼已结束变更",
+                        "text": "【变更通告】状态:结束【名称】A楼已结束变更",
                     },
                     {
                         "active_item_id": "active-running",
                         "work_type": "change",
-                        "notice_type": "设备变更",
+                        "notice_type": "变更通告",
                         "title": "A楼进行中变更",
                         "building": "A楼",
                         "building_codes": ["A"],
-                        "text": "【设备变更】状态:更新【名称】A楼进行中变更",
+                        "text": "【变更通告】状态:更新【名称】A楼进行中变更",
                     },
                 ]
             )
@@ -4249,7 +4417,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 {
                     "source_record_id": "c-e",
                     "work_type": "change",
-                    "notice_type": "设备变更",
+                    "notice_type": "变更通告",
                     "target_record_id": "target-change-e",
                     "feishu_record_id": "target-change-e",
                     "active_item_id": "active-change-e",
@@ -4301,10 +4469,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "record_id": "target-change-e",
                     "target_record_id": "target-change-e",
                     "source_record_id": "c-e",
-                    "notice_type": "设备变更",
+                    "notice_type": "变更通告",
                     "work_type": "change",
                     "title": "E楼进行中变更",
-                    "text": "【设备变更】状态：开始\n【名称】E楼进行中变更",
+                    "text": "【变更通告】状态：开始\n【名称】E楼进行中变更",
                     "building": "E楼",
                     "building_codes": ["E"],
                 },
@@ -4359,12 +4527,12 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                         "record_id": "target-end-undo",
                         "target_record_id": "target-end-undo",
                         "source_record_id": "source-end-undo",
-                        "notice_type": "设备变更",
+                        "notice_type": "变更通告",
                         "work_type": "change",
                         "title": "A楼结束回退测试",
                         "building": "A楼",
                         "building_codes": ["A"],
-                        "text": "【设备变更】状态：开始\n【名称】A楼结束回退测试",
+                        "text": "【变更通告】状态：开始\n【名称】A楼结束回退测试",
                     },
                     section="other",
                     origin="web",
@@ -4373,7 +4541,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "job_id": "job-end-undo",
                     "action": "end",
                     "work_type": "change",
-                    "notice_type": "设备变更",
+                    "notice_type": "变更通告",
                     "scope": "A",
                     "title": "A楼结束回退测试",
                     "source_record_id": "source-end-undo",
@@ -4383,7 +4551,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "end_time": "2026-05-27 18:00",
                     "location": "A楼",
                     "progress": "工作已完成",
-                    "text": "【设备变更】状态：结束\n【名称】A楼结束回退测试",
+                    "text": "【变更通告】状态：结束\n【名称】A楼结束回退测试",
                     "extra_images": [{"file_token": "site-photo-token"}],
                 }
                 with patch(
@@ -4401,7 +4569,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 self.assertTrue(ok)
                 self.assertEqual(message, "更新成功")
                 self.assertEqual(record_id, "target-end-undo")
-                query_record.assert_called_once_with("target-end-undo", "设备变更")
+                query_record.assert_called_once_with("target-end-undo", "变更通告")
                 update_record.assert_called_once()
                 undos = service.list_available_notice_undos(scope="A", action_type="end")
                 self.assertEqual(len(undos), 1)
@@ -4485,7 +4653,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 {
                     "action": "update",
                     "work_type": "change",
-                    "notice_type": "设备变更",
+                    "notice_type": "变更通告",
                     "scope": "A",
                     "manual": True,
                     "manual_id": "manual-change-update",
@@ -5029,7 +5197,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertTrue(fake_service.cache_cleared)
             update_fields.assert_called_once_with(
                 "target-change",
-                "设备变更",
+                "变更通告",
                 {"实际结束时间": None, "变更结束时间": None},
             )
         finally:
@@ -5072,7 +5240,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             "job_id": "job-rebind",
             "action": "update",
             "work_type": "change",
-            "notice_type": "设备变更",
+            "notice_type": "变更通告",
             "scope": "A",
             "title": "A楼测试变更",
             "source_record_id": "source-change",
@@ -5080,7 +5248,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             "active_item_id": "active-change",
             "start_time": "2026-05-27 10:40",
             "end_time": "2026-05-27 18:00",
-            "text": "【设备变更】状态：更新\n【名称】A楼测试变更",
+            "text": "【变更通告】状态：更新\n【名称】A楼测试变更",
         }
         try:
             with patch(
@@ -5155,13 +5323,13 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                             "source_record_id": "source-change",
                             "active_item_id": "active-change",
                             "work_type": "change",
-                            "notice_type": "设备变更",
+                            "notice_type": "变更通告",
                             "scope": "A",
                             "title": "A楼测试变更",
                             "building_codes": ["A"],
                             "start_time": "2026-05-27 10:40",
                             "end_time": "2026-05-27 18:00",
-                            "text": "【设备变更】状态：更新\n【名称】A楼测试变更",
+                            "text": "【变更通告】状态：更新\n【名称】A楼测试变更",
                             "content": "工程师对A楼设备进行变更",
                         },
                     }
@@ -5209,7 +5377,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         fake_service = _TextLookupService()
         PortalRuntime.service = fake_service
         notice_text = (
-            "【设备变更】状态：更新\n"
+            "【变更通告】状态：更新\n"
             "【名称】A楼UPS设备变更\n"
             "【时间】2026年5月27日10：40-18：00\n"
             "【内容】工程师对A楼UPS设备进行变更测试\n"
@@ -5230,7 +5398,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                             "target_record_id": "stale-change-target",
                             "_record_id_kind": "target",
                             "work_type": "change",
-                            "notice_type": "设备变更",
+                            "notice_type": "变更通告",
                             "scope": "A",
                             "text": notice_text,
                         },
@@ -5315,7 +5483,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             result = service.query_records(month="5月", scope="CAMPUS")
             summary = result["records"][0]["work_summary"]
             self.assertEqual(summary["work_type"], WORK_TYPE_CHANGE)
-            self.assertEqual(summary["notice_type"], "设备变更")
+            self.assertEqual(summary["notice_type"], "变更通告")
             self.assertEqual(summary["source_record_id"], "c2")
             self.assertEqual(summary["feishu_record_id"], "change-target-1")
             self.assertEqual(summary["status"], "进行中")
@@ -6084,7 +6252,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 service._upsert_work_status_item_locked(
                     {
                         "work_type": WORK_TYPE_CHANGE,
-                        "notice_type": "设备变更",
+                        "notice_type": "变更通告",
                         "source_record_id": "ali-c",
                         "title": "C楼阿里侧变更",
                         "building": "C楼",
@@ -6235,7 +6403,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             )
 
             self.assertEqual(prepared["work_type"], WORK_TYPE_CHANGE)
-            self.assertEqual(prepared["notice_type"], "设备变更")
+            self.assertEqual(prepared["notice_type"], "变更通告")
             self.assertEqual(prepared["source_work_type"], WORK_TYPE_MAINTENANCE)
             self.assertEqual(prepared["source_app_token"], service.app_token)
             self.assertEqual(prepared["source_table_id"], service.table_id)
@@ -6243,7 +6411,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(prepared["building_codes"], ["A"])
             self.assertEqual(prepared["specialty"], "电气")
             self.assertEqual(prepared["level"], "I3")
-            self.assertIn("【设备变更】状态：开始", prepared["text"])
+            self.assertIn("【变更通告】状态：开始", prepared["text"])
             self.assertIn("【名称】EA118机房A楼冷却塔清洗", prepared["text"])
             self.assertNotIn("【维保通告】", prepared["text"])
             self.assertFalse(prepared["skip_personal_message"])
@@ -6350,6 +6518,44 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "【名称】EA118-110KV阿里中天变电池内阻刷新维护通告",
                 prepared["text"],
             )
+
+    def test_maintenance_delayed_not_started_can_start(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            current_month = MaintenancePortalService._current_month_label()
+            service._records = [
+                _build_record(
+                    "m-delayed-not-started",
+                    "A楼",
+                    "冷却塔清洗",
+                    current_month,
+                    status="延期未开始",
+                    maintenance_cycle="每月",
+                )
+            ]
+            service._maintenance_loaded_once = True
+
+            prepared = service.prepare_maintenance_action(
+                {
+                    "action": "start",
+                    "scope": "A",
+                    "work_type": WORK_TYPE_MAINTENANCE,
+                    "record_id": "m-delayed-not-started",
+                    "source_record_id": "m-delayed-not-started",
+                    "specialty": "电气",
+                    "start_time": "2026-06-12T09:30",
+                    "end_time": "2026-06-12T18:30",
+                    "location": "A楼",
+                    "content": "测试内容",
+                    "reason": "测试原因",
+                    "impact": "测试影响",
+                    "progress": "准备工作已完成",
+                },
+                job_id="job-maint-delayed-not-started",
+            )
+
+            self.assertEqual(prepared["action"], "start")
+            self.assertEqual(prepared["source_progress"], "延期未开始")
 
     def test_prepare_actions_reject_time_range_shorter_than_one_hour(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -6897,7 +7103,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 {
                     "scope": "C",
                     "work_type": WORK_TYPE_CHANGE,
-                    "notice_type": "设备变更",
+                    "notice_type": "变更通告",
                     "active_item_id": "source-change-source-change-hide",
                     "source_record_id": "source-change-hide",
                     "building": "C楼",
@@ -6920,7 +7126,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 {
                     "scope": "C",
                     "work_type": WORK_TYPE_CHANGE,
-                    "notice_type": "设备变更",
+                    "notice_type": "变更通告",
                     "active_item_id": "active-old",
                     "record_id": "target-same",
                     "building": "C楼",
@@ -6937,7 +7143,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     {
                         "active_item_id": "active-new",
                         "work_type": WORK_TYPE_CHANGE,
-                        "notice_type": "设备变更",
+                        "notice_type": "变更通告",
                         "record_id": "target-same",
                         "title": "C楼同一目标记录",
                         "building": "C楼",
@@ -6958,7 +7164,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     {
                         "active_item_id": "active-a",
                         "work_type": WORK_TYPE_CHANGE,
-                        "notice_type": "设备变更",
+                        "notice_type": "变更通告",
                         "record_id": "target-a",
                         "title": "A楼变更",
                         "building": "A楼",
@@ -6980,7 +7186,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "target_record_id": "target-a-delete",
                     "source_record_id": "source-a-delete",
                     "work_type": WORK_TYPE_CHANGE,
-                    "notice_type": "设备变更",
+                    "notice_type": "变更通告",
                     "title": "A楼删除校验变更",
                     "building": "A楼",
                     "building_codes": ["A"],
@@ -6993,7 +7199,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "target_record_id": "target-a-delete",
                 "source_record_id": "source-a-delete",
                 "work_type": WORK_TYPE_CHANGE,
-                "notice_type": "设备变更",
+                "notice_type": "变更通告",
             }
 
             keys = service.validate_ongoing_delete_item(payload, scope="A")
@@ -7012,7 +7218,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "record_id": "target-a-delete",
                     "target_record_id": "target-a-delete",
                     "work_type": WORK_TYPE_CHANGE,
-                    "notice_type": "设备变更",
+                    "notice_type": "变更通告",
                     "title": "A楼删除校验变更",
                     "building": "A楼",
                     "building_codes": ["A"],
@@ -7026,7 +7232,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                         "active_item_id": "active-a-delete",
                         "target_record_id": "target-a-delete",
                         "work_type": WORK_TYPE_CHANGE,
-                        "notice_type": "设备变更",
+                        "notice_type": "变更通告",
                     },
                     scope="C",
                 )
@@ -7055,7 +7261,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                         {
                             "active_item_id": "active-ended",
                             "work_type": WORK_TYPE_CHANGE,
-                            "notice_type": "设备变更",
+                            "notice_type": "变更通告",
                             "record_id": "target-change-ended",
                             "title": "C楼已完成变更",
                             "building": "C楼",

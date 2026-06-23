@@ -128,7 +128,7 @@ def _find_chat_id_by_name(target_name: str) -> Tuple[str, str]:
 
 
 def _resolve_group_name(notice_type: str, level: str) -> str:
-    if notice_type in ("设备变更", "变更通告"):
+    if notice_type == "变更通告":
         if level == "I3":
             return config.group_name_change_i3
         return ""

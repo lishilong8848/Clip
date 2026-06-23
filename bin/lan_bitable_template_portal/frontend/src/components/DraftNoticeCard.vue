@@ -52,12 +52,17 @@
         </label>
         <label v-if="record.manual" :class="fieldClass('building')">
           楼栋/范围
-          <select :value="draft.building" @change="changeBuilding(($event.target as HTMLSelectElement).value)">
-            <option value="">请选择</option>
-            <option v-for="item in requestableScopes" :key="item.value" :value="item.label">
+          <select
+            multiple
+            size="4"
+            :value="selectedBuildingCodes"
+            @change="changeBuildings($event)"
+          >
+            <option v-for="item in requestableScopes" :key="item.value" :value="item.value">
               {{ item.label }}
             </option>
           </select>
+          <small class="building-select-hint">{{ selectedBuildingLabel || "可多选，按住 Ctrl 可选择多个楼栋" }}</small>
         </label>
       </div>
 
@@ -210,8 +215,37 @@ function changeManualType(value: string): void {
   emit("manual-type-change");
 }
 
-function changeBuilding(value: string): void {
-  setDraft("building", value);
+const selectedBuildingCodes = computed(() => {
+  const raw = Array.isArray(props.draft.building_codes) ? props.draft.building_codes : [];
+  return raw.map((item: any) => String(item || "").trim().toUpperCase()).filter(Boolean);
+});
+
+const selectedBuildingLabel = computed(() => {
+  const labels = props.requestableScopes
+    .filter((item) => selectedBuildingCodes.value.includes(String(item.value || "").toUpperCase()))
+    .map((item) => item.label);
+  return labels.join("、");
+});
+
+function changeBuildings(event: Event): void {
+  const select = event.target as HTMLSelectElement;
+  const values = Array.from(select.selectedOptions).map((option) => option.value);
+  const expanded: string[] = [];
+  for (const value of values) {
+    const code = String(value || "").trim().toUpperCase();
+    if (code === "CAMPUS") {
+      for (const campusCode of ["A", "B", "C"]) {
+        if (!expanded.includes(campusCode)) expanded.push(campusCode);
+      }
+    } else if (code && !expanded.includes(code)) {
+      expanded.push(code);
+    }
+  }
+  const labels = props.requestableScopes
+    .filter((item) => expanded.includes(String(item.value || "").toUpperCase()))
+    .map((item) => item.label);
+  setDraft("building_codes", expanded);
+  setDraft("building", labels.join("、"));
   emit("building-change");
 }
 
@@ -482,6 +516,24 @@ textarea {
   background: #ffffff;
   color: #0f172a;
   font: inherit;
+}
+
+select[multiple] {
+  min-height: 116px;
+  padding: 6px;
+  border-radius: 12px;
+  background: #f8fbff;
+}
+
+select[multiple] option {
+  border-radius: 8px;
+  padding: 5px 7px;
+}
+
+.building-select-hint {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 textarea {

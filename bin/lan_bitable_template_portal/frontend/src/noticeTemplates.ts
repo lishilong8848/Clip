@@ -31,7 +31,7 @@ export const noticeTemplates: Record<WorkTypeValue, NoticeTemplate> = {
     uploadFields: ["specialty", "maintenance_cycle", "non_plan"],
   },
   change: {
-    heading: "设备变更",
+    heading: "变更通告",
     titleLabel: "名称",
     messageFields: ["title", "level", "start_time", "end_time", "location", "content", "reason", "impact", "progress"],
     uploadFields: ["specialty", "zhihang"],
