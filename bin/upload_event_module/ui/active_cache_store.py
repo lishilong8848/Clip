@@ -1,6 +1,3 @@
-import json
-import os
-import re
 import threading
 import time
 import uuid
@@ -22,18 +19,14 @@ from .display_state import (
 
 
 class ActiveCacheStore:
-    """Thread-safe SQLite-backed store wrapper for active notice cache."""
+    """Thread-safe SQLite-backed store wrapper for active notices."""
 
     _SECTIONS = ("event", "other")
-    _STATE_NAMESPACE = "qt_active_cache"
-    _STATE_KEY = "active_cache"
-    _LEGACY_MERGE_MARKER_KEY = "legacy_active_cache_merge"
 
     def __init__(self, cache_file: str, state_store: LanPortalStateStore | None = None):
         self.cache_file = str(cache_file or "")
         self._state_store = state_store or LanPortalStateStore()
         self._lock = threading.RLock()
-        self._legacy_file_migration_result: dict[str, Any] | None = None
 
     def _default_payload(self) -> dict:
         return {
@@ -53,70 +46,22 @@ class ActiveCacheStore:
             qt_items = self._state_store.list_qt_active_items()
         except Exception:
             qt_items = []
-        qt_items_initialized = bool(qt_items)
-        if not qt_items_initialized:
-            try:
-                qt_items_initialized = bool(
-                    self._state_store.list_qt_active_items(include_deleted=True)
-                )
-            except Exception:
-                qt_items_initialized = False
-        if qt_items_initialized:
-            payload = self._default_payload()
-            try:
-                stored = self._state_store.get_document(
-                    self._STATE_NAMESPACE, self._STATE_KEY
-                )
-            except Exception:
-                stored = None
-            if isinstance(stored, dict) and isinstance(stored.get("clipboard_queue"), list):
-                payload["clipboard_queue"] = list(stored.get("clipboard_queue") or [])
-            for item in qt_items:
-                if not isinstance(item, dict):
-                    continue
-                section = str(item.get("section") or "other").strip()
-                if section not in self._SECTIONS:
-                    section = "other"
-                data = item.get("payload")
-                if not isinstance(data, dict):
-                    continue
-                normalized = dict(data)
-                active_item_id = str(item.get("active_item_id") or "").strip()
-                if active_item_id and not str(normalized.get("active_item_id") or "").strip():
-                    normalized["active_item_id"] = active_item_id
-                payload[section].append({"data": normalized})
-            return self._normalize_payload(payload)
-        try:
-            stored = self._state_store.get_document(
-                self._STATE_NAMESPACE, self._STATE_KEY
-            )
-        except Exception:
-            stored = None
-        if isinstance(stored, dict):
-            payload = self._normalize_payload(stored)
-            try:
-                self._state_store.replace_qt_active_items_from_payload(payload)
-            except Exception:
-                pass
-            return payload
-        if not self.cache_file or not os.path.exists(self.cache_file):
-            return self._default_payload()
-        try:
-            with open(self.cache_file, "r", encoding="utf-8") as f:
-                payload = json.load(f)
-            if not isinstance(payload, dict):
-                return self._default_payload()
-            payload = self._normalize_payload(payload)
-            try:
-                self._state_store.put_document(
-                    self._STATE_NAMESPACE, self._STATE_KEY, payload
-                )
-                self._state_store.replace_qt_active_items_from_payload(payload)
-            except Exception:
-                pass
-            return payload
-        except Exception:
-            return self._default_payload()
+        payload = self._default_payload()
+        for item in qt_items:
+            if not isinstance(item, dict):
+                continue
+            section = str(item.get("section") or "other").strip()
+            if section not in self._SECTIONS:
+                section = "other"
+            data = item.get("payload")
+            if not isinstance(data, dict):
+                continue
+            normalized = dict(data)
+            active_item_id = str(item.get("active_item_id") or "").strip()
+            if active_item_id and not str(normalized.get("active_item_id") or "").strip():
+                normalized["active_item_id"] = active_item_id
+            payload[section].append({"data": normalized})
+        return self._normalize_payload(payload)
 
     def _normalize_payload(self, payload: dict) -> dict:
         payload = dict(payload or {})
@@ -128,177 +73,8 @@ class ActiveCacheStore:
             payload["clipboard_queue"] = []
         return payload
 
-    def _count_payload_items(self, payload: dict) -> int:
-        total = 0
-        for section in self._SECTIONS:
-            values = payload.get(section, []) if isinstance(payload, dict) else []
-            total += len(values) if isinstance(values, list) else 0
-        return total
-
-    def _legacy_file_signature_unlocked(self, payload: dict | None = None) -> dict[str, Any]:
-        try:
-            stat = os.stat(self.cache_file)
-        except Exception:
-            return {}
-        signature = {
-            "path": os.path.abspath(self.cache_file),
-            "mtime": float(stat.st_mtime or 0),
-            "size": int(stat.st_size or 0),
-        }
-        if isinstance(payload, dict):
-            signature["count"] = self._count_payload_items(payload)
-        return signature
-
-    @staticmethod
-    def _legacy_cache_entry_ended(data: dict | None) -> bool:
-        if not isinstance(data, dict):
-            return False
-        if bool(data.get("_ended_moved")):
-            return True
-        status = str(data.get("status") or "").strip()
-        if status == "结束":
-            return True
-        text = str(data.get("text") or data.get("content") or "").strip()
-        return bool(re.search(r"状态\s*[:：]?\s*结束", text))
-
-    def _merge_legacy_payload_into_qt_items_unlocked(self, payload: dict) -> int:
-        merged = 0
-        for section in self._SECTIONS:
-            section_items = payload.get(section, [])
-            if not isinstance(section_items, list):
-                continue
-            for entry in section_items:
-                if not isinstance(entry, dict):
-                    continue
-                data = entry.get("data")
-                if not isinstance(data, dict) or self._legacy_cache_entry_ended(data):
-                    continue
-                if self._state_store.upsert_qt_active_item(
-                    dict(data),
-                    section=section,
-                    origin=str(data.get("origin") or "legacy_active_cache"),
-                ):
-                    merged += 1
-        return merged
-
-    def _migrate_legacy_cache_file_unlocked(self) -> dict[str, Any]:
-        if self._legacy_file_migration_result is not None:
-            return dict(self._legacy_file_migration_result)
-        result = {
-            "status": "skipped",
-            "imported": 0,
-            "path": self.cache_file,
-            "reason": "",
-        }
-        if not self.cache_file or not os.path.exists(self.cache_file):
-            result["reason"] = "missing_legacy_file"
-            self._legacy_file_migration_result = result
-            return dict(result)
-        try:
-            existing_qt_items = self._state_store.list_qt_active_items(include_deleted=True)
-        except Exception:
-            existing_qt_items = []
-        try:
-            with open(self.cache_file, "r", encoding="utf-8") as f:
-                payload = json.load(f)
-        except Exception as exc:
-            result["status"] = "failed"
-            result["reason"] = f"read_failed: {exc}"
-            self._legacy_file_migration_result = result
-            return dict(result)
-        if not isinstance(payload, dict):
-            result["status"] = "failed"
-            result["reason"] = "invalid_payload"
-            self._legacy_file_migration_result = result
-            return dict(result)
-        payload = self._normalize_payload(payload)
-        legacy_signature = self._legacy_file_signature_unlocked(payload)
-        try:
-            existing_doc = self._state_store.get_document(
-                self._STATE_NAMESPACE, self._STATE_KEY
-            )
-        except Exception:
-            existing_doc = None
-        if isinstance(existing_doc, dict) or existing_qt_items:
-            try:
-                active_qt_count = len(self._state_store.list_qt_active_items())
-            except Exception:
-                active_qt_count = 0
-            legacy_count = self._count_payload_items(payload)
-            try:
-                marker = self._state_store.get_document(
-                    self._STATE_NAMESPACE, self._LEGACY_MERGE_MARKER_KEY
-                )
-            except Exception:
-                marker = None
-            already_merged = bool(
-                isinstance(marker, dict)
-                and marker.get("legacy_signature") == legacy_signature
-            )
-            if legacy_count > active_qt_count and not already_merged:
-                try:
-                    imported = self._merge_legacy_payload_into_qt_items_unlocked(payload)
-                    self._state_store.put_document(
-                        self._STATE_NAMESPACE,
-                        self._LEGACY_MERGE_MARKER_KEY,
-                        {
-                            "legacy_signature": legacy_signature,
-                            "active_qt_count_before": active_qt_count,
-                            "legacy_count": legacy_count,
-                            "imported": imported,
-                            "merged_at": time.time(),
-                        },
-                    )
-                    result["status"] = "merged"
-                    result["imported"] = imported
-                    result["reason"] = ""
-                except Exception as exc:
-                    result["status"] = "failed"
-                    result["reason"] = f"sqlite_merge_failed: {exc}"
-                self._legacy_file_migration_result = result
-                return dict(result)
-            result["reason"] = "sqlite_already_initialized"
-            self._legacy_file_migration_result = result
-            return dict(result)
-        try:
-            self._state_store.put_document(self._STATE_NAMESPACE, self._STATE_KEY, payload)
-            migrated = self._state_store.replace_qt_active_items_from_payload(payload)
-            self._state_store.put_document(
-                self._STATE_NAMESPACE,
-                self._LEGACY_MERGE_MARKER_KEY,
-                {
-                    "legacy_signature": legacy_signature,
-                    "active_qt_count_before": 0,
-                    "legacy_count": self._count_payload_items(payload),
-                    "imported": int((migrated or {}).get("upserted") or self._count_payload_items(payload)),
-                    "merged_at": time.time(),
-                },
-            )
-        except Exception as exc:
-            result["status"] = "failed"
-            result["reason"] = f"sqlite_import_failed: {exc}"
-            self._legacy_file_migration_result = result
-            return dict(result)
-        imported = int((migrated or {}).get("upserted") or self._count_payload_items(payload))
-        result["status"] = "imported"
-        result["imported"] = imported
-        result["reason"] = ""
-        self._legacy_file_migration_result = result
-        return dict(result)
-
-    def migrate_legacy_cache_file_to_sqlite(self) -> dict[str, Any]:
-        with self._lock:
-            return self._migrate_legacy_cache_file_unlocked()
-
-    def _sync_legacy_document_from_qt_items_unlocked(self) -> None:
-        # Runtime state now lives in qt_active_items. Keep this method as a
-        # no-op for old call sites while avoiding a second active-cache state
-        # source and unnecessary SQLite document writes.
-        return None
-
     def load_payload(self) -> dict:
         with self._lock:
-            self._migrate_legacy_cache_file_unlocked()
             return self._load_payload_unlocked()
 
     def _save_payload_unlocked(self, payload: dict) -> bool:
@@ -344,10 +120,59 @@ class ActiveCacheStore:
         if not target_id:
             return False
         canonical = cls._normalize_key(canonical_target_record_id(data))
-        if canonical:
-            return canonical == target_id
-        legacy = cls._normalize_key(data.get("record_id"))
-        return bool(legacy and legacy == target_id)
+        return bool(canonical and canonical == target_id)
+
+    @classmethod
+    def _record_matches_active_item_id(
+        cls, item: dict | None, active_item_id: str = ""
+    ) -> bool:
+        if not isinstance(item, dict):
+            return False
+        active_item_id = cls._normalize_key(active_item_id)
+        if not active_item_id:
+            return False
+        payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+        return active_item_id in {
+            cls._normalize_key(item.get("active_item_id")),
+            cls._normalize_key(payload.get("active_item_id")),
+        }
+
+    def _qt_active_item_matches_identity(
+        self,
+        item: dict | None,
+        *,
+        record_id: str = "",
+        active_item_id: str = "",
+    ) -> bool:
+        if not isinstance(item, dict):
+            return False
+        active_item_id = self._normalize_key(active_item_id)
+        if active_item_id and self._record_matches_active_item_id(item, active_item_id):
+            return True
+        rid = self._normalize_key(record_id)
+        if not rid:
+            return False
+        payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+        return self._record_matches_target_id(payload, rid)
+
+    def _find_qt_active_items_by_identity(
+        self,
+        *,
+        record_id: str = "",
+        active_item_id: str = "",
+    ) -> list[dict]:
+        try:
+            return [
+                item
+                for item in self._state_store.list_qt_active_items()
+                if self._qt_active_item_matches_identity(
+                    item,
+                    record_id=record_id,
+                    active_item_id=active_item_id,
+                )
+            ]
+        except Exception:
+            return []
 
     @staticmethod
     def _section_for_data(data: dict) -> str:
@@ -380,22 +205,21 @@ class ActiveCacheStore:
     def get_record_fields(
         self,
         record_id: str = "",
+        active_item_id: str = "",
         fields: list[str] | tuple[str, ...] | None = None,
     ) -> dict:
         if not fields:
             return {}
-        with self._lock:
-            payload = self._load_payload_unlocked()
-            _, _, data, err = self._find_record_by_id_unlocked(payload, record_id)
-            if err:
-                return {}
+        matches = self._find_qt_active_items_by_identity(
+            record_id=record_id,
+            active_item_id=active_item_id,
+        )
+        if len(matches) == 1:
+            data = matches[0].get("payload")
             if not isinstance(data, dict):
                 return {}
-            result = {}
-            for key in fields:
-                if key in data:
-                    result[key] = data.get(key)
-            return result
+            return {key: data.get(key) for key in fields if key in data}
+        return {}
 
     def get_locked_level_map(self) -> dict[str, dict[str, Any]]:
         """Return level-lock fields for all cached active records in one read."""
@@ -406,7 +230,7 @@ class ActiveCacheStore:
                 if not isinstance(data, dict):
                     continue
                 record_id = self._normalize_key(
-                    canonical_target_record_id(data) or data.get("record_id")
+                    canonical_target_record_id(data)
                 )
                 if not record_id or not bool(data.get("level_locked")):
                     continue
@@ -419,53 +243,18 @@ class ActiveCacheStore:
     def patch_record_fields(
         self,
         record_id: str = "",
+        active_item_id: str = "",
         patch: dict | None = None,
     ) -> bool:
         if not isinstance(patch, dict) or not patch:
             return False
-        rid = self._normalize_key(record_id)
-        if rid:
-            with self._lock:
-                try:
-                    matches = [
-                        item
-                        for item in self._state_store.list_qt_active_items()
-                        if self._record_matches_target_id(item.get("payload") or {}, rid)
-                    ]
-                except Exception:
-                    matches = []
-                if len(matches) == 1:
-                    item = matches[0]
-                    data = dict(item.get("payload") or {})
-                    changed = False
-                    for key, value in patch.items():
-                        old_value = data.get(key, None)
-                        if value is None:
-                            if key in data:
-                                data.pop(key, None)
-                                changed = True
-                            continue
-                        if old_value != value:
-                            data[key] = value
-                            changed = True
-                    if not changed:
-                        return False
-                    saved = self._state_store.upsert_qt_active_item(
-                        data,
-                        section=str(item.get("section") or ""),
-                        sort_order=int(item.get("sort_order") or 0),
-                        origin=str(item.get("origin") or ""),
-                    )
-                    return saved
-                if len(matches) > 1:
-                    return False
-        with self._lock:
-            payload = self._load_payload_unlocked()
-            _, _, data, err = self._find_record_by_id_unlocked(payload, record_id)
-            if err:
-                return False
-            if not isinstance(data, dict):
-                return False
+        matches = self._find_qt_active_items_by_identity(
+            record_id=record_id,
+            active_item_id=active_item_id,
+        )
+        if len(matches) == 1:
+            item = matches[0]
+            data = dict(item.get("payload") or {})
             changed = False
             for key, value in patch.items():
                 old_value = data.get(key, None)
@@ -479,8 +268,13 @@ class ActiveCacheStore:
                     changed = True
             if not changed:
                 return False
-            payload["saved_at"] = int(time.time())
-            return self._save_payload_unlocked(payload)
+            return self._state_store.upsert_qt_active_item(
+                data,
+                section=str(item.get("section") or ""),
+                sort_order=int(item.get("sort_order") or 0),
+                origin=str(item.get("origin") or ""),
+            )
+        return False
 
     def upsert_record(self, data_dict: dict | None = None) -> bool:
         if not isinstance(data_dict, dict):
@@ -551,18 +345,7 @@ class ActiveCacheStore:
                     return True
             except Exception:
                 pass
-        with self._lock:
-            payload = self._load_payload_unlocked()
-            changed = False
-            for _, _, data in self._iter_record_entries_unlocked(payload):
-                if self._record_matches_target_id(data, old_id):
-                    data["record_id"] = new_id
-                    data["target_record_id"] = new_id
-                    changed = True
-            if not changed:
-                return False
-            payload["saved_at"] = int(time.time())
-            return self._save_payload_unlocked(payload)
+        return False
 
     def validate_or_repair_record_ids(self) -> dict:
         """
@@ -653,7 +436,7 @@ class ActiveCacheStore:
                 result["had_repairs"] = False
             return result
 
-    def remove_legacy_display_fields_on_startup(self) -> dict:
+    def normalize_display_fields_on_startup(self) -> dict:
         result = {
             "changed": 0,
             "saved": False,

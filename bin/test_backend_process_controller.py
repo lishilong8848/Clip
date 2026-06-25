@@ -76,6 +76,30 @@ class BackendProcessControllerTests(unittest.TestCase):
         controller = BackendProcessPortalController()
         self.assertGreaterEqual(controller._snapshot_interval_s, 300)
 
+    def test_qt_command_strips_legacy_inline_image_fields(self):
+        controller = BackendProcessPortalController()
+        payload = {
+            "data_dict": {
+                "record_id": "rec1",
+                "bytes_b64": "legacy-inline",
+                "nested": {"screenshot_bytes_b64": "legacy-screenshot"},
+            },
+            "extra_images": [
+                {
+                    "upload_id": "upload-1",
+                    "file_name": "site.png",
+                    "bytes_b64": "legacy-site",
+                }
+            ],
+        }
+
+        cleaned = controller._strip_inline_image_command_fields(payload)
+
+        self.assertNotIn("bytes_b64", cleaned["data_dict"])
+        self.assertNotIn("screenshot_bytes_b64", cleaned["data_dict"]["nested"])
+        self.assertNotIn("bytes_b64", cleaned["extra_images"][0])
+        self.assertEqual(cleaned["extra_images"][0]["upload_id"], "upload-1")
+
 
 if __name__ == "__main__":
     unittest.main()

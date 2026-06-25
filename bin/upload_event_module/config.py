@@ -43,13 +43,13 @@ DEFAULT_DEPENDENCY_INSTALL_RETRIES_PER_MIRROR = 1
 DEFAULT_DEPENDENCY_BOOTSTRAP_ALLOW_GET_PIP = True
 
 # 3个表格ID配置（根据通告类型使用不同表格）
-DEFAULT_TABLE_ID_WEIBAO = ""  # 维保通告表格ID
-DEFAULT_TABLE_ID_BIANGENG = ""  # 变更通告表格ID
-DEFAULT_TABLE_ID_TIAOZHENG = ""  # 设备调整表格ID
+DEFAULT_TABLE_ID_WEIBAO = "tblk7QuEsiE4p3nZ"  # 维保通告表格ID
+DEFAULT_TABLE_ID_BIANGENG = "tblYodlEKeWzqogu"  # 变更通告表格ID
+DEFAULT_TABLE_ID_TIAOZHENG = "tbleqBZdQu1n8qqK"  # 设备调整表格ID
 DEFAULT_TABLE_ID_SHIJIAN = ""  # 事件通告表格ID
-DEFAULT_TABLE_ID_POWER = ""  # 上下电通告表格ID
-DEFAULT_TABLE_ID_POLLING = ""  # 设备轮巡表格ID
-DEFAULT_TABLE_ID_OVERHAUL = ""  # 设备检修表格ID
+DEFAULT_TABLE_ID_POWER = "tblf2uQrzCWw5eIV"  # 上下电通告表格ID
+DEFAULT_TABLE_ID_POLLING = "tbl0XK1iQ1P6VY5Y"  # 设备轮巡表格ID
+DEFAULT_TABLE_ID_OVERHAUL = "tblpaHktT0mn0hwg"  # 设备检修表格ID
 DEFAULT_GROUP_NAME_CHANGE_I3 = ""  # I3变更群名称
 DEFAULT_GROUP_NAME_MAINTENANCE = ""  # 维保群名称
 DEFAULT_GROUP_NAME_EVENT_I2 = ""  # I2事件群名称
@@ -182,26 +182,26 @@ class ConfigManager:
                     )
                     self.token_expire_time = config_data.get("token_expire_time", 0)
                     # 加载3个表格ID
-                    self.table_id_weibao = config_data.get(
-                        "table_id_weibao", DEFAULT_TABLE_ID_WEIBAO
+                    self.table_id_weibao = (
+                        config_data.get("table_id_weibao") or DEFAULT_TABLE_ID_WEIBAO
                     )
-                    self.table_id_biangeng = config_data.get(
-                        "table_id_biangeng", DEFAULT_TABLE_ID_BIANGENG
+                    self.table_id_biangeng = (
+                        config_data.get("table_id_biangeng") or DEFAULT_TABLE_ID_BIANGENG
                     )
-                    self.table_id_tiaozheng = config_data.get(
-                        "table_id_tiaozheng", DEFAULT_TABLE_ID_TIAOZHENG
+                    self.table_id_tiaozheng = (
+                        config_data.get("table_id_tiaozheng") or DEFAULT_TABLE_ID_TIAOZHENG
                     )
-                    self.table_id_shijian = config_data.get(
-                        "table_id_shijian", DEFAULT_TABLE_ID_SHIJIAN
+                    self.table_id_shijian = (
+                        config_data.get("table_id_shijian") or DEFAULT_TABLE_ID_SHIJIAN
                     )
-                    self.table_id_power = config_data.get(
-                        "table_id_power", DEFAULT_TABLE_ID_POWER
+                    self.table_id_power = (
+                        config_data.get("table_id_power") or DEFAULT_TABLE_ID_POWER
                     )
-                    self.table_id_polling = config_data.get(
-                        "table_id_polling", DEFAULT_TABLE_ID_POLLING
+                    self.table_id_polling = (
+                        config_data.get("table_id_polling") or DEFAULT_TABLE_ID_POLLING
                     )
-                    self.table_id_overhaul = config_data.get(
-                        "table_id_overhaul", DEFAULT_TABLE_ID_OVERHAUL
+                    self.table_id_overhaul = (
+                        config_data.get("table_id_overhaul") or DEFAULT_TABLE_ID_OVERHAUL
                     )
                     self.disable_hot_reload = config_data.get(
                         "disable_hot_reload", DEFAULT_DISABLE_HOT_RELOAD

@@ -23,18 +23,17 @@ class NoticeIdentityTests(unittest.TestCase):
         )
         self.assertEqual(canonical_target_record_id(payload), "")
 
-    def test_update_record_id_can_be_legacy_target(self):
+    def test_update_record_id_alone_is_not_target(self):
         payload = normalize_notice_identity_payload(
             {"action": "update", "record_id": "tar-1", "work_type": "change"}
         )
-        self.assertEqual(canonical_target_record_id(payload), "tar-1")
+        self.assertEqual(canonical_target_record_id(payload), "")
 
-    def test_explicit_target_marker_wins_even_for_upload_action(self):
+    def test_explicit_target_record_id_wins_even_for_upload_action(self):
         payload = normalize_notice_identity_payload(
             {
                 "action": "upload",
-                "record_id": "tar-upload-1",
-                "_record_id_kind": "target",
+                "target_record_id": "tar-upload-1",
                 "_is_placeholder_record": False,
             }
         )
@@ -53,17 +52,15 @@ class NoticeIdentityTests(unittest.TestCase):
         self.assertEqual(canonical_source_record_id(payload), "src-1")
         self.assertEqual(canonical_target_record_id(payload), "")
 
-    def test_aliases_normalize_to_source_and_target(self):
+    def test_old_aliases_do_not_normalize_to_source_or_target(self):
         payload = normalize_notice_identity_payload(
             {
                 "action": "end",
-                "lan_source_record_id": "src-2",
-                "feishu_record_id": "tar-2",
-                "raw_record_id": "raw-ignored",
+                "record_id": "local-only",
             }
         )
-        self.assertEqual(canonical_source_record_id(payload), "src-2")
-        self.assertEqual(canonical_target_record_id(payload), "tar-2")
+        self.assertEqual(canonical_source_record_id(payload), "")
+        self.assertEqual(canonical_target_record_id(payload), "")
 
     def test_state_store_repair_backfills_identity_from_qt_active(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -73,6 +70,7 @@ class NoticeIdentityTests(unittest.TestCase):
                 {
                     "active_item_id": "active-1",
                     "record_id": "tar-3",
+                    "target_record_id": "tar-3",
                     "source_record_id": "src-3",
                     "work_type": "maintenance",
                     "notice_type": "维保通告",

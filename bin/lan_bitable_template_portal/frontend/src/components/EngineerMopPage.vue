@@ -8,21 +8,28 @@
       <div class="head-actions">
         <label v-if="scopeOptions.length" class="scope-select">
           楼栋
-          <select v-model="scope" :disabled="loading || previewLoading">
+          <select v-model="scope" :disabled="loading || previewLoading" aria-label="切换楼栋">
             <option v-for="item in scopeOptions" :key="item.value" :value="normalizeScope(item.value)">
               {{ item.label }}
             </option>
           </select>
         </label>
-        <button class="btn ghost refresh-mini" type="button" :disabled="loading" title="刷新本页数据" @click="loadPage">
-          {{ loading ? "…" : "刷新" }}
+        <button
+          class="btn ghost refresh-mini"
+          type="button"
+          :disabled="loading"
+          :aria-busy="loading ? 'true' : 'false'"
+          title="刷新本页数据"
+          @click="loadPage"
+        >
+          {{ loading ? "刷新中" : "刷新" }}
         </button>
         <a class="btn ghost" href="/">功能选择</a>
       </div>
     </header>
 
-    <div v-if="checking" class="notice-box">正在检查登录状态...</div>
-    <div v-else-if="!loggedIn" class="notice-box">
+    <div v-if="checking" class="notice-box" role="status" aria-live="polite">正在检查登录状态...</div>
+    <div v-else-if="!loggedIn" class="notice-box" role="alert">
       请先登录飞书后再使用工程师 MOP 页面。
       <a class="btn blue" :href="loginUrl">飞书登录</a>
     </div>
@@ -3533,7 +3540,7 @@ watch(() => props.scopeOptions, (items) => {
 
 select,
 input {
-  min-height: 38px;
+  min-height: 44px;
   border: 1px solid #d8e5f7;
   border-radius: 12px;
   padding: 8px 11px;
@@ -3549,7 +3556,7 @@ select:focus {
 }
 
 .btn {
-  min-height: 38px;
+  min-height: 44px;
   border: 1px solid #d8e5f7;
   border-radius: 12px;
   padding: 8px 14px;
@@ -3558,11 +3565,27 @@ select:focus {
   text-decoration: none;
   background: #ffffff;
   cursor: pointer;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease, background 0.16s ease;
+}
+
+.btn:hover:not(:disabled) {
+  border-color: #9cc7ff;
+  box-shadow: 0 8px 18px rgba(30, 99, 255, 0.08);
+  transform: translateY(-1px);
+}
+
+.btn:focus-visible,
+select:focus-visible,
+input:focus-visible {
+  outline: 3px solid rgba(75, 153, 255, 0.38);
+  outline-offset: 2px;
 }
 
 .btn:disabled {
   cursor: not-allowed;
   opacity: 0.58;
+  box-shadow: none;
+  transform: none;
 }
 
 .btn.blue {
@@ -3572,13 +3595,42 @@ select:focus {
   box-shadow: 0 10px 22px rgba(30, 99, 255, 0.22);
 }
 
+.btn.ghost {
+  color: #1d4ed8;
+  background: #f8fbff;
+}
+
+.btn[aria-busy="true"] {
+  position: relative;
+  color: transparent;
+}
+
+.btn[aria-busy="true"]::after {
+  content: "";
+  width: 16px;
+  height: 16px;
+  position: absolute;
+  inset: 50% auto auto 50%;
+  margin: -8px 0 0 -8px;
+  border-radius: 999px;
+  border: 2px solid rgba(29, 78, 216, 0.25);
+  border-top-color: #1d4ed8;
+  animation: mopSpin 0.8s linear infinite;
+}
+
 .refresh-mini {
   min-width: 56px;
-  min-height: 32px;
+  min-height: 44px;
   border-radius: 999px;
   padding: 6px 12px;
   color: #1d4ed8;
   background: #f8fbff;
+}
+
+@keyframes mopSpin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .mop-layout {
@@ -4368,6 +4420,16 @@ button.signature-guide-item:hover {
   border-radius: 18px;
   padding-bottom: var(--mop-upload-footer-safe-space);
   scroll-padding-bottom: var(--mop-upload-footer-safe-space);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 @media (max-width: 1180px) {

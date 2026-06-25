@@ -70,7 +70,6 @@ class NoticeUndoTests(unittest.TestCase):
                     "active_item_id": "aid-1",
                     "source_record_id": "src-1",
                     "target_record_id": "rec-1",
-                    "feishu_record_id": "rec-1",
                     "work_type": WORK_TYPE_MAINTENANCE,
                     "notice_type": NOTICE_TYPE_MAINTENANCE,
                     "title": "A楼测试维保",

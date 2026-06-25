@@ -31,9 +31,6 @@ class WorkbenchActionRequest(APIModel):
     record_id: str = ""
     source_record_id: str = ""
     target_record_id: str = ""
-    feishu_record_id: str = ""
-    raw_record_id: str = ""
-    lan_source_record_id: str = ""
     active_item_id: str = ""
     manual_id: str = ""
     manual_key: str = ""
@@ -236,6 +233,21 @@ class NoticeTargetLookupRequest(ChangeTargetLookupRequest):
     work_type: str = "change"
 
 
+class NoticeIdentityBindRequest(APIModel):
+    scope: str = "ALL"
+    work_type: str = "maintenance"
+    notice_type: str = ""
+    active_item_id: str = ""
+    source_record_id: str = ""
+    target_record_id: str = ""
+    record_id: str = ""
+    title: str = ""
+    reason: str = ""
+    start_time: str = ""
+    end_time: str = ""
+    status: str = ""
+
+
 class ChangeTargetConfirmRequest(ChangeTargetLookupRequest):
     record_id: str = ""
 
@@ -329,6 +341,9 @@ class QtJobProgressRequest(APIModel):
 class QtJobResultRequest(APIModel):
     success: bool = False
     message: str = ""
+    record_id: str = ""
+    target_record_id: str = ""
+    active_item_id: str = ""
 
 
 class JobMarkStuckFailedRequest(APIModel):

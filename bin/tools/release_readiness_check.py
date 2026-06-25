@@ -294,7 +294,6 @@ def check_frontend_api_client() -> tuple[bool, list[str]]:
 def check_frontend_realtime_coordination() -> tuple[bool, list[str]]:
     src_dir = BIN_DIR / "lan_bitable_template_portal" / "frontend" / "src"
     app_vue = src_dir / "App.vue"
-    coordinator = src_dir / "streamCoordinator.ts"
     smoke_script = BIN_DIR / "tools" / "frontend_runtime_smoke.py"
     errors: list[str] = []
     try:
@@ -302,55 +301,136 @@ def check_frontend_realtime_coordination() -> tuple[bool, list[str]]:
     except Exception as exc:
         return False, [f"读取 App.vue 失败: {exc}"]
     try:
-        coordinator_text = coordinator.read_text(encoding="utf-8", errors="ignore")
-    except Exception as exc:
-        return False, [f"缺少或无法读取 streamCoordinator.ts: {exc}"]
-    try:
         smoke_text = smoke_script.read_text(encoding="utf-8", errors="ignore")
     except Exception as exc:
         return False, [f"读取 frontend_runtime_smoke.py 失败: {exc}"]
 
-    coordinator_markers = [
-        "BroadcastChannel",
-        "leaderKey",
-        "heartbeatMs",
-        "leaderTtlMs",
-        "pagehide",
-        "localStorage",
-        "removeLeaderIfOwned",
-    ]
-    for marker in coordinator_markers:
-        if marker not in coordinator_text:
-            errors.append(f"streamCoordinator.ts 缺少 {marker}")
-
     app_markers = [
-        "createCrossTabStreamCoordinator",
-        "clipflow-jobs-stream-v1",
-        "clipflow-active-items-stream-v1",
-        "pauseJobStatusChecksForHiddenPage",
-        "resumePendingJobStatusChecks",
-        "stopRealtimeConnections();\n    return;",
-        "sharedJobStreamAvailable.value = coordinator.supported",
-        "sharedActiveItemsStreamAvailable.value = coordinator.supported",
+        "enterScope(scope: string, workType = \"maintenance\")",
+        "new URL(\"/workbench-lite\", window.location.origin)",
+        "portalRequest(`/api/auth/status?",
+        "redirectToLogin",
+        "signatureLinkMode",
     ]
     for marker in app_markers:
         if marker not in app_text:
-            errors.append(f"App.vue 实时连接降噪缺少 {marker}")
-
-    if "if (!pageVisible.value)" not in app_text or "pauseJobStatusChecksForHiddenPage();" not in app_text:
-        errors.append("App.vue 页面隐藏时未主动暂停实时连接和轮询")
-    if "resumePendingJobStatusChecks();" not in app_text or "startActiveItemsSse();" not in app_text:
-        errors.append("App.vue 页面恢复时未恢复实时连接/job 状态检查")
+            errors.append(f"App.vue 轻量门户壳缺少 {marker}")
+    for forbidden in (
+        "createCrossTabStreamCoordinator",
+        "clipflow-jobs-stream-v1",
+        "clipflow-active-items-stream-v1",
+        "actionSubmitWorker",
+        "workbenchLoadWorker",
+        "submitWorkbenchActionInBackground",
+    ):
+        if forbidden in app_text:
+            errors.append(f"App.vue 仍包含旧 Vue 工作台实时/worker 热路径: {forbidden}")
 
     smoke_markers = [
-        "__clipflowEventSourceUrls",
-        "cross-tab stream coordination failed",
-        "second tab should not show realtime reconnect warning",
-        "多标签SSE降噪",
+        "workbench-lite",
+        "lite workbench action click blocked main thread",
+        "lite workbench became sluggish after submit",
+        "lite ongoing click caused full page reload",
+        "lite paste parse caused full page reload",
+        "source link options missing expected record",
     ]
     for marker in smoke_markers:
         if marker not in smoke_text:
             errors.append(f"frontend_runtime_smoke.py 未覆盖 {marker}")
+    return not errors, errors
+
+
+def check_frontend_freeze_guards() -> tuple[bool, list[str]]:
+    src_dir = BIN_DIR / "lan_bitable_template_portal" / "frontend" / "src"
+    dist_assets = BIN_DIR / "lan_bitable_template_portal" / "frontend" / "dist" / "assets"
+    app_vue = src_dir / "App.vue"
+    workbench_lite = BIN_DIR / "lan_bitable_template_portal" / "workbench_lite.py"
+    backend_main = BIN_DIR / "clipflow_backend" / "main.py"
+    errors: list[str] = []
+    try:
+        app_text = app_vue.read_text(encoding="utf-8", errors="ignore")
+        lite_text = workbench_lite.read_text(encoding="utf-8", errors="ignore")
+        backend_text = backend_main.read_text(encoding="utf-8", errors="ignore")
+    except Exception as exc:
+        return False, [f"读取轻量工作台检查文件失败: {exc}"]
+
+    for forbidden in (
+        "actionSubmitWorker",
+        "workbenchLoadWorker",
+        "WorkbenchDraftsPanel",
+        "WorkbenchOngoingPanel",
+        "loadWorkbenchInBackground",
+        "submitWorkbenchActionInBackground",
+        "draftStorage",
+        "streamCoordinator",
+    ):
+        if forbidden in app_text:
+            errors.append(f"App.vue 仍包含旧 Vue 工作台代码: {forbidden}")
+
+    lite_markers = [
+        "render_workbench_lite",
+        "parse_pasted_notice_to_draft",
+        "source-link-field",
+        "_source_link_options",
+        "command_format: 'notice_command'",
+        "requestAnimationFrame(() => setTimeout(resolve, 0))",
+        "applyLiteHtml",
+        "navigateLite",
+        "manual-menu",
+        "selectors = isRow ? ['.status', '#detail-panel']",
+        "SPECIALTY_OPTIONS",
+        "MAINTENANCE_CYCLE_OPTIONS",
+        "canonicalLiteUrlFromDocument",
+        "refresh-picker",
+        "lite-refresh-page",
+        "lite-refresh-repair",
+        "lite-refresh-change",
+        "type-count",
+        "panel-count",
+        "captureWorkspaceScroll",
+        "restoreWorkspaceScroll",
+        "preserveWorkspaceScroll",
+        "confirmDiscardLiteChanges",
+        "has-dirty-lite-form",
+        "beforeunload",
+        "applyOptimisticSubmission",
+        "schedulePostSubmitRefresh",
+    ]
+    for marker in lite_markers:
+        if marker not in lite_text:
+            errors.append(f"workbench_lite.py 缺少轻量工作台防卡顿/关联能力: {marker}")
+    for forbidden in ("setTimeout(() => location.reload", "liteFetchThenReload"):
+        if forbidden in lite_text:
+            errors.append(f"workbench_lite.py 普通交互仍依赖整页刷新: {forbidden}")
+
+    backend_markers = [
+        "@app.get(\"/workbench-lite\")",
+        "@app.post(\"/workbench-lite/parse\")",
+        "render_workbench_lite(",
+        "parse_pasted_notice_to_draft",
+        "if key != \"frontend\"",
+        "headers={\"Location\": f\"/workbench-lite?",
+    ]
+    for marker in backend_markers:
+        if marker not in backend_text:
+            errors.append(f"clipflow_backend/main.py 缺少轻量工作台路由/重定向能力: {marker}")
+
+    try:
+        dist_js = "\n".join(
+            path.read_text(encoding="utf-8", errors="ignore")
+            for path in sorted(dist_assets.glob("*.js"))
+            if path.is_file()
+        )
+    except Exception as exc:
+        errors.append(f"读取 Vue dist JS 失败: {exc}")
+        dist_js = ""
+    if dist_js:
+        for forbidden in ("actionSubmitWorker", "workbenchLoadWorker", "/api/workbench-actions", "/api/workbench?"):
+            if forbidden in dist_js:
+                errors.append(f"Vue dist 仍包含旧通告工作台热路径: {forbidden}")
+        if "/workbench-lite" not in dist_js:
+            errors.append("Vue dist 缺少轻量工作台入口 /workbench-lite")
+
     return not errors, errors
 
 
@@ -362,12 +442,8 @@ def check_frontend_vnet_skin() -> tuple[bool, list[str]]:
     auth_panels = src_dir / "components" / "AuthPanels.vue"
     admin_tools = src_dir / "components" / "AdminTools.vue"
     scope_home = src_dir / "components" / "ScopeHome.vue"
-    draft_notice_card = src_dir / "components" / "DraftNoticeCard.vue"
-    ongoing_notice_card = src_dir / "components" / "OngoingNoticeCard.vue"
-    target_record_modal = src_dir / "components" / "TargetRecordSelectionModal.vue"
     history_memory = src_dir / "components" / "HistoryMemoryPage.vue"
-    recent_undo = src_dir / "components" / "RecentUndoPanel.vue"
-    virtual_list = src_dir / "components" / "VirtualNoticeList.vue"
+    workbench_lite = BIN_DIR / "lan_bitable_template_portal" / "workbench_lite.py"
     smoke_script = BIN_DIR / "tools" / "frontend_runtime_smoke.py"
     errors: list[str] = []
 
@@ -379,12 +455,8 @@ def check_frontend_vnet_skin() -> tuple[bool, list[str]]:
         ("AdminTools.vue", admin_tools),
         ("AuthPanels.vue", auth_panels),
         ("ScopeHome.vue", scope_home),
-        ("DraftNoticeCard.vue", draft_notice_card),
-        ("OngoingNoticeCard.vue", ongoing_notice_card),
-        ("TargetRecordSelectionModal.vue", target_record_modal),
         ("HistoryMemoryPage.vue", history_memory),
-        ("RecentUndoPanel.vue", recent_undo),
-        ("VirtualNoticeList.vue", virtual_list),
+        ("workbench_lite.py", workbench_lite),
         ("frontend_runtime_smoke.py", smoke_script),
     ):
         try:
@@ -457,20 +529,17 @@ def check_frontend_vnet_skin() -> tuple[bool, list[str]]:
         if marker not in scope_text:
             errors.append(f"ScopeHome.vue 功能选择页缺少生产入口样式/文案: {marker}")
 
-    draft_card_text = files["DraftNoticeCard.vue"]
-    for marker in ("VNET notice card skin", ".draft-card.active", ".notice-preview", ".btn.blue"):
-        if marker not in draft_card_text:
-            errors.append(f"DraftNoticeCard.vue 待发起通告卡片缺少蓝白卡片样式: {marker}")
-
-    ongoing_card_text = files["OngoingNoticeCard.vue"]
-    for marker in ("VNET ongoing card skin", ".ongoing-card.active", ".site-photo-fields", ".btn.danger"):
-        if marker not in ongoing_card_text:
-            errors.append(f"OngoingNoticeCard.vue 已开始未结束卡片缺少蓝白卡片样式: {marker}")
-
-    target_modal_text = files["TargetRecordSelectionModal.vue"]
-    for marker in ("VNET target selection skin", ".modal-backdrop", ".candidate-modal", ".target-choice.active"):
-        if marker not in target_modal_text:
-            errors.append(f"TargetRecordSelectionModal.vue 目标记录选择弹窗缺少蓝白弹窗样式: {marker}")
+    lite_text = files["workbench_lite.py"]
+    for marker in (
+        "background:linear-gradient(120deg,#0c57d8,#07348d)",
+        ".notice-row,.ongoing-row",
+        "text-overflow:ellipsis",
+        ".source-link-field",
+        "关联源表事项",
+        "已被其他进行中通告占用的事项不会出现",
+    ):
+        if marker not in lite_text:
+            errors.append(f"workbench_lite.py 轻量工作台缺少蓝白/关联交互样式: {marker}")
 
     history_text = files["HistoryMemoryPage.vue"]
     for marker in (
@@ -482,42 +551,22 @@ def check_frontend_vnet_skin() -> tuple[bool, list[str]]:
         if marker not in history_text:
             errors.append(f"HistoryMemoryPage.vue 历史记忆页缺少紧凑蓝白样式/批量确认: {marker}")
 
-    undo_text = files["RecentUndoPanel.vue"]
-    for marker in ("VNET undo panel skin", ".recent-undo-panel::before", ".undo-card:hover"):
-        if marker not in undo_text:
-            errors.append(f"RecentUndoPanel.vue 近三天回退面板缺少蓝白卡片样式: {marker}")
-
-    list_text = files["VirtualNoticeList.vue"]
-    for marker in ("VNET list skin", "scrollbar-color", ".notice-row.disabled"):
-        if marker not in list_text:
-            errors.append(f"VirtualNoticeList.vue 虚拟列表缺少蓝白滚动/禁用态样式: {marker}")
-
     smoke_text = files["frontend_runtime_smoke.py"]
     for marker in (
         "assertHeaderSubtitle",
         "assertVnetSkin",
         "VNET skin issues",
-        "__clipflowActiveEventSourceUrls",
-        "header exposes technical HTTP status",
         "功能选择 · 请先登录",
         "功能选择 · 申请访问权限",
         "permission request scope pills too few",
         "handover link href mismatch",
-        "home-after-return-from-workbench",
-        "workbench-after-return",
         "选择楼栋打开交接班审核页",
-        "刷新检修",
-        "刷新变更",
-        "近三天可回退",
-        "回退删除",
         "VNET蓝白皮肤",
-        "manual adjust draft not visible",
         "解析到待发起通告",
-        "parsed adjust draft not visible",
-        "EA118机房A楼空调调整通告",
+        "source link options missing expected record",
         "admin permission rows missing",
         "admin permission VNET skin missing",
-        "A楼 · 通告工作台",
+        "A楼轻量工作台",
         "管理工具 · 历史通告记忆导入",
     ):
         if marker not in smoke_text:
@@ -684,27 +733,20 @@ def check_qt_active_cache_no_runtime_legacy_document_writes() -> tuple[bool, lis
         "_legacy_document_signature",
         "_payload_from_qt_items_unlocked",
         "_last_legacy_document_signature",
+        "_sync_legacy_document_from_qt_items_unlocked",
     )
     offenders = [pattern for pattern in forbidden if pattern in text]
-    for marker in (
-        "    def _save_payload_unlocked(self, payload: dict) -> bool:",
-        "    def _sync_legacy_document_from_qt_items_unlocked(self) -> None:",
-    ):
-        start = text.find(marker)
-        if start < 0:
-            offenders.append(f"缺少 {marker.strip()}")
-            continue
+    marker = "    def _save_payload_unlocked(self, payload: dict) -> bool:"
+    start = text.find(marker)
+    if start < 0:
+        offenders.append(f"缺少 {marker.strip()}")
+    else:
         next_def = text.find("\n    def ", start + len(marker))
         body = text[start:] if next_def < 0 else text[start:next_def]
+        if "replace_qt_active_items_from_payload(" not in body:
+            offenders.append(f"{marker.strip()} 未写入 SQLite qt_active_items 规范表")
         if "put_document(" in body or "_put_table_document" in body:
             offenders.append(f"{marker.strip()} 仍写回 json_documents")
-    sync_marker = "    def _sync_legacy_document_from_qt_items_unlocked(self) -> None:"
-    sync_start = text.find(sync_marker)
-    if sync_start >= 0:
-        next_def = text.find("\n    def ", sync_start + len(sync_marker))
-        sync_body = text[sync_start:] if next_def < 0 else text[sync_start:next_def]
-        if "return None" not in sync_body:
-            offenders.append("_sync_legacy_document_from_qt_items_unlocked 不再是 no-op")
     return not offenders, offenders
 
 
@@ -1341,175 +1383,38 @@ def check_notice_type_mappings() -> tuple[bool, list[str]]:
         actual_fields = tuple(template.get("fields") or ())
         if actual_fields != expected_fields[work_type]:
             errors.append(f"{work_type} 模板字段顺序不符合六类通告合同")
-    frontend_template_path = (
-        BIN_DIR / "lan_bitable_template_portal" / "frontend" / "src" / "noticeTemplates.ts"
-    )
+    lite_path = BIN_DIR / "lan_bitable_template_portal" / "workbench_lite.py"
     try:
-        frontend_text = frontend_template_path.read_text(
-            encoding="utf-8", errors="ignore"
-        )
+        lite_text = lite_path.read_text(encoding="utf-8", errors="ignore")
     except Exception as exc:
-        errors.append(f"读取 noticeTemplates.ts 失败: {exc}")
+        errors.append(f"读取 workbench_lite.py 失败: {exc}")
         return not errors, errors
-
-    frontend_required_labels = {
-        "fault_type": "故障类型",
-        "repair_mode": "维修方式",
-        "discovery": "故障发现方式",
-        "symptom": "故障现象",
-    }
-    for field_name, label in frontend_required_labels.items():
-        if f'{field_name}: "{label}"' not in frontend_text:
-            errors.append(f"noticeTemplates.ts 缺少 {field_name} 的中文标签 {label}")
-
-    frontend_message_fields = {
-        work_type: [field for _label, field in fields]
-        for work_type, fields in expected_fields.items()
-    }
-    frontend_message_fields["maintenance"] = [
-        "title",
-        "start_time",
-        "end_time",
-        "location",
-        "content",
-        "reason",
-        "impact",
-        "progress",
-    ]
-    frontend_message_fields["change"] = [
-        "title",
-        "level",
-        "start_time",
-        "end_time",
-        "location",
-        "content",
-        "reason",
-        "impact",
-        "progress",
-    ]
-    frontend_message_fields["repair"] = [
-        "title",
-        "location",
-        "level",
-        "specialty",
-        "end_time",
-        "start_time",
-        "repair_device",
-        "repair_fault",
-        "fault_type",
-        "repair_mode",
-        "impact",
-        "discovery",
-        "symptom",
-        "reason",
-        "solution",
-        "spare_parts",
-        "progress",
-    ]
-    frontend_message_fields["power"] = [
-        "title",
-        "start_time",
-        "end_time",
-        "cabinet",
-        "quantity",
-        "progress",
-    ]
-    frontend_message_fields["polling"] = [
-        "title",
-        "start_time",
-        "end_time",
-        "device",
-        "content",
-        "impact",
-        "progress",
-    ]
-    frontend_message_fields["adjust"] = [
-        "title",
-        "start_time",
-        "end_time",
-        "location",
-        "content",
-        "reason",
-        "impact",
-        "progress",
-    ]
-    for work_type, heading in expected_headings.items():
-        block_match = re.search(
-            rf"\b{re.escape(work_type)}:\s*\{{(?P<body>.*?)\n\s*\}},",
-            frontend_text,
-            re.S,
-        )
-        if not block_match:
-            errors.append(f"noticeTemplates.ts 缺少 {work_type} 模板")
-            continue
-        body = block_match.group("body")
-        if f'heading: "{heading}"' not in body:
-            errors.append(f"noticeTemplates.ts {work_type} heading 不一致")
-        expected_fields_text = (
-            "messageFields: ["
-            + ", ".join(f'"{field}"' for field in frontend_message_fields[work_type])
-            + "]"
-        )
-        compact_body = re.sub(r"\s+", "", body).replace(",]", "]")
-        compact_expected = re.sub(r"\s+", "", expected_fields_text).replace(",]", "]")
-        if compact_expected not in compact_body:
-            errors.append(f"noticeTemplates.ts {work_type} messageFields 顺序不一致")
-    frontend_keyword_rules = {
-        "maintenance": ("维保", "维护"),
-        "change": ("变更",),
-        "repair": ("检修", "维修"),
-        "power": ("上电", "下电", "上下电"),
-        "polling": ("轮巡",),
-        "adjust": ("调整",),
-    }
-    for work_type, keywords in frontend_keyword_rules.items():
-        rule_match = re.search(
-            rf"\b{re.escape(work_type)}:\s*\[(?P<body>.*?)\]",
-            frontend_text,
-            re.S,
-        )
-        if not rule_match:
-            errors.append(f"noticeTemplates.ts 缺少 {work_type} 关键词规则")
-            continue
-        body = rule_match.group("body")
-        for keyword in keywords:
-            if keyword not in body:
-                errors.append(f"noticeTemplates.ts {work_type} 关键词规则缺少 {keyword}")
-    app_vue_path = (
-        BIN_DIR / "lan_bitable_template_portal" / "frontend" / "src" / "App.vue"
-    )
-    try:
-        app_vue_text = app_vue_path.read_text(encoding="utf-8", errors="ignore")
-    except Exception as exc:
-        errors.append(f"读取 App.vue 失败: {exc}")
-        return not errors, errors
-    if "draft.parsed_work_type = type" not in app_vue_text:
-        errors.append("解析粘贴草稿未记录 parsed_work_type，类型误选防线可能失效")
-    if "draft.parsed_work_type" not in app_vue_text or "parsedType !== expectedType" not in app_vue_text:
-        errors.append("发送前类型冲突校验未覆盖解析粘贴原始类型")
+    for marker in (
+        "def _pasted_work_type",
+        "if \"变更通告\" in source:",
+        "return \"change\"",
+        "parse_pasted_notice_to_draft",
+        "parsed_action",
+    ):
+        if marker not in lite_text:
+            errors.append(f"轻量工作台解析粘贴链路缺少 {marker}")
+    for label in ("故障类型", "维修方式", "故障发现方式", "故障现象", "备件更换情况"):
+        if label not in lite_text:
+            errors.append(f"轻量工作台表单缺少检修中文字段 {label}")
+    for forbidden in ("【设备变更】", "设备变更"):
+        if forbidden in lite_text:
+            errors.append(f"轻量工作台仍包含旧变更文案 {forbidden}")
     return not errors, errors
 
 
 def check_target_candidate_match_reason() -> tuple[bool, list[str]]:
     service_path = BIN_DIR / "lan_bitable_template_portal" / "portal_service.py"
-    frontend_path = (
-        BIN_DIR
-        / "lan_bitable_template_portal"
-        / "frontend"
-        / "src"
-        / "components"
-        / "TargetRecordSelectionModal.vue"
-    )
     qt_path = BIN_DIR / "upload_event_module" / "ui" / "main_window_workflow.py"
     errors: list[str] = []
     try:
         service_text = service_path.read_text(encoding="utf-8", errors="ignore")
     except Exception as exc:
         return False, [f"读取 portal_service.py 失败: {exc}"]
-    try:
-        frontend_text = frontend_path.read_text(encoding="utf-8", errors="ignore")
-    except Exception as exc:
-        return False, [f"读取 TargetRecordSelectionModal.vue 失败: {exc}"]
     try:
         qt_text = qt_path.read_text(encoding="utf-8", errors="ignore")
     except Exception as exc:
@@ -1521,8 +1426,6 @@ def check_target_candidate_match_reason() -> tuple[bool, list[str]]:
     for marker in ('"returned_count"', '"total_matched"', '"limited"'):
         if marker not in service_text:
             errors.append(f"目标候选返回结构缺少 {marker}")
-    if "item.match_reason" not in frontend_text:
-        errors.append("Vue 目标记录选择弹窗未展示 match_reason")
     if "candidate.get(\"match_reason\")" not in qt_text:
         errors.append("Qt 目标记录选择弹窗未展示 match_reason")
     return not errors, errors
@@ -1616,6 +1519,13 @@ def main() -> int:
         failures.append(
             "Vue 前端实时连接必须支持多标签降噪和隐藏页释放连接: "
             + ", ".join(frontend_realtime_offenders[:20])
+        )
+
+    ok, frontend_freeze_offenders = check_frontend_freeze_guards()
+    if not ok:
+        failures.append(
+            "Vue 前端通告提交和列表渲染必须具备防卡顿保护: "
+            + ", ".join(frontend_freeze_offenders[:20])
         )
 
     ok, frontend_skin_offenders = check_frontend_vnet_skin()

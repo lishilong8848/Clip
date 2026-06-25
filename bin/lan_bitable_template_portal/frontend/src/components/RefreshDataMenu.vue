@@ -15,66 +15,20 @@
         <strong>低频刷新数据</strong>
         <small>只读取最新快照，不发送通告；失败不会清空页面。</small>
       </div>
-      <template v-if="eventMode">
-        <button
-          class="refresh-option"
-          type="button"
-          role="menuitem"
-          :disabled="eventRefreshing || cooldownEvent"
-          :title="eventTitle"
-          @click="emitRefresh('refresh-event')"
-        >
-          <span>
-            <strong>刷新事件</strong>
-            <small>{{ optionHint("查找本月最新事件记录", eventRefreshing, cooldownEvent, eventTitle) }}</small>
-          </span>
-          <b>{{ eventRefreshing ? "读取中" : cooldownEvent ? "稍后再试" : "读取" }}</b>
-        </button>
-      </template>
-      <template v-else>
-        <button
-          class="refresh-option"
-          type="button"
-          role="menuitem"
-          :disabled="loading || cooldownWorkbench"
-          :title="workbenchTitle"
-          @click="emitRefresh('refresh-workbench')"
-        >
-          <span>
-            <strong>刷新本页</strong>
-            <small>{{ optionHint("重新显示当前楼栋数据", loading, cooldownWorkbench, workbenchTitle) }}</small>
-          </span>
-          <b>{{ loading ? "刷新中" : cooldownWorkbench ? "稍后再试" : "刷新" }}</b>
-        </button>
-        <button
-          class="refresh-option"
-          type="button"
-          role="menuitem"
-          :disabled="repairRefreshing || cooldownRepair"
-          :title="repairTitle"
-          @click="emitRefresh('refresh-repair')"
-        >
-          <span>
-            <strong>刷新检修</strong>
-            <small>{{ optionHint("刚新建的检修没出现时使用", repairRefreshing, cooldownRepair, repairTitle) }}</small>
-          </span>
-          <b>{{ repairRefreshing ? "读取中" : cooldownRepair ? "稍后再试" : "读取" }}</b>
-        </button>
-        <button
-          class="refresh-option"
-          type="button"
-          role="menuitem"
-          :disabled="changeRefreshing || cooldownChange"
-          :title="changeTitle"
-          @click="emitRefresh('refresh-change')"
-        >
-          <span>
-            <strong>刷新变更</strong>
-            <small>{{ optionHint("刚新建的变更没出现时使用", changeRefreshing, cooldownChange, changeTitle) }}</small>
-          </span>
-          <b>{{ changeRefreshing ? "读取中" : cooldownChange ? "稍后再试" : "读取" }}</b>
-        </button>
-      </template>
+      <button
+        class="refresh-option"
+        type="button"
+        role="menuitem"
+        :disabled="eventRefreshing || cooldownEvent"
+        :title="eventTitle"
+        @click="emitRefresh"
+      >
+        <span>
+          <strong>刷新事件</strong>
+          <small>{{ optionHint("查找本月最新事件记录", eventRefreshing, cooldownEvent, eventTitle) }}</small>
+        </span>
+        <b>{{ eventRefreshing ? "读取中" : cooldownEvent ? "稍后再试" : "读取" }}</b>
+      </button>
     </div>
   </div>
 </template>
@@ -84,37 +38,21 @@ import { onBeforeUnmount, ref, watch } from "vue";
 
 const props = defineProps<{
   open: boolean;
-  loading?: boolean;
-  repairRefreshing?: boolean;
-  changeRefreshing?: boolean;
   eventRefreshing?: boolean;
-  eventMode?: boolean;
-  cooldownWorkbench?: boolean;
-  cooldownRepair?: boolean;
-  cooldownChange?: boolean;
   cooldownEvent?: boolean;
-  workbenchTitle?: string;
-  repairTitle?: string;
-  changeTitle?: string;
   eventTitle?: string;
 }>();
 
 const emit = defineEmits<{
   "update:open": [value: boolean];
-  "refresh-workbench": [];
-  "refresh-repair": [];
-  "refresh-change": [];
   "refresh-event": [];
 }>();
 
 const rootRef = ref<HTMLElement | null>(null);
 let listenersAttached = false;
 
-function emitRefresh(eventName: "refresh-workbench" | "refresh-repair" | "refresh-change" | "refresh-event"): void {
-  if (eventName === "refresh-workbench") emit("refresh-workbench");
-  else if (eventName === "refresh-repair") emit("refresh-repair");
-  else if (eventName === "refresh-change") emit("refresh-change");
-  else emit("refresh-event");
+function emitRefresh(): void {
+  emit("refresh-event");
   emit("update:open", false);
 }
 

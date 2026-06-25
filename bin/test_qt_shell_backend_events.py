@@ -12,6 +12,7 @@ from upload_event_module.ui.main_window_runtime import MainWindowRuntimeMixin  #
 from upload_event_module.ui.main_window_clipboard import MainWindowClipboardMixin  # noqa: E402
 from clipflow_backend.main import FastAPIPortalController  # noqa: E402
 from lan_bitable_template_portal.server import PortalRuntime  # noqa: E402
+from lan_bitable_template_portal.portal_service import MaintenancePortalService  # noqa: E402
 from lan_bitable_template_portal.state_store import LanPortalStateStore  # noqa: E402
 
 
@@ -232,6 +233,187 @@ class QtShellBackendEventTests(unittest.TestCase):
                 self.assertEqual(ongoing[0]["content"], "工程师对蓄电池进行测试")
                 self.assertEqual(ongoing[0]["impact"], "对IT业务无影响")
                 self.assertEqual(ongoing[0]["progress"], "准备工作已完成")
+            finally:
+                PortalRuntime.state_store = original_store
+
+    def test_event_clipboard_projection_reuses_existing_target_record_by_title(self):
+        first_text = (
+            "【事件通告】状态：开始\n"
+            "【标题】D楼直流屏系统总故障\n"
+            "【时间】2026-06-24 10:00"
+        )
+        update_text = (
+            "【事件通告】状态：更新\n"
+            "【标题】D楼直流屏系统总故障\n"
+            "【时间】2026-06-24 10:30"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            original_store = PortalRuntime.state_store
+            PortalRuntime.state_store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            try:
+                PortalRuntime.state_store.upsert_qt_active_item(
+                    {
+                        "active_item_id": "event-active-1",
+                        "record_id": "rec-event-target",
+                        "target_record_id": "rec-event-target",
+                        "notice_type": "事件通告",
+                        "work_type": "event",
+                        "title": "D楼直流屏系统总故障",
+                        "text": first_text,
+                        "_is_placeholder_record": False,
+                    },
+                    section="event",
+                    origin="clipboard",
+                )
+
+                entry = FastAPIPortalController._clipboard_entry_from_content(update_text)
+                self.assertIsNotNone(entry)
+                result = FastAPIPortalController._project_clipboard_entry_to_active(entry or {})
+
+                self.assertEqual(result["active_item_id"], "event-active-1")
+                self.assertEqual(result["record_id"], "rec-event-target")
+                items = PortalRuntime.state_store.list_qt_active_items()
+                self.assertEqual(len(items), 1)
+                self.assertEqual(items[0]["active_item_id"], "event-active-1")
+                self.assertEqual(items[0]["record_id"], "rec-event-target")
+                payload = items[0]["payload"]
+                self.assertEqual(payload["target_record_id"], "rec-event-target")
+                self.assertIn("状态：更新", payload["text"])
+            finally:
+                PortalRuntime.state_store = original_store
+
+    def test_qt_upload_result_binds_backend_active_item_before_next_update_projection(self):
+        first_text = (
+            "【事件通告】状态：开始\n"
+            "【标题】D楼直流屏系统总故障\n"
+            "【时间】2026-06-24 10:00"
+        )
+        update_text = (
+            "【事件通告】状态：更新\n"
+            "【标题】D楼直流屏系统总故障\n"
+            "【时间】2026-06-24 10:30"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            original_store = PortalRuntime.state_store
+            original_service = PortalRuntime.service
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            service = MaintenancePortalService()
+            service._state_store = store
+            PortalRuntime.state_store = store
+            PortalRuntime.service = service
+            try:
+                store.upsert_qt_active_item(
+                    {
+                        "active_item_id": "event-active-1",
+                        "record_id": "local_event_active_1",
+                        "target_record_id": "",
+                        "notice_type": "事件通告",
+                        "work_type": "event",
+                        "title": "D楼直流屏系统总故障",
+                        "text": first_text,
+                        "_is_placeholder_record": True,
+                    },
+                    section="event",
+                    origin="clipboard",
+                )
+                service._jobs["qt-job-1"] = {
+                    "job_id": "qt-job-1",
+                    "phase": "uploading",
+                    "prepared": {
+                        "action": "start",
+                        "active_item_id": "event-active-1",
+                        "record_id": "local_event_active_1",
+                        "notice_type": "事件通告",
+                        "work_type": "event",
+                        "title": "D楼直流屏系统总故障",
+                        "text": first_text,
+                    },
+                }
+
+                controller = FastAPIPortalController()
+                controller.mark_job_upload_result(
+                    "qt-job-1",
+                    success=True,
+                    message="rec-event-target",
+                    record_id="rec-event-target",
+                    active_item_id="event-active-1",
+                )
+
+                items = store.list_qt_active_items()
+                self.assertEqual(len(items), 1)
+                self.assertEqual(items[0]["record_id"], "rec-event-target")
+                payload = items[0]["payload"]
+                self.assertEqual(payload["record_id"], "rec-event-target")
+                self.assertEqual(payload["target_record_id"], "rec-event-target")
+                self.assertFalse(payload["_is_placeholder_record"])
+
+                entry = FastAPIPortalController._clipboard_entry_from_content(update_text)
+                self.assertIsNotNone(entry)
+                result = FastAPIPortalController._project_clipboard_entry_to_active(entry or {})
+                self.assertEqual(result["active_item_id"], "event-active-1")
+                self.assertEqual(result["record_id"], "rec-event-target")
+                payload = result["item"]["payload"]
+                self.assertEqual(payload["target_record_id"], "rec-event-target")
+                self.assertNotIn("local_event_active_1", payload["record_id"])
+            finally:
+                PortalRuntime.state_store = original_store
+                PortalRuntime.service = original_service
+
+    def test_local_qt_upload_remember_target_updates_backend_active_item(self):
+        first_text = (
+            "【事件通告】状态：开始\n"
+            "【标题】D楼直流屏系统总故障\n"
+            "【时间】2026-06-24 10:00"
+        )
+        update_text = (
+            "【事件通告】状态：更新\n"
+            "【标题】D楼直流屏系统总故障\n"
+            "【时间】2026-06-24 10:30"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            original_store = PortalRuntime.state_store
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            PortalRuntime.state_store = store
+            try:
+                store.upsert_qt_active_item(
+                    {
+                        "active_item_id": "event-active-1",
+                        "record_id": "local_event_active_1",
+                        "target_record_id": "",
+                        "notice_type": "事件通告",
+                        "work_type": "event",
+                        "title": "D楼直流屏系统总故障",
+                        "text": first_text,
+                        "_is_placeholder_record": True,
+                    },
+                    section="event",
+                    origin="clipboard",
+                )
+
+                PortalRuntime._remember_local_upload_target(
+                    {
+                        "active_item_id": "event-active-1",
+                        "record_id": "local_event_active_1",
+                        "notice_type": "事件通告",
+                        "work_type": "event",
+                        "title": "D楼直流屏系统总故障",
+                        "text": first_text,
+                        "_is_placeholder_record": True,
+                    },
+                    notice_type="事件通告",
+                    target_record_id="rec-event-target",
+                )
+
+                items = store.list_qt_active_items()
+                self.assertEqual(len(items), 1)
+                self.assertEqual(items[0]["record_id"], "rec-event-target")
+                self.assertEqual(items[0]["payload"]["target_record_id"], "rec-event-target")
+
+                entry = FastAPIPortalController._clipboard_entry_from_content(update_text)
+                self.assertIsNotNone(entry)
+                result = FastAPIPortalController._project_clipboard_entry_to_active(entry or {})
+                self.assertEqual(result["active_item_id"], "event-active-1")
+                self.assertEqual(result["record_id"], "rec-event-target")
             finally:
                 PortalRuntime.state_store = original_store
 

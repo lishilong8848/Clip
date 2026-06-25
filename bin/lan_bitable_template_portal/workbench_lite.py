@@ -1,0 +1,2848 @@
+# -*- coding: utf-8 -*-
+from __future__ import annotations
+
+import datetime as dt
+import html
+import json
+import re
+from typing import Any
+from urllib.parse import urlencode
+
+
+WORK_TYPE_LABELS: dict[str, str] = {
+    "maintenance": "维保",
+    "change": "变更",
+    "repair": "检修",
+    "power": "上电",
+    "polling": "轮巡",
+    "adjust": "调整",
+}
+
+NOTICE_TYPE_BY_WORK_TYPE: dict[str, str] = {
+    "maintenance": "维保通告",
+    "change": "变更通告",
+    "repair": "设备检修",
+    "power": "上电通告",
+    "polling": "设备轮巡",
+    "adjust": "设备调整",
+}
+
+SPECIALTY_OPTIONS = ("电气", "暖通", "消防", "弱电")
+MAINTENANCE_CYCLE_OPTIONS = ("/", "月度", "季度", "半年度", "年度", "非计划性")
+SITE_PHOTO_REQUIRED_WORK_TYPES = {"maintenance", "change", "repair"}
+BINDABLE_TARGET_WORK_TYPES = {"maintenance", "change", "repair", "power", "polling", "adjust"}
+BUILDING_SCOPE_CODES = ("110", "A", "B", "C", "D", "E", "H")
+
+
+def _e(value: Any) -> str:
+    return html.escape(str(value if value is not None else ""), quote=True)
+
+
+def _json_dumps(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _to_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _field(record: dict[str, Any], *names: str) -> str:
+    fields = record.get("display_fields") if isinstance(record.get("display_fields"), dict) else {}
+    for name in names:
+        value = fields.get(name)
+        if isinstance(value, list):
+            value = "、".join(str(item or "").strip() for item in value if str(item or "").strip())
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _first(*values: Any) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _work_type(value: Any) -> str:
+    text = str(value or "maintenance").strip()
+    return text if text in WORK_TYPE_LABELS else "maintenance"
+
+
+def _record_key(record: dict[str, Any]) -> str:
+    return f"{_work_type(record.get('work_type'))}:{record.get('record_id') or record.get('source_record_id') or ''}"
+
+
+def _source_id(record: dict[str, Any] | None) -> str:
+    if not isinstance(record, dict):
+        return ""
+    return str(record.get("source_record_id") or record.get("record_id") or "").strip()
+
+
+def _record_building_code(record: dict[str, Any], title: str = "") -> str:
+    values: list[str] = []
+    raw_codes = record.get("building_codes")
+    if isinstance(raw_codes, list):
+        values.extend(str(item or "") for item in raw_codes)
+    values.extend(
+        [
+            str(record.get("building_code") or ""),
+            str(record.get("scope") or ""),
+            _field(record, "楼栋", "变更楼栋", "所属数据中心/楼栋-使用"),
+            str(record.get("building") or ""),
+            str(title or ""),
+        ]
+    )
+    text = " ".join(value.strip() for value in values if value and value.strip()).upper()
+    if "110" in text:
+        return "110"
+    match = re.search(r"[ABCDEH]", text)
+    return match.group(0) if match else ""
+
+
+def _maintenance_prefixed_title(record: dict[str, Any], raw_title: str) -> str:
+    title = str(raw_title or "").strip()
+    if not title:
+        return ""
+    code = _record_building_code(record, title)
+    if code == "110":
+        prefix = "EA118-110KV阿里中天变"
+        if title.startswith(prefix):
+            return title
+        title = re.sub(
+            r"^EA118\s*(?:机房)?\s*[-－]?\s*110\s*(?:站|KV|千伏)?\s*",
+            "",
+            title,
+            flags=re.I,
+        ).strip()
+        title = re.sub(r"^110\s*(?:站|KV|千伏)?\s*", "", title, flags=re.I).strip()
+        return f"{prefix}{title}".strip()
+    if code in BUILDING_SCOPE_CODES:
+        prefix = f"EA118机房{code}楼"
+        if title.startswith(prefix):
+            return title
+        title = re.sub(
+            r"^EA118\s*(?:机房)?\s*[ABCDEH]\s*[楼栋]?\s*",
+            "",
+            title,
+            flags=re.I,
+        ).strip()
+        title = re.sub(r"^[ABCDEH]\s*[楼栋]\s*", "", title, flags=re.I).strip()
+        return f"{prefix}{title}".strip()
+    return title
+
+
+def _record_title(record: dict[str, Any]) -> str:
+    work_type = _work_type(record.get("work_type"))
+    if work_type == "change":
+        return _first(
+            record.get("title"),
+            _field(record, "变更简述", "名称", "标题"),
+            record.get("record_id"),
+        )
+    if work_type == "repair":
+        return _first(
+            record.get("title"),
+            _field(record, "检修通告名称", "维修名称", "标题"),
+            record.get("record_id"),
+        )
+    title = _first(
+        record.get("title"),
+        _field(record, "维护总项", "名称", "标题", "手动标题"),
+        record.get("record_id"),
+    )
+    return _maintenance_prefixed_title(record, title)
+
+
+def _record_building(record: dict[str, Any]) -> str:
+    return _first(
+        record.get("building"),
+        _field(record, "楼栋", "变更楼栋", "所属数据中心/楼栋-使用"),
+    )
+
+
+def _record_specialty(record: dict[str, Any]) -> str:
+    return _first(record.get("specialty"), _field(record, "专业类别", "专业", "所属专业"))
+
+
+def _record_progress(record: dict[str, Any]) -> str:
+    return _first(
+        record.get("source_progress"),
+        record.get("source_status"),
+        record.get("status"),
+        _field(record, "维护实施状态", "变更进度", "维修开始时间"),
+        "未开始",
+    )
+
+
+def _meta_chip(value: Any, *, tone: str = "") -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    tone_class = f" {tone}" if tone else ""
+    return f"<small class=\"meta-chip{tone_class}\">{_e(text)}</small>"
+
+
+def _row_meta(*values: Any, progress: Any = "", extra_chips: list[str] | None = None) -> str:
+    chips = []
+    progress_text = str(progress or "").strip()
+    if progress_text:
+        tone = "ready" if any(flag in progress_text for flag in ("未开始", "延期未开始", "进行中")) else "muted"
+        chips.append(_meta_chip(progress_text, tone=tone))
+    chips.extend(extra_chips or [])
+    for value in values:
+        chips.append(_meta_chip(value))
+    chips = [item for item in chips if item]
+    return f"<span class=\"row-meta\">{''.join(chips)}</span>"
+
+
+def _progress_tone(progress: Any) -> str:
+    text = str(progress or "").strip()
+    if any(flag in text for flag in ("失败", "异常", "不可")):
+        return "danger"
+    if "未结束" not in text and any(flag in text for flag in ("已结束", "正常结束", "延期结束", "结束", "闭环", "已完成")):
+        return "done"
+    if "进行中" in text:
+        return "working"
+    if any(flag in text for flag in ("延期未开始", "未开始")):
+        return "ready"
+    return "muted"
+
+
+def _progress_badge(progress: Any) -> str:
+    text = str(progress or "").strip() or "未开始"
+    return f"<span class=\"row-status {_e(_progress_tone(text))}\">{_e(text)}</span>"
+
+
+def _record_disabled_reason(progress: Any) -> str:
+    text = str(progress or "").strip()
+    if "未结束" not in text and any(flag in text for flag in ("已结束", "正常结束", "延期结束", "结束", "闭环", "已完成")):
+        return "该事项已结束，只保留查看状态，不可再次发起。"
+    return ""
+
+
+def _record_sort_key(record: dict[str, Any]) -> tuple[int, str, str]:
+    progress = _record_progress(record)
+    title = _record_title(record)
+    if "延期未开始" in progress:
+        priority = 0
+    elif "未开始" in progress:
+        priority = 1
+    elif "进行中" in progress or "未结束" in progress:
+        priority = 2
+    elif any(flag in progress for flag in ("失败", "异常", "待处理")):
+        priority = 3
+    elif _record_disabled_reason(progress):
+        priority = 9
+    else:
+        priority = 5
+    return priority, title, str(record.get("record_id") or record.get("source_record_id") or "")
+
+
+def _record_cycle(record: dict[str, Any]) -> str:
+    return _first(
+        record.get("maintenance_cycle"),
+        _field(record, "维保周期", "维护周期"),
+    )
+
+
+def _maintenance_cycle_chip(record: dict[str, Any], work_type: str) -> str:
+    if _work_type(work_type or record.get("work_type")) != "maintenance":
+        return ""
+    cycle = _record_cycle(record)
+    if not cycle:
+        return _meta_chip("周期未填", tone="warn")
+    if cycle == "/":
+        return _meta_chip("周期 /", tone="ready")
+    return _meta_chip(f"周期 {cycle}", tone="ready")
+
+
+def _truthy_display(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().lower()
+    return text in {"1", "true", "yes", "y", "已上传", "上传成功", "success", "done", "ok"}
+
+
+def _attachment_count(value: Any) -> int:
+    if isinstance(value, list):
+        return sum(1 for item in value if item)
+    if isinstance(value, tuple):
+        return sum(1 for item in value if item)
+    if isinstance(value, dict):
+        if isinstance(value.get("files"), list):
+            return _attachment_count(value.get("files"))
+        if isinstance(value.get("attachments"), list):
+            return _attachment_count(value.get("attachments"))
+        return 1 if any(str(value.get(key) or "").strip() for key in ("file_token", "token", "upload_id", "name", "url")) else 0
+    return 1 if str(value or "").strip() else 0
+
+
+def _site_photo_count(record: dict[str, Any]) -> int:
+    for key in ("site_photo_count", "site_photos_count", "extra_image_count"):
+        count = _to_int(record.get(key), -1)
+        if count >= 0:
+            return count
+    fields = record.get("display_fields") if isinstance(record.get("display_fields"), dict) else {}
+    count = 0
+    for key in ("extra_images", "site_photos", "process_site_images"):
+        count += _attachment_count(record.get(key))
+    for key in ("过程现场图片", "现场图片"):
+        count += _attachment_count(fields.get(key))
+    return count
+
+
+def _site_photo_chip(record: dict[str, Any], work_type: str) -> str:
+    if _work_type(work_type or record.get("work_type")) not in SITE_PHOTO_REQUIRED_WORK_TYPES:
+        return ""
+    count = _site_photo_count(record)
+    if count > 0:
+        return _meta_chip(f"现场图{count}张", tone="success")
+    return _meta_chip("现场图未传", tone="warn")
+
+
+def _site_photo_uploader(work_type: str, existing_count: int) -> str:
+    work = _work_type(work_type)
+    if work not in SITE_PHOTO_REQUIRED_WORK_TYPES:
+        return ""
+    count = max(0, _to_int(existing_count, 0))
+    status_text = (
+        f"已累计 {count} 张，结束时满足现场照片要求。"
+        if count > 0
+        else "开始、更新、结束任意一次上传 1 张现场照片后，即可满足结束要求。"
+    )
+    return f"""
+        <section class="site-photo-panel" data-site-photo-panel data-existing-count="{_e(count)}">
+          <input type="hidden" name="site_photos_json" value="[]">
+          <header class="site-photo-head">
+            <div>
+              <strong>现场照片</strong>
+              <span>仅维保、变更、检修需要；用于多维表“过程现场图片”。</span>
+            </div>
+            <b id="lite-site-photo-badge">{_e('已满足' if count > 0 else '待添加')}</b>
+          </header>
+          <div class="site-photo-upload">
+            <label class="site-photo-drop" for="lite-site-photo-input" tabindex="0">
+              <input id="lite-site-photo-input" type="file" accept="image/*" multiple>
+              <span>点击 / 拖入 / Ctrl+V 粘贴现场照片</span>
+              <small>支持截图粘贴、多张图片，单张不超过 8MB</small>
+            </label>
+            <div class="site-photo-side">
+              <span id="lite-site-photo-status">{_e(status_text)}</span>
+              <div id="lite-site-photo-list" class="site-photo-list" aria-live="polite"></div>
+            </div>
+          </div>
+        </section>
+    """
+
+
+def _mop_status_info(record: dict[str, Any], work_type: str) -> tuple[str, str]:
+    if _work_type(work_type or record.get("work_type")) != "maintenance":
+        return "", ""
+    fields = record.get("display_fields") if isinstance(record.get("display_fields"), dict) else {}
+    engineer_confirmed = _truthy_display(record.get("mop_engineer_confirmed")) or _truthy_display(fields.get("工程师确认"))
+    supervisor_confirmed = _truthy_display(record.get("mop_supervisor_confirmed")) or _truthy_display(fields.get("主管确认"))
+    uploaded_keys = (
+        "mop_uploaded",
+        "mop_uploaded_at",
+        "mop_upload_status",
+        "mop_attachment_count",
+        "mop_file_token",
+        "maintenance_sheet_uploaded",
+    )
+    if any(key in record for key in uploaded_keys) or fields.get("维护保养单"):
+        uploaded = (
+            _truthy_display(record.get("mop_uploaded"))
+            or bool(str(record.get("mop_uploaded_at") or "").strip())
+            or "成功" in str(record.get("mop_upload_status") or "")
+            or _to_int(record.get("mop_attachment_count"), 0) > 0
+            or bool(str(record.get("mop_file_token") or "").strip())
+            or bool(fields.get("维护保养单"))
+        )
+        if uploaded and engineer_confirmed and supervisor_confirmed:
+            return "MOP源表已确认", "success"
+        if uploaded:
+            return "MOP已上传", "success"
+        return "MOP未上传", "warn"
+    if _truthy_display(record.get("mop_filled")) or str(record.get("mop_filled_at") or "").strip():
+        return "MOP已填写未上传", "warn"
+    if _first(
+        record.get("mop_title"),
+        record.get("mop_attachment_name"),
+        record.get("mop_record_id"),
+        record.get("mop_binding"),
+    ):
+        return "MOP已绑定未填写", "ready"
+    return "MOP未绑定", "muted"
+
+
+def _mop_status_text(record: dict[str, Any], work_type: str) -> str:
+    text, _tone = _mop_status_info(record, work_type)
+    return text
+
+
+def _mop_status_chip(record: dict[str, Any], work_type: str) -> str:
+    text, tone = _mop_status_info(record, work_type)
+    return _meta_chip(text, tone=tone)
+
+
+def _memory_status_chip(record: dict[str, Any]) -> str:
+    memory = record.get("memory") if isinstance(record.get("memory"), dict) else {}
+    if (
+        _truthy_display(record.get("memory_applied"))
+        or _truthy_display(record.get("notice_memory_applied"))
+        or bool(memory)
+        or bool(str(record.get("memory_key") or "").strip())
+    ):
+        return _meta_chip("已用历史记忆", tone="success")
+    if str(record.get("memory_status") or "").strip() in {"missing", "none", "未匹配"}:
+        return _meta_chip("无历史记忆", tone="muted")
+    return ""
+
+
+def _source_mode_chip(record: dict[str, Any], *, ongoing: bool = False) -> str:
+    if _source_id(record):
+        return _meta_chip("源表事项", tone="source")
+    if ongoing or record.get("active_item_id") or record.get("manual"):
+        return _meta_chip("纯手填/复制", tone="manual")
+    return ""
+
+
+def _record_extra_chips(record: dict[str, Any], work_type: str, *, ongoing: bool = False) -> list[str]:
+    chips = [
+        _maintenance_cycle_chip(record, work_type),
+        _site_photo_chip(record, work_type),
+        _mop_status_chip(record, work_type),
+        _memory_status_chip(record),
+        _source_mode_chip(record, ongoing=ongoing),
+    ]
+    return [chip for chip in chips if chip]
+
+
+def _action_for_record(record: dict[str, Any]) -> str:
+    progress = _record_progress(record)
+    return "start" if "未开始" in progress or not progress else "update"
+
+
+def _query_url(path: str, **params: Any) -> str:
+    clean = {
+        key: str(value)
+        for key, value in params.items()
+        if value is not None and str(value) != ""
+    }
+    return f"{path}?{urlencode(clean)}" if clean else path
+
+
+def _manual_url(scope: str, work_type: str) -> str:
+    return _query_url("/workbench-lite", scope=scope, work_type=work_type, manual="1")
+
+
+def _datetime_local(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = text.replace("T", " ")
+    try:
+        parsed = dt.datetime.fromisoformat(text[:16])
+        return parsed.strftime("%Y-%m-%dT%H:%M")
+    except Exception:
+        return text[:16].replace(" ", "T")
+
+
+def _normalize_notice_label(label: str) -> str:
+    return str(label or "").replace(" ", "").replace("\t", "").replace("：", "").replace(":", "")
+
+
+def _parse_notice_sections(text: str) -> dict[str, str]:
+    sections: dict[str, str] = {}
+    pattern = re.compile(r"【([^】]+)】([\s\S]*?)(?=(?:\n\s*)*【[^】]+】|$)")
+    for match in pattern.finditer(str(text or "")):
+        sections[_normalize_notice_label(match.group(1))] = str(match.group(2) or "").strip()
+    return sections
+
+
+def _section_value(sections: dict[str, str], *names: str) -> str:
+    for name in names:
+        value = sections.get(_normalize_notice_label(name), "")
+        if str(value or "").strip():
+            return str(value).strip()
+    return ""
+
+
+def _to_datetime_local(text: str) -> str:
+    value = str(text or "").strip()
+    if not value:
+        return ""
+    value = value.replace("T", " ")
+    patterns = [
+        r"(\d{4})[年/-](\d{1,2})[月/-](\d{1,2})日?\D+(\d{1,2})[：:点时.](\d{1,2})?",
+        r"(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{1,2})",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, value)
+        if not match:
+            continue
+        return (
+            f"{match.group(1)}-{match.group(2).zfill(2)}-{match.group(3).zfill(2)}"
+            f"T{match.group(4).zfill(2)}:{(match.group(5) or '00').zfill(2)}"
+        )
+    return ""
+
+
+def _split_notice_time_range(text: str) -> tuple[str, str]:
+    value = str(text or "").strip()
+    if not value:
+        return "", ""
+    same_day = re.search(
+        r"(\d{4}[年/-]\d{1,2}[月/-]\d{1,2}日?)\s*(\d{1,2}[：:点时.]\d{1,2})\s*(?:-|至|~|～|—|--)\s*(\d{1,2}[：:点时.]\d{1,2})",
+        value,
+    )
+    if same_day:
+        prefix = same_day.group(1)
+        return _to_datetime_local(f"{prefix} {same_day.group(2)}"), _to_datetime_local(f"{prefix} {same_day.group(3)}")
+    parts = [item.strip() for item in re.split(r"\s*(?:至|~|～|—|--|-)\s*", value, maxsplit=1) if item.strip()]
+    if len(parts) >= 2:
+        start = _to_datetime_local(parts[0])
+        end = _to_datetime_local(parts[1])
+        if not end and start:
+            date_prefix = re.search(r"(\d{4}[年/-]\d{1,2}[月/-]\d{1,2}日?)", parts[0])
+            clock = re.search(r"(\d{1,2}[：:点时.]\d{1,2})", parts[1])
+            if date_prefix and clock:
+                end = _to_datetime_local(f"{date_prefix.group(1)} {clock.group(1)}")
+        return start, end
+    matches = re.findall(r"\d{4}[年/-]\d{1,2}[月/-]\d{1,2}日?\s*\d{1,2}[：:点时.]\d{1,2}", value)
+    if len(matches) >= 2:
+        return _to_datetime_local(matches[0]), _to_datetime_local(matches[1])
+    return _to_datetime_local(value), ""
+
+
+def _pasted_work_type(text: str, sections: dict[str, str]) -> str:
+    title_text = "\n".join(
+        item for item in [
+            _section_value(sections, "名称", "标题", "通告名称", "维修名称"),
+            _section_value(sections, "内容"),
+        ] if item
+    )
+    raw = str(text or "")
+    head_match = re.match(r"^【[^】]+】", raw)
+    head_text = f"{head_match.group(0) if head_match else ''}\n{title_text}"
+    raw_head = "\n".join(raw.splitlines()[:5])
+    for source in (head_text, raw_head):
+        if re.search(r"设备检修|检修通告", source):
+            return "repair"
+        if re.search(r"上电通告|上下电通告|下电通告", source):
+            return "power"
+        if re.search(r"设备轮巡|轮巡通告", source):
+            return "polling"
+        if re.search(r"设备调整|调整通告", source):
+            return "adjust"
+        if "变更通告" in source:
+            return "change"
+    return "maintenance"
+
+
+def _pasted_action(text: str) -> str:
+    match = re.search(r"状态\s*[：:]\s*(开始|更新|结束)", str(text or ""))
+    status = match.group(1) if match else "开始"
+    if status == "更新":
+        return "update"
+    if status == "结束":
+        return "end"
+    return "start"
+
+
+def parse_pasted_notice_to_draft(text: str) -> tuple[str, str, dict[str, str]]:
+    sections = _parse_notice_sections(text)
+    work = _pasted_work_type(text, sections)
+    action = _pasted_action(text)
+    time_value = _section_value(sections, "时间")
+    start_time, end_time = _split_notice_time_range(time_value)
+    if work == "repair":
+        start_time = _to_datetime_local(_section_value(sections, "期望完成时间"))
+        end_time = _to_datetime_local(_section_value(sections, "发现故障时间"))
+    draft = {
+        "title": _section_value(sections, "名称", "标题", "通告名称", "维修名称"),
+        "level": _section_value(sections, "等级", "紧急程度"),
+        "start_time": start_time,
+        "end_time": end_time,
+        "location": _section_value(sections, "位置", "地点"),
+        "content": _section_value(sections, "内容"),
+        "reason": _section_value(sections, "原因", "故障原因"),
+        "impact": _section_value(sections, "影响", "影响范围"),
+        "progress": _section_value(sections, "进度", "完成情况"),
+        "specialty": _section_value(sections, "专业"),
+        "repair_device": _section_value(sections, "维修设备"),
+        "repair_fault": _section_value(sections, "维修故障"),
+        "fault_type": _section_value(sections, "故障类型"),
+        "repair_mode": _section_value(sections, "维修方式"),
+        "discovery": _section_value(sections, "故障发现方式"),
+        "symptom": _section_value(sections, "故障现象"),
+        "solution": _section_value(sections, "解决方案"),
+        "spare_parts": _section_value(sections, "备件更换情况"),
+        "device": _section_value(sections, "设备"),
+        "cabinet": _section_value(sections, "柜号"),
+        "quantity": _section_value(sections, "数量"),
+    }
+    return work, action, {key: value for key, value in draft.items() if str(value or "").strip()}
+
+
+def _draft_from_record(record: dict[str, Any], *, manual: bool = False, work_type: str = "") -> dict[str, str]:
+    work = _work_type(work_type or record.get("work_type"))
+    title = _record_title(record)
+    if manual:
+        title = ""
+    return {
+        "title": title,
+        "building": _record_building(record),
+        "specialty": _record_specialty(record),
+        "maintenance_cycle": _first(record.get("maintenance_cycle"), _field(record, "维护周期")),
+        "level": _first(record.get("level"), _field(record, "变更等级（阿里）", "紧急程度"), "I3" if work == "change" else ""),
+        "start_time": _datetime_local(_first(record.get("start_time"), _field(record, "计划开始时间", "计划开始", "变更开始日期（阿里）"))),
+        "end_time": _datetime_local(_first(record.get("end_time"), _field(record, "计划结束时间", "计划结束", "变更结束日期（阿里）"))),
+        "location": _first(record.get("location"), _field(record, "位置", "地点")),
+        "content": _first(record.get("content"), _field(record, "内容", "标题/补充内容", "标题补充内容")),
+        "reason": _first(record.get("reason"), _field(record, "原因", "故障原因", "故障维修原因")),
+        "impact": _first(record.get("impact"), _field(record, "影响", "影响范围")),
+        "progress": _first(record.get("progress"), _field(record, "进度", "维修进展描述", "当前维修进度"), "准备工作已完成，人员已就位，是否可以操作？"),
+        "repair_device": _first(record.get("repair_device"), _field(record, "维修设备")),
+        "repair_fault": _first(record.get("repair_fault"), _field(record, "维修故障", "故障维修原因")),
+        "fault_type": _first(record.get("fault_type"), _field(record, "故障类型"), "设备故障" if work == "repair" else ""),
+        "repair_mode": _first(record.get("repair_mode"), _field(record, "维修方式", "维修方", "供应商名称")),
+        "discovery": _first(record.get("discovery"), _field(record, "故障发现方式", "对应来源")),
+        "symptom": _first(record.get("symptom"), _field(record, "故障现象", "故障发生现象描述")),
+        "solution": _first(record.get("solution"), _field(record, "解决方案", "维修方案", "后续整改措施")),
+        "spare_parts": _first(record.get("spare_parts"), _field(record, "备件更换情况", "备件使用情况")),
+        "device": _first(record.get("device"), _field(record, "设备")),
+        "cabinet": _first(record.get("cabinet"), _field(record, "柜号")),
+        "quantity": _first(record.get("quantity"), _field(record, "数量")),
+    }
+
+
+def _input(
+    name: str,
+    label: str,
+    value: Any = "",
+    *,
+    textarea: bool = False,
+    input_type: str = "text",
+    datalist: str = "",
+) -> str:
+    if textarea:
+        return (
+            f"<label><span>{_e(label)}</span>"
+            f"<textarea name=\"{_e(name)}\" rows=\"1\">{_e(value)}</textarea></label>"
+        )
+    list_attr = f" list=\"{_e(datalist)}\"" if datalist else ""
+    return (
+        f"<label><span>{_e(label)}</span>"
+        f"<input name=\"{_e(name)}\" type=\"{_e(input_type)}\" value=\"{_e(value)}\"{list_attr}></label>"
+    )
+
+
+def _field_group(title: str, description: str, fields: list[str]) -> str:
+    if not fields:
+        return ""
+    return (
+        "<section class=\"form-section\">"
+        f"<header><strong>{_e(title)}</strong><span>{_e(description)}</span></header>"
+        f"<div class=\"form-grid\">{''.join(fields)}</div>"
+        "</section>"
+    )
+
+
+def _form_fields(work_type: str, draft: dict[str, str]) -> str:
+    notice_fields: list[str] = [
+        _input("title", "名称" if work_type not in {"repair", "polling"} else "标题", draft.get("title")),
+        _input("start_time", "开始时间" if work_type != "repair" else "期望完成时间", draft.get("start_time"), input_type="datetime-local"),
+        _input("end_time", "结束时间" if work_type != "repair" else "发现故障时间", draft.get("end_time"), input_type="datetime-local"),
+    ]
+    upload_fields: list[str] = [
+        _input("specialty", "专业", draft.get("specialty"), datalist="specialty-options"),
+    ]
+    if work_type == "maintenance":
+        upload_fields.append(_input("maintenance_cycle", "维保周期", draft.get("maintenance_cycle"), datalist="maintenance-cycle-options"))
+    if work_type in {"change", "repair"}:
+        notice_fields.append(_input("level", "等级" if work_type == "change" else "紧急程度", draft.get("level")))
+    if work_type in {"maintenance", "change", "adjust", "repair"}:
+        notice_fields.extend([
+            _input("location", "位置" if work_type != "repair" else "地点", draft.get("location")),
+            _input("content", "内容", draft.get("content"), textarea=True),
+            _input("reason", "原因" if work_type != "repair" else "故障原因", draft.get("reason"), textarea=True),
+            _input("impact", "影响" if work_type != "repair" else "影响范围", draft.get("impact"), textarea=True),
+        ])
+    if work_type == "repair":
+        notice_fields.extend([
+            _input("repair_device", "维修设备", draft.get("repair_device")),
+            _input("repair_fault", "维修故障", draft.get("repair_fault")),
+            _input("fault_type", "故障类型", draft.get("fault_type")),
+            _input("repair_mode", "维修方式", draft.get("repair_mode")),
+            _input("discovery", "故障发现方式", draft.get("discovery")),
+            _input("symptom", "故障现象", draft.get("symptom")),
+            _input("solution", "解决方案", draft.get("solution"), textarea=True),
+            _input("spare_parts", "备件更换情况", draft.get("spare_parts"), textarea=True),
+        ])
+    if work_type == "power":
+        notice_fields.extend([
+            _input("cabinet", "柜号", draft.get("cabinet")),
+            _input("quantity", "数量", draft.get("quantity")),
+        ])
+    if work_type == "polling":
+        notice_fields.extend([
+            _input("device", "设备", draft.get("device")),
+            _input("content", "内容", draft.get("content"), textarea=True),
+            _input("impact", "影响", draft.get("impact"), textarea=True),
+        ])
+    notice_fields.append(_input("progress", "进度" if work_type != "repair" else "完成情况", draft.get("progress"), textarea=True))
+    return "\n".join([
+        _field_group("通告内容字段", "这些字段会进入飞书通告文本，发送前请重点确认。", notice_fields),
+        _field_group("分类与上传字段", "用于多维记录分类、筛选和后续同步。", upload_fields),
+    ])
+
+
+def _record_rows(records: list[dict[str, Any]], *, scope: str, work_type: str, search: str, specialty: str, selected_id: str) -> str:
+    if not records:
+        return "<div class=\"empty\">没有待发起事项</div>"
+    rows: list[str] = []
+    for record in sorted(records, key=_record_sort_key):
+        record_id = str(record.get("record_id") or record.get("source_record_id") or "")
+        url = _query_url(
+            "/workbench-lite",
+            scope=scope,
+            work_type=work_type,
+            search=search,
+            specialty=specialty,
+            record_id=record_id,
+        )
+        active = " active" if record_id == selected_id else ""
+        title = _record_title(record)
+        progress = _record_progress(record)
+        draft = _draft_from_record(record, work_type=work_type)
+        source_record_id = _source_id(record)
+        action = _action_for_record(record)
+        disabled_reason = _record_disabled_reason(progress)
+        site_photo_count = _site_photo_count(record)
+        mop_status = _mop_status_text(record, work_type)
+        disabled_class = " is-disabled" if disabled_reason else ""
+        aria_disabled = "true" if disabled_reason else "false"
+        rows.append(
+        f"<a class=\"notice-row{active}{disabled_class}\" href=\"{_e(url)}\" title=\"{_e(disabled_reason or title)}\""
+        f" aria-current=\"{'true' if active else 'false'}\""
+        f" aria-disabled=\"{aria_disabled}\""
+        f" data-row-kind=\"source\""
+        f" data-work-type=\"{_e(work_type)}\""
+        f" data-record-id=\"{_e(record_id)}\""
+        f" data-source-record-id=\"{_e(source_record_id)}\""
+        f" data-site-photo-count=\"{_e(site_photo_count)}\""
+        f" data-mop-status=\"{_e(mop_status)}\""
+        f" data-action=\"{_e(action)}\""
+        f" data-disabled-reason=\"{_e(disabled_reason)}\""
+            f" data-title=\"{_e(title)}\""
+        f" data-draft=\"{_e(_json_dumps(draft))}\">"
+            f"<span class=\"row-main\"><strong>{_e(title)}</strong>{_progress_badge(progress)}</span>"
+            f"{_row_meta(_record_building(record), _record_specialty(record), progress=progress, extra_chips=_record_extra_chips(record, work_type))}"
+            "</a>"
+        )
+    return "\n".join(rows)
+
+
+def _ongoing_rows(items: list[dict[str, Any]], *, scope: str, work_type: str, selected_id: str) -> str:
+    filtered = [item for item in items if not work_type or _work_type(item.get("work_type")) == work_type]
+    if not filtered:
+        return "<div class=\"empty\">当前没有进行中通告</div>"
+    rows: list[str] = []
+    for item in filtered:
+        active_id = str(item.get("active_item_id") or item.get("target_record_id") or item.get("record_id") or "")
+        url = _query_url("/workbench-lite", scope=scope, work_type=work_type, active_item_id=active_id)
+        active = " active" if active_id == selected_id else ""
+        title = _record_title(item)
+        draft = _draft_from_record(item, work_type=work_type)
+        target_record_id = str(item.get("target_record_id") or item.get("record_id") or "")
+        source_record_id = _source_id(item)
+        status = item.get("status") or "进行中"
+        site_photo_count = _site_photo_count(item)
+        mop_status = _mop_status_text(item, work_type)
+        rows.append(
+        f"<a class=\"ongoing-row{active}\" href=\"{_e(url)}\" title=\"{_e(title)}\""
+        f" aria-current=\"{'true' if active else 'false'}\""
+        f" data-row-kind=\"ongoing\""
+        f" data-work-type=\"{_e(work_type)}\""
+        f" data-active-item-id=\"{_e(str(item.get('active_item_id') or ''))}\""
+        f" data-record-id=\"{_e(str(item.get('record_id') or ''))}\""
+        f" data-target-record-id=\"{_e(target_record_id)}\""
+        f" data-source-record-id=\"{_e(source_record_id)}\""
+        f" data-site-photo-count=\"{_e(site_photo_count)}\""
+        f" data-mop-status=\"{_e(mop_status)}\""
+        f" data-action=\"update\""
+            f" data-title=\"{_e(title)}\""
+        f" data-draft=\"{_e(_json_dumps(draft))}\">"
+            f"<span class=\"row-main\"><strong>{_e(title)}</strong>{_progress_badge(status)}</span>"
+            f"{_row_meta(_record_building(item), _record_specialty(item), progress=status, extra_chips=_record_extra_chips(item, work_type, ongoing=True))}"
+            "</a>"
+        )
+    return "\n".join(rows)
+
+
+def _attention_rows(items: list[dict[str, Any]], *, work_type: str) -> str:
+    rows: list[str] = []
+    for item in items or []:
+        if work_type and _work_type(item.get("work_type")) != work_type:
+            continue
+        status_text = " ".join(
+            str(value or "")
+            for value in [
+                item.get("status"),
+                item.get("phase"),
+                item.get("error"),
+                item.get("last_error"),
+                item.get("failure_reason"),
+            ]
+        )
+        if not any(flag in status_text for flag in ("失败", "错误", "异常", "重试", "缺失", "不存在", "待处理")):
+            continue
+        title = _record_title(item)
+        reason = str(item.get("error") or item.get("last_error") or item.get("failure_reason") or item.get("status") or "需要处理").strip()
+        rows.append(
+            "<article class=\"attention-row\">"
+            f"<strong>{_e(title or '待处理通告')}</strong>"
+            f"<span>{_e(reason[:120])}</span>"
+            "</article>"
+        )
+    return "\n".join(rows) or "<div class=\"empty compact\">当前没有需要处理的问题</div>"
+
+
+def _selected_source(records: list[dict[str, Any]], record_id: str) -> dict[str, Any] | None:
+    if not records:
+        return None
+    if record_id:
+        for record in records:
+            if str(record.get("record_id") or record.get("source_record_id") or "") == record_id:
+                return record
+    return records[0]
+
+
+def _selected_ongoing(items: list[dict[str, Any]], active_item_id: str) -> dict[str, Any] | None:
+    if not active_item_id:
+        return None
+    for item in items or []:
+        candidates = {
+            str(item.get("active_item_id") or ""),
+            str(item.get("target_record_id") or ""),
+            str(item.get("record_id") or ""),
+        }
+        if active_item_id in candidates:
+            return item
+    return None
+
+
+def _source_link_options(
+    records: list[dict[str, Any]],
+    ongoing_items: list[dict[str, Any]],
+    *,
+    work_type: str,
+) -> list[dict[str, str]]:
+    used_source_ids = {
+        str(item.get("source_record_id") or "").strip()
+        for item in ongoing_items or []
+        if _work_type(item.get("work_type")) == work_type and str(item.get("source_record_id") or "").strip()
+    }
+    options: list[dict[str, str]] = []
+    for record in records or []:
+        if _work_type(record.get("work_type")) != work_type:
+            continue
+        source_id = _source_id(record)
+        if not source_id or source_id in used_source_ids:
+            continue
+        progress = _record_progress(record)
+        if not any(flag in progress for flag in ("未开始", "延期未开始", "进行中")):
+            continue
+        options.append(
+            {
+                "source_record_id": source_id,
+                "title": _record_title(record),
+                "building": _record_building(record),
+                "specialty": _record_specialty(record),
+                "progress": progress,
+            }
+        )
+    return options
+
+
+def _source_link_select(
+    *,
+    ongoing_item: dict[str, Any] | None,
+    current_source_id: str,
+    options: list[dict[str, str]],
+) -> str:
+    _ = ongoing_item
+    if current_source_id:
+        return (
+            "<label class=\"source-link-field readonly\"><span>关联源表事项</span>"
+            "<div class=\"source-link-title\">已关联源表记录</div>"
+            f"<select disabled><option>{_e(current_source_id)}</option></select>"
+            f"<input type=\"hidden\" name=\"source_record_id\" value=\"{_e(current_source_id)}\">"
+            "</label>"
+        )
+    if not options:
+        return (
+            "<label class=\"source-link-field readonly\"><span>关联源表事项</span>"
+            "<div class=\"source-link-title\">当前通告没有源表 ID</div>"
+            "<select disabled><option>暂无可关联的未开始 / 延期未开始 / 进行中源表事项</option></select>"
+            "<em>可能是左侧对应事项已被其他进行中通告占用，或该类型当前没有可关联事项。</em>"
+            "</label>"
+        )
+    option_html = [
+        "<option value=\"\">不关联源表记录</option>"
+    ]
+    for item in options:
+        label = " · ".join(
+            part for part in [
+                item.get("progress") or "",
+                item.get("building") or "",
+                item.get("specialty") or "",
+                item.get("title") or "",
+            ] if part
+        )
+        option_html.append(
+            f"<option value=\"{_e(item.get('source_record_id'))}\">{_e(label)}</option>"
+        )
+    return (
+        "<label class=\"source-link-field\"><span>关联源表事项</span>"
+        "<div class=\"source-link-title\">纯手填、解析通告或进行中通告可在这里绑定源表</div>"
+        f"<select name=\"source_record_id\">{''.join(option_html)}</select>"
+        "<em>已被其他进行中通告占用的事项不会出现；选择后可再查找目标多维记录。</em>"
+        "</label>"
+    )
+
+
+def _target_link_panel(work_type: str, target_record_id: str) -> str:
+    work = _work_type(work_type)
+    if work not in BINDABLE_TARGET_WORK_TYPES:
+        return ""
+    linked = bool(str(target_record_id or "").strip())
+    return f"""
+        <section class="target-link-panel">
+          <div>
+            <strong>目标多维关系</strong>
+            <span id="lite-target-link-status">{_e('已关联目标多维记录，后续更新/结束会继续使用同一条。' if linked else '未关联目标多维记录，可按当前字段查找相似记录。')}</span>
+          </div>
+          <button class="btn ghost" id="lite-target-search" type="button">{_e('更换目标记录' if linked else '查找目标记录')}</button>
+        </section>
+    """
+
+
+def _completion_hint(work_type: str) -> str:
+    if work_type in {"maintenance", "change", "repair"}:
+        return "整条通告任意一次上传过现场图片后即可结束，后端按累计现场图片校验。"
+    return "当前类型结束不强制上传现场图片。"
+
+
+def _detail_mode_note(
+    *,
+    ongoing_item: dict[str, Any] | None,
+    manual: bool,
+    parsed_draft: dict[str, str] | None,
+    source_record_id: str,
+    target_record_id: str,
+) -> str:
+    if ongoing_item:
+        if source_record_id and target_record_id:
+            return "已关联源表与目标多维，更新/结束会继续使用同一目标记录。"
+        if target_record_id:
+            return "纯手填或复制通告，已绑定目标多维，后续更新/结束继续使用同一目标记录。"
+        return "进行中通告缺少目标多维 ID，提交时后端会要求先绑定目标记录。"
+    if manual or parsed_draft:
+        return "纯手填或解析通告，提交后只创建目标多维记录，不要求源表 ID。"
+    if source_record_id:
+        return "源表事项，提交后后端会创建并绑定目标多维记录。"
+    return "请选择左侧事项或使用纯手填。"
+
+
+def _detail_form(
+    *,
+    record: dict[str, Any] | None,
+    ongoing_item: dict[str, Any] | None,
+    scope: str,
+    work_type: str,
+    manual: bool,
+    parsed_draft: dict[str, str] | None = None,
+    parsed_action: str = "",
+    source_link_options: list[dict[str, str]] | None = None,
+) -> str:
+    source = ongoing_item or record or {}
+    work = _work_type(work_type or source.get("work_type"))
+    draft = _draft_from_record(source, manual=manual, work_type=work)
+    if parsed_draft:
+        draft.update(parsed_draft)
+    action = "start" if manual or not ongoing_item else "update"
+    if record and not ongoing_item:
+        action = _action_for_record(record)
+    if parsed_action in {"start", "update", "end"}:
+        action = parsed_action
+    record_id = "" if manual else str((record or {}).get("record_id") or (record or {}).get("source_record_id") or "")
+    source_record_id = "" if manual else str(source.get("source_record_id") or record_id)
+    target_record_id = str(source.get("target_record_id") or source.get("record_id") or "") if ongoing_item else ""
+    active_item_id = str(source.get("active_item_id") or "") if ongoing_item else ""
+    site_photo_count = _site_photo_count(source)
+    mop_status = _mop_status_text(source, work)
+    source_link_html = _source_link_select(
+        ongoing_item=ongoing_item,
+        current_source_id=source_record_id,
+        options=source_link_options or [],
+    )
+    hidden_source_input = "" if source_link_html else f'<input type="hidden" name="source_record_id" value="{_e(source_record_id)}">'
+    title = "解析粘贴通告" if parsed_draft else ("纯手填通告" if manual else (_record_title(source) or "选择左侧事项"))
+    disabled = "" if source or manual else " disabled"
+    detail_mode = "ongoing" if ongoing_item else ("manual" if manual or parsed_draft else "source")
+    mode_note = _detail_mode_note(
+        ongoing_item=ongoing_item,
+        manual=manual,
+        parsed_draft=parsed_draft,
+        source_record_id=source_record_id,
+        target_record_id=target_record_id,
+    )
+    action_buttons = (
+        "<button class=\"btn primary\" type=\"submit\" name=\"submit_action\" value=\"update\">发送更新</button>"
+        "<button class=\"btn danger\" type=\"submit\" name=\"submit_action\" value=\"end\">发送结束</button>"
+        if ongoing_item else
+        f"<button class=\"btn primary\" type=\"submit\" name=\"submit_action\" value=\"{_e(action)}\"{disabled}>发送{_e('开始' if action == 'start' else '更新')}</button>"
+    )
+    datalists = (
+        f"<datalist id=\"specialty-options\">{''.join(f'<option value=\"{_e(item)}\"></option>' for item in SPECIALTY_OPTIONS)}</datalist>"
+        f"<datalist id=\"maintenance-cycle-options\">{''.join(f'<option value=\"{_e(item)}\"></option>' for item in MAINTENANCE_CYCLE_OPTIONS)}</datalist>"
+    )
+    return f"""
+      <form id="lite-notice-form" class="detail-form" data-action="{_e(action)}" data-detail-mode="{_e(detail_mode)}" data-work-type="{_e(work)}">
+        {datalists}
+        <input type="hidden" name="scope" value="{_e(scope)}">
+        <input type="hidden" name="work_type" value="{_e(work)}">
+        <input type="hidden" name="notice_type" value="{_e(NOTICE_TYPE_BY_WORK_TYPE.get(work, '维保通告'))}">
+        <input type="hidden" name="manual" value="{_e('1' if manual else '')}">
+        <input type="hidden" name="manual_id" value="{_e('manual:lite' if manual else '')}">
+        <input type="hidden" name="record_id" value="{_e(record_id)}">
+        {hidden_source_input}
+        <input type="hidden" name="target_record_id" value="{_e(target_record_id)}">
+        <input type="hidden" name="active_item_id" value="{_e(active_item_id)}">
+        <input type="hidden" name="site_photo_count" value="{_e(site_photo_count)}">
+        <input type="hidden" name="mop_status" value="{_e(mop_status)}">
+        <header class="detail-head">
+          <span>{_e(WORK_TYPE_LABELS.get(work, '通告'))}</span>
+          <strong>{_e(title)}</strong>
+          <em>{_e('后端驱动表单，提交后进入后台队列')}</em>
+          <small class="detail-mode-note">{_e(mode_note)}</small>
+        </header>
+        {source_link_html}
+        {_target_link_panel(work, target_record_id)}
+        {_form_fields(work, draft)}
+        {_site_photo_uploader(work, site_photo_count)}
+        <section class="notice-preview" aria-live="polite">
+          <div class="preview-head">
+            <span>发送预览</span>
+            <b id="lite-completion-hint">{_e(_completion_hint(work))}</b>
+          </div>
+          <pre id="lite-notice-preview"></pre>
+        </section>
+        <div class="form-actions">
+          <span id="lite-job-status" class="job-status" aria-live="polite">等待操作</span>
+          <span id="lite-action-reason" class="action-reason">请先确认标题和进度。</span>
+          {action_buttons}
+        </div>
+      </form>
+    """
+
+
+def render_workbench_lite(
+    *,
+    payload: dict[str, Any],
+    session: dict[str, Any],
+    scope: str,
+    work_type: str,
+    search: str = "",
+    specialty: str = "",
+    record_id: str = "",
+    active_item_id: str = "",
+    manual: bool = False,
+    scope_options: list[dict[str, Any]] | None = None,
+    parsed_draft: dict[str, str] | None = None,
+    parsed_action: str = "",
+    paste_text: str = "",
+    notice_undos: list[dict[str, Any]] | None = None,
+) -> str:
+    records = payload.get("records") if isinstance(payload.get("records"), list) else []
+    ongoing = payload.get("ongoing") if isinstance(payload.get("ongoing"), list) else []
+    daily = payload.get("daily_summary") if isinstance(payload.get("daily_summary"), dict) else {}
+    stats = daily.get("stats") if isinstance(daily.get("stats"), dict) else {}
+    work = _work_type(work_type)
+    payload_record_counts = payload.get("record_type_counts") if isinstance(payload.get("record_type_counts"), dict) else {}
+    payload_ongoing_counts = payload.get("ongoing_type_counts") if isinstance(payload.get("ongoing_type_counts"), dict) else {}
+    fallback_record_counts = {key: 0 for key in WORK_TYPE_LABELS}
+    fallback_ongoing_counts = {key: 0 for key in WORK_TYPE_LABELS}
+    for record in records:
+        record_work = _work_type(record.get("work_type"))
+        fallback_record_counts[record_work] = fallback_record_counts.get(record_work, 0) + 1
+    for item in ongoing:
+        item_work = _work_type(item.get("work_type"))
+        fallback_ongoing_counts[item_work] = fallback_ongoing_counts.get(item_work, 0) + 1
+    record_counts = {
+        key: _to_int(payload_record_counts.get(key), fallback_record_counts.get(key, 0))
+        for key in WORK_TYPE_LABELS
+    }
+    ongoing_counts = {
+        key: _to_int(payload_ongoing_counts.get(key), fallback_ongoing_counts.get(key, 0))
+        for key in WORK_TYPE_LABELS
+    }
+    current_pending_count = record_counts.get(work, 0)
+    current_ongoing_count = ongoing_counts.get(work, 0)
+    selected_ongoing = _selected_ongoing(ongoing, active_item_id)
+    selected_record = None if selected_ongoing or manual or parsed_draft else _selected_source(records, record_id)
+    selected_record_id = str((selected_record or {}).get("record_id") or "")
+    source_options = _source_link_options(records, ongoing, work_type=work)
+    user = session.get("user") if isinstance(session.get("user"), dict) else {}
+    scope_options = scope_options or []
+    scope_select = "".join(
+        f"<option value=\"{_e(option.get('value'))}\"{' selected' if str(option.get('value')) == scope else ''}>{_e(option.get('label') or option.get('value'))}</option>"
+        for option in scope_options
+    )
+    type_tabs = "".join(
+        f"<a class=\"type-tab{' active' if key == work else ''}\" href=\"{_e(_query_url('/workbench-lite', scope=scope, work_type=key))}\" title=\"待发起 {record_counts.get(key, 0)} / 进行中 {ongoing_counts.get(key, 0)}\""
+        f" aria-current=\"{'page' if key == work else 'false'}\">"
+        f"<span>{_e(label)}</span><b class=\"type-count\">{_e(record_counts.get(key, 0))}</b>"
+        "</a>"
+        for key, label in WORK_TYPE_LABELS.items()
+    )
+    manual_url = _query_url("/workbench-lite", scope=scope, work_type=work, manual="1")
+    undo_items = notice_undos or []
+    source_loaded_at = str(payload.get("last_loaded_at") or "").strip()
+    source_loaded_text = source_loaded_at or "暂无成功同步时间"
+    undo_html = "".join(
+        f"<button class=\"undo-row\" type=\"button\" data-undo-id=\"{_e(item.get('undo_id'))}\">"
+        f"<strong>{_e(item.get('title') or item.get('undo_label') or '可回退通告')}</strong>"
+        f"<span>{_e(item.get('undo_label') or item.get('undo_action_type') or '回退')}</span>"
+        "</button>"
+        for item in undo_items[:12]
+    ) or "<div class=\"empty compact\">近三天暂无可回退通告</div>"
+    attention_html = _attention_rows(ongoing, work_type=work)
+    attention_count = 0 if "当前没有需要处理的问题" in attention_html else attention_html.count("attention-row")
+    undo_count = len(undo_items[:12])
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>南通基地-运维灯塔工作台</title>
+  <style>
+    * {{ box-sizing: border-box; }}
+    body {{ margin:0; min-height:100vh; font-family:"Microsoft YaHei", Arial, sans-serif; color:#08204a; background:linear-gradient(180deg,#eaf3ff 0,#f6f9ff 42%,#eef5ff 100%); }}
+    .visually-hidden {{ position:absolute !important; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }}
+    .topbar {{ min-height:96px; padding:18px 34px 28px; display:flex; justify-content:space-between; align-items:center; color:#fff; background:linear-gradient(120deg,#0c57d8,#07348d); background-image:linear-gradient(rgba(255,255,255,.07) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.07) 1px,transparent 1px),linear-gradient(120deg,#0c57d8,#07348d); background-size:64px 64px,64px 64px,auto; border-bottom:1px solid rgba(255,255,255,.16); box-shadow:0 18px 42px rgba(7,52,141,.22); }}
+    .brand {{ display:flex; gap:24px; align-items:center; }}
+    .logo {{ font-weight:900; line-height:1.05; border-right:1px solid rgba(255,255,255,.35); padding-right:24px; }}
+    .brand h1 {{ margin:0; font-size:27px; letter-spacing:0; line-height:1.16; }}
+    .brand p {{ margin:5px 0 0; color:#dbeafe; line-height:1.45; font-size:13px; font-weight:700; }}
+    .top-actions {{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; justify-content:flex-end; }}
+    .top-actions a,.top-actions button,.scope-switch {{ min-height:44px; border:1px solid rgba(255,255,255,.34); border-radius:18px; padding:0 16px; color:#fff; background:rgba(255,255,255,.14); text-decoration:none; font-weight:900; box-shadow:inset 0 1px 0 rgba(255,255,255,.16); transition:background .16s ease, border-color .16s ease, box-shadow .16s ease; cursor:pointer; }}
+    .top-actions a,.top-actions button,.scope-switch {{ display:inline-flex; align-items:center; justify-content:center; gap:8px; }}
+    .top-actions a:hover,.top-actions button:hover,.scope-switch:hover {{ background:rgba(255,255,255,.22); border-color:rgba(255,255,255,.5); box-shadow:0 10px 24px rgba(0,0,0,.12), inset 0 1px 0 rgba(255,255,255,.18); }}
+    .top-actions a:focus-visible,.top-actions button:focus-visible,.scope-switch:focus-within,.scope-select:focus-visible,.btn:focus-visible,.type-tab:focus-visible,.notice-row:focus-visible,.ongoing-row:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible {{ outline:3px solid rgba(75,153,255,.38); outline-offset:2px; }}
+    .scope-switch {{ min-width:188px; gap:10px; padding:6px 8px 6px 10px; border-color:rgba(255,255,255,.78); background:linear-gradient(135deg,#ffffff,#eff6ff); color:#0c3f99; box-shadow:0 12px 26px rgba(4,46,145,.16), inset 0 1px 0 rgba(255,255,255,.72); }}
+    .scope-icon {{ flex:0 0 auto; width:32px; height:32px; border-radius:13px; display:grid; place-items:center; color:#fff; background:linear-gradient(180deg,#1f63ff,#00aeda); font-size:13px; font-weight:950; box-shadow:0 8px 18px rgba(31,99,255,.24); }}
+    .scope-switch span {{ margin:0; color:#5873a3; font-size:11px; font-weight:950; line-height:1; white-space:nowrap; }}
+    .scope-select {{ min-width:88px; min-height:34px; border:1px solid #cfe0ff; border-radius:14px; padding:0 30px 0 12px; color:#073f9d; background:#f7fbff; cursor:pointer; font-weight:950; box-shadow:inset 0 0 0 1px rgba(255,255,255,.7); }}
+    .top-actions .top-link {{ min-width:92px; }}
+    .top-actions .exit {{ color:#c03943; background:#fff; border-color:#fff; min-width:76px; }}
+    .shell {{ max-width:1840px; margin:-18px auto 0; padding:0 22px 28px; }}
+    .status {{ position:relative; max-width:1180px; min-height:38px; display:flex; align-items:center; gap:10px; margin:0 auto 12px; border:1px solid #d6e4f7; border-radius:999px; padding:8px 16px 8px 44px; background:linear-gradient(135deg,rgba(255,255,255,.96),rgba(244,249,255,.94)); color:#506783; box-shadow:0 10px 22px rgba(15,73,153,.08); font-size:12px; font-weight:850; }}
+    .status::before {{ content:""; position:absolute; left:12px; top:50%; width:21px; height:21px; margin-top:-10px; border-radius:9px; background:linear-gradient(180deg,#1f63ff,#00aeda); box-shadow:0 6px 14px rgba(31,99,255,.18); }}
+    .status::after {{ content:""; position:absolute; left:20px; top:50%; width:6px; height:10px; margin-top:-7px; border:solid #fff; border-width:0 2px 2px 0; transform:rotate(45deg); }}
+    body.has-dirty-lite-form .status {{ border-color:#ffd599; color:#8a4b00; background:linear-gradient(135deg,#fff8eb,#fff); }}
+    body.has-dirty-lite-form .status::before {{ background:linear-gradient(180deg,#f59e0b,#f97316); }}
+    .summary {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin-bottom:10px; }}
+    .summary article {{ position:relative; overflow:hidden; min-height:58px; border:1px solid #d8e5f7; border-radius:18px; padding:9px 16px 9px 42px; background:rgba(255,255,255,.94); box-shadow:0 10px 22px rgba(15,73,153,.08); }}
+    .summary article::before {{ content:""; position:absolute; left:16px; top:18px; width:15px; height:15px; border-radius:7px; background:linear-gradient(180deg,#1f63ff,#00aeda); box-shadow:0 6px 14px rgba(31,99,255,.2); }}
+    .summary article:nth-child(2)::before {{ background:linear-gradient(180deg,#16b6d6,#10b981); }}
+    .summary article:nth-child(3)::before {{ background:linear-gradient(180deg,#12b886,#26c281); }}
+    .summary article:nth-child(4)::before {{ background:linear-gradient(180deg,#315fbd,#5b8cff); }}
+    .summary strong {{ display:block; font-size:12px; color:#53677f; }}
+    .summary b {{ display:block; margin-top:1px; font-size:23px; color:#0a4fc4; line-height:1.05; }}
+    .workbench-guide {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; margin-bottom:10px; }}
+    .guide-step {{ position:relative; min-height:42px; border:1px solid #d8e5f7; border-radius:16px; padding:8px 10px 8px 42px; background:rgba(255,255,255,.92); box-shadow:0 8px 18px rgba(15,73,153,.05); }}
+    .guide-step::before {{ content:attr(data-step); position:absolute; left:10px; top:9px; width:24px; height:24px; border-radius:10px; display:grid; place-items:center; color:#fff; background:linear-gradient(180deg,#1f63ff,#00aeda); font-size:12px; font-weight:900; box-shadow:0 6px 14px rgba(31,99,255,.14); }}
+    .guide-step strong {{ display:block; color:#0c244d; font-size:13px; line-height:1.25; }}
+    .guide-step span {{ display:block; margin-top:1px; color:#64748b; font-size:11px; line-height:1.25; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+    .toolbar {{ display:flex; flex-wrap:wrap; gap:8px; align-items:center; border:1px solid #d8e5f7; border-radius:18px; padding:8px; background:rgba(255,255,255,.95); box-shadow:0 10px 24px rgba(15,73,153,.08); position:relative; }}
+    .type-tabs {{ display:flex; gap:6px; flex-wrap:wrap; }}
+    .type-tab {{ min-height:36px; padding:6px 9px 6px 12px; border-radius:14px; color:#12345f; text-decoration:none; font-size:13px; font-weight:900; background:#f4f8ff; display:inline-flex; align-items:center; gap:7px; border:1px solid transparent; transition:background .16s ease, border-color .16s ease, box-shadow .16s ease; }}
+    .type-tab:hover {{ border-color:#b9d7ff; background:#eaf3ff; }}
+    .type-tab.active {{ color:#fff; background:linear-gradient(180deg,#1e63ff,#00aeda); }}
+    .type-count {{ min-width:24px; height:21px; border-radius:999px; padding:0 7px; display:inline-flex; align-items:center; justify-content:center; color:#0a57d8; background:#fff; font-size:11px; box-shadow:inset 0 0 0 1px rgba(31,99,255,.12); }}
+    .type-tab.active .type-count {{ color:#0a57d8; background:#fff; }}
+    .toolbar form {{ margin-left:auto; min-width:min(100%, 360px); flex:1 1 420px; display:flex; flex-wrap:wrap; gap:8px; align-items:center; justify-content:flex-end; }}
+    input,select,textarea {{ width:100%; min-height:34px; border:1px solid #d5e2f2; border-radius:10px; padding:7px 10px; font:inherit; font-size:13px; line-height:1.35; background:#fff; }}
+    select {{ appearance:none; -webkit-appearance:none; padding-right:28px; color:#073f9d; font-weight:900; background:linear-gradient(45deg,transparent 50%,#0a57d8 50%) calc(100% - 15px) 50%/6px 6px no-repeat,linear-gradient(135deg,#0a57d8 50%,transparent 50%) calc(100% - 10px) 50%/6px 6px no-repeat,linear-gradient(180deg,#ffffff,#f4f8ff); box-shadow:inset 0 0 0 1px rgba(255,255,255,.66); cursor:pointer; }}
+    select:hover {{ border-color:#9cc7ff; background:linear-gradient(45deg,transparent 50%,#075bd8 50%) calc(100% - 15px) 50%/6px 6px no-repeat,linear-gradient(135deg,#075bd8 50%,transparent 50%) calc(100% - 10px) 50%/6px 6px no-repeat,linear-gradient(180deg,#ffffff,#eaf3ff); }}
+    #lite-notice-form textarea {{ height:34px; min-height:34px; overflow:auto; resize:vertical; }}
+    .toolbar input {{ min-width:220px; flex:1 1 240px; }}
+    .toolbar select {{ min-width:90px; max-width:112px; flex:0 0 104px; border-radius:999px; padding-left:12px; font-size:12px; text-align:left; }}
+    .btn {{ min-height:38px; border:0; border-radius:12px; padding:8px 14px; font-size:13px; font-weight:900; cursor:pointer; text-decoration:none; display:inline-flex; align-items:center; justify-content:center; transition:background .16s ease, border-color .16s ease, box-shadow .16s ease; }}
+    .btn:hover {{ box-shadow:0 10px 22px rgba(21,99,255,.14); }}
+    .btn.primary {{ color:#fff; background:linear-gradient(180deg,#1f63ff,#0097d7); box-shadow:0 10px 18px rgba(21,99,255,.2); }}
+    .btn.ghost {{ color:#0a4fc4; background:#eef6ff; }}
+    .btn.danger {{ color:#fff; background:#e04d5f; }}
+    .btn.is-busy,.btn[aria-busy="true"] {{ position:relative; color:transparent !important; pointer-events:none; }}
+    .btn.is-busy::after,.btn[aria-busy="true"]::after {{ content:""; width:16px; height:16px; border-radius:999px; border:2px solid rgba(255,255,255,.55); border-top-color:#fff; animation:liteSpin .8s linear infinite; position:absolute; inset:auto; }}
+    .btn.ghost.is-busy::after,.btn.ghost[aria-busy="true"]::after {{ border-color:rgba(10,79,196,.25); border-top-color:#0a4fc4; }}
+    button:disabled,.btn[disabled] {{ cursor:not-allowed; opacity:.58; box-shadow:none; transform:none; }}
+    .manual-picker {{ position:relative; display:inline-flex; }}
+    .manual-menu {{ position:absolute; z-index:20; top:50px; left:0; width:310px; display:none; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; padding:10px; border:1px solid #c9def8; border-radius:18px; background:#fff; box-shadow:0 18px 42px rgba(15,73,153,.18); }}
+    .manual-picker.open .manual-menu {{ display:grid; }}
+    .manual-menu a {{ border:1px solid #dce8f8; border-radius:14px; padding:10px 12px; color:#12345f; background:#f7fbff; text-decoration:none; font-weight:900; text-align:center; }}
+    .manual-menu a:hover {{ border-color:#1f63ff; background:#eaf3ff; }}
+    .refresh-picker {{ position:relative; display:inline-flex; }}
+    .refresh-menu {{ position:absolute; z-index:20; top:50px; left:0; width:286px; display:none; gap:8px; padding:10px; border:1px solid #c9def8; border-radius:18px; background:#fff; box-shadow:0 18px 42px rgba(15,73,153,.18); }}
+    .refresh-picker.open .refresh-menu {{ display:grid; }}
+    .refresh-menu-head {{ display:grid; gap:3px; border:1px solid #dce8f8; border-radius:14px; padding:10px 12px; background:linear-gradient(135deg,#f8fbff,#eef6ff); color:#12345f; }}
+    .refresh-menu-head strong {{ font-size:13px; font-weight:950; }}
+    .refresh-menu-head span {{ color:#64748b; font-size:11px; font-weight:800; line-height:1.4; }}
+    .refresh-menu button {{ width:100%; min-height:44px; border:1px solid #dce8f8; border-radius:14px; padding:9px 12px; color:#12345f; background:#f7fbff; font-weight:900; text-align:left; cursor:pointer; }}
+    .refresh-menu button:hover {{ border-color:#1f63ff; background:#eaf3ff; }}
+    .refresh-menu button[aria-busy="true"] {{ position:relative; color:transparent; pointer-events:none; }}
+    .refresh-menu button[aria-busy="true"]::after {{ content:""; width:16px; height:16px; border-radius:999px; border:2px solid rgba(10,79,196,.25); border-top-color:#0a4fc4; animation:liteSpin .8s linear infinite; position:absolute; left:18px; top:50%; margin-top:-8px; }}
+    .refresh-menu small {{ display:block; margin-top:2px; color:#64748b; font-size:11px; font-weight:700; }}
+    .lite-tools {{ display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:16px; }}
+    .paste-box,.undo-box {{ border:1px solid #d8e5f7; border-radius:22px; padding:14px; background:rgba(255,255,255,.94); box-shadow:0 12px 30px rgba(15,73,153,.07); }}
+    .paste-box h2,.undo-box h2 {{ margin:0 0 10px; font-size:16px; }}
+    .paste-box form {{ display:grid; gap:10px; }}
+    .paste-box textarea {{ min-height:92px; resize:vertical; }}
+    .undo-list {{ display:grid; gap:8px; max-height:180px; overflow:auto; }}
+    .undo-row {{ text-align:left; border:1px solid #dce8f8; border-radius:14px; background:#fff; padding:10px; cursor:pointer; }}
+    .undo-row strong {{ display:block; color:#0c244d; }}
+    .undo-row span {{ color:#0a57d8; font-weight:900; font-size:12px; }}
+    .empty.compact {{ padding:10px; }}
+    .workspace {{ display:grid; grid-template-columns:minmax(280px, .9fr) minmax(520px, 1.55fr) minmax(300px, .95fr); gap:12px; margin-top:12px; align-items:start; }}
+    .panel {{ position:relative; border:1px solid #d8e5f7; border-radius:18px; padding:12px; background:rgba(255,255,255,.95); box-shadow:0 10px 24px rgba(15,73,153,.08); }}
+    .panel::before {{ content:""; position:absolute; left:14px; right:14px; top:0; height:3px; border-radius:0 0 999px 999px; background:linear-gradient(90deg,#1f63ff,#00aeda); opacity:.72; }}
+    .panel.loading {{ position:relative; opacity:.7; pointer-events:none; }}
+    .panel.loading::after {{ content:"正在加载"; position:absolute; right:14px; top:14px; border-radius:999px; padding:5px 10px; color:#075bd8; background:#eaf3ff; font-size:12px; font-weight:900; }}
+    .panel h2 {{ margin:0 0 9px; font-size:16px; }}
+    .panel-title {{ display:flex; align-items:center; justify-content:space-between; gap:10px; }}
+    .panel-title .panel-count {{ min-width:30px; height:24px; border-radius:999px; display:inline-flex; align-items:center; justify-content:center; color:#0a57d8; background:#eaf3ff; font-size:12px; font-weight:900; }}
+    .list {{ display:grid; gap:6px; max-height:70vh; overflow:auto; padding-right:3px; }}
+    .result-rail {{ display:grid; gap:10px; }}
+    .rail-panel {{ position:relative; border:1px solid #d8e5f7; border-radius:18px; padding:12px; background:rgba(255,255,255,.95); box-shadow:0 10px 24px rgba(15,73,153,.07); overflow:hidden; }}
+    .rail-panel::before {{ content:""; position:absolute; left:14px; right:14px; top:0; height:3px; border-radius:0 0 999px 999px; background:linear-gradient(90deg,#1f63ff,#00aeda); opacity:.62; }}
+    .rail-panel h2 {{ margin:0 0 9px; font-size:16px; }}
+    .rail-panel.undo::before {{ background:linear-gradient(90deg,#f59e0b,#22c55e); }}
+    .rail-panel.attention::before {{ background:linear-gradient(90deg,#ef4444,#f59e0b); }}
+    .rail-panel .list {{ max-height:42vh; }}
+    .rail-fold {{ border:1px solid #d8e5f7; border-radius:16px; background:rgba(255,255,255,.95); box-shadow:0 8px 18px rgba(15,73,153,.06); overflow:hidden; }}
+    .rail-fold summary {{ min-height:38px; display:flex; align-items:center; justify-content:space-between; gap:10px; padding:8px 12px; cursor:pointer; color:#0c244d; font-size:14px; font-weight:950; list-style:none; }}
+    .rail-fold summary::-webkit-details-marker {{ display:none; }}
+    .rail-fold summary::after {{ content:"展开"; border-radius:999px; padding:3px 8px; color:#0a57d8; background:#eaf3ff; font-size:11px; font-weight:900; }}
+    .rail-fold[open] summary::after {{ content:"收起"; }}
+    .rail-fold .rail-panel {{ border:0; border-radius:0; box-shadow:none; padding:0 12px 12px; background:transparent; }}
+    .rail-fold .rail-panel::before,.rail-fold .rail-panel h2 {{ display:none; }}
+    .undo-panel-list {{ display:grid; gap:6px; max-height:180px; overflow:auto; padding-right:3px; }}
+    .attention-list {{ display:grid; gap:6px; max-height:160px; overflow:auto; padding-right:3px; }}
+    .attention-row {{ border:1px solid #ffd3b0; border-radius:14px; padding:10px; background:#fff8ed; }}
+    .attention-row strong {{ display:block; color:#7c2d12; font-size:13px; line-height:1.35; }}
+    .attention-row span {{ display:block; margin-top:4px; color:#9a3412; font-size:12px; line-height:1.45; overflow-wrap:anywhere; }}
+    .notice-row,.ongoing-row {{ position:relative; min-width:0; display:grid; gap:5px; border:1px solid #dce8f8; border-radius:13px; padding:8px 10px 8px 13px; color:#0c244d; text-decoration:none; background:#fff; transition:border-color .12s ease, box-shadow .12s ease, transform .12s ease, background .12s ease; overflow:hidden; }}
+    .notice-row::before,.ongoing-row::before {{ content:""; position:absolute; left:0; top:10px; bottom:10px; width:4px; border-radius:999px; background:#cfe0f5; }}
+    .notice-row.active::before,.ongoing-row.active::before {{ background:#1f63ff; }}
+    .notice-row:hover,.ongoing-row:hover {{ border-color:#9cc7ff; box-shadow:0 8px 18px rgba(31,99,255,.08); transform:translateY(-1px); }}
+    .notice-row.active,.ongoing-row.active {{ border-color:#1f63ff; box-shadow:0 0 0 3px rgba(31,99,255,.12), 0 10px 22px rgba(31,99,255,.09); background:linear-gradient(180deg,#fff,#f4f9ff); }}
+    .notice-row.is-disabled {{ cursor:not-allowed; background:#f7f9fc; opacity:.76; }}
+    .notice-row.is-disabled:hover {{ transform:none; box-shadow:none; border-color:#dce8f8; }}
+    .notice-row.is-loading,.ongoing-row.is-loading {{ border-color:#1f63ff; background:#eef6ff; box-shadow:0 0 0 3px rgba(31,99,255,.14); }}
+    .notice-row.is-loading::after,.ongoing-row.is-loading::after {{ content:"正在打开"; width:max-content; justify-self:end; border-radius:999px; padding:3px 8px; color:#0a57d8; background:#fff; font-size:11px; font-weight:900; }}
+    .ongoing-row.optimistic {{ border-color:#6aa8ff; background:linear-gradient(180deg,#f7fbff,#eef6ff); }}
+    .ongoing-row.optimistic::after {{ content:"后台同步中"; width:max-content; justify-self:end; border-radius:999px; padding:3px 8px; color:#0a57d8; background:#fff; font-size:11px; font-weight:900; }}
+    .notice-row strong,.ongoing-row strong {{ min-width:0; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; overflow-wrap:anywhere; font-size:12px; line-height:1.32; }}
+    .row-main {{ min-width:0; display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; align-items:start; }}
+    .row-status {{ white-space:nowrap; border-radius:999px; padding:3px 7px; font-size:10px; font-weight:900; }}
+    .row-status.ready {{ color:#075fb8; background:#e7f2ff; }}
+    .row-status.working {{ color:#8a4b00; background:#fff4d6; }}
+    .row-status.done {{ color:#475569; background:#eef2f7; }}
+    .row-status.danger {{ color:#b42318; background:#fff1f0; }}
+    .row-status.muted {{ color:#64748b; background:#f1f5f9; }}
+    .row-meta {{ display:flex; flex-wrap:wrap; gap:4px; align-items:center; }}
+    .meta-chip {{ max-width:100%; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; border-radius:999px; padding:2px 6px; color:#53677f; background:#f1f6fd; font-size:10px; font-weight:900; }}
+    .meta-chip.ready {{ color:#075fb8; background:#e7f2ff; }}
+    .meta-chip.muted {{ color:#64748b; background:#eef2f7; }}
+    .meta-chip.warn {{ color:#8a4b00; background:#fff4d6; }}
+    .meta-chip.success {{ color:#087443; background:#e8fff3; }}
+    .meta-chip.source {{ color:#0a57d8; background:#eaf3ff; }}
+    .meta-chip.manual {{ color:#7c3aed; background:#f3e8ff; }}
+    .detail-head {{ display:grid; gap:4px; margin-bottom:9px; border:1px solid #e3edf9; border-radius:14px; padding:9px; background:linear-gradient(135deg,#f8fbff,#eef6ff); }}
+    .detail-head span {{ width:max-content; border-radius:999px; padding:4px 8px; color:#0a57d8; background:#eaf3ff; font-size:12px; font-weight:900; }}
+    .detail-head strong {{ font-size:17px; line-height:1.25; }}
+    .detail-head em {{ color:#64748b; font-style:normal; }}
+    .detail-mode-note {{ width:max-content; max-width:100%; border-radius:999px; padding:5px 8px; color:#0a57d8; background:#fff; box-shadow:inset 0 0 0 1px rgba(31,99,255,.12); font-size:11px; font-weight:900; line-height:1.3; }}
+    .detail-form {{ display:grid; gap:9px; }}
+    .site-photo-panel {{ border:1px solid #cfe0f5; border-radius:16px; padding:10px; background:linear-gradient(135deg,#f8fbff,#eef6ff); display:grid; gap:9px; }}
+    .site-photo-head {{ display:flex; justify-content:space-between; gap:10px; align-items:flex-start; }}
+    .site-photo-head strong {{ display:block; color:#0c244d; font-size:14px; line-height:1.25; }}
+    .site-photo-head span {{ display:block; margin-top:2px; color:#64748b; font-size:11px; line-height:1.35; }}
+    .site-photo-head b {{ white-space:nowrap; border-radius:999px; padding:4px 9px; color:#0a57d8; background:#fff; box-shadow:inset 0 0 0 1px rgba(31,99,255,.14); font-size:11px; }}
+    .site-photo-upload {{ display:grid; grid-template-columns:minmax(150px,190px) minmax(0,1fr); gap:10px; align-items:stretch; }}
+    .site-photo-drop {{ min-height:62px; border:1px dashed #93c5fd; border-radius:14px; display:grid; place-items:center; gap:2px; padding:10px; color:#0a57d8; background:#fff; cursor:pointer; font-weight:950; text-align:center; transition:border-color .16s ease, background .16s ease, box-shadow .16s ease; }}
+    .site-photo-drop:hover,.site-photo-drop.dragover {{ border-color:#1f63ff; background:#eef6ff; box-shadow:0 10px 22px rgba(31,99,255,.1); }}
+    .site-photo-drop input {{ display:none; }}
+    .site-photo-drop small {{ color:#64748b; font-size:10px; font-weight:800; }}
+    .site-photo-side {{ min-width:0; display:grid; gap:7px; align-content:start; }}
+    #lite-site-photo-status {{ color:#53677f; font-size:12px; font-weight:900; line-height:1.45; }}
+    .site-photo-list {{ display:flex; flex-wrap:wrap; gap:6px; min-height:24px; }}
+    .site-photo-item {{ max-width:180px; min-width:0; display:inline-flex; align-items:center; gap:6px; border:1px solid #d8e5f7; border-radius:999px; padding:4px 8px; color:#0c244d; background:#fff; font-size:11px; font-weight:900; }}
+    .site-photo-item span {{ min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+    .site-photo-remove {{ border:0; border-radius:999px; width:18px; height:18px; display:grid; place-items:center; color:#64748b; background:#eef2f7; cursor:pointer; font-size:12px; line-height:1; }}
+    .site-photo-remove:hover {{ color:#b42318; background:#fff1f0; }}
+    .site-photo-panel.uploading .site-photo-drop {{ pointer-events:none; opacity:.68; }}
+    .paste-drawer {{ border:1px solid #cfe0f5; border-radius:18px; background:linear-gradient(135deg,#f8fbff,#eef6ff); overflow:hidden; }}
+    .paste-drawer summary {{ min-height:38px; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:8px 11px; cursor:pointer; color:#0a57d8; font-size:13px; font-weight:900; }}
+    .paste-drawer summary::after {{ content:"展开"; border-radius:999px; padding:4px 9px; color:#0a57d8; background:#fff; font-size:12px; box-shadow:inset 0 0 0 1px rgba(31,99,255,.14); }}
+    .paste-drawer[open] summary::after {{ content:"收起"; }}
+    .paste-drawer form {{ display:grid; gap:10px; padding:0 13px 13px; }}
+    .paste-drawer textarea {{ min-height:96px; resize:vertical; }}
+    .form-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }}
+    .form-section {{ border:1px solid #d8e5f7; border-radius:14px; padding:9px; background:#fff; }}
+    .form-section + .form-section {{ margin-top:2px; }}
+    .form-section header {{ display:flex; justify-content:space-between; gap:10px; align-items:flex-start; margin-bottom:8px; }}
+    .form-section header strong {{ color:#0c244d; font-size:13px; }}
+    .form-section header span {{ margin:0; color:#64748b; font-size:11px; line-height:1.35; text-align:right; }}
+    label span {{ display:block; margin:0 0 4px; color:#51677f; font-size:11px; font-weight:900; }}
+    label:has(textarea), label:nth-last-child(1) {{ grid-column:span 2; }}
+    .source-link-field {{ display:grid; gap:8px; margin:0 0 12px; border:1px solid #a8cdfa; border-radius:16px; padding:12px; background:linear-gradient(135deg,#f5fbff,#eef6ff); }}
+    .source-link-field span {{ margin:0; color:#0a57d8; }}
+    .source-link-title {{ color:#0c244d; font-size:13px; font-weight:900; }}
+    .source-link-field em {{ color:#64748b; font-style:normal; font-size:12px; line-height:1.45; }}
+    .source-link-field.readonly select {{ color:#64748b; background:#eef4fb; }}
+    .target-link-panel {{ display:flex; align-items:center; justify-content:space-between; gap:12px; border:1px solid #a8cdfa; border-radius:16px; padding:10px 12px; background:linear-gradient(135deg,#f5fbff,#ffffff); }}
+    .target-link-panel strong {{ display:block; color:#0c244d; font-size:13px; line-height:1.3; }}
+    .target-link-panel span {{ display:block; margin-top:2px; color:#64748b; font-size:12px; line-height:1.45; }}
+    .target-link-panel .btn {{ flex:0 0 auto; min-height:34px; }}
+    .notice-preview {{ border:1px solid #d8e5f7; border-radius:14px; background:#fbfdff; overflow:hidden; }}
+    .preview-head {{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 12px; border-bottom:1px solid #e5edf8; background:linear-gradient(180deg,#f8fbff,#eef6ff); }}
+    .preview-head span {{ color:#0a57d8; font-size:13px; font-weight:900; }}
+    .preview-head b {{ color:#7c5a00; border-radius:999px; padding:5px 9px; background:#fff8db; font-size:12px; line-height:1.25; text-align:right; }}
+    .notice-preview pre {{ margin:0; max-height:82px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; padding:10px; color:#0c244d; background:#fff; font:12px/1.55 "Microsoft YaHei", Arial, sans-serif; }}
+    .notice-preview:focus-within pre,.notice-preview:hover pre {{ max-height:220px; }}
+    .form-actions {{ position:sticky; bottom:8px; z-index:8; display:flex; justify-content:flex-end; gap:8px; align-items:center; margin-top:0; border:1px solid #d8e5f7; border-radius:15px; padding:8px; background:linear-gradient(135deg,rgba(255,255,255,.98),rgba(247,251,255,.96)); box-shadow:0 12px 26px rgba(15,73,153,.12); backdrop-filter:blur(8px); }}
+    .job-status {{ color:#64748b; font-size:12px; font-weight:800; }}
+    .form-actions .job-status {{ margin-right:auto; }}
+    .action-reason {{ max-width:220px; border-radius:999px; padding:5px 8px; color:#64748b; background:#f1f6fd; font-size:11px; font-weight:900; line-height:1.25; }}
+    .action-reason.warn {{ color:#8a4b00; background:#fff4d6; }}
+    .action-reason.ready {{ color:#087443; background:#e8fff3; }}
+    .action-reason.blocked {{ color:#b42318; background:#fff1f0; }}
+    .form-actions .btn.primary,.form-actions .btn.danger {{ min-width:112px; box-shadow:0 12px 24px rgba(21,99,255,.18); }}
+    .end-check-backdrop {{ position:fixed; inset:0; z-index:60; display:grid; place-items:center; padding:24px; background:rgba(8,32,74,.36); backdrop-filter:blur(8px); }}
+    .end-check-backdrop[hidden] {{ display:none; }}
+    .end-check-dialog {{ width:min(560px,100%); border:1px solid #d8e5f7; border-radius:24px; background:#fff; box-shadow:0 28px 70px rgba(8,32,74,.24); overflow:hidden; }}
+    .end-check-head {{ padding:18px 20px; background:linear-gradient(135deg,#f8fbff,#eef6ff); border-bottom:1px solid #e5edf8; }}
+    .end-check-head span {{ display:inline-flex; width:max-content; border-radius:999px; padding:5px 10px; color:#0a57d8; background:#eaf3ff; font-weight:900; font-size:12px; }}
+    .end-check-head strong {{ display:block; margin-top:8px; color:#0c244d; font-size:20px; }}
+    .end-check-head p {{ margin:6px 0 0; color:#64748b; line-height:1.5; }}
+    .end-check-list {{ display:grid; gap:9px; margin:0; padding:16px 20px; list-style:none; }}
+    .end-check-list li {{ display:grid; grid-template-columns:22px minmax(0,1fr); gap:10px; align-items:start; border:1px solid #dce8f8; border-radius:16px; padding:11px 12px; background:#fbfdff; }}
+    .end-check-list li::before {{ content:""; width:14px; height:14px; margin-top:2px; border-radius:999px; background:#94a3b8; box-shadow:0 0 0 4px #f1f5f9; }}
+    .end-check-list li.ok::before {{ background:#12b886; box-shadow:0 0 0 4px #e8fff3; }}
+    .end-check-list li.warn::before {{ background:#f59e0b; box-shadow:0 0 0 4px #fff4d6; }}
+    .end-check-list li.blocked::before {{ background:#e04d5f; box-shadow:0 0 0 4px #fff1f0; }}
+    .end-check-list b {{ display:block; color:#0c244d; font-size:14px; }}
+    .end-check-list small {{ display:block; margin-top:3px; color:#64748b; line-height:1.45; }}
+    .end-check-actions {{ display:flex; justify-content:flex-end; gap:10px; padding:14px 20px 18px; border-top:1px solid #e5edf8; background:#fbfdff; }}
+    .target-candidate-dialog {{ width:min(760px,100%); max-height:min(760px,88vh); display:grid; grid-template-rows:auto minmax(0,1fr) auto; }}
+    .target-candidate-list {{ display:grid; gap:9px; overflow:auto; padding:16px 20px; }}
+    .target-candidate-row {{ border:1px solid #dce8f8; border-radius:16px; padding:12px; background:#fff; text-align:left; cursor:pointer; display:grid; gap:7px; color:#0c244d; }}
+    .target-candidate-row:hover,.target-candidate-row.active {{ border-color:#1f63ff; box-shadow:0 0 0 3px rgba(31,99,255,.12); background:#f7fbff; }}
+    .target-candidate-row strong {{ font-size:14px; line-height:1.35; }}
+    .target-candidate-row span {{ color:#64748b; font-size:12px; line-height:1.45; }}
+    .target-candidate-row small {{ width:max-content; max-width:100%; border-radius:999px; padding:3px 8px; color:#0a57d8; background:#eaf3ff; font-size:11px; font-weight:900; }}
+    .target-candidate-empty {{ border:1px dashed #cbdaf0; border-radius:16px; padding:18px; color:#64748b; text-align:center; background:#f8fbff; }}
+    body.has-dirty-lite-form .job-status {{ color:#b15d00; }}
+    .empty {{ border:1px dashed #cbdaf0; border-radius:16px; padding:18px; color:#64748b; text-align:center; background:#f8fbff; }}
+    @keyframes liteSpin {{ to {{ transform:rotate(360deg); }} }}
+    @media (prefers-reduced-motion: reduce) {{ *, *::before, *::after {{ transition:none !important; animation:none !important; scroll-behavior:auto !important; }} }}
+    @media (max-width: 1180px) {{ .workspace,.summary,.lite-tools,.workbench-guide {{ grid-template-columns:1fr; }} .toolbar {{ flex-wrap:wrap; }} }}
+    @media (max-width: 900px) {{
+      .topbar {{ min-height:auto; padding:18px 20px; flex-direction:column; align-items:stretch; gap:16px; }}
+      .brand {{ gap:14px; align-items:flex-start; }}
+      .brand h1 {{ font-size:24px; line-height:1.2; }}
+      .logo {{ padding-right:14px; }}
+      .top-actions {{ justify-content:flex-start; }}
+      .scope-switch {{ flex:1 1 180px; justify-content:space-between; }}
+      .top-actions .top-link,.top-actions .exit {{ flex:1 1 120px; }}
+      .shell {{ padding:14px 14px 28px; }}
+      .status {{ border-radius:18px; }}
+      .summary {{ grid-template-columns:repeat(2,minmax(0,1fr)); }}
+      .toolbar form {{ width:100%; margin-left:0; flex-wrap:wrap; }}
+      .toolbar input,.toolbar select {{ min-width:0; flex:1 1 180px; }}
+      .manual-picker,.refresh-picker {{ flex:1 1 150px; }}
+      .manual-picker > .btn,.refresh-picker > .btn {{ width:100%; }}
+      .manual-menu,.refresh-menu {{ left:0; right:auto; max-width:calc(100vw - 32px); }}
+      .form-grid {{ grid-template-columns:1fr; }}
+      .site-photo-upload {{ grid-template-columns:1fr; }}
+      label:has(textarea), label:nth-last-child(1) {{ grid-column:auto; }}
+      .form-actions {{ flex-wrap:wrap; }}
+      .form-actions .btn {{ flex:1 1 140px; }}
+    }}
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo brand-logo">世纪互联<br>VNET</div>
+      <div><h1>南通基地-运维灯塔工作台</h1><p id="lite-workbench-subtitle">{_e(WORK_TYPE_LABELS.get(work, '通告'))} · 后端驱动工作台</p></div>
+    </div>
+    <nav class="top-actions">
+      <label class="scope-switch"><b class="scope-icon" aria-hidden="true">楼</b><span>当前楼栋</span><select class="scope-select" id="lite-scope-select" aria-label="切换楼栋">{scope_select}</select></label>
+      <a class="top-link" href="/" aria-label="返回功能选择">功能选择</a>
+      <a class="top-link" href="/engineer/mop?scope={_e(scope)}" aria-label="打开维护单管理">维护单</a>
+      <a class="exit" href="/api/auth/logout" aria-label="退出登录">退出</a>
+    </nav>
+  </header>
+  <main class="shell">
+    <div class="status" id="lite-page-status" aria-live="polite">数据已就绪 · 源表 {_e(source_loaded_text)} · 当前用户 {_e(user.get('name') or user.get('open_id') or '')}</div>
+    <section class="summary">
+      <article><strong>已发起</strong><b>{_e(stats.get('started') or 0)}</b></article>
+      <article><strong>有更新</strong><b>{_e(stats.get('updated') or 0)}</b></article>
+      <article><strong>已结束</strong><b>{_e(stats.get('ended') or 0)}</b></article>
+      <article><strong>进行中</strong><b>{_e(len(ongoing))}</b></article>
+    </section>
+    <section class="toolbar">
+      <div class="type-tabs">{type_tabs}</div>
+      <div class="manual-picker" id="manual-picker">
+        <button class="btn ghost" id="manual-open" type="button" aria-expanded="false" aria-controls="manual-menu">纯手填</button>
+        <div class="manual-menu" id="manual-menu">
+          {''.join(f'<a href="{_e(_manual_url(scope, key))}">{_e(label)}</a>' for key, label in WORK_TYPE_LABELS.items())}
+        </div>
+      </div>
+      <div class="refresh-picker" id="refresh-picker">
+        <button class="btn ghost" id="refresh-open" type="button" aria-expanded="false" aria-controls="refresh-menu">刷新数据</button>
+        <div class="refresh-menu" id="refresh-menu">
+          <div class="refresh-menu-head"><strong>低频刷新</strong><span>最近源表同步：{_e(source_loaded_text)}</span></div>
+          <button id="lite-refresh-page" type="button">刷新本页<small>只重新读取当前楼栋和类型</small></button>
+          <button id="lite-refresh-repair" type="button">刷新检修<small>全局同步检修源表快照</small></button>
+          <button id="lite-refresh-change" type="button">刷新变更<small>全局同步阿里和智航变更</small></button>
+        </div>
+      </div>
+      <form method="get" action="/workbench-lite">
+        <input type="hidden" name="scope" value="{_e(scope)}">
+        <input type="hidden" name="work_type" value="{_e(work)}">
+        <label class="visually-hidden" for="lite-search-input">搜索标题、楼栋、专业</label>
+        <input id="lite-search-input" name="search" value="{_e(search)}" placeholder="搜索标题、楼栋、专业">
+        <label class="visually-hidden" for="lite-specialty-select">筛选专业</label>
+        <select id="lite-specialty-select" name="specialty" aria-label="筛选专业">
+          <option value="">全部专业</option>
+          {''.join(f'<option value="{_e(item)}"{" selected" if item == specialty else ""}>{_e(item)}</option>' for item in (payload.get("filters") or {}).get("specialties", []))}
+        </select>
+        <button class="btn primary" type="submit">筛选</button>
+      </form>
+    </section>
+    <section class="workbench-guide" aria-label="通告办理步骤">
+      <article class="guide-step" data-step="1"><strong>左侧选事项</strong><span>待发起、延期未开始、进行中事项都在这里找。</span></article>
+      <article class="guide-step" data-step="2"><strong>中间编辑当前通告</strong><span>只处理当前一条，字段和发送文本实时预览。</span></article>
+      <article class="guide-step" data-step="3"><strong>右侧看结果</strong><span>进行中、失败待处理和可回退通告集中查看。</span></article>
+    </section>
+    <section class="workspace">
+      <aside class="panel"><h2 class="panel-title"><span>待发起事项</span><b class="panel-count">{_e(current_pending_count)}</b></h2><div class="list">{_record_rows(records, scope=scope, work_type=work, search=search, specialty=specialty, selected_id=selected_record_id)}</div></aside>
+      <section class="panel" id="detail-panel">
+        <h2>当前通告</h2>
+        <details class="paste-drawer"{' open' if parsed_draft else ''}>
+          <summary>解析粘贴通告</summary>
+          <form method="post" action="/workbench-lite/parse">
+            <input type="hidden" name="scope" value="{_e(scope)}">
+            <input type="hidden" name="work_type" value="{_e(work)}">
+            <textarea name="paste_text" placeholder="粘贴完整通告文本，后端解析后会填入当前通告。">{_e(paste_text)}</textarea>
+            <button class="btn primary" type="submit">解析到当前通告</button>
+          </form>
+        </details>
+        {_detail_form(record=selected_record, ongoing_item=selected_ongoing, scope=scope, work_type=work, manual=manual or bool(parsed_draft), parsed_draft=parsed_draft, parsed_action=parsed_action, source_link_options=source_options)}
+      </section>
+      <aside class="result-rail">
+        <section class="rail-panel"><h2 class="panel-title"><span>已开始未结束</span><b class="panel-count">{_e(current_ongoing_count)}</b></h2><div class="list">{_ongoing_rows(ongoing, scope=scope, work_type=work, selected_id=active_item_id)}</div></section>
+        <details class="rail-fold attention"{' open' if attention_count else ''}><summary>待处理问题 <b class="panel-count">{_e(attention_count)}</b></summary><section class="rail-panel attention"><h2>待处理问题</h2><div class="attention-list">{attention_html}</div></section></details>
+        <details class="rail-fold undo"><summary>近三天可回退 <b class="panel-count">{_e(undo_count)}</b></summary><section class="rail-panel undo"><h2>近三天可回退</h2><div class="undo-panel-list">{undo_html}</div></section></details>
+      </aside>
+    </section>
+  </main>
+  <div class="end-check-backdrop" id="lite-end-check" hidden>
+    <section class="end-check-dialog" role="dialog" aria-modal="true" aria-labelledby="lite-end-check-title">
+      <header class="end-check-head">
+        <span>结束前检查</span>
+        <strong id="lite-end-check-title">确认发送结束通告</strong>
+        <p>请确认下面几项，确认后才会把结束任务交给后端队列。</p>
+      </header>
+      <ul class="end-check-list" id="lite-end-check-list"></ul>
+      <footer class="end-check-actions">
+        <button class="btn ghost" type="button" id="lite-end-check-cancel">返回修改</button>
+        <button class="btn danger" type="button" id="lite-end-check-confirm">确认发送结束</button>
+      </footer>
+    </section>
+  </div>
+  <div class="end-check-backdrop" id="lite-target-candidates" hidden>
+    <section class="end-check-dialog target-candidate-dialog" role="dialog" aria-modal="true" aria-labelledby="lite-target-candidates-title">
+      <header class="end-check-head">
+        <span>目标多维关系</span>
+        <strong id="lite-target-candidates-title">选择对应目标记录</strong>
+        <p id="lite-target-candidates-desc">按当前通告标题、时间、内容和原因查找目标多维表中的相似记录。</p>
+      </header>
+      <div class="target-candidate-list" id="lite-target-candidate-list"></div>
+      <footer class="end-check-actions">
+        <button class="btn ghost" type="button" id="lite-target-candidates-cancel">取消</button>
+        <button class="btn primary" type="button" id="lite-target-candidates-confirm" disabled>确认绑定</button>
+      </footer>
+    </section>
+  </div>
+  <div class="end-check-backdrop" id="lite-discard-confirm" hidden>
+    <section class="end-check-dialog lite-discard-dialog" role="dialog" aria-modal="true" aria-labelledby="lite-discard-title">
+      <header class="end-check-head">
+        <span>未发送修改</span>
+        <strong id="lite-discard-title">切换会丢失当前修改</strong>
+        <p>当前通告有未发送的编辑内容。继续切换会放弃这些修改。</p>
+      </header>
+      <footer class="end-check-actions">
+        <button class="btn ghost" type="button" id="lite-discard-cancel">继续编辑</button>
+        <button class="btn primary" type="button" id="lite-discard-confirm-button">放弃并切换</button>
+      </footer>
+    </section>
+  </div>
+  <script>
+    const initialScope = {_json_dumps(scope)};
+    let liteFormDirty = false;
+    function currentUrlScope() {{
+      return new URLSearchParams(location.search).get('scope') || initialScope;
+    }}
+    function getCurrentScope() {{
+      return document.getElementById('lite-scope-select')?.value || currentUrlScope();
+    }}
+    function statusBox() {{
+      return document.getElementById('lite-job-status');
+    }}
+    function setLiteStatus(text) {{
+      const box = statusBox();
+      if (box) box.textContent = text;
+      const pageStatus = document.getElementById('lite-page-status');
+      if (pageStatus) pageStatus.textContent = text;
+    }}
+    function showLiteError(message) {{
+      const text = message || '操作失败';
+      setLiteStatus(text);
+      const box = statusBox();
+      if (box) {{
+        box.classList.add('failed');
+        window.setTimeout(() => box.classList.remove('failed'), 3200);
+      }}
+    }}
+    function setLiteFormDirty(enabled) {{
+      liteFormDirty = Boolean(enabled);
+      document.body.classList.toggle('has-dirty-lite-form', liteFormDirty);
+      if (liteFormDirty) setLiteStatus('有未发送修改');
+    }}
+    let pendingDiscardResolver = null;
+    function confirmDiscardLiteChanges() {{
+      if (!liteFormDirty) return Promise.resolve(true);
+      const modal = document.getElementById('lite-discard-confirm');
+      const confirmButton = document.getElementById('lite-discard-confirm-button');
+      if (!modal || !confirmButton) return Promise.resolve(false);
+      modal.hidden = false;
+      confirmButton.focus();
+      return new Promise(resolve => {{
+        pendingDiscardResolver = resolve;
+      }});
+    }}
+    function resolveDiscardConfirm(approved) {{
+      const modal = document.getElementById('lite-discard-confirm');
+      if (modal) modal.hidden = true;
+      const resolver = pendingDiscardResolver;
+      pendingDiscardResolver = null;
+      if (resolver) resolver(Boolean(approved));
+    }}
+    function setPanelLoading(enabled) {{
+      const panel = document.getElementById('detail-panel');
+      if (panel) panel.classList.toggle('loading', Boolean(enabled));
+    }}
+    function setButtonBusy(button, enabled) {{
+      if (!button) return;
+      button.disabled = Boolean(enabled);
+      button.classList.toggle('is-busy', Boolean(enabled));
+      if (enabled) button.setAttribute('aria-busy', 'true');
+      else button.removeAttribute('aria-busy');
+    }}
+    function setPickerOpen(pickerId, openerId, open) {{
+      document.getElementById(pickerId)?.classList.toggle('open', Boolean(open));
+      document.getElementById(openerId)?.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }}
+    function closePickers() {{
+      setPickerOpen('manual-picker', 'manual-open', false);
+      setPickerOpen('refresh-picker', 'refresh-open', false);
+    }}
+    let pendingEndSubmitter = null;
+    function isMissingTargetRecordId(value) {{
+      const text = String(value || '').trim();
+      return !text || text.startsWith('local') || text.startsWith('manual:') || text.startsWith('active:');
+    }}
+    function endCheckItem(title, detail, tone) {{
+      const item = document.createElement('li');
+      item.className = tone || 'warn';
+      const body = document.createElement('div');
+      const heading = document.createElement('b');
+      heading.textContent = title;
+      const desc = document.createElement('small');
+      desc.textContent = detail;
+      body.append(heading, desc);
+      item.append(body);
+      return item;
+    }}
+    function openEndCheck(form, submitter) {{
+      const modal = document.getElementById('lite-end-check');
+      const list = document.getElementById('lite-end-check-list');
+      const confirmButton = document.getElementById('lite-end-check-confirm');
+      if (!modal || !list || !confirmButton) return false;
+      const workType = previewValue(form, 'work_type') || form.dataset.workType || 'maintenance';
+      const targetRecordId = previewValue(form, 'target_record_id') || previewValue(form, 'record_id');
+      const sitePhotoCount = Number(previewValue(form, 'site_photo_count') || 0);
+      const mopStatus = previewValue(form, 'mop_status');
+      const checks = [];
+      if (['maintenance', 'change', 'repair'].includes(workType)) {{
+        checks.push(sitePhotoCount > 0
+          ? ['现场图片', `已累计上传${{sitePhotoCount}}张，满足结束条件。`, 'ok']
+          : ['现场图片', '当前页面未看到现场图片；后端会按整条通告历史记录再次校验。', 'warn']);
+      }} else {{
+        checks.push(['现场图片', '当前通告类型不强制现场图片。', 'ok']);
+      }}
+      checks.push(isMissingTargetRecordId(targetRecordId)
+        ? ['目标多维', '缺少目标多维记录 ID，不能直接结束，请先绑定或重新选择目标记录。', 'blocked']
+        : ['目标多维', '已绑定目标多维记录，结束会更新同一条记录。', 'ok']);
+      if (workType === 'maintenance') {{
+        checks.push(mopStatus
+          ? ['MOP状态', mopStatus, mopStatus.includes('未') ? 'warn' : 'ok']
+          : ['MOP状态', '未读取到MOP状态，不阻塞结束通告。', 'warn']);
+      }} else {{
+        checks.push(['MOP状态', '当前通告类型不要求MOP。', 'ok']);
+      }}
+      checks.push(['飞书消息', '确认后将创建后台任务发送结束通告；如个人消息失败，页面会保留可复制文本。', 'ok']);
+      list.replaceChildren(...checks.map(([title, detail, tone]) => endCheckItem(title, detail, tone)));
+      confirmButton.disabled = checks.some(([, , tone]) => tone === 'blocked');
+      pendingEndSubmitter = submitter || null;
+      modal.hidden = false;
+      confirmButton.focus();
+      return true;
+    }}
+    function closeEndCheck() {{
+      const modal = document.getElementById('lite-end-check');
+      if (modal) modal.hidden = true;
+      pendingEndSubmitter = null;
+    }}
+    function replaceFromDocument(nextDoc, selector) {{
+      const current = document.querySelector(selector);
+      const next = nextDoc.querySelector(selector);
+      if (current && next) current.replaceWith(next);
+    }}
+    function captureWorkspaceScroll() {{
+      return Array.from(document.querySelectorAll('.workspace .list,.undo-panel-list')).map(node => node.scrollTop || 0);
+    }}
+    function restoreWorkspaceScroll(positions) {{
+      if (!Array.isArray(positions)) return;
+      requestAnimationFrame(() => {{
+        document.querySelectorAll('.workspace .list,.undo-panel-list').forEach((node, index) => {{
+          if (typeof positions[index] === 'number') node.scrollTop = positions[index];
+        }});
+      }});
+    }}
+    function applyLiteDocument(nextDoc, url, push, selectors) {{
+      const replaceSelectors = selectors || ['#lite-workbench-subtitle', '.status', '.summary', '.toolbar', '.workbench-guide', '.workspace'];
+      for (const selector of replaceSelectors) {{
+        replaceFromDocument(nextDoc, selector);
+      }}
+      if (push && url) history.pushState({{ lite: true }}, '', url);
+      requestAnimationFrame(hydrateLitePreview);
+    }}
+    function applyLiteHtml(html, url, push, selectors) {{
+      const nextDoc = new DOMParser().parseFromString(html, 'text/html');
+      applyLiteDocument(nextDoc, url, push, selectors);
+    }}
+    function canonicalLiteUrlFromDocument(nextDoc, fallbackUrl) {{
+      const form = nextDoc.querySelector('#lite-notice-form');
+      const nextScope = form?.querySelector('input[name="scope"]')?.value || getCurrentScope();
+      const nextWorkType = form?.querySelector('input[name="work_type"]')?.value || new URLSearchParams(location.search).get('work_type') || 'maintenance';
+      const isManual = form?.querySelector('input[name="manual"]')?.value === '1';
+      const url = new URL('/workbench-lite', location.origin);
+      url.searchParams.set('scope', nextScope);
+      url.searchParams.set('work_type', nextWorkType);
+      if (isManual) url.searchParams.set('manual', '1');
+      return url.pathname + url.search;
+    }}
+    function parseJsonAttr(node, attrName) {{
+      try {{ return JSON.parse(node.getAttribute(attrName) || '{{}}'); }}
+      catch {{ return {{}}; }}
+    }}
+    function setFormValue(form, name, value) {{
+      const field = form.querySelector(`[name="${{CSS.escape(name)}}"]`);
+      if (!field) return;
+      field.value = value == null ? '' : String(value);
+    }}
+    function setSourceLinkDisplay(form, sourceId, titleText) {{
+      if (!form) return;
+      const sourceField = form.querySelector('.source-link-field');
+      if (!sourceField) return;
+      const normalized = String(sourceId || '').trim();
+      const title = sourceField.querySelector('.source-link-title');
+      const select = sourceField.querySelector('select');
+      if (title) {{
+        title.textContent = normalized
+          ? (titleText || '已关联源表记录')
+          : '当前通告没有源表 ID';
+      }}
+      if (!select) return;
+      if (select.disabled) {{
+        select.replaceChildren(new Option(normalized || '暂无源表记录', normalized));
+      }} else {{
+        select.value = normalized;
+      }}
+    }}
+    let liteSitePhotos = [];
+    let liteSitePhotoSignature = '';
+    function sitePhotoSignature(form) {{
+      if (!form) return '';
+      return [
+        previewValue(form, 'scope'),
+        previewValue(form, 'work_type'),
+        previewValue(form, 'active_item_id'),
+        previewValue(form, 'target_record_id'),
+        previewValue(form, 'source_record_id'),
+        previewValue(form, 'record_id'),
+        previewValue(form, 'manual_id'),
+      ].join('|');
+    }}
+    function parseSitePhotosFromForm(form) {{
+      const hidden = form?.querySelector('[name="site_photos_json"]');
+      if (!hidden) return [];
+      try {{
+        const parsed = JSON.parse(hidden.value || '[]');
+        return Array.isArray(parsed) ? parsed.filter(item => item && typeof item === 'object' && item.upload_id) : [];
+      }} catch {{
+        return [];
+      }}
+    }}
+    function resetSitePhotoState(form, existingCount) {{
+      if (!form) return;
+      const panel = form.querySelector('[data-site-photo-panel]');
+      const hiddenJson = form.querySelector('[name="site_photos_json"]');
+      if (!panel || !hiddenJson) {{
+        liteSitePhotos = [];
+        liteSitePhotoSignature = '';
+        return;
+      }}
+      const countField = form.querySelector('[name="site_photo_count"]');
+      const count = Math.max(0, Number(existingCount ?? countField?.value ?? panel.dataset.existingCount ?? 0) || 0);
+      panel.dataset.existingCount = String(count);
+      liteSitePhotos = parseSitePhotosFromForm(form);
+      liteSitePhotoSignature = sitePhotoSignature(form);
+      updateSitePhotoUi(form);
+    }}
+    function ensureSitePhotoState(form) {{
+      if (!form) return;
+      if (sitePhotoSignature(form) !== liteSitePhotoSignature) resetSitePhotoState(form);
+    }}
+    function updateSitePhotoUi(form) {{
+      if (!form) return;
+      const panel = form.querySelector('[data-site-photo-panel]');
+      const hiddenJson = form.querySelector('[name="site_photos_json"]');
+      const countField = form.querySelector('[name="site_photo_count"]');
+      if (!panel || !hiddenJson || !countField) return;
+      const existing = Math.max(0, Number(panel.dataset.existingCount || countField.value || 0) || 0);
+      const uploaded = liteSitePhotos.length;
+      const total = existing + uploaded;
+      hiddenJson.value = JSON.stringify(liteSitePhotos);
+      countField.value = String(total);
+      const badge = document.getElementById('lite-site-photo-badge');
+      if (badge) badge.textContent = total > 0 ? `已累计 ${{total}} 张` : '待添加';
+      const status = document.getElementById('lite-site-photo-status');
+      if (status) {{
+        status.textContent = total > 0
+          ? `已累计 ${{total}} 张现场照片，可用于结束校验。`
+          : '开始、更新、结束任意一次上传 1 张现场照片后，即可满足结束要求。';
+      }}
+      const list = document.getElementById('lite-site-photo-list');
+      if (list) {{
+        const items = liteSitePhotos.map((item, index) => {{
+          const chip = document.createElement('span');
+          chip.className = 'site-photo-item';
+          const label = document.createElement('span');
+          label.textContent = item.file_name || `现场照片${{index + 1}}`;
+          const remove = document.createElement('button');
+          remove.className = 'site-photo-remove';
+          remove.type = 'button';
+          remove.setAttribute('data-site-photo-remove', String(index));
+          remove.setAttribute('aria-label', '移除现场照片');
+          remove.textContent = '×';
+          chip.append(label, remove);
+          return chip;
+        }});
+        list.replaceChildren(...items);
+      }}
+      updateActionAvailability(form);
+    }}
+    function sitePhotoPayload(form) {{
+      ensureSitePhotoState(form);
+      return liteSitePhotos.map(item => ({{
+        upload_id: String(item.upload_id || ''),
+        file_name: String(item.file_name || 'site_photo.png'),
+        mime_type: String(item.mime_type || item.content_type || 'image/png'),
+        size: Number(item.size || 0),
+      }})).filter(item => item.upload_id);
+    }}
+    async function uploadSitePhotoFile(file, form) {{
+      if (!file || !form) return null;
+      if (!String(file.type || '').startsWith('image/')) throw new Error('只能上传图片作为现场照片。');
+      if (file.size > 8 * 1024 * 1024) throw new Error('现场照片不能超过 8MB。');
+      const url = '/api/notice-attachments?file_name=' + encodeURIComponent(file.name || 'site_photo.png');
+      const response = await fetch(url, {{
+        method: 'POST',
+        headers: {{ 'Content-Type': file.type || 'image/png' }},
+        body: file,
+        credentials: 'same-origin',
+      }});
+      const data = await response.json().catch(() => ({{}}));
+      if (!response.ok || data.ok === false) throw new Error(data.error || data.message || '现场照片上传失败');
+      const item = data.data || data;
+      if (!item.upload_id) throw new Error('现场照片上传返回缺少 upload_id');
+      return {{
+        upload_id: item.upload_id,
+        file_name: item.file_name || file.name || 'site_photo.png',
+        mime_type: item.mime_type || file.type || 'image/png',
+        size: item.size || file.size || 0,
+      }};
+    }}
+    async function handleSitePhotoFiles(files, form) {{
+      const panel = form?.querySelector('[data-site-photo-panel]');
+      if (!panel) return;
+      ensureSitePhotoState(form);
+      const fileItems = Array.from(files || []).filter(Boolean);
+      if (!fileItems.length) return;
+      const status = document.getElementById('lite-site-photo-status');
+      panel.classList.add('uploading');
+      if (status) status.textContent = '现场照片上传中...';
+      const uploaded = [];
+      try {{
+        for (const file of fileItems) {{
+          const item = await uploadSitePhotoFile(file, form);
+          if (item) uploaded.push(item);
+        }}
+        liteSitePhotos = liteSitePhotos.concat(uploaded);
+        setLiteFormDirty(true);
+        updateSitePhotoUi(form);
+        setLiteStatus(`已添加现场照片 ${{uploaded.length}} 张`);
+      }} catch (error) {{
+        if (status) status.textContent = error && error.message ? error.message : '现场照片上传失败';
+        showLiteError(error && error.message ? error.message : '现场照片上传失败');
+      }} finally {{
+        panel.classList.remove('uploading');
+        const input = form.querySelector('#lite-site-photo-input');
+        if (input) input.value = '';
+      }}
+    }}
+    function isTextEditingTarget(target) {{
+      if (!(target instanceof Element)) return false;
+      if (target.closest('[data-site-photo-panel]')) return false;
+      return Boolean(target.closest('input, textarea, select, [contenteditable="true"]'));
+    }}
+    function clipboardImageFiles(event) {{
+      const data = event.clipboardData;
+      if (!data) return [];
+      const files = [];
+      Array.from(data.files || []).forEach(file => {{
+        if (file && String(file.type || '').startsWith('image/')) files.push(file);
+      }});
+      Array.from(data.items || []).forEach((item, index) => {{
+        if (!item || item.kind !== 'file' || !String(item.type || '').startsWith('image/')) return;
+        const file = item.getAsFile && item.getAsFile();
+        if (!file) return;
+        const named = file.name ? file : new File(
+          [file],
+          `粘贴现场照片${{Date.now()}}_${{index + 1}}.${{String(file.type || 'image/png').split('/')[1] || 'png'}}`,
+          {{ type: file.type || 'image/png' }}
+        );
+        if (!files.some(existing => existing === named || (existing.size === named.size && existing.type === named.type && existing.name === named.name))) {{
+          files.push(named);
+        }}
+      }});
+      return files;
+    }}
+    function sitePhotoPanelFromTarget(target) {{
+      const element = target instanceof Element ? target : null;
+      return element?.closest('[data-site-photo-panel]') || document.querySelector('#lite-notice-form [data-site-photo-panel]');
+    }}
+    function sitePhotoDropFromTarget(target) {{
+      const panel = sitePhotoPanelFromTarget(target);
+      return panel?.querySelector('.site-photo-drop') || null;
+    }}
+    async function handleSitePhotoPaste(event) {{
+      const target = event.target instanceof Element ? event.target : null;
+      if (isTextEditingTarget(target)) return;
+      const panel = sitePhotoPanelFromTarget(target);
+      if (!panel) return;
+      const files = clipboardImageFiles(event);
+      if (!files.length) {{
+        if (target?.closest('[data-site-photo-panel]')) {{
+          const status = document.getElementById('lite-site-photo-status');
+          if (status) status.textContent = '剪贴板里没有图片。请复制截图/图片文件后再粘贴。';
+          setLiteStatus('剪贴板里没有可上传的现场照片');
+        }}
+        return;
+      }}
+      event.preventDefault();
+      const form = panel.closest('#lite-notice-form') || document.getElementById('lite-notice-form');
+      const drop = panel.querySelector('.site-photo-drop');
+      if (drop) drop.classList.add('dragover');
+      try {{
+        await handleSitePhotoFiles(files, form);
+      }} finally {{
+        if (drop) drop.classList.remove('dragover');
+      }}
+    }}
+    function setDetailModeNote(text) {{
+      const note = document.querySelector('.detail-mode-note');
+      if (note) note.textContent = text || '';
+    }}
+    const previewTemplates = {{
+      maintenance: {{
+        heading: '维保通告',
+        fields: [
+          ['名称', 'title'], ['时间', '__range'], ['位置', 'location'],
+          ['内容', 'content'], ['原因', 'reason'], ['影响', 'impact'], ['进度', 'progress']
+        ]
+      }},
+      change: {{
+        heading: '变更通告',
+        fields: [
+          ['名称', 'title'], ['等级', 'level'], ['时间', '__range'], ['位置', 'location'],
+          ['内容', 'content'], ['原因', 'reason'], ['影响', 'impact'], ['进度', 'progress']
+        ]
+      }},
+      repair: {{
+        heading: '设备检修',
+        fields: [
+          ['标题', 'title'], ['地点', 'location'], ['紧急程度', 'level'], ['专业', 'specialty'],
+          ['发现故障时间', 'end_time'], ['期望完成时间', 'start_time'],
+          ['维修设备', 'repair_device'], ['维修故障', 'repair_fault'], ['故障类型', 'fault_type'],
+          ['维修方式', 'repair_mode'], ['影响范围', 'impact'], ['故障发现方式', 'discovery'],
+          ['故障现象', 'symptom'], ['故障原因', 'reason'], ['解决方案', 'solution'],
+          ['备件更换情况', 'spare_parts'], ['完成情况', 'progress']
+        ]
+      }},
+      power: {{
+        heading: '上电通告',
+        fields: [['名称', 'title'], ['时间', '__range'], ['柜号', 'cabinet'], ['数量', 'quantity'], ['进度', 'progress']]
+      }},
+      polling: {{
+        heading: '设备轮巡',
+        fields: [['标题', 'title'], ['时间', '__range'], ['设备', 'device'], ['内容', 'content'], ['影响', 'impact'], ['进度', 'progress']]
+      }},
+      adjust: {{
+        heading: '设备调整',
+        fields: [['名称', 'title'], ['时间', '__range'], ['位置', 'location'], ['内容', 'content'], ['原因', 'reason'], ['影响', 'impact'], ['进度', 'progress']]
+      }}
+    }};
+    function previewValue(form, name) {{
+      const field = form.querySelector(`[name="${{CSS.escape(name)}}"]`);
+      return field ? String(field.value || '').trim() : '';
+    }}
+    function previewDate(value) {{
+      return String(value || '').trim().replace('T', ' ');
+    }}
+    function previewActionLabel(action) {{
+      return action === 'end' ? '结束' : (action === 'update' ? '更新' : '开始');
+    }}
+    function requiredFieldsFor(workType) {{
+      const fields = [
+        ['title', workType === 'repair' || workType === 'polling' ? '标题' : '名称'],
+        ['start_time', workType === 'repair' ? '期望完成时间' : '开始时间'],
+        ['end_time', workType === 'repair' ? '发现故障时间' : '结束时间'],
+      ];
+      if (workType === 'maintenance') {{
+        fields.push(['specialty', '专业'], ['maintenance_cycle', '维保周期']);
+      }} else if (workType === 'repair') {{
+        fields.push(['specialty', '专业'], ['level', '紧急程度']);
+      }}
+      return fields;
+    }}
+    function missingRequiredFields(form) {{
+      const workType = form?.querySelector('[name="work_type"]')?.value || form?.dataset.workType || 'maintenance';
+      return requiredFieldsFor(workType)
+        .filter(([name]) => !previewValue(form, name))
+        .map(([, label]) => label);
+    }}
+    function buildPreviewLine(form, label, key) {{
+      let value = '';
+      if (key === '__range') {{
+        const start = previewDate(previewValue(form, 'start_time'));
+        const end = previewDate(previewValue(form, 'end_time'));
+        value = start && end ? `${{start}}~${{end}}` : (start || end);
+      }} else {{
+        value = previewDate(previewValue(form, key));
+      }}
+      return `【${{label}}】${{value}}`;
+    }}
+    function updateNoticePreview(form) {{
+      const targetForm = form || document.getElementById('lite-notice-form');
+      const preview = document.getElementById('lite-notice-preview');
+      if (!targetForm || !preview) return;
+      const workType = targetForm.querySelector('[name="work_type"]')?.value || targetForm.dataset.workType || 'maintenance';
+      const template = previewTemplates[workType] || previewTemplates.maintenance;
+      const action = targetForm.dataset.action || 'start';
+      const lines = [`【${{template.heading}}】状态：${{previewActionLabel(action)}}`];
+      for (const [label, key] of template.fields) {{
+        lines.push(buildPreviewLine(targetForm, label, key));
+      }}
+      preview.textContent = lines.join('\\n');
+      updateActionAvailability(targetForm);
+    }}
+    function setActionReason(text, tone) {{
+      const reason = document.getElementById('lite-action-reason');
+      if (!reason) return;
+      reason.textContent = text;
+      reason.className = 'action-reason ' + (tone || '');
+    }}
+    function updateActionAvailability(form) {{
+      const targetForm = form || document.getElementById('lite-notice-form');
+      if (!targetForm) return;
+      const title = previewValue(targetForm, 'title');
+      const action = targetForm.dataset.action || 'start';
+      const workType = targetForm.querySelector('[name="work_type"]')?.value || targetForm.dataset.workType || 'maintenance';
+      const sitePhotoCount = Number(previewValue(targetForm, 'site_photo_count') || 0);
+      const buttons = targetForm.querySelectorAll('button[name="submit_action"]');
+      const missing = missingRequiredFields(targetForm);
+      if (missing.length) {{
+        buttons.forEach(button => button.disabled = true);
+        setActionReason('缺少' + missing.join('、') + '，暂不能发送', 'blocked');
+        return;
+      }}
+      if (targetForm.dataset.targetEnded === '1') {{
+        buttons.forEach(button => button.disabled = true);
+        setActionReason('已关联已结束目标记录，不需要再次发送', 'blocked');
+        return;
+      }}
+      buttons.forEach(button => button.disabled = false);
+      if (action === 'end' && ['maintenance', 'change', 'repair'].includes(workType)) {{
+        if (sitePhotoCount > 0) {{
+          setActionReason(`已累计现场图片${{sitePhotoCount}}张，可结束`, 'ready');
+        }} else {{
+          setActionReason('尚未看到现场图片，结束时后端按累计记录校验', 'warn');
+        }}
+        return;
+      }}
+      setActionReason('字段可发送，后台排队处理', 'ready');
+    }}
+    let liteTargetCandidates = [];
+    let liteSelectedTargetIndex = -1;
+    function closeTargetCandidates() {{
+      const modal = document.getElementById('lite-target-candidates');
+      if (modal) modal.hidden = true;
+      liteTargetCandidates = [];
+      liteSelectedTargetIndex = -1;
+    }}
+    function targetCandidateRecordId(candidate) {{
+      return String(candidate?.target_record_id || candidate?.record_id || '').trim();
+    }}
+    function isEndedCandidate(candidate) {{
+      return String(candidate?.status || '').includes('结束');
+    }}
+    function targetLookupPayload(form) {{
+      return {{
+        scope: previewValue(form, 'scope') || getCurrentScope(),
+        work_type: previewValue(form, 'work_type') || form?.dataset.workType || 'maintenance',
+        title: previewValue(form, 'title'),
+        start_time: previewValue(form, 'start_time'),
+        end_time: previewValue(form, 'end_time'),
+        action: form?.dataset.action || 'update',
+        content: previewValue(form, 'content'),
+        reason: previewValue(form, 'reason'),
+        impact: previewValue(form, 'impact'),
+        progress: previewValue(form, 'progress'),
+        text: document.getElementById('lite-notice-preview')?.textContent || '',
+      }};
+    }}
+    function renderTargetCandidates(candidates) {{
+      const list = document.getElementById('lite-target-candidate-list');
+      const confirmButton = document.getElementById('lite-target-candidates-confirm');
+      if (!list || !confirmButton) return;
+      liteTargetCandidates = Array.isArray(candidates) ? candidates : [];
+      liteSelectedTargetIndex = -1;
+      confirmButton.disabled = true;
+      if (!liteTargetCandidates.length) {{
+        const empty = document.createElement('div');
+        empty.className = 'target-candidate-empty';
+        empty.textContent = '未找到可关联的目标多维记录。可以先发送开始通告，由后端创建新的目标记录。';
+        list.replaceChildren(empty);
+        return;
+      }}
+      const rows = liteTargetCandidates.map((candidate, index) => {{
+        const row = document.createElement('button');
+        row.className = 'target-candidate-row';
+        row.type = 'button';
+        row.setAttribute('data-target-candidate-index', String(index));
+        const title = document.createElement('strong');
+        title.textContent = candidate.title || '未命名目标记录';
+        const meta = document.createElement('span');
+        meta.textContent = [
+          candidate.building || '',
+          candidate.status ? '状态 ' + candidate.status : '',
+          candidate.start_time || candidate.end_time ? `时间 ${{candidate.start_time || '-'}} ~ ${{candidate.end_time || '-'}}` : '',
+        ].filter(Boolean).join(' · ');
+        const reason = document.createElement('small');
+        reason.textContent = candidate.match_reason || (candidate.date_matched ? '时间匹配' : '相似记录');
+        row.append(title, meta, reason);
+        return row;
+      }});
+      list.replaceChildren(...rows);
+    }}
+    async function openTargetCandidates(form, opener) {{
+      if (!form) return;
+      const payload = targetLookupPayload(form);
+      if (!payload.title) {{
+        showLiteError('请先填写标题或名称，再查找目标记录。');
+        return;
+      }}
+      setButtonBusy(opener, true);
+      setLiteStatus('正在查找目标多维记录...');
+      try {{
+        const response = await fetch('/api/notice-target-candidates', {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          credentials: 'same-origin',
+          body: JSON.stringify(payload),
+        }});
+        const data = await response.json().catch(() => ({{}}));
+        if (!response.ok || data.ok === false) throw new Error(data.error || '查询目标记录失败');
+        const result = data.data || data;
+        renderTargetCandidates(result.candidates || []);
+        const modal = document.getElementById('lite-target-candidates');
+        if (modal) modal.hidden = false;
+        setLiteStatus(`找到 ${{(result.candidates || []).length}} 条候选目标记录`);
+      }} catch (error) {{
+        showLiteError(error && error.message ? error.message : '查询目标记录失败');
+        setLiteStatus(error && error.message ? error.message : '查询目标记录失败');
+      }} finally {{
+        setButtonBusy(opener, false);
+      }}
+    }}
+    function selectTargetCandidate(index) {{
+      liteSelectedTargetIndex = index;
+      document.querySelectorAll('.target-candidate-row').forEach((node, nodeIndex) => {{
+        node.classList.toggle('active', nodeIndex === index);
+      }});
+      const confirmButton = document.getElementById('lite-target-candidates-confirm');
+      if (confirmButton) confirmButton.disabled = index < 0;
+    }}
+    async function confirmTargetCandidateBinding() {{
+      const candidate = liteTargetCandidates[liteSelectedTargetIndex];
+      const form = document.getElementById('lite-notice-form');
+      const targetRecordId = targetCandidateRecordId(candidate);
+      if (!form || !targetRecordId) return;
+      const confirmButton = document.getElementById('lite-target-candidates-confirm');
+      setButtonBusy(confirmButton, true);
+      try {{
+        const payload = {{
+          scope: previewValue(form, 'scope') || getCurrentScope(),
+          work_type: previewValue(form, 'work_type') || form.dataset.workType || 'maintenance',
+          notice_type: previewValue(form, 'notice_type'),
+          active_item_id: previewValue(form, 'active_item_id'),
+          source_record_id: previewValue(form, 'source_record_id'),
+          target_record_id: targetRecordId,
+          record_id: targetRecordId,
+          title: previewValue(form, 'title') || candidate.title || '',
+          reason: previewValue(form, 'reason'),
+          start_time: previewValue(form, 'start_time'),
+          end_time: previewValue(form, 'end_time'),
+          status: candidate.status || '',
+        }};
+        const response = await fetch('/api/notice-identity/bind', {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          credentials: 'same-origin',
+          body: JSON.stringify(payload),
+        }});
+        const data = await response.json().catch(() => ({{}}));
+        if (!response.ok || data.ok === false) throw new Error(data.error || '绑定目标记录失败');
+        setFormValue(form, 'target_record_id', targetRecordId);
+        form.dataset.targetEnded = isEndedCandidate(candidate) ? '1' : '';
+        const status = document.getElementById('lite-target-link-status');
+        if (status) status.textContent = isEndedCandidate(candidate)
+          ? '已关联已结束目标记录，左侧事项将作为已闭环关系处理。'
+          : '已关联目标多维记录，后续更新/结束会继续使用同一条。';
+        if (isEndedCandidate(candidate)) {{
+          updateNoticePreview(form);
+        }} else {{
+          setOngoingSubmitButtons(form);
+        }}
+        setLiteFormDirty(false);
+        closeTargetCandidates();
+        setLiteStatus('目标多维关系已保存');
+      }} catch (error) {{
+        showLiteError(error && error.message ? error.message : '绑定目标记录失败');
+      }} finally {{
+        setButtonBusy(confirmButton, false);
+      }}
+    }}
+    function hydrateLitePreview() {{
+      const form = document.getElementById('lite-notice-form');
+      resetSitePhotoState(form);
+      updateNoticePreview(form);
+    }}
+    function setSubmitButtons(form, action) {{
+      const actions = form.querySelector('.form-actions');
+      if (!actions) return;
+      actions.querySelectorAll('button[name="submit_action"]').forEach(node => node.remove());
+      const button = document.createElement('button');
+      button.className = 'btn primary';
+      button.type = 'submit';
+      button.name = 'submit_action';
+      button.value = action === 'update' ? 'update' : 'start';
+      button.textContent = action === 'update' ? '发送更新' : '发送开始';
+      actions.appendChild(button);
+      updateNoticePreview(form);
+    }}
+    function setOngoingSubmitButtons(form) {{
+      const actions = form.querySelector('.form-actions');
+      if (!actions) return;
+      actions.querySelectorAll('button[name="submit_action"]').forEach(node => node.remove());
+      const updateButton = document.createElement('button');
+      updateButton.className = 'btn primary';
+      updateButton.type = 'submit';
+      updateButton.name = 'submit_action';
+      updateButton.value = 'update';
+      updateButton.textContent = '发送更新';
+      const endButton = document.createElement('button');
+      endButton.className = 'btn danger';
+      endButton.type = 'submit';
+      endButton.name = 'submit_action';
+      endButton.value = 'end';
+      endButton.textContent = '发送结束';
+      actions.appendChild(updateButton);
+      actions.appendChild(endButton);
+      updateNoticePreview(form);
+    }}
+    function applySourceRowToDetail(link) {{
+      const form = document.getElementById('lite-notice-form');
+      if (!form || !link || !link.matches('.notice-row')) return false;
+      const workType = link.getAttribute('data-work-type') || '';
+      if (workType && form.dataset.workType && workType !== form.dataset.workType) return false;
+      const draft = parseJsonAttr(link, 'data-draft');
+      const action = link.getAttribute('data-action') || 'start';
+      const title = link.getAttribute('data-title') || draft.title || '选择左侧事项';
+      form.dataset.action = action;
+      form.dataset.detailMode = 'source';
+      form.dataset.targetEnded = '';
+      setFormValue(form, 'manual', '');
+      setFormValue(form, 'manual_id', '');
+      setFormValue(form, 'record_id', link.getAttribute('data-record-id') || '');
+      setFormValue(form, 'source_record_id', link.getAttribute('data-source-record-id') || link.getAttribute('data-record-id') || '');
+      setSourceLinkDisplay(form, link.getAttribute('data-source-record-id') || link.getAttribute('data-record-id') || '', '已关联源表记录');
+      setFormValue(form, 'target_record_id', '');
+      setFormValue(form, 'active_item_id', '');
+      setFormValue(form, 'site_photo_count', link.getAttribute('data-site-photo-count') || '0');
+      setFormValue(form, 'mop_status', link.getAttribute('data-mop-status') || '');
+      for (const [key, value] of Object.entries(draft)) {{
+        setFormValue(form, key, value);
+      }}
+      form.querySelector('.detail-head strong')?.replaceChildren(document.createTextNode(title));
+      const hint = form.querySelector('.detail-head em');
+      if (hint) hint.textContent = '后端驱动表单，提交后进入后台队列';
+      setDetailModeNote('源表事项，提交后后端会创建并绑定目标多维记录。');
+      resetSitePhotoState(form, Number(link.getAttribute('data-site-photo-count') || 0));
+      setSubmitButtons(form, action);
+      updateNoticePreview(form);
+      setLiteStatus('已选择待发起事项，可继续编辑后发送');
+      return true;
+    }}
+    function applyOngoingRowToDetail(link) {{
+      const form = document.getElementById('lite-notice-form');
+      if (!form || !link || !link.matches('.ongoing-row')) return false;
+      const workType = link.getAttribute('data-work-type') || '';
+      if (workType && form.dataset.workType && workType !== form.dataset.workType) return false;
+      const draft = parseJsonAttr(link, 'data-draft');
+      const title = link.getAttribute('data-title') || draft.title || '进行中通告';
+      form.dataset.action = 'update';
+      form.dataset.detailMode = 'ongoing';
+      form.dataset.targetEnded = '';
+      setFormValue(form, 'manual', '');
+      setFormValue(form, 'manual_id', '');
+      setFormValue(form, 'record_id', link.getAttribute('data-target-record-id') || link.getAttribute('data-record-id') || '');
+      setFormValue(form, 'source_record_id', link.getAttribute('data-source-record-id') || '');
+      setSourceLinkDisplay(form, link.getAttribute('data-source-record-id') || '', '已关联源表记录');
+      setFormValue(form, 'target_record_id', link.getAttribute('data-target-record-id') || link.getAttribute('data-record-id') || '');
+      setFormValue(form, 'active_item_id', link.getAttribute('data-active-item-id') || '');
+      setFormValue(form, 'site_photo_count', link.getAttribute('data-site-photo-count') || '0');
+      setFormValue(form, 'mop_status', link.getAttribute('data-mop-status') || '');
+      for (const [key, value] of Object.entries(draft)) {{
+        setFormValue(form, key, value);
+      }}
+      form.querySelector('.detail-head strong')?.replaceChildren(document.createTextNode(title));
+      const hint = form.querySelector('.detail-head em');
+      if (hint) hint.textContent = '已开始未结束通告，可在这里更新或结束';
+      const sourceId = link.getAttribute('data-source-record-id') || '';
+      const targetId = link.getAttribute('data-target-record-id') || link.getAttribute('data-record-id') || '';
+      setDetailModeNote(sourceId && targetId
+        ? '已关联源表与目标多维，更新/结束会继续使用同一目标记录。'
+        : (targetId ? '纯手填或复制通告，已绑定目标多维，后续更新/结束继续使用同一目标记录。' : '进行中通告缺少目标多维 ID，提交时后端会要求先绑定目标记录。')
+      );
+      resetSitePhotoState(form, Number(link.getAttribute('data-site-photo-count') || 0));
+      setOngoingSubmitButtons(form);
+      updateNoticePreview(form);
+      setLiteStatus('已选择进行中通告，可发送更新或结束');
+      return true;
+    }}
+    async function navigateLite(url, options = {{}}) {{
+      setPanelLoading(true);
+      setLiteStatus(options.label || '正在切换...');
+      const scrollPositions = options.preserveWorkspaceScroll ? captureWorkspaceScroll() : null;
+      try {{
+        const response = await fetch(url, {{ credentials: 'same-origin' }});
+        const html = await response.text();
+        if (!response.ok) throw new Error(html || '页面加载失败');
+        applyLiteHtml(html, url, options.push !== false, options.selectors);
+        if (options.preserveWorkspaceScroll) restoreWorkspaceScroll(scrollPositions);
+      }} finally {{
+        setPanelLoading(false);
+      }}
+    }}
+    async function refreshCurrentLite(label, selectors) {{
+      await navigateLite(location.href, {{ push: false, label: label || '正在刷新...', selectors, preserveWorkspaceScroll: true }});
+    }}
+    async function liteFetchThenRefresh(url, label) {{
+      setLiteStatus(label + '中...');
+      const response = await fetch(url, {{ credentials: 'same-origin' }});
+      const data = await response.json().catch(() => ({{}}));
+      if (!response.ok || data.ok === false) throw new Error(data.error || label + '失败');
+      await refreshCurrentLite(label + '完成，正在更新页面...');
+    }}
+    document.addEventListener('click', async (event) => {{
+      const target = event.target instanceof Element ? event.target : null;
+      if (!target) return;
+      const photoRemove = target.closest('[data-site-photo-remove]');
+      if (photoRemove) {{
+        event.preventDefault();
+        const form = photoRemove.closest('#lite-notice-form') || document.getElementById('lite-notice-form');
+        ensureSitePhotoState(form);
+        const index = Number(photoRemove.getAttribute('data-site-photo-remove'));
+        if (Number.isInteger(index) && index >= 0) {{
+          liteSitePhotos.splice(index, 1);
+          setLiteFormDirty(true);
+          updateSitePhotoUi(form);
+        }}
+        return;
+      }}
+      const targetSearch = target.closest('#lite-target-search');
+      if (targetSearch) {{
+        event.preventDefault();
+        await openTargetCandidates(document.getElementById('lite-notice-form'), targetSearch);
+        return;
+      }}
+      const targetCandidateRow = target.closest('[data-target-candidate-index]');
+      if (targetCandidateRow) {{
+        event.preventDefault();
+        selectTargetCandidate(Number(targetCandidateRow.getAttribute('data-target-candidate-index')));
+        return;
+      }}
+      const targetCancel = target.closest('#lite-target-candidates-cancel');
+      if (targetCancel) {{
+        event.preventDefault();
+        closeTargetCandidates();
+        return;
+      }}
+      const targetConfirm = target.closest('#lite-target-candidates-confirm');
+      if (targetConfirm) {{
+        event.preventDefault();
+        await confirmTargetCandidateBinding();
+        return;
+      }}
+      const discardCancel = target.closest('#lite-discard-cancel');
+      if (discardCancel) {{
+        event.preventDefault();
+        resolveDiscardConfirm(false);
+        return;
+      }}
+      const discardConfirm = target.closest('#lite-discard-confirm-button');
+      if (discardConfirm) {{
+        event.preventDefault();
+        resolveDiscardConfirm(true);
+        return;
+      }}
+      const manualOpen = target.closest('#manual-open');
+      if (manualOpen) {{
+        event.preventDefault();
+        const willOpen = !document.getElementById('manual-picker')?.classList.contains('open');
+        setPickerOpen('manual-picker', 'manual-open', willOpen);
+        setPickerOpen('refresh-picker', 'refresh-open', false);
+        return;
+      }}
+      const refreshOpen = target.closest('#refresh-open');
+      if (refreshOpen) {{
+        event.preventDefault();
+        const willOpen = !document.getElementById('refresh-picker')?.classList.contains('open');
+        setPickerOpen('refresh-picker', 'refresh-open', willOpen);
+        setPickerOpen('manual-picker', 'manual-open', false);
+        return;
+      }}
+      const navLink = target.closest('.notice-row,.ongoing-row,.type-tab,.manual-menu a');
+      if (navLink) {{
+        event.preventDefault();
+        if (navLink.matches('.notice-row.is-disabled')) {{
+          setLiteStatus(navLink.getAttribute('data-disabled-reason') || '该事项不可操作');
+          return;
+        }}
+        if (!(await confirmDiscardLiteChanges())) return;
+        setLiteFormDirty(false);
+        closePickers();
+        navLink.classList.add('is-loading');
+        const isRow = navLink.matches('.notice-row,.ongoing-row');
+        const appliedLocally = isRow && navLink.matches('.notice-row') && applySourceRowToDetail(navLink);
+        const appliedOngoingLocally = isRow && navLink.matches('.ongoing-row') && applyOngoingRowToDetail(navLink);
+        if (appliedLocally || appliedOngoingLocally) {{
+          const selectingOngoing = navLink.matches('.ongoing-row');
+          document.querySelectorAll('.notice-row').forEach(node => {{
+            node.classList.toggle('active', !selectingOngoing && node === navLink);
+            node.setAttribute('aria-current', !selectingOngoing && node === navLink ? 'true' : 'false');
+          }});
+          document.querySelectorAll('.ongoing-row').forEach(node => {{
+            node.classList.toggle('active', selectingOngoing && node === navLink);
+            node.setAttribute('aria-current', selectingOngoing && node === navLink ? 'true' : 'false');
+          }});
+          navLink.classList.remove('is-loading');
+          history.replaceState({{ lite: true }}, '', navLink.href);
+          return;
+        }}
+        const selectors = isRow ? ['.status', '#detail-panel'] : undefined;
+        const rowGroupSelector = navLink.matches('.notice-row') ? '.notice-row' : '.ongoing-row';
+        try {{
+          await navigateLite(navLink.href, {{ label: '正在打开通告...', selectors, preserveWorkspaceScroll: isRow }});
+          if (isRow) {{
+            document.querySelectorAll(rowGroupSelector).forEach(node => {{
+              node.classList.toggle('active', node === navLink);
+              node.setAttribute('aria-current', node === navLink ? 'true' : 'false');
+            }});
+            navLink.classList.remove('is-loading');
+          }}
+        }}
+        catch (error) {{
+          navLink.classList.remove('is-loading');
+          showLiteError(error && error.message ? error.message : '打开失败');
+        }}
+        return;
+      }}
+      const pageRefreshButton = target.closest('#lite-refresh-page');
+      if (pageRefreshButton) {{
+        if (!(await confirmDiscardLiteChanges())) return;
+        setLiteFormDirty(false);
+        setButtonBusy(pageRefreshButton, true);
+        setPickerOpen('refresh-picker', 'refresh-open', false);
+        try {{ await refreshCurrentLite('正在刷新本页...', ['.status', '.summary', '.workbench-guide', '.workspace']); }}
+        catch (error) {{ showLiteError(error && error.message ? error.message : '刷新本页失败'); }}
+        finally {{ setButtonBusy(pageRefreshButton, false); }}
+        return;
+      }}
+      const repairButton = target.closest('#lite-refresh-repair');
+      if (repairButton) {{
+        if (!(await confirmDiscardLiteChanges())) return;
+        setLiteFormDirty(false);
+        setButtonBusy(repairButton, true);
+        setPickerOpen('refresh-picker', 'refresh-open', false);
+        try {{ await liteFetchThenRefresh('/api/repair-refresh?scope=' + encodeURIComponent(getCurrentScope()), '刷新检修'); }}
+        catch (error) {{ showLiteError(error && error.message ? error.message : '刷新检修失败'); }}
+        finally {{ setButtonBusy(repairButton, false); }}
+        return;
+      }}
+      const changeButton = target.closest('#lite-refresh-change');
+      if (changeButton) {{
+        if (!(await confirmDiscardLiteChanges())) return;
+        setLiteFormDirty(false);
+        setButtonBusy(changeButton, true);
+        setPickerOpen('refresh-picker', 'refresh-open', false);
+        try {{ await liteFetchThenRefresh('/api/change-refresh?scope=' + encodeURIComponent(getCurrentScope()), '刷新变更'); }}
+        catch (error) {{ showLiteError(error && error.message ? error.message : '刷新变更失败'); }}
+        finally {{ setButtonBusy(changeButton, false); }}
+        return;
+      }}
+      const undoButton = target.closest('.undo-row[data-undo-id]');
+      if (undoButton) {{
+        const undoId = undoButton.getAttribute('data-undo-id');
+        if (!undoId) return;
+        undoButton.disabled = true;
+        try {{
+          const response = await fetch('/api/notice-undo/' + encodeURIComponent(undoId) + '/apply', {{
+            method: 'POST',
+            headers: {{ 'Content-Type': 'application/json' }},
+            body: JSON.stringify({{ scope: getCurrentScope() }}),
+          }});
+          const data = await response.json().catch(() => ({{}}));
+          if (!response.ok || data.ok === false) throw new Error(data.error || '回退失败');
+          await refreshCurrentLite('回退已受理，正在更新页面...');
+        }} catch (error) {{
+          showLiteError(error && error.message ? error.message : '回退失败');
+          undoButton.disabled = false;
+        }}
+        return;
+      }}
+      const endCancel = target.closest('#lite-end-check-cancel');
+      if (endCancel) {{
+        event.preventDefault();
+        closeEndCheck();
+        return;
+      }}
+      const endConfirm = target.closest('#lite-end-check-confirm');
+      if (endConfirm) {{
+        event.preventDefault();
+        const form = document.getElementById('lite-notice-form');
+        if (!form) return;
+        form.dataset.endCheckApproved = '1';
+        const submitter = pendingEndSubmitter;
+        closeEndCheck();
+        if (submitter && typeof form.requestSubmit === 'function') form.requestSubmit(submitter);
+        else form.requestSubmit();
+        return;
+      }}
+      if (!target.closest('#manual-picker')) {{
+        setPickerOpen('manual-picker', 'manual-open', false);
+      }}
+      if (!target.closest('#refresh-picker')) {{
+        setPickerOpen('refresh-picker', 'refresh-open', false);
+      }}
+    }});
+    document.addEventListener('change', async (event) => {{
+      if (event.target && event.target.id === 'lite-scope-select') {{
+        if (!(await confirmDiscardLiteChanges())) {{
+          event.target.value = currentUrlScope();
+          return;
+        }}
+        setLiteFormDirty(false);
+        const url = '/workbench-lite?scope=' + encodeURIComponent(event.target.value) + '&work_type=' + encodeURIComponent(new URLSearchParams(location.search).get('work_type') || '{_e(work)}');
+        try {{ await navigateLite(url, {{ label: '正在切换楼栋...', selectors: ['.topbar', '.status', '.summary', '.toolbar', '.workbench-guide', '.workspace'] }}); }}
+        catch (error) {{ location.href = url; }}
+        return;
+      }}
+      if (event.target && event.target.id === 'lite-site-photo-input') {{
+        event.preventDefault();
+        const form = event.target.closest('#lite-notice-form') || document.getElementById('lite-notice-form');
+        await handleSitePhotoFiles(event.target.files, form);
+        return;
+      }}
+      if (event.target && event.target.name === 'source_record_id' && event.target.closest('#lite-notice-form')) {{
+        const form = event.target.closest('#lite-notice-form');
+        const sourceId = event.target.value || '';
+        setFormValue(form, 'record_id', sourceId);
+        setFormValue(form, 'target_record_id', '');
+        setSourceLinkDisplay(form, sourceId, sourceId ? '已选择源表记录' : '当前通告没有源表 ID');
+        form.dataset.targetEnded = '';
+        const status = document.getElementById('lite-target-link-status');
+        if (status) status.textContent = '已切换源表事项，请重新查找或确认目标多维记录。';
+      }}
+      if (event.target && event.target.closest('#lite-notice-form')) {{
+        setLiteFormDirty(true);
+        updateNoticePreview(event.target.closest('#lite-notice-form'));
+      }}
+    }});
+    document.addEventListener('dragover', (event) => {{
+      const target = event.target instanceof Element ? event.target : null;
+      const drop = sitePhotoDropFromTarget(target);
+      if (!drop) return;
+      event.preventDefault();
+      drop.classList.add('dragover');
+    }});
+    document.addEventListener('dragleave', (event) => {{
+      const target = event.target instanceof Element ? event.target : null;
+      const drop = sitePhotoDropFromTarget(target);
+      if (drop) drop.classList.remove('dragover');
+    }});
+    document.addEventListener('drop', async (event) => {{
+      const target = event.target instanceof Element ? event.target : null;
+      const drop = sitePhotoDropFromTarget(target);
+      if (!drop) return;
+      event.preventDefault();
+      drop.classList.remove('dragover');
+      const form = drop.closest('#lite-notice-form') || sitePhotoPanelFromTarget(target)?.closest('#lite-notice-form') || document.getElementById('lite-notice-form');
+      await handleSitePhotoFiles(event.dataTransfer?.files, form);
+    }});
+    document.addEventListener('paste', (event) => {{
+      handleSitePhotoPaste(event).catch(error => {{
+        const message = error && error.message ? error.message : '粘贴现场照片失败';
+        const status = document.getElementById('lite-site-photo-status');
+        if (status) status.textContent = message;
+        setLiteStatus(message);
+      }});
+    }});
+    document.addEventListener('keydown', (event) => {{
+      if (event.key === 'Escape') {{
+        closePickers();
+        closeEndCheck();
+        closeTargetCandidates();
+      }}
+    }});
+    window.addEventListener('popstate', () => {{
+      navigateLite(location.href, {{ push: false, label: '正在恢复页面...' }}).catch(() => location.reload());
+    }});
+    function formPayload(form, submitter) {{
+      const fd = new FormData(form);
+      const action = submitter && submitter.value ? submitter.value : (form.dataset.action || 'start');
+      const patch = Object.fromEntries(fd.entries());
+      const photos = sitePhotoPayload(form);
+      const sourceRecordId = String(patch.source_record_id || '').trim();
+      const rawRecordId = String(patch.record_id || '').trim();
+      const targetRecordId = String(patch.target_record_id || '').trim()
+        || (isMissingTargetRecordId(rawRecordId) ? '' : rawRecordId);
+      const submitRecordId = action === 'start'
+        ? (sourceRecordId || patch.manual_id || rawRecordId || '')
+        : (targetRecordId || rawRecordId || '');
+      const operationIdentity = action === 'start'
+        ? (sourceRecordId || patch.manual_id || rawRecordId || patch.active_item_id || '')
+        : (targetRecordId || patch.active_item_id || rawRecordId || '');
+      patch.action = action;
+      patch.manual = patch.manual === '1';
+      patch.source_record_id = sourceRecordId;
+      patch.target_record_id = targetRecordId;
+      patch.record_id = submitRecordId;
+      patch.operation_id = `${{patch.scope}}:${{patch.work_type}}:${{operationIdentity}}:${{action}}:${{Date.now()}}`;
+      delete patch.site_photos_json;
+      if (photos.length) {{
+        patch.site_photos = photos;
+        patch.extra_images = photos;
+      }}
+      return {{
+        command_format: 'notice_command',
+        action,
+        scope: patch.scope,
+        work_type: patch.work_type,
+        notice_type: patch.notice_type,
+        active_item_id: patch.active_item_id || '',
+        source_record_id: sourceRecordId,
+        target_record_id: targetRecordId,
+        record_id: submitRecordId,
+        operation_id: patch.operation_id,
+        patch
+      }};
+    }}
+    function rowIdentityCandidates(draft) {{
+      return [
+        draft.active_item_id,
+        draft.target_record_id,
+        draft.record_id,
+        draft.source_record_id,
+        draft.manual_id,
+        draft.operation_id,
+      ].map(value => String(value || '').trim()).filter(Boolean);
+    }}
+    function findOngoingRowByDraft(draft) {{
+      const candidates = rowIdentityCandidates(draft);
+      if (!candidates.length) return null;
+      return Array.from(document.querySelectorAll('.ongoing-row')).find(row => {{
+        const rowValues = [
+          row.getAttribute('data-active-item-id'),
+          row.getAttribute('data-target-record-id'),
+          row.getAttribute('data-record-id'),
+          row.getAttribute('data-source-record-id'),
+        ].map(value => String(value || '').trim()).filter(Boolean);
+        return candidates.some(value => rowValues.includes(value));
+      }}) || null;
+    }}
+    function ongoingListElements() {{
+      const panel = document.querySelector('.result-rail .rail-panel');
+      return {{
+        panel,
+        list: panel ? panel.querySelector('.list') : null,
+        count: panel ? panel.querySelector('.panel-count') : null,
+      }};
+    }}
+    function setPanelCountValue(countNode, value) {{
+      if (!countNode) return;
+      countNode.textContent = String(Math.max(0, Number(value) || 0));
+    }}
+    function adjustOngoingCount(delta) {{
+      const {{ count }} = ongoingListElements();
+      const current = Number(count?.textContent || 0);
+      setPanelCountValue(count, current + delta);
+      document.querySelectorAll('.summary article').forEach(card => {{
+        const label = card.querySelector('strong')?.textContent?.trim();
+        if (label !== '进行中') return;
+        const value = card.querySelector('b');
+        setPanelCountValue(value, Number(value?.textContent || 0) + delta);
+      }});
+    }}
+    function setMetaChip(parent, text, tone) {{
+      if (!text) return;
+      const chip = document.createElement('small');
+      chip.className = 'meta-chip' + (tone ? ' ' + tone : '');
+      chip.textContent = text;
+      parent.appendChild(chip);
+    }}
+    function renderOngoingRow(row, draft, action) {{
+      const title = String(draft.title || '进行中通告').trim();
+      const isEnding = action === 'end';
+      const status = isEnding ? '结束处理中' : '后台处理中';
+      row.className = 'ongoing-row active optimistic';
+      row.href = '#';
+      row.title = title;
+      row.setAttribute('aria-current', 'true');
+      row.setAttribute('data-row-kind', 'ongoing');
+      row.setAttribute('data-work-type', draft.work_type || '');
+      row.setAttribute('data-active-item-id', draft.active_item_id || draft.operation_id || '');
+      row.setAttribute('data-record-id', draft.target_record_id || draft.record_id || '');
+      row.setAttribute('data-target-record-id', draft.target_record_id || draft.record_id || '');
+      row.setAttribute('data-source-record-id', draft.source_record_id || '');
+      row.setAttribute('data-site-photo-count', draft.site_photo_count || '0');
+      row.setAttribute('data-mop-status', draft.mop_status || '');
+      row.setAttribute('data-action', 'update');
+      row.setAttribute('data-title', title);
+      row.setAttribute('data-draft', JSON.stringify(draft));
+      const rowMain = document.createElement('span');
+      rowMain.className = 'row-main';
+      const strong = document.createElement('strong');
+      strong.textContent = title;
+      const badge = document.createElement('span');
+      badge.className = 'row-status working';
+      badge.textContent = status;
+      rowMain.append(strong, badge);
+      const meta = document.createElement('span');
+      meta.className = 'row-meta';
+      setMetaChip(meta, status, 'ready');
+      setMetaChip(meta, draft.building || draft.buildings || getCurrentScope());
+      setMetaChip(meta, draft.specialty || '');
+      if (draft.maintenance_cycle) setMetaChip(meta, '周期 ' + draft.maintenance_cycle, 'ready');
+      const sitePhotoCount = Number(draft.site_photo_count || 0);
+      if (['maintenance', 'change', 'repair'].includes(draft.work_type || '')) {{
+        setMetaChip(meta, sitePhotoCount > 0 ? `现场图${{sitePhotoCount}}张` : '现场图未传', sitePhotoCount > 0 ? 'success' : 'warn');
+      }}
+      row.replaceChildren(rowMain, meta);
+      return row;
+    }}
+    function removeSourceRowForDraft(draft) {{
+      const sourceId = String(draft.source_record_id || draft.record_id || '').trim();
+      if (!sourceId) return;
+      const row = Array.from(document.querySelectorAll('.notice-row')).find(node =>
+        [node.getAttribute('data-source-record-id'), node.getAttribute('data-record-id')]
+          .map(value => String(value || '').trim())
+          .includes(sourceId)
+      );
+      if (!row) return;
+      row.classList.add('is-disabled');
+      row.setAttribute('aria-disabled', 'true');
+      row.setAttribute('data-disabled-reason', '已提交后台处理');
+      row.querySelector('.row-status')?.replaceChildren(document.createTextNode('处理中'));
+    }}
+    function applyOptimisticSubmission(form, action, payload) {{
+      const draft = Object.assign({{}}, payload.patch || {{}});
+      draft.action = action;
+      draft.operation_id = payload.operation_id || draft.operation_id || '';
+      draft.active_item_id = payload.active_item_id || draft.active_item_id || '';
+      draft.source_record_id = payload.source_record_id || draft.source_record_id || '';
+      draft.target_record_id = payload.target_record_id || draft.target_record_id || '';
+      draft.record_id = payload.record_id || draft.record_id || '';
+      const row = findOngoingRowByDraft(draft);
+      if (row) {{
+        row.classList.add('optimistic');
+        row.querySelector('.row-status')?.replaceChildren(document.createTextNode('后台处理中'));
+      }}
+      if (action === 'start') {{
+        setLiteStatus('开始任务已提交后台，发送成功后自动加入进行中');
+      }} else if (action === 'end') {{
+        setLiteStatus('结束任务已提交后台，成功后自动移出进行中');
+      }} else {{
+        setLiteStatus('更新任务已提交后台，成功后自动刷新当前通告');
+      }}
+      return true;
+    }}
+    function schedulePostSubmitRefresh(label) {{
+      const selectors = ['.status', '.summary', '.workspace'];
+      setTimeout(() => refreshCurrentLite(label || '后台已受理，正在校准列表...', selectors).catch(() => null), 450);
+      setTimeout(() => refreshCurrentLite('后台状态校准中...', selectors).catch(() => null), 2200);
+    }}
+    document.addEventListener('submit', async (event) => {{
+      const pasteForm = event.target.closest('.paste-drawer form,.paste-box form');
+      if (pasteForm) {{
+        event.preventDefault();
+        if (!(await confirmDiscardLiteChanges())) return;
+        setLiteFormDirty(false);
+        const submitter = event.submitter;
+        if (submitter) submitter.disabled = true;
+        try {{
+          const response = await fetch(pasteForm.action, {{
+            method: 'POST',
+            body: new FormData(pasteForm),
+            credentials: 'same-origin',
+          }});
+          const html = await response.text();
+          if (!response.ok) throw new Error(html || '解析失败');
+          const nextDoc = new DOMParser().parseFromString(html, 'text/html');
+          applyLiteDocument(nextDoc, canonicalLiteUrlFromDocument(nextDoc, location.href), true);
+        }} catch (error) {{
+          showLiteError(error && error.message ? error.message : '解析失败');
+          if (submitter) submitter.disabled = false;
+        }}
+        return;
+      }}
+      const filterForm = event.target.closest('.toolbar form');
+      if (filterForm) {{
+        event.preventDefault();
+        if (!(await confirmDiscardLiteChanges())) return;
+        setLiteFormDirty(false);
+        const url = filterForm.action + '?' + new URLSearchParams(new FormData(filterForm)).toString();
+        try {{ await navigateLite(url, {{ label: '正在筛选...' }}); }}
+        catch (error) {{ location.href = url; }}
+        return;
+      }}
+      const form = event.target.closest('#lite-notice-form');
+      if (!form) return;
+      event.preventDefault();
+      const submitter = event.submitter;
+      const submitAction = submitter && submitter.value ? submitter.value : (form.dataset.action || 'start');
+      if (submitAction === 'end' && form.dataset.endCheckApproved !== '1') {{
+        openEndCheck(form, submitter);
+        return;
+      }}
+      delete form.dataset.endCheckApproved;
+      setLiteFormDirty(false);
+      if (submitter) submitter.disabled = true;
+      setButtonBusy(submitter, true);
+      setLiteStatus('已加入后台发送队列');
+      const payload = formPayload(form, submitter);
+      const optimisticApplied = applyOptimisticSubmission(form, submitAction, payload);
+      try {{
+        await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)));
+        const response = await fetch('/api/workbench-actions', {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify(payload),
+        }});
+        const data = await response.json();
+        if (!response.ok || data.ok === false) throw new Error(data.error || '提交失败');
+        const jobId = (data && data.job_id) || (data && data.data && data.data.job_id) || '';
+        setLiteStatus(`已受理，任务号 ${{jobId}}`);
+        schedulePostSubmitRefresh('任务已受理，正在更新列表...');
+      }} catch (error) {{
+        setLiteFormDirty(true);
+        setLiteStatus(error && error.message ? error.message : '提交失败');
+        if (optimisticApplied) {{
+          setTimeout(() => refreshCurrentLite('提交失败，正在恢复页面状态...', ['.status', '.summary', '.workspace']).catch(() => null), 300);
+        }}
+      }} finally {{
+        setButtonBusy(submitter, false);
+      }}
+    }});
+    document.addEventListener('input', (event) => {{
+      if (event.target && event.target.closest('#lite-notice-form')) {{
+        setLiteFormDirty(true);
+        updateNoticePreview(event.target.closest('#lite-notice-form'));
+      }}
+    }});
+    hydrateLitePreview();
+    window.addEventListener('beforeunload', (event) => {{
+      if (!liteFormDirty) return;
+      event.preventDefault();
+      event.returnValue = '';
+    }});
+  </script>
+</body>
+</html>"""

@@ -27,6 +27,7 @@ try:
     from .identity_utils import (
         canonical_source_record_id,
         canonical_target_record_id,
+        is_local_record_id,
         normalize_notice_identity_payload,
     )
 except ImportError:
@@ -37,6 +38,7 @@ except ImportError:
     from lan_bitable_template_portal.identity_utils import (
         canonical_source_record_id,
         canonical_target_record_id,
+        is_local_record_id,
         normalize_notice_identity_payload,
     )
 
@@ -364,7 +366,6 @@ class LanPortalStateStore:
                 identity TEXT PRIMARY KEY,
                 active_item_id TEXT,
                 record_id TEXT,
-                raw_record_id TEXT,
                 source_record_id TEXT,
                 work_type TEXT,
                 notice_type TEXT,
@@ -1083,6 +1084,7 @@ class LanPortalStateStore:
         self._migrate_legacy_source_snapshot_locked(conn)
         self._migrate_legacy_change_notice_labels_locked(conn)
         self._repair_notice_identity_map_locked(conn)
+        self._cleanup_invalid_notice_identity_targets_locked(conn)
         conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
             (str(self.SCHEMA_VERSION),),
@@ -1420,6 +1422,12 @@ class LanPortalStateStore:
             normalized = normalize_notice_identity_payload(payload)
             if not normalized:
                 return
+            if not (
+                self._text(normalized.get("active_item_id"))
+                or canonical_source_record_id(normalized)
+                or canonical_target_record_id(normalized)
+            ):
+                return
             identity = self._upsert_notice_identity_locked(conn, normalized, origin=origin)
             if identity:
                 repaired += 1
@@ -1438,7 +1446,8 @@ class LanPortalStateStore:
                 if not isinstance(payload, dict):
                     continue
                 payload.setdefault("active_item_id", str(row["active_item_id"] or ""))
-                if row["record_id"] and not payload.get("target_record_id"):
+                record_id = str(row["record_id"] or "").strip()
+                if record_id and not is_local_record_id(record_id) and not payload.get("target_record_id"):
                     payload["target_record_id"] = str(row["record_id"] or "")
                 upsert_candidate(payload, origin=str(row["origin"] or "qt_active_repair"))
         except Exception:
@@ -1447,7 +1456,7 @@ class LanPortalStateStore:
         try:
             rows = conn.execute(
                 """
-                SELECT active_item_id, record_id, raw_record_id, source_record_id,
+                SELECT active_item_id, record_id, source_record_id,
                        work_type, notice_type, payload_json
                 FROM ongoing_items
                 ORDER BY updated_at DESC
@@ -1463,7 +1472,9 @@ class LanPortalStateStore:
                 payload.setdefault("notice_type", str(row["notice_type"] or ""))
                 if row["source_record_id"] and not payload.get("source_record_id"):
                     payload["source_record_id"] = str(row["source_record_id"] or "")
-                target_record_id = str(row["record_id"] or row["raw_record_id"] or "")
+                target_record_id = str(row["record_id"] or "")
+                if is_local_record_id(target_record_id):
+                    target_record_id = ""
                 if target_record_id and not payload.get("target_record_id"):
                     payload["target_record_id"] = target_record_id
                 upsert_candidate(payload, origin="ongoing_repair")
@@ -1512,6 +1523,51 @@ class LanPortalStateStore:
         conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES('notice_identity_repair_v1_done', ?)",
             (self._json({"repaired": repaired, "at": time.time()}),),
+        )
+
+    def _cleanup_invalid_notice_identity_targets_locked(self, conn: sqlite3.Connection) -> None:
+        """Remove local/draft placeholders from target_record_id bindings."""
+
+        marker_key = "notice_identity_strict_target_cleanup_v1_done"
+        marker = conn.execute(
+            "SELECT value FROM meta WHERE key = ?",
+            (marker_key,),
+        ).fetchone()
+        if marker:
+            return
+        cleaned = 0
+        try:
+            rows = conn.execute(
+                """
+                SELECT identity_id, target_record_id, payload_json
+                FROM notice_identity_map
+                WHERE deleted_at IS NULL
+                """
+            ).fetchall()
+            for row in rows:
+                target_record_id = self._text(row["target_record_id"])
+                if not is_local_record_id(target_record_id):
+                    continue
+                payload = self._loads(str(row["payload_json"] or ""), {})
+                if not isinstance(payload, dict):
+                    payload = {}
+                payload.pop("target_record_id", None)
+                if self._text(payload.get("record_id")) == target_record_id:
+                    payload["record_id"] = self._text(payload.get("active_item_id"))
+                conn.execute(
+                    """
+                    UPDATE notice_identity_map
+                    SET target_record_id = '', payload_json = ?, updated_at = ?
+                    WHERE identity_id = ?
+                    """,
+                    (self._json(payload), time.time(), row["identity_id"]),
+                )
+                cleaned += 1
+        except Exception:
+            pass
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
+            (marker_key, self._json({"cleaned": cleaned, "at": time.time()})),
         )
 
     @staticmethod
@@ -2136,7 +2192,6 @@ class LanPortalStateStore:
                             identity,
                             active_item_id,
                             record_id,
-                            raw_record_id,
                             source_record_id,
                             work_type,
                             notice_type,
@@ -2146,13 +2201,12 @@ class LanPortalStateStore:
                             payload_json,
                             updated_at,
                             snapshot_id
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             self._identity_for_item(item),
                             self._text(item.get("active_item_id")),
                             canonical_target_record_id(normalized_item),
-                            self._text(item.get("raw_record_id")),
                             canonical_source_record_id(normalized_item),
                             self._text(item.get("work_type")),
                             self._text(item.get("notice_type")),
@@ -3998,7 +4052,7 @@ class LanPortalStateStore:
         return (
             self._text(payload.get("active_item_id"))
             or self._text(payload.get("item_id"))
-            or self._text(payload.get("record_id"))
+            or canonical_target_record_id(payload)
             or self._text(fallback)
         )
 
@@ -4072,24 +4126,29 @@ class LanPortalStateStore:
         with self._lock:
             with closing(self._connect()) as conn:
                 self._ensure_schema_locked(conn)
-                if not explicit_active_item_id:
-                    existing_identity = self._notice_identity_lookup_locked(
-                        conn,
-                        work_type=self._text(normalized.get("work_type")),
-                        active_item_id=active_item_id,
-                        source_record_id=canonical_source_record_id(normalized),
-                        target_record_id=record_id,
-                    )
-                else:
-                    existing_identity = None
+                existing_identity = self._notice_identity_lookup_locked(
+                    conn,
+                    work_type=self._text(normalized.get("work_type")),
+                    active_item_id=active_item_id,
+                    source_record_id=canonical_source_record_id(normalized),
+                    target_record_id=record_id,
+                )
                 if existing_identity is not None:
                     existing_identity_data = self._notice_identity_from_row(existing_identity)
                     existing_active_item_id = self._text(
                         existing_identity_data.get("active_item_id")
                     )
-                    if existing_active_item_id:
+                    if existing_active_item_id and not explicit_active_item_id:
                         active_item_id = existing_active_item_id
                         normalized["active_item_id"] = active_item_id
+                    existing_target_record_id = self._text(
+                        existing_identity_data.get("target_record_id")
+                    )
+                    if existing_target_record_id and not record_id:
+                        record_id = existing_target_record_id
+                        normalized["record_id"] = existing_target_record_id
+                        normalized["target_record_id"] = existing_target_record_id
+                        normalized["_is_placeholder_record"] = False
                 conn.execute(
                     """
                     INSERT INTO qt_active_items(
@@ -4157,6 +4216,10 @@ class LanPortalStateStore:
     def _notice_identity_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
         payload = self._loads(str(row["payload_json"] or ""), {})
         payload = payload if isinstance(payload, dict) else {}
+        target_record_id = str(row["target_record_id"] or "")
+        if is_local_record_id(target_record_id):
+            target_record_id = ""
+            payload.pop("target_record_id", None)
         building_codes = self._loads(str(row["building_codes_json"] or "[]"), [])
         if not isinstance(building_codes, list):
             building_codes = []
@@ -4170,7 +4233,7 @@ class LanPortalStateStore:
             "source_record_id": str(row["source_record_id"] or ""),
             "target_app_token": str(row["target_app_token"] or ""),
             "target_table_id": str(row["target_table_id"] or ""),
-            "target_record_id": str(row["target_record_id"] or ""),
+            "target_record_id": target_record_id,
             "title": str(row["title"] or ""),
             "reason": str(row["reason"] or ""),
             "building_codes": building_codes,
@@ -4198,9 +4261,11 @@ class LanPortalStateStore:
         target_record_id: str = "",
     ) -> sqlite3.Row | None:
         work_type = self._text(work_type)
+        source_record_id = "" if is_local_record_id(self._text(source_record_id)) else self._text(source_record_id)
+        target_record_id = "" if is_local_record_id(self._text(target_record_id)) else self._text(target_record_id)
         lookups = (
-            ("target_record_id", self._text(target_record_id)),
-            ("source_record_id", self._text(source_record_id)),
+            ("target_record_id", target_record_id),
+            ("source_record_id", source_record_id),
             ("active_item_id", self._text(active_item_id)),
         )
         for column, value in lookups:
@@ -4289,6 +4354,9 @@ class LanPortalStateStore:
             target_record_id=target_record_id,
         )
         existing = self._notice_identity_from_row(existing_row) if existing_row else {}
+        existing_target_record_id = self._text(existing.get("target_record_id"))
+        if is_local_record_id(existing_target_record_id):
+            existing_target_record_id = ""
         identity_id = self._text(existing.get("identity_id")) or self._notice_identity_id_for_payload(
             work_type=work_type,
             active_item_id=active_item_id,
@@ -4310,7 +4378,7 @@ class LanPortalStateStore:
             "source_record_id": source_record_id or existing.get("source_record_id", ""),
             "target_app_token": target_app_token or existing.get("target_app_token", ""),
             "target_table_id": target_table_id or existing.get("target_table_id", ""),
-            "target_record_id": target_record_id or existing.get("target_record_id", ""),
+            "target_record_id": target_record_id or existing_target_record_id,
             "title": title or existing.get("title", ""),
             "reason": reason or existing.get("reason", ""),
             "building_codes": building_codes or existing.get("building_codes", []),

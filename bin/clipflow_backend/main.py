@@ -14,6 +14,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
@@ -55,6 +56,7 @@ from clipflow_backend.api_models import (
     NoticeMemoryHistorySaveRequest,
     NoticeMemoryHistoryScanRequest,
     NoticeMemoryImportRequest,
+    NoticeIdentityBindRequest,
     NoticeTargetLookupRequest,
     NoticeUndoApplyRequest,
     NoticeWorkTypeOverrideRequest,
@@ -96,9 +98,14 @@ from lan_bitable_template_portal.server import (
     portal_index_file,
     portal_static_roots,
 )
+from lan_bitable_template_portal.workbench_lite import (
+    parse_pasted_notice_to_draft,
+    render_workbench_lite,
+)
 from lan_bitable_template_portal.portal_auth import AUTH_COOKIE_NAME
 from lan_bitable_template_portal.identity_utils import (
     canonical_target_record_id,
+    is_local_record_id,
     normalize_notice_identity_payload,
 )
 from lan_bitable_template_portal.portal_service import (
@@ -428,12 +435,153 @@ class FastAPIPortalController:
             oauth_response = self._root_oauth_callback_response(request)
             if oauth_response is not None:
                 return oauth_response
+            if (
+                str(request.query_params.get("scope") or "").strip()
+                and str(request.query_params.get("mode") or "").strip() != "events"
+            ):
+                params = {
+                    key: value
+                    for key, value in request.query_params.multi_items()
+                    if key != "frontend"
+                }
+                return Response(
+                    status_code=302,
+                    headers={"Location": f"/workbench-lite?{urlencode(params)}"},
+                )
             return self._static_file_response(request, portal_index_file(), html=True)
 
         @app.get("/admin/history-memory")
         @app.get("/admin/history-memory/")
         async def admin_history_memory_page(request: Request):
             return self._static_file_response(request, portal_index_file(), html=True)
+
+        @app.get("/workbench-lite")
+        @app.get("/workbench-lite/")
+        async def workbench_lite_page(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                next_path = str(request.url.path or "/workbench-lite")
+                if str(request.url.query or ""):
+                    next_path += "?" + str(request.url.query)
+                login_url = f"/api/auth/login?{urlencode({'next': next_path})}"
+                return Response(status_code=302, headers={"Location": login_url})
+            try:
+                self._ensure_source_snapshot_background()
+                requested_scope = (
+                    request.query_params.get("scope")
+                    or PortalRuntime.auth_manager.default_scope(session)
+                    or "ALL"
+                )
+                scope = self._authorized_scope_or_error(session, requested_scope)
+                work_type = str(request.query_params.get("work_type") or "maintenance").strip()
+                if work_type not in NOTICE_TYPE_BY_WORK_TYPE:
+                    work_type = "maintenance"
+                search = str(request.query_params.get("search") or "")
+                specialty = str(request.query_params.get("specialty") or "")
+                record_id = str(request.query_params.get("record_id") or "")
+                active_item_id = str(request.query_params.get("active_item_id") or "")
+                manual = str(request.query_params.get("manual") or "").strip().lower() in {
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                }
+                ongoing = self._get_ongoing(scope)
+                self._reconcile_orphan_started_items(scope, ongoing)
+                payload = await asyncio.to_thread(
+                    PortalRuntime.service.query_records,
+                    scope=scope,
+                    specialty=specialty,
+                    search=search,
+                    ongoing_items=ongoing,
+                    work_type=work_type,
+                    sections=("records", "ongoing", "stats", "zhihang"),
+                )
+                scope_options = PortalRuntime.auth_manager.filter_scope_options(
+                    SCOPE_OPTIONS,
+                    session,
+                )
+                notice_undos = await asyncio.to_thread(
+                    PortalRuntime.service.list_available_notice_undos,
+                    scope=scope,
+                    since_seconds=3 * 24 * 60 * 60,
+                )
+                html_body = render_workbench_lite(
+                    payload=payload if isinstance(payload, dict) else {},
+                    session=session,
+                    scope=scope,
+                    work_type=work_type,
+                    search=search,
+                    specialty=specialty,
+                    record_id=record_id,
+                    active_item_id=active_item_id,
+                    manual=manual,
+                    scope_options=scope_options,
+                    notice_undos=notice_undos if isinstance(notice_undos, list) else [],
+                )
+                return Response(
+                    content=html_body.encode("utf-8"),
+                    media_type="text/html; charset=utf-8",
+                )
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
+        @app.post("/workbench-lite/parse")
+        async def workbench_lite_parse_page(
+            request: Request,
+            scope: str = Form("ALL"),
+            work_type: str = Form("maintenance"),
+            paste_text: str = Form(""),
+        ):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                self._ensure_source_snapshot_background()
+                checked_scope = self._authorized_scope_or_error(session, scope or "ALL")
+                parsed_work_type, parsed_action, parsed_draft = parse_pasted_notice_to_draft(
+                    paste_text
+                )
+                if parsed_work_type not in NOTICE_TYPE_BY_WORK_TYPE:
+                    parsed_work_type = str(work_type or "maintenance")
+                if parsed_work_type not in NOTICE_TYPE_BY_WORK_TYPE:
+                    parsed_work_type = "maintenance"
+                ongoing = self._get_ongoing(checked_scope)
+                self._reconcile_orphan_started_items(checked_scope, ongoing)
+                payload = await asyncio.to_thread(
+                    PortalRuntime.service.query_records,
+                    scope=checked_scope,
+                    ongoing_items=ongoing,
+                    work_type=parsed_work_type,
+                    sections=("records", "ongoing", "stats", "zhihang"),
+                )
+                scope_options = PortalRuntime.auth_manager.filter_scope_options(
+                    SCOPE_OPTIONS,
+                    session,
+                )
+                notice_undos = await asyncio.to_thread(
+                    PortalRuntime.service.list_available_notice_undos,
+                    scope=checked_scope,
+                    since_seconds=3 * 24 * 60 * 60,
+                )
+                html_body = render_workbench_lite(
+                    payload=payload if isinstance(payload, dict) else {},
+                    session=session,
+                    scope=checked_scope,
+                    work_type=parsed_work_type,
+                    manual=True,
+                    scope_options=scope_options,
+                    parsed_draft=parsed_draft,
+                    parsed_action=parsed_action,
+                    paste_text=paste_text,
+                    notice_undos=notice_undos if isinstance(notice_undos, list) else [],
+                )
+                return Response(
+                    content=html_body.encode("utf-8"),
+                    media_type="text/html; charset=utf-8",
+                )
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
 
         @app.get("/engineer/mop")
         @app.get("/engineer/mop/")
@@ -1277,8 +1425,19 @@ class FastAPIPortalController:
                 self._reconcile_orphan_started_items(scope, ongoing)
                 month = str(request.query_params.get("month") or "")
                 specialty = str(request.query_params.get("specialty") or "")
+                search = str(request.query_params.get("search") or "")
+                work_type = str(request.query_params.get("work_type") or "").strip()
+                raw_sections = str(request.query_params.get("sections") or "").strip()
+                sections = tuple(
+                    item.strip().lower()
+                    for item in raw_sections.split(",")
+                    if item.strip()
+                )
                 open_id = str((session.get("user") or {}).get("open_id") or "")
                 payload_key = "records" if request.url.path == "/api/records" else "workbench"
+                if payload_key == "records":
+                    work_type = ""
+                    sections = ()
                 payload = await asyncio.to_thread(
                     self._cached_service_payload,
                     (
@@ -1287,14 +1446,73 @@ class FastAPIPortalController:
                         scope,
                         month,
                         specialty,
+                        search,
+                        work_type,
+                        sections,
                         PortalRuntime._ongoing_items_marker(ongoing),
                     ),
                     lambda: PortalRuntime.service.query_records(
                         month=month,
                         specialty=specialty,
+                        search=search,
                         scope=scope,
                         ongoing_items=ongoing,
+                        work_type=work_type,
+                        sections=sections,
                     ),
+                )
+                if payload_key == "workbench" and work_type and isinstance(payload, dict):
+                    filtered_payload = dict(payload)
+                    filtered_payload["records"] = [
+                        item
+                        for item in (payload.get("records") or [])
+                        if str((item or {}).get("work_type") or "maintenance") == work_type
+                    ]
+                    type_count = 0
+                    with suppress(Exception):
+                        type_count = int(float((payload.get("record_type_counts") or {}).get(work_type, 0)))
+                    if not filtered_payload["records"] and type_count > 0:
+                        broad_payload = await asyncio.to_thread(
+                            PortalRuntime.service.query_records,
+                            month=month,
+                            specialty=specialty,
+                            search=search,
+                            scope=scope,
+                            ongoing_items=ongoing,
+                            work_type="",
+                            sections=sections,
+                        )
+                        if isinstance(broad_payload, dict):
+                            filtered_payload["records"] = [
+                                item
+                                for item in (broad_payload.get("records") or [])
+                                if str((item or {}).get("work_type") or "maintenance") == work_type
+                            ]
+                            filtered_payload["record_type_counts"] = (
+                                broad_payload.get("record_type_counts")
+                                or filtered_payload.get("record_type_counts")
+                                or {}
+                            )
+                    payload = filtered_payload
+                return self._json_ok(request, session, payload)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
+        @app.get("/api/workbench/closed")
+        async def workbench_closed(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_scope_or_error(
+                    session, request.query_params.get("scope") or "ALL"
+                )
+                ongoing = self._get_ongoing(scope)
+                payload = await asyncio.to_thread(
+                    PortalRuntime.service.get_workbench_closed_items,
+                    scope=scope,
+                    work_type=str(request.query_params.get("work_type") or ""),
+                    ongoing_items=ongoing,
                 )
                 return self._json_ok(request, session, payload)
             except Exception as exc:
@@ -2479,6 +2697,18 @@ class FastAPIPortalController:
                 payload["_auth_user_name"] = str(
                     user.get("name") or user.get("en_name") or ""
                 )
+                if str(payload.get("command_format") or "") == "notice_command":
+                    payload = await asyncio.to_thread(
+                        PortalRuntime.service.expand_workbench_action_command,
+                        payload,
+                        scope=scope,
+                        ongoing_items=self._get_ongoing(scope),
+                    )
+                    payload["scope"] = scope
+                    payload["_auth_open_id"] = str(user.get("open_id") or "")
+                    payload["_auth_user_name"] = str(
+                        user.get("name") or user.get("en_name") or ""
+                    )
                 job_id, should_start = PortalRuntime.service.create_action_job(payload)
                 if should_start:
                     PortalRuntime.clear_payload_cache()
@@ -2860,6 +3090,146 @@ class FastAPIPortalController:
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)
 
+        @app.post("/api/notice-identity/bind")
+        async def notice_identity_bind(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                payload = (
+                    await self._read_model_request(request, NoticeIdentityBindRequest)
+                ).to_payload()
+                scope = self._authorized_scope_or_error(
+                    session, payload.get("scope") or "ALL"
+                )
+                work_type = str(payload.get("work_type") or "maintenance").strip()
+                notice_type = str(
+                    payload.get("notice_type")
+                    or NOTICE_TYPE_BY_WORK_TYPE.get(work_type)
+                    or ""
+                ).strip()
+                source_record_id = str(payload.get("source_record_id") or "").strip()
+                target_record_id = str(
+                    payload.get("target_record_id") or payload.get("record_id") or ""
+                ).strip()
+                active_item_id = str(payload.get("active_item_id") or "").strip()
+                if target_record_id and is_local_record_id(target_record_id):
+                    target_record_id = ""
+                if not (source_record_id or target_record_id or active_item_id):
+                    raise PortalError("缺少可绑定的源表记录、目标记录或本地进行中条目。")
+                validation = await asyncio.to_thread(
+                    PortalRuntime.service.validate_notice_identity_binding,
+                    scope=scope,
+                    work_type=work_type,
+                    notice_type=notice_type,
+                    source_record_id=source_record_id,
+                    target_record_id=target_record_id,
+                    active_item_id=active_item_id,
+                )
+                scope = str(validation.get("scope") or scope)
+                work_type = str(validation.get("work_type") or work_type)
+                notice_type = str(validation.get("notice_type") or notice_type)
+                source_record_id = str(validation.get("source_record_id") or "")
+                target_record_id = str(validation.get("target_record_id") or "")
+                active_item_id = str(validation.get("active_item_id") or active_item_id)
+
+                identity_payload = dict(payload)
+                identity_payload.update(
+                    {
+                        "scope": scope,
+                        "work_type": work_type,
+                        "notice_type": notice_type,
+                        "source_record_id": source_record_id,
+                        "target_record_id": target_record_id,
+                        "record_id": target_record_id or source_record_id,
+                        "active_item_id": active_item_id,
+                    }
+                )
+
+                def persist_binding() -> dict[str, Any]:
+                    state_store = PortalRuntime.state_store
+                    identity = state_store.upsert_notice_identity(
+                        identity_payload,
+                        origin="manual_notice_binding",
+                    )
+                    active_updated = False
+                    qt_event_id = 0
+                    if active_item_id:
+                        try:
+                            for row in state_store.list_qt_active_items(include_deleted=False):
+                                if str(row.get("active_item_id") or "") != active_item_id:
+                                    continue
+                                row_payload = row.get("payload")
+                                merged = dict(row_payload if isinstance(row_payload, dict) else {})
+                                merged.update(
+                                    {
+                                        "active_item_id": active_item_id,
+                                        "work_type": work_type or merged.get("work_type") or "",
+                                        "notice_type": notice_type or merged.get("notice_type") or "",
+                                    }
+                                )
+                                if source_record_id:
+                                    merged["source_record_id"] = source_record_id
+                                if target_record_id:
+                                    merged["target_record_id"] = target_record_id
+                                    merged["record_id"] = target_record_id
+                                state_store.upsert_qt_active_item(
+                                    merged,
+                                    section=str(row.get("section") or ""),
+                                    sort_order=int(row.get("sort_order") or 0),
+                                    origin=str(row.get("origin") or "manual_notice_binding"),
+                                )
+                                qt_event_id = state_store.enqueue_outbox_event(
+                                    "qt_action",
+                                    {
+                                        "kind": "active_upsert",
+                                        "payload": {
+                                            "item": {
+                                                "active_item_id": active_item_id,
+                                                "record_id": target_record_id
+                                                or str(row.get("record_id") or ""),
+                                                "notice_type": notice_type
+                                                or str(row.get("notice_type") or ""),
+                                                "section": str(row.get("section") or ""),
+                                                "sort_order": int(row.get("sort_order") or 0),
+                                                "origin": str(
+                                                    row.get("origin")
+                                                    or "manual_notice_binding"
+                                                ),
+                                                "payload": merged,
+                                            },
+                                            "source": "manual_notice_binding",
+                                        },
+                                    },
+                                )
+                                active_updated = True
+                                break
+                        except Exception as exc:
+                            log_warning(f"同步 Qt active 绑定关系失败: {exc}")
+                    return {
+                        "identity": identity or {},
+                        "active_updated": active_updated,
+                        "qt_event_id": qt_event_id,
+                    }
+
+                result = await asyncio.to_thread(persist_binding)
+                return self._json_ok(
+                    request,
+                    session,
+                    {
+                        "scope": scope,
+                        "work_type": work_type,
+                        "notice_type": notice_type,
+                        "source_record_id": source_record_id,
+                        "target_record_id": target_record_id,
+                        "active_item_id": active_item_id,
+                        "validation": validation,
+                        **result,
+                    },
+                )
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
         @app.post("/api/change-target-candidates/confirm")
         async def change_target_candidates_confirm(request: Request):
             session = self._current_session(request)
@@ -3195,13 +3565,43 @@ class FastAPIPortalController:
                         "notice_end": "end",
                         "notice_archive": "upload_replace",
                     }
+                    action_name_map = {
+                        "notice_upload": "上传",
+                        "notice_update": "更新",
+                        "notice_end": "结束",
+                        "notice_archive": "归档",
+                    }
                     command_payload = dict(payload.get("payload") or {})
                     command_payload["action_type"] = action_map[command]
                     command_payload = normalize_notice_identity_payload(command_payload)
-                    data = await asyncio.to_thread(
-                        PortalRuntime.execute_local_notice_upload,
-                        command_payload,
-                    )
+                    try:
+                        data = await asyncio.to_thread(
+                            PortalRuntime.execute_local_notice_upload,
+                            command_payload,
+                        )
+                    except Exception as exc:
+                        data_dict = (
+                            command_payload.get("data_dict")
+                            if isinstance(command_payload.get("data_dict"), dict)
+                            else {}
+                        )
+                        fail_record_id = str(
+                            data_dict.get("target_record_id")
+                            or data_dict.get("record_id")
+                            or command_payload.get("target_record_id")
+                            or command_payload.get("record_id")
+                            or ""
+                        ).strip()
+                        return {
+                            "ok": True,
+                            "data": {
+                                "ok": False,
+                                "name": action_name_map.get(command, "上传"),
+                                "message": str(exc),
+                                "record_id": fail_record_id,
+                                "real_record_id": "",
+                            },
+                        }
                     PortalRuntime.clear_payload_cache()
                     self._clear_read_cache()
                     return {"ok": True, "data": data}
@@ -3758,11 +4158,14 @@ class FastAPIPortalController:
             payload = (
                 await self._read_model_request(request, QtJobResultRequest)
             ).to_payload()
+            result_record_id = str(
+                payload.get("record_id") or payload.get("target_record_id") or ""
+            )
             self.mark_job_upload_result(
                 job_id,
                 success=bool(payload.get("success")),
                 message=str(payload.get("message") or ""),
-                record_id=str(payload.get("record_id") or ""),
+                record_id=result_record_id,
                 active_item_id=str(payload.get("active_item_id") or ""),
             )
             return {"ok": True, "data": {"job_id": job_id}}
@@ -4789,7 +5192,6 @@ class FastAPIPortalController:
                     source_record_id = str(identity.get("source_record_id") or "").strip()
                     if target_record_id:
                         item["target_record_id"] = target_record_id
-                        item["feishu_record_id"] = target_record_id
                         if not str(item.get("record_id") or "").strip():
                             item["record_id"] = target_record_id
                     if source_record_id and not str(item.get("source_record_id") or "").strip():
@@ -4967,26 +5369,67 @@ class FastAPIPortalController:
         target_record_id = str(entry.get("target_record_id") or "").strip()
         if not notice_type or not (unique_key or title):
             return None
+        normalized_title = cls._normalize_clipboard_event_title(title)
+        event_title_matches = []
         for item in PortalRuntime.state_store.list_qt_active_items():
             payload = item.get("payload") if isinstance(item, dict) else {}
             payload = payload if isinstance(payload, dict) else {}
             if str(payload.get("notice_type") or item.get("notice_type") or "").strip() != notice_type:
                 continue
-            if target_record_id and str(payload.get("record_id") or item.get("record_id") or "").strip() == target_record_id:
+            if target_record_id and target_record_id in {
+                str(payload.get("target_record_id") or "").strip(),
+                str(payload.get("record_id") or "").strip(),
+                str(item.get("record_id") or "").strip(),
+            }:
                 return item
             info = extract_event_info(str(payload.get("text") or "")) or {}
             item_key = str(info.get("unique_key") or "").strip()
-            item_title = str(info.get("title") or payload.get("title") or "").strip()
+            item_title = str(
+                payload.get("match_title")
+                or info.get("title")
+                or payload.get("title")
+                or ""
+            ).strip()
             item_reason = str(info.get("reason") or payload.get("reason") or "").strip()
             if unique_key and item_key and item_key == unique_key:
                 return item
-            if title and item_title and item_title == title and notice_type != "事件通告":
+            if (
+                normalized_title
+                and item_title
+                and cls._normalize_clipboard_event_title(item_title) == normalized_title
+            ):
+                if notice_type == "事件通告":
+                    event_title_matches.append(item)
+                    continue
                 if notice_type == "维保通告" and reason and item_reason and reason != item_reason:
                     continue
                 if notice_type == "维保通告" and reason and not item_reason:
                     continue
                 return item
+        if notice_type == "事件通告" and event_title_matches:
+            bound_matches = []
+            for item in event_title_matches:
+                payload = item.get("payload") if isinstance(item, dict) else {}
+                payload = payload if isinstance(payload, dict) else {}
+                record_id = str(
+                    payload.get("target_record_id")
+                    or payload.get("record_id")
+                    or item.get("record_id")
+                    or ""
+                ).strip()
+                if record_id and not is_local_record_id(record_id):
+                    bound_matches.append(item)
+            if len(bound_matches) == 1:
+                return bound_matches[0]
+            if len(event_title_matches) == 1:
+                return event_title_matches[0]
         return None
+
+    @staticmethod
+    def _normalize_clipboard_event_title(value: Any) -> str:
+        text = unicodedata.normalize("NFKC", str(value or ""))
+        text = re.sub(r"\s+", " ", text).strip()
+        return text.strip(" ;；")
 
     @staticmethod
     def _clean_projected_notice_field(value: Any) -> str:
@@ -5180,21 +5623,82 @@ class FastAPIPortalController:
         status = str(entry.get("status") or "").strip()
         content = str(entry.get("content") or "").strip()
         notice_type = str(entry.get("notice_type") or "").strip()
+        entry_target_record_id = str(entry.get("target_record_id") or "").strip()
+        if entry_target_record_id and notice_type:
+            incoming_notice_type = cls._normalize_projected_notice_type(
+                notice_type,
+                str(entry.get("work_type") or entry.get("lan_work_type") or "").strip(),
+            )
+            for item in PortalRuntime.state_store.list_qt_active_items():
+                payload = item.get("payload") if isinstance(item, dict) else {}
+                payload = payload if isinstance(payload, dict) else {}
+                item_target_record_id = str(
+                    payload.get("target_record_id")
+                    or payload.get("record_id")
+                    or item.get("record_id")
+                    or ""
+                ).strip()
+                if item_target_record_id != entry_target_record_id:
+                    continue
+                item_notice_type = cls._normalize_projected_notice_type(
+                    str(payload.get("notice_type") or item.get("notice_type") or "").strip(),
+                    str(payload.get("work_type") or payload.get("lan_work_type") or "").strip(),
+                )
+                if item_notice_type and incoming_notice_type and item_notice_type != incoming_notice_type:
+                    return {
+                        "ok": True,
+                        "ignored": True,
+                        "reason": "目标记录已绑定其他通告类型，已忽略本次剪贴板投影。",
+                    }
         existing = cls._find_qt_active_item_for_clipboard_entry(entry)
         active_item_id = ""
         if existing and isinstance(existing.get("payload"), dict):
             data = dict(existing.get("payload") or {})
             active_item_id = str(data.get("active_item_id") or existing.get("active_item_id") or "").strip()
+            existing_record_id = str(existing.get("record_id") or "").strip()
+            existing_target_id = str(
+                data.get("target_record_id")
+                or existing_record_id
+                or data.get("record_id")
+                or ""
+            ).strip()
+            if existing_target_id and not is_local_record_id(existing_target_id):
+                data["target_record_id"] = existing_target_id
+                data["record_id"] = existing_target_id
+                data["_is_placeholder_record"] = False
+            elif existing_record_id and not str(data.get("record_id") or "").strip():
+                data["record_id"] = existing_record_id
+            existing_notice_type = cls._normalize_projected_notice_type(
+                str(data.get("notice_type") or existing.get("notice_type") or "").strip(),
+                str(data.get("work_type") or data.get("lan_work_type") or "").strip(),
+            )
+            incoming_notice_type = cls._normalize_projected_notice_type(
+                notice_type,
+                str(entry.get("work_type") or entry.get("lan_work_type") or "").strip(),
+            )
+            if existing_notice_type and incoming_notice_type and existing_notice_type != incoming_notice_type:
+                return {
+                    "ok": True,
+                    "ignored": True,
+                    "reason": "目标记录已绑定其他通告类型，已忽略本次剪贴板投影。",
+                }
         else:
             data = {}
-        if status not in {"", "开始", "新增"} and not data:
+        if status not in {"", "开始", "新增"} and not data and not entry_target_record_id:
             return {"ok": True, "ignored": True, "reason": "未找到可更新的活动条目。"}
         if not active_item_id:
             active_item_id = str(entry.get("entry_id") or "").strip() or uuid.uuid4().hex
-        record_id = str(data.get("record_id") or "").strip()
+        record_id = str(
+            entry_target_record_id
+            or data.get("target_record_id")
+            or data.get("record_id")
+            or ""
+        ).strip()
         if not record_id:
             record_id = f"local_{active_item_id[:24]}"
-        if "_is_placeholder_record" in data:
+        if entry_target_record_id:
+            is_placeholder = False
+        elif "_is_placeholder_record" in data:
             is_placeholder = bool(data.get("_is_placeholder_record"))
         else:
             is_placeholder = not bool(str(data.get("record_id") or "").strip())
@@ -5222,10 +5726,16 @@ class FastAPIPortalController:
             elif notice_type == "设备检修":
                 work_type = "repair"
         notice_type = cls._normalize_projected_notice_type(notice_type, work_type)
+        projected_target_record_id = str(
+            entry_target_record_id or data.get("target_record_id") or ""
+        ).strip()
+        if not projected_target_record_id and record_id and not is_local_record_id(record_id):
+            projected_target_record_id = record_id
         data.update(
             {
                 "active_item_id": active_item_id,
                 "record_id": record_id,
+                "target_record_id": projected_target_record_id,
                 "_is_placeholder_record": is_placeholder,
                 "text": content,
                 "title": data.get("title") or entry.get("title") or "",
@@ -5916,8 +6426,126 @@ class FastAPIPortalController:
         self.maintenance_action_callback = callback
         PortalRuntime.maintenance_action_callback = callback
 
+    def _sync_qt_active_item_upload_result(
+        self,
+        *,
+        job_id: str,
+        record_id: str,
+        active_item_id: str = "",
+        job_snapshot: dict[str, Any] | None = None,
+    ) -> None:
+        target_record_id = str(record_id or "").strip()
+        if not target_record_id or is_local_record_id(target_record_id):
+            return
+        job = job_snapshot if isinstance(job_snapshot, dict) else {}
+        prepared = job.get("prepared") if isinstance(job.get("prepared"), dict) else {}
+        active_item_id = str(
+            active_item_id
+            or prepared.get("active_item_id")
+            or job.get("active_item_id")
+            or ""
+        ).strip()
+        placeholder_ids = {
+            str(value or "").strip()
+            for value in (
+                prepared.get("record_id"),
+                prepared.get("target_record_id"),
+                job.get("record_id"),
+                job.get("target_record_id"),
+            )
+            if str(value or "").strip()
+        }
+        matched_item: dict[str, Any] | None = None
+        for item in PortalRuntime.state_store.list_qt_active_items():
+            payload = item.get("payload") if isinstance(item, dict) else {}
+            payload = payload if isinstance(payload, dict) else {}
+            item_active_id = str(
+                payload.get("active_item_id") or item.get("active_item_id") or ""
+            ).strip()
+            item_record_ids = {
+                str(value or "").strip()
+                for value in (
+                    item.get("record_id"),
+                    payload.get("record_id"),
+                    payload.get("target_record_id"),
+                )
+                if str(value or "").strip()
+            }
+            if active_item_id and item_active_id == active_item_id:
+                matched_item = item
+                break
+            if target_record_id in item_record_ids:
+                matched_item = item
+                break
+            if placeholder_ids and item_record_ids.intersection(placeholder_ids):
+                matched_item = item
+                break
+        if not matched_item:
+            return
+        payload = matched_item.get("payload") if isinstance(matched_item, dict) else {}
+        payload = dict(payload) if isinstance(payload, dict) else {}
+        if active_item_id:
+            payload["active_item_id"] = active_item_id
+        else:
+            active_item_id = str(
+                payload.get("active_item_id") or matched_item.get("active_item_id") or ""
+            ).strip()
+        old_record_id = str(
+            payload.get("record_id") or matched_item.get("record_id") or ""
+        ).strip()
+        if old_record_id and old_record_id != target_record_id:
+            aliases = payload.get("record_id_aliases")
+            if not isinstance(aliases, list):
+                aliases = []
+            if old_record_id not in aliases:
+                aliases.append(old_record_id)
+            payload["record_id_aliases"] = aliases[-8:]
+        payload["record_id"] = target_record_id
+        payload["target_record_id"] = target_record_id
+        payload["_is_placeholder_record"] = False
+        payload["binding_status"] = "bound"
+        section = str(matched_item.get("section") or "").strip()
+        sort_order = int(matched_item.get("sort_order") or 0)
+        origin = str(matched_item.get("origin") or payload.get("origin") or "").strip()
+        PortalRuntime.state_store.upsert_qt_active_item(
+            payload,
+            section=section,
+            sort_order=sort_order,
+            origin=origin,
+        )
+        projected_item = {
+            "active_item_id": active_item_id,
+            "record_id": target_record_id,
+            "notice_type": str(
+                payload.get("notice_type") or matched_item.get("notice_type") or ""
+            ).strip(),
+            "section": section,
+            "sort_order": sort_order,
+            "origin": origin,
+            "payload": payload,
+        }
+        PortalRuntime.state_store.enqueue_outbox_event(
+            "qt_action",
+            {
+                "kind": "active_upsert",
+                "payload": {
+                    "item": projected_item,
+                    "source": "qt_upload_result",
+                    "job_id": str(job_id or "").strip(),
+                },
+            },
+        )
+
     def mark_job_upload_result(self, job_id: str, **kwargs) -> None:
+        job_snapshot = PortalRuntime.service.get_job(job_id) or {}
         PortalRuntime.service.mark_action_upload_result(job_id, **kwargs)
+        if bool(kwargs.get("success")):
+            self._sync_qt_active_item_upload_result(
+                job_id=job_id,
+                record_id=str(kwargs.get("record_id") or ""),
+                active_item_id=str(kwargs.get("active_item_id") or ""),
+                job_snapshot=job_snapshot,
+            )
 
     def mark_job_progress(self, job_id: str, **patch) -> None:
         if not job_id:

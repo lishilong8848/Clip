@@ -41,6 +41,7 @@ from .state_store import LanPortalStateStore
 from .identity_utils import (
     canonical_source_record_id,
     canonical_target_record_id,
+    is_local_record_id,
     normalize_notice_identity_payload,
 )
 
@@ -1986,6 +1987,93 @@ class MaintenancePortalService:
             return
         raise PortalError("结束通告前必须添加至少一张现场照片。")
 
+    def _has_existing_site_photo_for_notice(
+        self,
+        request_payload: dict[str, Any],
+        *,
+        work_type: Any = "",
+    ) -> bool:
+        request_payload = (
+            normalize_notice_identity_payload(request_payload)
+            if isinstance(request_payload, dict)
+            else {}
+        )
+        work_type_text = str(work_type or request_payload.get("work_type") or "").strip()
+        active_item_id = str(request_payload.get("active_item_id") or "").strip()
+        source_record_id = canonical_source_record_id(request_payload)
+        target_record_id = canonical_target_record_id(request_payload)
+        request_record_id = str(request_payload.get("record_id") or "").strip()
+        target_ids = {
+            item
+            for item in (target_record_id, request_record_id)
+            if item and not is_local_record_id(item)
+        }
+
+        def matches_notice(payload: dict[str, Any]) -> bool:
+            payload = normalize_notice_identity_payload(payload)
+            payload_work_type = str(
+                payload.get("work_type") or WORK_TYPE_MAINTENANCE
+            ).strip()
+            if work_type_text and payload_work_type != work_type_text:
+                return False
+            if active_item_id and str(payload.get("active_item_id") or "").strip() == active_item_id:
+                return True
+            if source_record_id and canonical_source_record_id(payload) == source_record_id:
+                return True
+            if target_ids and canonical_target_record_id(payload) in target_ids:
+                return True
+            return False
+
+        with self._summary_lock:
+            status_items = self._load_work_status_items_locked("ALL")
+        for item in status_items:
+            if (
+                isinstance(item, dict)
+                and matches_notice(item)
+                and self._has_site_photo_payload(item)
+            ):
+                return True
+
+        try:
+            active_items = self._state_store.list_qt_active_items(include_deleted=False)
+        except Exception:
+            active_items = []
+        for row in active_items:
+            if not isinstance(row, dict):
+                continue
+            payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+            merged_payload = dict(payload)
+            merged_payload.setdefault("active_item_id", row.get("active_item_id"))
+            merged_payload.setdefault("target_record_id", row.get("record_id"))
+            merged_payload.setdefault("record_id", row.get("record_id"))
+            if matches_notice(merged_payload) and self._has_site_photo_payload(merged_payload):
+                return True
+        return False
+
+    def _require_end_site_photo_cumulative(
+        self,
+        request_payload: dict[str, Any],
+        action: str,
+        *,
+        notice_type: Any = "",
+        work_type: Any = "",
+    ) -> None:
+        if str(action or "").strip().lower() != "end":
+            return
+        if not self._end_site_photo_required(
+            notice_type=notice_type,
+            work_type=work_type,
+        ):
+            return
+        if self._has_site_photo_payload(request_payload):
+            return
+        if self._has_existing_site_photo_for_notice(
+            request_payload,
+            work_type=work_type,
+        ):
+            return
+        raise PortalError("结束通告前必须至少上传过一张现场照片，可在开始、更新或结束任意一次上传。")
+
     @staticmethod
     def _site_photo_payload(request_payload: dict[str, Any]) -> list[dict[str, Any]]:
         images = request_payload.get("extra_images")
@@ -3410,7 +3498,6 @@ class MaintenancePortalService:
             "source_record_id",
             "target_record_id",
             "active_item_id",
-            "feishu_record_id",
             "title",
             "building",
             "building_code",
@@ -3488,6 +3575,7 @@ class MaintenancePortalService:
         message: str = "",
         record_id: str = "",
         active_item_id: str = "",
+        target_selection: dict[str, Any] | None = None,
     ) -> None:
         job_id = str(job_id or "").strip()
         if not job_id:
@@ -3509,6 +3597,15 @@ class MaintenancePortalService:
             "upload_message": str(message or ""),
             "record_id": str(record_id or ""),
         }
+        if success and str(record_id or "").strip():
+            patch["target_record_id"] = str(record_id or "").strip()
+        if not success and isinstance(target_selection, dict):
+            candidates = target_selection.get("target_candidates")
+            if isinstance(candidates, list):
+                patch["target_candidates"] = candidates[:50]
+            patch["target_record_missing"] = bool(target_selection.get("target_record_missing"))
+            patch["needs_target_selection"] = bool(target_selection.get("needs_target_selection"))
+            patch["target_selection_message"] = str(target_selection.get("message") or "")
         if notice_text:
             patch["notice_text"] = notice_text
             patch["copy_text"] = notice_text
@@ -3538,8 +3635,9 @@ class MaintenancePortalService:
         action = str(prepared.get("action") or "").strip().lower()
         if action not in {"start", "update", "end"}:
             return
+        prepared_identity = normalize_notice_identity_payload(dict(prepared), action=action)
         now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
-        source_record_id = str(prepared.get("record_id") or "").strip()
+        source_record_id = canonical_source_record_id(prepared_identity)
         title = str(prepared.get("title") or "").strip()
         reason = str(prepared.get("reason") or "").strip()
         building = str(prepared.get("building") or "").strip()
@@ -3555,7 +3653,12 @@ class MaintenancePortalService:
             title=title, building=building, reason=reason, work_type=work_type
         )
         active_item_id = str(active_item_id or prepared.get("active_item_id") or job.get("active_item_id") or "").strip()
-        feishu_record_id = str(record_id or job.get("record_id") or "").strip()
+        target_record_id = str(
+            record_id
+            or job.get("target_record_id")
+            or prepared_identity.get("target_record_id")
+            or ""
+        ).strip()
         with self._summary_lock:
             payload = self._load_day_summary_locked()
             items = payload.setdefault("items", [])
@@ -3577,9 +3680,12 @@ class MaintenancePortalService:
                     "source_app_token": str(prepared.get("source_app_token") or ""),
                     "source_table_id": str(prepared.get("source_table_id") or ""),
                     "source_record_id": source_record_id,
-                    "target_record_id": str(prepared.get("target_record_id") or ""),
+                    "target_record_id": str(
+                        target_record_id
+                        or prepared_identity.get("target_record_id")
+                        or ""
+                    ),
                     "active_item_id": active_item_id,
-                    "feishu_record_id": feishu_record_id,
                     "title": title,
                     "building": building,
                     "building_code": str(prepared.get("building_code") or ""),
@@ -3604,12 +3710,13 @@ class MaintenancePortalService:
                 value = prepared.get(field)
                 if value not in (None, ""):
                     item[field] = value
+            if target_record_id:
+                item["target_record_id"] = target_record_id
+                item["record_id"] = target_record_id
             if source_record_id and not item.get("source_record_id"):
                 item["source_record_id"] = source_record_id
             if active_item_id:
                 item["active_item_id"] = active_item_id
-            if feishu_record_id:
-                item["feishu_record_id"] = feishu_record_id
             for field in (
                 "title",
                 "building",
@@ -3672,7 +3779,7 @@ class MaintenancePortalService:
                     "label": action_label,
                     "time": now,
                     "job_id": job_id,
-                    "record_id": feishu_record_id,
+                    "record_id": target_record_id,
                     "progress": str(prepared.get("progress") or ""),
                     "text": str(prepared.get("text") or ""),
                 }
@@ -3684,7 +3791,7 @@ class MaintenancePortalService:
                 try:
                     self._state_store.delete_qt_active_item(
                         active_item_id=active_item_id,
-                        record_id=feishu_record_id,
+                        record_id=target_record_id,
                     )
                 except Exception:
                     pass
@@ -3694,12 +3801,9 @@ class MaintenancePortalService:
                 identity_payload["active_item_id"] = active_item_id
             if source_record_id:
                 identity_payload["source_record_id"] = source_record_id
-            if feishu_record_id:
-                identity_payload["target_record_id"] = feishu_record_id
-                identity_payload["feishu_record_id"] = feishu_record_id
-                identity_payload["record_id"] = (
-                    source_record_id if source_record_id else feishu_record_id
-                )
+            if target_record_id:
+                identity_payload["target_record_id"] = target_record_id
+                identity_payload["record_id"] = target_record_id
             identity_payload["status"] = "已结束" if action == "end" else "进行中"
             self._state_store.upsert_notice_identity(
                 identity_payload,
@@ -3710,7 +3814,7 @@ class MaintenancePortalService:
         self._schedule_repair_link_task_after_success(
             prepared,
             action=action,
-            target_record_id=feishu_record_id,
+            target_record_id=target_record_id,
             job_id=job_id,
         )
 
@@ -3726,7 +3830,9 @@ class MaintenancePortalService:
             return
         if str((prepared or {}).get("work_type") or "").strip() != WORK_TYPE_REPAIR:
             return
-        source_record_id = str((prepared or {}).get("record_id") or "").strip()
+        if self._truthy_flag((prepared or {}).get("manual")):
+            return
+        source_record_id = canonical_source_record_id(prepared)
         target_record_id = str(target_record_id or "").strip()
         if not source_record_id or not target_record_id:
             return
@@ -4382,7 +4488,7 @@ class MaintenancePortalService:
         for kind, field_names in {
             "active": ("active_item_id",),
             "source": ("source_record_id",),
-            "target": ("target_record_id", "feishu_record_id", "raw_record_id"),
+            "target": ("target_record_id",),
             "key": ("key", "fallback_key", "work_fallback_key"),
         }.items():
             for field_name in field_names:
@@ -6174,7 +6280,6 @@ class MaintenancePortalService:
             "active_item_id": active_item_id,
             "source_record_id": source_record_id,
             "target_record_id": target_record_id,
-            "feishu_record_id": target_record_id,
             "title": title,
             "reason": reason,
             "building": building,
@@ -6667,7 +6772,6 @@ class MaintenancePortalService:
                 restored_daily = copy.deepcopy(daily_item)
                 if target_record_id:
                     restored_daily["target_record_id"] = target_record_id
-                    restored_daily["feishu_record_id"] = target_record_id
                 summary_payload["items"].append(restored_daily)
             summary_payload["updated_at"] = now
             self._save_day_summary_locked(summary_payload)
@@ -6705,7 +6809,6 @@ class MaintenancePortalService:
                 item = copy.deepcopy(saved.get("item") or {})
                 if target_record_id:
                     item["target_record_id"] = target_record_id
-                    item["feishu_record_id"] = target_record_id
                 payload["items"].append(item)
                 payload["updated_at"] = now
                 self._state_store.put_document(STATE_NS_WORK_STATUS, document_key, payload)
@@ -6893,6 +6996,133 @@ class MaintenancePortalService:
                 "records": records,
             }
             return list(records)
+
+    @classmethod
+    def _normalize_notice_work_type_alias(cls, work_type: Any) -> str:
+        text = str(work_type or "").strip()
+        aliases = {
+            "maintenance": WORK_TYPE_MAINTENANCE,
+            "维保": WORK_TYPE_MAINTENANCE,
+            "维保通告": WORK_TYPE_MAINTENANCE,
+            "change": WORK_TYPE_CHANGE,
+            "变更": WORK_TYPE_CHANGE,
+            "变更通告": WORK_TYPE_CHANGE,
+            "repair": WORK_TYPE_REPAIR,
+            "检修": WORK_TYPE_REPAIR,
+            "设备检修": WORK_TYPE_REPAIR,
+            "power": WORK_TYPE_POWER,
+            "上电": WORK_TYPE_POWER,
+            "上电通告": WORK_TYPE_POWER,
+            "上下电通告": WORK_TYPE_POWER,
+            "polling": WORK_TYPE_POLLING,
+            "轮巡": WORK_TYPE_POLLING,
+            "设备轮巡": WORK_TYPE_POLLING,
+            "adjust": WORK_TYPE_ADJUST,
+            "调整": WORK_TYPE_ADJUST,
+            "设备调整": WORK_TYPE_ADJUST,
+        }
+        return aliases.get(text.lower()) or aliases.get(text) or WORK_TYPE_MAINTENANCE
+
+    def validate_notice_identity_binding(
+        self,
+        *,
+        scope: str,
+        work_type: str,
+        notice_type: str = "",
+        source_record_id: str = "",
+        target_record_id: str = "",
+        active_item_id: str = "",
+    ) -> dict[str, Any]:
+        scope = self._normalize_scope(scope)
+        work_type = self._normalize_notice_work_type_alias(work_type)
+        notice_type = str(notice_type or self._notice_type_for_work_type(work_type)).strip()
+        source_record_id = str(source_record_id or "").strip()
+        target_record_id = str(target_record_id or "").strip()
+        active_item_id = str(active_item_id or "").strip()
+        if source_record_id and is_local_record_id(source_record_id):
+            source_record_id = ""
+        if target_record_id and is_local_record_id(target_record_id):
+            target_record_id = ""
+        if not (source_record_id or target_record_id or active_item_id):
+            raise PortalError("缺少可绑定的源表记录、目标记录或本地进行中条目。")
+
+        source_record: dict[str, Any] | None = None
+        if source_record_id:
+            source_record = self._source_record_in_scope_snapshot(
+                record_id=source_record_id,
+                work_type=work_type,
+                scope=scope,
+            )
+            if source_record is None:
+                raise PortalError("源表事项不属于当前楼栋或当前通告类型，请重新选择。")
+
+        target_record: dict[str, Any] | None = None
+        target_building_codes: list[str] = []
+        if target_record_id:
+            try:
+                target_records = self._target_records_for_notice_type(
+                    notice_type,
+                    work_type,
+                    force_refresh=False,
+                )
+            except Exception as exc:
+                raise PortalError(f"查询{notice_type}目标表失败：{exc}") from exc
+            target_record = next(
+                (
+                    record
+                    for record in target_records
+                    if str(record.get("record_id") or "").strip() == target_record_id
+                ),
+                None,
+            )
+            if target_record is None:
+                try:
+                    target_records = self._target_records_for_notice_type(
+                        notice_type,
+                        work_type,
+                        force_refresh=True,
+                    )
+                except Exception as exc:
+                    raise PortalError(f"查询{notice_type}目标表失败：{exc}") from exc
+                target_record = next(
+                    (
+                        record
+                        for record in target_records
+                        if str(record.get("record_id") or "").strip() == target_record_id
+                    ),
+                    None,
+                )
+            if target_record is None:
+                raise PortalError("目标多维记录不存在，请重新查找并选择正确记录。")
+            fields = target_record.get("display_fields") or {}
+            field_config = get_field_config(notice_type)
+            target_building_codes = self._target_record_building_codes(fields, field_config)
+            if not target_building_codes:
+                target_building_codes = self._clean_building_codes(
+                    target_record.get("building_codes")
+                ) or self._building_codes_from_value(target_record.get("building"))
+            if target_building_codes and not self._scope_matches_buildings(
+                scope, target_building_codes
+            ):
+                raise PortalError("目标多维记录不属于当前楼栋，请重新选择。")
+
+        return {
+            "scope": scope,
+            "work_type": work_type,
+            "notice_type": notice_type,
+            "source_record_id": source_record_id,
+            "target_record_id": target_record_id,
+            "active_item_id": active_item_id,
+            "source_found": bool(source_record),
+            "target_found": bool(target_record),
+            "target_building_codes": target_building_codes,
+            "target_status": str(
+                ((target_record or {}).get("display_fields") or {}).get(
+                    get_field_config(notice_type).get("status", "")
+                )
+                or ""
+            ),
+        }
 
     def _resolve_target_record_reference(
         self,
@@ -7182,7 +7412,15 @@ class MaintenancePortalService:
         candidates: list[dict[str, Any]] = []
         for target in target_records:
             fields = target.get("display_fields") or {}
-            target_title = str(fields.get(title_field) or fields.get("名称") or "").strip()
+            target_title = str(
+                fields.get(title_field)
+                or fields.get("名称")
+                or fields.get("标题")
+                or fields.get("名称（标题）")
+                or fields.get("检修通告名称")
+                or fields.get("维修名称")
+                or ""
+            ).strip()
             title_matched = self._source_candidate_title_matches(title, target_title, work_type)
             business_match_count = self._target_business_match_count(
                 fields,
@@ -8019,6 +8257,59 @@ class MaintenancePortalService:
             return self._repair_specialty(record) == specialty
         return True
 
+    def _source_record_matches_search(self, record: dict[str, Any], search: str = "") -> bool:
+        query = str(search or "").strip().lower()
+        if not query:
+            return True
+        fields = record.get("display_fields") or {}
+        terms: list[str] = [
+            str(record.get("record_id") or ""),
+            str(record.get("source_record_id") or ""),
+            str(record.get("target_record_id") or ""),
+            str(record.get("work_type") or ""),
+            str(record.get("notice_type") or ""),
+        ]
+        with suppress(Exception):
+            terms.append(self._change_title(record))
+        with suppress(Exception):
+            terms.append(self._repair_title(record))
+        for value in fields.values():
+            if isinstance(value, (list, tuple, set)):
+                terms.extend(str(item or "") for item in value)
+            elif isinstance(value, dict):
+                terms.extend(str(item or "") for item in value.values())
+            else:
+                terms.append(str(value or ""))
+        return query in " ".join(terms).lower()
+
+    def _source_record_display_priority(self, record: dict[str, Any]) -> int:
+        source_work_type = self._record_source_work_type(record)
+        if source_work_type == WORK_TYPE_MAINTENANCE:
+            progress = self._maintenance_status_value(record)
+        elif source_work_type == WORK_TYPE_CHANGE:
+            progress = self._change_progress_value(record)
+        elif source_work_type == WORK_TYPE_REPAIR:
+            progress = self._repair_source_status(record)
+        else:
+            progress = self._maintenance_status_value(record)
+        text = str(progress or "").strip()
+        if "延期未开始" in text:
+            return 0
+        if "未开始" in text:
+            return 1
+        if "进行中" in text:
+            return 2
+        return 10
+
+    def _sort_workbench_records(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            item
+            for _, item in sorted(
+                enumerate(records or []),
+                key=lambda pair: (self._source_record_display_priority(pair[1]), pair[0]),
+            )
+        ]
+
     def _workbench_records_from_memory(
         self, *, month: str = "", specialty: str = "", scope: str = "ALL"
     ) -> list[dict[str, Any]]:
@@ -8040,18 +8331,18 @@ class MaintenancePortalService:
     ) -> list[dict[str, Any]]:
         snapshot_records = self._source_snapshot_records(scope)
         if snapshot_records is not None:
-            return self._apply_work_type_overrides([
+            return self._sort_workbench_records(self._apply_work_type_overrides([
                 record
                 for record in snapshot_records
                 if self._source_record_matches_filters(
                     record, month=month, specialty=specialty
                 )
-            ])
-        return self._apply_work_type_overrides(
+            ]))
+        return self._sort_workbench_records(self._apply_work_type_overrides(
             self._workbench_records_from_memory(
                 month=month, specialty=specialty, scope=scope
             )
-        )
+        ))
 
     def _maintenance_options_for_records(self, records: list[dict[str, Any]]) -> list[dict[str, str]]:
         options = []
@@ -8199,14 +8490,34 @@ class MaintenancePortalService:
         *,
         month: str = "",
         specialty: str = "",
+        search: str = "",
         building: str = "",
         scope: str = "ALL",
         ongoing_items: list[dict[str, Any]] | None = None,
+        work_type: str = "",
+        sections: set[str] | list[str] | tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
         self.ensure_snapshot_loaded()
         scope = self._normalize_scope(scope)
+        requested_sections = {
+            str(item or "").strip().lower()
+            for item in (sections or [])
+            if str(item or "").strip()
+        }
+        if not requested_sections:
+            requested_sections = {"records", "ongoing", "stats", "zhihang"}
+        requested_work_type = str(work_type or "").strip()
+        if requested_work_type not in {
+            WORK_TYPE_MAINTENANCE,
+            WORK_TYPE_CHANGE,
+            WORK_TYPE_REPAIR,
+            WORK_TYPE_POWER,
+            WORK_TYPE_POLLING,
+            WORK_TYPE_ADJUST,
+        }:
+            requested_work_type = ""
         merged_ongoing = self._project_ongoing_items(scope, ongoing_items or [])
-        filtered_records = self._workbench_records(
+        scoped_records = self._workbench_records(
             month=month, specialty=specialty, scope=scope
         )
         linked_zhihang_ids = self._linked_zhihang_record_ids(merged_ongoing)
@@ -8214,25 +8525,51 @@ class MaintenancePortalService:
             month=month, scope=scope, exclude_record_ids=linked_zhihang_ids
         )
         if building:
+            scoped_records = [
+                record
+                for record in scoped_records
+                if str((record.get("display_fields") or {}).get("楼栋") or "") == building
+            ]
+        record_type_counts = self._work_type_counts(scoped_records)
+        filtered_records = [
+            record
+            for record in scoped_records
+            if not requested_work_type or self._record_work_type(record) == requested_work_type
+        ]
+        search_text = str(search or "").strip()
+        if search_text:
             filtered_records = [
                 record
                 for record in filtered_records
-                if str((record.get("display_fields") or {}).get("楼栋") or "") == building
+                if self._source_record_matches_search(record, search_text)
             ]
         daily_summary = self.get_daily_summary(
             scope=scope, ongoing_items=merged_ongoing
         )
         merged_ongoing = self._annotate_undo_items(merged_ongoing, scope=scope)
-        daily_summary["items"] = self._annotate_undo_items(
-            daily_summary.get("items") or [], scope=scope
-        )
+        if "closed" in requested_sections or "daily" in requested_sections:
+            daily_summary["items"] = self._annotate_undo_items(
+                daily_summary.get("items") or [], scope=scope
+            )
+        else:
+            daily_summary["items"] = []
         summary_by_record = self._work_status_by_records(
             filtered_records,
             scope=scope,
             daily_items=daily_summary.get("items") or [],
         )
-        record_type_counts = self._work_type_counts(filtered_records)
         ongoing_type_counts = self._work_type_counts(merged_ongoing)
+        include_records = "records" in requested_sections
+        include_ongoing = "ongoing" in requested_sections
+        include_zhihang = (
+            "zhihang" in requested_sections
+            or requested_work_type == WORK_TYPE_CHANGE
+            or not requested_work_type
+        )
+        serialized_records = [
+            self._serialize_record(record, summary_by_record)
+            for record in filtered_records
+        ] if include_records else []
         return {
             "maintenance_status": DEFAULT_MAINTENANCE_STATUS,
             "scope": scope,
@@ -8250,20 +8587,50 @@ class MaintenancePortalService:
             "source_snapshot_ready": self._source_snapshot_exists(scope),
             "source_cache_ttl_seconds": self._source_cache_ttl_seconds(),
             "warnings": self._current_load_warnings(),
-            "records": [
-                self._serialize_record(record, summary_by_record)
-                for record in filtered_records
-            ],
+            "records": serialized_records,
             "zhihang_change_records": [
                 self._serialize_zhihang_change_record(record)
                 for record in zhihang_records
-            ],
-            "ongoing": merged_ongoing,
+            ] if include_zhihang else [],
+            "ongoing": merged_ongoing if include_ongoing else [],
             "daily_summary": daily_summary,
             "record_type_counts": record_type_counts,
             "ongoing_type_counts": ongoing_type_counts,
             "maintenance_options": self._maintenance_options_for_records(filtered_records),
+            "filters": {
+                "default_month": month or RECENT_MONTH_FILTER_LABEL,
+                "specialties": self._sorted_unique_work_specialties(),
+            },
             "count": len(filtered_records),
+        }
+
+    def get_workbench_closed_items(
+        self,
+        *,
+        scope: str = "ALL",
+        work_type: str = "",
+        ongoing_items: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        scope = self._normalize_scope(scope)
+        requested_work_type = str(work_type or "").strip()
+        daily_summary = self.get_daily_summary(scope=scope, ongoing_items=ongoing_items or [])
+        items = self._annotate_undo_items(daily_summary.get("items") or [], scope=scope)
+        if requested_work_type:
+            items = [
+                item
+                for item in items
+                if str(item.get("work_type") or WORK_TYPE_MAINTENANCE).strip() == requested_work_type
+            ]
+        closed = [
+            item
+            for item in items
+            if str(item.get("status") or "") == "已结束" or bool(item.get("ended_at"))
+        ]
+        return {
+            "scope": scope,
+            "items": closed,
+            "count": len(closed),
+            "stats": daily_summary.get("stats") or {},
         }
 
     def _engineer_mop_settings(self) -> dict[str, str]:
@@ -12899,6 +13266,75 @@ class MaintenancePortalService:
             return
         self._state_store.put_document(STATE_NS_ACTION_JOB, job_id, job)
 
+    def expand_workbench_action_command(
+        self,
+        payload: dict[str, Any],
+        *,
+        scope: str = "ALL",
+        ongoing_items: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            return {}
+        if str(payload.get("command_format") or "") != "notice_command":
+            return payload
+        action = str(payload.get("action") or "").strip().lower()
+        patch = payload.get("patch") if isinstance(payload.get("patch"), dict) else {}
+        work_type = str(payload.get("work_type") or patch.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
+        active_item_id = str(payload.get("active_item_id") or patch.get("active_item_id") or "").strip()
+        target_record_id = str(
+            payload.get("target_record_id")
+            or payload.get("record_id")
+            or patch.get("target_record_id")
+            or patch.get("record_id")
+            or ""
+        ).strip()
+        source_record_id = str(payload.get("source_record_id") or patch.get("source_record_id") or "").strip()
+        base: dict[str, Any] = {}
+        for item in self._project_ongoing_items(scope, ongoing_items or []):
+            item_work_type = str(item.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
+            if work_type and item_work_type != work_type:
+                continue
+            if active_item_id and str(item.get("active_item_id") or "").strip() == active_item_id:
+                base = item
+                break
+            if target_record_id and canonical_target_record_id(item) == target_record_id:
+                base = item
+                break
+            if source_record_id and str(item.get("source_record_id") or "").strip() == source_record_id:
+                base = item
+                break
+        if action in {"update", "end"} and not base and not target_record_id:
+            raise PortalError("更新/结束通告缺少可展开的进行中记录。")
+        expanded = copy.deepcopy(base) if base else {}
+        expanded.update(copy.deepcopy(patch))
+        for key in (
+            "scope",
+            "action",
+            "work_type",
+            "notice_type",
+            "active_item_id",
+            "source_record_id",
+            "target_record_id",
+            "record_id",
+            "operation_id",
+            "_auth_open_id",
+            "_auth_user_name",
+        ):
+            value = payload.get(key)
+            if value not in (None, ""):
+                expanded[key] = value
+        if target_record_id:
+            expanded["target_record_id"] = target_record_id
+            expanded["record_id"] = target_record_id
+        if source_record_id:
+            expanded["source_record_id"] = source_record_id
+        if active_item_id:
+            expanded["active_item_id"] = active_item_id
+        expanded["scope"] = str(expanded.get("scope") or scope or "ALL")
+        expanded["action"] = action
+        expanded["work_type"] = str(expanded.get("work_type") or work_type or WORK_TYPE_MAINTENANCE)
+        return normalize_notice_identity_payload(expanded, action=action)
+
     def create_action_job(self, request_payload: dict[str, Any]) -> tuple[str, bool]:
         if not isinstance(request_payload, dict):
             raise PortalError("请求体格式错误。")
@@ -13284,7 +13720,12 @@ class MaintenancePortalService:
             "upload_queue_position": 0,
             "upload_queue_size": 0,
             "record_id": str(job.get("record_id") or ""),
+            "target_record_id": str(job.get("target_record_id") or ""),
             "active_item_id": str(job.get("active_item_id") or ""),
+            "target_record_missing": bool(job.get("target_record_missing")),
+            "needs_target_selection": bool(job.get("needs_target_selection")),
+            "target_selection_message": str(job.get("target_selection_message") or ""),
+            "target_candidates": copy.deepcopy(job.get("target_candidates") or []),
             "error": str(job.get("error") or ""),
             "error_category": str(job.get("error_category") or ""),
             "error_retryable": retryable,
@@ -13551,7 +13992,7 @@ class MaintenancePortalService:
         if not start_time or not end_time:
             raise PortalError("计划开始时间和计划结束时间不能为空。")
         self._validate_minimum_notice_duration(start_time, end_time)
-        self._require_end_site_photo(
+        self._require_end_site_photo_cumulative(
             request_payload,
             action,
             notice_type=notice_type,
@@ -13688,6 +14129,7 @@ class MaintenancePortalService:
                     raise PortalError("纯手填维保通告必须选择维保周期。")
             else:
                 record = self._find_record_by_id(record_id)
+                source_record_id = record_id
                 fields = record.get("display_fields") or {}
                 current_status = str(fields.get("维护实施状态") or "").strip()
                 if not self._maintenance_status_is_startable(record):
@@ -13777,7 +14219,7 @@ class MaintenancePortalService:
         if not start_time or not end_time:
             raise PortalError("开始时间和结束时间不能为空。")
         self._validate_minimum_notice_duration(start_time, end_time)
-        self._require_end_site_photo(
+        self._require_end_site_photo_cumulative(
             request_payload,
             action,
             notice_type=NOTICE_TYPE_MAINTENANCE,
@@ -13856,6 +14298,7 @@ class MaintenancePortalService:
             "scope": scope,
             "scope_label": self._scope_label(scope),
             "record_id": record_id,
+            "source_record_id": source_record_id,
             "target_record_id": target_record_id,
             "active_item_id": active_item_id,
             "title": title,
@@ -14336,7 +14779,7 @@ class MaintenancePortalService:
         if not start_time or not end_time:
             raise PortalError("开始时间和结束时间不能为空。")
         self._validate_minimum_notice_duration(start_time, end_time)
-        self._require_end_site_photo(
+        self._require_end_site_photo_cumulative(
             request_payload,
             action,
             notice_type=NOTICE_TYPE_CHANGE,
@@ -14452,6 +14895,7 @@ class MaintenancePortalService:
             "scope": scope,
             "scope_label": self._scope_label(scope),
             "record_id": record_id,
+            "source_record_id": source_record_id,
             "target_record_id": target_record_id,
             "active_item_id": str(request_payload.get("active_item_id") or "").strip(),
             "title": title,
@@ -14570,6 +15014,11 @@ class MaintenancePortalService:
                 return self._clean_source_text(request_payload.get(name))
             return self._clean_source_text(default)
 
+        def request_text_keep_none_word(name: str, default: str = "") -> str:
+            if name in request_payload:
+                return str(request_payload.get(name) or "").strip()
+            return str(default or "").strip()
+
         def request_first_text(names: tuple[str, ...], default: str = "") -> str:
             for name in names:
                 if name in request_payload:
@@ -14579,6 +15028,7 @@ class MaintenancePortalService:
             return str(default or "").strip()
 
         record_id = str(request_payload.get("record_id") or "").strip()
+        source_record_id = str(request_payload.get("source_record_id") or "").strip()
         manual = self._truthy_flag(request_payload.get("manual"))
         if manual and not record_id:
             record_id = str(request_payload.get("manual_id") or "").strip()
@@ -14616,7 +15066,7 @@ class MaintenancePortalService:
                 discovery = request_text("discovery")
                 symptom = request_text("symptom")
                 solution = request_text("solution")
-                spare_parts = request_text("spare_parts")
+                spare_parts = request_text_keep_none_word("spare_parts")
                 fault_time = request_text("fault_time")
                 target_record_id = ""
             else:
@@ -14661,11 +15111,12 @@ class MaintenancePortalService:
                     discovery = request_text("discovery")
                     symptom = request_text("symptom")
                     solution = request_text("solution")
-                    spare_parts = request_text("spare_parts")
+                    spare_parts = request_text_keep_none_word("spare_parts")
                     fault_time = request_text("fault_time")
                     target_record_id = ""
                 else:
                     fields = record.get("display_fields") or {}
+                    source_record_id = record_id
                     if not self._is_valid_repair_record(record):
                         raise PortalError("该检修记录缺少有效检修通告名称/维修名称或楼栋，不能发起。")
                     source_progress = self._repair_source_status(record)
@@ -14708,6 +15159,10 @@ class MaintenancePortalService:
                     spare_parts = request_text(
                         "spare_parts",
                         self._repair_first_field(fields, "备件更换情况", "备件使用情况"),
+                    )
+                    spare_parts = request_text_keep_none_word(
+                        "spare_parts",
+                        spare_parts,
                     )
                     source_fault_time = self._repair_first_field(
                         fields, "故障发生时间", "发现故障时间"
@@ -14823,7 +15278,7 @@ class MaintenancePortalService:
             solution = request_text("solution")
             if not solution and source_record is not None:
                 solution = self._repair_first_field(fields, "解决方案", "维修方案", "后续整改措施")
-            spare_parts = request_text("spare_parts")
+            spare_parts = request_text_keep_none_word("spare_parts")
             if not spare_parts and source_record is not None:
                 spare_parts = self._repair_first_field(fields, "备件更换情况", "备件使用情况")
             fault_time = request_text("fault_time")
@@ -14871,7 +15326,7 @@ class MaintenancePortalService:
             start_label="发现故障时间",
             end_label="期望完成时间",
         )
-        self._require_end_site_photo(
+        self._require_end_site_photo_cumulative(
             request_payload,
             action,
             notice_type=NOTICE_TYPE_REPAIR,
@@ -14975,6 +15430,7 @@ class MaintenancePortalService:
             "scope": scope,
             "scope_label": self._scope_label(scope),
             "record_id": record_id,
+            "source_record_id": source_record_id,
             "target_record_id": target_record_id,
             "active_item_id": str(request_payload.get("active_item_id") or "").strip(),
             "title": title,

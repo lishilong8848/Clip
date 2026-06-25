@@ -13,6 +13,7 @@ import re
 import socket
 import threading
 import time
+from contextlib import suppress
 from http import HTTPStatus
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -48,6 +49,7 @@ from upload_event_module.services.service_registry import (
 from upload_event_module.services.feishu_service import delete_bitable_record
 from upload_event_module.services.robot_webhook import send_text_to_open_ids
 from upload_event_module.core.parser import extract_event_info, extract_notice_info
+from upload_event_module.logger import log_warning
 
 
 FRONTEND_DIST_DIR = Path(__file__).resolve().parent / "frontend" / "dist"
@@ -1559,6 +1561,14 @@ class PortalRuntime:
                 self._reconcile_orphan_started_items(scope, ongoing)
                 month = (qs.get("month") or [""])[0]
                 specialty = (qs.get("specialty") or [""])[0]
+                search = (qs.get("search") or [""])[0]
+                work_type = str((qs.get("work_type") or [""])[0] or "").strip()
+                raw_sections = str((qs.get("sections") or [""])[0] or "").strip()
+                sections = tuple(
+                    item.strip().lower()
+                    for item in raw_sections.split(",")
+                    if item.strip()
+                )
                 open_id = str((session.get("user") or {}).get("open_id") or "")
                 payload = self._cached_service_payload(
                     (
@@ -1567,15 +1577,52 @@ class PortalRuntime:
                         scope,
                         month,
                         specialty,
+                        search,
+                        work_type,
+                        sections,
                         self._ongoing_items_marker(ongoing),
                     ),
                     lambda: self.service.query_records(
                         month=month,
                         specialty=specialty,
+                        search=search,
                         scope=scope,
                         ongoing_items=ongoing,
+                        work_type=work_type,
+                        sections=sections,
                     ),
                 )
+                if work_type and isinstance(payload, dict):
+                    payload = dict(payload)
+                    payload["records"] = [
+                        item
+                        for item in (payload.get("records") or [])
+                        if str((item or {}).get("work_type") or "maintenance") == work_type
+                    ]
+                    type_count = 0
+                    with suppress(Exception):
+                        type_count = int(float((payload.get("record_type_counts") or {}).get(work_type, 0)))
+                    if not payload["records"] and type_count > 0:
+                        broad_payload = self.service.query_records(
+                            month=month,
+                            specialty=specialty,
+                            search=search,
+                            scope=scope,
+                            ongoing_items=ongoing,
+                            work_type="",
+                            sections=sections,
+                        )
+                        if isinstance(broad_payload, dict):
+                            payload["records"] = [
+                                item
+                                for item in (broad_payload.get("records") or [])
+                                if str((item or {}).get("work_type") or "maintenance") == work_type
+                            ]
+                            payload["record_type_counts"] = (
+                                broad_payload.get("record_type_counts")
+                                or payload.get("record_type_counts")
+                                or {}
+                            )
                 return self._send_json(
                     200,
                     {
@@ -3715,9 +3762,6 @@ class PortalRuntime:
                 **dict(data or {}),
                 "record_id": target_record_id,
                 "target_record_id": target_record_id,
-                "feishu_record_id": target_record_id,
-                "raw_record_id": target_record_id,
-                "_record_id_kind": "target",
                 "_is_placeholder_record": False,
             },
             action="update",
@@ -3727,26 +3771,48 @@ class PortalRuntime:
                 str(payload.get("lan_work_type") or "").strip()
                 or cls._notice_work_type_from_notice_type(notice_type)
             )
+        payload["notice_type"] = notice_type
         section = "event" if notice_type == "事件通告" else "other"
         try:
             cls.state_store.upsert_notice_identity(payload, origin="qt_upload")
-        except Exception:
-            pass
+        except Exception as exc:
+            log_warning(f"Qt 上传目标 ID 写入身份表失败: {exc}")
+        active_item_id = str(payload.get("active_item_id") or "").strip()
+        if not active_item_id:
+            return
+        try:
+            cls.state_store.upsert_qt_active_item(
+                payload,
+                section=section,
+                sort_order=0,
+                origin="qt_upload",
+            )
+            cls.state_store.enqueue_outbox_event(
+                "qt_action",
+                {
+                    "kind": "active_upsert",
+                    "payload": {
+                        "item": {
+                            "active_item_id": active_item_id,
+                            "record_id": target_record_id,
+                            "notice_type": notice_type,
+                            "section": section,
+                            "sort_order": 0,
+                            "origin": "qt_upload",
+                            "payload": payload,
+                        },
+                        "source": "qt_upload_result",
+                    },
+                },
+            )
+        except Exception as exc:
+            log_warning(f"Qt 上传目标 ID 回写 active item 失败: {exc}")
 
     @classmethod
     def _source_record_id_from_prepared_start(cls, prepared: dict) -> str:
         prepared = prepared if isinstance(prepared, dict) else {}
         source_record_id = str(prepared.get("source_record_id") or "").strip()
-        if source_record_id:
-            return source_record_id
-        record_id = str(prepared.get("record_id") or "").strip()
-        if not record_id or is_local_record_id(record_id):
-            return ""
-        if str(prepared.get("source_app_token") or "").strip() or str(
-            prepared.get("source_table_id") or ""
-        ).strip():
-            return record_id
-        return ""
+        return "" if is_local_record_id(source_record_id) else source_record_id
 
     @classmethod
     def _existing_target_for_prepared_start(cls, prepared: dict, notice_type: str) -> str:
@@ -3843,7 +3909,7 @@ class PortalRuntime:
         if not str(prepared.get("title") or "").strip():
             prepared["title"] = (
                 str(parsed.get("title") or "").strip()
-                or section_value("名称", "标题", "事件描述", "通告名称")
+                or section_value("名称", "标题", "检修通告名称", "维修名称", "事件描述", "通告名称")
             )
         if not str(prepared.get("start_time") or "").strip() and not str(
             prepared.get("end_time") or ""
@@ -3984,6 +4050,20 @@ class PortalRuntime:
         if len(date_matched) == 1:
             candidates = date_matched
         if len(candidates) != 1:
+            scored_candidates = []
+            for item in candidates:
+                copied = dict(item)
+                copied["match_score"] = cls._target_candidate_score(prepared, copied)
+                scored_candidates.append(copied)
+            scored_candidates.sort(key=lambda item: -int(item.get("match_score") or 0))
+            if len(scored_candidates) == 1:
+                candidates = scored_candidates
+            elif scored_candidates:
+                top_score = int(scored_candidates[0].get("match_score") or 0)
+                second_score = int(scored_candidates[1].get("match_score") or 0)
+                if top_score >= 70 and top_score - second_score >= 25:
+                    candidates = [scored_candidates[0]]
+        if len(candidates) != 1:
             return (
                 "",
                 "目标多维记录不存在，且无法自动唯一匹配；请在前端选择正确的目标记录后再更新。"
@@ -3997,7 +4077,6 @@ class PortalRuntime:
                     **prepared,
                     "target_record_id": record_id,
                     "record_id": record_id,
-                    "_record_id_kind": "target",
                 },
                 origin="auto_rebind_target",
             )
@@ -4201,6 +4280,8 @@ class PortalRuntime:
             )
             ok, result = create_bitable_record_by_payload(notice_type, payload)
             record_id = str(result or "").strip() if ok else ""
+            if ok and not record_id:
+                return False, "多维创建未返回 record_id，已阻止标记上传成功。", ""
             return bool(ok), str(result or ""), record_id
 
         record_id = str(
@@ -4222,7 +4303,6 @@ class PortalRuntime:
                     **prepared,
                     "target_record_id": record_id,
                     "record_id": record_id,
-                    "_record_id_kind": "target",
                 }
                 ok_query, query_result = query_record_by_id(record_id, notice_type)
             elif rebound_error:
@@ -4235,7 +4315,6 @@ class PortalRuntime:
             {
                 **prepared,
                 "target_record_id": record_id,
-                "_record_id_kind": "source",
             },
             remote_fields=fields,
             remote_missing=False,
@@ -4434,13 +4513,11 @@ class PortalRuntime:
         cls, prepared: dict, *, remote_record_id: str = ""
     ) -> dict:
         prepared = normalize_notice_identity_payload(dict(prepared or {}))
-        source_record_id = str(
-            prepared.get("source_record_id") or prepared.get("record_id") or ""
-        ).strip()
         target_record_id = (
             str(remote_record_id or "").strip()
             or str(prepared.get("target_record_id") or "").strip()
         )
+        source_record_id = str(prepared.get("source_record_id") or "").strip()
         prepared["ui_only"] = True
         prepared["source_record_id"] = source_record_id
         prepared["record_id"] = target_record_id
@@ -4450,7 +4527,6 @@ class PortalRuntime:
         prepared.setdefault("origin", "portal")
         prepared["lan_created_from_portal"] = True
         prepared["_is_placeholder_record"] = False
-        prepared["_record_id_kind"] = "target"
         prepared["_upload_in_progress"] = False
         prepared["_has_unuploaded_changes"] = False
         return prepared
@@ -4569,28 +4645,14 @@ class PortalRuntime:
             raise PortalError("Qt 上传请求缺少 record_id。")
         source_record_id = str(data.get("source_record_id") or "").strip()
         target_record_id = str(data.get("target_record_id") or "").strip()
+        prequery_result: dict | None = None
         if action_type == "upload" and target_record_id:
             action_type = "update"
             data["action_type"] = action_type
             data["record_id"] = target_record_id
             data["target_record_id"] = target_record_id
-            data["_record_id_kind"] = "target"
             data["_is_placeholder_record"] = False
             record_id = target_record_id
-        elif (
-            action_type == "upload"
-            and not bool(data.get("_is_placeholder_record", True))
-            and record_id
-            and not is_local_record_id(record_id)
-            and record_id != source_record_id
-            and str(data.get("_record_id_kind") or "").strip().lower() != "source"
-            and not bool(data.get("source_only"))
-        ):
-            action_type = "update"
-            data["action_type"] = action_type
-            data["target_record_id"] = record_id
-            data["_record_id_kind"] = "target"
-            target_record_id = record_id
         if action_type in {"update", "end"} and not target_record_id:
             identity = cls.state_store.resolve_notice_identity(
                 work_type=str(data.get("work_type") or "").strip(),
@@ -4601,33 +4663,54 @@ class PortalRuntime:
             if isinstance(identity, dict):
                 target_record_id = str(identity.get("target_record_id") or "").strip()
         if action_type in {"update", "end"} and not target_record_id:
-            raise PortalError("Qt 更新/结束缺少目标多维 target_record_id。")
+            if record_id and not is_local_record_id(record_id):
+                ok_query, query_result = query_record_by_id(record_id, notice_type)
+                action_name = "结束" if action_type == "end" else "更新"
+                if ok_query:
+                    target_record_id = record_id
+                    data["target_record_id"] = target_record_id
+                    data["record_id"] = target_record_id
+                    data["_is_placeholder_record"] = False
+                    prequery_result = query_result if isinstance(query_result, dict) else {}
+                elif cls._remote_record_not_found(query_result):
+                    return cls._target_selection_response(
+                        data,
+                        stale_record_id=record_id,
+                        message=f"查询失败: {query_result}",
+                        action_name=action_name,
+                    )
+            if not target_record_id:
+                raise PortalError("Qt 更新/结束缺少目标多维 target_record_id。")
 
-        prequery_result: dict | None = None
-        if not bool(data.get("_is_placeholder_record")) and action_type in {
+        query_record_id_for_action = str(target_record_id or record_id or "").strip()
+        has_remote_record_for_action = bool(
+            query_record_id_for_action and not is_local_record_id(query_record_id_for_action)
+        )
+        if has_remote_record_for_action and action_type in {
             "update",
             "end",
             "upload_replace",
         }:
-            query_record_id = target_record_id or record_id
-            ok_query, query_result = query_record_by_id(query_record_id, notice_type)
-            if not ok_query:
-                action_name = "结束" if action_type == "end" else "更新" if action_type == "update" else "归档"
-                if cls._remote_record_not_found(query_result):
-                    return cls._target_selection_response(
-                        data,
-                        stale_record_id=query_record_id,
-                        message=f"查询失败: {query_result}",
-                        action_name=action_name,
-                    )
-                return {
-                    "ok": False,
-                    "name": action_name,
-                    "message": f"查询失败: {query_result}",
-                    "record_id": query_record_id,
-                    "real_record_id": "",
-                }
-            prequery_result = query_result if isinstance(query_result, dict) else {}
+            query_record_id = query_record_id_for_action
+            if prequery_result is None:
+                ok_query, query_result = query_record_by_id(query_record_id, notice_type)
+                if not ok_query:
+                    action_name = "结束" if action_type == "end" else "更新" if action_type == "update" else "归档"
+                    if cls._remote_record_not_found(query_result):
+                        return cls._target_selection_response(
+                            data,
+                            stale_record_id=query_record_id,
+                            message=f"查询失败: {query_result}",
+                            action_name=action_name,
+                        )
+                    return {
+                        "ok": False,
+                        "name": action_name,
+                        "message": f"查询失败: {query_result}",
+                        "record_id": query_record_id,
+                        "real_record_id": "",
+                    }
+                prequery_result = query_result if isinstance(query_result, dict) else {}
 
         extra_images = payload.get("extra_images") if isinstance(payload.get("extra_images"), list) else []
         if (
@@ -4647,6 +4730,14 @@ class PortalRuntime:
         file_tokens: list[str] = []
 
         screenshot_upload_id = str(payload.get("screenshot_upload_id") or "").strip()
+        if action_type == "update" and not screenshot_upload_id:
+            return {
+                "ok": False,
+                "name": "更新",
+                "message": "Qt 更新通告必须上传通告截图，未检测到截图。请重新点击更新并完成截图。",
+                "record_id": target_record_id or record_id,
+                "real_record_id": "",
+            }
         screenshot_bytes = b""
         screenshot_file_name = str(
             payload.get("screenshot_file_name") or "notice_screenshot.png"
@@ -4716,6 +4807,11 @@ class PortalRuntime:
                         cls.local_upload_created_targets.get(dedupe_key) or ""
                     ).strip()
                     if cached_target:
+                        cls._remember_local_upload_target(
+                            data,
+                            notice_type=notice_type,
+                            target_record_id=cached_target,
+                        )
                         return {
                             "ok": True,
                             "name": "上传",
@@ -4728,6 +4824,11 @@ class PortalRuntime:
                 if existing_target:
                     if dedupe_key:
                         cls.local_upload_created_targets[dedupe_key] = existing_target
+                    cls._remember_local_upload_target(
+                        data,
+                        notice_type=notice_type,
+                        target_record_id=existing_target,
+                    )
                     return {
                         "ok": True,
                         "name": "上传",
@@ -4741,6 +4842,9 @@ class PortalRuntime:
                     notice_payload,
                 )
                 real_record_id = str(result or "").strip() if success else ""
+                if success and not real_record_id:
+                    success = False
+                    result = "多维创建未返回 record_id，已阻止标记上传成功。"
                 if success:
                     if dedupe_key:
                         cls.local_upload_created_targets[dedupe_key] = real_record_id
@@ -4769,8 +4873,11 @@ class PortalRuntime:
         existing_extra_tokens: list[str] = []
         existing_response_time = ""
         checkpoint_id = ""
-        if not bool(data.get("_is_placeholder_record")):
-            query_record_id = target_record_id or record_id
+        query_record_id = str(target_record_id or record_id or "").strip()
+        has_remote_record_for_update = bool(
+            query_record_id and not is_local_record_id(query_record_id)
+        )
+        if has_remote_record_for_update:
             if prequery_result is None:
                 ok_query, query_result = query_record_by_id(query_record_id, notice_type)
                 if not ok_query:
@@ -4798,7 +4905,6 @@ class PortalRuntime:
                     {
                         **data,
                         "target_record_id": query_record_id,
-                        "_record_id_kind": "target",
                     },
                     remote_fields=fields,
                     remote_missing=False,
@@ -4818,6 +4924,9 @@ class PortalRuntime:
         if action_type == "upload_replace" and bool(data.get("_is_placeholder_record")):
             success, result = create_bitable_record_by_payload(notice_type, notice_payload)
             real_record_id = str(result or "").strip() if success else ""
+            if success and not real_record_id:
+                success = False
+                result = "多维创建未返回 record_id，已阻止标记归档成功。"
             return {
                 "ok": bool(success),
                 "name": "归档",
@@ -4841,7 +4950,7 @@ class PortalRuntime:
         if success and action_type == "end":
             cls._enqueue_active_delete_for_ended_notice(
                 data,
-            remote_record_id=target_record_id,
+                remote_record_id=target_record_id,
                 job_id=str(payload.get("job_id") or ""),
             )
         return {
@@ -4905,7 +5014,6 @@ class PortalRuntime:
                 {
                     **payload,
                     "target_record_id": record_id,
-                    "_record_id_kind": "target",
                 },
                 remote_fields=checkpoint_fields,
                 remote_missing=checkpoint_remote_missing,
@@ -5172,12 +5280,36 @@ class PortalRuntime:
             )
             ok, result_message, remote_record_id = cls._execute_backend_prepared_upload(prepared)
             if not ok:
+                target_selection = None
+                if cls._remote_record_not_found(result_message) or (
+                    "目标多维记录不存在" in str(result_message or "")
+                ):
+                    try:
+                        action_label = (
+                            "结束"
+                            if str(prepared.get("action") or "").strip().lower() == "end"
+                            else "更新"
+                        )
+                        target_selection = cls._target_selection_response(
+                            prepared,
+                            stale_record_id=str(
+                                remote_record_id
+                                or prepared.get("target_record_id")
+                                or prepared.get("record_id")
+                                or ""
+                            ),
+                            message=result_message,
+                            action_name=action_label,
+                        )
+                    except Exception:
+                        target_selection = None
                 cls.service.mark_action_upload_result(
                     job_id,
                     success=False,
                     message=result_message,
                     record_id=str(remote_record_id or prepared.get("target_record_id") or prepared.get("record_id") or ""),
                     active_item_id=str(prepared.get("active_item_id") or ""),
+                    target_selection=target_selection,
                 )
                 try:
                     cls.state_store.mark_runtime_queue_item(

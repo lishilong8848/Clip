@@ -3193,9 +3193,21 @@ class ScreenshotConfirmDialog(QDialog):
 
             return ""
 
-        record_id = str(self.data_dict.get("record_id") or "").strip()
+        record_id = str(
+            self.data_dict.get("target_record_id")
+            or self.data_dict.get("record_id")
+            or ""
+        ).strip()
 
         return record_id
+
+    def _get_active_item_identity(self):
+
+        if not isinstance(self.data_dict, dict):
+
+            return ""
+
+        return str(self.data_dict.get("active_item_id") or "").strip()
 
 
 
@@ -3211,6 +3223,7 @@ class ScreenshotConfirmDialog(QDialog):
             return self.cache_store.get_record_fields(
 
                 record_id=record_id,
+                active_item_id=self._get_active_item_identity(),
 
                 fields=[
                     "buildings",
@@ -3244,6 +3257,7 @@ class ScreenshotConfirmDialog(QDialog):
             self.cache_store.patch_record_fields(
 
                 record_id=record_id,
+                active_item_id=self._get_active_item_identity(),
 
                 patch=patch,
 
@@ -3392,17 +3406,17 @@ class ScreenshotConfirmDialog(QDialog):
 
         if self.enable_recover_select:
 
-            if "transfer_to_overhaul" in cache_state:
+            if isinstance(self.data_dict, dict) and "transfer_to_overhaul" in self.data_dict:
+
+                saved_transfer = bool(self.data_dict.get("transfer_to_overhaul"))
+
+            elif "transfer_to_overhaul" in cache_state:
 
                 saved_transfer = bool(cache_state.get("transfer_to_overhaul"))
 
             else:
 
-                saved_transfer = bool(
-
-                    (self.data_dict or {}).get("transfer_to_overhaul")
-
-                )
+                saved_transfer = False
 
             self.transfer_to_overhaul_selected = saved_transfer
 
@@ -3424,20 +3438,18 @@ class ScreenshotConfirmDialog(QDialog):
 
         if self.enable_change_level_select:
             cached_level = str(cache_state.get("level") or "").strip()
-            saved_level = (self.data_dict or {}).get("level")
+            saved_level = str((self.data_dict or {}).get("level") or "").strip()
             detected_level = self._detect_change_level(
                 (self.data_dict or {}).get("text", "")
             )
-            if level_locked and cached_level in self.change_level_options:
+            if saved_level in self.change_level_options:
+                level = saved_level
+            elif cached_level in self.change_level_options:
                 level = cached_level
             elif level_locked:
                 level = LEVEL_I3
             elif detected_level in self.change_level_options:
                 level = detected_level
-            elif cached_level in self.change_level_options:
-                level = cached_level
-            elif saved_level in self.change_level_options:
-                level = saved_level
             else:
                 level = LEVEL_I3
             self.selected_change_level = level
@@ -3469,16 +3481,14 @@ class ScreenshotConfirmDialog(QDialog):
 
         if self.enable_event_level_select:
             cached_level = str(cache_state.get("level") or "").strip()
-            saved_level = (self.data_dict or {}).get("level")
+            saved_level = str((self.data_dict or {}).get("level") or "").strip()
             detected_level = self._detect_event_level(
                 (self.data_dict or {}).get("text", "")
             )
-            if level_locked:
-                self._set_event_level(cached_level)
+            if saved_level:
+                self._set_event_level(saved_level)
             elif cached_level:
                 self._set_event_level(cached_level)
-            elif saved_level:
-                self._set_event_level(saved_level)
             else:
                 self._set_event_level(detected_level)
         else:
@@ -3502,7 +3512,7 @@ class ScreenshotConfirmDialog(QDialog):
 
             cached_source = str(cache_state.get("event_source") or "").strip()
 
-            saved_source = (self.data_dict or {}).get("event_source")
+            saved_source = str((self.data_dict or {}).get("event_source") or "").strip()
 
             detected_source = self._detect_event_source(
 
@@ -3510,13 +3520,13 @@ class ScreenshotConfirmDialog(QDialog):
 
             )
 
-            if cached_source:
-
-                self._set_event_source(cached_source)
-
-            elif saved_source:
+            if saved_source:
 
                 self._set_event_source(saved_source)
+
+            elif cached_source:
+
+                self._set_event_source(cached_source)
 
             else:
 
@@ -3543,10 +3553,22 @@ class ScreenshotConfirmDialog(QDialog):
             self._refresh_specialty_options()
 
             cached_specialty = str(cache_state.get("specialty") or "").strip()
+            saved_specialty = str((self.data_dict or {}).get("specialty") or "").strip()
+            detected_specialty = str(
+                self._detect_specialty((self.data_dict or {}).get("text", ""))
+            ).strip()
+            selected_specialty = ""
+            for candidate in (saved_specialty, cached_specialty, detected_specialty):
+                if candidate and (
+                    candidate in self.specialty_options
+                    or self.specialty_combo.findText(candidate) >= 0
+                ):
+                    selected_specialty = candidate
+                    break
 
-            if cached_specialty:
+            if selected_specialty:
 
-                self.selected_specialty = cached_specialty
+                self.selected_specialty = selected_specialty
 
                 idx = self.specialty_combo.findText(self.selected_specialty)
 
@@ -3565,6 +3587,9 @@ class ScreenshotConfirmDialog(QDialog):
                     "specialty", self.selected_specialty, remove_when_empty=True
 
                 )
+                self._update_data_dict_field(
+                    "_upload_specialty_cleared", False, remove_when_empty=True
+                )
 
             else:
 
@@ -3578,7 +3603,7 @@ class ScreenshotConfirmDialog(QDialog):
 
                 )
 
-                self._update_data_dict_field("specialty", "", remove_when_empty=True)
+                # 初始化弹窗时不清空条目中已保存的专业；只有用户明确选择“未选择”才清空。
 
 
         if self.enable_maintenance_cycle_select:
@@ -3593,7 +3618,7 @@ class ScreenshotConfirmDialog(QDialog):
 
             selected_cycle = ""
 
-            for candidate in (cached_cycle, saved_cycle, detected_cycle):
+            for candidate in (saved_cycle, cached_cycle, detected_cycle):
 
                 if candidate in self.maintenance_cycle_options:
 
@@ -3620,6 +3645,11 @@ class ScreenshotConfirmDialog(QDialog):
                     selected_cycle,
                     remove_when_empty=True,
                 )
+                self._update_data_dict_field(
+                    "_upload_maintenance_cycle_cleared",
+                    False,
+                    remove_when_empty=True,
+                )
 
             else:
 
@@ -3633,9 +3663,7 @@ class ScreenshotConfirmDialog(QDialog):
                     "color: #EF4444; font-size: 11px;"
                 )
 
-                self._update_data_dict_field(
-                    "maintenance_cycle", "", remove_when_empty=True
-                )
+                # 初始化弹窗时不清空条目中已保存的维保周期；只有用户明确选择“未选择”才清空。
 
         else:
 
@@ -3671,13 +3699,10 @@ class ScreenshotConfirmDialog(QDialog):
 
             selected_buildings = []
 
-            if BUILDING_110 in detected_buildings and BUILDING_110 not in cached_buildings:
-                selected_buildings = [BUILDING_110]
-            elif cached_buildings:
-
-                selected_buildings = cached_buildings
-            elif saved_buildings:
+            if saved_buildings:
                 selected_buildings = saved_buildings
+            elif cached_buildings:
+                selected_buildings = cached_buildings
             elif detected_buildings:
                 selected_buildings = detected_buildings
 
@@ -3882,6 +3907,27 @@ class ScreenshotConfirmDialog(QDialog):
         if ALI_LEVEL_HIGH in raw:
             return LEVEL_I1
         return ""
+
+    def _detect_specialty(self, text: str) -> str:
+        raw = (
+            self._extract_section(text or "", "专业")
+            or self._extract_section(text or "", "专业类别")
+            or self._extract_section(text or "", "所属专业")
+        ).strip()
+        if not raw:
+            return ""
+        options = [
+            SPECIALTY_ELECTRIC,
+            SPECIALTY_HVAC,
+            SPECIALTY_FIRE,
+            SPECIALTY_WEAK,
+            SPECIALTY_OTHER,
+            OPTION_SLASH,
+        ]
+        for option in options:
+            if option and option in raw:
+                return option
+        return raw
 
     def _detect_maintenance_cycle(self, text: str) -> str:
         raw = (
@@ -5946,7 +5992,12 @@ class ScreenshotConfirmDialog(QDialog):
 
         self.btn_confirm.setEnabled(enable_btns)
 
-        self.btn_skip.setEnabled(enable_btns)
+        screenshot_required = self._qt_notice_requires_screenshot()
+        self.btn_skip.setEnabled(enable_btns and not screenshot_required)
+        if screenshot_required:
+            self.btn_skip.setToolTip("更新通告必须上传通告截图。")
+        else:
+            self.btn_skip.setToolTip("")
 
 
 
@@ -5979,6 +6030,10 @@ class ScreenshotConfirmDialog(QDialog):
             or "状态： 结束" in head
             or "状态: 结束" in head
         )
+
+    def _qt_notice_requires_screenshot(self):
+        action = str(getattr(self, "action_type", "") or "").strip().lower()
+        return action == "update"
 
     def _end_requires_site_photo(self):
         notice_type = str(
@@ -7955,6 +8010,9 @@ class ScreenshotConfirmDialog(QDialog):
             )
 
             self._update_data_dict_field("specialty", "", remove_when_empty=True)
+            self._update_data_dict_field(
+                "_upload_specialty_cleared", True, remove_when_empty=False
+            )
 
             self._patch_cache_fields({"specialty": None})
 
@@ -7975,6 +8033,9 @@ class ScreenshotConfirmDialog(QDialog):
             "specialty", self.selected_specialty, remove_when_empty=True
 
         )
+        self._update_data_dict_field(
+            "_upload_specialty_cleared", False, remove_when_empty=True
+        )
 
         self._patch_cache_fields({"specialty": self.selected_specialty or None})
 
@@ -7992,6 +8053,11 @@ class ScreenshotConfirmDialog(QDialog):
             self._update_data_dict_field(
                 "maintenance_cycle", "", remove_when_empty=True
             )
+            self._update_data_dict_field(
+                "_upload_maintenance_cycle_cleared",
+                True,
+                remove_when_empty=False,
+            )
             self._patch_cache_fields({"maintenance_cycle": None})
             self._refresh_submit_state()
             self._notify_state_changed()
@@ -8007,6 +8073,11 @@ class ScreenshotConfirmDialog(QDialog):
         self._update_data_dict_field(
             "maintenance_cycle",
             self.selected_maintenance_cycle,
+            remove_when_empty=True,
+        )
+        self._update_data_dict_field(
+            "_upload_maintenance_cycle_cleared",
+            False,
             remove_when_empty=True,
         )
         self._patch_cache_fields(
@@ -8082,6 +8153,22 @@ class ScreenshotConfirmDialog(QDialog):
     def skip_screenshot(self):
 
         self._suppress_ocr_cancel_on_hide = False
+
+        if self._qt_notice_requires_screenshot():
+
+            message = "更新通告必须上传通告截图。"
+
+            self.hint_label.setText(message)
+
+            try:
+
+                show_simple_message(self, message, self.theme)
+
+            except Exception:
+
+                pass
+
+            return
 
         if not self._validate_end_site_photo():
 
@@ -8251,24 +8338,38 @@ class ScreenshotConfirmDialog(QDialog):
 
         if self.enable_specialty_select:
 
-            self._update_data_dict_field(
-
-                "specialty", self.selected_specialty, remove_when_empty=True
-
-            )
-
-            patch["specialty"] = self.selected_specialty or None
+            if self.selected_specialty:
+                self._update_data_dict_field(
+                    "specialty", self.selected_specialty, remove_when_empty=True
+                )
+                self._update_data_dict_field(
+                    "_upload_specialty_cleared", False, remove_when_empty=True
+                )
+                patch["specialty"] = self.selected_specialty
+            elif bool((self.data_dict or {}).get("_upload_specialty_cleared")):
+                self._update_data_dict_field("specialty", "", remove_when_empty=True)
+                patch["specialty"] = None
 
 
         if self.enable_maintenance_cycle_select:
 
-            self._update_data_dict_field(
-                "maintenance_cycle",
-                self.selected_maintenance_cycle,
-                remove_when_empty=True,
-            )
-
-            patch["maintenance_cycle"] = self.selected_maintenance_cycle or None
+            if self.selected_maintenance_cycle:
+                self._update_data_dict_field(
+                    "maintenance_cycle",
+                    self.selected_maintenance_cycle,
+                    remove_when_empty=True,
+                )
+                self._update_data_dict_field(
+                    "_upload_maintenance_cycle_cleared",
+                    False,
+                    remove_when_empty=True,
+                )
+                patch["maintenance_cycle"] = self.selected_maintenance_cycle
+            elif bool((self.data_dict or {}).get("_upload_maintenance_cycle_cleared")):
+                self._update_data_dict_field(
+                    "maintenance_cycle", "", remove_when_empty=True
+                )
+                patch["maintenance_cycle"] = None
 
 
 

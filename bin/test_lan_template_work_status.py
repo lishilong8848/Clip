@@ -11,6 +11,7 @@ import datetime as dt
 import base64
 import ast
 import re
+import gc
 from pathlib import Path
 from unittest.mock import patch
 
@@ -54,6 +55,9 @@ from upload_event_module.services.handlers.maintenance_notice import (  # noqa: 
 from upload_event_module.services.handlers.change_notice import (  # noqa: E402
     ChangeNoticeHandler,
 )
+from upload_event_module.services.handlers.event_notice import (  # noqa: E402
+    EventNoticeHandler,
+)
 from upload_event_module.services.handlers.polling_notice import (  # noqa: E402
     PollingNoticeHandler,
 )
@@ -69,6 +73,7 @@ from upload_event_module.services.handlers.device_adjust_notice import (  # noqa
 from upload_event_module.core.parser import extract_event_info  # noqa: E402
 import upload_event_module.services.feishu_service as feishu_service_module  # noqa: E402
 from upload_event_module.ui.active_cache_store import ActiveCacheStore  # noqa: E402
+from upload_event_module.ui.main_window_records import MainWindowRecordsMixin  # noqa: E402
 from upload_event_module.ui.main_window_workflow import MainWindowWorkflowMixin  # noqa: E402
 from upload_event_module.ui.main_window_ui import MainWindowUiMixin  # noqa: E402
 
@@ -97,7 +102,6 @@ class _TargetLookupService(_TestMaintenancePortalService):
     def _target_record_exists_for_status_item(self, item, target_cache):
         target_record_id = str(
             item.get("target_record_id")
-            or item.get("feishu_record_id")
             or item.get("record_id")
             or ""
         ).strip()
@@ -139,6 +143,43 @@ class _ChangeSourceFailureService(MaintenancePortalService):
         self._repair_records = []
         self._repair_loaded_once = True
         return self._repair_records
+
+
+class _MemoryUploadFieldCache:
+    def __init__(self, fields=None):
+        self.fields = dict(fields or {})
+        self.patches = []
+
+    def get_record_fields(self, *, record_id="", active_item_id="", fields=None):
+        return {key: self.fields[key] for key in (fields or []) if key in self.fields}
+
+    def patch_record_fields(self, *, record_id="", active_item_id="", patch=None):
+        patch = dict(patch or {})
+        self.patches.append(patch)
+        for key, value in patch.items():
+            if value is None:
+                self.fields.pop(key, None)
+            else:
+                self.fields[key] = value
+
+
+class _UploadFieldResolverHarness(MainWindowRecordsMixin):
+    def __init__(self, cache_fields=None):
+        self.cache_store = _MemoryUploadFieldCache(cache_fields)
+
+    def _normalize_buildings_value(self, value):
+        if isinstance(value, (list, tuple, set)):
+            return [str(item).strip() for item in value if str(item).strip()]
+        text = str(value or "").strip()
+        return [text] if text else []
+
+    def _get_cache_identity(self, data_dict):
+        return str(data_dict.get("target_record_id") or data_dict.get("record_id") or "")
+
+    def _reconcile_unlocked_change_notice_level(
+        self, data_dict, *, level="", level_locked=False, persist=False
+    ):
+        return str(level or data_dict.get("level") or "").strip()
 
 
 class _WorkflowRuntimeQueueHarness(MainWindowWorkflowMixin):
@@ -578,6 +619,25 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 work_type="change",
             )
 
+    def test_cumulative_end_site_photo_allows_previous_upload(self):
+        service = MaintenancePortalService()
+        service._has_existing_site_photo_for_notice = lambda *args, **kwargs: True
+        service._require_end_site_photo_cumulative(
+            {},
+            "end",
+            notice_type="维保通告",
+            work_type="maintenance",
+        )
+
+        service._has_existing_site_photo_for_notice = lambda *args, **kwargs: False
+        with self.assertRaises(PortalError):
+            service._require_end_site_photo_cumulative(
+                {},
+                "end",
+                notice_type="维保通告",
+                work_type="maintenance",
+            )
+
     def test_portal_runtime_routes_change_site_photos_to_site_field(self):
         self.assertTrue(PortalRuntime._notice_supports_site_image_field("变更通告"))
         self.assertTrue(PortalRuntime._notice_supports_site_image_field("变更通告"))
@@ -806,6 +866,68 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 {"file_token": "new_site_token"},
             ],
         )
+
+    def test_update_notice_screenshots_append_to_type_specific_fields(self):
+        cases = [
+            (
+                "维保通告",
+                MaintenanceNoticeHandler("维保通告"),
+                "【维保通告】状态：更新\n【名称】测试维保\n【时间】2026-06-12 09:30~2026-06-12 18:30\n【进度】更新中",
+                MAINTENANCE_NOTICE_FIELDS["notice_images"],
+            ),
+            (
+                "事件通告",
+                EventNoticeHandler("事件通告"),
+                "【事件通告】状态：更新\n【标题】测试事件\n【事件发生时间】2026-06-12 09:30\n【进展】更新中",
+                "进展更新截图",
+            ),
+            (
+                "变更通告",
+                ChangeNoticeHandler("变更通告"),
+                "【变更通告】状态：更新\n【名称】测试变更\n【等级】低风险\n【时间】2026-06-12 09:30~2026-06-12 18:30\n【进度】更新中",
+                CHANGE_NOTICE_FIELDS["update_snapshot"],
+            ),
+            (
+                "上电通告",
+                PowerNoticeHandler("上电通告"),
+                "【上电通告】状态：更新\n【名称】测试上电\n【时间】2026-06-12 09:30~2026-06-12 18:30\n【进度】更新中",
+                POWER_NOTICE_FIELDS["notice_images"],
+            ),
+            (
+                "设备轮巡",
+                PollingNoticeHandler("设备轮巡"),
+                "【设备轮巡】状态：更新\n【标题】测试轮巡\n【时间】2026-06-12 09:30~2026-06-12 18:30\n【进度】更新中",
+                POLLING_NOTICE_FIELDS["notice_images"],
+            ),
+            (
+                "设备调整",
+                AdjustNoticeHandler("设备调整"),
+                "【设备调整】状态：更新\n【名称】测试调整\n【时间】2026-06-12 09:30~2026-06-12 18:30\n【进度】更新中",
+                ADJUST_NOTICE_FIELDS["notice_images"],
+            ),
+            (
+                "设备检修",
+                OverhaulNoticeHandler("设备检修"),
+                "【设备检修】状态：更新\n【标题】测试检修\n【发现故障时间】2026-06-12 09:30\n【期望完成时间】2026-06-12 18:30\n【完成情况】更新中",
+                "过程通告截图",
+            ),
+        ]
+
+        for notice_type, handler, text, field_name in cases:
+            with self.subTest(notice_type=notice_type):
+                fields = handler.build_update_fields(
+                    NoticePayload(
+                        text=text,
+                        existing_file_tokens=["old-token"],
+                        file_tokens=["new-token"],
+                        response_time="2026-06-12 10:00",
+                    )
+                )
+
+                self.assertEqual(
+                    fields[field_name],
+                    [{"file_token": "old-token"}, {"file_token": "new-token"}],
+                )
 
     def test_change_handler_writes_planned_end_before_end_state(self):
         handler = ChangeNoticeHandler("变更通告")
@@ -1039,7 +1161,6 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "source_record_id": "source-1",
                     "target_record_id": "target-1",
                     "record_id": "target-1",
-                    "_record_id_kind": "target",
                     "work_type": "maintenance",
                     "notice_type": "维保通告",
                     "title": "A楼维保",
@@ -1056,6 +1177,51 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(items[0]["active_item_id"], "active-1")
             self.assertEqual(items[0]["record_id"], "target-1")
             self.assertEqual(items[0]["payload"]["target_record_id"], "target-1")
+
+    def test_lan_portal_state_store_preserves_bound_target_on_later_local_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            store.upsert_qt_active_item(
+                {
+                    "active_item_id": "active-keep-target",
+                    "target_record_id": "target-keep",
+                    "record_id": "target-keep",
+                    "work_type": "maintenance",
+                    "notice_type": "维保通告",
+                    "title": "A楼维保",
+                    "text": "【维保通告】状态：开始\n【名称】A楼维保",
+                },
+                section="other",
+                origin="qt_upload",
+            )
+
+            store.upsert_qt_active_item(
+                {
+                    "active_item_id": "active-keep-target",
+                    "record_id": "local_active_keep_target",
+                    "work_type": "maintenance",
+                    "notice_type": "维保通告",
+                    "title": "A楼维保",
+                    "text": "【维保通告】状态：更新\n【名称】A楼维保",
+                    "_is_placeholder_record": True,
+                },
+                section="other",
+                origin="clipboard",
+            )
+
+            items = store.list_qt_active_items()
+            identity = store.resolve_notice_identity(
+                work_type="maintenance",
+                active_item_id="active-keep-target",
+            )
+
+            self.assertEqual(len(items), 1)
+            self.assertEqual(items[0]["record_id"], "target-keep")
+            self.assertEqual(items[0]["payload"]["record_id"], "target-keep")
+            self.assertEqual(items[0]["payload"]["target_record_id"], "target-keep")
+            self.assertFalse(items[0]["payload"]["_is_placeholder_record"])
+            self.assertIsNotNone(identity)
+            self.assertEqual(identity["target_record_id"], "target-keep")
 
     def test_lan_portal_state_store_keeps_different_reason_active_items_with_different_targets(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1611,6 +1777,99 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(result["record_id"], "placeholder-1")
         self.assertEqual(result["real_record_id"], "rec-backend-1")
 
+    def test_qt_upload_field_resolver_preserves_saved_fields_when_dialog_empty(self):
+        harness = _UploadFieldResolverHarness({})
+        data = {
+            "record_id": "rec-saved-fields",
+            "active_item_id": "active-saved-fields",
+            "buildings": ["A楼"],
+            "specialty": "消防",
+            "maintenance_cycle": "月度",
+        }
+        resolved = harness._resolve_upload_fields_from_cache(
+            data,
+            {"buildings": [], "specialty": "", "maintenance_cycle": ""},
+        )
+
+        self.assertEqual(resolved["buildings"], ["A楼"])
+        self.assertEqual(resolved["specialty"], "消防")
+        self.assertEqual(resolved["maintenance_cycle"], "月度")
+        self.assertEqual(data["specialty"], "消防")
+        self.assertEqual(data["maintenance_cycle"], "月度")
+        self.assertTrue(
+            any(
+                patch.get("specialty") == "消防"
+                and patch.get("maintenance_cycle") == "月度"
+                for patch in harness.cache_store.patches
+            )
+        )
+
+    def test_qt_upload_field_resolver_only_clears_saved_fields_when_explicit(self):
+        harness = _UploadFieldResolverHarness(
+            {"specialty": "消防", "maintenance_cycle": "月度"}
+        )
+        data = {
+            "record_id": "rec-clear-fields",
+            "active_item_id": "active-clear-fields",
+            "buildings": ["A楼"],
+            "specialty": "消防",
+            "maintenance_cycle": "月度",
+            "_upload_specialty_cleared": True,
+            "_upload_maintenance_cycle_cleared": True,
+        }
+        resolved = harness._resolve_upload_fields_from_cache(
+            data,
+            {"buildings": [], "specialty": "", "maintenance_cycle": ""},
+        )
+
+        self.assertEqual(resolved["specialty"], "")
+        self.assertEqual(resolved["maintenance_cycle"], "")
+        self.assertNotIn("specialty", data)
+        self.assertNotIn("maintenance_cycle", data)
+        self.assertTrue(data["_upload_specialty_cleared"])
+        self.assertTrue(data["_upload_maintenance_cycle_cleared"])
+        self.assertTrue(
+            any(
+                patch.get("specialty") is None
+                and patch.get("maintenance_cycle") is None
+                for patch in harness.cache_store.patches
+            )
+        )
+
+    def test_local_qt_notice_upload_create_without_record_id_is_failure(self):
+        request_payload = {
+            "action_type": "upload",
+            "data_dict": {
+                "active_item_id": "active-placeholder-empty-result",
+                "record_id": "placeholder-empty-result",
+                "notice_type": "维保通告",
+                "text": "【维保通告】状态：开始\n【名称】测试测试测试",
+                "buildings": ["A楼"],
+                "specialty": "测试",
+                "maintenance_cycle": "/",
+            },
+            "response_time": "2026-05-24 09:30",
+            "recover_selected": False,
+            "robot_group_choice": "auto",
+        }
+        old_store = PortalRuntime.state_store
+        with tempfile.TemporaryDirectory() as tmp:
+            PortalRuntime.state_store = LanPortalStateStore(
+                Path(tmp) / "lan_portal_state.sqlite3"
+            )
+            try:
+                with patch.object(
+                    portal_server_module,
+                    "create_bitable_record_by_payload",
+                    return_value=(True, ""),
+                ):
+                    result = PortalRuntime.execute_local_notice_upload(request_payload)
+            finally:
+                PortalRuntime.state_store = old_store
+        self.assertFalse(result["ok"])
+        self.assertIn("未返回 record_id", result["message"])
+        self.assertEqual(result["real_record_id"], "")
+
     def test_local_qt_notice_upload_uses_attachment_upload_ids(self):
         old_store = PortalRuntime.state_store
         with tempfile.TemporaryDirectory() as tmp:
@@ -1763,6 +2022,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "source_app_token": "source-app",
                 "source_table_id": "source-table",
                 "record_id": "source-maint-1",
+                "source_record_id": "source-maint-1",
                 "title": "A楼测试维保",
                 "building": "A楼",
                 "building_codes": ["A"],
@@ -1800,21 +2060,136 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         create_record.assert_not_called()
 
     def test_local_qt_notice_upload_with_target_record_updates_instead_of_creating(self):
+        old_store = PortalRuntime.state_store
+        with tempfile.TemporaryDirectory() as tmp:
+            PortalRuntime.state_store = LanPortalStateStore(
+                Path(tmp) / "lan_portal_state.sqlite3"
+            )
+            screenshot = PortalRuntime.state_store.put_notice_upload_attachment(
+                open_id="qt-local",
+                file_name="event-update.png",
+                mime_type="image/png",
+                content=b"event-update-bytes",
+            )
+            request_payload = {
+                "action_type": "upload",
+                "data_dict": {
+                    "record_id": "rec-existing-event",
+                    "target_record_id": "rec-existing-event",
+                    "_is_placeholder_record": False,
+                    "notice_type": "事件通告",
+                    "text": (
+                        "【事件通告】状态：更新\n"
+                        "【标题】测试测试测试事件\n"
+                        "【时间】2026-05-24 09:30~2026-05-24 18:30\n"
+                        "【进展】测试测试测试"
+                    ),
+                    "time_str": "2026-05-24 09:30~2026-05-24 18:30",
+                    "level": "I3",
+                },
+                "screenshot_upload_id": screenshot["upload_id"],
+                "response_time": "2026-05-24 09:30",
+                "recover_selected": False,
+                "robot_group_choice": "auto",
+            }
+            try:
+                with patch.object(
+                    portal_server_module,
+                    "query_record_by_id",
+                    return_value=(True, {"fields": {}}),
+                ) as query_record, patch.object(
+                    portal_server_module,
+                    "upload_media_to_feishu",
+                    return_value=(True, "event-update-token"),
+                ), patch.object(
+                    portal_server_module,
+                    "create_bitable_record_by_payload",
+                    return_value=(True, "rec-duplicate"),
+                ) as create_record, patch.object(
+                    portal_server_module,
+                    "update_bitable_record_by_payload",
+                    return_value=(True, "rec-existing-event"),
+                ) as update_record:
+                    result = PortalRuntime.execute_local_notice_upload(request_payload)
+            finally:
+                PortalRuntime.state_store = old_store
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["name"], "更新")
+        self.assertEqual(result["record_id"], "rec-existing-event")
+        self.assertEqual(result["real_record_id"], "rec-existing-event")
+        query_record.assert_called_once_with("rec-existing-event", "事件通告")
+        update_record.assert_called_once()
+        self.assertEqual(update_record.call_args.args[0], "rec-existing-event")
+        self.assertEqual(update_record.call_args.args[2].file_tokens, ["event-update-token"])
+        create_record.assert_not_called()
+
+    def test_local_qt_notice_update_accepts_record_id_as_target_when_verified(self):
+        old_store = PortalRuntime.state_store
+        with tempfile.TemporaryDirectory() as tmp:
+            PortalRuntime.state_store = LanPortalStateStore(
+                Path(tmp) / "lan_portal_state.sqlite3"
+            )
+            screenshot = PortalRuntime.state_store.put_notice_upload_attachment(
+                open_id="qt-local",
+                file_name="change-update.png",
+                mime_type="image/png",
+                content=b"change-update-bytes",
+            )
+            request_payload = {
+                "action_type": "update",
+                "data_dict": {
+                    "record_id": "rec-existing-change-no-target-field",
+                    "_is_placeholder_record": False,
+                    "notice_type": "变更通告",
+                    "text": "【变更通告】状态：更新\n【名称】测试测试测试变更",
+                    "level": "I3",
+                },
+                "screenshot_upload_id": screenshot["upload_id"],
+                "response_time": "2026-05-24 09:30",
+                "recover_selected": False,
+                "robot_group_choice": "auto",
+            }
+            try:
+                with patch.object(
+                    portal_server_module,
+                    "query_record_by_id",
+                    return_value=(True, {"fields": {}}),
+                ) as query_record, patch.object(
+                    portal_server_module,
+                    "upload_media_to_feishu",
+                    return_value=(True, "change-update-token"),
+                ), patch.object(
+                    portal_server_module,
+                    "update_bitable_record_by_payload",
+                    return_value=(True, "rec-existing-change-no-target-field"),
+                ) as update_record:
+                    result = PortalRuntime.execute_local_notice_upload(request_payload)
+            finally:
+                PortalRuntime.state_store = old_store
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["record_id"], "rec-existing-change-no-target-field")
+        self.assertEqual(result["real_record_id"], "rec-existing-change-no-target-field")
+        query_record.assert_called_once_with(
+            "rec-existing-change-no-target-field",
+            "变更通告",
+        )
+        update_record.assert_called_once()
+        self.assertEqual(
+            update_record.call_args.args[0],
+            "rec-existing-change-no-target-field",
+        )
+
+    def test_local_qt_notice_update_requires_notice_screenshot(self):
         request_payload = {
-            "action_type": "upload",
+            "action_type": "update",
             "data_dict": {
-                "record_id": "rec-existing-event",
-                "target_record_id": "rec-existing-event",
-                "_record_id_kind": "target",
+                "record_id": "rec-existing-change",
+                "target_record_id": "rec-existing-change",
                 "_is_placeholder_record": False,
-                "notice_type": "事件通告",
-                "text": (
-                    "【事件通告】状态：更新\n"
-                    "【标题】测试测试测试事件\n"
-                    "【时间】2026-05-24 09:30~2026-05-24 18:30\n"
-                    "【进展】测试测试测试"
-                ),
-                "time_str": "2026-05-24 09:30~2026-05-24 18:30",
+                "notice_type": "变更通告",
+                "text": "【变更通告】状态：更新\n【名称】测试测试测试变更",
                 "level": "I3",
             },
             "response_time": "2026-05-24 09:30",
@@ -1825,25 +2200,17 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             portal_server_module,
             "query_record_by_id",
             return_value=(True, {"fields": {}}),
-        ) as query_record, patch.object(
-            portal_server_module,
-            "create_bitable_record_by_payload",
-            return_value=(True, "rec-duplicate"),
-        ) as create_record, patch.object(
+        ), patch.object(
             portal_server_module,
             "update_bitable_record_by_payload",
-            return_value=(True, "rec-existing-event"),
+            return_value=(True, "rec-existing-change"),
         ) as update_record:
             result = PortalRuntime.execute_local_notice_upload(request_payload)
 
-        self.assertTrue(result["ok"])
+        self.assertFalse(result["ok"])
         self.assertEqual(result["name"], "更新")
-        self.assertEqual(result["record_id"], "rec-existing-event")
-        self.assertEqual(result["real_record_id"], "rec-existing-event")
-        query_record.assert_called_once_with("rec-existing-event", "事件通告")
-        update_record.assert_called_once()
-        self.assertEqual(update_record.call_args.args[0], "rec-existing-event")
-        create_record.assert_not_called()
+        self.assertIn("必须上传通告截图", result["message"])
+        update_record.assert_not_called()
 
     def test_workflow_delegate_qt_notice_upload_uses_backend_result(self):
         class _Controller:
@@ -2337,7 +2704,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(result["checkpoint"]["mode"], "TRUNCATE")
             self.assertGreaterEqual(result["reclaimed_bytes"], 0)
 
-    def test_active_cache_store_imports_legacy_file_to_qt_items(self):
+    def test_active_cache_store_ignores_stale_file_without_sqlite_items(self):
         with tempfile.TemporaryDirectory() as tmp:
             cache_path = Path(tmp) / "active_cache.json"
             cache_path.write_text(
@@ -2363,16 +2730,13 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             state_store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
             cache_store = ActiveCacheStore(str(cache_path), state_store)
 
-            result = cache_store.migrate_legacy_cache_file_to_sqlite()
             payload = cache_store.load_payload()
             qt_items = state_store.list_qt_active_items()
 
-            self.assertEqual(result["status"], "imported")
-            self.assertEqual(result["imported"], 1)
-            self.assertEqual(payload["other"][0]["data"]["record_id"], "legacy-record-1")
-            self.assertEqual(qt_items[0]["active_item_id"], "legacy-active-1")
+            self.assertEqual(payload["other"], [])
+            self.assertEqual(qt_items, [])
 
-    def test_active_cache_store_does_not_overwrite_existing_qt_items_with_legacy_file(self):
+    def test_active_cache_store_uses_existing_qt_items_and_ignores_stale_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             cache_path = Path(tmp) / "active_cache.json"
             cache_path.write_text(
@@ -2408,16 +2772,13 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             )
             cache_store = ActiveCacheStore(str(cache_path), state_store)
 
-            result = cache_store.migrate_legacy_cache_file_to_sqlite()
             payload = cache_store.load_payload()
             qt_items = state_store.list_qt_active_items()
 
-            self.assertEqual(result["status"], "skipped")
-            self.assertEqual(result["reason"], "sqlite_already_initialized")
             self.assertEqual(payload["other"][0]["data"]["record_id"], "current-record")
             self.assertEqual([item["active_item_id"] for item in qt_items], ["current-active"])
 
-    def test_active_cache_store_merges_legacy_items_when_sqlite_has_fewer(self):
+    def test_active_cache_store_does_not_merge_stale_file_items_when_sqlite_has_fewer(self):
         with tempfile.TemporaryDirectory() as tmp:
             cache_path = Path(tmp) / "active_cache.json"
             legacy_items = [
@@ -2452,26 +2813,25 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 )
             cache_store = ActiveCacheStore(str(cache_path), state_store)
 
-            result = cache_store.migrate_legacy_cache_file_to_sqlite()
+            payload = cache_store.load_payload()
             qt_items = state_store.list_qt_active_items()
 
-            self.assertEqual(result["status"], "merged")
-            self.assertEqual(result["imported"], 7)
-            self.assertEqual(len(qt_items), 7)
+            self.assertEqual(len(payload["other"]), 5)
+            self.assertEqual(len(qt_items), 5)
             self.assertEqual(
                 {item["record_id"] for item in qt_items},
-                {f"legacy-record-{index}" for index in range(1, 8)},
+                {f"legacy-record-{index}" for index in range(1, 6)},
             )
 
-            state_store.delete_qt_active_item(active_item_id="legacy-active-7")
+            state_store.delete_qt_active_item(active_item_id="legacy-active-5")
             restarted_cache_store = ActiveCacheStore(str(cache_path), state_store)
-            second_result = restarted_cache_store.migrate_legacy_cache_file_to_sqlite()
+            restarted_payload = restarted_cache_store.load_payload()
             qt_items_after_delete = state_store.list_qt_active_items()
 
-            self.assertEqual(second_result["status"], "skipped")
-            self.assertEqual(len(qt_items_after_delete), 6)
+            self.assertEqual(len(restarted_payload["other"]), 4)
+            self.assertEqual(len(qt_items_after_delete), 4)
             self.assertNotIn(
-                "legacy-record-7",
+                "legacy-record-5",
                 {item["record_id"] for item in qt_items_after_delete},
             )
 
@@ -2500,6 +2860,49 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 self.assertEqual(qt_items[0]["payload"]["title"], "测试测试测试")
                 self.assertIn("测试测试测试", qt_items[0]["payload"]["text"])
                 self.assertEqual(events[0]["payload"]["kind"], "active_upsert")
+            finally:
+                PortalRuntime.state_store = previous_store
+
+    def test_backend_manual_update_with_target_record_projects_to_bound_active_item(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            previous_store = PortalRuntime.state_store
+            PortalRuntime.state_store = LanPortalStateStore(
+                Path(tmp) / "lan_portal_state.sqlite3"
+            )
+            try:
+                controller = FastAPIPortalController()
+                entry = controller._clipboard_entry_from_content(
+                    "【维保通告】状态：更新\n"
+                    "【名称】EA118机房A楼灭火器维护\n"
+                    "【时间】2026-06-24 09:00~2026-06-24 18:00\n"
+                    "【位置】A楼\n"
+                    "【进度】更新测试",
+                    source="manual_add",
+                )
+                self.assertIsNotNone(entry)
+                entry["target_record_id"] = "recvnexkknTrwz"
+
+                result = controller._project_clipboard_entry_to_active(entry)
+                qt_items = PortalRuntime.state_store.list_qt_active_items()
+
+                self.assertTrue(result["ok"])
+                self.assertFalse(result.get("ignored"))
+                self.assertEqual(result["record_id"], "recvnexkknTrwz")
+                self.assertEqual(len(qt_items), 1)
+                payload = qt_items[0]["payload"]
+                identity = PortalRuntime.state_store.resolve_notice_identity(
+                    work_type="maintenance",
+                    active_item_id=payload.get("active_item_id", ""),
+                    source_record_id="",
+                    target_record_id="recvnexkknTrwz",
+                )
+                self.assertEqual(qt_items[0]["record_id"], "recvnexkknTrwz")
+                self.assertEqual(payload["record_id"], "recvnexkknTrwz")
+                self.assertEqual(payload["target_record_id"], "recvnexkknTrwz")
+                self.assertFalse(payload["_is_placeholder_record"])
+                self.assertEqual(payload["work_type"], "maintenance")
+                self.assertIsNotNone(identity)
+                self.assertEqual(identity["target_record_id"], "recvnexkknTrwz")
             finally:
                 PortalRuntime.state_store = previous_store
 
@@ -3030,7 +3433,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 PortalRuntime.state_store = previous_store
 
     def test_state_store_migrates_legacy_change_notice_labels(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             db_path = Path(tmp) / "lan_portal_state.sqlite3"
             store = LanPortalStateStore(db_path)
             store.schema_health()
@@ -3116,6 +3519,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(job_doc["prepared"]["notice_type"], "变更通告")
             self.assertIn("【变更通告】状态：开始", job_doc["prepared"]["text"])
             self.assertNotIn("【设备变更】", job_doc["prepared"]["text"])
+            del migrated
+            del store
+            gc.collect()
 
     def test_state_store_canonicalizes_legacy_change_notice_on_upsert(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3261,6 +3667,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "action": "start",
                 "work_type": "repair",
                 "record_id": "source-repair-1",
+                "source_record_id": "source-repair-1",
                 "source_app_token": "source-app",
                 "source_table_id": "source-table",
             }
@@ -3691,7 +4098,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertTrue(restored["restart_recovered"])
             self.assertEqual(restarted.recoverable_action_job_ids(), [job_id])
 
-    def test_qt_active_cache_migrates_to_sqlite_without_overwriting_json(self):
+    def test_qt_active_cache_uses_target_record_id_without_overwriting_json(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             cache_file = root / "active_cache.json"
@@ -3703,6 +4110,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     {
                         "data": {
                             "record_id": "active-1",
+                            "target_record_id": "active-1",
                             "notice_type": "维保通告",
                             "text": "旧通告",
                         }
@@ -3713,6 +4121,17 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             original = json.dumps(legacy_payload, ensure_ascii=False, indent=2)
             cache_file.write_text(original, encoding="utf-8")
             store = LanPortalStateStore(root / "lan_portal_state.sqlite3")
+            store.upsert_qt_active_item(
+                {
+                    "active_item_id": "active-local-1",
+                    "record_id": "active-1",
+                    "target_record_id": "active-1",
+                    "notice_type": "维保通告",
+                    "text": "SQLite 原始通告",
+                },
+                section="other",
+                origin="qt",
+            )
             cache_store = ActiveCacheStore(str(cache_file), state_store=store)
 
             payload = cache_store.load_payload()
@@ -3729,7 +4148,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 qt_items[0]["payload"]["text"],
                 "SQLite 通告",
             )
-            self.assertEqual(stored["other"][0]["data"]["text"], "旧通告")
+            self.assertIsNone(stored)
             self.assertEqual(cache_file.read_text(encoding="utf-8"), original)
 
     def test_qt_history_migrates_to_sqlite_without_overwriting_json(self):
@@ -3902,7 +4321,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(summary["status"], "已结束")
             self.assertEqual(summary["source_record_id"], "rec1")
             self.assertEqual(summary["active_item_id"], "active-1")
-            self.assertEqual(summary["feishu_record_id"], "bitable-rec-1")
+            self.assertEqual(summary["target_record_id"], "bitable-rec-1")
             self.assertEqual(summary["maintenance_cycle"], "每月")
             self.assertRegex(summary["completed_date"], r"^\d{4}-\d{2}-\d{2}$")
             self.assertEqual(summary["completed_date"], summary["ended_at"][:10])
@@ -4105,7 +4524,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                                 "fallback_key": "title:A楼:EA118机房A楼过滤网维护",
                                 "source_record_id": "rec1",
                                 "active_item_id": "active-1",
-                                "feishu_record_id": "bitable-rec-1",
+                                "target_record_id": "bitable-rec-1",
                                 "title": "EA118机房A楼过滤网维护",
                                 "building": "A楼",
                                 "building_code": "A",
@@ -4155,7 +4574,6 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "work_type": "maintenance",
                     "notice_type": "维保通告",
                     "target_record_id": "target-m-running",
-                    "feishu_record_id": "target-m-running",
                     "title": "EA118机房A楼过滤网维护",
                     "building": "A楼",
                     "building_code": "A",
@@ -4207,7 +4625,6 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "work_type": "maintenance",
                     "notice_type": "维保通告",
                     "target_record_id": "target-m-running",
-                    "feishu_record_id": "target-m-running",
                     "active_item_id": "active-m-running",
                     "title": "EA118机房A楼过滤网维护",
                     "building": "A楼",
@@ -4419,7 +4836,6 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "work_type": "change",
                     "notice_type": "变更通告",
                     "target_record_id": "target-change-e",
-                    "feishu_record_id": "target-change-e",
                     "active_item_id": "active-change-e",
                     "title": "E楼进行中变更",
                     "building": "E楼",
@@ -5319,7 +5735,6 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                         "data_dict": {
                             "record_id": "stale-change-target",
                             "target_record_id": "stale-change-target",
-                            "_record_id_kind": "target",
                             "source_record_id": "source-change",
                             "active_item_id": "active-change",
                             "work_type": "change",
@@ -5396,7 +5811,6 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                         "data_dict": {
                             "record_id": "stale-change-target",
                             "target_record_id": "stale-change-target",
-                            "_record_id_kind": "target",
                             "work_type": "change",
                             "notice_type": "变更通告",
                             "scope": "A",
@@ -5485,7 +5899,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(summary["work_type"], WORK_TYPE_CHANGE)
             self.assertEqual(summary["notice_type"], "变更通告")
             self.assertEqual(summary["source_record_id"], "c2")
-            self.assertEqual(summary["feishu_record_id"], "change-target-1")
+            self.assertEqual(summary["target_record_id"], "change-target-1")
             self.assertEqual(summary["status"], "进行中")
 
     def test_repair_records_filter_placeholders_and_scope(self):
@@ -5886,7 +6300,6 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "work_type": "repair",
                     "notice_type": "设备检修",
                     "target_record_id": "target-r1",
-                    "feishu_record_id": "target-r1",
                     "active_item_id": "active-r1",
                     "title": "D楼UPS检修",
                     "building": "D楼",
@@ -7037,7 +7450,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 )
             ]
 
-            with self.assertRaisesRegex(PortalError, "当前入口与通告楼栋不匹配"):
+            with self.assertRaisesRegex(PortalError, "当前入口是E楼，但变更通告属于"):
                 service.prepare_change_action(
                     {
                         "action": "start",
@@ -7317,7 +7730,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
       "key": "change:source:c1",
       "work_type": "change",
       "source_record_id": "c1",
-      "feishu_record_id": "target-c1",
+      "target_record_id": "target-c1",
       "title": "园区变更",
       "building": "A楼、B楼",
       "building_codes": ["A", "B"],
@@ -9724,6 +10137,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             {
                 "active_item_id": "active-qt-delete",
                 "record_id": "rec-qt-delete",
+                "target_record_id": "rec-qt-delete",
                 "notice_type": "维保通告",
                 "work_type": "maintenance",
                 "title": "Qt 删除测试",
@@ -9751,6 +10165,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                                 "notice_type": "维保通告",
                                 "active_item_id": "active-qt-delete",
                                 "record_id": "rec-qt-delete",
+                                "target_record_id": "rec-qt-delete",
                             }
                         },
                     },

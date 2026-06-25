@@ -12,7 +12,7 @@
         {{ auth.user?.name || "已登录" }}
       </span>
       <button
-        v-if="auth.loggedIn && (isWorkbench || isEngineerMopPage || isEventPage)"
+        v-if="auth.loggedIn && (isEngineerMopPage || isEventPage)"
         class="btn ghost"
         type="button"
         title="返回功能选择页"
@@ -20,8 +20,9 @@
       >
         功能选择
       </button>
-      <label v-if="auth.loggedIn && (isWorkbench || isEventPage) && visibleScopeOptions.length > 1" class="scope-switch">
-        <span>切换楼栋</span>
+      <label v-if="auth.loggedIn && isEventPage && visibleScopeOptions.length > 1" class="scope-switch">
+        <b class="scope-icon" aria-hidden="true">楼</b>
+        <span>当前楼栋</span>
         <select :value="currentScope" :disabled="loading" @change="onScopeChange">
           <option v-for="item in visibleScopeOptions" :key="item.value" :value="item.value">
             {{ item.label }}
@@ -29,25 +30,12 @@
         </select>
       </label>
       <RefreshDataMenu
-        v-if="auth.loggedIn && (isWorkbench || isEventPage)"
+        v-if="auth.loggedIn && isEventPage"
         :open="refreshMenuOpen"
-        :loading="loading"
-        :repair-refreshing="repairRefreshing"
-        :change-refreshing="changeRefreshing"
         :event-refreshing="eventRefreshing"
-        :event-mode="isEventPage"
-        :cooldown-workbench="Boolean(refreshCooldown.workbench)"
-        :cooldown-repair="Boolean(refreshCooldown.repair)"
-        :cooldown-change="Boolean(refreshCooldown.change)"
         :cooldown-event="Boolean(refreshCooldown.event)"
-        :workbench-title="workbenchRefreshTitle"
-        :repair-title="repairRefreshTitle"
-        :change-title="changeRefreshTitle"
         :event-title="eventRefreshTitle"
         @update:open="emit('update:refreshMenuOpen', $event)"
-        @refresh-workbench="emit('refresh-workbench')"
-        @refresh-repair="emit('refresh-repair')"
-        @refresh-change="emit('refresh-change')"
         @refresh-event="emit('refresh-event')"
       />
       <button v-if="isAdmin" class="btn ghost admin-entry" type="button" title="打开管理员诊断和权限管理" @click="emit('open-admin')">管理/诊断</button>
@@ -67,20 +55,14 @@ const props = defineProps<{
     loggedIn: boolean;
     user?: LooseDict;
   };
-  isWorkbench: boolean;
   isEngineerMopPage: boolean;
   isEventPage: boolean;
   visibleScopeOptions: ScopeOption[];
   currentScope: string;
   loading: boolean;
   refreshMenuOpen: boolean;
-  repairRefreshing: boolean;
-  changeRefreshing: boolean;
   eventRefreshing: boolean;
   refreshCooldown: Record<string, boolean>;
-  workbenchRefreshTitle: string;
-  repairRefreshTitle: string;
-  changeRefreshTitle: string;
   eventRefreshTitle: string;
   isAdmin: boolean;
 }>();
@@ -89,9 +71,6 @@ const emit = defineEmits<{
   "return-home": [];
   "switch-scope": [value: string];
   "update:refreshMenuOpen": [value: boolean];
-  "refresh-workbench": [];
-  "refresh-repair": [];
-  "refresh-change": [];
   "refresh-event": [];
   "open-admin": [];
   logout: [];
@@ -262,27 +241,52 @@ header.app-topbar .user-chip {
 }
 
 header.app-topbar .scope-switch {
-  padding: 4px 8px 4px 14px;
+  min-width: 188px;
+  gap: 10px;
+  padding: 6px 8px 6px 10px;
+  border-color: rgba(255, 255, 255, 0.78);
+  background: linear-gradient(135deg, #ffffff, #eff6ff);
+  color: #0c3f99;
+  box-shadow:
+    0 12px 26px rgba(4, 46, 145, 0.16),
+    inset 0 1px 0 rgba(255, 255, 255, 0.72);
+}
+
+header.app-topbar .scope-icon {
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: 13px;
+  background: linear-gradient(180deg, #1f63ff, #00aeda);
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 950;
+  box-shadow: 0 8px 18px rgba(31, 99, 255, 0.24);
 }
 
 header.app-topbar .scope-switch span {
-  color: rgba(255, 255, 255, 0.78);
-  font-size: 13px;
-  font-weight: 900;
+  color: #5873a3;
+  font-size: 11px;
+  font-weight: 950;
+  line-height: 1;
+  white-space: nowrap;
 }
 
 header.app-topbar .scope-switch select {
-  min-width: 96px;
-  max-width: 156px;
+  min-width: 88px;
+  max-width: 148px;
   height: 34px;
-  border: 1px solid rgba(255, 255, 255, 0.52);
+  border: 1px solid #cfe0ff;
   border-radius: 14px;
   padding: 0 32px 0 12px;
-  background: #ffffff;
-  color: #07439f;
+  background: #f7fbff;
+  color: #073f9d;
   font-size: 14px;
-  font-weight: 900;
+  font-weight: 950;
   cursor: pointer;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.7);
 }
 
 header.app-topbar .scope-switch select:disabled {

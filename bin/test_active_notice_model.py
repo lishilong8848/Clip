@@ -7,7 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtCore import QEvent, QPointF, QRect, Qt
 from PyQt6.QtGui import QMouseEvent
-from PyQt6.QtWidgets import QApplication, QListWidget, QStyleOptionViewItem
+from PyQt6.QtWidgets import QApplication, QListWidget, QListWidgetItem, QStyleOptionViewItem
 
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -18,6 +18,7 @@ from upload_event_module.ui.active_notice_delegate import ActiveNoticeDelegate
 from upload_event_module.ui.main_window_cache import ActiveCacheMixin
 from upload_event_module.ui.main_window_records import MainWindowRecordsMixin
 from upload_event_module.ui.main_window_runtime import MainWindowRuntimeMixin
+from upload_event_module.ui.main_window_workflow import MainWindowWorkflowMixin
 
 
 class _RecordsFlagHarness(MainWindowRecordsMixin):
@@ -45,7 +46,8 @@ class _AddItemHarness(MainWindowRecordsMixin):
     def _ensure_active_item_identity(self, data):
         data = dict(data or {})
         data.setdefault("active_item_id", "aid-test")
-        data.setdefault("record_id", "rid-test")
+        data.setdefault("target_record_id", "rid-test")
+        data.setdefault("record_id", data["target_record_id"])
         return data
 
     def _ensure_payload_for_data(self, data):
@@ -95,6 +97,53 @@ class _TodayProgressHarness(_AddItemHarness):
         self.messages.append(str(message))
 
 
+class _RenameCacheStore:
+    def __init__(self):
+        self.renamed = []
+
+    def rename_record_id(self, old_id, new_id):
+        self.renamed.append((old_id, new_id))
+
+
+class _ReplaceRecordIdHarness(MainWindowWorkflowMixin, MainWindowRecordsMixin):
+    def __init__(self):
+        self.list_active_event = QListWidget()
+        self.list_active_other = QListWidget()
+        self.pending_replace_by_record_id = {"placeholder-1": {"x": 1}}
+        self.pending_upload_rollback_by_record_id = {}
+        self.pending_end_rollback_by_record_id = {}
+        self.pending_new_by_record_id = {}
+        self.pending_update_after_upload = {}
+        self.pending_action_types = {}
+        self.pending_action_record_ids = {"placeholder-1"}
+        self._today_in_progress_pending_record_ids = set()
+        self._today_in_progress_synced_record_ids = set()
+        self._record_binding_validation_pending_ids = set()
+        self._record_binding_validated_ids = set()
+        self._lan_portal_jobs_by_record_id = {}
+        self._payload_alias = {}
+        self._payload_store = {}
+        self._pending_force_uploads = [{"record_id": "placeholder-1"}]
+        self.current_screenshot_record_id = "placeholder-1"
+        self.cache_store = _RenameCacheStore()
+        self.detail_dialog = None
+
+    def _active_model_view_visible(self):
+        return False
+
+    def _upsert_active_notice_model_item(self, *_args, **_kwargs):
+        return None
+
+    def _rebuild_active_item_widget(self, *_args, **_kwargs):
+        return None
+
+    def _should_defer_ui_refresh(self):
+        return False
+
+    def _mark_cache_refresh_needed(self):
+        return None
+
+
 class _RuntimeOngoingStore:
     def __init__(self, records):
         self._records = records
@@ -107,7 +156,7 @@ class _RuntimeCacheStore:
     def __init__(self, fields_by_record_id):
         self._fields_by_record_id = fields_by_record_id
 
-    def get_record_fields(self, record_id="", fields=None):
+    def get_record_fields(self, record_id="", active_item_id="", fields=None):
         values = dict(self._fields_by_record_id.get(record_id, {}) or {})
         if not fields:
             return values
@@ -186,6 +235,7 @@ class ActiveNoticeModelTests(unittest.TestCase):
                 {
                     "active_item_id": "aid-1",
                     "record_id": "rid-1",
+                    "target_record_id": "rid-1",
                     "notice_type": "维保通告",
                     "text": "【维保通告】状态：开始\n\n【标题】A楼维保",
                     "lan_created_from_portal": True,
@@ -308,6 +358,7 @@ class ActiveNoticeModelTests(unittest.TestCase):
         change = {
             "notice_type": "变更通告",
             "record_id": "rid-1",
+            "target_record_id": "rid-1",
             "_is_placeholder_record": False,
             "today_in_progress_state": "yes",
         }
@@ -340,6 +391,107 @@ class ActiveNoticeModelTests(unittest.TestCase):
         harness.request_active_cache_save(force=True)
 
         self.assertEqual(harness.save_calls, 1)
+
+    def test_replace_record_id_updates_placeholder_item_without_target_index(self):
+        harness = _ReplaceRecordIdHarness()
+        item = QListWidgetItem("placeholder")
+        harness.list_active_event.addItem(item)
+        item.setData(
+            Qt.ItemDataRole.UserRole,
+            {
+                "active_item_id": "aid-1",
+                "record_id": "placeholder-1",
+                "payload_key": "placeholder-1",
+                "_is_placeholder_record": True,
+                "notice_type": "事件通告",
+                "text": "【事件通告】状态：开始\n【标题】测试",
+            },
+        )
+
+        changed = harness._replace_record_id_everywhere("placeholder-1", "rec-real")
+
+        self.assertTrue(changed)
+        data = item.data(Qt.ItemDataRole.UserRole)
+        self.assertEqual(data["record_id"], "rec-real")
+        self.assertEqual(data["target_record_id"], "rec-real")
+        self.assertEqual(data["payload_key"], "rec-real")
+        self.assertFalse(data["_is_placeholder_record"])
+        self.assertEqual(harness.current_screenshot_record_id, "rec-real")
+        self.assertIn("rec-real", harness.pending_action_record_ids)
+        self.assertEqual(harness._pending_force_uploads[0]["record_id"], "rec-real")
+        self.assertEqual(harness.cache_store.renamed, [("placeholder-1", "rec-real")])
+
+    def test_event_update_reuses_unique_title_match_with_target_record_id(self):
+        harness = _ReplaceRecordIdHarness()
+        item = QListWidgetItem("event")
+        harness.list_active_event.addItem(item)
+        item.setData(
+            Qt.ItemDataRole.UserRole,
+            {
+                "active_item_id": "aid-event",
+                "record_id": "rec-event-target",
+                "target_record_id": "rec-event-target",
+                "payload_key": "rec-event-target",
+                "_is_placeholder_record": False,
+                "notice_type": "事件通告",
+                "text": (
+                    "【事件通告】状态：开始\n"
+                    "【标题】D楼直流屏系统总故障\n"
+                    "【时间】2026-06-24 10:00"
+                ),
+                "match_title": "D楼直流屏系统总故障",
+                "match_key": "事件通告|D楼直流屏系统总故障|2026-06-24 10:00",
+            },
+        )
+
+        list_widget, found = harness._find_active_item_by_content_or_title(
+            (
+                "【事件通告】状态：更新\n"
+                "【标题】D楼直流屏系统总故障\n"
+                "【时间】2026-06-24 10:30"
+            ),
+            title="D楼直流屏系统总故障",
+            notice_type="事件通告",
+            unique_key="事件通告|D楼直流屏系统总故障|2026-06-24 10:30",
+        )
+
+        self.assertIs(list_widget, harness.list_active_event)
+        self.assertIs(found, item)
+
+    def test_event_update_reuses_title_parsed_from_existing_text_without_match_title(self):
+        harness = _ReplaceRecordIdHarness()
+        item = QListWidgetItem("event")
+        harness.list_active_event.addItem(item)
+        item.setData(
+            Qt.ItemDataRole.UserRole,
+            {
+                "active_item_id": "aid-event",
+                "record_id": "rec-event-target",
+                "target_record_id": "rec-event-target",
+                "payload_key": "rec-event-target",
+                "_is_placeholder_record": False,
+                "notice_type": "事件通告",
+                "text": (
+                    "【事件通告】状态：开始\n"
+                    "【标题】D楼直流屏系统总故障\n"
+                    "【时间】2026-06-24 10:00"
+                ),
+            },
+        )
+
+        list_widget, found = harness._find_active_item_by_content_or_title(
+            (
+                "【事件通告】状态：更新\n"
+                "【标题】D楼直流屏系统总故障\n"
+                "【时间】2026-06-24 10:30"
+            ),
+            title="D楼直流屏系统总故障",
+            notice_type="事件通告",
+            unique_key="事件通告|D楼直流屏系统总故障|2026-06-24 10:30",
+        )
+
+        self.assertIs(list_widget, harness.list_active_event)
+        self.assertIs(found, item)
 
     def test_runtime_collects_all_non_event_notice_types_for_portal(self):
         records = [
@@ -416,6 +568,7 @@ class ActiveNoticeModelTests(unittest.TestCase):
         record = {
             "active_item_id": "aid-1",
             "record_id": "rid-1",
+            "target_record_id": "rid-1",
             "notice_type": "变更通告",
             "_is_placeholder_record": False,
             "_has_unuploaded_changes": True,

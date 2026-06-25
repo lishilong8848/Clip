@@ -59,6 +59,7 @@
           :key="module.key"
           class="module-card"
           :class="[module.tone, module.size || 'compact', { disabled: module.disabled }]"
+          :aria-disabled="module.disabled ? 'true' : 'false'"
           :title="module.disabled ? '该模块建设中，当前无需操作' : ''"
         >
           <div class="module-card__head">
@@ -111,6 +112,7 @@
           class="tool-card"
           :class="tool.tone"
           type="button"
+          :aria-label="`选择${tool.title}`"
           @click="selectEntry(tool.key)"
         >
           <span class="tool-icon" :class="tool.icon" aria-hidden="true"></span>
@@ -167,7 +169,7 @@
             <button
               v-else
               class="primary"
-              @click="enterWorkbench(scope.value)"
+              @click="enterNoticeWorkbench(scope.value)"
             >
               {{ activeConfig.actionLabel }}
             </button>
@@ -421,7 +423,7 @@ function normalizeScopeValue(value: string, fallback = "ALL"): string {
   return match ? match[0] : fallback;
 }
 
-function enterWorkbench(scope: string): void {
+function enterNoticeWorkbench(scope: string): void {
   const workType = activeConfig.value.workType || "maintenance";
   emit("enter", scope, workType);
 }
@@ -924,7 +926,7 @@ function scopeMetricText(scope: string): string {
 }
 
 .module-actions .secondary {
-  min-height: 34px;
+  min-height: 44px;
   padding: 0 12px;
   border-radius: 999px;
   box-shadow: none;
@@ -1081,7 +1083,7 @@ a.secondary {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  min-height: 35px;
+  min-height: 44px;
   padding: 7px 12px;
   border-radius: 14px;
   font-size: 13px;
@@ -1104,7 +1106,7 @@ a.secondary {
 
 .primary:hover,
 .secondary:hover {
-  transform: translateY(-1px);
+  box-shadow: 0 12px 26px rgba(21, 92, 214, 0.16);
 }
 
 .primary:disabled,
@@ -1113,6 +1115,23 @@ a.secondary {
   opacity: 0.58;
   transform: none;
   box-shadow: none;
+}
+
+.primary:focus-visible,
+.secondary:focus-visible,
+.tool-card:focus-visible {
+  outline: 3px solid rgba(22, 120, 255, 0.28);
+  outline-offset: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition: none !important;
+    animation: none !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 @media (max-width: 1280px) {

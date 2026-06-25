@@ -27,6 +27,8 @@ from ..core.parser import extract_event_info
 from .styles import get_stylesheet
 
 class MainWindowWorkflowMixin:
+    _INLINE_IMAGE_COMMAND_FIELDS = {"bytes_b64", "screenshot_bytes_b64"}
+
     def request_active_cache_save(self, delay_ms: int = 800, *, force: bool = False):
         save = getattr(self, "save_active_cache", None)
         if force:
@@ -55,6 +57,39 @@ class MainWindowWorkflowMixin:
             raise RuntimeError("本机后端未返回图片 upload_id。")
         return result
 
+    @classmethod
+    def _strip_inline_image_command_fields(cls, value):
+        """Remove legacy inline image fields before posting Qt commands.
+
+        Images must be passed through the backend attachment store as upload_id.
+        Keeping old base64 fields inside data_dict/extra_images makes the
+        FastAPI request validator reject the command with HTTP 400 before the
+        business handler can return a user-readable failure.
+        """
+        if isinstance(value, dict):
+            cleaned = {}
+            for key, child in value.items():
+                if str(key or "") in cls._INLINE_IMAGE_COMMAND_FIELDS:
+                    continue
+                cleaned[key] = cls._strip_inline_image_command_fields(child)
+            return cleaned
+        if isinstance(value, list):
+            return [cls._strip_inline_image_command_fields(item) for item in value]
+        return value
+
+    @classmethod
+    def _qt_attachment_ref_payload(cls, item: dict) -> dict:
+        item = item if isinstance(item, dict) else {}
+        clean: dict = {}
+        for key in ("upload_id", "file_token", "token", "file_name", "mime_type", "size"):
+            if key not in item:
+                continue
+            value = item.get(key)
+            if value in (None, ""):
+                continue
+            clean[key] = value
+        return cls._strip_inline_image_command_fields(clean)
+
     @staticmethod
     def _candidate_record_id(candidate: dict) -> str:
         candidate = candidate if isinstance(candidate, dict) else {}
@@ -72,22 +107,10 @@ class MainWindowWorkflowMixin:
         action = str(action_type or "").strip()
         if action != "upload" or not isinstance(data_dict, dict):
             return action
-        target_record_id = str(
-            data_dict.get("target_record_id")
-            or data_dict.get("feishu_record_id")
-            or data_dict.get("raw_record_id")
-            or ""
-        ).strip()
-        record_id = str(data_dict.get("record_id") or "").strip()
-        record_id_kind = str(data_dict.get("_record_id_kind") or "").strip().lower()
-        if not target_record_id and record_id_kind == "target":
-            target_record_id = record_id
+        target_record_id = str(data_dict.get("target_record_id") or "").strip()
         if target_record_id and not bool(data_dict.get("_is_placeholder_record", True)):
             data_dict["record_id"] = target_record_id
             data_dict["target_record_id"] = target_record_id
-            data_dict["feishu_record_id"] = target_record_id
-            data_dict["raw_record_id"] = target_record_id
-            data_dict["_record_id_kind"] = "target"
             return "update"
         return action
 
@@ -508,9 +531,6 @@ class MainWindowWorkflowMixin:
             selected_data = dict(data_snapshot or {})
             selected_data["target_record_id"] = target_record_id
             selected_data["record_id"] = target_record_id
-            selected_data["feishu_record_id"] = target_record_id
-            selected_data["raw_record_id"] = target_record_id
-            selected_data["_record_id_kind"] = "target"
             selected_data["_is_placeholder_record"] = False
             if old_id and old_id != target_record_id and hasattr(
                 self, "_replace_record_id_everywhere"
@@ -568,7 +588,9 @@ class MainWindowWorkflowMixin:
             return True
         request_payload = {
             "action_type": str(action_type or "").strip(),
-            "data_dict": dict(data_snapshot or {}),
+            "data_dict": self._strip_inline_image_command_fields(
+                dict(data_snapshot or {})
+            ),
             "response_time": str(response_time or ""),
             "recover_selected": bool(recover_selected),
             "robot_group_choice": str(robot_group_choice or "auto").strip() or "auto",
@@ -598,7 +620,7 @@ class MainWindowWorkflowMixin:
         for index, item in enumerate(list(extra_images or []), start=1):
             if isinstance(item, dict):
                 if item.get("upload_id") or item.get("file_token") or item.get("token"):
-                    encoded_extra_images.append(dict(item))
+                    encoded_extra_images.append(self._qt_attachment_ref_payload(item))
                     continue
             if isinstance(item, (list, tuple)) and len(item) >= 2:
                 image_bytes = item[0]
@@ -1233,6 +1255,7 @@ class MainWindowWorkflowMixin:
         cleaned_text = info.get("content") or content
         data = {
             "record_id": record_id,
+            "target_record_id": record_id,
             "_is_placeholder_record": False,
             "text": cleaned_text,
             "notice_type": notice_type,
@@ -1356,8 +1379,7 @@ class MainWindowWorkflowMixin:
                     if self._is_event_notice(notice_type):
                         self._pin_item_to_top(target_list, target_item)
                     self.request_active_cache_save()
-                widget = self._safe_item_widget(target_list, target_item)
-                self._maybe_flash(widget, target_list, target_item)
+                self._scroll_active_item_into_view(target_list, target_item)
                 log_info("系统: 内容已存在，已高亮显示")
                 self._maybe_speak("该事件已存在")
             else:
@@ -1536,7 +1558,6 @@ class MainWindowWorkflowMixin:
         if not info:
             return
         defer_ui = self._should_defer_ui_refresh()
-        placeholder_record_id = uuid.uuid4().hex
 
         notice_type = info.get("notice_type", "")
         level = info.get("level")
@@ -1544,21 +1565,6 @@ class MainWindowWorkflowMixin:
         time_str = info.get("time_str", "")
         prefilled_buildings = self._infer_buildings_from_notice_text(content)
 
-        data = {
-            "record_id": placeholder_record_id,
-            "_is_placeholder_record": True,
-            "text": content,
-            "notice_type": notice_type,
-            "level": level,  # 保存等级字段
-            "source": source,  # 保存来源字段
-            "time_str": time_str,  # 保存时间字段
-            "buildings": prefilled_buildings,
-        }
-        data = self._mark_notice_content_dirty(data)
-        if entry:
-            self._ensure_payload_for_data(data, entry=entry)
-        else:
-            self._ensure_payload_for_data(data)
         if self._is_event_notice(notice_type):
             self._focus_event_tab()
 
@@ -1585,10 +1591,14 @@ class MainWindowWorkflowMixin:
                 routed_data["time_str"] = time_str
                 routed_data["buildings"] = self._resolve_prefilled_buildings(
                     existing_data.get("buildings"),
-                    data.get("buildings"),
+                    prefilled_buildings,
                 )
                 routed_data = self._mark_notice_content_dirty(routed_data)
                 routed_data = self._ensure_active_item_identity(routed_data)
+                if entry:
+                    self._ensure_payload_for_data(routed_data, entry=entry)
+                else:
+                    self._ensure_payload_for_data(routed_data)
                 committed = self._commit_active_record(
                     routed_data,
                     refresh_detail=not defer_ui,
@@ -1615,6 +1625,23 @@ class MainWindowWorkflowMixin:
                 )
                 self._schedule_pending_cache_refresh()
                 return
+
+        placeholder_record_id = uuid.uuid4().hex
+        data = {
+            "record_id": placeholder_record_id,
+            "_is_placeholder_record": True,
+            "text": content,
+            "notice_type": notice_type,
+            "level": level,  # 保存等级字段
+            "source": source,  # 保存来源字段
+            "time_str": time_str,  # 保存时间字段
+            "buildings": prefilled_buildings,
+        }
+        data = self._mark_notice_content_dirty(data)
+        if entry:
+            self._ensure_payload_for_data(data, entry=entry)
+        else:
+            self._ensure_payload_for_data(data)
 
         item, widget = self.add_active_item(data)
         if defer_ui:
@@ -1668,8 +1695,23 @@ class MainWindowWorkflowMixin:
             self._mark_cache_refresh_needed()
             return
         self._maybe_update_detail_dialog(new_data, new_data.get("record_id"))
-        widget = self._safe_item_widget(list_widget, item_ref)
-        self._maybe_flash(widget, list_widget, item_ref)
+        self._scroll_active_item_into_view(list_widget, item_ref)
+
+    def _scroll_active_item_into_view(self, list_widget, item_ref):
+        if list_widget is None or item_ref is None:
+            return
+        try:
+            if self._active_item_row(list_widget, item_ref) == -1:
+                return
+            if self._active_model_view_visible():
+                self._scroll_active_model_view_to_item(list_widget, item_ref)
+            else:
+                list_widget.scrollToItem(item_ref)
+                self._scroll_active_model_view_to_item(list_widget, item_ref)
+                if hasattr(self, "_schedule_active_list_virtualization_refresh"):
+                    self._schedule_active_list_virtualization_refresh(list_widget, 0)
+        except Exception:
+            return
 
     def apply_replace(
         self,
@@ -1690,13 +1732,27 @@ class MainWindowWorkflowMixin:
             return
         # 确保替换后的数据沿用同一个 record_id（保持后续更新/结束都指向同一条记录）
         current_data = item_ref.data(Qt.ItemDataRole.UserRole)
-        if current_data and "record_id" in current_data and "record_id" not in new_data:
-            new_data["record_id"] = current_data["record_id"]
-            # placeholder 标记沿用
-            if "_is_placeholder_record" in current_data:
-                new_data["_is_placeholder_record"] = current_data[
-                    "_is_placeholder_record"
-                ]
+        if isinstance(current_data, dict):
+            current_target_id = str(
+                current_data.get("target_record_id") or ""
+            ).strip()
+            current_record_id = str(current_data.get("record_id") or "").strip()
+            current_is_placeholder = bool(
+                current_data.get("_is_placeholder_record", True)
+            )
+            if current_target_id and not current_is_placeholder:
+                new_data["target_record_id"] = current_target_id
+                new_data["record_id"] = current_target_id
+                new_data["_is_placeholder_record"] = False
+            elif current_record_id and "record_id" not in new_data:
+                new_data["record_id"] = current_record_id
+                if "_is_placeholder_record" in current_data:
+                    new_data["_is_placeholder_record"] = current_data[
+                        "_is_placeholder_record"
+                    ]
+            for identity_key in ("active_item_id", "source_record_id", "payload_key"):
+                if current_data.get(identity_key) and not new_data.get(identity_key):
+                    new_data[identity_key] = current_data.get(identity_key)
         new_data = self._inherit_active_runtime_fields(new_data, current_data)
         if isinstance(current_data, dict) and "need_upload_first" in current_data:
             current_data = dict(current_data)
@@ -2191,6 +2247,7 @@ class MainWindowWorkflowMixin:
                 "buildings": buildings,
                 "specialty": specialty,
                 "level": dialog_level,
+                "maintenance_cycle": data_dict.get("maintenance_cycle"),
                 "event_source": event_source,
                 "transfer_to_overhaul": data_dict.get("transfer_to_overhaul"),
             },
@@ -2199,7 +2256,11 @@ class MainWindowWorkflowMixin:
         event_source = str(resolved_fields.get("event_source") or "").strip()
         _buildings = self._normalize_buildings_value(resolved_fields.get("buildings"))
         resolved_level = str(resolved_fields.get("level") or "").strip()
-        maintenance_cycle = str(data_dict.get("maintenance_cycle") or "").strip()
+        maintenance_cycle = str(
+            resolved_fields.get("maintenance_cycle")
+            or data_dict.get("maintenance_cycle")
+            or ""
+        ).strip()
         route_payload = NoticePayload(
             text=data_dict.get("text", ""),
             level=resolved_level or data_dict.get("level"),
@@ -2537,9 +2598,32 @@ class MainWindowWorkflowMixin:
         changed = False
         updated_items = []
         try:
-            candidates = self._active_notice_store().candidates_by_record_id(old_id)
+            store = self._active_notice_store()
+            candidates = store.candidates_by_record_id(old_id)
         except Exception:
+            store = None
             candidates = []
+        if not candidates and store is not None:
+            try:
+                seen = set()
+                for list_widget, item, data in store.entries():
+                    if not self._is_valid_list_item(item) or not isinstance(data, dict):
+                        continue
+                    values = {
+                        str(data.get("record_id") or "").strip(),
+                        str(data.get("target_record_id") or "").strip(),
+                        str(data.get("active_item_id") or "").strip(),
+                        str(data.get("payload_key") or "").strip(),
+                    }
+                    if old_id not in values:
+                        continue
+                    marker = (id(list_widget), id(item))
+                    if marker in seen:
+                        continue
+                    seen.add(marker)
+                    candidates.append((list_widget, item, data))
+            except Exception:
+                pass
         for list_widget, item, data in candidates:
             try:
                 if not self._is_valid_list_item(item):
@@ -2549,11 +2633,7 @@ class MainWindowWorkflowMixin:
                 data = dict(data)
                 data["record_id"] = new_id
                 data["target_record_id"] = new_id
-                for legacy_key in ("feishu_record_id", "raw_record_id"):
-                    if str(data.get(legacy_key) or "").strip() == old_id:
-                        data[legacy_key] = new_id
                 data["_is_placeholder_record"] = False
-                data["_record_id_kind"] = "target"
                 if data.get("payload_key") == old_id:
                     data["payload_key"] = new_id
                 item.setData(Qt.ItemDataRole.UserRole, data)
@@ -2684,9 +2764,6 @@ class MainWindowWorkflowMixin:
         committed = dict(selected_data)
         committed["record_id"] = target_id
         committed["target_record_id"] = target_id
-        committed["feishu_record_id"] = target_id
-        committed["raw_record_id"] = target_id
-        committed["_record_id_kind"] = "target"
         committed["_is_placeholder_record"] = False
         try:
             item.setData(Qt.ItemDataRole.UserRole, committed)
@@ -2701,9 +2778,6 @@ class MainWindowWorkflowMixin:
                     patch={
                         "record_id": target_id,
                         "target_record_id": target_id,
-                        "feishu_record_id": target_id,
-                        "raw_record_id": target_id,
-                        "_record_id_kind": "target",
                         "_is_placeholder_record": False,
                     },
                 )

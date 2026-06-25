@@ -34,11 +34,12 @@ class ActiveNoticeIndexTests(unittest.TestCase):
         item = _DummyItem(
             {
                 "record_id": "rid-1",
+                "target_record_id": "rid-1",
                 "active_item_id": "aid-1",
                 "text": "A B C",
                 "match_key": "key-1",
                 "match_title": "Title One",
-                "lan_source_record_id": "src-1",
+                "source_record_id": "src-1",
             }
         )
         index, factory = self._build_index([item])
@@ -68,24 +69,28 @@ class ActiveNoticeIndexTests(unittest.TestCase):
         self.assertIs(index.candidates_by_source_record_id("src-legacy", factory)[0][1], item)
 
     def test_rebuilds_when_cached_entry_changes(self):
-        item = _DummyItem({"record_id": "old", "active_item_id": "aid", "text": "old"})
+        item = _DummyItem(
+            {"record_id": "old", "target_record_id": "old", "active_item_id": "aid", "text": "old"}
+        )
         index, factory = self._build_index([item])
 
         self.assertIs(index.find_by_record_id("old", factory)[1], item)
-        item.set_data({"record_id": "new", "active_item_id": "aid", "text": "new"})
+        item.set_data(
+            {"record_id": "new", "target_record_id": "new", "active_item_id": "aid", "text": "new"}
+        )
 
         self.assertEqual(index.find_by_record_id("old", factory), (None, None))
         self.assertIs(index.find_by_record_id("new", factory)[1], item)
         self.assertIs(index.find_by_compact_text("new", factory)[1], item)
 
     def test_record_id_candidates_return_all_current_matches(self):
-        first = _DummyItem({"record_id": "same", "active_item_id": "aid-1", "text": "one"})
-        second = _DummyItem({"record_id": "same", "active_item_id": "aid-2", "text": "two"})
-        stale = _DummyItem({"record_id": "same", "active_item_id": "aid-3", "text": "stale"})
+        first = _DummyItem({"record_id": "same", "target_record_id": "same", "active_item_id": "aid-1", "text": "one"})
+        second = _DummyItem({"record_id": "same", "target_record_id": "same", "active_item_id": "aid-2", "text": "two"})
+        stale = _DummyItem({"record_id": "same", "target_record_id": "same", "active_item_id": "aid-3", "text": "stale"})
         index, factory = self._build_index([first, second, stale])
 
         self.assertEqual(len(index.candidates_by_record_id("same", factory)), 3)
-        stale.set_data({"record_id": "other", "active_item_id": "aid-3", "text": "stale"})
+        stale.set_data({"record_id": "other", "target_record_id": "other", "active_item_id": "aid-3", "text": "stale"})
 
         candidates = index.candidates_by_record_id("same", factory)
         self.assertEqual({row[2]["active_item_id"] for row in candidates}, {"aid-1", "aid-2"})
@@ -94,8 +99,9 @@ class ActiveNoticeIndexTests(unittest.TestCase):
         item = _DummyItem(
             {
                 "record_id": "rid",
+                "target_record_id": "rid",
                 "active_item_id": "aid",
-                "lan_source_record_id": "source-old",
+                "source_record_id": "source-old",
                 "text": "source",
             }
         )
@@ -105,8 +111,9 @@ class ActiveNoticeIndexTests(unittest.TestCase):
         item.set_data(
             {
                 "record_id": "rid",
+                "target_record_id": "rid",
                 "active_item_id": "aid",
-                "lan_source_record_id": "source-new",
+                "source_record_id": "source-new",
                 "text": "source",
             }
         )
@@ -118,6 +125,7 @@ class ActiveNoticeIndexTests(unittest.TestCase):
         valid = _DummyItem(
             {
                 "record_id": "rid",
+                "target_record_id": "rid",
                 "active_item_id": "aid",
                 "text": "text",
                 "match_key": "mk",
@@ -127,6 +135,7 @@ class ActiveNoticeIndexTests(unittest.TestCase):
         invalid = _DummyItem(
             {
                 "record_id": "rid-invalid",
+                "target_record_id": "rid-invalid",
                 "active_item_id": "aid-invalid",
                 "text": "hidden",
                 "match_key": "mk",
@@ -147,11 +156,12 @@ class ActiveNoticeStoreTests(unittest.TestCase):
         item = _DummyItem(
             {
                 "record_id": "rid-store",
+                "target_record_id": "rid-store",
                 "active_item_id": "aid-store",
                 "text": "store text",
                 "match_key": "store-key",
                 "match_title": "Store Title",
-                "lan_source_record_id": "store-source",
+                "source_record_id": "store-source",
             }
         )
         store = ActiveNoticeStore(

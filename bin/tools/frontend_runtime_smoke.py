@@ -11,6 +11,7 @@ import tempfile
 import textwrap
 import threading
 import time
+import uuid
 from pathlib import Path
 
 BIN_DIR = Path(__file__).resolve().parents[1]
@@ -28,6 +29,9 @@ class _SmokePortalService:
     _last_loaded_at = "smoke"
     _last_loaded_ts = 0.0
     _load_warnings: list[str] = []
+
+    def __init__(self) -> None:
+        self._jobs: dict[str, dict] = {}
 
     def _normalize_scope(self, scope: str) -> str:
         text = str(scope or "").strip().upper()
@@ -100,8 +104,11 @@ class _SmokePortalService:
         *,
         month: str = "",
         specialty: str = "",
+        search: str = "",
         scope: str = "ALL",
         ongoing_items: list[dict] | None = None,
+        work_type: str = "",
+        sections: set[str] | list[str] | tuple[str, ...] | None = None,
     ) -> dict:
         today = time.strftime("%Y-%m-%d")
         records = [
@@ -137,6 +144,44 @@ class _SmokePortalService:
                 },
             },
         ]
+        work_type_samples = [
+            ("maintenance", "维保通告", "冷站过滤器维护", "每月"),
+            ("change", "变更通告", "配电系统切换变更", ""),
+            ("repair", "设备检修", "BA通讯中断检修", ""),
+            ("power", "上电通告", "机柜上电", ""),
+            ("polling", "设备轮巡", "精密空调轮巡", ""),
+            ("adjust", "设备调整", "制冷单元调整", ""),
+        ]
+        for index in range(72):
+            sample_work_type, notice_type, title, cycle = work_type_samples[index % len(work_type_samples)]
+            record_id = f"src-{sample_work_type}-a-bulk-{index:03d}"
+            specialty_value = ["暖通", "电气", "消防", "弱电"][index % 4]
+            records.append(
+                {
+                    "record_id": record_id,
+                    "source_record_id": record_id,
+                    "work_type": sample_work_type,
+                    "notice_type": notice_type,
+                    "building_codes": ["A"],
+                    "source_progress": "未开始",
+                    "maintenance_cycle": cycle,
+                    "display_fields": {
+                        "楼栋": "A楼",
+                        "维护总项": f"{title}{index:03d}",
+                        "维护周期": cycle,
+                        "维护实施状态": "未开始",
+                        "专业类别": specialty_value,
+                        "变更简述": f"A楼{title}{index:03d}",
+                        "变更楼栋": "A楼",
+                        "变更进度": "未开始",
+                        "专业": specialty_value,
+                        "变更等级（阿里）": "I3",
+                        "检修通告名称": f"A楼{title}{index:03d}",
+                        "维修名称": f"A楼{title}{index:03d}",
+                        "所属数据中心/楼栋-使用": "A楼",
+                    },
+                }
+            )
         ongoing = [
             {
                 "active_item_id": "active-change-a-001",
@@ -159,33 +204,202 @@ class _SmokePortalService:
                 "progress": "测试测试测试",
                 "status": "已开始",
                 "uploaded": True,
+            },
+            {
+                "active_item_id": "active-maint-manual-a-001",
+                "record_id": "target-maint-manual-a-001",
+                "target_record_id": "target-maint-manual-a-001",
+                "work_type": "maintenance",
+                "notice_type": "维保通告",
+                "title": "A楼纯手填待关联维保通告",
+                "building": "A楼",
+                "building_codes": ["A"],
+                "specialty": "暖通",
+                "maintenance_cycle": "每月",
+                "start_time": f"{today}T09:30",
+                "end_time": f"{today}T18:30",
+                "location": "A楼冷站",
+                "content": "测试测试测试",
+                "reason": "测试测试测试",
+                "impact": "测试测试测试",
+                "progress": "测试测试测试",
+                "status": "已开始",
+                "uploaded": True,
             }
         ]
+        for index in range(54):
+            sample_work_type, notice_type, title, cycle = work_type_samples[index % len(work_type_samples)]
+            specialty_value = ["暖通", "电气", "消防", "弱电"][index % 4]
+            ongoing.append(
+                {
+                    "active_item_id": f"active-{sample_work_type}-a-bulk-{index:03d}",
+                    "record_id": f"target-{sample_work_type}-a-bulk-{index:03d}",
+                    "target_record_id": f"target-{sample_work_type}-a-bulk-{index:03d}",
+                    "source_record_id": f"src-{sample_work_type}-active-a-bulk-{index:03d}",
+                    "work_type": sample_work_type,
+                    "notice_type": notice_type,
+                    "title": f"A楼{title}{index:03d}",
+                    "building": "A楼",
+                    "building_codes": ["A"],
+                    "specialty": specialty_value,
+                    "level": "I3",
+                    "maintenance_cycle": cycle,
+                    "start_time": f"{today}T09:30",
+                    "end_time": f"{today}T18:30",
+                    "location": "A楼测试区域",
+                    "content": "测试测试测试",
+                    "reason": "测试测试测试",
+                    "impact": "测试测试测试",
+                    "progress": "测试测试测试",
+                    "device": "测试设备",
+                    "cabinet": "A01",
+                    "quantity": "1个",
+                    "repair_device": "测试设备",
+                    "repair_fault": "测试故障",
+                    "fault_type": "设备故障",
+                    "repair_mode": "自维",
+                    "discovery": "告警自动发现",
+                    "symptom": "测试现象",
+                    "solution": "测试方案",
+                    "status": "已开始",
+                    "uploaded": True,
+                }
+            )
+        def counts(items: list[dict]) -> dict[str, int]:
+            result = {
+                "maintenance": 0,
+                "change": 0,
+                "repair": 0,
+                "power": 0,
+                "polling": 0,
+                "adjust": 0,
+            }
+            for item in items:
+                key = str(item.get("work_type") or "maintenance")
+                if key in result:
+                    result[key] += 1
+            return result
+
+        requested_sections = {
+            str(item or "").strip().lower()
+            for item in (sections or [])
+            if str(item or "").strip()
+        } or {"records", "ongoing", "stats", "zhihang"}
+        all_record_counts = counts(records)
+        specialty_text = str(specialty or "").strip()
+        search_text = str(search or "").strip().lower()
+        filtered_records = [
+            item for item in records
+            if (not work_type or str(item.get("work_type") or "maintenance") == work_type)
+            and (
+                not specialty_text
+                or specialty_text in {
+                    str((item.get("display_fields") or {}).get("专业类别") or "").strip(),
+                    str((item.get("display_fields") or {}).get("专业") or "").strip(),
+                }
+            )
+            and (
+                not search_text
+                or search_text in " ".join(
+                    str(value or "")
+                    for value in [
+                        item.get("record_id"),
+                        item.get("notice_type"),
+                        *list((item.get("display_fields") or {}).values()),
+                    ]
+                ).lower()
+            )
+        ]
+        filtered_zhihang = [
+            {
+                "record_id": "zhihang-a-001",
+                "title": "A楼智航侧变更测试",
+                "building": "A楼",
+                "progress": "进行中",
+            }
+        ] if ("zhihang" in requested_sections or work_type in {"", "change"}) else []
         return {
             "scope": scope,
-            "records": records,
-            "ongoing": ongoing,
-            "zhihang_change_records": [
-                {
-                    "record_id": "zhihang-a-001",
-                    "title": "A楼智航侧变更测试",
-                    "building": "A楼",
-                    "progress": "进行中",
-                }
-            ],
+            "records": filtered_records if "records" in requested_sections else [],
+            "ongoing": ongoing if "ongoing" in requested_sections else [],
+            "zhihang_change_records": filtered_zhihang,
             "daily_summary": {
                 "date": today,
                 "items": [],
                 "stats": {"started": 1, "updated": 0, "ended": 0, "ongoing": 1},
             },
+            "record_type_counts": all_record_counts,
+            "ongoing_type_counts": counts(ongoing),
             "defaults": {
                 "impact": "对业务无影响",
                 "progress": "准备工作已完成",
+            },
+            "filters": {
+                "specialties": ["暖通", "电气", "消防", "弱电"],
             },
             "warnings": [],
             "last_loaded_at": "smoke",
             "source_snapshot_ready": True,
         }
+
+    def create_action_job(self, request_payload: dict) -> tuple[str, bool]:
+        job_id = uuid.uuid4().hex
+        now = time.time()
+        job = {
+            "job_id": job_id,
+            "operation_id": str(request_payload.get("operation_id") or job_id),
+            "scope": str(request_payload.get("scope") or "A"),
+            "work_type": str(request_payload.get("work_type") or "maintenance"),
+            "notice_type": str(request_payload.get("notice_type") or ""),
+            "phase": "success",
+            "status": "success",
+            "accepted_at": now,
+            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "notice_text": str(request_payload.get("notice_text") or request_payload.get("text") or ""),
+            "prepared": {
+                "text": str(request_payload.get("notice_text") or request_payload.get("text") or ""),
+                "title": str(request_payload.get("title") or ""),
+                "action": str(request_payload.get("action") or "start"),
+            },
+            "request": dict(request_payload),
+        }
+        self._jobs[job_id] = job
+        return job_id, False
+
+    def expand_workbench_action_command(
+        self,
+        payload: dict,
+        *,
+        scope: str = "ALL",
+        ongoing_items: list[dict] | None = None,
+    ) -> dict:
+        if not isinstance(payload, dict):
+            return {}
+        if str(payload.get("command_format") or "") != "notice_command":
+            return payload
+        patch = payload.get("patch") if isinstance(payload.get("patch"), dict) else {}
+        expanded = dict(patch)
+        for key in (
+            "scope",
+            "action",
+            "work_type",
+            "notice_type",
+            "active_item_id",
+            "source_record_id",
+            "target_record_id",
+            "record_id",
+            "operation_id",
+        ):
+            value = payload.get(key)
+            if value not in (None, ""):
+                expanded[key] = value
+        expanded["scope"] = str(expanded.get("scope") or scope or "ALL")
+        expanded["action"] = str(expanded.get("action") or "start").strip().lower()
+        expanded["work_type"] = str(expanded.get("work_type") or "maintenance")
+        return expanded
+
+    def get_job(self, job_id: str) -> dict | None:
+        return self._jobs.get(str(job_id or "").strip())
 
     def list_available_notice_undos(
         self,
@@ -335,6 +549,26 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           async function eventSourceUrls(targetPage) {{
             return await targetPage.evaluate(() => Array.from(window.__clipflowActiveEventSourceUrls || []));
           }}
+          async function waitForTextOrDump(targetPage, text, stage) {{
+            try {{
+              await targetPage.waitForSelector(`text=${{text}}`, {{ timeout: 10000 }});
+            }} catch (err) {{
+              const bodyText = await targetPage.locator('body').innerText({{ timeout: 10000 }}).catch(() => '');
+              const workbenchPayload = await targetPage.evaluate(async () => {{
+                try {{
+                  const params = new URLSearchParams(window.location.search);
+                  const scope = params.get('scope') || 'A';
+                  const workType = params.get('work_type') || '';
+                  const url = `/api/workbench?scope=${{encodeURIComponent(scope)}}&work_type=${{encodeURIComponent(workType)}}&sections=records,ongoing,stats`;
+                  const response = await fetch(url, {{ credentials: 'same-origin' }});
+                  return await response.json();
+                }} catch (fetchErr) {{
+                  return {{ fetch_error: String(fetchErr) }};
+                }}
+              }}).catch((fetchErr) => ({{ evaluate_error: String(fetchErr) }}));
+              throw new Error(`${{stage}} missing text "${{text}}". url=${{targetPage.url()}} workbench=${{JSON.stringify(workbenchPayload).slice(0, 1200)}} body=${{bodyText.slice(0, 1400)}}`);
+            }}
+          }}
 
           const unauthContext = await browser.newContext();
           const unauthPage = await unauthContext.newPage();
@@ -455,10 +689,179 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await page.waitForSelector('text=选择楼栋进入维护管理', {{ timeout: 10000 }});
           const scopeCard = page.locator('article.scope-card').filter({{ hasText: 'A楼' }}).first();
           await scopeCard.getByRole('button', {{ name: '进入维护管理' }}).click();
-          await page.waitForSelector('text=待发起事项', {{ timeout: 10000 }});
-          await page.waitForSelector('text=冷机月度巡检', {{ timeout: 10000 }});
-          await page.waitForSelector('text=已开始未结束', {{ timeout: 10000 }});
-          await page.waitForSelector('text=A楼UPS旁路切换变更测试', {{ timeout: 10000 }});
+          await waitForTextOrDump(page, '待发起事项', 'maintenance-entry');
+          await waitForTextOrDump(page, '冷机月度巡检', 'maintenance-entry');
+          await waitForTextOrDump(page, '已开始未结束', 'maintenance-entry');
+          await waitForTextOrDump(page, 'A楼冷站过滤器维护000', 'maintenance-entry');
+          const isLiteWorkbench = page.url().includes('/workbench-lite');
+          if (isLiteWorkbench) {{
+            const litePanels = await page.locator('.workspace > .panel').count();
+            if (litePanels < 3) throw new Error(`lite workbench panel count ${{litePanels}}`);
+            const typeCounts = await page.locator('.type-tab .type-count').count();
+            if (typeCounts < 6) throw new Error(`lite type counts did not render: ${{typeCounts}}`);
+            const panelCounts = await page.locator('.panel-title .panel-count').count();
+            if (panelCounts < 2) throw new Error(`lite panel counts did not render: ${{panelCounts}}`);
+            const liteOngoingRows = await page.locator('.ongoing-row').count();
+            if (liteOngoingRows < 1) throw new Error(`lite ongoing rows did not render: ${{liteOngoingRows}}`);
+            const liteA11yProbe = await page.evaluate(() => ({{
+              manualControls: document.querySelector('#manual-open')?.getAttribute('aria-controls') || '',
+              manualExpanded: document.querySelector('#manual-open')?.getAttribute('aria-expanded') || '',
+              refreshControls: document.querySelector('#refresh-open')?.getAttribute('aria-controls') || '',
+              searchLabel: document.querySelector('label[for="lite-search-input"]')?.textContent || '',
+              specialtyLabel: document.querySelector('#lite-specialty-select')?.getAttribute('aria-label') || '',
+              pageStatusLive: document.querySelector('#lite-page-status')?.getAttribute('aria-live') || '',
+              jobStatusLive: document.querySelector('#lite-job-status')?.getAttribute('aria-live') || '',
+            }}));
+            if (
+              liteA11yProbe.manualControls !== 'manual-menu'
+              || liteA11yProbe.manualExpanded !== 'false'
+              || liteA11yProbe.refreshControls !== 'refresh-menu'
+              || !liteA11yProbe.searchLabel.includes('搜索')
+              || !liteA11yProbe.specialtyLabel.includes('专业')
+              || liteA11yProbe.pageStatusLive !== 'polite'
+              || liteA11yProbe.jobStatusLive !== 'polite'
+            ) {{
+              throw new Error(`lite workbench accessibility markers missing: ${{JSON.stringify(liteA11yProbe)}}`);
+            }}
+            await page.evaluate(() => {{
+              window.__clipflowLiteNoReloadMarker = 'alive';
+              const topbar = document.querySelector('.topbar');
+              if (topbar) topbar.setAttribute('data-smoke-stable', 'stable');
+              document.querySelectorAll('.workspace .list').forEach(node => {{ node.scrollTop = 120; }});
+            }});
+            await page.locator('.ongoing-row').filter({{ hasText: 'A楼纯手填待关联维保通告' }}).first().click();
+            await page.waitForSelector('text=关联源表事项', {{ timeout: 10000 }});
+            const markerAfterOngoingClick = await page.evaluate(() => window.__clipflowLiteNoReloadMarker || '');
+            if (markerAfterOngoingClick !== 'alive') {{
+              throw new Error('lite ongoing click caused full page reload');
+            }}
+            const topbarStillStable = await page.evaluate(() => document.querySelector('.topbar')?.getAttribute('data-smoke-stable') || '');
+            if (topbarStillStable !== 'stable') {{
+              throw new Error('lite ongoing click rebuilt topbar instead of only updating work area');
+            }}
+            const restoredScroll = await page.evaluate(() => Array.from(document.querySelectorAll('.workspace .list')).map(node => node.scrollTop || 0));
+            if (!restoredScroll.some(value => value >= 80)) {{
+              throw new Error(`lite row click did not preserve list scroll: ${{JSON.stringify(restoredScroll)}}`);
+            }}
+            const sourceLinkOptions = await page.locator('select[name="source_record_id"] option').evaluateAll(nodes => nodes.map(node => node.textContent || ''));
+            if (!sourceLinkOptions.some(text => text.includes('冷机月度巡检'))) {{
+              throw new Error(`source link options missing expected record: ${{JSON.stringify(sourceLinkOptions)}}`);
+            }}
+            const sourceSelectDirty = await page.evaluate(() => {{
+              const select = document.querySelector('select[name="source_record_id"]');
+              if (!select) return false;
+              const option = Array.from(select.options).find(node => node.value);
+              if (option) select.value = option.value;
+              select.dispatchEvent(new Event('change', {{ bubbles: true }}));
+              return document.body.classList.contains('has-dirty-lite-form')
+                && (document.querySelector('#lite-job-status')?.textContent || '').includes('未发送修改');
+            }});
+            if (!sourceSelectDirty) {{
+              throw new Error('lite source link select did not mark form dirty');
+            }}
+            await page.locator('#lite-notice-form textarea[name="progress"]').fill('未发送修改测试');
+            await page.waitForSelector('text=有未发送修改', {{ timeout: 10000 }});
+            let sawDirtyConfirm = false;
+            page.once('dialog', async dialog => {{
+              sawDirtyConfirm = dialog.message().includes('未发送修改');
+              await dialog.accept();
+            }});
+            await page.locator('.notice-row').first().click();
+            await page.waitForTimeout(300);
+            if (!sawDirtyConfirm) throw new Error('lite dirty form warning did not appear before switching item');
+            await assertLayout(page, 'lite-workbench');
+            await assertVnetSkin(page, 'lite-workbench');
+            await page.getByRole('button', {{ name: '刷新数据' }}).click();
+            await page.waitForSelector('text=刷新检修', {{ timeout: 10000 }});
+            await page.waitForSelector('text=刷新变更', {{ timeout: 10000 }});
+            await page.waitForSelector('text=只重新读取当前楼栋和类型', {{ timeout: 10000 }});
+            await page.keyboard.press('Escape');
+            const refreshClosedByEscape = await page.evaluate(() => ({{
+              open: document.querySelector('#refresh-picker')?.classList.contains('open') || false,
+              expanded: document.querySelector('#refresh-open')?.getAttribute('aria-expanded') || '',
+            }}));
+            if (refreshClosedByEscape.open || refreshClosedByEscape.expanded !== 'false') {{
+              throw new Error(`lite refresh menu did not close on Escape: ${{JSON.stringify(refreshClosedByEscape)}}`);
+            }}
+            await page.getByRole('button', {{ name: '刷新数据' }}).click();
+            await page.locator('#lite-refresh-page').click();
+            await page.waitForTimeout(500);
+            const pageRefreshEnabled = await page.evaluate(() => document.querySelector('#lite-refresh-page')?.disabled === false);
+            if (!pageRefreshEnabled) {{
+              throw new Error('lite page refresh button stayed disabled after successful refresh');
+            }}
+            await page.locator('.paste-box textarea[name="paste_text"]').fill(`【设备轮巡】状态：开始
+【标题】EA118机房A楼制冷单元轮巡通告
+【时间】2026-06-24 09:30~2026-06-24 18:30
+【设备】A-127冷冻站制冷单元
+【内容】测试测试
+【影响】测试测试
+【进度】测试测试`);
+            await page.getByRole('button', {{ name: '解析到待发起通告' }}).click();
+            await page.waitForSelector('text=EA118机房A楼制冷单元轮巡通告', {{ timeout: 10000 }});
+            const markerAfterParse = await page.evaluate(() => window.__clipflowLiteNoReloadMarker || '');
+            if (markerAfterParse !== 'alive') {{
+              throw new Error('lite paste parse caused full page reload');
+            }}
+            await page.waitForSelector('text=设备轮巡', {{ timeout: 10000 }});
+            await page.waitForSelector('text=待发起通告', {{ timeout: 10000 }});
+            const datalistProbe = await page.evaluate(() => ({{
+              specialties: Array.from(document.querySelectorAll('#specialty-options option')).map(node => node.getAttribute('value') || ''),
+              cycles: Array.from(document.querySelectorAll('#maintenance-cycle-options option')).map(node => node.getAttribute('value') || ''),
+            }}));
+            if (!datalistProbe.specialties.includes('电气') || !datalistProbe.cycles.includes('/')) {{
+              throw new Error(`lite datalist options missing: ${{JSON.stringify(datalistProbe)}}`);
+            }}
+            const smokeSendButton = page.getByRole('button', {{ name: /发送.*开始/ }});
+            await smokeSendButton.waitFor({{ timeout: 10000 }});
+            await page.evaluate(() => {{
+              const topbar = document.querySelector('.topbar');
+              if (topbar) topbar.setAttribute('data-smoke-submit-stable', 'stable');
+            }});
+            const submitStart = Date.now();
+            await smokeSendButton.click({{ timeout: 5000 }});
+            const submitClickMs = Date.now() - submitStart;
+            if (submitClickMs > 1200) {{
+              throw new Error(`lite workbench action click blocked main thread for ${{submitClickMs}}ms`);
+            }}
+            await page.waitForSelector('text=已受理', {{ timeout: 10000 }});
+            const probeStart = Date.now();
+            const probe = await page.evaluate(() => ({{
+              hasWorkspace: document.body.innerText.includes('待发起事项') && document.body.innerText.includes('已开始未结束'),
+              statusText: document.querySelector('#lite-job-status')?.textContent || '',
+            }}));
+            const probeMs = Date.now() - probeStart;
+            if (probeMs > 500 || !probe.hasWorkspace || !probe.statusText.includes('已受理')) {{
+              throw new Error(`lite workbench became sluggish after submit: probeMs=${{probeMs}} probe=${{JSON.stringify(probe)}}`);
+            }}
+            await page.waitForTimeout(1800);
+            const topbarAfterSubmitRefresh = await page.evaluate(() => document.querySelector('.topbar')?.getAttribute('data-smoke-submit-stable') || '');
+            if (topbarAfterSubmitRefresh !== 'stable') {{
+              throw new Error('lite submit refresh rebuilt topbar instead of only updating status/summary/workspace');
+            }}
+            await page.setViewportSize({{ width: 900, height: 900 }});
+            await assertLayout(page, 'lite-workbench-narrow');
+            await page.setViewportSize({{ width: 1440, height: 900 }});
+            await page.getByRole('link', {{ name: '功能选择' }}).click();
+            await page.waitForSelector('text=业务工作台', {{ timeout: 10000 }});
+            await assertHeaderSubtitle(page, '功能选择 · 请选择功能', 'lite-home-after-return');
+            if (errors.length || failedResponses.length) {{
+              throw new Error(`browser runtime errors: ${{errors.join(' | ')}} failedResponses=${{failedResponses.join(' | ')}}`);
+            }}
+            const pageTitle = await page.title().catch(() => '');
+            await browser.close();
+            console.log(JSON.stringify({{
+              ok: true,
+              title: pageTitle,
+              mode: 'workbench-lite',
+              markers: ['飞书扫码登录', ...required, 'A楼轻量工作台', '待发起事项', '已开始未结束', 'VNET蓝白皮肤', 'worker提交不卡顿'],
+            }}));
+            return;
+          }}
+          const initialOngoingCards = await page.locator('article.ongoing-card').count();
+          if (initialOngoingCards < 1) {{
+            throw new Error(`ongoing cards did not render: ${{initialOngoingCards}}`);
+          }}
           await page.getByRole('button', {{ name: '刷新数据' }}).click();
           await page.waitForSelector('text=刷新检修', {{ timeout: 10000 }});
           await page.waitForSelector('text=刷新变更', {{ timeout: 10000 }});
@@ -514,7 +917,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           const returnScopeCard = page.locator('article.scope-card').filter({{ hasText: 'A楼' }}).first();
           await returnScopeCard.getByRole('button', {{ name: '进入维护管理' }}).click();
           await page.waitForSelector('text=待发起事项', {{ timeout: 10000 }});
-          await page.waitForSelector('text=A楼UPS旁路切换变更测试', {{ timeout: 10000 }});
+          await page.waitForSelector('text=A楼冷站过滤器维护000', {{ timeout: 10000 }});
           await assertHeaderSubtitle(page, 'A楼 · 通告工作台', 'workbench-after-return');
           const secondPage = await context.newPage();
           attachDiagnostics(secondPage, 'auth-second-tab');
@@ -546,8 +949,29 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await secondPage.close();
           await page.locator('article.notice-row').filter({{ hasText: '冷机月度巡检' }}).first().click();
           await page.waitForSelector('text=待发起通告', {{ timeout: 10000 }});
-          await page.getByRole('button', {{ name: /发送.*开始/ }}).waitFor({{ timeout: 10000 }});
-          await page.locator('article.ongoing-card').filter({{ hasText: 'A楼UPS旁路切换变更测试' }}).first().click();
+          const smokeSendButton = page.getByRole('button', {{ name: /发送.*开始/ }});
+          await smokeSendButton.waitFor({{ timeout: 10000 }});
+          const submitStart = Date.now();
+          await smokeSendButton.click({{ timeout: 5000 }});
+          const submitClickMs = Date.now() - submitStart;
+          if (submitClickMs > 1800) {{
+            throw new Error(`workbench action click blocked main thread for ${{submitClickMs}}ms`);
+          }}
+          await page.waitForTimeout(700);
+          const probeStart = Date.now();
+          const probe = await page.evaluate(() => {{
+            const buttons = Array.from(document.querySelectorAll('button')).map((node) => node.textContent || '');
+            return {{
+              status: document.querySelector('[role="status"]')?.textContent || '',
+              buttonCount: buttons.length,
+              hasWorkbench: document.body.innerText.includes('待发起通告') && document.body.innerText.includes('已开始未结束'),
+            }};
+          }});
+          const probeMs = Date.now() - probeStart;
+          if (probeMs > 800 || !probe.hasWorkbench) {{
+            throw new Error(`page became sluggish after submit: probeMs=${{probeMs}} probe=${{JSON.stringify(probe)}}`);
+          }}
+          await page.locator('article.ongoing-card').filter({{ hasText: 'A楼冷站过滤器维护000' }}).first().click();
           await page.waitForSelector('text=更新', {{ timeout: 10000 }});
           await page.waitForSelector('text=结束', {{ timeout: 10000 }});
           await page.getByRole('button', {{ name: '管理/诊断' }}).click();
@@ -626,7 +1050,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           console.log(JSON.stringify({{
             ok: true,
             title: pageTitle,
-            markers: ['飞书扫码登录', ...required, 'A楼工作台', '待发起事项', '已开始未结束', '多标签SSE降噪', 'VNET蓝白皮肤', '管理员工具', '历史通告记忆导入'],
+            markers: ['飞书扫码登录', ...required, 'A楼工作台', '待发起事项', '已开始未结束', '多标签SSE降噪', 'VNET蓝白皮肤', '管理员工具', '历史通告记忆导入', '大列表不卡顿', 'worker提交不卡顿'],
           }}));
         }})().catch(async err => {{
           console.error(String(err && err.stack || err));

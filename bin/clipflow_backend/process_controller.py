@@ -48,6 +48,8 @@ def _probe_host(host: str) -> str:
 class BackendProcessPortalController:
     """Qt-side controller for the standalone FastAPI backend process."""
 
+    _INLINE_IMAGE_COMMAND_FIELDS = {"bytes_b64", "screenshot_bytes_b64"}
+
     def __init__(
         self,
         *,
@@ -126,6 +128,26 @@ class BackendProcessPortalController:
             maximum=50,
         )
 
+    @classmethod
+    def _strip_inline_image_command_fields(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            cleaned: dict[str, Any] = {}
+            stripped: list[str] = []
+            for key, child in value.items():
+                if str(key or "") in cls._INLINE_IMAGE_COMMAND_FIELDS:
+                    stripped.append(str(key or ""))
+                    continue
+                cleaned[key] = cls._strip_inline_image_command_fields(child)
+            if stripped:
+                log_warning(
+                    "Qt command payload stripped inline image fields: "
+                    + ", ".join(sorted(set(stripped)))
+                )
+            return cleaned
+        if isinstance(value, list):
+            return [cls._strip_inline_image_command_fields(item) for item in value]
+        return value
+
     def get_url(self) -> str:
         return f"http://{_display_host(self.host)}:{self.bound_port}"
 
@@ -147,8 +169,11 @@ class BackendProcessPortalController:
             data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             headers["Content-Type"] = "application/json; charset=utf-8"
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            body = response.read()
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                body = response.read()
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(self._http_error_message(exc)) from exc
         if not body:
             return {}
         result = json.loads(body.decode("utf-8"))
@@ -174,12 +199,42 @@ class BackendProcessPortalController:
             headers=headers,
             method=method,
         )
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            body = response.read()
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                body = response.read()
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(self._http_error_message(exc)) from exc
         if not body:
             return {}
         result = json.loads(body.decode("utf-8"))
         return result if isinstance(result, dict) else {}
+
+    @staticmethod
+    def _http_error_message(exc: urllib.error.HTTPError) -> str:
+        status = getattr(exc, "code", "") or ""
+        reason = getattr(exc, "reason", "") or ""
+        detail = ""
+        try:
+            raw = exc.read()
+            if raw:
+                text = raw.decode("utf-8", errors="ignore")
+                try:
+                    body = json.loads(text)
+                    if isinstance(body, dict):
+                        detail = str(
+                            body.get("error")
+                            or body.get("message")
+                            or body.get("detail")
+                            or ""
+                        )
+                    else:
+                        detail = text
+                except Exception:
+                    detail = text
+        except Exception:
+            detail = ""
+        base = f"HTTP Error {status}: {reason}".strip()
+        return f"{base}，响应={detail}" if detail else base
 
     def _health_ok(self) -> bool:
         try:
@@ -938,7 +993,7 @@ class BackendProcessPortalController:
     ) -> dict:
         request_payload = {
             "command": str(command or "").strip(),
-            "payload": dict(payload or {}),
+            "payload": self._strip_inline_image_command_fields(dict(payload or {})),
         }
         result = self._request_json(
             "POST",

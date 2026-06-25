@@ -601,7 +601,7 @@ const visibleDisplayFields = computed(() => {
 function isTechnicalDisplayField(key: string): boolean {
   const text = String(key || "").trim();
   if (!text) return true;
-  return /(record_id|active_item_id|source_record_id|target_record_id|raw_record_id|feishu_record_id|app_token|table_id|file_token|open_id|openid|session_id|snapshot_id|payload_json)$/i.test(text);
+  return /(record_id|active_item_id|source_record_id|target_record_id|app_token|table_id|file_token|open_id|openid|session_id|snapshot_id|payload_json)$/i.test(text);
 }
 
 function normalizeScope(value: string): string {

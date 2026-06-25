@@ -1147,7 +1147,7 @@ class MainWindowRuntimeMixin:
             if item and self._is_valid_list_item(item):
                 return list_widget, item
 
-        for key in ("target_record_id", "record_id", "raw_record_id"):
+        for key in ("target_record_id",):
             record_id = str((payload or {}).get(key) or "").strip()
             if not record_id:
                 continue
@@ -1184,7 +1184,7 @@ class MainWindowRuntimeMixin:
                 continue
             if notice_type and str(data.get("notice_type") or "").strip() != notice_type:
                 continue
-            if source_record_id and str(data.get("lan_source_record_id") or "") == source_record_id:
+            if source_record_id and str(data.get("source_record_id") or "") == source_record_id:
                 return list_widget, item
             if not title_key:
                 continue
@@ -1305,8 +1305,6 @@ class MainWindowRuntimeMixin:
             if cache_store is not None:
                 cache_record_id = (
                     str(data.get("target_record_id") or "").strip()
-                    or str(data.get("feishu_record_id") or "").strip()
-                    or str(data.get("raw_record_id") or "").strip()
                     or str(data.get("record_id") or "").strip()
                 )
                 if cache_record_id:
@@ -1385,8 +1383,7 @@ class MainWindowRuntimeMixin:
                 {
                     "active_item_id": active_item_id,
                     "record_id": "" if self._is_placeholder_record(data) else record_id,
-                    "raw_record_id": record_id,
-                    "source_record_id": str(data.get("lan_source_record_id") or ""),
+                    "source_record_id": str(data.get("source_record_id") or ""),
                     "source_app_token": str(data.get("lan_source_app_token") or ""),
                     "source_table_id": str(data.get("lan_source_table_id") or ""),
                     "maintenance_cycle": str(
@@ -1749,7 +1746,7 @@ class MainWindowRuntimeMixin:
             info = extract_event_info(text) or {}
             if str(info.get("status") or "").strip() == "结束":
                 continue
-            if source_record_id and str(data.get("lan_source_record_id") or "") == source_record_id:
+            if source_record_id and str(data.get("source_record_id") or "") == source_record_id:
                 return data
             if normalized_title:
                 sections = self._lan_notice_sections(text)
@@ -1801,7 +1798,7 @@ class MainWindowRuntimeMixin:
             "_pending_upload_hash": None,
             "_upload_in_progress": False,
             "_is_placeholder_record": False,
-            "lan_source_record_id": source_record_id,
+                "source_record_id": source_record_id,
             "lan_source_app_token": str(payload.get("source_app_token") or ""),
             "lan_source_table_id": str(payload.get("source_table_id") or ""),
             "lan_work_type": work_type,
@@ -1934,7 +1931,7 @@ class MainWindowRuntimeMixin:
                 "_has_unuploaded_changes": False,
                 "_pending_upload_hash": None,
                 "_upload_in_progress": False,
-                "lan_source_record_id": str(payload.get("record_id") or ""),
+                "source_record_id": str(payload.get("source_record_id") or ""),
                 "lan_source_app_token": str(payload.get("source_app_token") or ""),
                 "lan_source_table_id": str(payload.get("source_table_id") or ""),
                 "lan_work_type": work_type,
@@ -1975,10 +1972,10 @@ class MainWindowRuntimeMixin:
         if (
             (not item or not self._is_valid_list_item(item))
             and work_type in {"maintenance", "change", "repair", "power", "polling", "adjust"}
-            and str(payload.get("target_record_id") or payload.get("record_id") or "").strip()
+                and str(payload.get("target_record_id") or "").strip()
         ):
             target_record_id = str(
-                payload.get("target_record_id") or payload.get("record_id") or ""
+                payload.get("target_record_id") or ""
             ).strip()
             list_widget, item = self._find_active_item_by_record_id(target_record_id)
             if item and self._is_valid_list_item(item):
@@ -1990,10 +1987,10 @@ class MainWindowRuntimeMixin:
         if (
             (not item or not self._is_valid_list_item(item))
             and work_type in {"maintenance", "change", "repair", "power", "polling", "adjust"}
-            and str(payload.get("target_record_id") or payload.get("record_id") or "").strip()
+            and str(payload.get("target_record_id") or "").strip()
         ):
             target_record_id = str(
-                payload.get("target_record_id") or payload.get("record_id") or ""
+                payload.get("target_record_id") or ""
             ).strip()
             data = {
                 "record_id": target_record_id,
@@ -2007,7 +2004,7 @@ class MainWindowRuntimeMixin:
                 "_has_unuploaded_changes": False,
                 "_pending_upload_hash": None,
                 "_upload_in_progress": False,
-                "lan_source_record_id": str(payload.get("source_record_id") or ""),
+                "source_record_id": str(payload.get("source_record_id") or ""),
                 "lan_source_app_token": str(payload.get("source_app_token") or ""),
                 "lan_source_table_id": str(payload.get("source_table_id") or ""),
                 "lan_work_type": work_type,
@@ -2079,8 +2076,8 @@ class MainWindowRuntimeMixin:
         if payload.get("maintenance_cycle"):
             data["maintenance_cycle"] = str(payload.get("maintenance_cycle") or "")
         data["lan_work_type"] = work_type
-        if payload.get("source_record_id") and not data.get("lan_source_record_id"):
-            data["lan_source_record_id"] = str(payload.get("source_record_id") or "")
+        if payload.get("source_record_id") and not data.get("source_record_id"):
+            data["source_record_id"] = str(payload.get("source_record_id") or "")
         if payload.get("source_app_token") and not data.get("lan_source_app_token"):
             data["lan_source_app_token"] = str(payload.get("source_app_token") or "")
         if payload.get("source_table_id") and not data.get("lan_source_table_id"):

@@ -537,8 +537,8 @@ class MainWindowUiMixin:
         if not self._alerts_enabled():
             return
         speech_manager.speak("来事件了，请及时处理")
-        if widget:
-            widget.trigger_flash()
+        # QWidget 闪烁动画依赖定时器和样式重绘，长时间运行或列表切换时
+        # 容易触发 Qt 原生层崩溃。新事件保留语音提醒，视觉状态由模型刷新承担。
 
     def _alerts_enabled(self):
         return not getattr(config, "disable_alerts", False)

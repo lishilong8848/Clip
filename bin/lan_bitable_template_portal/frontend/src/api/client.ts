@@ -88,6 +88,9 @@ export async function requestJson(
     });
     hooks.onOnline?.();
   } catch (error: unknown) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new ApiError("请求超时，请稍后重试。");
+    }
     const message = error instanceof Error && error.message ? error.message : "服务连接中断";
     hooks.onOffline?.("服务连接中断，已保留当前页面数据。", error);
     throw new ApiError(message, { offline: true });
@@ -140,6 +143,9 @@ export async function requestBinaryJson(
     });
     hooks.onOnline?.();
   } catch (error: unknown) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new ApiError("请求超时，请稍后重试。");
+    }
     const message = error instanceof Error && error.message ? error.message : "服务连接中断";
     hooks.onOffline?.("服务连接中断，已保留当前页面数据。", error);
     throw new ApiError(message, { offline: true });

@@ -112,7 +112,7 @@ class MainWindowRecordsMixin:
         if not isinstance(data, dict):
             return False
         record_ids = set()
-        for key in ("record_id", "target_record_id", "feishu_record_id", "raw_record_id"):
+        for key in ("record_id", "target_record_id"):
             value = str(data.get(key) or "").strip()
             if value:
                 record_ids.update(self._upload_completion_record_id_candidates(value))
@@ -195,8 +195,6 @@ class MainWindowRecordsMixin:
                     clear_state(
                         data.get("record_id"),
                         data.get("target_record_id"),
-                        data.get("feishu_record_id"),
-                        data.get("raw_record_id"),
                     )
                     mark_failed = getattr(self, "_mark_upload_state_failed_for_ids", None)
                     if callable(mark_failed):
@@ -204,8 +202,6 @@ class MainWindowRecordsMixin:
                             "上传状态超时，后端仍以任务为准；请刷新核对后重试。",
                             data.get("record_id"),
                             data.get("target_record_id"),
-                            data.get("feishu_record_id"),
-                            data.get("raw_record_id"),
                         )
                     recovered += 1
                     continue
@@ -231,7 +227,7 @@ class MainWindowRecordsMixin:
                 continue
             has_record_identity = any(
                 str(data.get(key) or "").strip()
-                for key in ("record_id", "target_record_id", "feishu_record_id", "raw_record_id")
+                for key in ("record_id", "target_record_id")
             )
             if not has_record_identity:
                 data = dict(data)
@@ -1007,6 +1003,33 @@ class MainWindowRecordsMixin:
         text = unicodedata.normalize("NFKC", str(value or ""))
         text = re.sub(r"\s+", " ", text).strip()
         return text
+
+    @classmethod
+    def _normalize_event_match_title(cls, value) -> str:
+        text = cls._normalize_match_text(value)
+        return text.strip(" ;；")
+
+    def _event_match_title_from_data(self, data: dict | None) -> str:
+        if not isinstance(data, dict):
+            return ""
+        for key in ("match_title", "title"):
+            value = self._normalize_event_match_title(data.get(key))
+            if value:
+                return value
+        info = extract_event_info(str(data.get("text") or "")) or {}
+        return self._normalize_event_match_title(info.get("title") or "")
+
+    @staticmethod
+    def _remote_target_record_id_from_data(data: dict | None) -> str:
+        if not isinstance(data, dict):
+            return ""
+        target_record_id = str(data.get("target_record_id") or "").strip()
+        if target_record_id and target_record_id.startswith("rec"):
+            return target_record_id
+        record_id = str(data.get("record_id") or "").strip()
+        if record_id and record_id.startswith("rec"):
+            return record_id
+        return ""
 
     def _build_match_identity(
         self,
@@ -2917,8 +2940,6 @@ class MainWindowRecordsMixin:
             values = {
                 str(data.get("record_id") or "").strip(),
                 str(data.get("target_record_id") or "").strip(),
-                str(data.get("feishu_record_id") or "").strip(),
-                str(data.get("raw_record_id") or "").strip(),
             }
             matched = values & candidate_set
             if matched:
@@ -3136,7 +3157,7 @@ class MainWindowRecordsMixin:
         except Exception as exc:
             log_warning(f"ActiveCache record_id修复失败: {exc}")
         try:
-            display_repair = self.cache_store.remove_legacy_display_fields_on_startup()
+            display_repair = self.cache_store.normalize_display_fields_on_startup()
             if isinstance(display_repair, dict):
                 result["display_had_repairs"] = bool(display_repair.get("had_repairs"))
                 result["display_saved"] = bool(display_repair.get("saved"))
@@ -3231,15 +3252,16 @@ class MainWindowRecordsMixin:
             return default if value in (None, "") else str(value).strip()
 
         record_id = self._get_cache_identity(data_dict)
+        active_item_id = str(data_dict.get("active_item_id") or "").strip()
         if not record_id:
             existing_buildings = self._normalize_buildings_value(
                 data_dict.get("buildings")
             )
             data_dict["buildings"] = existing_buildings or _fallback_buildings()
-            data_dict.pop("specialty", None)
             return data_dict
         cache_fields = self.cache_store.get_record_fields(
             record_id=record_id,
+            active_item_id=active_item_id,
             fields=[
                 "buildings",
                 "specialty",
@@ -3270,15 +3292,25 @@ class MainWindowRecordsMixin:
             if specialty:
                 data_dict["specialty"] = specialty
             else:
-                data_dict.pop("specialty", None)
+                existing_specialty = str(data_dict.get("specialty") or "").strip()
+                if existing_specialty:
+                    data_dict["specialty"] = existing_specialty
+                else:
+                    data_dict.pop("specialty", None)
         else:
-            data_dict.pop("specialty", None)
+            existing_specialty = str(data_dict.get("specialty") or "").strip()
+            if existing_specialty:
+                data_dict["specialty"] = existing_specialty
         if "maintenance_cycle" in cache_fields:
             maintenance_cycle = str(cache_fields.get("maintenance_cycle") or "").strip()
             if maintenance_cycle:
                 data_dict["maintenance_cycle"] = maintenance_cycle
             else:
-                data_dict.pop("maintenance_cycle", None)
+                existing_cycle = str(data_dict.get("maintenance_cycle") or "").strip()
+                if existing_cycle:
+                    data_dict["maintenance_cycle"] = existing_cycle
+                else:
+                    data_dict.pop("maintenance_cycle", None)
         level_locked = bool(cache_fields.get("level_locked")) or bool(
             data_dict.get("level_locked")
         )
@@ -3368,6 +3400,9 @@ class MainWindowRecordsMixin:
             "specialty": str(dialog_fields.get("specialty") or "").strip(),
             "level": str(dialog_fields.get("level") or "").strip(),
             "event_source": str(dialog_fields.get("event_source") or "").strip(),
+            "maintenance_cycle": str(
+                dialog_fields.get("maintenance_cycle") or ""
+            ).strip(),
             "transfer_to_overhaul": None,
         }
         if "transfer_to_overhaul" in dialog_fields:
@@ -3377,13 +3412,34 @@ class MainWindowRecordsMixin:
         if not isinstance(data_dict, dict):
             return resolved
 
+        specialty_cleared = bool(
+            data_dict.get("_upload_specialty_cleared")
+            or dialog_fields.get("_upload_specialty_cleared")
+        )
+        maintenance_cycle_cleared = bool(
+            data_dict.get("_upload_maintenance_cycle_cleared")
+            or dialog_fields.get("_upload_maintenance_cycle_cleared")
+        )
+        existing_buildings = self._normalize_buildings_value(data_dict.get("buildings"))
+        existing_specialty = str(data_dict.get("specialty") or "").strip()
+        existing_maintenance_cycle = str(data_dict.get("maintenance_cycle") or "").strip()
+        if not resolved["buildings"]:
+            resolved["buildings"] = existing_buildings
+        if not resolved["specialty"] and not specialty_cleared:
+            resolved["specialty"] = existing_specialty
+        if not resolved["maintenance_cycle"] and not maintenance_cycle_cleared:
+            resolved["maintenance_cycle"] = existing_maintenance_cycle
+
         record_id = self._get_cache_identity(data_dict)
+        active_item_id = str(data_dict.get("active_item_id") or "").strip()
         if getattr(self, "cache_store", None) and record_id:
             cache_fields = self.cache_store.get_record_fields(
                 record_id=record_id,
+                active_item_id=active_item_id,
                 fields=[
                     "buildings",
                     "specialty",
+                    "maintenance_cycle",
                     "level",
                     "level_locked",
                     "event_source",
@@ -3391,45 +3447,59 @@ class MainWindowRecordsMixin:
                 ],
             )
             patch = {}
-            if "buildings" not in cache_fields and resolved["buildings"]:
+            if resolved["buildings"]:
                 patch["buildings"] = resolved["buildings"]
-            if "specialty" not in cache_fields and resolved["specialty"]:
+            if resolved["specialty"]:
                 patch["specialty"] = resolved["specialty"]
-            if "level" not in cache_fields and resolved["level"]:
+            elif specialty_cleared:
+                patch["specialty"] = None
+            if resolved["maintenance_cycle"]:
+                patch["maintenance_cycle"] = resolved["maintenance_cycle"]
+            elif maintenance_cycle_cleared:
+                patch["maintenance_cycle"] = None
+            if resolved["level"]:
                 patch["level"] = resolved["level"]
-            if "event_source" not in cache_fields and resolved["event_source"]:
+            if resolved["event_source"]:
                 patch["event_source"] = resolved["event_source"]
-            if (
-                "transfer_to_overhaul" not in cache_fields
-                and resolved["transfer_to_overhaul"] is not None
-            ):
+            if resolved["transfer_to_overhaul"] is not None:
                 patch["transfer_to_overhaul"] = resolved["transfer_to_overhaul"]
             if patch:
                 self.cache_store.patch_record_fields(
                     record_id=record_id,
+                    active_item_id=active_item_id,
                     patch=patch,
                 )
                 cache_fields = self.cache_store.get_record_fields(
                     record_id=record_id,
+                    active_item_id=active_item_id,
                     fields=[
                         "buildings",
                         "specialty",
+                        "maintenance_cycle",
                         "level",
                         "level_locked",
                         "event_source",
                         "transfer_to_overhaul",
                     ],
                 )
-            if "buildings" in cache_fields:
+            if not resolved["buildings"] and "buildings" in cache_fields:
                 resolved["buildings"] = self._normalize_buildings_value(
                     cache_fields.get("buildings")
                 )
-            else:
-                resolved["buildings"] = []
-            if "specialty" in cache_fields:
+            if (
+                not resolved["specialty"]
+                and not specialty_cleared
+                and "specialty" in cache_fields
+            ):
                 resolved["specialty"] = str(cache_fields.get("specialty") or "").strip()
-            else:
-                resolved["specialty"] = ""
+            if (
+                not resolved["maintenance_cycle"]
+                and not maintenance_cycle_cleared
+                and "maintenance_cycle" in cache_fields
+            ):
+                resolved["maintenance_cycle"] = str(
+                    cache_fields.get("maintenance_cycle") or ""
+                ).strip()
             level_locked = bool(cache_fields.get("level_locked")) or bool(
                 data_dict.get("level_locked")
             )
@@ -3452,15 +3522,20 @@ class MainWindowRecordsMixin:
                     cache_fields.get("transfer_to_overhaul")
                 )
         else:
-            # 缓存主键缺失时，严格留空，避免跨条目串值。
-            resolved["buildings"] = []
-            resolved["specialty"] = ""
+            # 缓存主键缺失时只使用当前条目自身字段，避免跨条目串值。
+            resolved["buildings"] = existing_buildings
+            resolved["specialty"] = "" if specialty_cleared else existing_specialty
+            resolved["maintenance_cycle"] = (
+                "" if maintenance_cycle_cleared else existing_maintenance_cycle
+            )
 
         data_dict["buildings"] = resolved["buildings"]
         if resolved["specialty"]:
             data_dict["specialty"] = resolved["specialty"]
-        else:
+            data_dict.pop("_upload_specialty_cleared", None)
+        elif specialty_cleared:
             data_dict.pop("specialty", None)
+            data_dict["_upload_specialty_cleared"] = True
         if resolved["level"]:
             data_dict["level"] = resolved["level"]
         elif "level" in dialog_fields:
@@ -3469,6 +3544,12 @@ class MainWindowRecordsMixin:
             data_dict["event_source"] = resolved["event_source"]
         elif "event_source" in dialog_fields:
             data_dict.pop("event_source", None)
+        if resolved["maintenance_cycle"]:
+            data_dict["maintenance_cycle"] = resolved["maintenance_cycle"]
+            data_dict.pop("_upload_maintenance_cycle_cleared", None)
+        elif maintenance_cycle_cleared:
+            data_dict.pop("maintenance_cycle", None)
+            data_dict["_upload_maintenance_cycle_cleared"] = True
         if resolved["transfer_to_overhaul"] is not None:
             data_dict["transfer_to_overhaul"] = bool(resolved["transfer_to_overhaul"])
 
@@ -3515,17 +3596,49 @@ class MainWindowRecordsMixin:
         if match_key:
             for list_widget, item, data in store.candidates_by_match_key(match_key):
                 if _notice_type_matches(data):
-                    key_matches.append((list_widget, item))
+                    key_matches.append((list_widget, item, data))
         if match_title:
             for list_widget, item, data in store.candidates_by_match_title(match_title):
                 if _notice_type_matches(data):
-                    title_matches.append((list_widget, item))
+                    title_matches.append((list_widget, item, data))
         if key_matches:
-            return key_matches[0]
+            return key_matches[0][0], key_matches[0][1]
         if self._is_event_notice(resolved_notice_type):
+            normalized_title = self._normalize_event_match_title(match_title)
+            event_title_matches = []
+            seen_items = set()
+            for match in title_matches:
+                marker = (id(match[0]), id(match[1]))
+                if marker in seen_items:
+                    continue
+                seen_items.add(marker)
+                event_title_matches.append(match)
+            if normalized_title:
+                for list_widget, item, data in store.entries():
+                    if not _notice_type_matches(data):
+                        continue
+                    if not self._is_valid_list_item(item):
+                        continue
+                    data_title = self._event_match_title_from_data(data)
+                    if not data_title or data_title != normalized_title:
+                        continue
+                    marker = (id(list_widget), id(item))
+                    if marker in seen_items:
+                        continue
+                    seen_items.add(marker)
+                    event_title_matches.append((list_widget, item, data))
+            bound_title_matches = [
+                match
+                for match in event_title_matches
+                if self._remote_target_record_id_from_data(match[2])
+            ]
+            if len(bound_title_matches) == 1:
+                return bound_title_matches[0][0], bound_title_matches[0][1]
+            if len(event_title_matches) == 1:
+                return event_title_matches[0][0], event_title_matches[0][1]
             return None, None
         if title_matches:
-            return title_matches[0]
+            return title_matches[0][0], title_matches[0][1]
         return None, None
 
     def _find_active_item_by_content(self, content: str):

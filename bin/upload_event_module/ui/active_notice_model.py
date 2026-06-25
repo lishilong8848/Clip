@@ -190,7 +190,7 @@ class ActiveNoticeModel(QAbstractListModel):
         if role == self.ActiveItemIdRole:
             return str(record.get("active_item_id") or "")
         if role == self.RecordIdRole:
-            return canonical_target_record_id(record) or str(record.get("record_id") or "")
+            return canonical_target_record_id(record)
         if role == self.NoticeTypeRole:
             return str(record.get("notice_type") or "")
         if role == self.OriginRole:
@@ -342,10 +342,8 @@ class ActiveNoticeModel(QAbstractListModel):
             if identity:
                 self._identity_to_row[identity] = row
             target_id = canonical_target_record_id(record)
-            raw_record_id = str(record.get("record_id") or "").strip()
-            record_id = target_id or raw_record_id
-            if record_id:
-                self._record_id_to_row.setdefault(record_id, row)
+            if target_id:
+                self._record_id_to_row.setdefault(target_id, row)
             source_record_id = canonical_source_record_id(record)
             if source_record_id:
                 self._source_record_id_to_row.setdefault(source_record_id, row)
