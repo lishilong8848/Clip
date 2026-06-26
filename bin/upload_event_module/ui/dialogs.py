@@ -229,6 +229,7 @@ MAINTENANCE_CYCLE_OPTIONS = (
     "每三年",
     "每五年",
     "冬季保温每日",
+    "非计划性",
 )
 
 

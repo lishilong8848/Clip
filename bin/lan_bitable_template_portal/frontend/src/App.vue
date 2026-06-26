@@ -56,6 +56,12 @@
       :scope-options="visibleScopeOptions"
     />
 
+    <RepairManagementPage
+      v-else-if="isRepairManagementPage"
+      :scope="currentScope"
+      :scope-options="visibleScopeOptions"
+    />
+
     <AuthPanels
       v-else-if="showPermissionRequestPanel || authChecking || !auth.loggedIn || (auth.loggedIn && !auth.scopeOptions.length)"
       :checking="authChecking"
@@ -95,6 +101,7 @@
       @enter="enterScope"
       @event="enterEventManagement"
       @engineer="enterEngineerMop"
+      @repair-management="enterRepairManagement"
       @request-permission="openAdditionalPermissionRequest"
     />
 
@@ -125,6 +132,7 @@ const AdminTools = asyncPage(() => import("./components/AdminTools.vue"));
 const EngineerMopPage = asyncPage(() => import("./components/EngineerMopPage.vue"));
 const EventManagementPage = asyncPage(() => import("./components/EventManagementPage.vue"));
 const HistoryMemoryPage = asyncPage(() => import("./components/HistoryMemoryPage.vue"));
+const RepairManagementPage = asyncPage(() => import("./components/RepairManagementPage.vue"));
 const SignaturePage = asyncPage(() => import("./components/SignaturePage.vue"));
 
 type Dict = LooseDict;
@@ -184,6 +192,7 @@ const refreshCooldownTimers = new Map<string, number>();
 
 const isHistoryMemoryPage = computed(() => routePath.value === "/admin/history-memory");
 const isEngineerMopPage = computed(() => routePath.value === "/engineer/mop");
+const isRepairManagementPage = computed(() => routePath.value === "/repair-management");
 const isSignaturePage = computed(() => routePath.value === "/signature");
 const isEventPage = computed(() => routeParams.value.get("mode") === "events");
 const signatureLinkMode = computed(() => isSignaturePage.value && Boolean(routeParams.value.get("record_id") || routeParams.value.get("temporary_id")));
@@ -222,6 +231,7 @@ const permissionPanelEmptyText = computed(() => (
 const headerSubtitle = computed(() => {
   if (isHistoryMemoryPage.value) return "管理工具 · 历史通告记忆导入";
   if (isEngineerMopPage.value) return `${scopeLabel(currentScope.value)} · 工程师 MOP 填写`;
+  if (isRepairManagementPage.value) return `${scopeLabel(currentScope.value)} · 检修管理`;
   if (isSignaturePage.value) return "线上签名 · 手机手写保存";
   if (isEventPage.value) return `${scopeLabel(currentScope.value)} · 事件管理`;
   if (authChecking.value) return "功能选择 · 正在检查登录";
@@ -431,6 +441,12 @@ function enterEventManagement(scope: string): void {
 
 function enterEngineerMop(scope: string): void {
   const url = new URL("/engineer/mop", window.location.origin);
+  url.searchParams.set("scope", normalizeScopeValue(scope));
+  window.location.href = url.toString();
+}
+
+function enterRepairManagement(scope: string): void {
+  const url = new URL("/repair-management", window.location.origin);
   url.searchParams.set("scope", normalizeScopeValue(scope));
   window.location.href = url.toString();
 }

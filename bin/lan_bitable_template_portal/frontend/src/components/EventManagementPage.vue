@@ -234,6 +234,25 @@
           <span class="status-pill" :class="statusTone(selectedEvent.status)">{{ selectedEvent.status || "未知" }}</span>
           <small>{{ selectedEvent.occurrence_time || "未填写发生时间" }}</small>
         </div>
+        <section class="event-repair-actions">
+          <div>
+            <small>是否转检修</small>
+            <strong :class="{ enabled: eventTransferEnabled(selectedEvent) }">
+              {{ eventTransferEnabled(selectedEvent) ? "已转检修" : "未转检修" }}
+            </strong>
+          </div>
+          <button
+            class="btn secondary"
+            type="button"
+            :disabled="eventTransferBusy || eventTransferEnabled(selectedEvent)"
+            @click="markSelectedEventTransferred"
+          >
+            {{ eventTransferBusy ? "处理中" : eventTransferEnabled(selectedEvent) ? "已转检修" : "标记转检修" }}
+          </button>
+          <button class="btn primary" type="button" @click="openRepairManagementForSelectedEvent">
+            填写检修单
+          </button>
+        </section>
         <div class="event-detail-tabs" aria-label="事件详情分区">
           <button
             type="button"
@@ -357,6 +376,7 @@ const detailScope = ref("");
 const detailRequested = ref(false);
 const selectedEvent = ref<LooseDict | null>(null);
 const selectedEventDetailTab = ref<"summary" | "timeline" | "fields">("summary");
+const eventTransferBusy = ref(false);
 
 const scopeLabel = computed(() => {
   const normalized = normalizeScope(props.scope);
@@ -706,6 +726,64 @@ function eventKey(item: LooseDict | undefined): string {
   return String(item.source_record_id || item.record_id || `${item.title}-${item.occurrence_time}`);
 }
 
+function eventRecordId(item: LooseDict | null | undefined): string {
+  if (!item) return "";
+  return String(item.source_record_id || item.record_id || "").trim();
+}
+
+function eventTransferEnabled(item: LooseDict | null | undefined): boolean {
+  const text = String(item?.transfer_to_overhaul ?? "").trim().toLowerCase();
+  return ["true", "1", "是", "已转", "已转检修", "yes", "y"].includes(text);
+}
+
+function setEventTransferState(recordId: string): void {
+  if (!recordId) return;
+  if (selectedEvent.value && eventRecordId(selectedEvent.value) === recordId) {
+    selectedEvent.value = { ...selectedEvent.value, transfer_to_overhaul: "True" };
+  }
+  events.value = events.value.map((item) => (
+    eventRecordId(item) === recordId ? { ...item, transfer_to_overhaul: "True" } : item
+  ));
+}
+
+async function markSelectedEventTransferred(): Promise<void> {
+  const recordId = eventRecordId(selectedEvent.value);
+  if (!recordId) {
+    errorText.value = "当前事件缺少记录 ID，无法转检修。";
+    return;
+  }
+  eventTransferBusy.value = true;
+  try {
+    await requestJson("/api/events/transfer-repair", {
+      method: "POST",
+      body: JSON.stringify({
+        scope: detailScope.value || props.scope || "ALL",
+        month: selectedMonth.value,
+        record_id: recordId,
+      }),
+    });
+    setEventTransferState(recordId);
+    emit("status", "事件已标记为转检修。");
+  } catch (error: unknown) {
+    errorText.value = error instanceof Error ? error.message : "转检修失败。";
+    emit("status", errorText.value);
+  } finally {
+    eventTransferBusy.value = false;
+  }
+}
+
+function openRepairManagementForSelectedEvent(): void {
+  const item = selectedEvent.value || {};
+  const url = new URL("/repair-management", window.location.origin);
+  url.searchParams.set("scope", detailScope.value || props.scope || "ALL");
+  url.searchParams.set("mode", "create");
+  const recordId = eventRecordId(item);
+  if (recordId) url.searchParams.set("from_event_record_id", recordId);
+  const title = String(item.title || item.alarm_desc || "").trim();
+  if (title) url.searchParams.set("event_title", title);
+  window.location.href = url.toString();
+}
+
 function openBuilding(code: string): void {
   const nextScope = normalizeScope(code);
   if (!allowedBuildingCodes.value.has(nextScope)) return;
@@ -1003,6 +1081,12 @@ onMounted(() => {
 .btn.secondary {
   background: #f7fbff;
   color: #0e4fb2;
+}
+
+.btn.primary {
+  border-color: #1e63ff;
+  background: linear-gradient(135deg, #2a77ff, #0050d9);
+  color: #fff;
 }
 
 .btn:disabled {
@@ -1669,6 +1753,39 @@ onMounted(() => {
   color: #516a88;
   font-size: 12px;
   font-weight: 900;
+}
+
+.event-repair-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  border: 1px solid #d8e5f7;
+  border-radius: 18px;
+  background: #f8fbff;
+  padding: 12px 14px;
+}
+
+.event-repair-actions > div {
+  min-width: 150px;
+  display: grid;
+  gap: 2px;
+  margin-right: auto;
+}
+
+.event-repair-actions small {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.event-repair-actions strong {
+  color: #c2410c;
+  font-weight: 950;
+}
+
+.event-repair-actions strong.enabled {
+  color: #047857;
 }
 
 .event-detail-tabs {

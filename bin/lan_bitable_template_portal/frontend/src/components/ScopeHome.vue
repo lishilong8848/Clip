@@ -143,6 +143,13 @@
               进入事件管理
             </button>
             <button
+              v-else-if="activeMode === 'repair_management'"
+              class="primary"
+              @click="$emit('repair-management', scope.value)"
+            >
+              进入检修管理
+            </button>
+            <button
               v-else-if="activeMode === 'maintenance_mop'"
               class="primary"
               @click="$emit('engineer', scope.value)"
@@ -184,7 +191,7 @@
 import { computed, ref } from "vue";
 
 type Dict = Record<string, any>;
-type EntryKey = "" | "event" | "maintenance" | "maintenance_mop" | "change" | "repair" | "tools" | "power" | "polling" | "adjust" | "handover";
+type EntryKey = "" | "event" | "maintenance" | "maintenance_mop" | "change" | "repair_management" | "repair" | "tools" | "power" | "polling" | "adjust" | "handover";
 type ModuleAction = { key: EntryKey; label: string; primary?: boolean; disabled?: boolean };
 
 const props = defineProps<{
@@ -198,6 +205,7 @@ const emit = defineEmits<{
   enter: [scope: string, workType?: string];
   event: [scope: string];
   engineer: [scope: string];
+  "repair-management": [scope: string];
   "request-permission": [];
 }>();
 
@@ -250,6 +258,16 @@ const moduleCards: Array<{
     tags: ["变更申请", "风险评估", "回退确认"],
     size: "main",
     actions: [{ key: "change", label: "进入变更管理", primary: true }],
+  },
+  {
+    key: "repair_management",
+    tone: "blue",
+    icon: "repair",
+    badge: "检修单",
+    title: "检修管理",
+    description: "查看检修源表全部内容，支持新增、修改、删除检修记录",
+    tags: ["检修单", "增删改", "转检修"],
+    actions: [{ key: "repair_management", label: "进入检修管理", primary: true }],
   },
   {
     key: "drill",
@@ -336,11 +354,17 @@ const entryConfigs: Record<Exclude<EntryKey, "">, {
     workType: "change",
   },
   repair: {
+    kicker: "检修通告",
+    title: "选择楼栋进入检修通告",
+    description: "进入后自动选中检修通告。",
+    actionLabel: "进入检修通告",
+    workType: "repair",
+  },
+  repair_management: {
     kicker: "检修管理",
     title: "选择楼栋进入检修管理",
-    description: "进入后自动选中检修通告。",
+    description: "进入后显示检修源表全部记录，可新增、修改、删除。",
     actionLabel: "进入检修管理",
-    workType: "repair",
   },
   tools: {
     kicker: "其他工具",
@@ -445,6 +469,7 @@ function countText(scope: string, workType: string): string {
 
 function scopeMetricText(scope: string): string {
   if (activeMode.value === "event") return "本月事件 / 处理中 / 已结束";
+  if (activeMode.value === "repair_management") return "检修记录 / 新增 / 修改";
   if (activeMode.value === "maintenance") return countText(scope, "maintenance");
   if (activeMode.value === "change") return countText(scope, "change");
   if (activeMode.value === "repair") return countText(scope, "repair");

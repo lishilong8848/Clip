@@ -2,6 +2,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 BIN_DIR = Path(__file__).resolve().parent
@@ -24,10 +25,148 @@ from clipflow_backend.api_models import (  # noqa: E402
     parse_api_model,
 )
 from clipflow_backend.main import FastAPIPortalController  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+from lan_bitable_template_portal.portal_auth import AUTH_COOKIE_NAME  # noqa: E402
+from lan_bitable_template_portal.server import PortalRuntime  # noqa: E402
 from lan_bitable_template_portal.state_store import LanPortalStateStore  # noqa: E402
 
 
+class _FakeRepairEventRouteService:
+    def __init__(self):
+        self.calls: list[tuple] = []
+
+    def get_repair_management_records(self, scope: str = "ALL", query: str = "", limit: int = 200) -> dict:
+        self.calls.append(("list_repair", scope, query, limit))
+        return {
+            "records": [],
+            "fields": [{"field_name": "维修名称", "readonly": False}],
+            "total": 0,
+        }
+
+    def create_repair_management_record(
+        self,
+        fields: dict,
+        *,
+        source_event_id: str = "",
+        scope: str = "ALL",
+    ) -> dict:
+        self.calls.append(("create_repair", scope, dict(fields or {}), source_event_id))
+        return {"record_id": "rec-new", "fields": dict(fields or {})}
+
+    def update_repair_management_record(self, record_id: str, fields: dict, *, scope: str = "ALL") -> dict:
+        self.calls.append(("update_repair", scope, record_id, dict(fields or {})))
+        return {"record_id": record_id, "fields": dict(fields or {})}
+
+    def delete_repair_management_record(self, record_id: str, *, scope: str = "ALL") -> dict:
+        self.calls.append(("delete_repair", scope, record_id))
+        return {"record_id": record_id, "deleted": True}
+
+    def list_repair_management_event_candidates(
+        self,
+        *,
+        scope: str = "ALL",
+        month: str = "",
+        query: str = "",
+        limit: int = 50,
+    ) -> dict:
+        self.calls.append(("repair_events", scope, month, query, limit))
+        return {"records": [{"record_id": "rec-event"}], "total": 1}
+
+    def repair_management_event_prefill(
+        self,
+        *,
+        scope: str = "ALL",
+        record_id: str = "",
+        month: str = "",
+    ) -> dict:
+        self.calls.append(("repair_prefill", scope, record_id, month))
+        return {"event": {"record_id": record_id}, "fields": {"维修名称": "事件检修"}}
+
+    def mark_event_transferred_to_repair(self, record_id: str = "", month: str = "") -> dict:
+        self.calls.append(("transfer_repair", record_id, month))
+        return {"record_id": record_id, "transfer_to_overhaul": True}
+
+
 class BackendApiModelTests(unittest.TestCase):
+    def test_repair_management_and_event_transfer_routes_are_native_and_authorized(self):
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        original_service = PortalRuntime.service
+        original_sessions = dict(PortalRuntime.auth_manager._sessions)
+        service = _FakeRepairEventRouteService()
+        session_id = "repair-event-route-session"
+        PortalRuntime.service = service
+        with PortalRuntime.auth_manager._lock:
+            PortalRuntime.auth_manager._sessions[session_id] = {
+                "session_id": session_id,
+                "user": {"name": "测试管理员", "open_id": ""},
+                "role": "admin",
+                "allowed_scopes": ["E"],
+                "expires_at": 9999999999,
+            }
+        client = TestClient(controller._build_app())
+        headers = {"Cookie": f"{AUTH_COOKIE_NAME}={session_id}"}
+        try:
+            with patch.object(controller, "_proxy_request", side_effect=AssertionError("proxy used")):
+                unauth = client.get("/api/repair-management/records?scope=E")
+                denied = client.get(
+                    "/api/repair-management/records?scope=A",
+                    headers=headers,
+                )
+                listed = client.get(
+                    "/api/repair-management/records?scope=E&q=冷站&limit=3",
+                    headers=headers,
+                )
+                created = client.post(
+                    "/api/repair-management/records",
+                    headers=headers,
+                    json={"scope": "E", "fields": {"维修名称": "测试检修"}},
+                )
+                updated = client.put(
+                    "/api/repair-management/records/rec-1",
+                    headers=headers,
+                    json={"scope": "E", "fields": {"专业": "电气"}},
+                )
+                deleted = client.delete(
+                    "/api/repair-management/records/rec-1?scope=E",
+                    headers=headers,
+                )
+                repair_events = client.get(
+                    "/api/repair-management/event-candidates?scope=E&month=2026-06&q=告警&limit=5",
+                    headers=headers,
+                )
+                repair_prefill = client.get(
+                    "/api/repair-management/event-prefill?scope=E&month=2026-06&record_id=rec-event",
+                    headers=headers,
+                )
+                transferred = client.post(
+                    "/api/events/transfer-repair",
+                    headers=headers,
+                    json={"scope": "E", "record_id": "rec-event", "month": "2026-06"},
+                )
+
+            self.assertEqual(unauth.status_code, 401)
+            self.assertEqual(denied.status_code, 403)
+            for response in [listed, created, updated, deleted, repair_events, repair_prefill, transferred]:
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertTrue(response.json().get("ok"), response.text)
+            self.assertEqual(
+                service.calls,
+                [
+                    ("list_repair", "E", "冷站", 3),
+                    ("create_repair", "E", {"维修名称": "测试检修"}, ""),
+                    ("update_repair", "E", "rec-1", {"专业": "电气"}),
+                    ("delete_repair", "E", "rec-1"),
+                    ("repair_events", "E", "2026-06", "告警", 5),
+                    ("repair_prefill", "E", "rec-event", "2026-06"),
+                    ("transfer_repair", "rec-event", "2026-06"),
+                ],
+            )
+            self.assertTrue(transferred.json()["data"]["transfer_to_overhaul"])
+        finally:
+            PortalRuntime.service = original_service
+            with PortalRuntime.auth_manager._lock:
+                PortalRuntime.auth_manager._sessions = original_sessions
+
     def test_workbench_action_keeps_extra_fields_for_compatibility(self):
         model = parse_api_model(
             WorkbenchActionRequest,

@@ -424,6 +424,100 @@ class _SmokePortalService:
             }
         ]
 
+    def get_repair_management_records(self, *, scope: str = "ALL", query: str = "", limit: int = 200) -> dict:
+        records = [
+            {
+                "record_id": "repair-mgmt-a-001",
+                "title": "A楼测试检修管理记录",
+                "created_time": "2026-06-01 09:00:00",
+                "last_modified_time": "2026-06-01 10:00:00",
+                "display_fields": {
+                    "检修通告名称": "A楼测试检修管理记录",
+                    "楼栋": "A楼",
+                    "专业": "弱电",
+                },
+                "raw_fields": {
+                    "检修通告名称": "A楼测试检修管理记录",
+                    "楼栋": "A楼",
+                    "专业": "弱电",
+                },
+                "building_codes": ["A"],
+            }
+        ]
+        if str(scope or "").strip().upper() not in {"", "ALL", "A"}:
+            records = []
+        return {
+            "app_token": "AnEBwJlvGiJfDdkOB32cUPuknzg",
+            "table_id": "tblschT48zXwigUG",
+            "fields": [
+                {"field_name": "检修通告名称", "editable": True, "is_primary": True, "ui_type": "text"},
+                {"field_name": "楼栋", "editable": True, "ui_type": "text"},
+                {"field_name": "专业", "editable": True, "ui_type": "text"},
+                {"field_name": "创建时间", "editable": False, "ui_type": "created_time"},
+            ],
+            "records": records[: max(1, min(int(limit or 200), 500))],
+            "total": len(records),
+            "returned": len(records),
+        }
+
+    def create_repair_management_record(self, fields: dict, *, source_event_id: str = "", scope: str = "ALL") -> dict:
+        return {"record_id": "repair-mgmt-created-001", "fields": dict(fields or {}), "field_count": len(fields or {})}
+
+    def update_repair_management_record(self, record_id: str, fields: dict, *, scope: str = "ALL") -> dict:
+        return {"record_id": record_id, "fields": dict(fields or {}), "field_count": len(fields or {})}
+
+    def delete_repair_management_record(self, record_id: str, *, scope: str = "ALL") -> dict:
+        return {"record_id": record_id, "deleted": True}
+
+    def list_repair_management_event_candidates(
+        self,
+        *,
+        scope: str = "ALL",
+        month: str = "",
+        query: str = "",
+        limit: int = 50,
+    ) -> dict:
+        return {
+            "scope": scope,
+            "month": month,
+            "records": [
+                {
+                    "record_id": "rec-smoke-event-a-001",
+                    "title": "A楼测试事件转检修",
+                    "building": "A楼",
+                    "building_codes": ["A"],
+                    "specialty": "弱电",
+                    "level": "I3",
+                    "source": "BMS",
+                    "status": "处理中",
+                    "occurrence_time": "2026-06-25 10:00",
+                }
+            ],
+            "total": 1,
+            "returned": 1,
+        }
+
+    def repair_management_event_prefill(
+        self,
+        *,
+        scope: str = "ALL",
+        record_id: str = "",
+        month: str = "",
+    ) -> dict:
+        return {
+            "event": {
+                "record_id": record_id,
+                "title": "A楼测试事件转检修",
+                "building": "A楼",
+                "specialty": "弱电",
+            },
+            "fields": {
+                "维修名称": "A楼测试事件转检修",
+                "楼栋": "A楼",
+                "专业": "弱电",
+            },
+        }
+
 
 def _build_playwright_script(url: str, session_id: str) -> str:
     no_scope_session_id = f"{session_id}-no-scope"
@@ -493,7 +587,10 @@ def _build_playwright_script(url: str, session_id: str) -> str:
               }}
               const panels = Array.from(document.querySelectorAll('.workspace > .panel'));
               if (panels.length) {{
-                if (panels.length < 3) result.push(`workspace panel count ${{panels.length}}`);
+                const rails = Array.from(document.querySelectorAll('.result-rail .rail-panel'));
+                if (panels.length < 2 || rails.length < 1) {{
+                  result.push(`workspace panel count ${{panels.length}}, rail count ${{rails.length}}`);
+                }}
                 const narrow = panels
                   .map((node, index) => [index + 1, node.getBoundingClientRect().width])
                   .filter(([, width]) => width < 250);
@@ -659,7 +756,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await assertHeaderSubtitle(page, '功能选择 · 请选择功能', 'home');
           await assertVnetSkin(page, 'home');
           const bodyText = await page.locator('body').innerText({{ timeout: 10000 }});
-          const required = ['功能选择', '事件管理', '维护管理', '变更管理', '其他工具'];
+          const required = ['功能选择', '事件管理', '维护管理', '检修管理', '变更管理', '其他工具'];
           for (const marker of required) {{
             if (!bodyText.includes(marker)) throw new Error(`missing marker: ${{marker}}`);
           }}
@@ -685,6 +782,19 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await page.getByRole('button', {{ name: '返回功能选择' }}).click();
           await page.waitForSelector('text=业务工作台', {{ timeout: 10000 }});
           await assertHeaderSubtitle(page, '功能选择 · 请选择功能', 'home-after-handover');
+          await page.getByRole('button', {{ name: '进入检修管理', exact: true }}).click();
+          await page.waitForSelector('text=选择楼栋进入检修管理', {{ timeout: 10000 }});
+          const repairScopeCard = page.locator('article.scope-card').filter({{ hasText: 'A楼' }}).first();
+          await repairScopeCard.getByRole('button', {{ name: '进入检修管理' }}).click();
+          await waitForTextOrDump(page, '检修记录管理', 'repair-management-entry');
+          await waitForTextOrDump(page, 'A楼测试检修管理记录', 'repair-management-entry');
+          await assertLayout(page, 'repair-management-entry');
+          await page.goto(cfg.url, {{
+            waitUntil: 'domcontentloaded',
+            timeout: 20000,
+          }});
+          await page.waitForSelector('text=业务工作台', {{ timeout: 10000 }});
+          await assertHeaderSubtitle(page, '功能选择 · 请选择功能', 'home-after-repair-management');
           await page.getByRole('button', {{ name: '进入维护管理', exact: true }}).click();
           await page.waitForSelector('text=选择楼栋进入维护管理', {{ timeout: 10000 }});
           const scopeCard = page.locator('article.scope-card').filter({{ hasText: 'A楼' }}).first();
@@ -696,7 +806,9 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           const isLiteWorkbench = page.url().includes('/workbench-lite');
           if (isLiteWorkbench) {{
             const litePanels = await page.locator('.workspace > .panel').count();
-            if (litePanels < 3) throw new Error(`lite workbench panel count ${{litePanels}}`);
+            if (litePanels < 2) throw new Error(`lite workbench panel count ${{litePanels}}`);
+            const liteRails = await page.locator('.result-rail .rail-panel').count();
+            if (liteRails < 1) throw new Error(`lite workbench rail count ${{liteRails}}`);
             const typeCounts = await page.locator('.type-tab .type-count').count();
             if (typeCounts < 6) throw new Error(`lite type counts did not render: ${{typeCounts}}`);
             const panelCounts = await page.locator('.panel-title .panel-count').count();
@@ -723,6 +835,25 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             ) {{
               throw new Error(`lite workbench accessibility markers missing: ${{JSON.stringify(liteA11yProbe)}}`);
             }}
+            const liteSubmitScriptProbe = await page.evaluate(() => {{
+              const scriptText = Array.from(document.scripts).map(node => node.textContent || '').join('\\n');
+              return {{
+                hasSchedule: scriptText.includes('function schedulePostSubmitRefresh'),
+                hasWorkspaceRefresh1800: scriptText.includes('workspaceRefresh(1800'),
+                hasWorkspaceRefresh5200: scriptText.includes('workspaceRefresh(5200'),
+                hasWorkspaceRefresh12000: scriptText.includes('workspaceRefresh(12000'),
+                hasWorkspaceSelectorRefresh: scriptText.includes("['.status', '.summary', '.workspace']"),
+              }};
+            }});
+            if (
+              !liteSubmitScriptProbe.hasSchedule
+              || !liteSubmitScriptProbe.hasWorkspaceRefresh1800
+              || !liteSubmitScriptProbe.hasWorkspaceRefresh5200
+              || !liteSubmitScriptProbe.hasWorkspaceRefresh12000
+              || !liteSubmitScriptProbe.hasWorkspaceSelectorRefresh
+            ) {{
+              throw new Error(`lite submit workspace refresh guards missing: ${{JSON.stringify(liteSubmitScriptProbe)}}`);
+            }}
             await page.evaluate(() => {{
               window.__clipflowLiteNoReloadMarker = 'alive';
               const topbar = document.querySelector('.topbar');
@@ -743,13 +874,24 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             if (!restoredScroll.some(value => value >= 80)) {{
               throw new Error(`lite row click did not preserve list scroll: ${{JSON.stringify(restoredScroll)}}`);
             }}
-            const sourceLinkOptions = await page.locator('select[name="source_record_id"] option').evaluateAll(nodes => nodes.map(node => node.textContent || ''));
-            if (!sourceLinkOptions.some(text => text.includes('冷机月度巡检'))) {{
-              throw new Error(`source link options missing expected record: ${{JSON.stringify(sourceLinkOptions)}}`);
+            const sourceLinkProbe = await page.evaluate(() => {{
+              const select = document.querySelector('select[name="source_record_id"]');
+              const hidden = document.querySelector('input[type="hidden"][name="source_record_id"]');
+              return {{
+                hasSelect: !!select,
+                hiddenValue: hidden?.value || '',
+                options: select ? Array.from(select.options).map(node => node.textContent || '') : [],
+              }};
+            }});
+            if (
+              !sourceLinkProbe.hiddenValue
+              && !sourceLinkProbe.options.some(text => text.includes('冷机月度巡检'))
+            ) {{
+              throw new Error(`source link options missing expected record: ${{JSON.stringify(sourceLinkProbe)}}`);
             }}
             const sourceSelectDirty = await page.evaluate(() => {{
               const select = document.querySelector('select[name="source_record_id"]');
-              if (!select) return false;
+              if (!select) return true;
               const option = Array.from(select.options).find(node => node.value);
               if (option) select.value = option.value;
               select.dispatchEvent(new Event('change', {{ bubbles: true }}));
@@ -761,14 +903,11 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             }}
             await page.locator('#lite-notice-form textarea[name="progress"]').fill('未发送修改测试');
             await page.waitForSelector('text=有未发送修改', {{ timeout: 10000 }});
-            let sawDirtyConfirm = false;
-            page.once('dialog', async dialog => {{
-              sawDirtyConfirm = dialog.message().includes('未发送修改');
-              await dialog.accept();
-            }});
             await page.locator('.notice-row').first().click();
-            await page.waitForTimeout(300);
-            if (!sawDirtyConfirm) throw new Error('lite dirty form warning did not appear before switching item');
+            await page.waitForSelector('#lite-discard-confirm:not([hidden])', {{ timeout: 10000 }});
+            const sawDirtyConfirm = await page.locator('#lite-discard-confirm').innerText();
+            if (!sawDirtyConfirm.includes('未发送修改')) throw new Error('lite dirty form warning did not appear before switching item');
+            await page.locator('#lite-discard-confirm-button').click();
             await assertLayout(page, 'lite-workbench');
             await assertVnetSkin(page, 'lite-workbench');
             await page.getByRole('button', {{ name: '刷新数据' }}).click();
@@ -785,26 +924,44 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             }}
             await page.getByRole('button', {{ name: '刷新数据' }}).click();
             await page.locator('#lite-refresh-page').click();
-            await page.waitForTimeout(500);
-            const pageRefreshEnabled = await page.evaluate(() => document.querySelector('#lite-refresh-page')?.disabled === false);
+            await page.waitForFunction(() => document.querySelector('#lite-refresh-page')?.disabled === false, null, {{ timeout: 10000 }});
+            let pageRefreshEnabled = false;
+            for (let attempt = 0; attempt < 4; attempt += 1) {{
+              try {{
+                if (!page.url().includes('/workbench-lite')) {{
+                  throw new Error(`lite page refresh navigated away: ${{page.url()}}`);
+                }}
+                pageRefreshEnabled = await page.evaluate(() => document.querySelector('#lite-refresh-page')?.disabled === false);
+                break;
+              }} catch (refreshProbeError) {{
+                if (!String(refreshProbeError).includes('Execution context was destroyed')) throw refreshProbeError;
+                await page.waitForLoadState('domcontentloaded', {{ timeout: 5000 }}).catch(() => null);
+                await page.waitForTimeout(300);
+              }}
+            }}
             if (!pageRefreshEnabled) {{
               throw new Error('lite page refresh button stayed disabled after successful refresh');
             }}
-            await page.locator('.paste-box textarea[name="paste_text"]').fill(`【设备轮巡】状态：开始
+            await page.locator('details.paste-drawer summary').click();
+            await page.locator('form[action="/workbench-lite/parse"] textarea[name="paste_text"]').fill(`【设备轮巡】状态：开始
 【标题】EA118机房A楼制冷单元轮巡通告
 【时间】2026-06-24 09:30~2026-06-24 18:30
 【设备】A-127冷冻站制冷单元
 【内容】测试测试
 【影响】测试测试
 【进度】测试测试`);
-            await page.getByRole('button', {{ name: '解析到待发起通告' }}).click();
+            await page.getByRole('button', {{ name: '解析到当前通告' }}).click();
             await page.waitForSelector('text=EA118机房A楼制冷单元轮巡通告', {{ timeout: 10000 }});
             const markerAfterParse = await page.evaluate(() => window.__clipflowLiteNoReloadMarker || '');
             if (markerAfterParse !== 'alive') {{
               throw new Error('lite paste parse caused full page reload');
             }}
             await page.waitForSelector('text=设备轮巡', {{ timeout: 10000 }});
-            await page.waitForSelector('text=待发起通告', {{ timeout: 10000 }});
+            await page.waitForSelector('text=当前通告', {{ timeout: 10000 }});
+            const parsedSpecialtyInput = page.locator('#lite-notice-form input[name="specialty"]');
+            if (await parsedSpecialtyInput.count() === 1) {{
+              await parsedSpecialtyInput.fill('暖通');
+            }}
             const datalistProbe = await page.evaluate(() => ({{
               specialties: Array.from(document.querySelectorAll('#specialty-options option')).map(node => node.getAttribute('value') || ''),
               cycles: Array.from(document.querySelectorAll('#maintenance-cycle-options option')).map(node => node.getAttribute('value') || ''),

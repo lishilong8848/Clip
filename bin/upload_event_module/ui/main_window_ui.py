@@ -550,13 +550,9 @@ class MainWindowUiMixin:
     def _maybe_flash(self, widget, list_widget=None, item=None):
         if not self._alerts_enabled():
             return
-        if widget:
-            try:
-                if sip.isdeleted(widget):
-                    return
-            except Exception:
-                return
-            widget.trigger_flash()
+        # The old QWidget flash animation repeatedly repolished item widgets via
+        # timers. Crash traces show this native repaint path can access deleted
+        # widgets during clipboard replacement, so keep only the safe scroll hint.
         if list_widget is not None and item is not None:
             try:
                 if self._active_item_row(list_widget, item) != -1:
@@ -1238,32 +1234,7 @@ class MainWindowUiMixin:
         msg.destroyed.connect(_cleanup)
 
     def _prompt_i2_robot_group_choice(self, notice_type: str):
-        msg = QMessageBox(self)
-        msg.setWindowFlags(Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
-        msg.setWindowTitle("")
-        msg.setIcon(QMessageBox.Icon.Question)
-        msg.setText(
-            f"{notice_type or '该通告'}默认将发送到 I2 群。\n"
-            "这次只覆盖群消息去向，不会修改多维里的等级。"
-        )
-        msg.setInformativeText("请选择本次群消息的发送目标。")
-        msg.setStyleSheet(get_stylesheet(self.current_theme))
-        btn_i2 = msg.addButton("发送I2群", QMessageBox.ButtonRole.AcceptRole)
-        btn_i3 = msg.addButton("发送I3群", QMessageBox.ButtonRole.ActionRole)
-        btn_skip = msg.addButton(
-            "不发送群消息", QMessageBox.ButtonRole.DestructiveRole
-        )
-        btn_back = msg.addButton("关闭", QMessageBox.ButtonRole.RejectRole)
-        msg.setEscapeButton(btn_back)
-        msg.exec()
-        clicked = msg.clickedButton()
-        if clicked == btn_i2:
-            return "i2"
-        if clicked == btn_i3:
-            return "i3"
-        if clicked == btn_skip:
-            return "skip"
-        if clicked == btn_back:
-            return None
-        return None
+        # Avoid a blocking native popup in the upload path. The screenshot dialog
+        # can pass an explicit group choice; otherwise I2 events use the I2 route.
+        return "i2"
 

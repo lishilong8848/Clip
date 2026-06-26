@@ -1534,6 +1534,7 @@ class LanPortalStateStore:
             (marker_key,),
         ).fetchone()
         if marker:
+            self._delete_unbound_notice_identity_rows_locked(conn)
             return
         cleaned = 0
         try:
@@ -1568,6 +1569,45 @@ class LanPortalStateStore:
         conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
             (marker_key, self._json({"cleaned": cleaned, "at": time.time()})),
+        )
+        self._delete_unbound_notice_identity_rows_locked(conn)
+
+    def _delete_unbound_notice_identity_rows_locked(self, conn: sqlite3.Connection) -> None:
+        """Soft-delete legacy identity rows that cannot identify a source or target row."""
+
+        marker_key = "notice_identity_unbound_cleanup_v1_done"
+        marker = conn.execute(
+            "SELECT value FROM meta WHERE key = ?",
+            (marker_key,),
+        ).fetchone()
+        if marker:
+            return
+        now = time.time()
+        deleted = 0
+        try:
+            cursor = conn.execute(
+                """
+                UPDATE notice_identity_map
+                SET deleted_at = ?, updated_at = ?
+                WHERE deleted_at IS NULL
+                  AND COALESCE(TRIM(source_record_id), '') = ''
+                  AND (
+                        COALESCE(TRIM(target_record_id), '') = ''
+                        OR target_record_id LIKE 'local_%'
+                        OR target_record_id LIKE 'localid%'
+                        OR target_record_id LIKE 'manual:%'
+                        OR target_record_id LIKE 'draft:%'
+                        OR target_record_id LIKE 'placeholder-%'
+                  )
+                """,
+                (now, now),
+            )
+            deleted = int(cursor.rowcount or 0)
+        except Exception:
+            pass
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
+            (marker_key, self._json({"deleted": deleted, "at": now})),
         )
 
     @staticmethod

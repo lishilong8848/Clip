@@ -58,6 +58,18 @@ class NoticeWorkTypeOverrideRequest(APIModel):
     target_work_type: str = "change"
 
 
+class RepairManagementRecordRequest(APIModel):
+    scope: str = "ALL"
+    source_event_id: str = ""
+    fields: dict[str, Any] = Field(default_factory=dict)
+
+
+class EventTransferRepairRequest(APIModel):
+    scope: str = "ALL"
+    month: str = ""
+    record_id: str = ""
+
+
 class PermissionRequestCreate(APIModel):
     scopes: list[str] = Field(default_factory=list)
     reason: str = ""

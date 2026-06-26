@@ -2848,7 +2848,10 @@ class PortalRuntime:
 
     @classmethod
     def enqueue_initial_message_or_upload_job(cls, job_id: str) -> None:
-        cls.enqueue_message_job(job_id)
+        # Run the business upload first.  Personal openid messages are sent only
+        # after the target table write succeeds, so a Feishu message cannot be
+        # delivered for a notice that failed to create/update the bitable record.
+        cls.enqueue_action_job(job_id)
 
     @classmethod
     def enqueue_message_job(cls, job_id: str) -> None:
@@ -2977,94 +2980,15 @@ class PortalRuntime:
     def _process_message_batch(cls, batched_prepared: list[tuple[str, dict]]) -> None:
         if not batched_prepared:
             return
-        if len(batched_prepared) == 1:
-            job_id, prepared = batched_prepared[0]
-            ok, message = cls.service.send_action_personal_message(prepared)
-            if not ok:
-                warning = f"个人消息发送失败，已继续上传多维，可复制通告文本：{message}"
-                cls.service.mark_job(
-                    job_id,
-                    phase="upload_queued",
-                    message=str(warning),
-                    message_error=str(message or ""),
-                    message_warning=warning,
-                    message_failed=True,
-                    message_failed_continue=True,
-                    message_sent=False,
-                    message_signature=str(prepared.get("message_signature") or ""),
-                    message_queue_position=0,
-                    queue_position=0,
-                )
-                try:
-                    cls.state_store.mark_runtime_queue_item(
-                        "message",
-                        job_id,
-                        "done",
-                        error=message,
-                    )
-                except Exception:
-                    pass
-                cls.enqueue_action_job(job_id)
-                return
+        # Historical message queue entries are drained into the action queue only.
+        # The action worker writes the target bitable record first, then sends
+        # personal openid messages.  Keeping message sending here would re-open
+        # the failure mode where Feishu text is sent but the bitable write fails.
+        for job_id, _prepared in batched_prepared:
             cls.service.mark_job(
                 job_id,
-                phase="message_sent",
-                message_sent=True,
-                message_signature=str(prepared.get("message_signature") or ""),
-                message_queue_position=0,
-                queue_position=0,
-            )
-            try:
-                cls.state_store.mark_runtime_queue_item("message", job_id, "done")
-            except Exception:
-                pass
-            cls.enqueue_action_job(job_id)
-            return
-        recipients = [
-            str(open_id or "").strip()
-            for open_id in (batched_prepared[0][1].get("recipients") or [])
-            if str(open_id or "").strip()
-        ]
-        combined_text = "\n\n".join(
-            str((prepared or {}).get("text") or "").strip()
-            for _job_id, prepared in batched_prepared
-            if str((prepared or {}).get("text") or "").strip()
-        )
-        ok, message, results = _send_text_to_open_ids_guarded(combined_text, recipients)
-        for job_id, prepared in batched_prepared:
-            if not ok:
-                warning = f"个人消息发送失败，已继续上传多维，可复制通告文本：{message}"
-                cls.service.mark_job(
-                    job_id,
-                    phase="upload_queued",
-                    message=str(warning),
-                    message_error=str(message or ""),
-                    message_warning=warning,
-                    message_failed=True,
-                    message_failed_continue=True,
-                    message_sent=False,
-                    message_signature=str(prepared.get("message_signature") or ""),
-                    recipient_results=copy.deepcopy(results),
-                    message_queue_position=0,
-                    queue_position=0,
-                )
-                try:
-                    cls.state_store.mark_runtime_queue_item(
-                        "message",
-                        job_id,
-                        "done",
-                        error=message,
-                    )
-                except Exception:
-                    pass
-                cls.enqueue_action_job(job_id)
-                continue
-            cls.service.mark_job(
-                job_id,
-                phase="message_sent",
-                message_sent=True,
-                message_signature=str(prepared.get("message_signature") or ""),
-                recipient_results=copy.deepcopy(results),
+                phase="upload_queued",
+                message_sent=False,
                 message_queue_position=0,
                 queue_position=0,
             )
@@ -3195,46 +3119,16 @@ class PortalRuntime:
     @classmethod
     def _process_initial_message_job(cls, job_id: str) -> None:
         try:
-            job_ids = cls._collect_message_batch_job_ids(job_id)
-            batched_prepared: list[tuple[str, dict]] = []
-            for current_job_id in job_ids:
-                prepared = cls.service.prepare_action_job(current_job_id)
-                if prepared.get("skip_personal_message"):
-                    try:
-                        cls.state_store.mark_runtime_queue_item(
-                            "message", current_job_id, "done"
-                        )
-                    except Exception:
-                        pass
-                    cls.enqueue_action_job(current_job_id)
-                    continue
-                message_signature = str(prepared.get("message_signature") or "")
-                if prepared.get("message_sent"):
-                    cls.service.mark_job(
-                        current_job_id,
-                        phase="message_sent",
-                        message_sent=True,
-                        message_signature=message_signature,
-                        message_queue_position=0,
-                        queue_position=0,
-                    )
-                    try:
-                        cls.state_store.mark_runtime_queue_item(
-                            "message", current_job_id, "done"
-                        )
-                    except Exception:
-                        pass
-                    cls.enqueue_action_job(current_job_id)
-                    continue
-                cls.service.mark_job(
-                    current_job_id,
-                    phase="sending_message",
-                    message_queue_position=0,
-                    queue_position=0,
-                )
-                batched_prepared.append((current_job_id, prepared))
-            if batched_prepared:
-                cls._process_message_batch(batched_prepared)
+            # The message queue is kept only to drain queue items persisted by
+            # older builds.  Current safety rule: upload/update the target table
+            # first, then send personal openid messages inside the action worker.
+            # Therefore a queued message item must only hand the job to the
+            # action queue and must not send anything here.
+            try:
+                cls.state_store.mark_runtime_queue_item("message", job_id, "done")
+            except Exception:
+                pass
+            cls.enqueue_action_job(job_id)
         except Exception as exc:
             cls.service.mark_job(job_id, phase="failed", error=str(exc))
             try:
@@ -3607,6 +3501,45 @@ class PortalRuntime:
         return False
 
     @classmethod
+    def _has_cumulative_site_photo_for_notice(
+        cls,
+        payload: dict,
+        notice_type: str,
+    ) -> bool:
+        """Return whether the notice already has any required site photo.
+
+        The business rule is cumulative: for maintenance/change/repair, a site
+        photo uploaded during start, update, or end is enough to allow ending the
+        notice.  The final execution layer must therefore check both the current
+        request and the backend active/work-status projection.
+        """
+        payload = payload if isinstance(payload, dict) else {}
+        if cls._has_extra_images_payload(payload):
+            return True
+        try:
+            if cls.service._has_site_photo_payload(payload):
+                return True
+        except Exception:
+            pass
+        try:
+            if int(payload.get("site_photo_count") or 0) > 0:
+                return True
+        except Exception:
+            pass
+        try:
+            work_type = str(payload.get("work_type") or "").strip()
+            if not work_type:
+                work_type = cls._notice_work_type_from_notice_type(notice_type)
+            return bool(
+                cls.service._has_existing_site_photo_for_notice(
+                    payload,
+                    work_type=work_type,
+                )
+            )
+        except Exception:
+            return False
+
+    @classmethod
     def _upload_extra_images_for_notice(
         cls,
         payload: dict,
@@ -3679,6 +3612,11 @@ class PortalRuntime:
             "维保通告": "maintenance",
             "变更通告": "change",
             "设备检修": "repair",
+            "上电通告": "power",
+            "下电通告": "power",
+            "上下电通告": "power",
+            "设备轮巡": "polling",
+            "设备调整": "adjust",
         }.get(notice_type, "")
 
     @classmethod
@@ -3702,21 +3640,74 @@ class PortalRuntime:
     def _local_upload_dedupe_key(cls, data: dict, notice_type: str) -> str:
         data = data if isinstance(data, dict) else {}
         notice_type = str(notice_type or data.get("notice_type") or "").strip()
+        if notice_type == "事件通告":
+            event_title_key = cls._event_notice_title_key(data)
+            if event_title_key:
+                return f"{notice_type}:event-title:{hashlib.sha256(event_title_key.encode('utf-8', errors='ignore')).hexdigest()}"
         active_item_id = str(data.get("active_item_id") or "").strip()
-        if active_item_id:
+        if active_item_id and not is_local_record_id(active_item_id):
             return f"{notice_type}:active:{active_item_id}"
         record_id = str(data.get("record_id") or "").strip()
-        if record_id:
+        if record_id and not is_local_record_id(record_id):
             return f"{notice_type}:record:{record_id}"
         info = extract_notice_info(str(data.get("text") or "")) or {}
         unique_key = str(info.get("unique_key") or "").strip()
         if unique_key:
             return f"{notice_type}:unique:{hashlib.sha256(unique_key.encode('utf-8', errors='ignore')).hexdigest()}"
+        if active_item_id:
+            return f"{notice_type}:active:{active_item_id}"
+        if record_id:
+            return f"{notice_type}:record:{record_id}"
+        return ""
+
+    @classmethod
+    def _event_notice_title_key(cls, data: dict) -> str:
+        data = data if isinstance(data, dict) else {}
+        info = extract_event_info(str(data.get("text") or "")) or {}
+        title = str(
+            info.get("title")
+            or data.get("title")
+            or data.get("name")
+            or data.get("event_title")
+            or ""
+        ).strip()
+        if not title:
+            return ""
+        return re.sub(r"[\s　:：;；,，。.\-_/\\()（）【】\\[\\]~～至]+", "", title).lower()
+
+    @classmethod
+    def _existing_event_target_for_local_notice(cls, data: dict, notice_type: str) -> str:
+        if str(notice_type or "").strip() != "事件通告":
+            return ""
+        title_key = cls._event_notice_title_key(data)
+        if not title_key:
+            return ""
+        try:
+            active_items = cls.state_store.list_qt_active_items(include_deleted=False)
+        except Exception:
+            active_items = []
+        for row in active_items:
+            if not isinstance(row, dict):
+                continue
+            payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+            if str(payload.get("notice_type") or row.get("notice_type") or "").strip() != "事件通告":
+                continue
+            if cls._event_notice_title_key(payload) != title_key:
+                continue
+            target_record_id = (
+                canonical_target_record_id(payload)
+                or str(row.get("record_id") or "").strip()
+            )
+            if target_record_id and not is_local_record_id(target_record_id):
+                return target_record_id
         return ""
 
     @classmethod
     def _existing_target_for_local_upload(cls, data: dict, notice_type: str) -> str:
         data = normalize_notice_identity_payload(dict(data or {}), action="upload")
+        event_target = cls._existing_event_target_for_local_notice(data, notice_type)
+        if event_target:
+            return event_target
         work_type = str(data.get("work_type") or data.get("lan_work_type") or "").strip()
         if not work_type:
             work_type = cls._notice_work_type_from_notice_type(notice_type)
@@ -3763,9 +3754,17 @@ class PortalRuntime:
                 "record_id": target_record_id,
                 "target_record_id": target_record_id,
                 "_is_placeholder_record": False,
+                "_has_unuploaded_changes": False,
+                "_upload_in_progress": False,
+                "_last_upload_error": "",
+                "binding_status": "bound",
             },
             action="update",
         )
+        if not str(payload.get("action") or "").strip():
+            payload["action"] = "start"
+        if not str(payload.get("status") or "").strip():
+            payload["status"] = "开始" if str(payload.get("action") or "") == "start" else str(payload.get("action") or "")
         if not str(payload.get("work_type") or "").strip():
             payload["work_type"] = (
                 str(payload.get("lan_work_type") or "").strip()
@@ -3815,6 +3814,41 @@ class PortalRuntime:
         return "" if is_local_record_id(source_record_id) else source_record_id
 
     @classmethod
+    def _manual_start_target_key_from_payload(cls, payload: dict, work_type: str) -> str:
+        if not isinstance(payload, dict):
+            return ""
+        candidate = dict(payload)
+        candidate["action"] = "start"
+        candidate["work_type"] = str(work_type or candidate.get("work_type") or "").strip()
+        return cls.service._manual_start_target_key(candidate, candidate["work_type"])
+
+    @classmethod
+    def _existing_manual_active_target_for_start(cls, prepared: dict, work_type: str) -> str:
+        target_key = cls._manual_start_target_key_from_payload(prepared, work_type)
+        if not target_key:
+            return ""
+        try:
+            items = cls.state_store.list_qt_active_items(include_deleted=False)
+        except Exception:
+            return ""
+        for item in items:
+            payload = item.get("payload") if isinstance(item, dict) else {}
+            if not isinstance(payload, dict):
+                continue
+            item_work_type = str(payload.get("work_type") or "").strip() or cls._notice_work_type_from_notice_type(
+                str(payload.get("notice_type") or "")
+            )
+            if work_type and item_work_type and item_work_type != work_type:
+                continue
+            item_key = cls._manual_start_target_key_from_payload(payload, item_work_type or work_type)
+            if item_key != target_key:
+                continue
+            target_record_id = canonical_target_record_id(payload) or str(item.get("record_id") or "").strip()
+            if target_record_id and not is_local_record_id(target_record_id):
+                return target_record_id
+        return ""
+
+    @classmethod
     def _existing_target_for_prepared_start(cls, prepared: dict, notice_type: str) -> str:
         prepared = normalize_notice_identity_payload(dict(prepared or {}), action="start")
         work_type = str(prepared.get("work_type") or "").strip()
@@ -3844,6 +3878,11 @@ class PortalRuntime:
                 )
             except Exception:
                 target_record_id = ""
+        if not target_record_id and not source_record_id:
+            target_record_id = cls._existing_manual_active_target_for_start(
+                prepared,
+                work_type,
+            )
         if not target_record_id:
             return ""
         guard = external_real_write_guard()
@@ -4247,7 +4286,7 @@ class PortalRuntime:
         if (
             action == "end"
             and cls._end_site_photo_required(notice_type)
-            and not cls._has_extra_images_payload(prepared)
+            and not cls._has_cumulative_site_photo_for_notice(prepared, notice_type)
         ):
             return False, "结束通告前必须添加至少一张现场照片。", ""
         guard = external_real_write_guard()
@@ -4260,12 +4299,6 @@ class PortalRuntime:
             return True, record_id, record_id
         if not guard["real_write_allowed"]:
             return False, str(guard["reason"] or "真实外部写入未确认。"), ""
-        images_ok, images_error, image_file_tokens, image_extra_file_tokens = (
-            cls._upload_extra_images_for_notice(prepared, notice_type)
-        )
-        if not images_ok:
-            return False, images_error or "现场照片上传失败。", ""
-
         if action == "start":
             existing_target = cls._existing_target_for_prepared_start(
                 prepared,
@@ -4273,6 +4306,11 @@ class PortalRuntime:
             )
             if existing_target:
                 return True, existing_target, existing_target
+            images_ok, images_error, image_file_tokens, image_extra_file_tokens = (
+                cls._upload_extra_images_for_notice(prepared, notice_type)
+            )
+            if not images_ok:
+                return False, images_error or "现场照片上传失败。", ""
             payload = cls._prepared_to_notice_payload(
                 prepared,
                 file_tokens=image_file_tokens,
@@ -4323,6 +4361,11 @@ class PortalRuntime:
         existing_tokens, existing_extra_tokens, existing_response_time = (
             cls._existing_tokens_for_notice_type(notice_type, fields)
         )
+        images_ok, images_error, image_file_tokens, image_extra_file_tokens = (
+            cls._upload_extra_images_for_notice(prepared, notice_type)
+        )
+        if not images_ok:
+            return False, images_error or "现场照片上传失败。", record_id
         payload = cls._prepared_to_notice_payload(
             prepared,
             file_tokens=image_file_tokens,
@@ -4529,7 +4572,56 @@ class PortalRuntime:
         prepared["_is_placeholder_record"] = False
         prepared["_upload_in_progress"] = False
         prepared["_has_unuploaded_changes"] = False
+        cls._merge_existing_site_photo_projection(prepared)
         return prepared
+
+    @classmethod
+    def _merge_existing_site_photo_projection(cls, prepared: dict) -> None:
+        if not isinstance(prepared, dict):
+            return
+        if cls.service._has_site_photo_payload(prepared) or int(prepared.get("site_photo_count") or 0) > 0:
+            return
+        active_item_id = str(prepared.get("active_item_id") or "").strip()
+        target_record_id = canonical_target_record_id(prepared)
+        source_record_id = str(prepared.get("source_record_id") or "").strip()
+        work_type = str(prepared.get("work_type") or "").strip()
+        try:
+            active_items = cls.state_store.list_qt_active_items(include_deleted=False)
+        except Exception:
+            active_items = []
+        for row in active_items:
+            if not isinstance(row, dict):
+                continue
+            payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+            if not isinstance(payload, dict):
+                continue
+            row_target = canonical_target_record_id(payload) or str(row.get("record_id") or "").strip()
+            row_active = str(payload.get("active_item_id") or row.get("active_item_id") or "").strip()
+            row_source = str(payload.get("source_record_id") or "").strip()
+            row_work_type = str(payload.get("work_type") or "").strip()
+            if work_type and row_work_type and row_work_type != work_type:
+                continue
+            matched = (
+                bool(active_item_id and row_active == active_item_id)
+                or bool(target_record_id and row_target == target_record_id)
+                or bool(source_record_id and row_source == source_record_id)
+            )
+            if not matched:
+                continue
+            if cls.service._has_site_photo_payload(payload):
+                for key in ("extra_images", "site_photos", "process_site_images"):
+                    value = payload.get(key)
+                    if isinstance(value, list) and value:
+                        prepared[key] = copy.deepcopy(value)
+                prepared["site_photo_count"] = max(
+                    int(prepared.get("site_photo_count") or 0),
+                    len(prepared.get("extra_images") or prepared.get("site_photos") or []),
+                )
+                return
+            count = int(payload.get("site_photo_count") or 0)
+            if count > 0:
+                prepared["site_photo_count"] = count
+                return
 
     @classmethod
     def _upsert_backend_active_notice(
@@ -4663,6 +4755,12 @@ class PortalRuntime:
             if isinstance(identity, dict):
                 target_record_id = str(identity.get("target_record_id") or "").strip()
         if action_type in {"update", "end"} and not target_record_id:
+            target_record_id = cls._existing_event_target_for_local_notice(data, notice_type)
+            if target_record_id:
+                data["target_record_id"] = target_record_id
+                data["record_id"] = target_record_id
+                data["_is_placeholder_record"] = False
+        if action_type in {"update", "end"} and not target_record_id:
             if record_id and not is_local_record_id(record_id):
                 ok_query, query_result = query_record_by_id(record_id, notice_type)
                 action_name = "结束" if action_type == "end" else "更新"
@@ -4716,7 +4814,13 @@ class PortalRuntime:
         if (
             action_type == "end"
             and cls._end_site_photo_required(notice_type)
-            and not cls._has_extra_images_payload({"extra_images": extra_images})
+            and not cls._has_cumulative_site_photo_for_notice(
+                {
+                    **data,
+                    "extra_images": extra_images,
+                },
+                notice_type,
+            )
         ):
             return {
                 "ok": False,
@@ -4952,6 +5056,22 @@ class PortalRuntime:
                 data,
                 remote_record_id=target_record_id,
                 job_id=str(payload.get("job_id") or ""),
+            )
+        elif success and action_type == "update":
+            updated_active_payload = {
+                **data,
+                "record_id": target_record_id,
+                "target_record_id": target_record_id,
+                "_is_placeholder_record": False,
+                "_has_unuploaded_changes": False,
+                "_upload_in_progress": False,
+                "_last_upload_error": "",
+                "binding_status": "bound",
+            }
+            cls._remember_local_upload_target(
+                updated_active_payload,
+                notice_type=notice_type,
+                target_record_id=target_record_id,
             )
         return {
             "ok": bool(success),
@@ -5228,23 +5348,6 @@ class PortalRuntime:
     def _process_maintenance_action_job(cls, job_id: str) -> None:
         try:
             prepared = cls.service.prepare_action_job(job_id)
-            current_job = cls.service.get_job(job_id) or {}
-            message_failed_continue = bool(current_job.get("message_failed_continue"))
-            if (
-                not prepared.get("skip_personal_message")
-                and not prepared.get("message_sent")
-                and not message_failed_continue
-            ):
-                try:
-                    cls.state_store.mark_runtime_queue_item(
-                        "qt_action",
-                        job_id,
-                        "waiting_message",
-                    )
-                except Exception:
-                    pass
-                cls.enqueue_message_job(job_id)
-                return
             if prepared.get("skip_personal_message"):
                 cls.service.mark_job(
                     job_id,
@@ -5334,6 +5437,43 @@ class PortalRuntime:
                 )
                 if not paired_ok:
                     paired_warning = f"维保多维同步失败：{paired_message}"
+            if not prepared.get("skip_personal_message") and not prepared.get("message_sent"):
+                cls.service.mark_job(
+                    job_id,
+                    phase="sending_message",
+                    message_queue_position=0,
+                    queue_position=0,
+                )
+                message_ok, message_result = cls.service.send_action_personal_message(
+                    prepared
+                )
+                if message_ok:
+                    cls.service.mark_job(
+                        job_id,
+                        phase="message_sent",
+                        message_sent=True,
+                        message_signature=str(prepared.get("message_signature") or ""),
+                        message_queue_position=0,
+                        queue_position=0,
+                    )
+                    prepared["message_sent"] = True
+                else:
+                    warning = (
+                        "多维上传成功；个人消息发送失败，可复制通告文本："
+                        f"{message_result}"
+                    )
+                    cls.service.mark_job(
+                        job_id,
+                        message=str(warning),
+                        message_error=str(message_result or ""),
+                        message_warning=warning,
+                        message_failed=True,
+                        message_failed_continue=True,
+                        message_sent=False,
+                        message_signature=str(prepared.get("message_signature") or ""),
+                        message_queue_position=0,
+                        queue_position=0,
+                    )
             cls.service.mark_job(
                 job_id,
                 prepared=prepared,

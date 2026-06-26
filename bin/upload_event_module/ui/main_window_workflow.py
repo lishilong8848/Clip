@@ -483,8 +483,22 @@ class MainWindowWorkflowMixin:
 
         executor = getattr(self, "_qt_backend_command_executor", None)
         if executor is None:
-            worker()
-            return
+            try:
+                from concurrent.futures import ThreadPoolExecutor
+
+                executor = ThreadPoolExecutor(
+                    max_workers=2,
+                    thread_name_prefix="ClipFlowQtBackendCommandFallback",
+                )
+                self._qt_backend_command_executor = executor
+            except Exception as exc:
+                self._post_request_finished(
+                    "上传",
+                    False,
+                    f"后端命令后台线程创建失败: {exc}",
+                    record_id,
+                )
+                return
         try:
             executor.submit(worker)
         except RuntimeError as exc:
@@ -1068,8 +1082,6 @@ class MainWindowWorkflowMixin:
                 and existing.get("screenshot_bytes") is not None
             ):
                 merged["screenshot_bytes"] = existing.get("screenshot_bytes")
-            if not payload.get("extra_images") and existing.get("extra_images"):
-                merged["extra_images"] = existing.get("extra_images")
             if not payload.get("response_time") and existing.get("response_time"):
                 merged["response_time"] = existing.get("response_time")
             if str(payload.get("robot_group_choice") or "").strip().lower() in ("", "auto"):

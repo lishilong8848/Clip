@@ -4,10 +4,13 @@ from __future__ import annotations
 import os
 import re
 import json
+import gc
 import importlib.util
 import subprocess
 import sys
 import tempfile
+import sqlite3
+import time
 from pathlib import Path
 
 
@@ -127,10 +130,67 @@ def check_git_runtime_data() -> tuple[bool, list[str]]:
 
 
 def check_state_schema() -> tuple[bool, dict]:
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
         report = store.runtime_health_report()
     return bool(report.get("ok")), report
+
+
+def check_notice_identity_cleanup() -> tuple[bool, str]:
+    message = "旧 local/空目标 identity 已在启动时软删除。"
+    ok = True
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        db_path = Path(tmp) / "state.sqlite3"
+        store = LanPortalStateStore(db_path)
+        store.runtime_health_report()
+        now = time.time()
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.execute(
+                """
+                INSERT INTO notice_identity_map(
+                    identity_id, work_type, notice_type, active_item_id,
+                    source_record_id, target_record_id, title,
+                    building_codes_json, payload_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "maintenance:active:release-local-only",
+                    "maintenance",
+                    "维保通告",
+                    "release-local-only",
+                    "",
+                    "local_release_placeholder",
+                    "旧本地占位",
+                    "[]",
+                    json.dumps(
+                        {
+                            "active_item_id": "release-local-only",
+                            "record_id": "local_release_placeholder",
+                            "target_record_id": "local_release_placeholder",
+                            "work_type": "maintenance",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    now,
+                    now,
+                ),
+            )
+            conn.execute(
+                "DELETE FROM meta WHERE key = 'notice_identity_unbound_cleanup_v1_done'"
+            )
+            conn.commit()
+        reloaded = LanPortalStateStore(db_path)
+        identity = reloaded.resolve_notice_identity(
+            work_type="maintenance",
+            active_item_id="release-local-only",
+        )
+        if identity:
+            ok = False
+            message = "旧 local/空目标 identity 仍可被 resolve_notice_identity 命中。"
+        del reloaded
+        del store
+        gc.collect()
+    return ok, message
 
 
 def check_requests_usage() -> tuple[bool, list[str]]:
@@ -392,16 +452,31 @@ def check_frontend_freeze_guards() -> tuple[bool, list[str]]:
         "preserveWorkspaceScroll",
         "confirmDiscardLiteChanges",
         "has-dirty-lite-form",
-        "beforeunload",
         "applyOptimisticSubmission",
         "schedulePostSubmitRefresh",
+        "workspaceRefresh(1800",
+        "workspaceRefresh(5200",
+        "workspaceRefresh(12000",
+        "['.status', '.summary', '.workspace']",
+        "pendingSubmitAction",
     ]
     for marker in lite_markers:
         if marker not in lite_text:
             errors.append(f"workbench_lite.py 缺少轻量工作台防卡顿/关联能力: {marker}")
-    for forbidden in ("setTimeout(() => location.reload", "liteFetchThenReload"):
+    for forbidden in ("setTimeout(() => location.reload", "liteFetchThenReload", "beforeunload"):
         if forbidden in lite_text:
             errors.append(f"workbench_lite.py 普通交互仍依赖整页刷新: {forbidden}")
+    for forbidden in (
+        "row.setAttribute('data-draft', JSON.stringify(draft))",
+        'row.setAttribute("data-draft", JSON.stringify(draft))',
+    ):
+        if forbidden in lite_text:
+            errors.append(
+                "workbench_lite.py 会把完整 draft 写入 DOM，附件/图片场景可能导致浏览器卡死"
+            )
+    for marker in ("setSafeDraftAttr", "safeDraftSnapshot", "compactOptimisticDraft"):
+        if marker not in lite_text:
+            errors.append(f"workbench_lite.py 缺少轻量 draft DOM 防卡死保护: {marker}")
 
     backend_markers = [
         "@app.get(\"/workbench-lite\")",
@@ -1279,7 +1354,7 @@ def check_notice_type_mappings() -> tuple[bool, list[str]]:
         "maintenance": "维保通告",
         "change": "变更通告",
         "repair": "设备检修",
-        "power": "上下电通告",
+        "power": "上电通告",
         "polling": "设备轮巡",
         "adjust": "设备调整",
     }
@@ -1431,6 +1506,38 @@ def check_target_candidate_match_reason() -> tuple[bool, list[str]]:
     return not errors, errors
 
 
+def check_notice_site_photo_payload_not_reused() -> tuple[bool, list[str]]:
+    service_path = BIN_DIR / "lan_bitable_template_portal" / "portal_service.py"
+    qt_path = BIN_DIR / "upload_event_module" / "ui" / "main_window_workflow.py"
+    errors: list[str] = []
+    try:
+        service_text = service_path.read_text(encoding="utf-8", errors="ignore")
+    except Exception as exc:
+        return False, [f"读取 portal_service.py 失败: {exc}"]
+    try:
+        qt_text = qt_path.read_text(encoding="utf-8", errors="ignore")
+    except Exception as exc:
+        return False, [f"读取 main_window_workflow.py 失败: {exc}"]
+
+    required_service_markers = (
+        "explicit_site_photos = self._has_site_photo_payload(payload) or self._has_site_photo_payload(patch)",
+        'for stale_image_key in ("extra_images", "site_photos", "process_site_images")',
+        "expanded.pop(stale_image_key, None)",
+    )
+    for marker in required_service_markers:
+        if marker not in service_text:
+            errors.append(f"后端 notice command 缺少旧现场照片清理保护: {marker}")
+
+    forbidden_qt_markers = (
+        'if not payload.get("extra_images") and existing.get("extra_images")',
+        'merged["extra_images"] = existing.get("extra_images")',
+    )
+    for marker in forbidden_qt_markers:
+        if marker in qt_text:
+            errors.append(f"Qt 更新队列仍会继承旧现场照片: {marker}")
+    return not errors, errors
+
+
 def check_fastapi_backend_entry() -> tuple[bool, str]:
     main_path = BIN_DIR / "refactored_main.py"
     backend_main_path = BIN_DIR / "clipflow_backend" / "main.py"
@@ -1494,6 +1601,10 @@ def main() -> int:
     ok, report = check_state_schema()
     if not ok:
         failures.append(f"SQLite schema 自检失败: {report}")
+
+    ok, notice_identity_message = check_notice_identity_cleanup()
+    if not ok:
+        failures.append("SQLite notice_identity_map 清理不完整: " + notice_identity_message)
 
     ok, requests_offenders = check_requests_usage()
     if not ok:
@@ -1685,6 +1796,13 @@ def main() -> int:
         failures.append(
             "目标多维候选记录必须返回并展示匹配原因: "
             + "; ".join(target_candidate_errors[:20])
+        )
+
+    ok, site_photo_reuse_errors = check_notice_site_photo_payload_not_reused()
+    if not ok:
+        failures.append(
+            "通告更新/结束不得复用旧现场照片上传凭证: "
+            + "; ".join(site_photo_reuse_errors[:20])
         )
 
     ok, fastapi_entry_message = check_fastapi_backend_entry()

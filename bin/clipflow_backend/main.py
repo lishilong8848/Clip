@@ -47,6 +47,7 @@ from clipflow_backend.api_models import (
     EngineerMopResetRequest,
     EngineerMopSettingsSaveRequest,
     EngineerMopUploadSignedRequest,
+    EventTransferRepairRequest,
     GenerateTemplatesRequest,
     HandoverLinksAuthRequest,
     HandoverLinksSaveRequest,
@@ -65,6 +66,7 @@ from clipflow_backend.api_models import (
     PermissionRequestConfirm,
     PermissionRequestCreate,
     PermissionRequestReviewRequest,
+    RepairManagementRecordRequest,
     QtClipboardAckRequest,
     QtClipboardEventRequest,
     QtActiveItemsDeltaRequest,
@@ -586,6 +588,11 @@ class FastAPIPortalController:
         @app.get("/engineer/mop")
         @app.get("/engineer/mop/")
         async def engineer_mop_page(request: Request):
+            return self._static_file_response(request, portal_index_file(), html=True)
+
+        @app.get("/repair-management")
+        @app.get("/repair-management/")
+        async def repair_management_page(request: Request):
             return self._static_file_response(request, portal_index_file(), html=True)
 
         @app.get("/signature")
@@ -2457,6 +2464,152 @@ class FastAPIPortalController:
                 return self._json_ok(request, session, data)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)
+
+        @app.post("/api/events/transfer-repair")
+        async def events_transfer_repair(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                payload = (
+                    await self._read_model_request(request, EventTransferRepairRequest)
+                ).to_payload()
+                self._authorized_scope_or_error(session, payload.get("scope") or "ALL")
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.mark_event_transferred_to_repair,
+                    record_id=str(payload.get("record_id") or ""),
+                    month=str(payload.get("month") or ""),
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.get("/api/repair-management/event-candidates")
+        async def repair_management_event_candidates(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_scope_or_error(
+                    session, request.query_params.get("scope") or "ALL"
+                )
+                month = str(request.query_params.get("month") or "").strip()
+                query = str(request.query_params.get("q") or "").strip()
+                try:
+                    limit = int(request.query_params.get("limit") or 50)
+                except ValueError:
+                    limit = 50
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.list_repair_management_event_candidates,
+                    scope=scope,
+                    month=month,
+                    query=query,
+                    limit=limit,
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
+        @app.get("/api/repair-management/event-prefill")
+        async def repair_management_event_prefill(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_scope_or_error(
+                    session, request.query_params.get("scope") or "ALL"
+                )
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.repair_management_event_prefill,
+                    scope=scope,
+                    record_id=str(request.query_params.get("record_id") or ""),
+                    month=str(request.query_params.get("month") or ""),
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.get("/api/repair-management/records")
+        async def repair_management_records(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                self._authorized_scope_or_error(
+                    session, request.query_params.get("scope") or "ALL"
+                )
+                query = str(request.query_params.get("q") or "").strip()
+                try:
+                    limit = int(request.query_params.get("limit") or 200)
+                except ValueError:
+                    limit = 200
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.get_repair_management_records,
+                    scope=request.query_params.get("scope") or "ALL",
+                    query=query,
+                    limit=limit,
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
+        @app.post("/api/repair-management/records")
+        async def repair_management_record_create(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                payload = (
+                    await self._read_model_request(request, RepairManagementRecordRequest)
+                ).to_payload()
+                self._authorized_scope_or_error(session, payload.get("scope") or "ALL")
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.create_repair_management_record,
+                    payload.get("fields") if isinstance(payload.get("fields"), dict) else {},
+                    source_event_id=str(payload.get("source_event_id") or ""),
+                    scope=str(payload.get("scope") or "ALL"),
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.put("/api/repair-management/records/{record_id}")
+        async def repair_management_record_update(record_id: str, request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                payload = (
+                    await self._read_model_request(request, RepairManagementRecordRequest)
+                ).to_payload()
+                self._authorized_scope_or_error(session, payload.get("scope") or "ALL")
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.update_repair_management_record,
+                    record_id,
+                    payload.get("fields") if isinstance(payload.get("fields"), dict) else {},
+                    scope=str(payload.get("scope") or "ALL"),
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.delete("/api/repair-management/records/{record_id}")
+        async def repair_management_record_delete(record_id: str, request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                self._authorized_scope_or_error(
+                    session, request.query_params.get("scope") or "ALL"
+                )
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.delete_repair_management_record,
+                    record_id,
+                    scope=request.query_params.get("scope") or "ALL",
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
 
         @app.get("/api/handover-links")
         async def handover_links(request: Request):
