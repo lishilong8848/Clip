@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import re
 from typing import Any
 
 
@@ -10,9 +11,16 @@ def text(value: Any) -> str:
 
 def is_local_record_id(record_id: str) -> bool:
     record_id = text(record_id)
+    if not record_id:
+        return True
+    if re.fullmatch(r"[0-9a-fA-F]{32}", record_id):
+        return True
+    if "|" in record_id:
+        return True
+    if re.search(r"[\u4e00-\u9fff]", record_id):
+        return True
     return (
-        not record_id
-        or record_id.startswith("local_")
+        record_id.startswith("local_")
         or record_id.startswith("localid")
         or record_id.startswith("placeholder-")
         or record_id.startswith("manual:")

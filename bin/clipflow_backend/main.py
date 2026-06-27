@@ -101,6 +101,8 @@ from lan_bitable_template_portal.server import (
     portal_static_roots,
 )
 from lan_bitable_template_portal.workbench_lite import (
+    ONGOING_PAGE_SIZE,
+    PENDING_PAGE_SIZE,
     parse_pasted_notice_to_draft,
     render_workbench_lite,
 )
@@ -482,6 +484,8 @@ class FastAPIPortalController:
                 specialty = str(request.query_params.get("specialty") or "")
                 record_id = str(request.query_params.get("record_id") or "")
                 active_item_id = str(request.query_params.get("active_item_id") or "")
+                pending_page = str(request.query_params.get("pending_page") or "1")
+                ongoing_page = str(request.query_params.get("ongoing_page") or "1")
                 manual = str(request.query_params.get("manual") or "").strip().lower() in {
                     "1",
                     "true",
@@ -498,6 +502,10 @@ class FastAPIPortalController:
                     ongoing_items=ongoing,
                     work_type=work_type,
                     sections=("records", "ongoing", "stats", "zhihang"),
+                    records_page=pending_page,
+                    records_page_size=PENDING_PAGE_SIZE,
+                    ongoing_page=ongoing_page,
+                    ongoing_page_size=ONGOING_PAGE_SIZE,
                 )
                 scope_options = PortalRuntime.auth_manager.filter_scope_options(
                     SCOPE_OPTIONS,
@@ -517,6 +525,8 @@ class FastAPIPortalController:
                     specialty=specialty,
                     record_id=record_id,
                     active_item_id=active_item_id,
+                    pending_page=pending_page,
+                    ongoing_page=ongoing_page,
                     manual=manual,
                     scope_options=scope_options,
                     notice_undos=notice_undos if isinstance(notice_undos, list) else [],
@@ -556,6 +566,10 @@ class FastAPIPortalController:
                     ongoing_items=ongoing,
                     work_type=parsed_work_type,
                     sections=("records", "ongoing", "stats", "zhihang"),
+                    records_page=1,
+                    records_page_size=PENDING_PAGE_SIZE,
+                    ongoing_page=1,
+                    ongoing_page_size=ONGOING_PAGE_SIZE,
                 )
                 scope_options = PortalRuntime.auth_manager.filter_scope_options(
                     SCOPE_OPTIONS,
@@ -1434,6 +1448,20 @@ class FastAPIPortalController:
                 specialty = str(request.query_params.get("specialty") or "")
                 search = str(request.query_params.get("search") or "")
                 work_type = str(request.query_params.get("work_type") or "").strip()
+                records_page = str(
+                    request.query_params.get("records_page")
+                    or request.query_params.get("pending_page")
+                    or request.query_params.get("page")
+                    or "1"
+                )
+                records_page_size = str(
+                    request.query_params.get("records_page_size")
+                    or request.query_params.get("pending_page_size")
+                    or request.query_params.get("page_size")
+                    or "0"
+                )
+                ongoing_page = str(request.query_params.get("ongoing_page") or "1")
+                ongoing_page_size = str(request.query_params.get("ongoing_page_size") or "0")
                 raw_sections = str(request.query_params.get("sections") or "").strip()
                 sections = tuple(
                     item.strip().lower()
@@ -1456,6 +1484,10 @@ class FastAPIPortalController:
                         search,
                         work_type,
                         sections,
+                        records_page,
+                        records_page_size,
+                        ongoing_page,
+                        ongoing_page_size,
                         PortalRuntime._ongoing_items_marker(ongoing),
                     ),
                     lambda: PortalRuntime.service.query_records(
@@ -1466,6 +1498,10 @@ class FastAPIPortalController:
                         ongoing_items=ongoing,
                         work_type=work_type,
                         sections=sections,
+                        records_page=records_page,
+                        records_page_size=records_page_size,
+                        ongoing_page=ongoing_page,
+                        ongoing_page_size=ongoing_page_size,
                     ),
                 )
                 if payload_key == "workbench" and work_type and isinstance(payload, dict):
@@ -1488,6 +1524,10 @@ class FastAPIPortalController:
                             ongoing_items=ongoing,
                             work_type="",
                             sections=sections,
+                            records_page=1,
+                            records_page_size=0,
+                            ongoing_page=1,
+                            ongoing_page_size=0,
                         )
                         if isinstance(broad_payload, dict):
                             filtered_payload["records"] = [

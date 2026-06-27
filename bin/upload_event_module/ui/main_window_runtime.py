@@ -1917,7 +1917,7 @@ class MainWindowRuntimeMixin:
                 if self._is_placeholder_record(duplicate):
                     raise RuntimeError("该通告已在主界面发起，开始上传未完成。")
                 raise RuntimeError(f"该通告已存在进行中记录: {duplicate_id}")
-            placeholder_id = uuid.uuid4().hex
+            placeholder_id = f"local_{uuid.uuid4().hex}"
             data = {
                 "record_id": placeholder_id,
                 "_is_placeholder_record": True,

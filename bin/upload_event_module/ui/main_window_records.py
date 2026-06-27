@@ -1836,7 +1836,12 @@ class MainWindowRecordsMixin:
             merged["routing_state"] = "normal"
             merged.pop("routing_error", None)
             if real_entries:
-                merged["record_id"] = survivor_data.get("record_id")
+                survivor_target_id = (
+                    survivor_data.get("target_record_id")
+                    or survivor_data.get("record_id")
+                )
+                merged["record_id"] = survivor_target_id
+                merged["target_record_id"] = survivor_target_id
                 merged["_is_placeholder_record"] = False
                 merged["record_binding_state"] = survivor_data.get(
                     "record_binding_state", "bound"

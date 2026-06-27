@@ -454,10 +454,9 @@ def check_frontend_freeze_guards() -> tuple[bool, list[str]]:
         "has-dirty-lite-form",
         "applyOptimisticSubmission",
         "schedulePostSubmitRefresh",
-        "workspaceRefresh(1800",
-        "workspaceRefresh(5200",
-        "workspaceRefresh(12000",
-        "['.status', '.summary', '.workspace']",
+        "applyJobPatch(job.frontend_patch",
+        "refreshCurrentLite(label || '发送成功，正在更新统计...', ['.status', '.summary'])",
+        "pollSubmittedJob(jobId, label || '任务已完成，正在更新列表...', payload)",
         "pendingSubmitAction",
     ]
     for marker in lite_markers:

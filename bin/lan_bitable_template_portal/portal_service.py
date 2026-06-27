@@ -4210,6 +4210,78 @@ class MaintenancePortalService:
         payload["updated_at"] = now
         self._save_work_status_locked(payload, building=building, building_code=building_code)
 
+    def _build_action_frontend_patch(
+        self,
+        job: dict[str, Any],
+        *,
+        success: bool,
+        message: str = "",
+        record_id: str = "",
+        active_item_id: str = "",
+        target_selection: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        prepared = job.get("prepared") if isinstance(job.get("prepared"), dict) else {}
+        request = job.get("request") if isinstance(job.get("request"), dict) else {}
+        action = str(prepared.get("action") or request.get("action") or "").strip().lower()
+        merged = {}
+        merged.update(request)
+        merged.update(prepared)
+        if record_id:
+            merged["target_record_id"] = str(record_id or "").strip()
+            merged["record_id"] = str(record_id or "").strip()
+        if active_item_id:
+            merged["active_item_id"] = str(active_item_id or "").strip()
+        identity = normalize_notice_identity_payload(merged, action=action)
+        target_record_id = str(
+            record_id
+            or identity.get("target_record_id")
+            or job.get("target_record_id")
+            or ""
+        ).strip()
+        patch = {
+            "kind": "notice_action_result",
+            "status": "success" if success else "failed",
+            "action": action,
+            "work_type": str(
+                prepared.get("work_type")
+                or request.get("work_type")
+                or WORK_TYPE_MAINTENANCE
+            ).strip(),
+            "notice_type": str(prepared.get("notice_type") or request.get("notice_type") or "").strip(),
+            "active_item_id": str(
+                active_item_id
+                or identity.get("active_item_id")
+                or job.get("active_item_id")
+                or ""
+            ).strip(),
+            "source_record_id": canonical_source_record_id(identity),
+            "target_record_id": target_record_id,
+            "record_id": target_record_id,
+            "title": str(prepared.get("title") or request.get("title") or "").strip(),
+            "building": str(prepared.get("building") or request.get("building") or "").strip(),
+            "specialty": str(prepared.get("specialty") or request.get("specialty") or "").strip(),
+            "maintenance_cycle": str(
+                prepared.get("maintenance_cycle")
+                or request.get("maintenance_cycle")
+                or ""
+            ).strip(),
+            "status_text": str(prepared.get("status") or request.get("status") or "").strip(),
+            "site_photo_count": str(
+                prepared.get("site_photo_count")
+                or request.get("site_photo_count")
+                or "0"
+            ).strip(),
+            "message": str(message or "").strip(),
+        }
+        if not success and isinstance(target_selection, dict):
+            patch["target_record_missing"] = bool(target_selection.get("target_record_missing"))
+            patch["needs_target_selection"] = bool(target_selection.get("needs_target_selection"))
+            patch["target_selection_message"] = str(target_selection.get("message") or "").strip()
+            candidates = target_selection.get("target_candidates")
+            if isinstance(candidates, list):
+                patch["target_candidates"] = copy.deepcopy(candidates[:20])
+        return patch
+
     def mark_action_upload_result(
         self,
         job_id: str,
@@ -4234,11 +4306,20 @@ class MaintenancePortalService:
             )
             message = message_warning
         phase = "success" if success else "failed"
+        frontend_patch = self._build_action_frontend_patch(
+            job,
+            success=success,
+            message=message,
+            record_id=record_id,
+            active_item_id=active_item_id,
+            target_selection=target_selection,
+        )
         patch = {
             "phase": phase,
             "error": "" if success else str(message or "上传失败"),
             "upload_message": str(message or ""),
             "record_id": str(record_id or ""),
+            "frontend_patch": frontend_patch,
         }
         if success and str(record_id or "").strip():
             patch["target_record_id"] = str(record_id or "").strip()
@@ -9156,6 +9237,10 @@ class MaintenancePortalService:
         ongoing_items: list[dict[str, Any]] | None = None,
         work_type: str = "",
         sections: set[str] | list[str] | tuple[str, ...] | None = None,
+        records_page: int | str = 1,
+        records_page_size: int | str = 0,
+        ongoing_page: int | str = 1,
+        ongoing_page_size: int | str = 0,
     ) -> dict[str, Any]:
         self.ensure_snapshot_loaded()
         scope = self._normalize_scope(scope)
@@ -9213,12 +9298,13 @@ class MaintenancePortalService:
             )
         else:
             daily_summary["items"] = []
-        summary_by_record = self._work_status_by_records(
-            filtered_records,
-            scope=scope,
-            daily_items=daily_summary.get("items") or [],
-        )
         ongoing_type_counts = self._work_type_counts(merged_ongoing)
+        filtered_ongoing_for_response = [
+            item
+            for item in merged_ongoing
+            if not requested_work_type
+            or str(item.get("work_type") or WORK_TYPE_MAINTENANCE).strip() == requested_work_type
+        ]
         include_records = "records" in requested_sections
         include_ongoing = "ongoing" in requested_sections
         include_zhihang = (
@@ -9226,9 +9312,56 @@ class MaintenancePortalService:
             or requested_work_type == WORK_TYPE_CHANGE
             or not requested_work_type
         )
+        def _positive_int(value: Any, default: int = 0) -> int:
+            try:
+                return max(0, int(float(value)))
+            except Exception:
+                return default
+
+        def _slice_page(items: list[Any], page: Any, page_size: Any) -> tuple[list[Any], dict[str, int]]:
+            total = len(items or [])
+            size = _positive_int(page_size, 0)
+            if size <= 0:
+                return list(items or []), {
+                    "page": 1,
+                    "page_size": total,
+                    "total": total,
+                    "total_pages": 1,
+                    "offset": 0,
+                    "returned": total,
+                }
+            size = min(size, 200)
+            total_pages = max(1, (total + size - 1) // size)
+            current_page = min(max(1, _positive_int(page, 1) or 1), total_pages)
+            offset = (current_page - 1) * size
+            visible = list(items or [])[offset : offset + size]
+            return visible, {
+                "page": current_page,
+                "page_size": size,
+                "total": total,
+                "total_pages": total_pages,
+                "offset": offset,
+                "returned": len(visible),
+            }
+
+        visible_records, records_pagination = _slice_page(
+            filtered_records,
+            records_page,
+            records_page_size,
+        )
+        visible_ongoing, ongoing_pagination = _slice_page(
+            filtered_ongoing_for_response,
+            ongoing_page,
+            ongoing_page_size,
+        )
+        summary_by_record = self._work_status_by_records(
+            visible_records,
+            scope=scope,
+            daily_items=daily_summary.get("items") or [],
+        ) if include_records else {}
         serialized_records = [
             self._serialize_record(record, summary_by_record)
-            for record in filtered_records
+            for record in visible_records
         ] if include_records else []
         return {
             "maintenance_status": DEFAULT_MAINTENANCE_STATUS,
@@ -9252,11 +9385,13 @@ class MaintenancePortalService:
                 self._serialize_zhihang_change_record(record)
                 for record in zhihang_records
             ] if include_zhihang else [],
-            "ongoing": merged_ongoing if include_ongoing else [],
+            "ongoing": visible_ongoing if include_ongoing else [],
             "daily_summary": daily_summary,
             "record_type_counts": record_type_counts,
             "ongoing_type_counts": ongoing_type_counts,
-            "maintenance_options": self._maintenance_options_for_records(filtered_records),
+            "maintenance_options": self._maintenance_options_for_records(visible_records),
+            "records_pagination": records_pagination,
+            "ongoing_pagination": ongoing_pagination,
             "filters": {
                 "default_month": month or RECENT_MONTH_FILTER_LABEL,
                 "specialties": self._sorted_unique_work_specialties(),
@@ -14497,6 +14632,7 @@ class MaintenancePortalService:
             "paired_maintenance_target_record_id": str(
                 job.get("paired_maintenance_target_record_id") or ""
             ),
+            "frontend_patch": copy.deepcopy(job.get("frontend_patch") or {}),
             "notice_text": str(
                 job.get("notice_text")
                 or (job.get("prepared") or {}).get("text")
@@ -14562,6 +14698,7 @@ class MaintenancePortalService:
             "error_retryable": retryable,
             "upload_message": str(job.get("upload_message") or ""),
             "retry_count": int(job.get("retry_count") or 0),
+            "frontend_patch": copy.deepcopy(job.get("frontend_patch") or {}),
             "notice_text": str(
                 job.get("notice_text")
                 or (job.get("prepared") or {}).get("text")

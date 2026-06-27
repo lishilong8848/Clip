@@ -1638,7 +1638,7 @@ class MainWindowWorkflowMixin:
                 self._schedule_pending_cache_refresh()
                 return
 
-        placeholder_record_id = uuid.uuid4().hex
+        placeholder_record_id = f"local_{uuid.uuid4().hex}"
         data = {
             "record_id": placeholder_record_id,
             "_is_placeholder_record": True,

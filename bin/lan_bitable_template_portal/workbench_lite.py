@@ -32,6 +32,8 @@ MAINTENANCE_CYCLE_OPTIONS = ("/", "每月", "每季", "每年", "半年", "每�
 SITE_PHOTO_REQUIRED_WORK_TYPES = {"maintenance", "change", "repair"}
 BINDABLE_TARGET_WORK_TYPES = {"maintenance", "change", "repair", "power", "polling", "adjust"}
 BUILDING_SCOPE_CODES = ("110", "A", "B", "C", "D", "E", "H")
+PENDING_PAGE_SIZE = 24
+ONGOING_PAGE_SIZE = 18
 REQUIRED_UPLOAD_FIELDS_BY_WORK_TYPE: dict[str, set[str]] = {
     "maintenance": {"title", "start_time", "end_time", "location", "content", "reason", "impact", "progress", "specialty", "maintenance_cycle"},
     "change": {"title", "level", "start_time", "end_time", "location", "content", "reason", "impact", "progress", "specialty"},
@@ -72,6 +74,72 @@ def _to_int(value: Any, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _page_number(value: Any) -> int:
+    return max(1, _to_int(value, 1))
+
+
+def _page_count(total: int, page_size: int) -> int:
+    total = max(0, int(total or 0))
+    page_size = max(1, int(page_size or 1))
+    return max(1, (total + page_size - 1) // page_size)
+
+
+def _page_slice(items: list[dict[str, Any]], page: int, page_size: int) -> tuple[list[dict[str, Any]], int, int]:
+    total_pages = _page_count(len(items), page_size)
+    page = min(max(1, int(page or 1)), total_pages)
+    start = (page - 1) * page_size
+    return items[start : start + page_size], page, total_pages
+
+
+def _pagination_controls(
+    *,
+    label: str,
+    page_param: str,
+    page: int,
+    total_pages: int,
+    total: int,
+    page_size: int,
+    base_params: dict[str, Any],
+) -> str:
+    if total <= page_size or total_pages <= 1:
+        return ""
+    page = min(max(1, page), total_pages)
+    start = max(1, page - 2)
+    end = min(total_pages, page + 2)
+
+    def page_link(target_page: int, text: str, class_name: str = "") -> str:
+        params = dict(base_params)
+        params[page_param] = target_page
+        disabled = target_page == page
+        if disabled:
+            return f"<span class=\"page-btn current {class_name}\" aria-current=\"page\">{_e(text)}</span>"
+        return f"<a class=\"page-btn {class_name}\" href=\"{_e(_query_url('/workbench-lite', **params))}\">{_e(text)}</a>"
+
+    parts = [
+        f"<nav class=\"list-pagination\" aria-label=\"{_e(label)}分页\">",
+        f"<span class=\"page-summary\">{_e(label)} {total} 条 · 每页 {page_size} 条</span>",
+        "<span class=\"page-links\">",
+        page_link(max(1, page - 1), "上一页", "prev") if page > 1 else "<span class=\"page-btn disabled\">上一页</span>",
+    ]
+    if start > 1:
+        parts.append(page_link(1, "1"))
+        if start > 2:
+            parts.append("<span class=\"page-ellipsis\">...</span>")
+    for item_page in range(start, end + 1):
+        parts.append(page_link(item_page, str(item_page)))
+    if end < total_pages:
+        if end < total_pages - 1:
+            parts.append("<span class=\"page-ellipsis\">...</span>")
+        parts.append(page_link(total_pages, str(total_pages)))
+    parts.append(
+        page_link(min(total_pages, page + 1), "下一页", "next")
+        if page < total_pages
+        else "<span class=\"page-btn disabled\">下一页</span>"
+    )
+    parts.extend(["</span>", "</nav>"])
+    return "".join(parts)
 
 
 def _field(record: dict[str, Any], *names: str) -> str:
@@ -753,7 +821,17 @@ def _form_fields(work_type: str, draft: dict[str, str]) -> str:
     ])
 
 
-def _record_rows(records: list[dict[str, Any]], *, scope: str, work_type: str, search: str, specialty: str, selected_id: str) -> str:
+def _record_rows(
+    records: list[dict[str, Any]],
+    *,
+    scope: str,
+    work_type: str,
+    search: str,
+    specialty: str,
+    selected_id: str,
+    pending_page: int = 1,
+    ongoing_page: int = 1,
+) -> str:
     if not records:
         return "<div class=\"empty\">没有待发起事项</div>"
     rows: list[str] = []
@@ -766,6 +844,8 @@ def _record_rows(records: list[dict[str, Any]], *, scope: str, work_type: str, s
             search=search,
             specialty=specialty,
             record_id=record_id,
+            pending_page=pending_page,
+            ongoing_page=ongoing_page,
         )
         active = " active" if record_id == selected_id else ""
         title = _record_title(record)
@@ -799,14 +879,29 @@ def _record_rows(records: list[dict[str, Any]], *, scope: str, work_type: str, s
     return "\n".join(rows)
 
 
-def _ongoing_rows(items: list[dict[str, Any]], *, scope: str, work_type: str, selected_id: str) -> str:
+def _ongoing_rows(
+    items: list[dict[str, Any]],
+    *,
+    scope: str,
+    work_type: str,
+    selected_id: str,
+    pending_page: int = 1,
+    ongoing_page: int = 1,
+) -> str:
     filtered = [item for item in items if not work_type or _work_type(item.get("work_type")) == work_type]
     if not filtered:
         return "<div class=\"empty\">当前没有进行中通告</div>"
     rows: list[str] = []
     for item in filtered:
         active_id = str(item.get("active_item_id") or item.get("target_record_id") or item.get("record_id") or "")
-        url = _query_url("/workbench-lite", scope=scope, work_type=work_type, active_item_id=active_id)
+        url = _query_url(
+            "/workbench-lite",
+            scope=scope,
+            work_type=work_type,
+            active_item_id=active_id,
+            pending_page=pending_page,
+            ongoing_page=ongoing_page,
+        )
         active = " active" if active_id == selected_id else ""
         title = _record_title(item)
         draft = _draft_from_record(item, work_type=work_type)
@@ -1115,6 +1210,8 @@ def render_workbench_lite(
     specialty: str = "",
     record_id: str = "",
     active_item_id: str = "",
+    pending_page: int | str = 1,
+    ongoing_page: int | str = 1,
     manual: bool = False,
     scope_options: list[dict[str, Any]] | None = None,
     parsed_draft: dict[str, str] | None = None,
@@ -1145,8 +1242,77 @@ def render_workbench_lite(
         key: _to_int(payload_ongoing_counts.get(key), fallback_ongoing_counts.get(key, 0))
         for key in WORK_TYPE_LABELS
     }
-    current_pending_count = record_counts.get(work, 0)
-    current_ongoing_count = ongoing_counts.get(work, 0)
+    records_pagination = (
+        payload.get("records_pagination")
+        if isinstance(payload.get("records_pagination"), dict)
+        else {}
+    )
+    ongoing_pagination = (
+        payload.get("ongoing_pagination")
+        if isinstance(payload.get("ongoing_pagination"), dict)
+        else {}
+    )
+    sorted_records = sorted(records, key=_record_sort_key)
+    filtered_ongoing = [
+        item for item in ongoing if not work or _work_type(item.get("work_type")) == work
+    ]
+    if records_pagination:
+        visible_records = sorted_records
+        pending_page_num = _page_number(records_pagination.get("page"))
+        pending_pages = max(1, _to_int(records_pagination.get("total_pages"), 1))
+        current_pending_count = _to_int(records_pagination.get("total"), len(sorted_records))
+        pending_page_size = max(1, _to_int(records_pagination.get("page_size"), PENDING_PAGE_SIZE))
+    else:
+        pending_page_num = _page_number(pending_page)
+        visible_records, pending_page_num, pending_pages = _page_slice(
+            sorted_records,
+            pending_page_num,
+            PENDING_PAGE_SIZE,
+        )
+        current_pending_count = len(sorted_records)
+        pending_page_size = PENDING_PAGE_SIZE
+    if ongoing_pagination:
+        visible_ongoing = filtered_ongoing
+        ongoing_page_num = _page_number(ongoing_pagination.get("page"))
+        ongoing_pages = max(1, _to_int(ongoing_pagination.get("total_pages"), 1))
+        current_ongoing_count = _to_int(ongoing_pagination.get("total"), len(filtered_ongoing))
+        ongoing_page_size = max(1, _to_int(ongoing_pagination.get("page_size"), ONGOING_PAGE_SIZE))
+    else:
+        ongoing_page_num = _page_number(ongoing_page)
+        visible_ongoing, ongoing_page_num, ongoing_pages = _page_slice(
+            filtered_ongoing,
+            ongoing_page_num,
+            ONGOING_PAGE_SIZE,
+        )
+        current_ongoing_count = len(filtered_ongoing)
+        ongoing_page_size = ONGOING_PAGE_SIZE
+    pager_base = {
+        "scope": scope,
+        "work_type": work,
+        "search": search,
+        "specialty": specialty,
+        "record_id": record_id,
+        "active_item_id": active_item_id,
+        "manual": "1" if manual else "",
+    }
+    pending_pager = _pagination_controls(
+        label="待发起事项",
+        page_param="pending_page",
+        page=pending_page_num,
+        total_pages=pending_pages,
+        total=current_pending_count,
+        page_size=pending_page_size,
+        base_params={**pager_base, "ongoing_page": ongoing_page_num},
+    )
+    ongoing_pager = _pagination_controls(
+        label="进行中通告",
+        page_param="ongoing_page",
+        page=ongoing_page_num,
+        total_pages=ongoing_pages,
+        total=current_ongoing_count,
+        page_size=ongoing_page_size,
+        base_params={**pager_base, "pending_page": pending_page_num},
+    )
     selected_ongoing = _selected_ongoing(ongoing, active_item_id)
     selected_record = None if selected_ongoing or manual or parsed_draft else _selected_source(records, record_id)
     selected_record_id = str((selected_record or {}).get("record_id") or "")
@@ -1281,6 +1447,14 @@ def render_workbench_lite(
     .panel-title {{ display:flex; align-items:center; justify-content:space-between; gap:10px; }}
     .panel-title .panel-count {{ min-width:30px; height:24px; border-radius:999px; display:inline-flex; align-items:center; justify-content:center; color:#0a57d8; background:#eaf3ff; font-size:12px; font-weight:900; }}
     .list {{ display:grid; gap:6px; max-height:70vh; overflow:auto; padding-right:3px; }}
+    .list-pagination {{ display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:8px; border:1px solid #dce8f8; border-radius:14px; padding:7px 8px; background:linear-gradient(135deg,#fbfdff,#f1f7ff); }}
+    .page-summary {{ color:#64748b; font-size:11px; font-weight:900; white-space:nowrap; }}
+    .page-links {{ display:flex; align-items:center; justify-content:flex-end; gap:4px; flex-wrap:wrap; }}
+    .page-btn {{ min-width:28px; min-height:26px; border:1px solid #cfe0f5; border-radius:10px; padding:4px 8px; display:inline-flex; align-items:center; justify-content:center; color:#0a57d8; background:#fff; text-decoration:none; font-size:11px; font-weight:950; line-height:1; }}
+    .page-btn:hover {{ border-color:#1f63ff; background:#eaf3ff; }}
+    .page-btn.current {{ color:#fff; border-color:#1f63ff; background:linear-gradient(180deg,#1f63ff,#00aeda); box-shadow:0 6px 14px rgba(31,99,255,.16); }}
+    .page-btn.disabled {{ color:#94a3b8; background:#f3f7fd; cursor:not-allowed; }}
+    .page-ellipsis {{ min-width:16px; color:#94a3b8; text-align:center; font-size:11px; font-weight:950; }}
     .result-rail {{ display:grid; gap:10px; }}
     .rail-panel {{ position:relative; border:1px solid #d8e5f7; border-radius:18px; padding:12px; background:rgba(255,255,255,.95); box-shadow:0 10px 24px rgba(15,73,153,.07); overflow:hidden; }}
     .rail-panel::before {{ content:""; position:absolute; left:14px; right:14px; top:0; height:3px; border-radius:0 0 999px 999px; background:linear-gradient(90deg,#1f63ff,#00aeda); opacity:.62; }}
@@ -1311,6 +1485,8 @@ def render_workbench_lite(
     .notice-row.is-loading::after,.ongoing-row.is-loading::after {{ content:"正在打开"; width:max-content; justify-self:end; border-radius:999px; padding:3px 8px; color:#0a57d8; background:#fff; font-size:11px; font-weight:900; }}
     .ongoing-row.optimistic {{ border-color:#6aa8ff; background:linear-gradient(180deg,#f7fbff,#eef6ff); }}
     .ongoing-row.optimistic::after {{ content:"后台同步中"; width:max-content; justify-self:end; border-radius:999px; padding:3px 8px; color:#0a57d8; background:#fff; font-size:11px; font-weight:900; }}
+    .ongoing-row.failed {{ border-color:#f5a3aa; background:linear-gradient(180deg,#fffafa,#fff1f0); }}
+    .ongoing-row.failed::before {{ background:#e04d5f; }}
     .notice-row strong,.ongoing-row strong {{ min-width:0; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; overflow-wrap:anywhere; font-size:12px; line-height:1.32; }}
     .row-main {{ min-width:0; display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; align-items:start; }}
     .row-status {{ white-space:nowrap; border-radius:999px; padding:3px 7px; font-size:10px; font-weight:900; }}
@@ -1500,7 +1676,7 @@ def render_workbench_lite(
       <article class="guide-step" data-step="3"><strong>右侧看结果</strong><span>进行中、失败待处理和可回退通告集中查看。</span></article>
     </section>
     <section class="workspace">
-      <aside class="panel"><h2 class="panel-title"><span>待发起事项</span><b class="panel-count">{_e(current_pending_count)}</b></h2><div class="list">{_record_rows(records, scope=scope, work_type=work, search=search, specialty=specialty, selected_id=selected_record_id)}</div></aside>
+      <aside class="panel"><h2 class="panel-title"><span>待发起事项</span><b class="panel-count">{_e(current_pending_count)}</b></h2><div class="list">{_record_rows(visible_records, scope=scope, work_type=work, search=search, specialty=specialty, selected_id=selected_record_id, pending_page=pending_page_num, ongoing_page=ongoing_page_num)}</div>{pending_pager}</aside>
       <section class="panel" id="detail-panel">
         <h2>当前通告</h2>
         <details class="paste-drawer"{' open' if parsed_draft else ''}>
@@ -1515,7 +1691,7 @@ def render_workbench_lite(
         {_detail_form(record=selected_record, ongoing_item=selected_ongoing, scope=scope, work_type=work, manual=manual or bool(parsed_draft), parsed_draft=parsed_draft, parsed_action=parsed_action, source_link_options=source_options)}
       </section>
       <aside class="result-rail">
-        <section class="rail-panel"><h2 class="panel-title"><span>已开始未结束</span><b class="panel-count">{_e(current_ongoing_count)}</b></h2><div class="list">{_ongoing_rows(ongoing, scope=scope, work_type=work, selected_id=active_item_id)}</div></section>
+        <section class="rail-panel"><h2 class="panel-title"><span>已开始未结束</span><b class="panel-count">{_e(current_ongoing_count)}</b></h2><div class="list">{_ongoing_rows(visible_ongoing, scope=scope, work_type=work, selected_id=active_item_id, pending_page=pending_page_num, ongoing_page=ongoing_page_num)}</div>{ongoing_pager}</section>
         <details class="rail-fold attention"{' open' if attention_count else ''}><summary>待处理问题 <b class="panel-count">{_e(attention_count)}</b></summary><section class="rail-panel attention"><h2>待处理问题</h2><div class="attention-list">{attention_html}</div></section></details>
         <details class="rail-fold undo"><summary>近三天可回退 <b class="panel-count">{_e(undo_count)}</b></summary><section class="rail-panel undo"><h2>近三天可回退</h2><div class="undo-panel-list">{undo_html}</div></section></details>
       </aside>
@@ -1820,6 +1996,46 @@ def render_workbench_lite(
       delete compact.attachments;
       delete compact.site_photos_json;
       delete compact.process_images_json;
+      return compact;
+    }}
+    const commandPatchKeys = new Set([
+      'manual', 'manual_id', 'scope', 'action', 'work_type', 'notice_type', 'operation_id',
+      'active_item_id', 'source_record_id', 'target_record_id', 'record_id',
+      'source_work_type', 'converted_from_work_type', 'sync_maintenance_target',
+      'paired_maintenance_target_record_id', 'paired_maintenance_original_title',
+      'paired_maintenance_actual_start_time',
+      'building', 'buildings', 'building_code', 'building_codes', 'title', 'name',
+      'specialty', 'maintenance_cycle', 'level', 'start_time', 'end_time',
+      'location', 'content', 'reason', 'impact', 'progress',
+      'repair_device', 'repair_fault', 'fault_type', 'repair_mode', 'discovery',
+      'symptom', 'solution', 'spare_parts', 'cabinet', 'quantity', 'device',
+      'status', 'site_photo_count', 'site_photos', 'extra_images',
+      'mop_status', 'zhihang_record_id', 'lan_zhihang_record_id', 'zhihang_involved'
+    ]);
+    function compactCommandPatch(patch) {{
+      const compact = {{}};
+      const source = patch || {{}};
+      for (const key of commandPatchKeys) {{
+        if (!Object.prototype.hasOwnProperty.call(source, key)) continue;
+        const value = source[key];
+        if (value == null || value === '') continue;
+        if (Array.isArray(value)) {{
+          compact[key] = value.map(item => {{
+            if (item && typeof item === 'object') {{
+              const safe = {{}};
+              for (const field of ['file_token', 'file_name', 'url', 'size']) {{
+                if (item[field] != null && item[field] !== '') safe[field] = String(item[field]).slice(0, 500);
+              }}
+              return safe;
+            }}
+            return String(item || '').slice(0, 500);
+          }});
+        }} else if (typeof value === 'object') {{
+          continue;
+        }} else {{
+          compact[key] = String(value).slice(0, 2000);
+        }}
+      }}
       return compact;
     }}
     function setFormValue(form, name, value) {{
@@ -2596,7 +2812,7 @@ def render_workbench_lite(
         setPickerOpen('manual-picker', 'manual-open', false);
         return;
       }}
-      const navLink = target.closest('.notice-row,.ongoing-row,.type-tab,.manual-menu a');
+      const navLink = target.closest('.notice-row,.ongoing-row,.type-tab,.manual-menu a,.page-btn[href]');
       if (navLink) {{
         event.preventDefault();
         if (navLink.matches('.ongoing-row.optimistic')) {{
@@ -2833,6 +3049,7 @@ def render_workbench_lite(
         patch.site_photos = photos;
         patch.extra_images = photos;
       }}
+      const commandPatch = compactCommandPatch(patch);
       return {{
         command_format: 'notice_command',
         action,
@@ -2844,7 +3061,7 @@ def render_workbench_lite(
         target_record_id: targetRecordId,
         record_id: submitRecordId,
         operation_id: patch.operation_id,
-        patch
+        patch: commandPatch
       }};
     }}
     function rowIdentityCandidates(draft) {{
@@ -2979,6 +3196,7 @@ def render_workbench_lite(
         }}
       }}
       if (action === 'start') {{
+        removeSourceRowForDraft(draft);
         setLiteStatus('开始任务已提交后台，发送成功后自动加入进行中');
       }} else if (action === 'end') {{
         setLiteStatus('结束任务已提交后台，成功后自动移出进行中');
@@ -3002,6 +3220,110 @@ def render_workbench_lite(
         }}
       }});
     }}
+    function markSubmissionResult(payload, ok, message) {{
+      const draft = compactOptimisticDraft(Object.assign({{}}, payload?.patch || {{}}));
+      draft.action = payload?.action || draft.action || '';
+      draft.operation_id = payload?.operation_id || draft.operation_id || '';
+      draft.active_item_id = payload?.active_item_id || draft.active_item_id || '';
+      draft.source_record_id = payload?.source_record_id || draft.source_record_id || '';
+      draft.target_record_id = payload?.target_record_id || draft.target_record_id || '';
+      draft.record_id = payload?.record_id || draft.record_id || '';
+      const row = findOngoingRowByDraft(draft);
+      if (!row) return;
+      if (ok && draft.action === 'end') {{
+        const list = row.parentElement;
+        row.remove();
+        adjustOngoingCount(-1);
+        if (list && !list.querySelector('.ongoing-row')) {{
+          const empty = document.createElement('div');
+          empty.className = 'empty';
+          empty.textContent = '当前没有进行中通告';
+          list.replaceChildren(empty);
+        }}
+        return;
+      }}
+      row.classList.remove('optimistic');
+      row.classList.toggle('failed', !ok);
+      const status = row.querySelector('.row-status');
+      if (status) status.textContent = ok ? '发送成功' : '发送失败';
+      const meta = row.querySelector('.row-meta');
+      if (meta && message) setMetaChip(meta, String(message).slice(0, 36), ok ? 'success' : 'warn');
+    }}
+    function removeOngoingRow(row) {{
+      if (!row) return;
+      const list = row.parentElement;
+      row.remove();
+      adjustOngoingCount(-1);
+      if (list && !list.querySelector('.ongoing-row')) {{
+        const empty = document.createElement('div');
+        empty.className = 'empty';
+        empty.textContent = '当前没有进行中通告';
+        list.replaceChildren(empty);
+      }}
+    }}
+    function applyJobPatch(jobPatch, payload, ok, message) {{
+      const patch = jobPatch && typeof jobPatch === 'object' ? jobPatch : null;
+      if (!patch || patch.kind !== 'notice_action_result') {{
+        markSubmissionResult(payload, ok, message);
+        return;
+      }}
+      const draft = compactOptimisticDraft(Object.assign({{}}, payload?.patch || {{}}, patch));
+      draft.action = patch.action || payload?.action || draft.action || '';
+      draft.operation_id = payload?.operation_id || draft.operation_id || '';
+      draft.active_item_id = patch.active_item_id || payload?.active_item_id || draft.active_item_id || '';
+      draft.source_record_id = patch.source_record_id || payload?.source_record_id || draft.source_record_id || '';
+      draft.target_record_id = patch.target_record_id || payload?.target_record_id || draft.target_record_id || '';
+      draft.record_id = patch.record_id || draft.target_record_id || payload?.record_id || draft.record_id || '';
+      if (ok && draft.action === 'end') {{
+        removeOngoingRow(findOngoingRowByDraft(draft));
+        return;
+      }}
+      let row = findOngoingRowByDraft(draft);
+      if (!ok) {{
+        if (!row) {{
+          markSubmissionResult(payload, false, patch.target_selection_message || message || '发送失败');
+          return;
+        }}
+        row.classList.remove('optimistic');
+        row.classList.add('failed');
+        const status = row.querySelector('.row-status');
+        if (status) status.textContent = '发送失败';
+        const meta = row.querySelector('.row-meta');
+        const failMessage = patch.target_selection_message || patch.message || message || '发送失败';
+        if (meta && failMessage) setMetaChip(meta, String(failMessage).slice(0, 36), 'warn');
+        return;
+      }}
+      if (!row && draft.action === 'start') {{
+        const {{ list }} = ongoingListElements();
+        if (list) {{
+          row = renderOngoingRow(document.createElement('a'), draft, 'update');
+          const onlyEmpty = list.children.length === 1 && list.firstElementChild?.classList.contains('empty');
+          if (onlyEmpty) list.replaceChildren(row);
+          else list.prepend(row);
+          adjustOngoingCount(1);
+        }}
+      }}
+      if (!row) return;
+      row.classList.remove('optimistic', 'failed');
+      row.setAttribute('data-active-item-id', draft.active_item_id || '');
+      row.setAttribute('data-record-id', draft.record_id || draft.target_record_id || '');
+      row.setAttribute('data-target-record-id', draft.target_record_id || draft.record_id || '');
+      row.setAttribute('data-source-record-id', draft.source_record_id || '');
+      row.setAttribute('data-site-photo-count', draft.site_photo_count || row.getAttribute('data-site-photo-count') || '0');
+      row.setAttribute('data-operation-id', draft.operation_id || row.getAttribute('data-operation-id') || '');
+      if (draft.title) {{
+        row.setAttribute('data-title', draft.title);
+        row.title = draft.title;
+        const strong = row.querySelector('.row-main strong');
+        if (strong) strong.textContent = draft.title;
+      }}
+      const status = row.querySelector('.row-status');
+      if (status) status.textContent = '发送成功';
+      setSafeDraftAttr(row, Object.assign({{}}, draftFromRow(row), draft));
+      const meta = row.querySelector('.row-meta');
+      if (meta) setMetaChip(meta, String(message || patch.message || '已完成').slice(0, 36), 'success');
+      if (draft.action === 'start') removeSourceRowForDraft(draft);
+    }}
     function sleep(ms) {{
       return new Promise(resolve => setTimeout(resolve, ms));
     }}
@@ -3019,7 +3341,7 @@ def render_workbench_lite(
       }};
       return map[String(phase || '')] || String(phase || '后台处理中');
     }}
-    async function pollSubmittedJob(jobId, label) {{
+    async function pollSubmittedJob(jobId, label, payload) {{
       if (!jobId) return false;
       const startedAt = Date.now();
       let delay = 800;
@@ -3033,16 +3355,23 @@ def render_workbench_lite(
           const job = data.data || {{}};
           const phase = String(job.phase || '');
           if (phase === 'success') {{
-            setLiteStatus('发送成功，正在更新页面...');
-            await refreshCurrentLite(label || '发送成功，正在更新列表...', ['.status', '.summary', '.workspace']).catch(() => null);
+            applyJobPatch(job.frontend_patch, payload, true, job.upload_message || '已完成');
+            setLiteStatus('发送成功，列表已局部更新');
+            if (liteFormDirty) {{
+              setLiteStatus('发送成功。当前正在编辑，暂不刷新列表，可稍后点刷新本页校准。');
+              return true;
+            }}
+            await refreshCurrentLite(label || '发送成功，正在更新统计...', ['.status', '.summary']).catch(() => null);
             return true;
           }}
           if (phase === 'failed') {{
             const message = job.error || job.upload_message || job.message_error || '后台任务失败';
+            applyJobPatch(job.frontend_patch, payload, false, message);
             showLiteError(message);
             setLiteStatus('发送失败：' + message);
-            await refreshCurrentLite('发送失败，已保留当前填写内容', ['.status', '.summary', '.result-rail']).catch(() => null);
-            showLiteError(message);
+            if (!liteFormDirty) {{
+              await refreshCurrentLite('发送失败，已保留当前填写内容', ['.status', '.summary']).catch(() => null);
+            }}
             setLiteStatus('发送失败：' + friendlyLiteMessage(message));
             return true;
           }}
@@ -3055,22 +3384,9 @@ def render_workbench_lite(
       setLiteStatus('后台仍在处理，请稍后刷新本页查看结果');
       return false;
     }}
-    function schedulePostSubmitRefresh(label, jobId) {{
-      const workspaceRefresh = (delay, refreshLabel) => {{
-        setTimeout(() => {{
-          if (liteFormDirty) {{
-            setLiteStatus('后台有更新，当前正在编辑，暂不刷新列表');
-            return;
-          }}
-          refreshCurrentLite(refreshLabel || label || '后台状态校准中...', ['.status', '.summary', '.workspace']).catch(() => null);
-        }}, delay);
-      }};
-      setTimeout(() => refreshCurrentLite(label || '后台已受理，正在校准状态...', ['.status', '.summary']).catch(() => null), 450);
-      workspaceRefresh(1800, '后台已受理，正在校准列表...');
-      workspaceRefresh(5200, '后台仍在处理，正在校准列表...');
-      workspaceRefresh(12000, '后台状态校准中...');
+    function schedulePostSubmitRefresh(label, jobId, payload) {{
       if (jobId) {{
-        pollSubmittedJob(jobId, label || '任务已完成，正在更新列表...').catch(() => {{
+        pollSubmittedJob(jobId, label || '任务已完成，正在更新列表...', payload).catch(() => {{
           setLiteStatus('后台任务仍在处理，请稍后刷新本页');
         }});
         return;
@@ -3080,7 +3396,7 @@ def render_workbench_lite(
           setLiteStatus('后台有更新，当前正在编辑，暂不刷新列表');
           return;
         }}
-        refreshCurrentLite('后台状态校准中...', ['.status', '.summary', '.workspace']).catch(() => null);
+        refreshCurrentLite('后台状态校准中...', ['.status', '.summary']).catch(() => null);
       }}, 8000);
     }}
     document.addEventListener('submit', async (event) => {{
@@ -3162,7 +3478,7 @@ def render_workbench_lite(
         if (!response.ok || data.ok === false) throw new Error(data.error || '提交失败');
         const jobId = (data && data.job_id) || (data && data.data && data.data.job_id) || '';
         setLiteStatus(`已受理，任务号 ${{jobId}}`);
-        schedulePostSubmitRefresh('任务已受理，正在更新列表...', jobId);
+        schedulePostSubmitRefresh('任务已受理，正在更新列表...', jobId, payload);
       }} catch (error) {{
         setLiteFormDirty(true);
         removeOptimisticSubmission(payload);

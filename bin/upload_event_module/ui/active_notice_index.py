@@ -73,11 +73,17 @@ class ActiveNoticeIndex:
             data_copy = dict(data)
             entries.append((list_widget, item, data_copy))
             record_id = canonical_target_record_id(data)
+            raw_record_id = str(data.get("record_id") or "").strip()
             active_item_id = str(data.get("active_item_id") or "").strip()
             source_record_id = canonical_source_record_id(data)
             if record_id:
                 by_record_id[record_id] = (list_widget, item)
                 by_record_id_candidates.setdefault(record_id, []).append(
+                    (list_widget, item, data_copy)
+                )
+            elif raw_record_id:
+                by_record_id[raw_record_id] = (list_widget, item)
+                by_record_id_candidates.setdefault(raw_record_id, []).append(
                     (list_widget, item, data_copy)
                 )
             if active_item_id:
