@@ -92,6 +92,83 @@
         </article>
       </div>
     </section>
+    <section class="diagnostic-section">
+      <div class="section-title">
+        <strong>Qt/网页一致性</strong>
+        <span>{{ consistency.ok ? "一致" : "需关注" }} · {{ formatTime(consistency.checked_at) }}</span>
+      </div>
+      <div class="diagnostic-inline-actions">
+        <button class="btn ghost" type="button" :disabled="busy" @click="emit('repair-notice-projection')">
+          修复本地映射
+        </button>
+        <small>只修复 SQLite 投影，不写飞书多维。</small>
+      </div>
+      <div class="consistency-grid">
+        <article>
+          <span>Qt 显示</span>
+          <strong>{{ consistency.counts?.qt_active ?? "-" }}</strong>
+        </article>
+        <article>
+          <span>网页进行中</span>
+          <strong>{{ consistency.counts?.web_ongoing ?? "-" }}</strong>
+        </article>
+        <article :class="{ warn: Number(consistency.counts?.qt_only || 0) > 0 }">
+          <span>仅 Qt 有</span>
+          <strong>{{ consistency.counts?.qt_only ?? 0 }}</strong>
+        </article>
+        <article :class="{ warn: Number(consistency.counts?.web_only || 0) > 0 }">
+          <span>仅网页有</span>
+          <strong>{{ consistency.counts?.web_only ?? 0 }}</strong>
+        </article>
+        <article :class="{ warn: Number(consistency.counts?.missing_target || 0) > 0 }">
+          <span>缺目标 ID</span>
+          <strong>{{ consistency.counts?.missing_target ?? 0 }}</strong>
+        </article>
+        <article :class="{ warn: Number(consistency.counts?.duplicate_targets || 0) > 0 }">
+          <span>重复目标</span>
+          <strong>{{ consistency.counts?.duplicate_targets ?? 0 }}</strong>
+        </article>
+      </div>
+      <div v-if="consistencyIssueItems.length" class="consistency-list">
+        <article v-for="item in consistencyIssueItems" :key="item.key">
+          <b>{{ item.label }}</b>
+          <span>{{ item.title || "未命名通告" }}</span>
+          <em>{{ workTypeLabel(item.work_type) }} · {{ shortId(item.target_record_id || item.active_item_id || item.source_record_id) }}</em>
+        </article>
+      </div>
+      <p v-if="!consistencyIssueItems.length" class="muted-line">
+        Qt 活动列表、网页进行中投影和目标 ID 当前一致。
+      </p>
+    </section>
+    <section class="diagnostic-section">
+      <div class="section-title">
+        <strong>通告链路自检</strong>
+        <span>查本地 SQLite，不访问飞书</span>
+      </div>
+      <form class="notice-diagnostic-form" @submit.prevent="emit('run-notice-diagnostic')">
+        <input
+          :value="noticeDiagnosticQuery"
+          placeholder="输入标题、active/source/target ID"
+          @input="emit('update:noticeDiagnosticQuery', ($event.target as HTMLInputElement).value)"
+        />
+        <button class="btn blue" type="submit" :disabled="busy || noticeDiagnosticLoading">
+          {{ noticeDiagnosticLoading ? "检查中" : "检查链路" }}
+        </button>
+      </form>
+      <div v-if="noticeDiagnosticItems.length" class="consistency-list notice-diagnostic-list">
+        <article v-for="item in noticeDiagnosticItems" :key="item.key">
+          <b>{{ item.diagnostic_source || "本地记录" }}</b>
+          <span>{{ item.title || "未命名通告" }}</span>
+          <em>{{ workTypeLabel(item.work_type) }} · {{ item.binding_status || "未知" }} · {{ shortId(item.target_record_id || item.active_item_id || item.source_record_id) }}</em>
+        </article>
+      </div>
+      <p v-else-if="noticeDiagnostic.query" class="muted-line">
+        未找到匹配本地链路；如果是刚提交的任务，请稍后刷新状态再查。
+      </p>
+      <p v-else class="muted-line">
+        用于排查“Qt 有、网页无”或“更新找不到目标记录”的本地绑定情况。
+      </p>
+    </section>
     <section v-if="slowJobs.length" class="diagnostic-section">
       <div class="section-title">
         <strong>耗时较长任务</strong>
@@ -143,7 +220,7 @@
     </section>
     <details class="raw-diagnostic">
       <summary>查看详细诊断数据</summary>
-      <pre>{{ pretty({ stats, perf, queues, recentJobs }) }}</pre>
+      <pre>{{ pretty({ stats, perf, queues, consistency, noticeDiagnostic, recentJobs }) }}</pre>
     </details>
   </section>
 </template>
@@ -157,12 +234,19 @@ const props = defineProps<{
   stats: Dict;
   perf: Dict;
   queues: Dict;
+  consistency: Dict;
+  noticeDiagnosticQuery: string;
+  noticeDiagnostic: Dict;
+  noticeDiagnosticLoading?: boolean;
   recentJobs: Dict;
   busy?: boolean;
 }>();
 
 const emit = defineEmits<{
   refresh: [];
+  "update:noticeDiagnosticQuery": [value: string];
+  "run-notice-diagnostic": [];
+  "repair-notice-projection": [];
   "open-history-memory": [];
   preflight: [];
   cleanup: [];
@@ -250,9 +334,60 @@ const cleanupCards = computed(() => {
     ["attachment_removed", "附件暂存"],
     ["clipboard_removed", "剪贴板候选"],
     ["dialog_removed", "弹窗会话"],
+    ["mop_temp_signature_removed", "临时签名"],
     ["undo_removed", "回退记录"],
     ["append_events_removed", "事件日志"],
   ].map(([key, label]) => ({ key, label, count: Number(item[key] || 0) }));
+});
+
+const consistencyIssueItems = computed(() => {
+  const items: Array<Dict & { key: string; label: string }> = [];
+  const pushItems = (label: string, source: unknown) => {
+    const sourceItems = Array.isArray(source) ? source : [];
+    for (const item of sourceItems.slice(0, 3)) {
+      if (!item || typeof item !== "object") continue;
+      const active = String((item as Dict).active_item_id || "");
+      const target = String((item as Dict).target_record_id || "");
+      const sourceRecord = String((item as Dict).source_record_id || "");
+      items.push({
+        ...(item as Dict),
+        label,
+        key: `${label}:${active}:${target}:${sourceRecord}:${items.length}`,
+      });
+    }
+  };
+  pushItems("仅 Qt 有", props.consistency.qt_only);
+  pushItems("仅网页有", props.consistency.web_only);
+  pushItems("缺目标 ID", props.consistency.missing_target);
+  for (const item of (Array.isArray(props.consistency.duplicate_targets) ? props.consistency.duplicate_targets : []).slice(0, 3)) {
+    if (!item || typeof item !== "object") continue;
+    const target = String((item as Dict).target_record_id || "");
+    items.push({
+      label: "重复目标",
+      key: `重复目标:${target}:${items.length}`,
+      title: `目标记录重复 ${Number((item as Dict).count || 0)} 条`,
+      target_record_id: target,
+      work_type: "",
+    });
+  }
+  return items.slice(0, 8);
+});
+
+const noticeDiagnosticItems = computed<Array<Dict & { key: string }>>(() => {
+  const items = Array.isArray(props.noticeDiagnostic.items)
+    ? props.noticeDiagnostic.items
+    : [];
+  return items.slice(0, 12).map((item: Dict, index: number) => ({
+    ...item,
+    key: [
+      item.diagnostic_source || "source",
+      item.identity_id || "",
+      item.active_item_id || "",
+      item.source_record_id || "",
+      item.target_record_id || "",
+      index,
+    ].join(":"),
+  }));
 });
 
 function formatTime(value: unknown): string {
@@ -392,12 +527,20 @@ function pretty(value: unknown): string {
   grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
 }
 
+.consistency-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px;
+}
+
 .metric-grid article,
 .status-card,
 .diagnostic-section,
 .warning-list,
 .raw-diagnostic,
 .source-type-grid article,
+.consistency-grid article,
+.consistency-list article,
 .slow-job-list article,
 .job-row {
   border: 1px solid rgba(191, 219, 254, 0.74);
@@ -409,7 +552,8 @@ function pretty(value: unknown): string {
 }
 
 .metric-grid article,
-.source-type-grid article {
+.source-type-grid article,
+.consistency-grid article {
   display: grid;
   gap: 5px;
   padding: 14px;
@@ -417,7 +561,8 @@ function pretty(value: unknown): string {
 
 .metric-grid span,
 .status-card span,
-.source-type-grid span {
+.source-type-grid span,
+.consistency-grid span {
   color: #64748b;
   font-size: 12px;
   font-weight: 800;
@@ -425,10 +570,105 @@ function pretty(value: unknown): string {
 
 .metric-grid strong,
 .status-card strong,
-.source-type-grid strong {
+.source-type-grid strong,
+.consistency-grid strong {
   color: #0f2f6f;
   font-size: 22px;
   line-height: 1;
+}
+
+.consistency-grid article.warn {
+  border-color: rgba(245, 158, 11, 0.36);
+  background: linear-gradient(135deg, rgba(255, 251, 235, 0.96), rgba(255, 255, 255, 0.88));
+}
+
+.consistency-grid article.warn strong {
+  color: #b45309;
+}
+
+.consistency-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.consistency-list article {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  box-shadow: none;
+}
+
+.consistency-list b {
+  color: #b45309;
+  font-size: 12px;
+}
+
+.consistency-list span {
+  min-width: 0;
+  overflow: hidden;
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.consistency-list em {
+  color: #64748b;
+  font-size: 12px;
+  font-style: normal;
+  white-space: nowrap;
+}
+
+.notice-diagnostic-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.notice-diagnostic-form input {
+  min-width: 0;
+  border: 1px solid rgba(147, 197, 253, 0.82);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.94);
+  color: #0f172a;
+  font: inherit;
+  font-weight: 700;
+  padding: 10px 12px;
+  outline: none;
+}
+
+.notice-diagnostic-form input:focus {
+  border-color: rgba(37, 99, 235, 0.82);
+  box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.12);
+}
+
+.diagnostic-inline-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 12px;
+}
+
+.diagnostic-inline-actions .btn {
+  min-height: 32px;
+  border-radius: 12px;
+  padding: 6px 12px;
+}
+
+.diagnostic-inline-actions small {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.notice-diagnostic-list article {
+  grid-template-columns: 96px minmax(0, 1fr) minmax(220px, auto);
 }
 
 .status-card {
@@ -598,14 +838,17 @@ function pretty(value: unknown): string {
 
 @media (max-width: 900px) {
   .metric-grid,
-  .status-grid {
+  .status-grid,
+  .consistency-grid {
     grid-template-columns: 1fr;
   }
 
   .job-row,
-  .slow-job-list article {
+  .slow-job-list article,
+  .consistency-list article {
     align-items: stretch;
     flex-direction: column;
+    grid-template-columns: 1fr;
   }
 
   .job-actions {

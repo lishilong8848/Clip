@@ -148,6 +148,21 @@
         <div v-if="missingRequiredEditableFields.length" class="form-warning">
           还缺 {{ missingRequiredEditableFields.length }} 项：{{ missingRequiredEditableFields.join("、") }}
         </div>
+        <section v-if="editingRecordId" class="next-step-panel">
+          <div>
+            <span class="section-kicker">下一步</span>
+            <strong>检修记录已就绪</strong>
+            <p>后续请到检修通告页选择这条检修记录，再发起开始、更新或结束通告。</p>
+          </div>
+          <div class="next-step-actions">
+            <button class="btn quiet" type="button" :disabled="repairNoticeOpening" @click="openRepairNoticeWorkbench(true)">
+              {{ repairNoticeOpening ? "刷新中" : "刷新检修后查看" }}
+            </button>
+            <button class="btn primary" type="button" @click="openRepairNoticeWorkbench(false)">
+              去发检修通告
+            </button>
+          </div>
+        </section>
 
         <div v-if="!fields.length && loading" class="empty-state">正在读取字段...</div>
         <div v-else-if="!editableFields.length" class="empty-state">
@@ -230,6 +245,7 @@ const eventSearchText = ref("");
 const eventCandidates = ref<LooseDict[]>([]);
 const selectedEvent = ref<LooseDict | null>(null);
 const routeEventPrefillApplied = ref(false);
+const repairNoticeOpening = ref(false);
 
 const routeParams = new URLSearchParams(window.location.search);
 const eventTitle = ref(String(routeParams.get("event_title") || "").trim());
@@ -626,6 +642,27 @@ function returnHome(): void {
   window.location.href = "/";
 }
 
+async function openRepairNoticeWorkbench(refreshFirst = false): Promise<void> {
+  const url = new URL("/workbench-lite", window.location.origin);
+  url.searchParams.set("scope", props.scope || "ALL");
+  url.searchParams.set("work_type", "repair");
+  if (editingRecordId.value) url.searchParams.set("record_id", editingRecordId.value);
+  if (!refreshFirst) {
+    window.location.href = url.toString();
+    return;
+  }
+  repairNoticeOpening.value = true;
+  try {
+    const params = new URLSearchParams({ scope: props.scope || "ALL" });
+    await requestJson(`/api/repair-refresh?${params.toString()}`);
+    window.location.href = url.toString();
+  } catch (error: unknown) {
+    showMessage(error instanceof Error ? error.message : "刷新检修失败，请稍后再试。", "failed");
+  } finally {
+    repairNoticeOpening.value = false;
+  }
+}
+
 watch(
   () => props.scope,
   () => {
@@ -1005,6 +1042,49 @@ textarea {
   color: #9a3412;
   font-size: 13px;
   font-weight: 850;
+}
+
+.next-step-panel {
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px;
+  border: 1px solid #bfdbfe;
+  border-radius: 16px;
+  background:
+    linear-gradient(135deg, rgba(239, 246, 255, 0.98), rgba(255, 255, 255, 0.96)),
+    radial-gradient(circle at 92% 20%, rgba(30, 99, 255, 0.12), transparent 28%);
+}
+
+.next-step-panel > div:first-child {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.next-step-panel strong {
+  color: #071a39;
+  font-size: 15px;
+  font-weight: 950;
+}
+
+.next-step-panel p {
+  margin: 0;
+  color: #4f6684;
+  font-size: 12px;
+  font-weight: 820;
+  line-height: 1.45;
+}
+
+.next-step-actions {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .field-grid {

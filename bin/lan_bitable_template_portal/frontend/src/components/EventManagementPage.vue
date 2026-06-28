@@ -238,8 +238,9 @@
           <div>
             <small>是否转检修</small>
             <strong :class="{ enabled: eventTransferEnabled(selectedEvent) }">
-              {{ eventTransferEnabled(selectedEvent) ? "已转检修" : "未转检修" }}
+              {{ eventRepairFlowLabel(selectedEvent) }}
             </strong>
+            <em>{{ eventRepairFlowHint(selectedEvent) }}</em>
           </div>
           <button
             class="btn secondary"
@@ -250,7 +251,7 @@
             {{ eventTransferBusy ? "处理中" : eventTransferEnabled(selectedEvent) ? "已转检修" : "标记转检修" }}
           </button>
           <button class="btn primary" type="button" @click="openRepairManagementForSelectedEvent">
-            填写检修单
+            填写/选择维修单
           </button>
         </section>
         <div class="event-detail-tabs" aria-label="事件详情分区">
@@ -594,7 +595,7 @@ const detailFields = computed(() => {
     { key: "specialty", label: "专业", value: item.specialty },
     { key: "source", label: "事件发现来源", value: item.source },
     { key: "status", label: "状态", value: item.status },
-    { key: "transfer", label: "是否转检修", value: item.transfer_to_overhaul },
+    { key: "transfer", label: "检修链路", value: eventRepairFlowLabel(item) },
   ];
 });
 
@@ -734,6 +735,17 @@ function eventRecordId(item: LooseDict | null | undefined): string {
 function eventTransferEnabled(item: LooseDict | null | undefined): boolean {
   const text = String(item?.transfer_to_overhaul ?? "").trim().toLowerCase();
   return ["true", "1", "是", "已转", "已转检修", "yes", "y"].includes(text);
+}
+
+function eventRepairFlowLabel(item: LooseDict | null | undefined): string {
+  return eventTransferEnabled(item) ? "已转检修" : "未转检修";
+}
+
+function eventRepairFlowHint(item: LooseDict | null | undefined): string {
+  if (eventTransferEnabled(item)) {
+    return "下一步：填写维修单，再从检修通告页选择记录发起通告。";
+  }
+  return "如需转检修，先标记转检修，再填写维修单。";
 }
 
 function setEventTransferState(recordId: string): void {
@@ -1777,6 +1789,14 @@ onMounted(() => {
   color: #64748b;
   font-size: 12px;
   font-weight: 900;
+}
+
+.event-repair-actions em {
+  color: #4f6684;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 780;
+  line-height: 1.45;
 }
 
 .event-repair-actions strong {

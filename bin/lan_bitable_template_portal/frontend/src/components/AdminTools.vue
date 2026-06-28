@@ -77,9 +77,15 @@
         :stats="stats"
         :perf="perf"
         :queues="queues"
+        :consistency="consistency"
+        v-model:notice-diagnostic-query="noticeDiagnosticQuery"
+        :notice-diagnostic="noticeDiagnostic"
+        :notice-diagnostic-loading="noticeDiagnosticLoading"
         :recent-jobs="recentJobs"
         :busy="busy"
         @refresh="loadStatus"
+        @run-notice-diagnostic="runNoticeDiagnostic"
+        @repair-notice-projection="repairNoticeProjection"
         @open-history-memory="openHistoryMemory"
         @preflight="runPreflight"
         @cleanup="cleanupJobs"
@@ -369,6 +375,10 @@ const message = ref("");
 const stats = ref<Dict>({});
 const perf = ref<Dict>({});
 const queues = ref<Dict>({});
+const consistency = ref<Dict>({});
+const noticeDiagnosticQuery = ref("");
+const noticeDiagnostic = ref<Dict>({});
+const noticeDiagnosticLoading = ref(false);
 const recentJobs = ref<Dict>({});
 const permissions = reactive<{ users: Dict[]; scope_options: Dict[] }>({ users: [], scope_options: [] });
 const permissionRequests = ref<Dict[]>([]);
@@ -676,6 +686,7 @@ function cleanupRemovedTotal(value: Dict): number {
     "attachment_removed",
     "clipboard_removed",
     "dialog_removed",
+    "mop_temp_signature_removed",
   ];
   return keys.reduce((total, key) => total + Number(value?.[key] || 0), 0);
 }
@@ -688,18 +699,56 @@ async function loadStatus(): Promise<void> {
   message.value = "";
   busy.value = true;
   try {
-    const [statsData, perfData, queuesData, jobsData] = await Promise.all([
+    const [statsData, perfData, queuesData, consistencyData, jobsData] = await Promise.all([
       api("/api/backend/stats"),
       api("/api/backend/perf"),
       api("/api/backend/queues"),
+      api("/api/backend/consistency?scope=ALL"),
       api("/api/jobs/recent?limit=20"),
     ]);
     stats.value = statsData;
     perf.value = perfData;
     queues.value = queuesData;
+    consistency.value = consistencyData;
     recentJobs.value = jobsData;
   } catch (error: any) {
     message.value = error?.message || "状态加载失败";
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function runNoticeDiagnostic(): Promise<void> {
+  const query = noticeDiagnosticQuery.value.trim();
+  if (!query) {
+    message.value = "请输入通告标题、active_item_id、source_record_id 或 target_record_id";
+    return;
+  }
+  noticeDiagnosticLoading.value = true;
+  try {
+    const params = new URLSearchParams({ scope: "ALL", query });
+    noticeDiagnostic.value = await api(`/api/backend/notice-diagnostic?${params.toString()}`);
+  } catch (error: any) {
+    message.value = error?.message || "通告链路自检失败";
+  } finally {
+    noticeDiagnosticLoading.value = false;
+  }
+}
+
+async function repairNoticeProjection(): Promise<void> {
+  busy.value = true;
+  try {
+    const data = await api("/api/backend/notice-projection-repair?scope=ALL", {
+      method: "POST",
+      body: "{}",
+    });
+    const repairedIdentities = Number(data.repaired_identities || 0);
+    const repairedQtItems = Number(data.repaired_qt_items || 0);
+    consistency.value = data.consistency || consistency.value;
+    await loadStatus();
+    message.value = `本地映射修复完成：identity ${repairedIdentities}，Qt投影 ${repairedQtItems}`;
+  } catch (error: any) {
+    message.value = error?.message || "本地映射修复失败";
   } finally {
     busy.value = false;
   }
@@ -722,8 +771,9 @@ async function cleanupJobs(): Promise<void> {
   busy.value = true;
   try {
     const data = await api("/api/backend/jobs/cleanup", { method: "POST", body: "{}" });
-    message.value = `清理完成：${cleanupRemovedTotal(data)}`;
+    const removedTotal = cleanupRemovedTotal(data);
     await loadStatus();
+    message.value = `清理完成：${removedTotal}`;
   } catch (error: any) {
     message.value = error?.message || "清理失败";
   } finally {

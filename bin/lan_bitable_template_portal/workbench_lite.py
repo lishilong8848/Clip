@@ -910,8 +910,10 @@ def _ongoing_rows(
         status = item.get("status") or "进行中"
         site_photo_count = _site_photo_count(item)
         mop_status = _mop_status_text(item, work_type)
+        needs_site_class = " needs-site-photo" if work_type in SITE_PHOTO_REQUIRED_WORK_TYPES and site_photo_count <= 0 else ""
+        needs_mop_class = " needs-mop" if work_type == "maintenance" and ("未" in mop_status or not mop_status) else ""
         rows.append(
-        f"<a class=\"ongoing-row{active}\" href=\"{_e(url)}\" title=\"{_e(title)}\""
+        f"<a class=\"ongoing-row{active}{needs_site_class}{needs_mop_class}\" href=\"{_e(url)}\" title=\"{_e(title)}\""
         f" aria-current=\"{'true' if active else 'false'}\""
         f" data-row-kind=\"ongoing\""
         f" data-work-type=\"{_e(work_type)}\""
@@ -931,7 +933,14 @@ def _ongoing_rows(
     return "\n".join(rows)
 
 
-def _attention_rows(items: list[dict[str, Any]], *, work_type: str) -> str:
+def _attention_rows(
+    items: list[dict[str, Any]],
+    *,
+    work_type: str,
+    scope: str,
+    pending_page: int | str = 1,
+    ongoing_page: int | str = 1,
+) -> str:
     rows: list[str] = []
     for item in items or []:
         if work_type and _work_type(item.get("work_type")) != work_type:
@@ -950,10 +959,25 @@ def _attention_rows(items: list[dict[str, Any]], *, work_type: str) -> str:
             continue
         title = _record_title(item)
         reason = str(item.get("error") or item.get("last_error") or item.get("failure_reason") or item.get("status") or "需要处理").strip()
+        active_id = str(item.get("active_item_id") or item.get("target_record_id") or item.get("record_id") or "").strip()
+        detail_url = _query_url(
+            "/workbench-lite",
+            scope=scope,
+            work_type=work_type,
+            active_item_id=active_id,
+            pending_page=pending_page,
+            ongoing_page=ongoing_page,
+        )
+        action_label = "重新绑定目标记录" if any(
+            flag in reason for flag in ("目标多维记录不存在", "RecordIdNotFound", "record_id不存在", "缺少目标")
+        ) else "打开处理"
         rows.append(
             "<article class=\"attention-row\">"
             f"<strong>{_e(title or '待处理通告')}</strong>"
             f"<span>{_e(reason[:120])}</span>"
+            "<div class=\"attention-actions\">"
+            f"<a class=\"btn ghost\" href=\"{_e(detail_url)}\">{_e(action_label)}</a>"
+            "</div>"
             "</article>"
         )
     return "\n".join(rows) or "<div class=\"empty compact\">当前没有需要处理的问题</div>"
@@ -1079,6 +1103,99 @@ def _target_link_panel(work_type: str, target_record_id: str) -> str:
     """
 
 
+def _detail_status_item(label: str, value: str, tone: str = "") -> str:
+    tone_class = f" {tone}" if tone else ""
+    return (
+        f"<article class=\"detail-status-item{tone_class}\">"
+        f"<span>{_e(label)}</span>"
+        f"<strong>{_e(value)}</strong>"
+        "</article>"
+    )
+
+
+def _detail_status_board(
+    *,
+    work_type: str,
+    detail_mode: str,
+    source_record_id: str,
+    target_record_id: str,
+    site_photo_count: int,
+    mop_status: str,
+) -> str:
+    work = _work_type(work_type)
+    source_text = "源表已关联" if source_record_id else ("纯手填/复制" if detail_mode in {"manual", "ongoing"} else "待选择事项")
+    source_tone = "ok" if source_record_id else ("ready" if detail_mode in {"manual", "ongoing"} else "warn")
+    if target_record_id:
+        target_text, target_tone = "目标已绑定", "ok"
+    elif detail_mode == "ongoing":
+        target_text, target_tone = "需绑定目标", "blocked"
+    else:
+        target_text, target_tone = "发送后创建", "ready"
+    if work in SITE_PHOTO_REQUIRED_WORK_TYPES:
+        if site_photo_count > 0:
+            site_text, site_tone = f"现场图 {site_photo_count} 张", "ok"
+        else:
+            site_text, site_tone = "现场图待补", "warn"
+    else:
+        site_text, site_tone = "无需现场图", "muted"
+    if work == "maintenance":
+        mop_text = mop_status or "MOP未绑定"
+        mop_tone = "ok" if ("已上传" in mop_text or "已确认" in mop_text) else ("warn" if "未" in mop_text else "ready")
+    else:
+        mop_text, mop_tone = "不要求MOP", "muted"
+    qt_text = "已进入同步视图" if detail_mode == "ongoing" else "发送后同步Qt"
+    return (
+        "<section class=\"detail-status-board\" aria-label=\"当前通告办理状态\">"
+        + _detail_status_item("源表关系", source_text, source_tone)
+        + _detail_status_item("目标多维", target_text, target_tone)
+        + _detail_status_item("现场照片", site_text, site_tone)
+        + _detail_status_item("维护单", mop_text, mop_tone)
+        + _detail_status_item("Qt显示", qt_text, "ready")
+        + "</section>"
+    )
+
+
+def _mop_next_action_panel(
+    *,
+    scope: str,
+    work_type: str,
+    source_record_id: str,
+    mop_status: str,
+) -> str:
+    if _work_type(work_type) != "maintenance":
+        return ""
+    params: dict[str, Any] = {"scope": scope}
+    if source_record_id:
+        params["source_record_id"] = source_record_id
+    mop_url = _query_url("/engineer/mop", **params)
+    status = mop_status or "MOP未绑定"
+    if "已上传" in status or "已确认" in status:
+        title = "维护单已处理"
+        detail = "可进入维护单页面查看绑定和上传状态。"
+        action = "查看维护单"
+        tone = "ok"
+    elif "未绑定" in status:
+        title = "维护单待绑定"
+        detail = "选择或上传对应 MOP 表格后，填写签名并上传维护保养单。"
+        action = "去绑定MOP"
+        tone = "warn"
+    else:
+        title = "维护单待上传"
+        detail = "维护单已有关联状态，请继续填写、签名或上传源表。"
+        action = "继续处理MOP"
+        tone = "ready"
+    return (
+        f"<section class=\"mop-action-panel {tone}\">"
+        "<div>"
+        f"<strong>{_e(title)}</strong>"
+        f"<span>{_e(detail)}</span>"
+        f"<em>{_e(status)}</em>"
+        "</div>"
+        f"<a class=\"btn ghost\" href=\"{_e(mop_url)}\">{_e(action)}</a>"
+        "</section>"
+    )
+
+
 def _completion_hint(work_type: str) -> str:
     if work_type in {"maintenance", "change", "repair"}:
         return "整条通告任意一次上传过现场图片后即可结束，后端按累计现场图片校验。"
@@ -1150,6 +1267,20 @@ def _detail_form(
         source_record_id=source_record_id,
         target_record_id=target_record_id,
     )
+    status_board = _detail_status_board(
+        work_type=work,
+        detail_mode=detail_mode,
+        source_record_id=source_record_id,
+        target_record_id=target_record_id,
+        site_photo_count=site_photo_count,
+        mop_status=mop_status,
+    )
+    mop_action_panel = _mop_next_action_panel(
+        scope=scope,
+        work_type=work,
+        source_record_id=source_record_id,
+        mop_status=mop_status,
+    )
     action_buttons = (
         "<button class=\"btn primary\" type=\"submit\" name=\"submit_action\" value=\"update\">发送更新</button>"
         "<button class=\"btn danger\" type=\"submit\" name=\"submit_action\" value=\"end\">发送结束</button>"
@@ -1180,6 +1311,8 @@ def _detail_form(
           <em>{_e('后端驱动表单，提交后进入后台队列')}</em>
           <small class="detail-mode-note">{_e(mode_note)}</small>
         </header>
+        {status_board}
+        {mop_action_panel}
         {source_link_html}
         {_target_link_panel(work, target_record_id)}
         {_form_fields(work, draft)}
@@ -1341,7 +1474,13 @@ def render_workbench_lite(
         "</button>"
         for item in undo_items[:12]
     ) or "<div class=\"empty compact\">近三天暂无可回退通告</div>"
-    attention_html = _attention_rows(ongoing, work_type=work)
+    attention_html = _attention_rows(
+        ongoing,
+        work_type=work,
+        scope=scope,
+        pending_page=pending_page_num,
+        ongoing_page=ongoing_page_num,
+    )
     attention_count = 0 if "当前没有需要处理的问题" in attention_html else attention_html.count("attention-row")
     undo_count = len(undo_items[:12])
     return f"""<!doctype html>
@@ -1474,11 +1613,16 @@ def render_workbench_lite(
     .attention-row {{ border:1px solid #ffd3b0; border-radius:14px; padding:10px; background:#fff8ed; }}
     .attention-row strong {{ display:block; color:#7c2d12; font-size:13px; line-height:1.35; }}
     .attention-row span {{ display:block; margin-top:4px; color:#9a3412; font-size:12px; line-height:1.45; overflow-wrap:anywhere; }}
+    .attention-actions {{ display:flex; justify-content:flex-end; gap:8px; margin-top:8px; }}
+    .attention-actions .btn {{ min-height:30px; padding:5px 10px; border-radius:10px; font-size:12px; }}
     .notice-row,.ongoing-row {{ position:relative; min-width:0; display:grid; gap:5px; border:1px solid #dce8f8; border-radius:13px; padding:8px 10px 8px 13px; color:#0c244d; text-decoration:none; background:#fff; transition:border-color .12s ease, box-shadow .12s ease, transform .12s ease, background .12s ease; overflow:hidden; }}
     .notice-row::before,.ongoing-row::before {{ content:""; position:absolute; left:0; top:10px; bottom:10px; width:4px; border-radius:999px; background:#cfe0f5; }}
     .notice-row.active::before,.ongoing-row.active::before {{ background:#1f63ff; }}
     .notice-row:hover,.ongoing-row:hover {{ border-color:#9cc7ff; box-shadow:0 8px 18px rgba(31,99,255,.08); transform:translateY(-1px); }}
     .notice-row.active,.ongoing-row.active {{ border-color:#1f63ff; box-shadow:0 0 0 3px rgba(31,99,255,.12), 0 10px 22px rgba(31,99,255,.09); background:linear-gradient(180deg,#fff,#f4f9ff); }}
+    .notice-row.needs-site-photo:not(.active),.ongoing-row.needs-site-photo:not(.active) {{ border-color:#ffd899; background:linear-gradient(180deg,#fff,#fffaf0); }}
+    .notice-row.needs-site-photo::before,.ongoing-row.needs-site-photo::before {{ background:#f59e0b; }}
+    .notice-row.needs-mop:not(.active),.ongoing-row.needs-mop:not(.active) {{ box-shadow:inset 0 -2px 0 rgba(245,158,11,.18); }}
     .notice-row.is-disabled {{ cursor:not-allowed; background:#f7f9fc; opacity:.76; }}
     .notice-row.is-disabled:hover {{ transform:none; box-shadow:none; border-color:#dce8f8; }}
     .notice-row.is-loading,.ongoing-row.is-loading {{ border-color:#1f63ff; background:#eef6ff; box-shadow:0 0 0 3px rgba(31,99,255,.14); }}
@@ -1508,6 +1652,19 @@ def render_workbench_lite(
     .detail-head strong {{ font-size:17px; line-height:1.25; }}
     .detail-head em {{ color:#64748b; font-style:normal; }}
     .detail-mode-note {{ width:max-content; max-width:100%; border-radius:999px; padding:5px 8px; color:#0a57d8; background:#fff; box-shadow:inset 0 0 0 1px rgba(31,99,255,.12); font-size:11px; font-weight:900; line-height:1.3; }}
+    .detail-status-board {{ display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:7px; }}
+    .detail-status-item {{ min-width:0; border:1px solid #d8e5f7; border-radius:14px; padding:8px 9px; background:linear-gradient(180deg,#fff,#f8fbff); box-shadow:0 6px 14px rgba(15,73,153,.04); }}
+    .detail-status-item span {{ display:block; margin:0 0 3px; color:#64748b; font-size:10px; font-weight:950; line-height:1.2; }}
+    .detail-status-item strong {{ display:block; min-width:0; color:#0c244d; font-size:12px; line-height:1.25; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+    .detail-status-item.ok {{ border-color:#b7efd1; background:linear-gradient(180deg,#fff,#ecfff5); }}
+    .detail-status-item.ok strong {{ color:#087443; }}
+    .detail-status-item.ready {{ border-color:#b9d7ff; background:linear-gradient(180deg,#fff,#eef6ff); }}
+    .detail-status-item.ready strong {{ color:#0a57d8; }}
+    .detail-status-item.warn {{ border-color:#ffd899; background:linear-gradient(180deg,#fff,#fff8eb); }}
+    .detail-status-item.warn strong {{ color:#8a4b00; }}
+    .detail-status-item.blocked {{ border-color:#ffc7bf; background:linear-gradient(180deg,#fff,#fff1f0); }}
+    .detail-status-item.blocked strong {{ color:#b42318; }}
+    .detail-status-item.muted {{ background:#f7f9fc; }}
     .detail-form {{ display:grid; gap:9px; }}
     .site-photo-panel {{ border:1px solid #cfe0f5; border-radius:16px; padding:10px; background:linear-gradient(135deg,#f8fbff,#eef6ff); display:grid; gap:9px; }}
     .site-photo-head {{ display:flex; justify-content:space-between; gap:10px; align-items:flex-start; }}
@@ -1548,6 +1705,14 @@ def render_workbench_lite(
     .source-link-title {{ color:#0c244d; font-size:13px; font-weight:900; }}
     .source-link-field em {{ color:#64748b; font-style:normal; font-size:12px; line-height:1.45; }}
     .source-link-field.readonly select {{ color:#64748b; background:#eef4fb; }}
+    .mop-action-panel {{ display:flex; align-items:center; justify-content:space-between; gap:12px; margin:0 0 12px; border:1px solid #bfdbfe; border-radius:16px; padding:10px 12px; background:linear-gradient(135deg,#f5fbff,#ffffff); }}
+    .mop-action-panel.warn {{ border-color:#fbd38d; background:linear-gradient(135deg,#fff8ed,#ffffff); }}
+    .mop-action-panel.ok {{ border-color:#bbf7d0; background:linear-gradient(135deg,#f0fdf4,#ffffff); }}
+    .mop-action-panel > div {{ min-width:0; display:grid; gap:2px; }}
+    .mop-action-panel strong {{ color:#0c244d; font-size:13px; line-height:1.3; }}
+    .mop-action-panel span,.mop-action-panel em {{ color:#64748b; font-size:12px; font-style:normal; line-height:1.45; }}
+    .mop-action-panel em {{ color:#0a57d8; font-weight:900; }}
+    .mop-action-panel .btn {{ flex:0 0 auto; min-height:34px; }}
     .target-link-panel {{ display:flex; align-items:center; justify-content:space-between; gap:12px; border:1px solid #a8cdfa; border-radius:16px; padding:10px 12px; background:linear-gradient(135deg,#f5fbff,#ffffff); }}
     .target-link-panel strong {{ display:block; color:#0c244d; font-size:13px; line-height:1.3; }}
     .target-link-panel span {{ display:block; margin-top:2px; color:#64748b; font-size:12px; line-height:1.45; }}
@@ -1613,6 +1778,7 @@ def render_workbench_lite(
       .manual-menu,.refresh-menu {{ left:0; right:auto; max-width:calc(100vw - 32px); }}
       .form-grid {{ grid-template-columns:1fr; }}
       .site-photo-upload {{ grid-template-columns:1fr; }}
+      .detail-status-board {{ grid-template-columns:repeat(2,minmax(0,1fr)); }}
       label:has(textarea), label:nth-last-child(1) {{ grid-column:auto; }}
       .form-actions {{ flex-wrap:wrap; }}
       .form-actions .btn {{ flex:1 1 140px; }}
@@ -1839,6 +2005,11 @@ def render_workbench_lite(
       if (enabled) button.setAttribute('aria-busy', 'true');
       else button.removeAttribute('aria-busy');
     }}
+    function setFormSubmitBusy(form, enabled) {{
+      if (!form) return;
+      form.classList.toggle('is-submitting', Boolean(enabled));
+      form.querySelectorAll('button[name="submit_action"]').forEach(button => setButtonBusy(button, enabled));
+    }}
     function setPickerOpen(pickerId, openerId, open) {{
       document.getElementById(pickerId)?.classList.toggle('open', Boolean(open));
       document.getElementById(openerId)?.setAttribute('aria-expanded', open ? 'true' : 'false');
@@ -1877,7 +2048,7 @@ def render_workbench_lite(
       if (['maintenance', 'change', 'repair'].includes(workType)) {{
         checks.push(sitePhotoCount > 0
           ? ['现场图片', `已累计上传${{sitePhotoCount}}张，满足结束条件。`, 'ok']
-          : ['现场图片', '当前页面未看到现场图片；后端会按整条通告历史记录再次校验。', 'warn']);
+          : ['现场图片', '还没有现场照片。请先在当前通告里上传至少 1 张现场照片，再发送结束。', 'blocked']);
       }} else {{
         checks.push(['现场图片', '当前通告类型不强制现场图片。', 'ok']);
       }}
@@ -2829,8 +3000,7 @@ def render_workbench_lite(
         navLink.classList.add('is-loading');
         const isRow = navLink.matches('.notice-row,.ongoing-row');
         const appliedLocally = isRow && navLink.matches('.notice-row') && applySourceRowToDetail(navLink);
-        const ongoingHasSource = navLink.matches('.ongoing-row') && String(navLink.getAttribute('data-source-record-id') || '').trim();
-        const appliedOngoingLocally = isRow && ongoingHasSource && applyOngoingRowToDetail(navLink);
+        const appliedOngoingLocally = isRow && navLink.matches('.ongoing-row') && applyOngoingRowToDetail(navLink);
         if (appliedLocally || appliedOngoingLocally) {{
           const selectingOngoing = navLink.matches('.ongoing-row');
           document.querySelectorAll('.notice-row').forEach(node => {{
@@ -3461,9 +3631,8 @@ def render_workbench_lite(
         return;
       }}
       setLiteFormDirty(false);
-      if (submitter) submitter.disabled = true;
-      setButtonBusy(submitter, true);
-      setLiteStatus('已加入后台发送队列');
+      setFormSubmitBusy(form, true);
+      setLiteStatus('已加入后台发送队列，后端正在受理，页面不会执行飞书或多维写入');
       const payload = formPayload(form, submitter, submitAction);
       const optimisticApplied = applyOptimisticSubmission(form, submitAction, payload);
       try {{
@@ -3477,7 +3646,7 @@ def render_workbench_lite(
         if (handleLiteAuthRequired(response, data)) return;
         if (!response.ok || data.ok === false) throw new Error(data.error || '提交失败');
         const jobId = (data && data.job_id) || (data && data.data && data.data.job_id) || '';
-        setLiteStatus(`已受理，任务号 ${{jobId}}`);
+        setLiteStatus(`后端已受理，正在排队发送和上传。任务号 ${{jobId}}`);
         schedulePostSubmitRefresh('任务已受理，正在更新列表...', jobId, payload);
       }} catch (error) {{
         setLiteFormDirty(true);
@@ -3486,7 +3655,7 @@ def render_workbench_lite(
         showLiteError(message);
         setLiteStatus('提交失败：' + friendlyLiteMessage(message));
       }} finally {{
-        setButtonBusy(submitter, false);
+        setFormSubmitBusy(form, false);
       }}
     }});
     document.addEventListener('input', (event) => {{

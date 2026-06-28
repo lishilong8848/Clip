@@ -13349,6 +13349,105 @@ class MaintenancePortalService:
             )
         return results, warning
 
+    @staticmethod
+    def _mop_confirm_field_truthy(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "y", "是", "已确认", "勾选"}
+        if isinstance(value, list):
+            return any(MaintenancePortalService._mop_confirm_field_truthy(item) for item in value)
+        if isinstance(value, dict):
+            for key in ("checked", "value", "text", "name"):
+                if key in value and MaintenancePortalService._mop_confirm_field_truthy(value.get(key)):
+                    return True
+        return False
+
+    @staticmethod
+    def _mop_attachment_has_token(value: Any, expected_file_token: str) -> bool:
+        expected_file_token = str(expected_file_token or "").strip()
+        if not expected_file_token:
+            return False
+        if isinstance(value, dict):
+            token = str(
+                value.get("file_token")
+                or value.get("token")
+                or value.get("id")
+                or ""
+            ).strip()
+            if token == expected_file_token:
+                return True
+            return any(
+                MaintenancePortalService._mop_attachment_has_token(item, expected_file_token)
+                for item in value.values()
+            )
+        if isinstance(value, list):
+            return any(
+                MaintenancePortalService._mop_attachment_has_token(item, expected_file_token)
+                for item in value
+            )
+        return str(value or "").strip() == expected_file_token
+
+    def _verify_mop_source_record_update(
+        self,
+        *,
+        source_record_id: str,
+        file_token: str,
+    ) -> dict[str, Any]:
+        source_record_id = str(source_record_id or "").strip()
+        file_token = str(file_token or "").strip()
+        if not source_record_id or not file_token:
+            raise PortalError("MOP 上传后校验缺少源记录 ID 或 file_token。")
+        guard = external_real_write_guard()
+        if guard.get("mock_external"):
+            return {
+                "ok": True,
+                "mock_external": True,
+                "message": "mock 外部写入，已跳过源表读回校验。",
+                "checked_fields": [
+                    MOP_SIGNED_ATTACHMENT_FIELD,
+                    MOP_ENGINEER_CONFIRM_FIELD,
+                    MOP_SUPERVISOR_CONFIRM_FIELD,
+                ],
+            }
+        payload = self._request_json(
+            f"records/{source_record_id}",
+            app_token=DEFAULT_APP_TOKEN,
+            table_id=DEFAULT_TABLE_ID,
+        )
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        record = data.get("record") if isinstance(data.get("record"), dict) else {}
+        fields = record.get("fields") if isinstance(record.get("fields"), dict) else {}
+        missing: list[str] = []
+        if not self._mop_attachment_has_token(
+            fields.get(MOP_SIGNED_ATTACHMENT_FIELD),
+            file_token,
+        ):
+            missing.append(MOP_SIGNED_ATTACHMENT_FIELD)
+        if not self._mop_confirm_field_truthy(fields.get(MOP_ENGINEER_CONFIRM_FIELD)):
+            missing.append(MOP_ENGINEER_CONFIRM_FIELD)
+        if not self._mop_confirm_field_truthy(fields.get(MOP_SUPERVISOR_CONFIRM_FIELD)):
+            missing.append(MOP_SUPERVISOR_CONFIRM_FIELD)
+        if missing:
+            raise PortalError(
+                "MOP 上传后源表校验失败，以下字段未确认写入："
+                + "、".join(missing)
+            )
+        return {
+            "ok": True,
+            "mock_external": False,
+            "message": "源表附件和确认字段已校验。",
+            "source_record_id": source_record_id,
+            "file_token": file_token,
+            "checked_fields": [
+                MOP_SIGNED_ATTACHMENT_FIELD,
+                MOP_ENGINEER_CONFIRM_FIELD,
+                MOP_SUPERVISOR_CONFIRM_FIELD,
+            ],
+        }
+
     def upload_signed_engineer_mop_file(
         self,
         *,
@@ -13409,6 +13508,10 @@ class MaintenancePortalService:
             table_id=DEFAULT_TABLE_ID,
             record_id=source_record_id,
             fields=update_fields,
+        )
+        verification = self._verify_mop_source_record_update(
+            source_record_id=source_record_id,
+            file_token=file_token,
         )
         display_fields.update(update_fields)
         for source_record in self._records:
@@ -13478,6 +13581,7 @@ class MaintenancePortalService:
             "file_token": file_token,
             "filled_file": filled,
             "updated_fields": list(update_fields.keys()),
+            "verification": verification,
             "notification_results": notification_results,
             "notification_warning": notification_warning,
             "memory_key": memory_key,

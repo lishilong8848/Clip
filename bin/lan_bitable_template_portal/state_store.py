@@ -4505,6 +4505,28 @@ class LanPortalStateStore:
                 )
         return self._notice_identity_from_row(row) if row else None
 
+    def list_notice_identities(
+        self,
+        *,
+        include_deleted: bool = False,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        if not self.db_path.exists():
+            return []
+        limit = max(1, min(int(limit or 0), 5000))
+        clauses = []
+        if not include_deleted:
+            clauses.append("deleted_at IS NULL")
+        sql = "SELECT * FROM notice_identity_map"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY updated_at DESC LIMIT ?"
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                rows = conn.execute(sql, (limit,)).fetchall()
+        return [self._notice_identity_from_row(row) for row in rows]
+
     def mark_notice_identity_deleted(
         self,
         *,
@@ -5710,6 +5732,40 @@ class LanPortalStateStore:
                 )
                 conn.commit()
         return self.get_mop_temporary_signature_session(temp_id=temp_id)
+
+    def cleanup_mop_temporary_signature_sessions(
+        self,
+        *,
+        signed_retention_seconds: int = 30 * 24 * 3600,
+        max_delete: int = 500,
+    ) -> int:
+        signed_retention_seconds = max(
+            24 * 3600,
+            min(int(signed_retention_seconds or 0), 180 * 24 * 3600),
+        )
+        max_delete = max(1, min(int(max_delete or 0), 5000))
+        now = time.time()
+        signed_cutoff = now - signed_retention_seconds
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                cursor = conn.execute(
+                    """
+                    DELETE FROM mop_temporary_signature_sessions
+                    WHERE rowid IN (
+                        SELECT rowid
+                        FROM mop_temporary_signature_sessions
+                        WHERE (status != 'signed' AND expires_at < ?)
+                           OR (status = 'signed' AND updated_at < ?)
+                        ORDER BY updated_at
+                        LIMIT ?
+                    )
+                    """,
+                    (now, signed_cutoff, max_delete),
+                )
+                removed = int(cursor.rowcount or 0)
+                conn.commit()
+        return removed
 
     def _mop_binding_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
         payload = self._loads(str(row["payload_json"] or ""), {})

@@ -108,6 +108,7 @@ from lan_bitable_template_portal.workbench_lite import (
 )
 from lan_bitable_template_portal.portal_auth import AUTH_COOKIE_NAME
 from lan_bitable_template_portal.identity_utils import (
+    canonical_source_record_id,
     canonical_target_record_id,
     is_local_record_id,
     normalize_notice_identity_payload,
@@ -942,6 +943,58 @@ class FastAPIPortalController:
                     "time": time.time(),
                 },
             }
+
+        @app.get("/api/backend/consistency")
+        async def backend_consistency(request: Request):
+            admin_response, _session = self._require_admin_response(request)
+            if admin_response is not None:
+                return admin_response
+            scope = str(request.query_params.get("scope") or "ALL").strip() or "ALL"
+            try:
+                data = await asyncio.to_thread(
+                    self._backend_consistency_snapshot,
+                    scope,
+                )
+                return {"ok": True, "data": data}
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=500)
+
+        @app.get("/api/backend/notice-diagnostic")
+        async def backend_notice_diagnostic(request: Request):
+            admin_response, _session = self._require_admin_response(request)
+            if admin_response is not None:
+                return admin_response
+            query = str(request.query_params.get("query") or "").strip()
+            scope = str(request.query_params.get("scope") or "ALL").strip() or "ALL"
+            try:
+                data = await asyncio.to_thread(
+                    self._backend_notice_diagnostic,
+                    query,
+                    scope,
+                )
+                return {"ok": True, "data": data}
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=500)
+
+        @app.post("/api/backend/notice-projection-repair")
+        async def backend_notice_projection_repair(request: Request):
+            admin_response, _session = self._require_admin_response(request)
+            if admin_response is not None:
+                return admin_response
+            scope = str(request.query_params.get("scope") or "ALL").strip() or "ALL"
+            try:
+                data = await asyncio.to_thread(
+                    self._backend_repair_notice_projection,
+                    scope,
+                )
+                PortalRuntime.state_store.put_backend_runtime(
+                    "notice_projection_repair",
+                    data,
+                )
+                self._clear_read_cache()
+                return {"ok": True, "data": data}
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=500)
 
         @app.post("/api/backend/preflight")
         async def backend_preflight(request: Request):
@@ -5253,6 +5306,421 @@ class FastAPIPortalController:
         return PortalRuntime._cached_service_payload(_CacheAdapter(), key_parts, builder)
 
     @staticmethod
+    def _diagnostic_work_type(item: dict) -> str:
+        work_type = str(
+            item.get("work_type") or item.get("lan_work_type") or ""
+        ).strip()
+        if work_type:
+            return work_type
+        notice_type = str(item.get("notice_type") or "").strip()
+        return WORK_TYPE_BY_NOTICE_TYPE.get(notice_type) or "maintenance"
+
+    @staticmethod
+    def _diagnostic_text_key(value: object) -> str:
+        return re.sub(
+            r"[\s,，;；:：。.【】（）()《》<>\"'“”‘’\-－_/\\~～至]+",
+            "",
+            str(value or ""),
+        ).strip().lower()
+
+    @classmethod
+    def _diagnostic_summary_from_payload(
+        cls,
+        payload: dict,
+        *,
+        row: dict | None = None,
+        source: str = "",
+    ) -> dict:
+        row = row if isinstance(row, dict) else {}
+        payload = normalize_notice_identity_payload(dict(payload or {}))
+        notice_type = str(payload.get("notice_type") or row.get("notice_type") or "").strip()
+        work_type = cls._diagnostic_work_type({**payload, "notice_type": notice_type})
+        active_item_id = str(
+            payload.get("active_item_id")
+            or row.get("active_item_id")
+            or ""
+        ).strip()
+        target_record_id = canonical_target_record_id(payload)
+        row_record_id = str(row.get("record_id") or "").strip()
+        if not target_record_id and row_record_id and not is_local_record_id(row_record_id):
+            target_record_id = row_record_id
+        source_record_id = canonical_source_record_id(payload)
+        title = str(
+            payload.get("title")
+            or payload.get("name")
+            or payload.get("content")
+            or payload.get("text")
+            or ""
+        ).strip()
+        if len(title) > 80:
+            title = title[:80] + "..."
+        building_codes = payload.get("building_codes")
+        if not isinstance(building_codes, list):
+            building_codes = []
+        return {
+            "source": source,
+            "work_type": work_type,
+            "notice_type": notice_type,
+            "active_item_id": active_item_id,
+            "source_record_id": source_record_id,
+            "target_record_id": target_record_id,
+            "record_id": target_record_id,
+            "title": title,
+            "origin": str(payload.get("origin") or row.get("origin") or "").strip(),
+            "building_codes": [
+                str(item or "").strip()
+                for item in building_codes
+                if str(item or "").strip()
+            ],
+            "status": str(payload.get("status") or "").strip(),
+            "updated_at": float(row.get("updated_at") or payload.get("updated_at") or 0),
+        }
+
+    @classmethod
+    def _diagnostic_identity_keys(cls, item: dict) -> set[str]:
+        work_type = str(item.get("work_type") or "maintenance").strip() or "maintenance"
+        keys: set[str] = set()
+        for kind in ("active_item_id", "source_record_id", "target_record_id"):
+            value = str(item.get(kind) or "").strip()
+            if value and not is_local_record_id(value):
+                label = {
+                    "active_item_id": "active",
+                    "source_record_id": "source",
+                    "target_record_id": "target",
+                }[kind]
+                keys.add(f"{work_type}:{label}:{value}")
+        active_item_id = str(item.get("active_item_id") or "").strip()
+        if active_item_id and not keys:
+            keys.add(f"{work_type}:active:{active_item_id}")
+        if not keys:
+            title_key = cls._diagnostic_text_key(item.get("title"))
+            if title_key:
+                keys.add(f"{work_type}:title:{title_key}")
+        return keys
+
+    def _backend_consistency_snapshot(self, scope: str = "ALL") -> dict:
+        normalized_scope = PortalRuntime.auth_manager.normalize_scope(scope or "ALL")
+        qt_items: list[dict] = []
+        web_items: list[dict] = []
+        errors: list[str] = []
+        try:
+            rows = PortalRuntime.state_store.list_qt_active_items(include_deleted=False)
+            for row in rows:
+                payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+                summary = self._diagnostic_summary_from_payload(
+                    payload,
+                    row=row,
+                    source="qt_active_items",
+                )
+                scope_payload = dict(payload)
+                scope_payload.setdefault("building_codes", summary.get("building_codes") or [])
+                if PortalRuntime.service._scope_matches_item(normalized_scope, scope_payload):
+                    qt_items.append(summary)
+        except Exception as exc:
+            errors.append(f"Qt active 读取失败: {exc}")
+        try:
+            ongoing = self._get_ongoing(normalized_scope)
+            for item in ongoing:
+                if not isinstance(item, dict):
+                    continue
+                summary = self._diagnostic_summary_from_payload(
+                    item,
+                    row={},
+                    source="web_ongoing",
+                )
+                web_items.append(summary)
+        except Exception as exc:
+            errors.append(f"网页进行中投影读取失败: {exc}")
+
+        web_keys: set[str] = set()
+        for item in web_items:
+            web_keys.update(self._diagnostic_identity_keys(item))
+        qt_keys: set[str] = set()
+        for item in qt_items:
+            qt_keys.update(self._diagnostic_identity_keys(item))
+
+        qt_only = [
+            item for item in qt_items
+            if not (self._diagnostic_identity_keys(item) & web_keys)
+        ]
+        web_only = [
+            item for item in web_items
+            if not (self._diagnostic_identity_keys(item) & qt_keys)
+        ]
+        missing_target = [
+            item for item in qt_items + web_items
+            if str(item.get("work_type") or "") != "event"
+            and not str(item.get("target_record_id") or "").strip()
+        ]
+        target_groups: dict[str, list[dict]] = {}
+        for item in qt_items:
+            target = str(item.get("target_record_id") or "").strip()
+            if target:
+                target_groups.setdefault(target, []).append(item)
+        duplicate_targets = [
+            {
+                "target_record_id": target,
+                "count": len(items),
+                "items": items[:5],
+            }
+            for target, items in sorted(target_groups.items())
+            if len(items) > 1
+        ]
+        issue_count = (
+            len(qt_only)
+            + len(web_only)
+            + len(missing_target)
+            + len(duplicate_targets)
+            + len(errors)
+        )
+        return {
+            "scope": normalized_scope,
+            "ok": issue_count == 0,
+            "checked_at": time.time(),
+            "counts": {
+                "qt_active": len(qt_items),
+                "web_ongoing": len(web_items),
+                "qt_only": len(qt_only),
+                "web_only": len(web_only),
+                "missing_target": len(missing_target),
+                "duplicate_targets": len(duplicate_targets),
+                "errors": len(errors),
+            },
+            "qt_only": qt_only[:20],
+            "web_only": web_only[:20],
+            "missing_target": missing_target[:20],
+            "duplicate_targets": duplicate_targets[:20],
+            "errors": errors,
+        }
+
+    def _backend_notice_diagnostic(self, query: str, scope: str = "ALL") -> dict:
+        normalized_scope = PortalRuntime.auth_manager.normalize_scope(scope or "ALL")
+        query = str(query or "").strip()
+        query_lower = query.lower()
+        query_key = self._diagnostic_text_key(query)
+        errors: list[str] = []
+        results: list[dict] = []
+        seen: set[str] = set()
+
+        def _matches(item: dict) -> bool:
+            if not query:
+                return False
+            values = [
+                item.get("active_item_id"),
+                item.get("source_record_id"),
+                item.get("target_record_id"),
+                item.get("record_id"),
+                item.get("identity_id"),
+                item.get("title"),
+                item.get("notice_type"),
+                item.get("work_type"),
+                item.get("status"),
+                item.get("origin"),
+            ]
+            haystack = " ".join(str(value or "") for value in values).lower()
+            if query_lower and query_lower in haystack:
+                return True
+            return bool(query_key and query_key in self._diagnostic_text_key(haystack))
+
+        def _scope_matches(summary: dict, raw_payload: dict | None = None) -> bool:
+            if normalized_scope in {"ALL", "*"}:
+                return True
+            payload = dict(raw_payload or {})
+            payload.setdefault("building_codes", summary.get("building_codes") or [])
+            return bool(PortalRuntime.service._scope_matches_item(normalized_scope, payload))
+
+        def _add(summary: dict, *, source: str, raw_payload: dict | None = None) -> None:
+            if not _scope_matches(summary, raw_payload):
+                return
+            if not _matches(summary):
+                return
+            key = "|".join([
+                source,
+                str(summary.get("identity_id") or ""),
+                str(summary.get("active_item_id") or ""),
+                str(summary.get("source_record_id") or ""),
+                str(summary.get("target_record_id") or ""),
+                str(summary.get("title") or ""),
+            ])
+            if key in seen:
+                return
+            seen.add(key)
+            target_record_id = str(summary.get("target_record_id") or "").strip()
+            source_record_id = str(summary.get("source_record_id") or "").strip()
+            results.append({
+                **summary,
+                "diagnostic_source": source,
+                "binding_status": "已绑定目标多维" if target_record_id else "缺目标多维",
+                "source_status": "有源表记录" if source_record_id else "无源表记录/纯手填",
+                "remote_check": "未查远端，避免诊断触发飞书接口",
+            })
+
+        try:
+            rows = PortalRuntime.state_store.list_qt_active_items(include_deleted=True)
+            for row in rows:
+                payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+                summary = self._diagnostic_summary_from_payload(
+                    payload,
+                    row=row,
+                    source="qt_active_items",
+                )
+                if row.get("deleted_at"):
+                    summary["deleted_at"] = row.get("deleted_at")
+                    summary["status"] = summary.get("status") or "deleted"
+                _add(summary, source="Qt 活动项", raw_payload=payload)
+        except Exception as exc:
+            errors.append(f"Qt active 读取失败: {exc}")
+
+        try:
+            for item in self._get_ongoing(normalized_scope):
+                if not isinstance(item, dict):
+                    continue
+                summary = self._diagnostic_summary_from_payload(
+                    item,
+                    row={},
+                    source="web_ongoing",
+                )
+                _add(summary, source="网页进行中", raw_payload=item)
+        except Exception as exc:
+            errors.append(f"网页进行中读取失败: {exc}")
+
+        try:
+            for identity in PortalRuntime.state_store.list_notice_identities(
+                include_deleted=True,
+                limit=2000,
+            ):
+                if not isinstance(identity, dict):
+                    continue
+                payload = dict(identity.get("payload") or {})
+                merged = {**payload, **{k: v for k, v in identity.items() if k != "payload"}}
+                summary = self._diagnostic_summary_from_payload(
+                    merged,
+                    row={},
+                    source="notice_identity_map",
+                )
+                summary.update({
+                    "identity_id": identity.get("identity_id") or "",
+                    "deleted_at": identity.get("deleted_at"),
+                    "source_app_token": identity.get("source_app_token") or "",
+                    "source_table_id": identity.get("source_table_id") or "",
+                    "target_app_token": identity.get("target_app_token") or "",
+                    "target_table_id": identity.get("target_table_id") or "",
+                })
+                _add(summary, source="身份映射", raw_payload=merged)
+        except Exception as exc:
+            errors.append(f"身份映射读取失败: {exc}")
+
+        results.sort(
+            key=lambda item: float(item.get("updated_at") or item.get("deleted_at") or 0),
+            reverse=True,
+        )
+        return {
+            "scope": normalized_scope,
+            "query": query,
+            "checked_at": time.time(),
+            "query_required": not bool(query),
+            "count": len(results),
+            "items": results[:50],
+            "errors": errors,
+            "tips": [
+                "更新/结束/删除必须有 target_record_id。",
+                "纯手填或剪贴板通告可以没有 source_record_id。",
+                "该诊断只查本地 SQLite，不主动访问飞书。",
+            ],
+        }
+
+    def _backend_repair_notice_projection(self, scope: str = "ALL") -> dict:
+        normalized_scope = PortalRuntime.auth_manager.normalize_scope(scope or "ALL")
+        repaired_identities = 0
+        repaired_qt_items = 0
+        skipped = 0
+        errors: list[str] = []
+
+        def _is_ended(payload: dict) -> bool:
+            status = str(payload.get("status") or "").strip()
+            text = str(payload.get("text") or payload.get("content") or "").strip()
+            return status == "结束" or "状态：结束" in text or "状态:结束" in text
+
+        def _scope_matches(payload: dict) -> bool:
+            if normalized_scope in {"ALL", "*"}:
+                return True
+            try:
+                return bool(PortalRuntime.service._scope_matches_item(normalized_scope, payload))
+            except Exception:
+                return False
+
+        def _identity_ready(payload: dict) -> bool:
+            return bool(
+                str(payload.get("active_item_id") or "").strip()
+                or canonical_source_record_id(payload)
+                or canonical_target_record_id(payload)
+            )
+
+        def _normalized_payload(payload: dict, *, row: dict | None = None) -> dict:
+            row = row if isinstance(row, dict) else {}
+            merged = dict(payload or {})
+            merged.setdefault("active_item_id", str(row.get("active_item_id") or ""))
+            merged.setdefault("record_id", str(row.get("record_id") or ""))
+            merged.setdefault("target_record_id", str(row.get("record_id") or ""))
+            merged.setdefault("notice_type", row.get("notice_type") or "")
+            merged.setdefault("origin", row.get("origin") or "")
+            return normalize_notice_identity_payload(merged)
+
+        def _upsert_identity(payload: dict, origin: str) -> None:
+            nonlocal repaired_identities, skipped
+            if not _identity_ready(payload):
+                skipped += 1
+                return
+            identity = PortalRuntime.state_store.upsert_notice_identity(
+                payload,
+                origin=origin,
+            )
+            if identity:
+                repaired_identities += 1
+
+        try:
+            for row in PortalRuntime.state_store.list_qt_active_items(include_deleted=False):
+                payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+                normalized = _normalized_payload(payload, row=row)
+                if _is_ended(normalized) or not _scope_matches(normalized):
+                    skipped += 1
+                    continue
+                _upsert_identity(normalized, "notice_projection_repair_qt")
+        except Exception as exc:
+            errors.append(f"Qt active 修复失败: {exc}")
+
+        try:
+            for item in self._get_ongoing(normalized_scope):
+                if not isinstance(item, dict):
+                    skipped += 1
+                    continue
+                normalized = normalize_notice_identity_payload(dict(item))
+                if _is_ended(normalized) or not _scope_matches(normalized):
+                    skipped += 1
+                    continue
+                _upsert_identity(normalized, "notice_projection_repair_web")
+                if PortalRuntime.state_store.upsert_qt_active_item(
+                    normalized,
+                    section="event" if str(normalized.get("notice_type") or "") == "事件通告" else "other",
+                    origin=str(normalized.get("origin") or "notice_projection_repair_web"),
+                ):
+                    repaired_qt_items += 1
+        except Exception as exc:
+            errors.append(f"网页进行中投影修复失败: {exc}")
+
+        snapshot = self._backend_consistency_snapshot(normalized_scope)
+        return {
+            "scope": normalized_scope,
+            "repaired_identities": repaired_identities,
+            "repaired_qt_items": repaired_qt_items,
+            "skipped": skipped,
+            "errors": errors,
+            "checked_at": time.time(),
+            "consistency": snapshot,
+            "note": "仅修复本地 SQLite identity/Qt 投影，不访问飞书、不写多维。",
+        }
+
+    @staticmethod
     def _get_ongoing(scope: str) -> list[dict]:
         active_rows: list[dict] = []
         active_qt_identity_keys: set[str] = set()
@@ -6044,6 +6512,9 @@ class FastAPIPortalController:
         )
         clipboard_removed = PortalRuntime.state_store.cleanup_clipboard_candidates()
         dialog_removed = PortalRuntime.state_store.cleanup_dialog_sessions()
+        mop_temp_signature_removed = (
+            PortalRuntime.state_store.cleanup_mop_temporary_signature_sessions()
+        )
         return {
             **cleanup,
             "runtime_queue_removed": queue_removed,
@@ -6053,6 +6524,7 @@ class FastAPIPortalController:
             "attachment_removed": attachment_removed,
             "clipboard_removed": clipboard_removed,
             "dialog_removed": dialog_removed,
+            "mop_temp_signature_removed": mop_temp_signature_removed,
             "cleaned_at": time.time(),
         }
 

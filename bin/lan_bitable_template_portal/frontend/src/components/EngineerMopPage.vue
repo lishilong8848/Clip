@@ -448,7 +448,10 @@ const props = defineProps<{
   scopeOptions: ScopeOption[];
 }>();
 
-const scope = ref(normalizeScope(new URLSearchParams(window.location.search).get("scope") || props.scopeOptions[0]?.value || "ALL"));
+const routeParams = new URLSearchParams(window.location.search);
+const initialSourceRecordId = String(routeParams.get("source_record_id") || "").trim();
+const initialNoticeKey = String(routeParams.get("notice_key") || "").trim();
+const scope = ref(normalizeScope(routeParams.get("scope") || props.scopeOptions[0]?.value || "ALL"));
 const loading = ref(false);
 const saving = ref(false);
 const previewLoading = ref(false);
@@ -464,6 +467,7 @@ const warnings = ref<string[]>([]);
 const notices = ref<Dict[]>([]);
 const mopCandidates = ref<Dict[]>([]);
 const selectedNoticeKey = ref("");
+const routeNoticePreselectApplied = ref(false);
 const selectedMopRecordId = ref("");
 const selectedAttachmentToken = ref("");
 const noticeSearch = ref("");
@@ -3184,6 +3188,18 @@ function backToBinding(): void {
   previewMode.value = false;
 }
 
+function noticeMatchesRouteTarget(item: Dict): boolean {
+  if (initialNoticeKey && String(item.notice_key || "") === initialNoticeKey) return true;
+  if (!initialSourceRecordId) return false;
+  return String(item.source_record_id || item.record_id || "") === initialSourceRecordId;
+}
+
+function preferredNoticeKeyFromRoute(): string {
+  const routeMatched = notices.value.find((item) => noticeMatchesRouteTarget(item));
+  if (routeMatched?.notice_key) return String(routeMatched.notice_key);
+  return "";
+}
+
 async function loadPage(): Promise<void> {
   if (!props.loggedIn) return;
   loading.value = true;
@@ -3194,6 +3210,11 @@ async function loadPage(): Promise<void> {
     notices.value = Array.isArray(data.notices) ? data.notices : [];
     mopCandidates.value = Array.isArray(data.mop_candidates) ? data.mop_candidates : [];
     warnings.value = Array.isArray(data.warnings) ? data.warnings.map((item: unknown) => String(item)) : [];
+    const routeNoticeKey = routeNoticePreselectApplied.value ? "" : preferredNoticeKeyFromRoute();
+    if (routeNoticeKey) {
+      selectedNoticeKey.value = routeNoticeKey;
+      routeNoticePreselectApplied.value = true;
+    }
     if (!selectedNoticeKey.value || !notices.value.some((item) => item.notice_key === selectedNoticeKey.value)) {
       selectedNoticeKey.value = filteredNotices.value[0]?.notice_key || notices.value[0]?.notice_key || "";
     }
