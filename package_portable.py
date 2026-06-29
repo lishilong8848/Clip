@@ -1363,7 +1363,9 @@ def _run_packaging_preflight_tests() -> None:
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "portal_service.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "server.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "state_store.py",
+        PROJECT_ROOT / "bin" / "test_notice_identity_boundaries.py",
         PROJECT_ROOT / "bin" / "tools" / "notice_flow_smoke.py",
+        PROJECT_ROOT / "bin" / "tools" / "release_readiness_check.py",
         PROJECT_ROOT / "bin" / "upload_event_module" / "ui" / "main_window_runtime.py",
         PROJECT_ROOT / "package_portable.py",
     ]
@@ -1408,6 +1410,13 @@ def _run_packaging_preflight_tests() -> None:
         log("通告链路静态烟测通过。")
     else:
         raise RuntimeError("缺少通告链路静态烟测脚本，已中止打包。")
+
+    subprocess.run(
+        [sys.executable, "-m", "unittest", "bin.test_notice_identity_boundaries"],
+        cwd=PROJECT_ROOT,
+        check=True,
+    )
+    log("通告 ID 边界测试通过。")
 
     log("打包前自动测试完成。")
 

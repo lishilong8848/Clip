@@ -69,6 +69,62 @@ def _json_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+_DRAFT_DOM_KEYS = {
+    "action",
+    "operation_id",
+    "active_item_id",
+    "source_record_id",
+    "target_record_id",
+    "record_id",
+    "manual_id",
+    "scope",
+    "work_type",
+    "notice_type",
+    "title",
+    "building",
+    "buildings",
+    "specialty",
+    "maintenance_cycle",
+    "level",
+    "start_time",
+    "end_time",
+    "status",
+    "site_photo_count",
+    "mop_status",
+    "name",
+    "location",
+    "content",
+    "reason",
+    "impact",
+    "progress",
+    "spare_parts",
+}
+
+
+def _safe_draft_snapshot(draft: dict[str, Any] | None) -> dict[str, str]:
+    if not isinstance(draft, dict):
+        return {}
+    snapshot: dict[str, str] = {}
+    for key in _DRAFT_DOM_KEYS:
+        value = draft.get(key)
+        if value in (None, ""):
+            continue
+        if isinstance(value, (list, tuple)):
+            text = "、".join(str(item or "") for item in value if str(item or "").strip())
+        elif isinstance(value, dict):
+            continue
+        else:
+            text = str(value)
+        text = text.strip()
+        if text:
+            snapshot[key] = text[:800]
+    return snapshot
+
+
+def _safe_draft_json_attr(draft: dict[str, Any] | None) -> str:
+    return _json_dumps(_safe_draft_snapshot(draft))
+
+
 def _to_int(value: Any, default: int = 0) -> int:
     try:
         return int(value)
@@ -871,7 +927,7 @@ def _record_rows(
         f" data-action=\"{_e(action)}\""
         f" data-disabled-reason=\"{_e(disabled_reason)}\""
             f" data-title=\"{_e(title)}\""
-        f" data-draft=\"{_e(_json_dumps(draft))}\">"
+        f" data-draft=\"{_e(_safe_draft_json_attr(draft))}\">"
             f"<span class=\"row-main\"><strong>{_e(title)}</strong>{_progress_badge(progress)}</span>"
             f"{_row_meta(_record_building(record), _record_specialty(record), progress=progress, extra_chips=_record_extra_chips(record, work_type))}"
             "</a>"
@@ -925,7 +981,7 @@ def _ongoing_rows(
         f" data-mop-status=\"{_e(mop_status)}\""
         f" data-action=\"update\""
             f" data-title=\"{_e(title)}\""
-        f" data-draft=\"{_e(_json_dumps(draft))}\">"
+        f" data-draft=\"{_e(_safe_draft_json_attr(draft))}\">"
             f"<span class=\"row-main\"><strong>{_e(title)}</strong>{_progress_badge(status)}</span>"
             f"{_row_meta(_record_building(item), _record_specialty(item), progress=status, extra_chips=_record_extra_chips(item, work_type, ongoing=True))}"
             "</a>"
@@ -2041,7 +2097,7 @@ def render_workbench_lite(
       const confirmButton = document.getElementById('lite-end-check-confirm');
       if (!modal || !list || !confirmButton) return false;
       const workType = previewValue(form, 'work_type') || form.dataset.workType || 'maintenance';
-      const targetRecordId = previewValue(form, 'target_record_id') || previewValue(form, 'record_id');
+      const targetRecordId = previewValue(form, 'target_record_id');
       const sitePhotoCount = Number(previewValue(form, 'site_photo_count') || 0);
       const mopStatus = previewValue(form, 'mop_status');
       const checks = [];
@@ -3434,6 +3490,9 @@ def render_workbench_lite(
     function applyJobPatch(jobPatch, payload, ok, message) {{
       const patch = jobPatch && typeof jobPatch === 'object' ? jobPatch : null;
       if (!patch || patch.kind !== 'notice_action_result') {{
+        if (ok && payload?.action === 'start') {{
+          applyOptimisticSubmission(document.getElementById('lite-notice-form'), 'start', payload);
+        }}
         markSubmissionResult(payload, ok, message);
         return;
       }}
@@ -3497,6 +3556,9 @@ def render_workbench_lite(
     function sleep(ms) {{
       return new Promise(resolve => setTimeout(resolve, ms));
     }}
+    function nextBrowserTurn() {{
+      return new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)));
+    }}
     function jobPhaseText(phase) {{
       const map = {{
         accepted: '已受理',
@@ -3527,11 +3589,6 @@ def render_workbench_lite(
           if (phase === 'success') {{
             applyJobPatch(job.frontend_patch, payload, true, job.upload_message || '已完成');
             setLiteStatus('发送成功，列表已局部更新');
-            if (liteFormDirty) {{
-              setLiteStatus('发送成功。当前正在编辑，暂不刷新列表，可稍后点刷新本页校准。');
-              return true;
-            }}
-            await refreshCurrentLite(label || '发送成功，正在更新统计...', ['.status', '.summary']).catch(() => null);
             return true;
           }}
           if (phase === 'failed') {{
@@ -3539,9 +3596,6 @@ def render_workbench_lite(
             applyJobPatch(job.frontend_patch, payload, false, message);
             showLiteError(message);
             setLiteStatus('发送失败：' + message);
-            if (!liteFormDirty) {{
-              await refreshCurrentLite('发送失败，已保留当前填写内容', ['.status', '.summary']).catch(() => null);
-            }}
             setLiteStatus('发送失败：' + friendlyLiteMessage(message));
             return true;
           }}
@@ -3633,10 +3687,12 @@ def render_workbench_lite(
       setLiteFormDirty(false);
       setFormSubmitBusy(form, true);
       setLiteStatus('已加入后台发送队列，后端正在受理，页面不会执行飞书或多维写入');
-      const payload = formPayload(form, submitter, submitAction);
-      const optimisticApplied = applyOptimisticSubmission(form, submitAction, payload);
+      let payload = null;
       try {{
-        await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)));
+        await nextBrowserTurn();
+        payload = formPayload(form, submitter, submitAction);
+        setLiteStatus('正在提交后端，页面只负责排队展示');
+        await nextBrowserTurn();
         const response = await fetch('/api/workbench-actions', {{
           method: 'POST',
           headers: {{ 'Content-Type': 'application/json' }},
@@ -3650,7 +3706,7 @@ def render_workbench_lite(
         schedulePostSubmitRefresh('任务已受理，正在更新列表...', jobId, payload);
       }} catch (error) {{
         setLiteFormDirty(true);
-        removeOptimisticSubmission(payload);
+        if (payload) removeOptimisticSubmission(payload);
         const message = error && error.message ? error.message : '提交失败';
         showLiteError(message);
         setLiteStatus('提交失败：' + friendlyLiteMessage(message));

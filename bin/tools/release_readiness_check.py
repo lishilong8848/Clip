@@ -433,7 +433,7 @@ def check_frontend_freeze_guards() -> tuple[bool, list[str]]:
         "source-link-field",
         "_source_link_options",
         "command_format: 'notice_command'",
-        "requestAnimationFrame(() => setTimeout(resolve, 0))",
+        "function nextBrowserTurn()",
         "applyLiteHtml",
         "navigateLite",
         "manual-menu",
@@ -455,9 +455,10 @@ def check_frontend_freeze_guards() -> tuple[bool, list[str]]:
         "applyOptimisticSubmission",
         "schedulePostSubmitRefresh",
         "applyJobPatch(job.frontend_patch",
-        "refreshCurrentLite(label || '发送成功，正在更新统计...', ['.status', '.summary'])",
         "pollSubmittedJob(jobId, label || '任务已完成，正在更新列表...', payload)",
         "pendingSubmitAction",
+        "const targetRecordId = previewValue(form, 'target_record_id');",
+        "_safe_draft_json_attr",
     ]
     for marker in lite_markers:
         if marker not in lite_text:
@@ -488,6 +489,19 @@ def check_frontend_freeze_guards() -> tuple[bool, list[str]]:
     for marker in backend_markers:
         if marker not in backend_text:
             errors.append(f"clipflow_backend/main.py 缺少轻量工作台路由/重定向能力: {marker}")
+
+    portal_service = BIN_DIR / "lan_bitable_template_portal" / "portal_service.py"
+    try:
+        portal_service_text = portal_service.read_text(encoding="utf-8", errors="ignore")
+    except Exception as exc:
+        errors.append(f"读取 portal_service.py 失败: {exc}")
+        portal_service_text = ""
+    for marker in (
+        "or (source_record_id and target_record_id == source_record_id)",
+        'target_record_id == str(source_record_id or "").strip()',
+    ):
+        if marker not in portal_service_text:
+            errors.append(f"portal_service.py 缺少源表/目标表 ID 边界保护: {marker}")
 
     try:
         dist_js = "\n".join(

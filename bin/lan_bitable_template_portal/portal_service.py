@@ -8624,6 +8624,11 @@ class MaintenancePortalService:
         if source_record_id and not str(payload.get("source_record_id") or "").strip():
             payload["source_record_id"] = source_record_id
         target_record_id = canonical_target_record_id(payload)
+        if target_record_id and (
+            is_local_record_id(target_record_id)
+            or target_record_id == str(source_record_id or "").strip()
+        ):
+            target_record_id = ""
         if target_record_id:
             return target_record_id
         action = str(action or payload.get("action") or "").strip().lower()
@@ -14325,6 +14330,11 @@ class MaintenancePortalService:
                 or patch.get("record_id")
                 or ""
             ).strip()
+            if target_record_id and (
+                is_local_record_id(target_record_id)
+                or (source_record_id and target_record_id == source_record_id)
+            ):
+                target_record_id = ""
         base: dict[str, Any] = {}
         for item in self._project_ongoing_items(scope, ongoing_items or []):
             item_work_type = str(item.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
