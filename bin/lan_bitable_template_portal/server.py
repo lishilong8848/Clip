@@ -3486,9 +3486,16 @@ class PortalRuntime:
 
     @classmethod
     def _has_extra_images_payload(cls, payload: dict) -> bool:
-        images = payload.get("extra_images") if isinstance(payload, dict) else []
-        if not isinstance(images, list):
+        if not isinstance(payload, dict):
             return False
+        images = payload.get("extra_images")
+        if not isinstance(images, list):
+            images = payload.get("site_photos")
+        if not isinstance(images, list):
+            try:
+                return int(payload.get("site_photo_count") or 0) > 0
+            except (TypeError, ValueError):
+                return False
         for item in images:
             if isinstance(item, dict):
                 if str(
@@ -3498,6 +3505,10 @@ class PortalRuntime:
                     or ""
                 ).strip():
                     return True
+        try:
+            return int(payload.get("site_photo_count") or 0) > 0
+        except (TypeError, ValueError):
+            return False
         return False
 
     @classmethod
@@ -3546,6 +3557,8 @@ class PortalRuntime:
         notice_type: str,
     ) -> tuple[bool, str, list[str], list[str]]:
         images = payload.get("extra_images") if isinstance(payload, dict) else []
+        if not isinstance(images, list) and isinstance(payload, dict):
+            images = payload.get("site_photos")
         if not isinstance(images, list):
             return True, "", [], []
         uploaded_tokens: list[str] = []
@@ -4810,7 +4823,11 @@ class PortalRuntime:
                     }
                 prequery_result = query_result if isinstance(query_result, dict) else {}
 
-        extra_images = payload.get("extra_images") if isinstance(payload.get("extra_images"), list) else []
+        extra_images = payload.get("extra_images")
+        if not isinstance(extra_images, list):
+            extra_images = payload.get("site_photos")
+        if not isinstance(extra_images, list):
+            extra_images = []
         if (
             action_type == "end"
             and cls._end_site_photo_required(notice_type)
@@ -4889,6 +4906,22 @@ class PortalRuntime:
             }
         file_tokens.extend(image_file_tokens)
         extra_file_tokens.extend(image_extra_file_tokens)
+        uploaded_site_photo_count = len(image_extra_file_tokens)
+        if uploaded_site_photo_count:
+            previous_count = 0
+            try:
+                previous_count = int(data.get("site_photo_count") or 0)
+            except (TypeError, ValueError):
+                previous_count = 0
+            try:
+                previous_extra_count = int(data.get("extra_image_count") or 0)
+            except (TypeError, ValueError):
+                previous_extra_count = 0
+            data["site_photo_count"] = max(previous_count, uploaded_site_photo_count)
+            data["extra_image_count"] = max(
+                previous_extra_count,
+                uploaded_site_photo_count,
+            )
 
         notice_payload = cls._prepared_to_notice_payload(data)
         notice_payload.file_tokens = file_tokens or None

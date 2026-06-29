@@ -2594,6 +2594,18 @@ class MaintenancePortalService:
                 return True
         return False
 
+    @staticmethod
+    def _site_photo_count_value(payload: dict[str, Any] | None) -> int:
+        payload = payload if isinstance(payload, dict) else {}
+        for key in ("site_photo_count", "site_photos_count", "extra_image_count"):
+            try:
+                count = int(payload.get(key) or 0)
+            except (TypeError, ValueError):
+                count = 0
+            if count > 0:
+                return count
+        return 0
+
     @classmethod
     def _end_site_photo_required(
         cls,
@@ -2673,7 +2685,10 @@ class MaintenancePortalService:
             if (
                 isinstance(item, dict)
                 and matches_notice(item)
-                and self._has_site_photo_payload(item)
+                and (
+                    self._has_site_photo_payload(item)
+                    or self._site_photo_count_value(item) > 0
+                )
             ):
                 return True
 
@@ -2689,7 +2704,10 @@ class MaintenancePortalService:
             merged_payload.setdefault("active_item_id", row.get("active_item_id"))
             merged_payload.setdefault("target_record_id", row.get("record_id"))
             merged_payload.setdefault("record_id", row.get("record_id"))
-            if matches_notice(merged_payload) and self._has_site_photo_payload(merged_payload):
+            if matches_notice(merged_payload) and (
+                self._has_site_photo_payload(merged_payload)
+                or self._site_photo_count_value(merged_payload) > 0
+            ):
                 return True
         return False
 

@@ -1,4 +1,5 @@
 import sys
+import threading
 import unittest
 from pathlib import Path
 
@@ -9,6 +10,7 @@ if str(BIN_DIR) not in sys.path:
 
 from lan_bitable_template_portal.portal_service import MaintenancePortalService  # noqa: E402
 from lan_bitable_template_portal.portal_service import PortalError  # noqa: E402
+from lan_bitable_template_portal.server import PortalRuntime  # noqa: E402
 
 
 class NoticeIdentityBoundaryTests(unittest.TestCase):
@@ -124,6 +126,57 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
         self.assertEqual(result.get("source_record_id"), "recSource123")
         self.assertEqual(result.get("target_record_id"), "recTarget456")
         self.assertEqual(result.get("record_id"), "recTarget456")
+
+    def test_existing_site_photo_count_satisfies_end_check(self) -> None:
+        class EmptyStateStore:
+            def list_qt_active_items(self, include_deleted: bool = False) -> list[dict]:
+                return []
+
+        self.service._summary_lock = threading.RLock()
+        self.service._state_store = EmptyStateStore()
+        self.service._load_work_status_items_locked = lambda scope: [
+            {
+                "work_type": "maintenance",
+                "target_record_id": "recTarget456",
+                "record_id": "recTarget456",
+                "site_photo_count": "2",
+            }
+        ]
+
+        self.service._require_end_site_photo_cumulative(
+            {
+                "work_type": "maintenance",
+                "target_record_id": "recTarget456",
+                "record_id": "recTarget456",
+            },
+            "end",
+            work_type="maintenance",
+        )
+
+    def test_workbench_lite_preserves_site_photo_upload_id(self) -> None:
+        workbench_lite = (BIN_DIR / "lan_bitable_template_portal" / "workbench_lite.py").read_text(
+            encoding="utf-8",
+            errors="ignore",
+        )
+
+        self.assertIn("'upload_id', 'file_token', 'token'", workbench_lite)
+
+    def test_qt_runtime_accepts_site_photos_alias_and_count(self) -> None:
+        self.assertTrue(
+            PortalRuntime._has_extra_images_payload(
+                {"site_photos": [{"upload_id": "upload123"}]}
+            )
+        )
+        self.assertTrue(PortalRuntime._has_extra_images_payload({"site_photo_count": "1"}))
+
+    def test_qt_runtime_records_uploaded_site_photo_count(self) -> None:
+        server_text = (BIN_DIR / "lan_bitable_template_portal" / "server.py").read_text(
+            encoding="utf-8",
+            errors="ignore",
+        )
+
+        self.assertIn('extra_images = payload.get("site_photos")', server_text)
+        self.assertIn('data["site_photo_count"] = max(previous_count, uploaded_site_photo_count)', server_text)
 
 
 if __name__ == "__main__":

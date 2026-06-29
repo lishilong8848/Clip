@@ -2250,7 +2250,7 @@ def render_workbench_lite(
           compact[key] = value.map(item => {{
             if (item && typeof item === 'object') {{
               const safe = {{}};
-              for (const field of ['file_token', 'file_name', 'url', 'size']) {{
+              for (const field of ['upload_id', 'file_token', 'token', 'file_name', 'url', 'mime_type', 'content_type', 'size']) {{
                 if (item[field] != null && item[field] !== '') safe[field] = String(item[field]).slice(0, 500);
               }}
               return safe;

@@ -406,11 +406,13 @@ def check_frontend_freeze_guards() -> tuple[bool, list[str]]:
     app_vue = src_dir / "App.vue"
     workbench_lite = BIN_DIR / "lan_bitable_template_portal" / "workbench_lite.py"
     backend_main = BIN_DIR / "clipflow_backend" / "main.py"
+    portal_server = BIN_DIR / "lan_bitable_template_portal" / "server.py"
     errors: list[str] = []
     try:
         app_text = app_vue.read_text(encoding="utf-8", errors="ignore")
         lite_text = workbench_lite.read_text(encoding="utf-8", errors="ignore")
         backend_text = backend_main.read_text(encoding="utf-8", errors="ignore")
+        portal_server_text = portal_server.read_text(encoding="utf-8", errors="ignore")
     except Exception as exc:
         return False, [f"读取轻量工作台检查文件失败: {exc}"]
 
@@ -459,6 +461,7 @@ def check_frontend_freeze_guards() -> tuple[bool, list[str]]:
         "pendingSubmitAction",
         "const targetRecordId = previewValue(form, 'target_record_id');",
         "_safe_draft_json_attr",
+        "'upload_id', 'file_token', 'token'",
     ]
     for marker in lite_markers:
         if marker not in lite_text:
@@ -477,6 +480,12 @@ def check_frontend_freeze_guards() -> tuple[bool, list[str]]:
     for marker in ("setSafeDraftAttr", "safeDraftSnapshot", "compactOptimisticDraft"):
         if marker not in lite_text:
             errors.append(f"workbench_lite.py 缺少轻量 draft DOM 防卡死保护: {marker}")
+    for marker in (
+        'extra_images = payload.get("site_photos")',
+        'data["site_photo_count"] = max(previous_count, uploaded_site_photo_count)',
+    ):
+        if marker not in portal_server_text:
+            errors.append(f"server.py 缺少 Qt 现场照片结束保护: {marker}")
 
     backend_markers = [
         "@app.get(\"/workbench-lite\")",

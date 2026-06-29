@@ -24,6 +24,7 @@ def main() -> int:
     main_py = BIN_DIR / "clipflow_backend" / "main.py"
     package_portable_py = PROJECT_ROOT / "package_portable.py"
     state_store_py = BIN_DIR / "lan_bitable_template_portal" / "state_store.py"
+    server_py = BIN_DIR / "lan_bitable_template_portal" / "server.py"
     portal_service_py = BIN_DIR / "lan_bitable_template_portal" / "portal_service.py"
     workbench_lite_py = BIN_DIR / "lan_bitable_template_portal" / "workbench_lite.py"
     admin_status_vue = (
@@ -57,8 +58,11 @@ def main() -> int:
         (workbench_lite_py, "setFormSubmitBusy", "工作台提交按钮整体锁定"),
         (workbench_lite_py, "_safe_draft_json_attr", "服务端 DOM draft 轻量化"),
         (workbench_lite_py, "function nextBrowserTurn()", "提交前让出浏览器主线程"),
+        (workbench_lite_py, "'upload_id', 'file_token', 'token'", "现场照片提交保留 upload_id"),
         (workbench_lite_py, "const targetRecordId = previewValue(form, 'target_record_id');", "结束校验只认显式目标多维 ID"),
         (workbench_lite_py, "command_format: 'notice_command'", "工作台最小命令提交"),
+        (server_py, 'extra_images = payload.get("site_photos")', "Qt 现场照片兼容 site_photos"),
+        (server_py, 'data["site_photo_count"] = max(previous_count, uploaded_site_photo_count)', "Qt 现场照片上传后回写计数"),
         (workbench_lite_py, "appliedOngoingLocally = isRow && navLink.matches('.ongoing-row')", "进行中通告本地切换"),
         (workbench_lite_py, "现场照片", "通告结束现场照片提示"),
         (workbench_lite_py, "mop-action-panel", "维保 MOP 后续动作入口"),
