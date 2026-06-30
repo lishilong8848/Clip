@@ -3609,38 +3609,8 @@ class MainWindowRecordsMixin:
         if key_matches:
             return key_matches[0][0], key_matches[0][1]
         if self._is_event_notice(resolved_notice_type):
-            normalized_title = self._normalize_event_match_title(match_title)
-            event_title_matches = []
-            seen_items = set()
-            for match in title_matches:
-                marker = (id(match[0]), id(match[1]))
-                if marker in seen_items:
-                    continue
-                seen_items.add(marker)
-                event_title_matches.append(match)
-            if normalized_title:
-                for list_widget, item, data in store.entries():
-                    if not _notice_type_matches(data):
-                        continue
-                    if not self._is_valid_list_item(item):
-                        continue
-                    data_title = self._event_match_title_from_data(data)
-                    if not data_title or data_title != normalized_title:
-                        continue
-                    marker = (id(list_widget), id(item))
-                    if marker in seen_items:
-                        continue
-                    seen_items.add(marker)
-                    event_title_matches.append((list_widget, item, data))
-            bound_title_matches = [
-                match
-                for match in event_title_matches
-                if self._remote_target_record_id_from_data(match[2])
-            ]
-            if len(bound_title_matches) == 1:
-                return bound_title_matches[0][0], bound_title_matches[0][1]
-            if len(event_title_matches) == 1:
-                return event_title_matches[0][0], event_title_matches[0][1]
+            # 事件通告不能只按标题路由。不同时间的事件可能标题完全相同，
+            # 只靠标题会把新事件绑定到旧 target_record_id，后续删除可能误删旧记录。
             return None, None
         if title_matches:
             return title_matches[0][0], title_matches[0][1]

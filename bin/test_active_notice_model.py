@@ -421,7 +421,7 @@ class ActiveNoticeModelTests(unittest.TestCase):
         self.assertEqual(harness._pending_force_uploads[0]["record_id"], "rec-real")
         self.assertEqual(harness.cache_store.renamed, [("placeholder-1", "rec-real")])
 
-    def test_event_update_reuses_unique_title_match_with_target_record_id(self):
+    def test_event_update_does_not_reuse_title_match_when_event_time_differs(self):
         harness = _ReplaceRecordIdHarness()
         item = QListWidgetItem("event")
         harness.list_active_event.addItem(item)
@@ -455,10 +455,10 @@ class ActiveNoticeModelTests(unittest.TestCase):
             unique_key="事件通告|D楼直流屏系统总故障|2026-06-24 10:30",
         )
 
-        self.assertIs(list_widget, harness.list_active_event)
-        self.assertIs(found, item)
+        self.assertIsNone(list_widget)
+        self.assertIsNone(found)
 
-    def test_event_update_reuses_title_parsed_from_existing_text_without_match_title(self):
+    def test_event_update_does_not_reuse_parsed_title_when_event_time_differs(self):
         harness = _ReplaceRecordIdHarness()
         item = QListWidgetItem("event")
         harness.list_active_event.addItem(item)
@@ -490,8 +490,8 @@ class ActiveNoticeModelTests(unittest.TestCase):
             unique_key="事件通告|D楼直流屏系统总故障|2026-06-24 10:30",
         )
 
-        self.assertIs(list_widget, harness.list_active_event)
-        self.assertIs(found, item)
+        self.assertIsNone(list_widget)
+        self.assertIsNone(found)
 
     def test_runtime_collects_all_non_event_notice_types_for_portal(self):
         records = [

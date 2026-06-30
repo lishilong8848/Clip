@@ -6068,22 +6068,12 @@ class FastAPIPortalController:
                     continue
                 return item
         if notice_type == "事件通告" and event_title_matches:
-            bound_matches = []
-            for item in event_title_matches:
-                payload = item.get("payload") if isinstance(item, dict) else {}
-                payload = payload if isinstance(payload, dict) else {}
-                record_id = str(
-                    payload.get("target_record_id")
-                    or payload.get("record_id")
-                    or item.get("record_id")
-                    or ""
-                ).strip()
-                if record_id and not is_local_record_id(record_id):
-                    bound_matches.append(item)
-            if len(bound_matches) == 1:
-                return bound_matches[0]
-            if len(event_title_matches) == 1:
-                return event_title_matches[0]
+            # Event notices often share the same alarm title across different
+            # occurrence times.  Title-only matching can bind a new local event
+            # to an old target_record_id, and deletion can then remove the
+            # wrong remote bitable row.  Only exact unique_key or explicit
+            # target_record_id matches are allowed for events.
+            return None
         return None
 
     @staticmethod
@@ -6098,6 +6088,19 @@ class FastAPIPortalController:
         if not text:
             return ""
         return re.sub(r"\s+", " ", text).strip(" ;；")
+
+    @staticmethod
+    def _projected_action_from_status(status: Any) -> tuple[str, str]:
+        text = str(status or "").strip()
+        if "结束" in text:
+            return "end", "结束"
+        if "更新" in text:
+            return "update", "更新"
+        if "新增" in text:
+            return "start", "新增"
+        if "开始" in text:
+            return "start", "开始"
+        return "", text
 
     @classmethod
     def _normalize_projected_notice_type(
@@ -6188,7 +6191,10 @@ class FastAPIPortalController:
             ["名称", "标题", "通告名称", "维修名称", "事件描述"],
             entry.get("title"),
         )
-        time_str = value(["时间", "计划时间", "维护时间"], entry.get("time_str"))
+        time_str = value(
+            ["时间", "事件发生时间", "发生时间", "计划时间", "维护时间"],
+            entry.get("time_str"),
+        )
         start_time, end_time = cls._split_projected_notice_time_range(time_str)
         projected: dict[str, Any] = {
             "notice_type": notice_type,
@@ -6284,6 +6290,7 @@ class FastAPIPortalController:
         status = str(entry.get("status") or "").strip()
         content = str(entry.get("content") or "").strip()
         notice_type = str(entry.get("notice_type") or "").strip()
+        projected_action, projected_status = cls._projected_action_from_status(status)
         entry_target_record_id = str(entry.get("target_record_id") or "").strip()
         if entry_target_record_id and notice_type:
             incoming_notice_type = cls._normalize_projected_notice_type(
@@ -6401,6 +6408,8 @@ class FastAPIPortalController:
                 "text": content,
                 "title": data.get("title") or entry.get("title") or "",
                 "notice_type": notice_type,
+                "action": projected_action or data.get("action") or "",
+                "status": projected_status or data.get("status") or "",
                 "level": data.get("level") or entry.get("level"),
                 "source": entry.get("source") or data.get("source", ""),
                 "time_str": data.get("time_str") or entry.get("time_str") or "",

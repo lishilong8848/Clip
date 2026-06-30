@@ -4047,10 +4047,7 @@ class MaintenancePortalService:
         work_type = str(work_type or WORK_TYPE_MAINTENANCE).strip()
 
         def _matches_work_type(item: dict[str, Any]) -> bool:
-            item_work_type = str(
-                item.get("work_type") or WORK_TYPE_MAINTENANCE
-            ).strip()
-            return item_work_type == work_type
+            return self._item_work_type(item) == work_type
 
         if source_record_id:
             for item in items:
@@ -4107,7 +4104,7 @@ class MaintenancePortalService:
         now = str(now or dt.datetime.now().strftime("%Y-%m-%d %H:%M"))
         building = str(incoming.get("building") or "").strip()
         building_code = str(incoming.get("building_code") or "").strip()
-        work_type = str(incoming.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
+        work_type = self._item_work_type(incoming)
         payload = self._load_work_status_locked(building, building_code)
         if building and not payload.get("building"):
             payload["building"] = building
@@ -4145,7 +4142,7 @@ class MaintenancePortalService:
                 "actions": [],
             }
             items.append(item)
-        item["work_type"] = str(item.get("work_type") or work_type)
+        item["work_type"] = self._item_work_type(item) if item.get("work_type") else work_type
         if work_fallback_key and not item.get("work_fallback_key"):
             item["work_fallback_key"] = work_fallback_key
         for field in (
@@ -4438,7 +4435,7 @@ class MaintenancePortalService:
                 }
                 items.append(item)
             item["fallback_key"] = item.get("fallback_key") or fallback_key
-            item["work_type"] = str(item.get("work_type") or work_type)
+            item["work_type"] = self._item_work_type(item) if item.get("work_type") else work_type
             for field in (
                 "notice_type",
                 "source_app_token",
@@ -4738,11 +4735,45 @@ class MaintenancePortalService:
             WORK_TYPE_ADJUST: 0,
         }
         for item in items or []:
-            work_type = str(item.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
+            work_type = MaintenancePortalService._item_work_type(item)
             if work_type not in counts:
                 continue
             counts[work_type] += 1
         return counts
+
+    @staticmethod
+    def _item_work_type(item: dict[str, Any] | None) -> str:
+        item = item if isinstance(item, dict) else {}
+        work_type = str(item.get("work_type") or item.get("lan_work_type") or "").strip()
+        if work_type in {
+            WORK_TYPE_MAINTENANCE,
+            WORK_TYPE_CHANGE,
+            WORK_TYPE_REPAIR,
+            WORK_TYPE_POWER,
+            WORK_TYPE_POLLING,
+            WORK_TYPE_ADJUST,
+        }:
+            return work_type
+        notice_type = str(item.get("notice_type") or "").strip()
+        mapped = WORK_TYPE_BY_NOTICE_TYPE.get(notice_type, "")
+        if mapped:
+            return mapped
+        text = "\n".join(
+            str(item.get(key) or "").strip()
+            for key in ("text", "content", "title", "name")
+            if str(item.get(key) or "").strip()
+        )
+        if re.search(r"上电通告|下电通告|上下电通告", text):
+            return WORK_TYPE_POWER
+        if re.search(r"设备轮巡|轮巡通告", text):
+            return WORK_TYPE_POLLING
+        if re.search(r"设备调整|调整通告", text):
+            return WORK_TYPE_ADJUST
+        if re.search(r"设备检修|检修通告", text):
+            return WORK_TYPE_REPAIR
+        if re.search(r"变更通告", text):
+            return WORK_TYPE_CHANGE
+        return WORK_TYPE_MAINTENANCE
 
     def get_scope_overview(
         self,
@@ -4777,7 +4808,7 @@ class MaintenancePortalService:
             )
             ongoing_sources = {
                 (
-                    str(item.get("work_type") or WORK_TYPE_MAINTENANCE).strip(),
+                    self._item_work_type(item),
                     str(item.get("source_record_id") or "").strip(),
                 )
                 for item in merged_ongoing
@@ -5008,7 +5039,7 @@ class MaintenancePortalService:
 
     @staticmethod
     def _summary_item_work_type(item: dict[str, Any]) -> str:
-        return str(item.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
+        return MaintenancePortalService._item_work_type(item)
 
     @staticmethod
     def _summary_item_sort_key(item: dict[str, Any]) -> str:
@@ -5178,7 +5209,7 @@ class MaintenancePortalService:
             status_items = self._load_work_status_items_locked(scope)
         by_source = {
             (
-                str(item.get("work_type") or WORK_TYPE_MAINTENANCE).strip(),
+                self._item_work_type(item),
                 str(item.get("source_record_id") or "").strip(),
             ): item
             for item in status_items
@@ -5194,7 +5225,7 @@ class MaintenancePortalService:
             if not isinstance(item, dict):
                 continue
             source_record_id = str(item.get("source_record_id") or "").strip()
-            item_work_type = str(item.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
+            item_work_type = self._item_work_type(item)
             source_key = (item_work_type, source_record_id)
             if source_record_id and source_key not in by_source:
                 by_source[source_key] = copy.deepcopy(item)
@@ -5209,7 +5240,7 @@ class MaintenancePortalService:
             record_id = str(record.get("record_id") or "").strip()
             if not record_id:
                 continue
-            work_type = str(record.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
+            work_type = self._record_work_type(record)
             item = by_source.get((work_type, record_id))
             if item is None and work_type == WORK_TYPE_MAINTENANCE:
                 item = by_source.get(("", record_id))
@@ -5225,7 +5256,7 @@ class MaintenancePortalService:
         if not isinstance(item, dict):
             return set()
         item = normalize_notice_identity_payload(item)
-        work_type = str(item.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
+        work_type = self._item_work_type(item)
         keys: set[str] = set()
         for kind, field_names in {
             "active": ("active_item_id",),
@@ -5250,8 +5281,12 @@ class MaintenancePortalService:
         item: dict[str, Any],
         target_cache: dict[tuple[str, str], set[str] | None],
     ) -> bool | None:
-        notice_type = str(item.get("notice_type") or NOTICE_TYPE_MAINTENANCE).strip()
-        work_type = str(item.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
+        work_type = self._item_work_type(item)
+        notice_type = str(
+            item.get("notice_type")
+            or NOTICE_TYPE_BY_WORK_TYPE.get(work_type)
+            or NOTICE_TYPE_MAINTENANCE
+        ).strip()
         target_record_id = canonical_target_record_id(item)
         if not target_record_id:
             return None
@@ -6839,7 +6874,7 @@ class MaintenancePortalService:
     def _ongoing_hidden_keys(self, item: dict[str, Any]) -> list[str]:
         if not isinstance(item, dict):
             return []
-        work_type = str(item.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
+        work_type = self._item_work_type(item)
         active_item_id = str(item.get("active_item_id") or "").strip()
         if active_item_id:
             return [f"{work_type}:active:{active_item_id}"]
@@ -6899,8 +6934,11 @@ class MaintenancePortalService:
             raise PortalError("删除参数格式错误。")
         scope = self._normalize_scope(scope)
         item = copy.deepcopy(item)
-        item.setdefault("work_type", WORK_TYPE_MAINTENANCE)
-        item.setdefault("notice_type", NOTICE_TYPE_MAINTENANCE)
+        item["work_type"] = self._item_work_type(item)
+        item.setdefault(
+            "notice_type",
+            NOTICE_TYPE_BY_WORK_TYPE.get(item["work_type"], NOTICE_TYPE_MAINTENANCE),
+        )
         keys = self.validate_ongoing_delete_item(item, scope=scope)
         now = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with self._hidden_ongoing_lock:
@@ -6911,7 +6949,7 @@ class MaintenancePortalService:
                     "deleted_at": now,
                     "deleted_by": str(deleted_by or ""),
                     "scope": scope,
-                    "work_type": str(item.get("work_type") or WORK_TYPE_MAINTENANCE),
+                    "work_type": item["work_type"],
                     "notice_type": str(item.get("notice_type") or ""),
                     "title": str(item.get("title") or ""),
                     "source_record_id": str(item.get("source_record_id") or ""),
@@ -6930,8 +6968,11 @@ class MaintenancePortalService:
             return {"work_status_removed": 0, "daily_summary_removed": 0}
         scope = self._normalize_scope(scope)
         item = copy.deepcopy(item)
-        item.setdefault("work_type", WORK_TYPE_MAINTENANCE)
-        item.setdefault("notice_type", NOTICE_TYPE_MAINTENANCE)
+        item["work_type"] = self._item_work_type(item)
+        item.setdefault(
+            "notice_type",
+            NOTICE_TYPE_BY_WORK_TYPE.get(item["work_type"], NOTICE_TYPE_MAINTENANCE),
+        )
         deleted_keys = self._work_status_identity_keys(item)
         if not deleted_keys:
             return {"work_status_removed": 0, "daily_summary_removed": 0}
@@ -7003,8 +7044,12 @@ class MaintenancePortalService:
             context if isinstance(context, dict) else {},
             action=action_type,
         )
-        work_type = str(context.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
-        notice_type = str(context.get("notice_type") or NOTICE_TYPE_MAINTENANCE).strip()
+        work_type = self._item_work_type(context)
+        notice_type = str(
+            context.get("notice_type")
+            or NOTICE_TYPE_BY_WORK_TYPE.get(work_type)
+            or NOTICE_TYPE_MAINTENANCE
+        ).strip()
         active_item_id = str(context.get("active_item_id") or "").strip()
         source_record_id = str(context.get("source_record_id") or "").strip()
         target_record_id = canonical_target_record_id(context)
@@ -7136,9 +7181,12 @@ class MaintenancePortalService:
         enriched = normalize_notice_identity_payload(
             copy.deepcopy(item) if isinstance(item, dict) else {}
         )
-        enriched.setdefault("work_type", WORK_TYPE_MAINTENANCE)
-        enriched.setdefault("notice_type", NOTICE_TYPE_MAINTENANCE)
-        work_type = str(enriched.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
+        enriched["work_type"] = self._item_work_type(enriched)
+        enriched.setdefault(
+            "notice_type",
+            NOTICE_TYPE_BY_WORK_TYPE.get(enriched["work_type"], NOTICE_TYPE_MAINTENANCE),
+        )
+        work_type = enriched["work_type"]
         identity = self._undo_identity_from_context(enriched, action_type="delete")
         qt_snapshot = self._find_qt_active_snapshot(identity)
         qt_payload = normalize_notice_identity_payload(
@@ -8595,7 +8643,7 @@ class MaintenancePortalService:
             status_items = self._load_work_status_items_locked("ALL")
         fallback = ""
         for item in status_items:
-            if str(item.get("work_type") or WORK_TYPE_MAINTENANCE).strip() != work_type:
+            if self._item_work_type(item) != work_type:
                 continue
             if source_record_id and str(item.get("source_record_id") or "").strip() != source_record_id:
                 continue
@@ -8744,8 +8792,11 @@ class MaintenancePortalService:
             if not self._scope_matches_item(scope, item):
                 continue
             copied = normalize_notice_identity_payload(copy.deepcopy(item))
-            copied.setdefault("work_type", WORK_TYPE_MAINTENANCE)
-            copied.setdefault("notice_type", NOTICE_TYPE_MAINTENANCE)
+            copied["work_type"] = self._item_work_type(copied)
+            copied.setdefault(
+                "notice_type",
+                NOTICE_TYPE_BY_WORK_TYPE.get(copied["work_type"], NOTICE_TYPE_MAINTENANCE),
+            )
             if self._is_ongoing_hidden(copied):
                 continue
             identity_keys = self._ongoing_merge_identity_keys(copied)
@@ -8790,8 +8841,11 @@ class MaintenancePortalService:
             if not self._scope_matches_item(scope, item):
                 continue
             copied = normalize_notice_identity_payload(copy.deepcopy(item))
-            copied.setdefault("work_type", WORK_TYPE_MAINTENANCE)
-            copied.setdefault("notice_type", NOTICE_TYPE_MAINTENANCE)
+            copied["work_type"] = self._item_work_type(copied)
+            copied.setdefault(
+                "notice_type",
+                NOTICE_TYPE_BY_WORK_TYPE.get(copied["work_type"], NOTICE_TYPE_MAINTENANCE),
+            )
             if self._is_ongoing_hidden(copied):
                 continue
             projected.append(copied)
@@ -8853,7 +8907,7 @@ class MaintenancePortalService:
             return ()
         item_fields = item.get("fields") if isinstance(item.get("fields"), dict) else {}
         return (
-            str(item.get("work_type") or item.get("lan_work_type") or "").strip(),
+            self._item_work_type(item),
             str(item.get("notice_type") or "").strip(),
             title_key,
             self._ongoing_business_text_key(item.get("building") or ""),
@@ -8869,7 +8923,7 @@ class MaintenancePortalService:
 
     def _ongoing_merge_identity_keys(self, item: dict[str, Any]) -> set[str]:
         item = normalize_notice_identity_payload(item)
-        work_type = str(item.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
+        work_type = self._item_work_type(item)
         keys: set[str] = set()
         for kind, value in (
             ("active", item.get("active_item_id")),
@@ -8905,7 +8959,7 @@ class MaintenancePortalService:
         items with different reasons do not collapse into one row.
         """
 
-        work_type = str(work_type or item.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
+        work_type = str(work_type or "").strip() or self._item_work_type(item)
         title_key = self._ongoing_business_text_key(
             item.get("title") or item.get("content") or item.get("name") or ""
         )
@@ -9326,7 +9380,7 @@ class MaintenancePortalService:
             item
             for item in merged_ongoing
             if not requested_work_type
-            or str(item.get("work_type") or WORK_TYPE_MAINTENANCE).strip() == requested_work_type
+            or self._item_work_type(item) == requested_work_type
         ]
         include_records = "records" in requested_sections
         include_ongoing = "ongoing" in requested_sections
@@ -9437,7 +9491,7 @@ class MaintenancePortalService:
             items = [
                 item
                 for item in items
-                if str(item.get("work_type") or WORK_TYPE_MAINTENANCE).strip() == requested_work_type
+                if self._item_work_type(item) == requested_work_type
             ]
         closed = [
             item
@@ -9484,7 +9538,7 @@ class MaintenancePortalService:
         }
 
     def _engineer_notice_key(self, item: dict[str, Any]) -> str:
-        work_type = str(item.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
+        work_type = self._item_work_type(item)
         target_record_id = canonical_target_record_id(item)
         source_record_id = str(item.get("source_record_id") or "").strip()
         active_item_id = str(item.get("active_item_id") or "").strip()
@@ -9529,7 +9583,7 @@ class MaintenancePortalService:
         maintenance_total: str = "",
         maintenance_cycle: str = "",
     ) -> str:
-        work_type = str(item.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
+        work_type = self._item_work_type(item)
         if work_type != WORK_TYPE_MAINTENANCE:
             return ""
         fields = item.get("display_fields") if isinstance(item.get("display_fields"), dict) else {}
@@ -9574,7 +9628,7 @@ class MaintenancePortalService:
         return f"mop-template:{hashlib.sha1(seed.encode('utf-8')).hexdigest()}"
 
     def _serialize_engineer_notice(self, item: dict[str, Any], *, status: str = "") -> dict[str, Any]:
-        work_type = str(item.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
+        work_type = self._item_work_type(item)
         fields = item.get("display_fields") if isinstance(item.get("display_fields"), dict) else {}
         title = str(item.get("title") or item.get("content") or item.get("name") or "").strip()
         start_time = str(item.get("started_at") or item.get("start_time") or item.get("time") or "").strip()
@@ -9804,7 +9858,7 @@ class MaintenancePortalService:
                 upsert_notice(notice)
 
         for item in merged_ongoing:
-            if str(item.get("work_type") or WORK_TYPE_MAINTENANCE) != WORK_TYPE_MAINTENANCE:
+            if self._item_work_type(item) != WORK_TYPE_MAINTENANCE:
                 continue
             notice = self._serialize_engineer_notice(item, status="进行中")
             upsert_notice(notice)
@@ -9812,7 +9866,7 @@ class MaintenancePortalService:
         for item in daily.get("items") or []:
             if not isinstance(item, dict):
                 continue
-            if str(item.get("work_type") or WORK_TYPE_MAINTENANCE) != WORK_TYPE_MAINTENANCE:
+            if self._item_work_type(item) != WORK_TYPE_MAINTENANCE:
                 continue
             notice = self._serialize_engineer_notice(item)
             existing = notices_by_key.get(notice["notice_key"])
@@ -14355,7 +14409,7 @@ class MaintenancePortalService:
                 target_record_id = ""
         base: dict[str, Any] = {}
         for item in self._project_ongoing_items(scope, ongoing_items or []):
-            item_work_type = str(item.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
+            item_work_type = self._item_work_type(item)
             if work_type and item_work_type != work_type:
                 continue
             if active_item_id and str(item.get("active_item_id") or "").strip() == active_item_id:

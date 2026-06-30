@@ -11,6 +11,9 @@ if str(BIN_DIR) not in sys.path:
 from lan_bitable_template_portal.portal_service import MaintenancePortalService  # noqa: E402
 from lan_bitable_template_portal.portal_service import PortalError  # noqa: E402
 from lan_bitable_template_portal.server import PortalRuntime  # noqa: E402
+from lan_bitable_template_portal import workbench_lite  # noqa: E402
+from upload_event_module.config import EVENT_NOTICE_FIELDS  # noqa: E402
+from upload_event_module.core.parser import extract_event_info  # noqa: E402
 
 
 class NoticeIdentityBoundaryTests(unittest.TestCase):
@@ -177,6 +180,190 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
 
         self.assertIn('extra_images = payload.get("site_photos")', server_text)
         self.assertIn('data["site_photo_count"] = max(previous_count, uploaded_site_photo_count)', server_text)
+
+    def test_notice_type_is_projected_as_matching_ongoing_work_type(self) -> None:
+        self.service._is_ongoing_hidden = lambda item: False
+        self.service._normalize_scope = MaintenancePortalService._normalize_scope
+        self.service._scope_matches_item = MaintenancePortalService._scope_matches_item
+        cases = [
+            ("维保通告", "maintenance", "EA118机房E楼维保通告"),
+            ("变更通告", "change", "EA118机房E楼变更通告"),
+            ("设备检修", "repair", "EA118机房E楼检修通告"),
+            ("下电通告", "power", "EA118机房E楼测试下电通告"),
+            ("设备轮巡", "polling", "EA118机房E楼制冷单元轮巡通告"),
+            ("设备调整", "adjust", "EA118机房E楼空调调整通告"),
+        ]
+        for notice_type, expected_work_type, title in cases:
+            with self.subTest(notice_type=notice_type):
+                item = {
+                    "notice_type": notice_type,
+                    "title": title,
+                    "building": "E楼",
+                    "building_codes": ["E"],
+                    "record_id": f"rec-{expected_work_type}",
+                    "target_record_id": f"rec-{expected_work_type}",
+                    "active_item_id": f"active-{expected_work_type}",
+                }
+
+                projected = self.service._project_ongoing_items("E", [item])
+                counts = MaintenancePortalService._work_type_counts(projected)
+
+                self.assertEqual(projected[0]["work_type"], expected_work_type)
+                self.assertEqual(counts[expected_work_type], 1)
+
+    def test_workbench_lite_infers_work_type_from_notice_type(self) -> None:
+        cases = [
+            ("维保通告", "maintenance"),
+            ("变更通告", "change"),
+            ("设备检修", "repair"),
+            ("上电通告", "power"),
+            ("下电通告", "power"),
+            ("设备轮巡", "polling"),
+            ("设备调整", "adjust"),
+        ]
+        for notice_type, expected_work_type in cases:
+            with self.subTest(notice_type=notice_type):
+                self.assertEqual(
+                    workbench_lite._item_work_type({"notice_type": notice_type}),
+                    expected_work_type,
+                )
+
+    def test_event_identity_requires_event_time(self) -> None:
+        base_text = (
+            "【事件通告】状态：新增\n"
+            "【标题】BMS报E-217-CRAC-02压缩机高压报警: 告警\n"
+            "【时间】{time}\n"
+            "【进展】测试"
+        )
+        first = {"notice_type": "事件通告", "text": base_text.format(time="2026-06-24 17:20")}
+        second = {"notice_type": "事件通告", "text": base_text.format(time="2026-06-24 18:20")}
+
+        self.assertNotEqual(
+            PortalRuntime._event_notice_identity_key(first),
+            PortalRuntime._event_notice_identity_key(second),
+        )
+        self.assertNotEqual(
+            PortalRuntime._local_upload_dedupe_key(first, "事件通告"),
+            PortalRuntime._local_upload_dedupe_key(second, "事件通告"),
+        )
+
+    def test_event_title_only_does_not_build_remote_reuse_identity(self) -> None:
+        payload = {
+            "notice_type": "事件通告",
+            "text": (
+                "【事件通告】状态：新增\n"
+                "【标题】BMS报E-217-CRAC-02压缩机高压报警: 告警\n"
+                "【进展】测试"
+            ),
+        }
+
+        self.assertEqual(PortalRuntime._event_notice_identity_key(payload), "")
+
+    def test_event_occurrence_time_label_builds_identity(self) -> None:
+        text = (
+            "【事件通告】状态：新增\n"
+            "【标题】BMS报E-217-CRAC-02压缩机高压报警: 告警\n"
+            "【事件发生时间】2026-06-24 17:20\n"
+            "【进展】测试"
+        )
+
+        info = extract_event_info(text) or {}
+
+        self.assertEqual(info.get("time_str"), "2026-06-24 17:20")
+        self.assertTrue(PortalRuntime._event_notice_identity_key({"notice_type": "事件通告", "text": text}))
+
+    def test_event_delete_requires_remote_fields(self) -> None:
+        payload = {
+            "notice_type": "事件通告",
+            "text": (
+                "【事件通告】状态：新增\n"
+                "【标题】BMS报E-217-CRAC-02压缩机高压报警: 告警\n"
+                "【时间】2026-06-24 17:20\n"
+                "【进展】测试"
+            ),
+        }
+
+        allowed, message = PortalRuntime._validate_event_delete_target(payload, {})
+
+        self.assertFalse(allowed)
+        self.assertIn("已阻止删除", message)
+
+    def test_event_delete_requires_same_remote_identity(self) -> None:
+        payload = {
+            "notice_type": "事件通告",
+            "text": (
+                "【事件通告】状态：新增\n"
+                "【标题】BMS报E-217-CRAC-02压缩机高压报警: 告警\n"
+                "【时间】2026-06-24 17:20\n"
+                "【进展】测试"
+            ),
+        }
+        remote_fields = {
+            EVENT_NOTICE_FIELDS["alarm_desc"]: "BMS报E-217-CRAC-02压缩机高压报警: 告警",
+            EVENT_NOTICE_FIELDS["occurrence_time"]: "2026-06-24 17:20",
+        }
+        other_remote_fields = {
+            EVENT_NOTICE_FIELDS["alarm_desc"]: "BMS报E-217-CRAC-02压缩机高压报警: 告警",
+            EVENT_NOTICE_FIELDS["occurrence_time"]: "2026-06-24 18:20",
+        }
+
+        self.assertTrue(PortalRuntime._validate_event_delete_target(payload, remote_fields)[0])
+        self.assertFalse(PortalRuntime._validate_event_delete_target(payload, other_remote_fields)[0])
+
+    def test_event_existing_target_requires_same_event_time(self) -> None:
+        class FakeStateStore:
+            def list_qt_active_items(self, include_deleted: bool = False) -> list[dict]:
+                return [
+                    {
+                        "record_id": "recOldEvent",
+                        "notice_type": "事件通告",
+                        "payload": {
+                            "notice_type": "事件通告",
+                            "target_record_id": "recOldEvent",
+                            "record_id": "recOldEvent",
+                            "text": (
+                                "【事件通告】状态：新增\n"
+                                "【标题】BMS报E-217-CRAC-02压缩机高压报警: 告警\n"
+                                "【时间】2026-06-24 17:20\n"
+                                "【进展】测试"
+                            ),
+                        },
+                    }
+                ]
+
+        old_state_store = PortalRuntime.state_store
+        PortalRuntime.state_store = FakeStateStore()
+        try:
+            same_title_different_time = {
+                "notice_type": "事件通告",
+                "text": (
+                    "【事件通告】状态：新增\n"
+                    "【标题】BMS报E-217-CRAC-02压缩机高压报警: 告警\n"
+                    "【时间】2026-06-24 18:20\n"
+                    "【进展】测试"
+                ),
+            }
+            same_title_same_time = {
+                **same_title_different_time,
+                "text": same_title_different_time["text"].replace("18:20", "17:20"),
+            }
+
+            self.assertEqual(
+                PortalRuntime._existing_event_target_for_local_notice(
+                    same_title_different_time,
+                    "事件通告",
+                ),
+                "",
+            )
+            self.assertEqual(
+                PortalRuntime._existing_event_target_for_local_notice(
+                    same_title_same_time,
+                    "事件通告",
+                ),
+                "recOldEvent",
+            )
+        finally:
+            PortalRuntime.state_store = old_state_store
 
 
 if __name__ == "__main__":

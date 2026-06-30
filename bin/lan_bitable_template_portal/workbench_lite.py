@@ -27,6 +27,21 @@ NOTICE_TYPE_BY_WORK_TYPE: dict[str, str] = {
     "adjust": "设备调整",
 }
 
+WORK_TYPE_BY_NOTICE_TYPE: dict[str, str] = {
+    "维保通告": "maintenance",
+    "维护通告": "maintenance",
+    "变更通告": "change",
+    "设备检修": "repair",
+    "检修通告": "repair",
+    "上下电通告": "power",
+    "上电通告": "power",
+    "下电通告": "power",
+    "设备轮巡": "polling",
+    "轮巡通告": "polling",
+    "设备调整": "adjust",
+    "调整通告": "adjust",
+}
+
 SPECIALTY_OPTIONS = ("电气", "暖通", "消防", "弱电")
 MAINTENANCE_CYCLE_OPTIONS = ("/", "每月", "每季", "每年", "半年", "每两年", "每三年", "每五年", "冬季保温每日", "非计划性")
 SITE_PHOTO_REQUIRED_WORK_TYPES = {"maintenance", "change", "repair"}
@@ -223,8 +238,35 @@ def _work_type(value: Any) -> str:
     return text if text in WORK_TYPE_LABELS else "maintenance"
 
 
+def _item_work_type(item: dict[str, Any] | None) -> str:
+    item = item if isinstance(item, dict) else {}
+    work = _work_type(item.get("work_type") or item.get("lan_work_type"))
+    if str(item.get("work_type") or item.get("lan_work_type") or "").strip() in WORK_TYPE_LABELS:
+        return work
+    notice_type = str(item.get("notice_type") or "").strip()
+    mapped = WORK_TYPE_BY_NOTICE_TYPE.get(notice_type)
+    if mapped:
+        return mapped
+    text = "\n".join(
+        str(item.get(key) or "").strip()
+        for key in ("text", "content", "title", "name")
+        if str(item.get(key) or "").strip()
+    )
+    if re.search(r"上电通告|下电通告|上下电通告", text):
+        return "power"
+    if re.search(r"设备轮巡|轮巡通告", text):
+        return "polling"
+    if re.search(r"设备调整|调整通告", text):
+        return "adjust"
+    if re.search(r"设备检修|检修通告", text):
+        return "repair"
+    if re.search(r"变更通告", text):
+        return "change"
+    return "maintenance"
+
+
 def _record_key(record: dict[str, Any]) -> str:
-    return f"{_work_type(record.get('work_type'))}:{record.get('record_id') or record.get('source_record_id') or ''}"
+    return f"{_item_work_type(record)}:{record.get('record_id') or record.get('source_record_id') or ''}"
 
 
 def _source_id(record: dict[str, Any] | None) -> str:
@@ -293,7 +335,7 @@ def _maintenance_prefixed_title(record: dict[str, Any], raw_title: str) -> str:
 
 
 def _record_title(record: dict[str, Any]) -> str:
-    work_type = _work_type(record.get("work_type"))
+    work_type = _item_work_type(record)
     text = str(record.get("text") or "").strip()
     text_title = ""
     if text:
@@ -416,7 +458,7 @@ def _record_cycle(record: dict[str, Any]) -> str:
 
 
 def _maintenance_cycle_chip(record: dict[str, Any], work_type: str) -> str:
-    if _work_type(work_type or record.get("work_type")) != "maintenance":
+    if (_work_type(work_type) if work_type else _item_work_type(record)) != "maintenance":
         return ""
     cycle = _record_cycle(record)
     if not cycle:
@@ -462,7 +504,7 @@ def _site_photo_count(record: dict[str, Any]) -> int:
 
 
 def _site_photo_chip(record: dict[str, Any], work_type: str) -> str:
-    if _work_type(work_type or record.get("work_type")) not in SITE_PHOTO_REQUIRED_WORK_TYPES:
+    if (_work_type(work_type) if work_type else _item_work_type(record)) not in SITE_PHOTO_REQUIRED_WORK_TYPES:
         return ""
     count = _site_photo_count(record)
     if count > 0:
@@ -506,7 +548,7 @@ def _site_photo_uploader(work_type: str, existing_count: int) -> str:
 
 
 def _mop_status_info(record: dict[str, Any], work_type: str) -> tuple[str, str]:
-    if _work_type(work_type or record.get("work_type")) != "maintenance":
+    if (_work_type(work_type) if work_type else _item_work_type(record)) != "maintenance":
         return "", ""
     fields = record.get("display_fields") if isinstance(record.get("display_fields"), dict) else {}
     engineer_confirmed = _truthy_display(record.get("mop_engineer_confirmed")) or _truthy_display(fields.get("工程师确认"))
@@ -756,7 +798,7 @@ def parse_pasted_notice_to_draft(text: str) -> tuple[str, str, dict[str, str]]:
 
 
 def _draft_from_record(record: dict[str, Any], *, manual: bool = False, work_type: str = "") -> dict[str, str]:
-    work = _work_type(work_type or record.get("work_type"))
+    work = _work_type(work_type) if work_type else _item_work_type(record)
     title = _record_title(record)
     if manual:
         title = ""
@@ -944,7 +986,7 @@ def _ongoing_rows(
     pending_page: int = 1,
     ongoing_page: int = 1,
 ) -> str:
-    filtered = [item for item in items if not work_type or _work_type(item.get("work_type")) == work_type]
+    filtered = [item for item in items if not work_type or _item_work_type(item) == work_type]
     if not filtered:
         return "<div class=\"empty\">当前没有进行中通告</div>"
     rows: list[str] = []
@@ -999,7 +1041,7 @@ def _attention_rows(
 ) -> str:
     rows: list[str] = []
     for item in items or []:
-        if work_type and _work_type(item.get("work_type")) != work_type:
+        if work_type and _item_work_type(item) != work_type:
             continue
         status_text = " ".join(
             str(value or "")
@@ -1072,11 +1114,11 @@ def _source_link_options(
     used_source_ids = {
         str(item.get("source_record_id") or "").strip()
         for item in ongoing_items or []
-        if _work_type(item.get("work_type")) == work_type and str(item.get("source_record_id") or "").strip()
+        if _item_work_type(item) == work_type and str(item.get("source_record_id") or "").strip()
     }
     options: list[dict[str, str]] = []
     for record in records or []:
-        if _work_type(record.get("work_type")) != work_type:
+        if _item_work_type(record) != work_type:
             continue
         source_id = _source_id(record)
         if not source_id or source_id in used_source_ids:
@@ -1291,7 +1333,7 @@ def _detail_form(
     source_link_options: list[dict[str, str]] | None = None,
 ) -> str:
     source = ongoing_item or record or {}
-    work = _work_type(work_type or source.get("work_type"))
+    work = _work_type(work_type) if work_type else _item_work_type(source)
     effective_manual = bool(manual or parsed_draft or (not ongoing_item and not record))
     draft = _draft_from_record(source, manual=effective_manual, work_type=work)
     if parsed_draft:
@@ -1418,10 +1460,10 @@ def render_workbench_lite(
     fallback_record_counts = {key: 0 for key in WORK_TYPE_LABELS}
     fallback_ongoing_counts = {key: 0 for key in WORK_TYPE_LABELS}
     for record in records:
-        record_work = _work_type(record.get("work_type"))
+        record_work = _item_work_type(record)
         fallback_record_counts[record_work] = fallback_record_counts.get(record_work, 0) + 1
     for item in ongoing:
-        item_work = _work_type(item.get("work_type"))
+        item_work = _item_work_type(item)
         fallback_ongoing_counts[item_work] = fallback_ongoing_counts.get(item_work, 0) + 1
     record_counts = {
         key: _to_int(payload_record_counts.get(key), fallback_record_counts.get(key, 0))
@@ -1443,7 +1485,7 @@ def render_workbench_lite(
     )
     sorted_records = sorted(records, key=_record_sort_key)
     filtered_ongoing = [
-        item for item in ongoing if not work or _work_type(item.get("work_type")) == work
+        item for item in ongoing if not work or _item_work_type(item) == work
     ]
     if records_pagination:
         visible_records = sorted_records

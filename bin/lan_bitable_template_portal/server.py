@@ -36,7 +36,7 @@ from .identity_utils import (
     normalize_notice_identity_payload,
 )
 from .state_store import LanPortalStateStore
-from upload_event_module.config import get_field_config
+from upload_event_module.config import EVENT_NOTICE_FIELDS, get_field_config
 from upload_event_module.services.handlers import NoticePayload
 from upload_event_module.services.service_registry import (
     create_bitable_record_fields,
@@ -50,6 +50,7 @@ from upload_event_module.services.feishu_service import delete_bitable_record
 from upload_event_module.services.robot_webhook import send_text_to_open_ids
 from upload_event_module.core.parser import extract_event_info, extract_notice_info
 from upload_event_module.logger import log_warning
+from upload_event_module.time_parser import parse_time_range
 
 
 FRONTEND_DIST_DIR = Path(__file__).resolve().parent / "frontend" / "dist"
@@ -3654,9 +3655,9 @@ class PortalRuntime:
         data = data if isinstance(data, dict) else {}
         notice_type = str(notice_type or data.get("notice_type") or "").strip()
         if notice_type == "事件通告":
-            event_title_key = cls._event_notice_title_key(data)
-            if event_title_key:
-                return f"{notice_type}:event-title:{hashlib.sha256(event_title_key.encode('utf-8', errors='ignore')).hexdigest()}"
+            event_identity_key = cls._event_notice_identity_key(data)
+            if event_identity_key:
+                return f"{notice_type}:event:{hashlib.sha256(event_identity_key.encode('utf-8', errors='ignore')).hexdigest()}"
         active_item_id = str(data.get("active_item_id") or "").strip()
         if active_item_id and not is_local_record_id(active_item_id):
             return f"{notice_type}:active:{active_item_id}"
@@ -3689,11 +3690,43 @@ class PortalRuntime:
         return re.sub(r"[\s　:：;；,，。.\-_/\\()（）【】\\[\\]~～至]+", "", title).lower()
 
     @classmethod
+    def _event_notice_time_key(cls, data: dict) -> str:
+        data = data if isinstance(data, dict) else {}
+        info = extract_event_info(str(data.get("text") or "")) or {}
+        raw_time = str(
+            info.get("time_str")
+            or data.get("time_str")
+            or data.get("occurrence_date")
+            or data.get("event_time")
+            or ""
+        ).strip()
+        if not raw_time:
+            return ""
+        try:
+            start_dt, _ = parse_time_range(raw_time)
+        except Exception:
+            start_dt = None
+        if start_dt is not None:
+            try:
+                return start_dt.strftime("%Y%m%d%H%M")
+            except Exception:
+                pass
+        return re.sub(r"\D+", "", raw_time)
+
+    @classmethod
+    def _event_notice_identity_key(cls, data: dict) -> str:
+        title_key = cls._event_notice_title_key(data)
+        time_key = cls._event_notice_time_key(data)
+        if not title_key or not time_key:
+            return ""
+        return f"{title_key}|{time_key}"
+
+    @classmethod
     def _existing_event_target_for_local_notice(cls, data: dict, notice_type: str) -> str:
         if str(notice_type or "").strip() != "事件通告":
             return ""
-        title_key = cls._event_notice_title_key(data)
-        if not title_key:
+        identity_key = cls._event_notice_identity_key(data)
+        if not identity_key:
             return ""
         try:
             active_items = cls.state_store.list_qt_active_items(include_deleted=False)
@@ -3705,7 +3738,7 @@ class PortalRuntime:
             payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
             if str(payload.get("notice_type") or row.get("notice_type") or "").strip() != "事件通告":
                 continue
-            if cls._event_notice_title_key(payload) != title_key:
+            if cls._event_notice_identity_key(payload) != identity_key:
                 continue
             target_record_id = (
                 canonical_target_record_id(payload)
@@ -3714,6 +3747,84 @@ class PortalRuntime:
             if target_record_id and not is_local_record_id(target_record_id):
                 return target_record_id
         return ""
+
+    @classmethod
+    def _remote_event_time_key_from_fields(cls, fields: dict | None) -> str:
+        if not isinstance(fields, dict):
+            return ""
+        value = fields.get(EVENT_NOTICE_FIELDS["occurrence_time"])
+        if value in (None, ""):
+            return ""
+        try:
+            if isinstance(value, (int, float)):
+                timestamp = float(value)
+                if timestamp > 10_000_000_000:
+                    timestamp = timestamp / 1000.0
+                return dt.datetime.fromtimestamp(timestamp).strftime("%Y%m%d%H%M")
+            raw = str(value).strip()
+            if raw.isdigit():
+                timestamp = float(raw)
+                if timestamp > 10_000_000_000:
+                    timestamp = timestamp / 1000.0
+                return dt.datetime.fromtimestamp(timestamp).strftime("%Y%m%d%H%M")
+            try:
+                parsed = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                return parsed.astimezone().strftime("%Y%m%d%H%M")
+            except Exception:
+                return re.sub(r"\D+", "", raw)
+        except Exception:
+            return ""
+
+    @classmethod
+    def _validate_event_delete_target(
+        cls, payload: dict, remote_fields: dict | None
+    ) -> tuple[bool, str]:
+        if str((payload or {}).get("notice_type") or "").strip() != "事件通告":
+            return True, ""
+        if not isinstance(remote_fields, dict) or not remote_fields:
+            return (
+                False,
+                "已阻止删除：无法读取目标多维记录，不能确认该记录就是当前事件。请先核对绑定记录，或使用“移除显示，不删除多维”。",
+            )
+        local_time_key = cls._event_notice_time_key(payload)
+        remote_time_key = cls._remote_event_time_key_from_fields(remote_fields)
+        if not local_time_key:
+            return (
+                False,
+                "已阻止删除：当前事件缺少事件发生时间，不能安全删除目标多维记录。",
+            )
+        if not remote_time_key:
+            return (
+                False,
+                "已阻止删除：目标多维记录缺少事件发生时间，不能确认删除对象。",
+            )
+        if local_time_key != remote_time_key:
+            return (
+                False,
+                "已阻止删除：当前事件与目标多维记录的事件发生时间不一致，请先核对绑定记录。",
+            )
+        local_title_key = cls._event_notice_title_key(payload)
+        remote_title_key = cls._event_notice_title_key(
+            {
+                "title": remote_fields.get(EVENT_NOTICE_FIELDS["alarm_desc"]),
+            }
+        )
+        if not local_title_key:
+            return (
+                False,
+                "已阻止删除：当前事件缺少标题/告警描述，不能安全删除目标多维记录。",
+            )
+        if not remote_title_key:
+            return (
+                False,
+                "已阻止删除：目标多维记录缺少告警描述，不能确认删除对象。",
+            )
+        if local_title_key != remote_title_key:
+            return (
+                False,
+                "已阻止删除：当前事件与目标多维记录的告警描述不一致，请先核对绑定记录。",
+            )
+        return True, ""
 
     @classmethod
     def _existing_target_for_local_upload(cls, data: dict, notice_type: str) -> str:
@@ -5160,6 +5271,27 @@ class PortalRuntime:
                 if ok_query and isinstance(query_result, dict):
                     checkpoint_fields = query_result.get("fields", {}) if isinstance(query_result.get("fields"), dict) else {}
                     checkpoint_remote_missing = False
+        if (
+            record_id
+            and notice_type == "事件通告"
+            and not is_placeholder
+            and checkpoint_remote_missing
+            and not external_real_write_guard().get("mock_external")
+        ):
+            ok_query, query_result = query_record_by_id(record_id, notice_type)
+            if ok_query and isinstance(query_result, dict):
+                checkpoint_fields = (
+                    query_result.get("fields", {})
+                    if isinstance(query_result.get("fields"), dict)
+                    else {}
+                )
+                checkpoint_remote_missing = False
+            else:
+                return {
+                    "ok": False,
+                    "message": f"已阻止删除：无法读取目标多维记录，不能确认该记录就是当前事件。查询结果：{query_result}",
+                    "record_id": record_id,
+                }
         checkpoint_id = ""
         if supports_undo:
             checkpoint_id = cls._create_backend_undo_checkpoint(
@@ -5172,6 +5304,28 @@ class PortalRuntime:
                 remote_missing=checkpoint_remote_missing,
                 job_id=str(payload.get("job_id") or ""),
             )
+        if (
+            record_id
+            and notice_type == "事件通告"
+            and not is_placeholder
+            and not external_real_write_guard().get("mock_external")
+        ):
+            delete_allowed, delete_guard_message = cls._validate_event_delete_target(
+                payload,
+                checkpoint_fields,
+            )
+            if not delete_allowed:
+                if checkpoint_id:
+                    cls.state_store.mark_notice_undo_action(
+                        checkpoint_id,
+                        "failed",
+                        error=delete_guard_message,
+                    )
+                return {
+                    "ok": False,
+                    "message": delete_guard_message,
+                    "record_id": record_id,
+                }
         if record_id and notice_type and not is_placeholder:
             ok, result = delete_bitable_record(record_id, notice_type)
             if not ok:
