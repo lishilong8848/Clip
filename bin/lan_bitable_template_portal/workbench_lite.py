@@ -866,17 +866,26 @@ def _input(
     )
 
 
-def _select(name: str, label: str, value: Any, options: tuple[str, ...]) -> str:
+def _select(
+    name: str,
+    label: str,
+    value: Any,
+    options: tuple[str, ...],
+    *,
+    required: bool = False,
+) -> str:
     selected_value = str(value or "").strip()
     if selected_value not in options:
         selected_value = options[0] if options else ""
+    label_class = " class=\"required\"" if required else ""
+    required_attr = " required aria-required=\"true\"" if required else ""
     option_html = "".join(
         f"<option value=\"{_e(option)}\"{' selected' if option == selected_value else ''}>{_e(option)}</option>"
         for option in options
     )
     return (
-        f"<label><span>{_e(label)}</span>"
-        f"<select name=\"{_e(name)}\">{option_html}</select></label>"
+        f"<label{label_class}><span>{_e(label)}</span>"
+        f"<select name=\"{_e(name)}\"{required_attr}>{option_html}</select></label>"
     )
 
 
@@ -903,7 +912,13 @@ def _form_fields(work_type: str, draft: dict[str, str]) -> str:
         field("title", "名称" if work_type not in {"repair", "polling"} else "标题", draft.get("title")),
         field("start_time", "开始时间" if work_type != "repair" else "期望完成时间", draft.get("start_time"), input_type="datetime-local"),
         field("end_time", "结束时间" if work_type != "repair" else "发现故障时间", draft.get("end_time"), input_type="datetime-local"),
-        field("specialty", "专业", draft.get("specialty"), datalist="specialty-options"),
+        _select(
+            "specialty",
+            "专业",
+            draft.get("specialty"),
+            SPECIALTY_OPTIONS,
+            required=_is_required_upload_field(work_type, "specialty"),
+        ),
     ]
     if work_type == "power":
         primary_fields.insert(0, _select("notice_type", "通告类型", draft.get("notice_type"), POWER_NOTICE_TYPES))
@@ -1966,7 +1981,7 @@ def render_workbench_lite(
         <label class="visually-hidden" for="lite-specialty-select">筛选专业</label>
         <select id="lite-specialty-select" name="specialty" aria-label="筛选专业">
           <option value="">全部专业</option>
-          {''.join(f'<option value="{_e(item)}"{" selected" if item == specialty else ""}>{_e(item)}</option>' for item in (payload.get("filters") or {}).get("specialties", []))}
+          {''.join(f'<option value="{_e(item)}"{" selected" if item == specialty else ""}>{_e(item)}</option>' for item in SPECIALTY_OPTIONS)}
         </select>
         <button class="btn primary" type="submit">筛选</button>
       </form>

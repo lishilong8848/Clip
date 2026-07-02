@@ -11791,6 +11791,22 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertIn("纯手填通告", html)
         self.assertIn("纯手填或解析通告，提交后只创建目标多维记录，不要求源表 ID。", html)
 
+    def test_workbench_lite_specialty_field_uses_fixed_select_options(self):
+        from lan_bitable_template_portal.workbench_lite import _detail_form
+
+        html = _detail_form(
+            record=None,
+            ongoing_item=None,
+            scope="E",
+            work_type="maintenance",
+            manual=True,
+        )
+
+        self.assertIn('<select name="specialty" required aria-required="true">', html)
+        for option in ("电气", "暖通", "消防", "弱电"):
+            self.assertIn(f'<option value="{option}"', html)
+        self.assertNotIn('name="specialty" type="text"', html)
+
     def test_workbench_lite_active_title_falls_back_to_notice_text(self):
         from lan_bitable_template_portal.workbench_lite import _record_title
 
