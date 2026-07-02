@@ -18,6 +18,9 @@ WORK_TYPE_LABELS: dict[str, str] = {
     "adjust": "调整",
 }
 
+ALL_WORK_TYPE = "all"
+WORK_TYPE_FILTER_LABELS: dict[str, str] = {ALL_WORK_TYPE: "全部", **WORK_TYPE_LABELS}
+
 NOTICE_TYPE_BY_WORK_TYPE: dict[str, str] = {
     "maintenance": "维保通告",
     "change": "变更通告",
@@ -249,6 +252,13 @@ def _first(*values: Any) -> str:
 def _work_type(value: Any) -> str:
     text = str(value or "maintenance").strip()
     return text if text in WORK_TYPE_LABELS else "maintenance"
+
+
+def _view_work_type(value: Any) -> str:
+    text = str(value or "maintenance").strip()
+    if text == ALL_WORK_TYPE:
+        return ALL_WORK_TYPE
+    return _work_type(text)
 
 
 def _item_work_type(item: dict[str, Any] | None) -> str:
@@ -991,6 +1001,7 @@ def _record_rows(
     rows: list[str] = []
     for record in sorted(records, key=_record_sort_key):
         record_id = str(record.get("record_id") or record.get("source_record_id") or "")
+        row_work_type = _item_work_type(record)
         url = _query_url(
             "/workbench-lite",
             scope=scope,
@@ -1004,12 +1015,12 @@ def _record_rows(
         active = " active" if record_id == selected_id else ""
         title = _record_title(record)
         progress = _record_progress(record)
-        draft = _draft_from_record(record, work_type=work_type)
+        draft = _draft_from_record(record, work_type=row_work_type)
         source_record_id = _source_id(record)
         action = _action_for_record(record)
         disabled_reason = _record_disabled_reason(progress)
         site_photo_count = _site_photo_count(record)
-        mop_status = _mop_status_text(record, work_type)
+        mop_status = _mop_status_text(record, row_work_type)
         disabled_class = " is-disabled" if disabled_reason else ""
         aria_disabled = "true" if disabled_reason else "false"
         rows.append(
@@ -1017,7 +1028,7 @@ def _record_rows(
         f" aria-current=\"{'true' if active else 'false'}\""
         f" aria-disabled=\"{aria_disabled}\""
         f" data-row-kind=\"source\""
-        f" data-work-type=\"{_e(work_type)}\""
+        f" data-work-type=\"{_e(row_work_type)}\""
         f" data-record-id=\"{_e(record_id)}\""
         f" data-source-record-id=\"{_e(source_record_id)}\""
         f" data-site-photo-count=\"{_e(site_photo_count)}\""
@@ -1027,7 +1038,7 @@ def _record_rows(
             f" data-title=\"{_e(title)}\""
         f" data-draft=\"{_e(_safe_draft_json_attr(draft))}\">"
             f"<span class=\"row-main\"><strong>{_e(title)}</strong>{_progress_badge(progress)}</span>"
-            f"{_row_meta(_record_building(record), _record_specialty(record), progress=progress, extra_chips=_record_extra_chips(record, work_type))}"
+            f"{_row_meta(_record_building(record), _record_specialty(record), progress=progress, extra_chips=_record_extra_chips(record, row_work_type))}"
             "</a>"
         )
     return "\n".join(rows)
@@ -1042,12 +1053,14 @@ def _ongoing_rows(
     pending_page: int = 1,
     ongoing_page: int = 1,
 ) -> str:
-    filtered = [item for item in items if not work_type or _item_work_type(item) == work_type]
+    filter_work_type = "" if work_type == ALL_WORK_TYPE else work_type
+    filtered = [item for item in items if not filter_work_type or _item_work_type(item) == filter_work_type]
     if not filtered:
         return "<div class=\"empty\">当前没有进行中通告</div>"
     rows: list[str] = []
     for item in filtered:
         active_id = str(item.get("active_item_id") or item.get("target_record_id") or item.get("record_id") or "")
+        row_work_type = _item_work_type(item)
         url = _query_url(
             "/workbench-lite",
             scope=scope,
@@ -1058,19 +1071,19 @@ def _ongoing_rows(
         )
         active = " active" if active_id == selected_id else ""
         title = _record_title(item)
-        draft = _draft_from_record(item, work_type=work_type)
+        draft = _draft_from_record(item, work_type=row_work_type)
         target_record_id = str(item.get("target_record_id") or item.get("record_id") or "")
         source_record_id = _explicit_source_id(item)
         status = item.get("status") or "进行中"
         site_photo_count = _site_photo_count(item)
-        mop_status = _mop_status_text(item, work_type)
-        needs_site_class = " needs-site-photo" if work_type in SITE_PHOTO_REQUIRED_WORK_TYPES and site_photo_count <= 0 else ""
-        needs_mop_class = " needs-mop" if work_type == "maintenance" and ("未" in mop_status or not mop_status) else ""
+        mop_status = _mop_status_text(item, row_work_type)
+        needs_site_class = " needs-site-photo" if row_work_type in SITE_PHOTO_REQUIRED_WORK_TYPES and site_photo_count <= 0 else ""
+        needs_mop_class = " needs-mop" if row_work_type == "maintenance" and ("未" in mop_status or not mop_status) else ""
         rows.append(
         f"<a class=\"ongoing-row{active}{needs_site_class}{needs_mop_class}\" href=\"{_e(url)}\" title=\"{_e(title)}\""
         f" aria-current=\"{'true' if active else 'false'}\""
         f" data-row-kind=\"ongoing\""
-        f" data-work-type=\"{_e(work_type)}\""
+        f" data-work-type=\"{_e(row_work_type)}\""
         f" data-active-item-id=\"{_e(str(item.get('active_item_id') or ''))}\""
         f" data-record-id=\"{_e(str(item.get('record_id') or ''))}\""
         f" data-target-record-id=\"{_e(target_record_id)}\""
@@ -1081,7 +1094,7 @@ def _ongoing_rows(
             f" data-title=\"{_e(title)}\""
         f" data-draft=\"{_e(_safe_draft_json_attr(draft))}\">"
             f"<span class=\"row-main\"><strong>{_e(title)}</strong>{_progress_badge(status)}</span>"
-            f"{_row_meta(_record_building(item), _record_specialty(item), progress=status, extra_chips=_record_extra_chips(item, work_type, ongoing=True))}"
+            f"{_row_meta(_record_building(item), _record_specialty(item), progress=status, extra_chips=_record_extra_chips(item, row_work_type, ongoing=True))}"
             "</a>"
         )
     return "\n".join(rows)
@@ -1096,8 +1109,9 @@ def _attention_rows(
     ongoing_page: int | str = 1,
 ) -> str:
     rows: list[str] = []
+    filter_work_type = "" if work_type == ALL_WORK_TYPE else work_type
     for item in items or []:
-        if work_type and _item_work_type(item) != work_type:
+        if filter_work_type and _item_work_type(item) != filter_work_type:
             continue
         status_text = " ".join(
             str(value or "")
@@ -1529,7 +1543,8 @@ def render_workbench_lite(
     ongoing = payload.get("ongoing") if isinstance(payload.get("ongoing"), list) else []
     daily = payload.get("daily_summary") if isinstance(payload.get("daily_summary"), dict) else {}
     stats = daily.get("stats") if isinstance(daily.get("stats"), dict) else {}
-    work = _work_type(work_type)
+    view_work = _view_work_type(work_type)
+    work_filter = "" if view_work == ALL_WORK_TYPE else view_work
     payload_record_counts = payload.get("record_type_counts") if isinstance(payload.get("record_type_counts"), dict) else {}
     payload_ongoing_counts = payload.get("ongoing_type_counts") if isinstance(payload.get("ongoing_type_counts"), dict) else {}
     fallback_record_counts = {key: 0 for key in WORK_TYPE_LABELS}
@@ -1548,6 +1563,8 @@ def render_workbench_lite(
         key: _to_int(payload_ongoing_counts.get(key), fallback_ongoing_counts.get(key, 0))
         for key in WORK_TYPE_LABELS
     }
+    record_counts[ALL_WORK_TYPE] = sum(record_counts.get(key, 0) for key in WORK_TYPE_LABELS)
+    ongoing_counts[ALL_WORK_TYPE] = sum(ongoing_counts.get(key, 0) for key in WORK_TYPE_LABELS)
     records_pagination = (
         payload.get("records_pagination")
         if isinstance(payload.get("records_pagination"), dict)
@@ -1560,7 +1577,7 @@ def render_workbench_lite(
     )
     sorted_records = sorted(records, key=_record_sort_key)
     filtered_ongoing = [
-        item for item in ongoing if not work or _item_work_type(item) == work
+        item for item in ongoing if not work_filter or _item_work_type(item) == work_filter
     ]
     if records_pagination:
         visible_records = sorted_records
@@ -1594,7 +1611,7 @@ def render_workbench_lite(
         ongoing_page_size = ONGOING_PAGE_SIZE
     pager_base = {
         "scope": scope,
-        "work_type": work,
+        "work_type": view_work,
         "search": search,
         "specialty": specialty,
         "record_id": record_id,
@@ -1622,7 +1639,19 @@ def render_workbench_lite(
     selected_ongoing = _selected_ongoing(ongoing, active_item_id)
     selected_record = None if selected_ongoing or manual or parsed_draft else _selected_source(records, record_id)
     selected_record_id = str((selected_record or {}).get("record_id") or "")
-    source_options = _source_link_options(records, ongoing, work_type=work)
+    detail_source = selected_ongoing or selected_record or {}
+    detail_work = _item_work_type(detail_source) if detail_source else (work_filter or "maintenance")
+    if parsed_draft:
+        parsed_work = str(parsed_draft.get("work_type") or "").strip()
+        parsed_notice_type = str(parsed_draft.get("notice_type") or "").strip()
+        detail_work = _work_type(
+            parsed_work
+            if parsed_work in WORK_TYPE_LABELS
+            else (WORK_TYPE_BY_NOTICE_TYPE.get(parsed_notice_type) or detail_work)
+        )
+    elif manual and work_filter:
+        detail_work = work_filter
+    source_options = _source_link_options(records, ongoing, work_type=detail_work)
     user = session.get("user") if isinstance(session.get("user"), dict) else {}
     is_admin_session = bool(session.get("is_admin")) or str(session.get("role") or "").strip().lower() == "admin"
     scope_options = scope_options or []
@@ -1631,13 +1660,13 @@ def render_workbench_lite(
         for option in scope_options
     )
     type_tabs = "".join(
-        f"<a class=\"type-tab{' active' if key == work else ''}\" href=\"{_e(_query_url('/workbench-lite', scope=scope, work_type=key))}\" title=\"待发起 {record_counts.get(key, 0)} / 进行中 {ongoing_counts.get(key, 0)}\""
-        f" aria-current=\"{'page' if key == work else 'false'}\">"
-        f"<span>{_e(label)}</span><b class=\"type-count\">{_e(record_counts.get(key, 0))}</b>"
+        f"<a class=\"type-tab{' active' if key == view_work else ''}\" href=\"{_e(_query_url('/workbench-lite', scope=scope, work_type=key))}\" title=\"待发起 {record_counts.get(key, 0)}，进行中 {ongoing_counts.get(key, 0)}\""
+        f" aria-current=\"{'page' if key == view_work else 'false'}\">"
+        f"<span>{_e(label)}</span><span class=\"type-counts\" aria-label=\"待发起 {record_counts.get(key, 0)}，进行中 {ongoing_counts.get(key, 0)}\"><b class=\"type-count pending\">{_e(record_counts.get(key, 0))}</b><i>/</i><b class=\"type-count ongoing\">{_e(ongoing_counts.get(key, 0))}</b></span>"
         "</a>"
-        for key, label in WORK_TYPE_LABELS.items()
+        for key, label in WORK_TYPE_FILTER_LABELS.items()
     )
-    manual_url = _query_url("/workbench-lite", scope=scope, work_type=work, manual="1")
+    manual_url = _query_url("/workbench-lite", scope=scope, work_type=(work_filter or "maintenance"), manual="1")
     undo_items = notice_undos or []
     source_loaded_at = str(payload.get("last_loaded_at") or "").strip()
     source_loaded_text = source_loaded_at or "暂无成功同步时间"
@@ -1650,7 +1679,7 @@ def render_workbench_lite(
     ) or "<div class=\"empty compact\">近三天暂无可回退通告</div>"
     attention_html = _attention_rows(
         ongoing,
-        work_type=work,
+        work_type=view_work,
         scope=scope,
         pending_page=pending_page_num,
         ongoing_page=ongoing_page_num,
@@ -1704,11 +1733,15 @@ def render_workbench_lite(
     .guide-step span {{ display:block; margin-top:1px; color:#64748b; font-size:11px; line-height:1.25; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
     .toolbar {{ display:flex; flex-wrap:wrap; gap:8px; align-items:center; border:1px solid #d8e5f7; border-radius:18px; padding:8px; background:rgba(255,255,255,.95); box-shadow:0 10px 24px rgba(15,73,153,.08); position:relative; }}
     .type-tabs {{ display:flex; gap:6px; flex-wrap:wrap; }}
-    .type-tab {{ min-height:36px; padding:6px 9px 6px 12px; border-radius:14px; color:#12345f; text-decoration:none; font-size:13px; font-weight:900; background:#f4f8ff; display:inline-flex; align-items:center; gap:7px; border:1px solid transparent; transition:background .16s ease, border-color .16s ease, box-shadow .16s ease; }}
+    .type-tab {{ min-height:36px; padding:6px 8px 6px 11px; border-radius:14px; color:#12345f; text-decoration:none; font-size:13px; font-weight:900; background:#f4f8ff; display:inline-flex; align-items:center; gap:7px; border:1px solid transparent; transition:background .16s ease, border-color .16s ease, box-shadow .16s ease; }}
     .type-tab:hover {{ border-color:#b9d7ff; background:#eaf3ff; }}
-    .type-tab.active {{ color:#fff; background:linear-gradient(180deg,#1e63ff,#00aeda); }}
-    .type-count {{ min-width:24px; height:21px; border-radius:999px; padding:0 7px; display:inline-flex; align-items:center; justify-content:center; color:#0a57d8; background:#fff; font-size:11px; box-shadow:inset 0 0 0 1px rgba(31,99,255,.12); }}
-    .type-tab.active .type-count {{ color:#0a57d8; background:#fff; }}
+    .type-tab.active,.type-tab.is-loading {{ color:#fff; background:linear-gradient(180deg,#1e63ff,#00aeda); }}
+    .type-counts {{ min-height:21px; border-radius:999px; padding:2px 5px; display:inline-flex; align-items:center; justify-content:center; gap:3px; color:#0a57d8; background:#fff; box-shadow:inset 0 0 0 1px rgba(31,99,255,.12); }}
+    .type-counts i {{ color:#8aa3c7; font-style:normal; font-size:10px; }}
+    .type-count {{ min-width:18px; height:17px; border-radius:999px; padding:0 4px; display:inline-flex; align-items:center; justify-content:center; font-size:10px; line-height:1; }}
+    .type-count.pending {{ color:#0a57d8; background:#eef6ff; }}
+    .type-count.ongoing {{ color:#087f5b; background:#e8fff5; }}
+    .type-tab.active .type-counts,.type-tab.is-loading .type-counts {{ color:#0a57d8; background:#fff; }}
     .toolbar form {{ margin-left:auto; min-width:min(100%, 360px); flex:1 1 420px; display:flex; flex-wrap:wrap; gap:8px; align-items:center; justify-content:flex-end; }}
     input,select,textarea {{ width:100%; min-height:34px; border:1px solid #d5e2f2; border-radius:10px; padding:7px 10px; font:inherit; font-size:13px; line-height:1.35; background:#fff; }}
     select {{ appearance:none; -webkit-appearance:none; padding-right:28px; color:#073f9d; font-weight:900; background:linear-gradient(45deg,transparent 50%,#0a57d8 50%) calc(100% - 15px) 50%/6px 6px no-repeat,linear-gradient(135deg,#0a57d8 50%,transparent 50%) calc(100% - 10px) 50%/6px 6px no-repeat,linear-gradient(180deg,#ffffff,#f4f8ff); box-shadow:inset 0 0 0 1px rgba(255,255,255,.66); cursor:pointer; }}
@@ -1966,7 +1999,7 @@ def render_workbench_lite(
   <header class="topbar">
     <div class="brand">
       <div class="logo brand-logo">世纪互联<br>VNET</div>
-      <div><h1>南通基地-运维灯塔工作台</h1><p id="lite-workbench-subtitle">{_e(WORK_TYPE_LABELS.get(work, '通告'))} · 后端驱动工作台</p></div>
+      <div><h1>南通基地-运维灯塔工作台</h1><p id="lite-workbench-subtitle">{_e(WORK_TYPE_FILTER_LABELS.get(view_work, '通告'))} · 后端驱动工作台</p></div>
     </div>
     <nav class="top-actions">
       <label class="scope-switch"><b class="scope-icon" aria-hidden="true">楼</b><span>当前楼栋</span><select class="scope-select" id="lite-scope-select" aria-label="切换楼栋">{scope_select}</select></label>
@@ -2002,7 +2035,7 @@ def render_workbench_lite(
       </div>
       <form method="get" action="/workbench-lite">
         <input type="hidden" name="scope" value="{_e(scope)}">
-        <input type="hidden" name="work_type" value="{_e(work)}">
+        <input type="hidden" name="work_type" value="{_e(view_work)}">
         <label class="visually-hidden" for="lite-search-input">搜索标题、楼栋、专业</label>
         <input id="lite-search-input" name="search" value="{_e(search)}" placeholder="搜索标题、楼栋、专业">
         <label class="visually-hidden" for="lite-specialty-select">筛选专业</label>
@@ -2019,22 +2052,22 @@ def render_workbench_lite(
       <article class="guide-step" data-step="3"><strong>右侧看结果</strong><span>进行中、失败待处理和可回退通告集中查看。</span></article>
     </section>
     <section class="workspace">
-      <aside class="panel"><h2 class="panel-title"><span>待发起事项</span><b class="panel-count">{_e(current_pending_count)}</b></h2><div class="list">{_record_rows(visible_records, scope=scope, work_type=work, search=search, specialty=specialty, selected_id=selected_record_id, pending_page=pending_page_num, ongoing_page=ongoing_page_num)}</div>{pending_pager}</aside>
+      <aside class="panel"><h2 class="panel-title"><span>待发起事项</span><b class="panel-count">{_e(current_pending_count)}</b></h2><div class="list">{_record_rows(visible_records, scope=scope, work_type=view_work, search=search, specialty=specialty, selected_id=selected_record_id, pending_page=pending_page_num, ongoing_page=ongoing_page_num)}</div>{pending_pager}</aside>
       <section class="panel" id="detail-panel">
         <h2>当前通告</h2>
         <details class="paste-drawer"{' open' if parsed_draft else ''}>
           <summary>解析粘贴通告</summary>
           <form method="post" action="/workbench-lite/parse">
             <input type="hidden" name="scope" value="{_e(scope)}">
-            <input type="hidden" name="work_type" value="{_e(work)}">
+            <input type="hidden" name="work_type" value="{_e(view_work)}">
             <textarea name="paste_text" placeholder="粘贴完整通告文本，后端解析后会填入当前通告。">{_e(paste_text)}</textarea>
             <button class="btn primary" type="submit">解析到当前通告</button>
           </form>
         </details>
-        {_detail_form(record=selected_record, ongoing_item=selected_ongoing, scope=scope, work_type=work, manual=manual or bool(parsed_draft), parsed_draft=parsed_draft, parsed_action=parsed_action, source_link_options=source_options, is_admin=is_admin_session)}
+        {_detail_form(record=selected_record, ongoing_item=selected_ongoing, scope=scope, work_type=detail_work, manual=manual or bool(parsed_draft), parsed_draft=parsed_draft, parsed_action=parsed_action, source_link_options=source_options, is_admin=is_admin_session)}
       </section>
       <aside class="result-rail">
-        <section class="rail-panel"><h2 class="panel-title"><span>已开始未结束</span><b class="panel-count">{_e(current_ongoing_count)}</b></h2><div class="list">{_ongoing_rows(visible_ongoing, scope=scope, work_type=work, selected_id=active_item_id, pending_page=pending_page_num, ongoing_page=ongoing_page_num)}</div>{ongoing_pager}</section>
+        <section class="rail-panel"><h2 class="panel-title"><span>已开始未结束</span><b class="panel-count">{_e(current_ongoing_count)}</b></h2><div class="list">{_ongoing_rows(visible_ongoing, scope=scope, work_type=view_work, selected_id=active_item_id, pending_page=pending_page_num, ongoing_page=ongoing_page_num)}</div>{ongoing_pager}</section>
         <details class="rail-fold attention"{' open' if attention_count else ''}><summary>待处理问题 <b class="panel-count">{_e(attention_count)}</b></summary><section class="rail-panel attention"><h2>待处理问题</h2><div class="attention-list">{attention_html}</div></section></details>
         <details class="rail-fold undo"><summary>近三天可回退 <b class="panel-count">{_e(undo_count)}</b></summary><section class="rail-panel undo"><h2>近三天可回退</h2><div class="undo-panel-list">{undo_html}</div></section></details>
       </aside>
@@ -2083,9 +2116,13 @@ def render_workbench_lite(
   </div>
   <script>
     const initialScope = {_json_dumps(scope)};
+    const liteIsAdmin = {_json_dumps(bool(is_admin_session))};
     let liteFormDirty = false;
     function currentUrlScope() {{
       return new URLSearchParams(location.search).get('scope') || initialScope;
+    }}
+    function currentViewWorkType() {{
+      return new URLSearchParams(location.search).get('work_type') || '{_e(view_work)}';
     }}
     function getCurrentScope() {{
       return document.getElementById('lite-scope-select')?.value || currentUrlScope();
@@ -2410,7 +2447,7 @@ def render_workbench_lite(
     function workbenchBaseUrl(scope, workType) {{
       const url = new URL('/workbench-lite', location.origin);
       url.searchParams.set('scope', scope || getCurrentScope());
-      url.searchParams.set('work_type', workType || new URLSearchParams(location.search).get('work_type') || 'maintenance');
+      url.searchParams.set('work_type', workType || currentViewWorkType() || 'maintenance');
       return url.pathname + url.search;
     }}
     async function deleteOngoingFromForm(button) {{
@@ -2457,7 +2494,7 @@ def render_workbench_lite(
           ? '已移除显示，Qt 和前端将同步消失，多维未删除。'
           : (result.remote_deleted ? '已删除通告，并同步删除对应多维记录。' : '已删除通告，本地显示已同步。');
         setLiteStatus(message);
-        await navigateLite(workbenchBaseUrl(payload.scope, payload.work_type), {{
+        await navigateLite(workbenchBaseUrl(payload.scope, currentViewWorkType() || payload.work_type), {{
           push: true,
           label: message,
           selectors: ['.status', '.summary', '.workbench-guide', '.workspace'],
@@ -3055,7 +3092,7 @@ def render_workbench_lite(
     function setSubmitButtons(form, action) {{
       const actions = form.querySelector('.form-actions');
       if (!actions) return;
-      actions.querySelectorAll('button[name="submit_action"]').forEach(node => node.remove());
+      actions.querySelectorAll('button[name="submit_action"],button[data-ongoing-delete-mode]').forEach(node => node.remove());
       const button = document.createElement('button');
       button.className = 'btn primary';
       button.type = 'submit';
@@ -3068,7 +3105,7 @@ def render_workbench_lite(
     function setOngoingSubmitButtons(form) {{
       const actions = form.querySelector('.form-actions');
       if (!actions) return;
-      actions.querySelectorAll('button[name="submit_action"]').forEach(node => node.remove());
+      actions.querySelectorAll('button[name="submit_action"],button[data-ongoing-delete-mode]').forEach(node => node.remove());
       const updateButton = document.createElement('button');
       updateButton.className = 'btn primary';
       updateButton.type = 'submit';
@@ -3081,8 +3118,22 @@ def render_workbench_lite(
       endButton.name = 'submit_action';
       endButton.value = 'end';
       endButton.textContent = '发送结束';
+      const deleteButton = document.createElement('button');
+      deleteButton.className = 'btn danger-ghost';
+      deleteButton.type = 'button';
+      deleteButton.setAttribute('data-ongoing-delete-mode', 'remote');
+      deleteButton.textContent = '删除通告';
       actions.appendChild(updateButton);
       actions.appendChild(endButton);
+      actions.appendChild(deleteButton);
+      if (liteIsAdmin) {{
+        const localRemoveButton = document.createElement('button');
+        localRemoveButton.className = 'btn danger-ghost';
+        localRemoveButton.type = 'button';
+        localRemoveButton.setAttribute('data-ongoing-delete-mode', 'local');
+        localRemoveButton.textContent = '移除显示';
+        actions.appendChild(localRemoveButton);
+      }}
       updateNoticePreview(form);
     }}
     function applySourceRowToDetail(link) {{
@@ -3265,6 +3316,13 @@ def render_workbench_lite(
         closePickers();
         navLink.classList.add('is-loading');
         const isRow = navLink.matches('.notice-row,.ongoing-row');
+        const isTypeTab = navLink.matches('.type-tab');
+        if (isTypeTab) {{
+          document.querySelectorAll('.type-tab').forEach(node => {{
+            node.classList.toggle('active', node === navLink);
+            node.setAttribute('aria-current', node === navLink ? 'page' : 'false');
+          }});
+        }}
         const appliedLocally = isRow && navLink.matches('.notice-row') && applySourceRowToDetail(navLink);
         const appliedOngoingLocally = isRow && navLink.matches('.ongoing-row') && applyOngoingRowToDetail(navLink);
         if (appliedLocally || appliedOngoingLocally) {{
@@ -3281,10 +3339,10 @@ def render_workbench_lite(
           history.replaceState({{ lite: true }}, '', navLink.href);
           return;
         }}
-        const selectors = isRow ? ['.status', '#detail-panel'] : undefined;
+        const selectors = isRow ? ['.status', '#detail-panel'] : (isTypeTab ? ['#lite-workbench-subtitle', '.status', '.summary', '.toolbar', '.workbench-guide', '.workspace'] : undefined);
         const rowGroupSelector = navLink.matches('.notice-row') ? '.notice-row' : '.ongoing-row';
         try {{
-          await navigateLite(navLink.href, {{ label: '正在打开通告...', selectors, preserveWorkspaceScroll: isRow }});
+          await navigateLite(navLink.href, {{ label: isTypeTab ? '正在切换分类...' : '正在打开通告...', selectors, preserveWorkspaceScroll: isRow }});
           if (isRow) {{
             document.querySelectorAll(rowGroupSelector).forEach(node => {{
               node.classList.toggle('active', node === navLink);
@@ -3297,6 +3355,7 @@ def render_workbench_lite(
           navLink.classList.remove('is-loading');
           showLiteError(error && error.message ? error.message : '打开失败');
         }}
+        if (isTypeTab) navLink.classList.remove('is-loading');
         return;
       }}
       const pageRefreshButton = target.closest('#lite-refresh-page');
@@ -3392,7 +3451,7 @@ def render_workbench_lite(
           return;
         }}
         setLiteFormDirty(false);
-        const url = '/workbench-lite?scope=' + encodeURIComponent(event.target.value) + '&work_type=' + encodeURIComponent(new URLSearchParams(location.search).get('work_type') || '{_e(work)}');
+        const url = '/workbench-lite?scope=' + encodeURIComponent(event.target.value) + '&work_type=' + encodeURIComponent(new URLSearchParams(location.search).get('work_type') || '{_e(view_work)}');
         try {{ await navigateLite(url, {{ label: '正在切换楼栋...', selectors: ['.topbar', '.status', '.summary', '.toolbar', '.workbench-guide', '.workspace'] }}); }}
         catch (error) {{ location.href = url; }}
         return;

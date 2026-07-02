@@ -479,7 +479,7 @@ class FastAPIPortalController:
                 )
                 scope = self._authorized_scope_or_error(session, requested_scope)
                 work_type = str(request.query_params.get("work_type") or "maintenance").strip()
-                if work_type not in NOTICE_TYPE_BY_WORK_TYPE:
+                if work_type != "all" and work_type not in NOTICE_TYPE_BY_WORK_TYPE:
                     work_type = "maintenance"
                 search = str(request.query_params.get("search") or "")
                 specialty = str(request.query_params.get("specialty") or "")
@@ -1557,7 +1557,11 @@ class FastAPIPortalController:
                         ongoing_page_size=ongoing_page_size,
                     ),
                 )
-                if payload_key == "workbench" and work_type and isinstance(payload, dict):
+                if (
+                    payload_key == "workbench"
+                    and work_type in NOTICE_TYPE_BY_WORK_TYPE
+                    and isinstance(payload, dict)
+                ):
                     filtered_payload = dict(payload)
                     filtered_payload["records"] = [
                         item

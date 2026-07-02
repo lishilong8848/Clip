@@ -11917,6 +11917,77 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertIn('data-ongoing-delete-mode="local"', admin_html)
         self.assertIn("移除显示", admin_html)
 
+    def test_workbench_lite_all_tab_counts_and_keeps_real_item_types(self):
+        from lan_bitable_template_portal.workbench_lite import render_workbench_lite
+
+        html = render_workbench_lite(
+            payload={
+                "records": [
+                    {
+                        "record_id": "src-maintenance",
+                        "source_record_id": "src-maintenance",
+                        "work_type": "maintenance",
+                        "notice_type": "维保通告",
+                        "title": "C楼维保待发起",
+                        "building": "C楼",
+                    },
+                    {
+                        "record_id": "src-change",
+                        "source_record_id": "src-change",
+                        "work_type": "change",
+                        "notice_type": "变更通告",
+                        "title": "C楼变更待发起",
+                        "building": "C楼",
+                    },
+                ],
+                "ongoing": [
+                    {
+                        "active_item_id": "active-repair",
+                        "target_record_id": "target-repair",
+                        "work_type": "repair",
+                        "notice_type": "设备检修",
+                        "title": "C楼检修进行中",
+                        "building": "C楼",
+                    },
+                    {
+                        "active_item_id": "active-polling",
+                        "target_record_id": "target-polling",
+                        "work_type": "polling",
+                        "notice_type": "设备轮巡",
+                        "title": "C楼轮巡进行中",
+                        "building": "C楼",
+                    },
+                ],
+                "daily_summary": {"stats": {}},
+                "record_type_counts": {},
+                "ongoing_type_counts": {},
+            },
+            session={"user": {"name": "管理员"}, "is_admin": True},
+            scope="C",
+            work_type="all",
+            scope_options=[{"value": "C", "label": "C楼"}],
+        )
+
+        self.assertIn("<span>全部</span>", html)
+        self.assertIn('aria-current="page"', html)
+        self.assertIn('title="待发起 2，进行中 2"', html)
+        self.assertIn('name="work_type" value="all"', html)
+        self.assertIn('data-work-type="maintenance"', html)
+        self.assertIn('data-work-type="change"', html)
+        self.assertIn('data-work-type="repair"', html)
+        self.assertIn('data-work-type="polling"', html)
+        self.assertIn("C楼变更待发起", html)
+        self.assertIn("C楼轮巡进行中", html)
+        self.assertIn("const liteIsAdmin = true", html)
+        self.assertIn("deleteButton.setAttribute('data-ongoing-delete-mode', 'remote')", html)
+        self.assertIn("localRemoveButton.setAttribute('data-ongoing-delete-mode', 'local')", html)
+
+    def test_api_workbench_all_is_not_treated_as_real_work_type(self):
+        main_text = (BIN_DIR / "clipflow_backend" / "main.py").read_text(encoding="utf-8")
+
+        self.assertIn("if work_type != \"all\" and work_type not in NOTICE_TYPE_BY_WORK_TYPE", main_text)
+        self.assertIn("work_type in NOTICE_TYPE_BY_WORK_TYPE", main_text)
+
     def test_workbench_lite_active_title_falls_back_to_notice_text(self):
         from lan_bitable_template_portal.workbench_lite import _record_title
 
