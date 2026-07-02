@@ -45,6 +45,7 @@ from clipflow_backend.process_controller import BackendProcessPortalController  
 from fastapi.testclient import TestClient  # noqa: E402
 import upload_event_module.config as config_module  # noqa: E402
 from upload_event_module.config import ConfigManager  # noqa: E402
+from upload_event_module.config import get_field_config  # noqa: E402
 from upload_event_module.config import ADJUST_NOTICE_FIELDS  # noqa: E402
 from upload_event_module.config import CHANGE_NOTICE_FIELDS  # noqa: E402
 from upload_event_module.config import MAINTENANCE_NOTICE_FIELDS  # noqa: E402
@@ -5945,6 +5946,14 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertIn("【下电通告】状态：开始", prepared.get("text") or "")
             self.assertIn("【名称】A楼PDU下电", prepared.get("text") or "")
             self.assertNotIn("【上电通告】", prepared.get("text") or "")
+
+    def test_power_notice_aliases_share_table_and_field_config(self):
+        cfg = ConfigManager()
+        cfg.table_id_power = "tbl-power-test"
+        for notice_type in ("上下电通告", "上电通告", "下电通告"):
+            with self.subTest(notice_type=notice_type):
+                self.assertEqual(cfg.get_table_id(notice_type), "tbl-power-test")
+                self.assertIs(get_field_config(notice_type), POWER_NOTICE_FIELDS)
 
     def test_simple_manual_polling_and_adjust_prepare_complete_text(self):
         with tempfile.TemporaryDirectory() as tmp:

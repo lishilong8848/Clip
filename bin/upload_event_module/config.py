@@ -132,6 +132,8 @@ class ConfigManager:
             NOTICE_TYPE_TIAOZHENG: self.table_id_tiaozheng,
             NOTICE_TYPE_SHIJIAN: self.table_id_shijian,
             "上下电通告": self.table_id_power,
+            "上电通告": self.table_id_power,
+            "下电通告": self.table_id_power,
             "设备轮巡": self.table_id_polling,
             "设备检修": self.table_id_overhaul,
         }
@@ -1109,6 +1111,8 @@ def get_field_config(notice_type: str) -> dict[str, str]:
         NOTICE_TYPE_TIAOZHENG: ADJUST_NOTICE_FIELDS,
         "设备调整": ADJUST_NOTICE_FIELDS,
         "上下电通告": POWER_NOTICE_FIELDS,
+        "上电通告": POWER_NOTICE_FIELDS,
+        "下电通告": POWER_NOTICE_FIELDS,
         "设备轮巡": POLLING_NOTICE_FIELDS,
         "设备检修": OVERHAUL_NOTICE_FIELDS,
     }
