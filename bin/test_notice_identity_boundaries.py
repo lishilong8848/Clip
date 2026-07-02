@@ -1,6 +1,7 @@
 import sys
 import threading
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -14,6 +15,8 @@ from lan_bitable_template_portal.server import PortalRuntime  # noqa: E402
 from lan_bitable_template_portal import workbench_lite  # noqa: E402
 from upload_event_module.config import EVENT_NOTICE_FIELDS  # noqa: E402
 from upload_event_module.core.parser import extract_event_info  # noqa: E402
+from upload_event_module.services.handlers.base import NoticePayload  # noqa: E402
+from upload_event_module.services.handlers.event_notice import EventNoticeHandler  # noqa: E402
 
 
 class NoticeIdentityBoundaryTests(unittest.TestCase):
@@ -228,6 +231,38 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
                     expected_work_type,
                 )
 
+    def test_multi_building_notice_matches_any_included_building_scope(self) -> None:
+        self.assertTrue(MaintenancePortalService._scope_matches_buildings("A", ["A", "B"]))
+        self.assertTrue(MaintenancePortalService._scope_matches_buildings("B", ["A", "B"]))
+        self.assertTrue(MaintenancePortalService._scope_matches_buildings("A", ["A", "B", "C"]))
+        self.assertTrue(MaintenancePortalService._scope_matches_buildings("B", ["A", "B", "C"]))
+        self.assertTrue(MaintenancePortalService._scope_matches_buildings("C", ["A", "B", "C"]))
+        self.assertTrue(MaintenancePortalService._scope_matches_buildings("CAMPUS", ["A", "B"]))
+        self.assertTrue(MaintenancePortalService._scope_matches_buildings("ALL", ["A", "B"]))
+        self.assertFalse(MaintenancePortalService._scope_matches_buildings("C", ["A", "B"]))
+        self.assertFalse(MaintenancePortalService._scope_matches_buildings("D", ["A", "B", "C"]))
+
+    def test_multi_building_notice_submit_is_allowed_from_included_scope(self) -> None:
+        building, codes = self.service._resolve_notice_submit_building(
+            scope="B",
+            request_payload={"building_codes": ["A", "B"], "building": "A楼、B楼"},
+            building_codes=["A", "B"],
+            work_type_label="检修通告",
+        )
+
+        self.assertEqual(codes, ["A", "B"])
+        self.assertIn("A", building)
+        self.assertIn("B", building)
+
+    def test_multi_building_notice_submit_rejects_unrelated_scope(self) -> None:
+        with self.assertRaises(PortalError):
+            self.service._resolve_notice_submit_building(
+                scope="C",
+                request_payload={"building_codes": ["A", "B"], "building": "A楼、B楼"},
+                building_codes=["A", "B"],
+                work_type_label="检修通告",
+            )
+
     def test_event_identity_requires_event_time(self) -> None:
         base_text = (
             "【事件通告】状态：新增\n"
@@ -245,6 +280,28 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
         self.assertNotEqual(
             PortalRuntime._local_upload_dedupe_key(first, "事件通告"),
             PortalRuntime._local_upload_dedupe_key(second, "事件通告"),
+        )
+
+    def test_event_identity_uses_summary_before_generic_title(self) -> None:
+        base_text = (
+            "【事件通告】状态：新增\n"
+            "【标题】EA118机房E楼I2级事件通报\n"
+            "【时间】2026-06-24 17:20\n"
+            "【概述】{summary}\n"
+            "【进展】测试"
+        )
+        first = {
+            "notice_type": "事件通告",
+            "text": base_text.format(summary="BMS报E-217-CRAC-02压缩机高压报警: 告警"),
+        }
+        second = {
+            "notice_type": "事件通告",
+            "text": base_text.format(summary="BMS报E-217-CRAC-03压缩机高压报警: 告警"),
+        }
+
+        self.assertNotEqual(
+            PortalRuntime._event_notice_identity_key(first),
+            PortalRuntime._event_notice_identity_key(second),
         )
 
     def test_event_title_only_does_not_build_remote_reuse_identity(self) -> None:
@@ -271,6 +328,23 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
 
         self.assertEqual(info.get("time_str"), "2026-06-24 17:20")
         self.assertTrue(PortalRuntime._event_notice_identity_key({"notice_type": "事件通告", "text": text}))
+
+    def test_event_create_fields_use_title_when_summary_missing(self) -> None:
+        text = (
+            "【事件通告】状态：新增\n"
+            "【标题】BMS报E-217-CRAC-02压缩机高压报警: 告警\n"
+            "【时间】2026-06-24 17:20\n"
+            "【进展】测试"
+        )
+
+        fields = EventNoticeHandler("事件通告").build_create_fields(
+            NoticePayload(text=text)
+        )
+
+        self.assertEqual(
+            fields.get(EVENT_NOTICE_FIELDS["alarm_desc"]),
+            "BMS报E-217-CRAC-02压缩机高压报警: 告警",
+        )
 
     def test_event_delete_requires_remote_fields(self) -> None:
         payload = {
@@ -309,6 +383,24 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
 
         self.assertTrue(PortalRuntime._validate_event_delete_target(payload, remote_fields)[0])
         self.assertFalse(PortalRuntime._validate_event_delete_target(payload, other_remote_fields)[0])
+
+    def test_event_delete_matches_local_summary_to_remote_alarm_desc(self) -> None:
+        payload = {
+            "notice_type": "事件通告",
+            "text": (
+                "【事件通告】状态：新增\n"
+                "【标题】EA118机房E楼I2级事件通报\n"
+                "【时间】2026-06-24 17:20\n"
+                "【概述】BMS报E-217-CRAC-02压缩机高压报警: 告警\n"
+                "【进展】测试"
+            ),
+        }
+        remote_fields = {
+            EVENT_NOTICE_FIELDS["alarm_desc"]: "BMS报E-217-CRAC-02压缩机高压报警: 告警",
+            EVENT_NOTICE_FIELDS["occurrence_time"]: "2026-06-24 17:20",
+        }
+
+        self.assertTrue(PortalRuntime._validate_event_delete_target(payload, remote_fields)[0])
 
     def test_event_existing_target_requires_same_event_time(self) -> None:
         class FakeStateStore:
@@ -364,6 +456,176 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
             )
         finally:
             PortalRuntime.state_store = old_state_store
+
+    def test_event_existing_target_ignores_missing_remote_record(self) -> None:
+        text = (
+            "【事件通告】状态：新增\n"
+            "【标题】EA118机房E楼I2级事件通报\n"
+            "【时间】2026-06-24 17:20\n"
+            "【概述】BMS报E-217-CRAC-02压缩机高压报警: 告警\n"
+            "【进展】测试"
+        )
+
+        class FakeStateStore:
+            def list_qt_active_items(self, include_deleted: bool = False) -> list[dict]:
+                return [
+                    {
+                        "record_id": "recMissingEvent",
+                        "notice_type": "事件通告",
+                        "payload": {
+                            "notice_type": "事件通告",
+                            "target_record_id": "recMissingEvent",
+                            "record_id": "recMissingEvent",
+                            "text": text,
+                        },
+                    }
+                ]
+
+        old_state_store = PortalRuntime.state_store
+        PortalRuntime.state_store = FakeStateStore()
+        try:
+            with mock.patch(
+                "lan_bitable_template_portal.server.query_record_by_id",
+                return_value=(False, "查询记录失败:1254043-RecordIdNotFound"),
+            ):
+                self.assertEqual(
+                    PortalRuntime._existing_target_for_local_upload(
+                        {"notice_type": "事件通告", "text": text},
+                        "事件通告",
+                    ),
+                    "",
+                )
+        finally:
+            PortalRuntime.state_store = old_state_store
+
+    def test_event_upload_with_stale_target_recreates_record(self) -> None:
+        class FakeStateStore:
+            def __init__(self) -> None:
+                self.identities = []
+                self.active_items = []
+                self.events = []
+
+            def resolve_notice_identity(self, **_kwargs):
+                return None
+
+            def list_qt_active_items(self, include_deleted: bool = False) -> list[dict]:
+                return []
+
+            def upsert_notice_identity(self, payload, origin: str = ""):
+                self.identities.append((dict(payload), origin))
+                return {}
+
+            def upsert_qt_active_item(self, payload, **kwargs):
+                self.active_items.append((dict(payload), kwargs))
+                return True
+
+            def enqueue_outbox_event(self, queue_name: str, payload: dict) -> str:
+                self.events.append((queue_name, payload))
+                return "event-1"
+
+        text = (
+            "【事件通告】状态：新增\n"
+            "【标题】EA118机房E楼I2级事件通报\n"
+            "【时间】2026-06-24 17:20\n"
+            "【概述】BMS报E-217-CRAC-02压缩机高压报警: 告警\n"
+            "【进展】测试"
+        )
+        request_payload = {
+            "action_type": "upload",
+            "data_dict": {
+                "notice_type": "事件通告",
+                "work_type": "event",
+                "active_item_id": "active-event-1",
+                "record_id": "recMissingEvent",
+                "target_record_id": "recMissingEvent",
+                "text": text,
+                "_is_placeholder_record": False,
+            },
+        }
+        old_state_store = PortalRuntime.state_store
+        old_service = PortalRuntime.service
+        old_created_targets = dict(getattr(PortalRuntime, "local_upload_created_targets", {}) or {})
+        fake_state = FakeStateStore()
+        PortalRuntime.state_store = fake_state
+        PortalRuntime.service = object()
+        PortalRuntime.local_upload_created_targets = {}
+        try:
+            with mock.patch(
+                "lan_bitable_template_portal.server.query_record_by_id",
+                return_value=(False, "查询记录失败:1254043-RecordIdNotFound"),
+            ), mock.patch(
+                "lan_bitable_template_portal.server.create_bitable_record_by_payload",
+                return_value=(True, "recNewEvent"),
+            ) as create_record:
+                result = PortalRuntime.execute_local_notice_upload(request_payload)
+
+            self.assertTrue(result.get("ok"))
+            self.assertEqual(result.get("name"), "上传")
+            self.assertEqual(result.get("real_record_id"), "recNewEvent")
+            self.assertEqual(fake_state.active_items[0][0]["target_record_id"], "recNewEvent")
+            create_record.assert_called_once()
+        finally:
+            PortalRuntime.state_store = old_state_store
+            PortalRuntime.service = old_service
+            PortalRuntime.local_upload_created_targets = old_created_targets
+
+    def test_event_delete_missing_remote_only_removes_local_item(self) -> None:
+        class FakeStateStore:
+            def __init__(self) -> None:
+                self.deleted = []
+                self.identity_deleted = []
+
+            def resolve_notice_identity(self, **_kwargs):
+                return None
+
+            def delete_qt_active_item(self, *, active_item_id: str = "", record_id: str = "") -> bool:
+                self.deleted.append((active_item_id, record_id))
+                return True
+
+            def mark_notice_identity_deleted(self, **kwargs) -> bool:
+                self.identity_deleted.append(kwargs)
+                return True
+
+        text = (
+            "【事件通告】状态：新增\n"
+            "【标题】BMS报E-217-CRAC-02压缩机高压报警: 告警\n"
+            "【时间】2026-06-24 17:20\n"
+            "【进展】测试"
+        )
+        payload = {
+            "notice_type": "事件通告",
+            "work_type": "event",
+            "active_item_id": "active-event-1",
+            "record_id": "recMissingEvent",
+            "target_record_id": "recMissingEvent",
+            "text": text,
+        }
+        old_state_store = PortalRuntime.state_store
+        old_service = PortalRuntime.service
+        fake_state = FakeStateStore()
+        PortalRuntime.state_store = fake_state
+        PortalRuntime.service = object()
+        try:
+            with mock.patch(
+                "lan_bitable_template_portal.server.query_record_by_id",
+                return_value=(False, "查询记录失败:1254043-RecordIdNotFound"),
+            ), mock.patch(
+                "lan_bitable_template_portal.server.delete_bitable_record"
+            ) as delete_record:
+                result = PortalRuntime.execute_local_delete_active_item(payload)
+
+            self.assertTrue(result.get("ok"))
+            self.assertFalse(result.get("remote_deleted"))
+            self.assertIn("仅移除本地显示", result.get("message", ""))
+            self.assertEqual(fake_state.deleted, [("active-event-1", "recMissingEvent")])
+            self.assertEqual(
+                fake_state.identity_deleted[0]["target_record_id"],
+                "recMissingEvent",
+            )
+            delete_record.assert_not_called()
+        finally:
+            PortalRuntime.state_store = old_state_store
+            PortalRuntime.service = old_service
 
 
 if __name__ == "__main__":

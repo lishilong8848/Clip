@@ -2911,7 +2911,7 @@ class MaintenancePortalService:
         codes = [code for code in BUILDING_SCOPE_CODES if code in codes]
         if normalized == "CAMPUS":
             return len(codes) >= 2
-        return len(codes) == 1 and codes[0] == normalized
+        return normalized in codes
 
     @classmethod
     def _scope_matches_item(cls, scope: Any, item: dict[str, Any]) -> bool:
@@ -5534,7 +5534,7 @@ class MaintenancePortalService:
         if not text:
             return []
         pattern = re.compile(
-            r"(?=【(?:维保通告|变更通告|设备检修|上电通告|上下电通告|设备轮巡|设备调整)】\s*状态[:：])"
+            r"(?=【(?:维保通告|变更通告|设备检修|上电通告|下电通告|上下电通告|设备轮巡|设备调整)】\s*状态[:：])"
         )
         parts = [part.strip() for part in pattern.split(text) if part.strip()]
         if len(parts) > 1:
@@ -5580,7 +5580,7 @@ class MaintenancePortalService:
             sections, ["维修设备", "维修故障", "故障现象", "解决方案"]
         ):
             return WORK_TYPE_REPAIR
-        if "【上电通告】" in raw or "【上下电通告】" in raw or cls._notice_section_value(
+        if "【上电通告】" in raw or "【下电通告】" in raw or "【上下电通告】" in raw or cls._notice_section_value(
             sections, ["柜号", "数量"]
         ):
             return WORK_TYPE_POWER
@@ -5889,6 +5889,8 @@ class MaintenancePortalService:
             "power": WORK_TYPE_POWER,
             "上电": WORK_TYPE_POWER,
             "上电通告": WORK_TYPE_POWER,
+            "下电": WORK_TYPE_POWER,
+            "下电通告": WORK_TYPE_POWER,
             "上下电通告": WORK_TYPE_POWER,
             "polling": WORK_TYPE_POLLING,
             "轮巡": WORK_TYPE_POLLING,
@@ -7803,6 +7805,8 @@ class MaintenancePortalService:
             "power": WORK_TYPE_POWER,
             "上电": WORK_TYPE_POWER,
             "上电通告": WORK_TYPE_POWER,
+            "下电": WORK_TYPE_POWER,
+            "下电通告": WORK_TYPE_POWER,
             "上下电通告": WORK_TYPE_POWER,
             "polling": WORK_TYPE_POLLING,
             "轮巡": WORK_TYPE_POLLING,
@@ -8136,6 +8140,8 @@ class MaintenancePortalService:
             "power": WORK_TYPE_POWER,
             "上电": WORK_TYPE_POWER,
             "上电通告": WORK_TYPE_POWER,
+            "下电": WORK_TYPE_POWER,
+            "下电通告": WORK_TYPE_POWER,
             "上下电通告": WORK_TYPE_POWER,
             "polling": WORK_TYPE_POLLING,
             "轮巡": WORK_TYPE_POLLING,
@@ -15118,7 +15124,12 @@ class MaintenancePortalService:
             and request_notice_type in {NOTICE_TYPE_POWER_UP, NOTICE_TYPE_POWER_DOWN}
             else str(request_payload.get("power_notice_heading") or "").strip()
         )
-        notice_type = profile["notice_type"]
+        notice_type = (
+            heading_notice_type
+            if work_type == WORK_TYPE_POWER
+            and heading_notice_type in {NOTICE_TYPE_POWER_UP, NOTICE_TYPE_POWER_DOWN}
+            else profile["notice_type"]
+        )
         scope = self._normalize_scope(request_payload.get("scope"))
         manual = self._truthy_flag(request_payload.get("manual"))
         record_id = str(

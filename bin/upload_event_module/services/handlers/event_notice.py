@@ -48,7 +48,10 @@ class EventNoticeHandler(BaseNoticeHandler):
 
         fields = {}
 
-        summary = self._extract_section(payload.text, "概述")
+        summary = self._extract_section(payload.text, "概述") or self._extract_section(
+            payload.text,
+            "标题",
+        )
         if summary:
             fields[EVENT_NOTICE_FIELDS["alarm_desc"]] = summary
 
@@ -109,7 +112,10 @@ class EventNoticeHandler(BaseNoticeHandler):
 
         fields = {}
 
-        summary = self._extract_section(payload.text, "概述")
+        summary = self._extract_section(payload.text, "概述") or self._extract_section(
+            payload.text,
+            "标题",
+        )
         if summary:
             fields[EVENT_NOTICE_FIELDS["alarm_desc"]] = summary
 

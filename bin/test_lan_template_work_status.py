@@ -5915,6 +5915,37 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertNotIn("【楼栋】", prepared.get("text") or "")
             self.assertNotIn("【专业】", prepared.get("text") or "")
 
+    def test_simple_manual_power_down_action_keeps_down_notice_heading(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            payload = {
+                "action": "start",
+                "work_type": WORK_TYPE_POWER,
+                "notice_type": "下电通告",
+                "scope": "A",
+                "manual": True,
+                "manual_id": "manual-power-down-start",
+                "record_id": "manual-power-down-start",
+                "title": "A楼PDU下电",
+                "building": "A楼",
+                "building_codes": ["A"],
+                "specialty": "电气",
+                "start_time": "2026-05-08T09:00",
+                "end_time": "2026-05-08T18:00",
+                "cabinet": "A-101",
+                "quantity": "2",
+                "progress": "准备下电",
+                "operation_id": "manual-power-down-start",
+            }
+
+            prepared = service.prepare_workbench_action(payload, job_id="job-power-down")
+
+            self.assertEqual(prepared.get("work_type"), WORK_TYPE_POWER)
+            self.assertEqual(prepared.get("notice_type"), "下电通告")
+            self.assertIn("【下电通告】状态：开始", prepared.get("text") or "")
+            self.assertIn("【名称】A楼PDU下电", prepared.get("text") or "")
+            self.assertNotIn("【上电通告】", prepared.get("text") or "")
+
     def test_simple_manual_polling_and_adjust_prepare_complete_text(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
@@ -11728,6 +11759,21 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(action, "start")
         self.assertEqual(draft.get("start_time"), "2026-06-24T09:30")
         self.assertEqual(draft.get("end_time"), "2026-06-24T18:30")
+
+    def test_workbench_lite_parse_power_down_keeps_notice_type(self):
+        work_type, action, draft = parse_pasted_notice_to_draft(
+            "【下电通告】状态：开始\n"
+            "【名称】EA118机房A楼PDU下电通告\n"
+            "【时间】2026-06-24 09:30~2026-06-24 18:30\n"
+            "【柜号】A-101\n"
+            "【数量】2\n"
+            "【进度】准备下电"
+        )
+
+        self.assertEqual(work_type, "power")
+        self.assertEqual(action, "start")
+        self.assertEqual(draft.get("notice_type"), "下电通告")
+        self.assertEqual(draft.get("title"), "EA118机房A楼PDU下电通告")
 
     def test_workbench_lite_blank_detail_form_defaults_to_manual(self):
         from lan_bitable_template_portal.workbench_lite import _detail_form

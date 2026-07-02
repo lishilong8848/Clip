@@ -13,7 +13,7 @@ WORK_TYPE_LABELS: dict[str, str] = {
     "maintenance": "维保",
     "change": "变更",
     "repair": "检修",
-    "power": "上电",
+    "power": "上/下电",
     "polling": "轮巡",
     "adjust": "调整",
 }
@@ -42,6 +42,7 @@ WORK_TYPE_BY_NOTICE_TYPE: dict[str, str] = {
     "调整通告": "adjust",
 }
 
+POWER_NOTICE_TYPES = ("上电通告", "下电通告")
 SPECIALTY_OPTIONS = ("电气", "暖通", "消防", "弱电")
 MAINTENANCE_CYCLE_OPTIONS = ("/", "每月", "每季", "每年", "半年", "每两年", "每三年", "每五年", "冬季保温每日", "非计划性")
 SITE_PHOTO_REQUIRED_WORK_TYPES = {"maintenance", "change", "repair"}
@@ -766,6 +767,7 @@ def parse_pasted_notice_to_draft(text: str) -> tuple[str, str, dict[str, str]]:
     sections = _parse_notice_sections(text)
     work = _pasted_work_type(text, sections)
     action = _pasted_action(text)
+    notice_type = _pasted_notice_type(text)
     time_value = _section_value(sections, "时间")
     start_time, end_time = _split_notice_time_range(time_value)
     if work == "repair":
@@ -794,7 +796,17 @@ def parse_pasted_notice_to_draft(text: str) -> tuple[str, str, dict[str, str]]:
         "cabinet": _section_value(sections, "柜号"),
         "quantity": _section_value(sections, "数量"),
     }
+    if notice_type:
+        draft["notice_type"] = notice_type
     return work, action, {key: value for key, value in draft.items() if str(value or "").strip()}
+
+
+def _pasted_notice_type(text: str) -> str:
+    match = re.search(r"【([^】]+)】", str(text or ""))
+    if not match:
+        return ""
+    notice_type = match.group(1).strip()
+    return notice_type if notice_type in WORK_TYPE_BY_NOTICE_TYPE else ""
 
 
 def _draft_from_record(record: dict[str, Any], *, manual: bool = False, work_type: str = "") -> dict[str, str]:
@@ -804,6 +816,7 @@ def _draft_from_record(record: dict[str, Any], *, manual: bool = False, work_typ
         title = ""
     return {
         "title": title,
+        "notice_type": str(record.get("notice_type") or "").strip(),
         "building": _record_building(record),
         "specialty": _record_specialty(record),
         "maintenance_cycle": _first(record.get("maintenance_cycle"), _field(record, "维护周期")),
@@ -853,6 +866,20 @@ def _input(
     )
 
 
+def _select(name: str, label: str, value: Any, options: tuple[str, ...]) -> str:
+    selected_value = str(value or "").strip()
+    if selected_value not in options:
+        selected_value = options[0] if options else ""
+    option_html = "".join(
+        f"<option value=\"{_e(option)}\"{' selected' if option == selected_value else ''}>{_e(option)}</option>"
+        for option in options
+    )
+    return (
+        f"<label><span>{_e(label)}</span>"
+        f"<select name=\"{_e(name)}\">{option_html}</select></label>"
+    )
+
+
 def _is_required_upload_field(work_type: str, name: str) -> bool:
     return name in REQUIRED_UPLOAD_FIELDS_BY_WORK_TYPE.get(_work_type(work_type), set())
 
@@ -878,6 +905,8 @@ def _form_fields(work_type: str, draft: dict[str, str]) -> str:
         field("end_time", "结束时间" if work_type != "repair" else "发现故障时间", draft.get("end_time"), input_type="datetime-local"),
         field("specialty", "专业", draft.get("specialty"), datalist="specialty-options"),
     ]
+    if work_type == "power":
+        primary_fields.insert(0, _select("notice_type", "通告类型", draft.get("notice_type"), POWER_NOTICE_TYPES))
     if work_type == "maintenance":
         primary_fields.append(field("maintenance_cycle", "维保周期", draft.get("maintenance_cycle"), datalist="maintenance-cycle-options"))
     if work_type in {"change", "repair"}:
@@ -1389,12 +1418,20 @@ def _detail_form(
         f"<datalist id=\"specialty-options\">{''.join(f'<option value=\"{_e(item)}\"></option>' for item in SPECIALTY_OPTIONS)}</datalist>"
         f"<datalist id=\"maintenance-cycle-options\">{''.join(f'<option value=\"{_e(item)}\"></option>' for item in MAINTENANCE_CYCLE_OPTIONS)}</datalist>"
     )
+    notice_type_value = str(draft.get("notice_type") or NOTICE_TYPE_BY_WORK_TYPE.get(work, "维保通告")).strip()
+    if work == "power" and notice_type_value not in POWER_NOTICE_TYPES:
+        notice_type_value = NOTICE_TYPE_BY_WORK_TYPE.get(work, "上电通告")
+    notice_type_input = (
+        ""
+        if work == "power"
+        else f"<input type=\"hidden\" name=\"notice_type\" value=\"{_e(notice_type_value)}\">"
+    )
     return f"""
       <form id="lite-notice-form" class="detail-form" data-action="{_e(action)}" data-detail-mode="{_e(detail_mode)}" data-work-type="{_e(work)}">
         {datalists}
         <input type="hidden" name="scope" value="{_e(scope)}">
         <input type="hidden" name="work_type" value="{_e(work)}">
-        <input type="hidden" name="notice_type" value="{_e(NOTICE_TYPE_BY_WORK_TYPE.get(work, '维保通告'))}">
+        {notice_type_input}
         <input type="hidden" name="manual" value="{_e('1' if effective_manual else '')}">
         <input type="hidden" name="manual_id" value="{_e(f'manual:lite:{scope}:{work}' if effective_manual else '')}">
         <input type="hidden" name="record_id" value="{_e(record_id)}">
@@ -2676,8 +2713,12 @@ def render_workbench_lite(
       if (!targetForm || !preview) return;
       const workType = targetForm.querySelector('[name="work_type"]')?.value || targetForm.dataset.workType || 'maintenance';
       const template = previewTemplates[workType] || previewTemplates.maintenance;
+      const noticeType = previewValue(targetForm, 'notice_type');
+      const heading = workType === 'power' && ['上电通告', '下电通告'].includes(noticeType)
+        ? noticeType
+        : template.heading;
       const action = targetForm.dataset.action || 'start';
-      const lines = [`【${{template.heading}}】状态：${{previewActionLabel(action)}}`];
+      const lines = [`【${{heading}}】状态：${{previewActionLabel(action)}}`];
       for (const [label, key] of template.fields) {{
         lines.push(buildPreviewLine(targetForm, label, key));
       }}

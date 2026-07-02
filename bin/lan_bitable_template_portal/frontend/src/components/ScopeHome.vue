@@ -308,11 +308,11 @@ const moduleCards: Array<{
     icon: "more",
     badge: "辅助入口",
     title: "其他工具",
-    description: "汇总检修、上电、轮巡、调整、交接班等辅助入口",
-    tags: ["检修", "上电", "轮巡", "交接班"],
+    description: "汇总检修、上/下电、轮巡、调整、交接班等辅助入口",
+    tags: ["检修", "上/下电", "轮巡", "交接班"],
     actions: [
       { key: "repair", label: "检修", primary: true },
-      { key: "power", label: "上电" },
+      { key: "power", label: "上/下电" },
       { key: "polling", label: "轮巡" },
       { key: "adjust", label: "调整" },
       { key: "handover", label: "交接班" },
@@ -369,14 +369,14 @@ const entryConfigs: Record<Exclude<EntryKey, "">, {
   tools: {
     kicker: "其他工具",
     title: "选择辅助工具",
-    description: "选择上电、轮巡、调整或交接班审核页。",
+    description: "选择上/下电、轮巡、调整或交接班审核页。",
     actionLabel: "选择工具",
   },
   power: {
     kicker: "其他工具",
-    title: "选择楼栋进入上电通告",
-    description: "进入后自动选中上电通告。",
-    actionLabel: "进入上电通告",
+    title: "选择楼栋进入上/下电通告",
+    description: "进入后可选择上电通告或下电通告。",
+    actionLabel: "进入上/下电通告",
     workType: "power",
   },
   polling: {
@@ -410,7 +410,7 @@ const toolEntries: Array<{
   tone: string;
 }> = [
   { key: "repair", title: "检修通告", description: "故障发现、检修过程和闭环确认", badge: "通告", icon: "repair", tone: "blue" },
-  { key: "power", title: "上电通告", description: "机柜上电、数量和进度确认", badge: "通告", icon: "power", tone: "blue" },
+  { key: "power", title: "上/下电通告", description: "机柜上电、下电、数量和进度确认", badge: "通告", icon: "power", tone: "blue" },
   { key: "polling", title: "设备轮巡", description: "设备轮巡切换和影响确认", badge: "通告", icon: "polling", tone: "cyan" },
   { key: "adjust", title: "设备调整", description: "设备运行模式调整与现场进度", badge: "通告", icon: "adjust", tone: "emerald" },
   { key: "handover", title: "交接班审核页", description: "按楼栋跳转审核链接", badge: "链接", icon: "link", tone: "slate" },

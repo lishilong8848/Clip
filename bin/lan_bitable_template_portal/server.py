@@ -3677,9 +3677,20 @@ class PortalRuntime:
     @classmethod
     def _event_notice_title_key(cls, data: dict) -> str:
         data = data if isinstance(data, dict) else {}
-        info = extract_event_info(str(data.get("text") or "")) or {}
+        text = str(data.get("text") or "")
+        info = extract_event_info(text) or {}
+        summary = ""
+        if text:
+            match = re.search(r"【(?:概述|告警描述)】(.*?)(?:【|$)", text, re.DOTALL)
+            if match:
+                summary = str(match.group(1) or "").strip()
         title = str(
-            info.get("title")
+            summary
+            or data.get("alarm_desc")
+            or data.get("告警描述")
+            or info.get("alarm_desc")
+            or info.get("summary")
+            or info.get("title")
             or data.get("title")
             or data.get("name")
             or data.get("event_title")
@@ -3831,7 +3842,22 @@ class PortalRuntime:
         data = normalize_notice_identity_payload(dict(data or {}), action="upload")
         event_target = cls._existing_event_target_for_local_notice(data, notice_type)
         if event_target:
-            return event_target
+            guard = external_real_write_guard()
+            if guard.get("mock_external"):
+                return event_target
+            ok_query, query_result = query_record_by_id(event_target, notice_type)
+            if ok_query and isinstance(query_result, dict):
+                fields = (
+                    query_result.get("fields", {})
+                    if isinstance(query_result.get("fields"), dict)
+                    else {}
+                )
+                allowed, _message = cls._validate_event_delete_target(data, fields)
+                if allowed:
+                    return event_target
+            if not ok_query and not cls._remote_record_not_found(query_result):
+                return event_target
+            return ""
         work_type = str(data.get("work_type") or data.get("lan_work_type") or "").strip()
         if not work_type:
             work_type = cls._notice_work_type_from_notice_type(notice_type)
@@ -4859,10 +4885,14 @@ class PortalRuntime:
         record_id = str(data.get("record_id") or "").strip()
         if not record_id:
             raise PortalError("Qt 上传请求缺少 record_id。")
+        requested_action_type = action_type
+        original_record_id = record_id
+        coerced_upload_to_update = False
         source_record_id = str(data.get("source_record_id") or "").strip()
         target_record_id = str(data.get("target_record_id") or "").strip()
         prequery_result: dict | None = None
         if action_type == "upload" and target_record_id:
+            coerced_upload_to_update = True
             action_type = "update"
             data["action_type"] = action_type
             data["record_id"] = target_record_id
@@ -4918,21 +4948,33 @@ class PortalRuntime:
                 ok_query, query_result = query_record_by_id(query_record_id, notice_type)
                 if not ok_query:
                     action_name = "结束" if action_type == "end" else "更新" if action_type == "update" else "归档"
-                    if cls._remote_record_not_found(query_result):
+                    remote_not_found = cls._remote_record_not_found(query_result)
+                    if remote_not_found and coerced_upload_to_update and requested_action_type == "upload":
+                        action_type = "upload"
+                        target_record_id = ""
+                        record_id = original_record_id or record_id
+                        data["action_type"] = action_type
+                        data["record_id"] = record_id
+                        data.pop("target_record_id", None)
+                        data["_is_placeholder_record"] = bool(is_local_record_id(record_id))
+                        prequery_result = None
+                    elif remote_not_found:
                         return cls._target_selection_response(
                             data,
                             stale_record_id=query_record_id,
                             message=f"查询失败: {query_result}",
                             action_name=action_name,
                         )
-                    return {
-                        "ok": False,
-                        "name": action_name,
-                        "message": f"查询失败: {query_result}",
-                        "record_id": query_record_id,
-                        "real_record_id": "",
-                    }
-                prequery_result = query_result if isinstance(query_result, dict) else {}
+                    else:
+                        return {
+                            "ok": False,
+                            "name": action_name,
+                            "message": f"查询失败: {query_result}",
+                            "record_id": query_record_id,
+                            "real_record_id": "",
+                        }
+                if action_type != "upload":
+                    prequery_result = query_result if isinstance(query_result, dict) else {}
 
         extra_images = payload.get("extra_images")
         if not isinstance(extra_images, list):
@@ -5257,6 +5299,7 @@ class PortalRuntime:
         notice_type = str(payload.get("notice_type") or "").strip()
         is_placeholder = bool(payload.get("_is_placeholder_record"))
         remote_deleted = False
+        remote_missing_delete_warning = ""
         checkpoint_fields: dict = {}
         checkpoint_remote_missing = True
         supports_undo = callable(
@@ -5286,6 +5329,10 @@ class PortalRuntime:
                     else {}
                 )
                 checkpoint_remote_missing = False
+            elif cls._remote_record_not_found(query_result):
+                remote_missing_delete_warning = (
+                    "目标多维记录已不存在，已仅移除本地显示；未执行远端删除。"
+                )
             else:
                 return {
                     "ok": False,
@@ -5308,6 +5355,7 @@ class PortalRuntime:
             record_id
             and notice_type == "事件通告"
             and not is_placeholder
+            and not remote_missing_delete_warning
             and not external_real_write_guard().get("mock_external")
         ):
             delete_allowed, delete_guard_message = cls._validate_event_delete_target(
@@ -5326,7 +5374,12 @@ class PortalRuntime:
                     "message": delete_guard_message,
                     "record_id": record_id,
                 }
-        if record_id and notice_type and not is_placeholder:
+        if (
+            record_id
+            and notice_type
+            and not is_placeholder
+            and not remote_missing_delete_warning
+        ):
             ok, result = delete_bitable_record(record_id, notice_type)
             if not ok:
                 if checkpoint_id:
@@ -5359,7 +5412,7 @@ class PortalRuntime:
             pass
         return {
             "ok": True,
-            "message": "",
+            "message": remote_missing_delete_warning,
             "record_id": record_id,
             "active_item_id": active_item_id,
             "remote_deleted": remote_deleted,

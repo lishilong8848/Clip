@@ -223,6 +223,78 @@ class _ActiveCacheScheduleHarness(ActiveCacheMixin):
         self.save_calls += 1
 
 
+class ActiveNoticeRouteIdentityTests(unittest.TestCase):
+    def setUp(self):
+        self.harness = _RecordsFlagHarness()
+
+    def _match_key(self, text):
+        _, key = self.harness._build_match_identity(text=text)
+        return key
+
+    def test_repair_same_title_different_faults_do_not_conflict(self):
+        first = (
+            "【设备检修】状态：开始\n"
+            "【标题】EA118_C01机房C楼C-345-HVDC-112、C-345-HVDC-2通信中断检修\n"
+            "【地点】C-345配电室\n"
+            "【发现故障时间】2026-06-18 09:30\n"
+            "【期望完成时间】2026-06-18 18:30\n"
+            "【维修设备】C-345-HVDC-112\n"
+            "【维修故障】C-345-HVDC-112通讯中断\n"
+            "【故障现象】C-345-HVDC-112通讯中断\n"
+            "【故障原因】AU采集器串口故障\n"
+            "【完成情况】准备工作已完成"
+        )
+        second = (
+            "【设备检修】状态：开始\n"
+            "【标题】EA118_C01机房C楼C-345-HVDC-112、C-345-HVDC-2通信中断检修\n"
+            "【地点】C-345配电室\n"
+            "【发现故障时间】2026-06-18 09:30\n"
+            "【期望完成时间】2026-06-18 18:30\n"
+            "【维修设备】C-345-HVDC-2\n"
+            "【维修故障】C-345-HVDC-2通讯中断\n"
+            "【故障现象】C-345-HVDC-2通讯中断\n"
+            "【故障原因】AU采集器串口故障\n"
+            "【完成情况】准备工作已完成"
+        )
+
+        self.assertNotEqual(self._match_key(first), self._match_key(second))
+
+    def test_repair_progress_only_change_keeps_same_route(self):
+        base = (
+            "【设备检修】状态：开始\n"
+            "【标题】EA118_C01机房C楼C-345-HVDC-112通信中断检修\n"
+            "【地点】C-345配电室\n"
+            "【发现故障时间】2026-06-18 09:30\n"
+            "【期望完成时间】2026-06-18 18:30\n"
+            "【维修设备】C-345-HVDC-112\n"
+            "【维修故障】C-345-HVDC-112通讯中断\n"
+            "【故障现象】C-345-HVDC-112通讯中断\n"
+            "【故障原因】AU采集器串口故障\n"
+            "【完成情况】准备工作已完成"
+        )
+        updated = base.replace("准备工作已完成", "现场正在更换串口")
+
+        self.assertEqual(self._match_key(base), self._match_key(updated))
+
+    def test_maintenance_reason_or_time_change_is_distinct(self):
+        base = (
+            "【维保通告】状态：开始\n"
+            "【名称】EA118机房C楼交直流列头柜及PDU维护\n"
+            "【时间】2026-06-18 09:30~2026-06-18 18:30\n"
+            "【位置】C楼\n"
+            "【内容】按计划对C栋直流列头柜及PDU季度维护\n"
+            "【原因】按计划对C栋直流列头柜及PDU季度维护，保证供电正常\n"
+            "【进度】准备工作已完成"
+        )
+        monthly = base.replace("季度维护", "月度维护")
+        shifted = base.replace("09:30", "10:30")
+        progress = base.replace("准备工作已完成", "人员已到场")
+
+        self.assertNotEqual(self._match_key(base), self._match_key(monthly))
+        self.assertNotEqual(self._match_key(base), self._match_key(shifted))
+        self.assertEqual(self._match_key(base), self._match_key(progress))
+
+
 class ActiveNoticeModelTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

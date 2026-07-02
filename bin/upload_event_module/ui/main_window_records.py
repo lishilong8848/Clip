@@ -1062,13 +1062,96 @@ class MainWindowRecordsMixin:
                 resolved_title,
                 f"{resolved_notice_type}|{resolved_title}|{resolved_time}",
             )
-        if resolved_notice_type == "维保通告" and resolved_reason:
-            match_title = f"{resolved_title}|原因:{resolved_reason}"
-            return (
-                match_title,
-                f"{resolved_notice_type}|{resolved_title}|{resolved_reason}",
-            )
-        return resolved_title, f"{resolved_notice_type}|{resolved_title}"
+        components = self._build_notice_match_components(
+            resolved_notice_type,
+            text=text,
+            info=info,
+            resolved_time=resolved_time,
+            resolved_reason=resolved_reason,
+        )
+        if not components:
+            return resolved_title, f"{resolved_notice_type}|{resolved_title}"
+        component_text = "|".join(f"{label}:{value}" for label, value in components)
+        match_title = f"{resolved_title}|{component_text}"
+        return (
+            match_title,
+            f"{resolved_notice_type}|{resolved_title}|{component_text}",
+        )
+
+    def _build_notice_match_components(
+        self,
+        notice_type: str,
+        *,
+        text: str,
+        info: dict | None = None,
+        resolved_time: str = "",
+        resolved_reason: str = "",
+    ) -> list[tuple[str, str]]:
+        info = info or {}
+        components: list[tuple[str, str]] = []
+        seen_labels: set[str] = set()
+
+        def _clean(value) -> str:
+            cleaned = self._normalize_match_text(value).strip(" ;；,，。")
+            return cleaned
+
+        def _section(labels: tuple[str, ...]) -> str:
+            return _clean(self._extract_section_text(text, labels))
+
+        def _add(label: str, value) -> None:
+            cleaned = _clean(value)
+            if not cleaned or label in seen_labels:
+                return
+            seen_labels.add(label)
+            components.append((label, cleaned))
+
+        if resolved_time:
+            _add("时间", resolved_time)
+
+        if notice_type == "维保通告":
+            _add("位置", _section(("位置", "地点")))
+            _add("内容", _section(("内容",)))
+            _add("原因", resolved_reason or _section(("原因",)))
+            _add("周期", _section(("维保周期", "维护周期")))
+            return components
+
+        if notice_type == "变更通告":
+            _add("位置", _section(("位置", "地点")))
+            _add("内容", _section(("内容",)))
+            _add("原因", resolved_reason or _section(("原因",)))
+            return components
+
+        if notice_type == "设备检修":
+            _add("地点", _section(("地点", "位置")))
+            _add("发现故障时间", _section(("发现故障时间", "发生故障时间")))
+            _add("期望完成时间", _section(("期望完成时间",)))
+            _add("维修设备", _section(("维修设备",)))
+            _add("维修故障", _section(("维修故障",)))
+            _add("故障类型", _section(("故障类型",)))
+            _add("维修方式", _section(("维修方式",)))
+            _add("故障发现方式", _section(("故障发现方式",)))
+            _add("故障现象", _section(("故障现象", "故障发生现象描述")))
+            _add("故障原因", resolved_reason or _section(("故障原因", "原因", "故障维修原因")))
+            _add("解决方案", _section(("解决方案",)))
+            return components
+
+        if notice_type in {"上电通告", "下电通告", "上下电通告"}:
+            _add("柜号", _section(("柜号", "机柜", "位置")))
+            _add("数量", _section(("数量",)))
+            return components
+
+        if notice_type == "设备轮巡":
+            _add("设备", _section(("设备",)))
+            _add("内容", _section(("内容",)))
+            return components
+
+        if notice_type == "设备调整":
+            _add("位置", _section(("位置", "地点")))
+            _add("内容", _section(("内容",)))
+            _add("原因", resolved_reason or _section(("原因",)))
+            return components
+
+        return components
 
     @staticmethod
     def _normalize_routing_state(value) -> str:
@@ -3606,13 +3689,15 @@ class MainWindowRecordsMixin:
             for list_widget, item, data in store.candidates_by_match_title(match_title):
                 if _notice_type_matches(data):
                     title_matches.append((list_widget, item, data))
-        if key_matches:
+        if len(key_matches) == 1:
             return key_matches[0][0], key_matches[0][1]
+        if len(key_matches) > 1:
+            return None, None
         if self._is_event_notice(resolved_notice_type):
             # 事件通告不能只按标题路由。不同时间的事件可能标题完全相同，
             # 只靠标题会把新事件绑定到旧 target_record_id，后续删除可能误删旧记录。
             return None, None
-        if title_matches:
+        if len(title_matches) == 1:
             return title_matches[0][0], title_matches[0][1]
         return None, None
 
