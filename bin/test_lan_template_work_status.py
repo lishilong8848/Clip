@@ -23,6 +23,7 @@ if str(BIN_DIR) not in sys.path:
 
 from lan_bitable_template_portal.portal_service import MaintenancePortalService  # noqa: E402
 from lan_bitable_template_portal.portal_service import PortalError  # noqa: E402
+from lan_bitable_template_portal.portal_service import NOTICE_TEXT_TEMPLATES  # noqa: E402
 from lan_bitable_template_portal.portal_service import RECENT_MONTH_FILTER_LABEL  # noqa: E402
 from lan_bitable_template_portal.portal_service import FieldMeta  # noqa: E402
 from lan_bitable_template_portal.portal_service import REPAIR_SOURCE_APP_TOKEN  # noqa: E402
@@ -36,6 +37,7 @@ from lan_bitable_template_portal.portal_auth import PortalAuthManager  # noqa: E
 from lan_bitable_template_portal.workbench_lite import (  # noqa: E402
     MAINTENANCE_CYCLE_OPTIONS as PORTAL_MAINTENANCE_CYCLE_OPTIONS,
 )
+import lan_bitable_template_portal.workbench_lite as workbench_lite_module  # noqa: E402
 from lan_bitable_template_portal.workbench_lite import parse_pasted_notice_to_draft  # noqa: E402
 import lan_bitable_template_portal.server as portal_server_module  # noqa: E402
 from lan_bitable_template_portal.server import PortalRuntime  # noqa: E402
@@ -6063,6 +6065,69 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertNotIn("spare_parts", config_module.OVERHAUL_NOTICE_FIELDS)
             self.assertNotIn("备件更换情况", fields)
 
+    def test_repair_update_uses_latest_web_form_fault_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            prepared = service.prepare_workbench_action(
+                {
+                    "action": "update",
+                    "work_type": "repair",
+                    "scope": "B",
+                    "active_item_id": "active-repair-update",
+                    "target_record_id": "rec-target-repair-update",
+                    "record_id": "rec-target-repair-update",
+                    "title": "B楼恒湿机检修",
+                    "building": "B楼",
+                    "building_codes": ["B"],
+                    "specialty": "暖通",
+                    "level": "低",
+                    "start_time": "2026-05-08T23:50",
+                    "end_time": "2026-05-08T10:30",
+                    "expected_time": "2026-05-08 23:00",
+                    "fault_time": "2026-05-08 08:20",
+                    "location": "B-418",
+                    "repair_device": "B-418-HUM-01",
+                    "repair_fault": "循环泵",
+                    "fault_type": "设备故障",
+                    "repair_mode": "自维",
+                    "impact": "无业务影响",
+                    "discovery": "巡检发现",
+                    "symptom": "加湿异常",
+                    "reason": "循环泵故障",
+                    "solution": "更换循环泵",
+                    "spare_parts": "无",
+                    "progress": "更新处理中",
+                },
+                job_id="job-repair-update-time",
+            )
+
+            text = prepared.get("text") or ""
+            self.assertEqual(prepared.get("fault_time"), "2026-05-08 10:30")
+            self.assertEqual(prepared.get("expected_time"), "2026-05-08 23:50")
+            self.assertIn("【发现故障时间】2026-05-08 10:30", text)
+            self.assertIn("【期望完成时间】2026-05-08 23:50", text)
+            self.assertNotIn("【发现故障时间】2026-05-08 08:20", text)
+
+    def test_workbench_lite_dom_snapshot_covers_notice_template_fields(self):
+        expected_fields = {
+            field
+            for fields in workbench_lite_module.REQUIRED_UPLOAD_FIELDS_BY_WORK_TYPE.values()
+            for field in fields
+        }
+        for template in NOTICE_TEXT_TEMPLATES.values():
+            for _, key in template["fields"]:
+                if key == "time_range":
+                    expected_fields.update({"start_time", "end_time"})
+                elif key == "fault_time":
+                    expected_fields.update({"fault_time", "end_time"})
+                elif key == "expected_time":
+                    expected_fields.update({"expected_time", "start_time"})
+                else:
+                    expected_fields.add(key)
+
+        missing = expected_fields - set(workbench_lite_module._DRAFT_DOM_KEYS)
+        self.assertFalse(missing, f"字段未进入轻量页面草稿快照: {sorted(missing)}")
+
     def test_manual_maintenance_payload_with_adjust_title_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
@@ -11815,6 +11880,42 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         for option in ("电气", "暖通", "消防", "弱电"):
             self.assertIn(f'<option value="{option}"', html)
         self.assertNotIn('name="specialty" type="text"', html)
+
+    def test_workbench_lite_ongoing_detail_exposes_delete_actions(self):
+        from lan_bitable_template_portal.workbench_lite import _detail_form
+
+        ongoing_item = {
+            "active_item_id": "active-delete",
+            "target_record_id": "rec-delete",
+            "record_id": "rec-delete",
+            "source_record_id": "src-delete",
+            "work_type": "maintenance",
+            "notice_type": "维保通告",
+            "title": "删除入口测试",
+        }
+
+        user_html = _detail_form(
+            record=None,
+            ongoing_item=ongoing_item,
+            scope="E",
+            work_type="maintenance",
+            manual=False,
+            is_admin=False,
+        )
+        admin_html = _detail_form(
+            record=None,
+            ongoing_item=ongoing_item,
+            scope="E",
+            work_type="maintenance",
+            manual=False,
+            is_admin=True,
+        )
+
+        self.assertIn('data-ongoing-delete-mode="remote"', user_html)
+        self.assertIn("删除通告", user_html)
+        self.assertNotIn('data-ongoing-delete-mode="local"', user_html)
+        self.assertIn('data-ongoing-delete-mode="local"', admin_html)
+        self.assertIn("移除显示", admin_html)
 
     def test_workbench_lite_active_title_falls_back_to_notice_text(self):
         from lan_bitable_template_portal.workbench_lite import _record_title

@@ -113,7 +113,19 @@ _DRAFT_DOM_KEYS = {
     "reason",
     "impact",
     "progress",
+    "repair_device",
+    "repair_fault",
+    "fault_type",
+    "repair_mode",
+    "discovery",
+    "symptom",
+    "solution",
     "spare_parts",
+    "fault_time",
+    "expected_time",
+    "device",
+    "cabinet",
+    "quantity",
 }
 
 
@@ -1375,6 +1387,7 @@ def _detail_form(
     parsed_draft: dict[str, str] | None = None,
     parsed_action: str = "",
     source_link_options: list[dict[str, str]] | None = None,
+    is_admin: bool = False,
 ) -> str:
     source = ongoing_item or record or {}
     work = _work_type(work_type) if work_type else _item_work_type(source)
@@ -1423,12 +1436,22 @@ def _detail_form(
         source_record_id=source_record_id,
         mop_status=mop_status,
     )
-    action_buttons = (
-        "<button class=\"btn primary\" type=\"submit\" name=\"submit_action\" value=\"update\">发送更新</button>"
-        "<button class=\"btn danger\" type=\"submit\" name=\"submit_action\" value=\"end\">发送结束</button>"
-        if ongoing_item else
-        f"<button class=\"btn primary\" type=\"submit\" name=\"submit_action\" value=\"{_e(action)}\"{disabled}>发送{_e('开始' if action == 'start' else '更新')}</button>"
-    )
+    if ongoing_item:
+        admin_remove_button = (
+            "<button class=\"btn danger-ghost\" type=\"button\" data-ongoing-delete-mode=\"local\">移除显示</button>"
+            if is_admin
+            else ""
+        )
+        action_buttons = (
+            "<button class=\"btn primary\" type=\"submit\" name=\"submit_action\" value=\"update\">发送更新</button>"
+            "<button class=\"btn danger\" type=\"submit\" name=\"submit_action\" value=\"end\">发送结束</button>"
+            "<button class=\"btn danger-ghost\" type=\"button\" data-ongoing-delete-mode=\"remote\">删除通告</button>"
+            f"{admin_remove_button}"
+        )
+    else:
+        action_buttons = (
+            f"<button class=\"btn primary\" type=\"submit\" name=\"submit_action\" value=\"{_e(action)}\"{disabled}>发送{_e('开始' if action == 'start' else '更新')}</button>"
+        )
     datalists = (
         f"<datalist id=\"specialty-options\">{''.join(f'<option value=\"{_e(item)}\"></option>' for item in SPECIALTY_OPTIONS)}</datalist>"
         f"<datalist id=\"maintenance-cycle-options\">{''.join(f'<option value=\"{_e(item)}\"></option>' for item in MAINTENANCE_CYCLE_OPTIONS)}</datalist>"
@@ -1601,6 +1624,7 @@ def render_workbench_lite(
     selected_record_id = str((selected_record or {}).get("record_id") or "")
     source_options = _source_link_options(records, ongoing, work_type=work)
     user = session.get("user") if isinstance(session.get("user"), dict) else {}
+    is_admin_session = bool(session.get("is_admin")) or str(session.get("role") or "").strip().lower() == "admin"
     scope_options = scope_options or []
     scope_select = "".join(
         f"<option value=\"{_e(option.get('value'))}\"{' selected' if str(option.get('value')) == scope else ''}>{_e(option.get('label') or option.get('value'))}</option>"
@@ -1697,9 +1721,12 @@ def render_workbench_lite(
     .btn.primary {{ color:#fff; background:linear-gradient(180deg,#1f63ff,#0097d7); box-shadow:0 10px 18px rgba(21,99,255,.2); }}
     .btn.ghost {{ color:#0a4fc4; background:#eef6ff; }}
     .btn.danger {{ color:#fff; background:#e04d5f; }}
+    .btn.danger-ghost {{ color:#b42318; border:1px solid #ffc7bf; background:#fff1f0; }}
+    .btn.danger-ghost:hover {{ border-color:#f58b88; background:#ffe9e7; }}
     .btn.is-busy,.btn[aria-busy="true"] {{ position:relative; color:transparent !important; pointer-events:none; }}
     .btn.is-busy::after,.btn[aria-busy="true"]::after {{ content:""; width:16px; height:16px; border-radius:999px; border:2px solid rgba(255,255,255,.55); border-top-color:#fff; animation:liteSpin .8s linear infinite; position:absolute; inset:auto; }}
     .btn.ghost.is-busy::after,.btn.ghost[aria-busy="true"]::after {{ border-color:rgba(10,79,196,.25); border-top-color:#0a4fc4; }}
+    .btn.danger-ghost.is-busy::after,.btn.danger-ghost[aria-busy="true"]::after {{ border-color:rgba(180,35,24,.22); border-top-color:#b42318; }}
     button:disabled,.btn[disabled] {{ cursor:not-allowed; opacity:.58; box-shadow:none; transform:none; }}
     .manual-picker {{ position:relative; display:inline-flex; }}
     .manual-menu {{ position:absolute; z-index:20; top:50px; left:0; width:310px; display:none; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; padding:10px; border:1px solid #c9def8; border-radius:18px; background:#fff; box-shadow:0 18px 42px rgba(15,73,153,.18); }}
@@ -1880,7 +1907,7 @@ def render_workbench_lite(
     .action-reason.warn {{ color:#8a4b00; background:#fff4d6; }}
     .action-reason.ready {{ color:#087443; background:#e8fff3; }}
     .action-reason.blocked {{ color:#b42318; background:#fff1f0; }}
-    .form-actions .btn.primary,.form-actions .btn.danger {{ min-width:112px; box-shadow:0 12px 24px rgba(21,99,255,.18); }}
+    .form-actions .btn.primary,.form-actions .btn.danger,.form-actions .btn.danger-ghost {{ min-width:104px; box-shadow:0 12px 24px rgba(21,99,255,.14); }}
     .end-check-backdrop {{ position:fixed; inset:0; z-index:60; display:grid; place-items:center; padding:24px; background:rgba(8,32,74,.36); backdrop-filter:blur(8px); }}
     .end-check-backdrop[hidden] {{ display:none; }}
     .end-check-dialog {{ width:min(560px,100%); border:1px solid #d8e5f7; border-radius:24px; background:#fff; box-shadow:0 28px 70px rgba(8,32,74,.24); overflow:hidden; }}
@@ -2004,7 +2031,7 @@ def render_workbench_lite(
             <button class="btn primary" type="submit">解析到当前通告</button>
           </form>
         </details>
-        {_detail_form(record=selected_record, ongoing_item=selected_ongoing, scope=scope, work_type=work, manual=manual or bool(parsed_draft), parsed_draft=parsed_draft, parsed_action=parsed_action, source_link_options=source_options)}
+        {_detail_form(record=selected_record, ongoing_item=selected_ongoing, scope=scope, work_type=work, manual=manual or bool(parsed_draft), parsed_draft=parsed_draft, parsed_action=parsed_action, source_link_options=source_options, is_admin=is_admin_session)}
       </section>
       <aside class="result-rail">
         <section class="rail-panel"><h2 class="panel-title"><span>已开始未结束</span><b class="panel-count">{_e(current_ongoing_count)}</b></h2><div class="list">{_ongoing_rows(visible_ongoing, scope=scope, work_type=work, selected_id=active_item_id, pending_page=pending_page_num, ongoing_page=ongoing_page_num)}</div>{ongoing_pager}</section>
@@ -2158,7 +2185,7 @@ def render_workbench_lite(
     function setFormSubmitBusy(form, enabled) {{
       if (!form) return;
       form.classList.toggle('is-submitting', Boolean(enabled));
-      form.querySelectorAll('button[name="submit_action"]').forEach(button => setButtonBusy(button, enabled));
+      form.querySelectorAll('button[name="submit_action"],button[data-ongoing-delete-mode]').forEach(button => setButtonBusy(button, enabled));
     }}
     function setPickerOpen(pickerId, openerId, open) {{
       document.getElementById(pickerId)?.classList.toggle('open', Boolean(open));
@@ -2273,7 +2300,10 @@ def render_workbench_lite(
       'action', 'operation_id', 'active_item_id', 'source_record_id', 'target_record_id', 'record_id',
       'manual_id', 'scope', 'work_type', 'notice_type', 'title', 'building', 'buildings', 'specialty',
       'maintenance_cycle', 'level', 'start_time', 'end_time', 'status', 'site_photo_count', 'mop_status',
-      'name', 'location', 'content', 'reason', 'impact', 'progress', 'spare_parts'
+      'name', 'location', 'content', 'reason', 'impact', 'progress',
+      'repair_device', 'repair_fault', 'fault_type', 'repair_mode', 'discovery',
+      'symptom', 'solution', 'spare_parts', 'fault_time', 'expected_time',
+      'device', 'cabinet', 'quantity'
     ];
     function draftCacheKey(draft) {{
       return String(
@@ -2329,7 +2359,8 @@ def render_workbench_lite(
       'specialty', 'maintenance_cycle', 'level', 'start_time', 'end_time',
       'location', 'content', 'reason', 'impact', 'progress',
       'repair_device', 'repair_fault', 'fault_type', 'repair_mode', 'discovery',
-      'symptom', 'solution', 'spare_parts', 'cabinet', 'quantity', 'device',
+      'symptom', 'solution', 'spare_parts', 'fault_time', 'expected_time',
+      'cabinet', 'quantity', 'device',
       'status', 'site_photo_count', 'site_photos', 'extra_images',
       'mop_status', 'zhihang_record_id', 'lan_zhihang_record_id', 'zhihang_involved'
     ]);
@@ -2358,6 +2389,87 @@ def render_workbench_lite(
         }}
       }}
       return compact;
+    }}
+    function ongoingDeletePayload(form) {{
+      const fd = new FormData(form);
+      const patch = Object.fromEntries(fd.entries());
+      const targetRecordId = String(patch.target_record_id || '').trim();
+      const sourceRecordId = String(patch.source_record_id || '').trim();
+      const rawRecordId = String(patch.record_id || '').trim();
+      const recordId = targetRecordId || rawRecordId;
+      return {{
+        scope: patch.scope || getCurrentScope(),
+        work_type: patch.work_type || '',
+        notice_type: patch.notice_type || '',
+        active_item_id: patch.active_item_id || '',
+        source_record_id: sourceRecordId,
+        target_record_id: targetRecordId,
+        record_id: recordId,
+      }};
+    }}
+    function workbenchBaseUrl(scope, workType) {{
+      const url = new URL('/workbench-lite', location.origin);
+      url.searchParams.set('scope', scope || getCurrentScope());
+      url.searchParams.set('work_type', workType || new URLSearchParams(location.search).get('work_type') || 'maintenance');
+      return url.pathname + url.search;
+    }}
+    async function deleteOngoingFromForm(button) {{
+      const form = button.closest('#lite-notice-form') || document.getElementById('lite-notice-form');
+      if (!form) return;
+      const mode = String(button.getAttribute('data-ongoing-delete-mode') || 'remote');
+      const isLocalRemove = mode === 'local';
+      const confirmText = isLocalRemove ? '确认移除' : '确认删除';
+      const originalText = button.getAttribute('data-original-text') || button.textContent || (isLocalRemove ? '移除显示' : '删除通告');
+      button.setAttribute('data-original-text', originalText);
+      if (button.getAttribute('data-confirmed') !== '1') {{
+        button.setAttribute('data-confirmed', '1');
+        button.textContent = confirmText;
+        setLiteStatus(isLocalRemove ? '再次点击确认仅移除前端和 Qt 显示，不删除多维记录。' : '再次点击确认删除通告，并同步删除对应多维记录。');
+        window.setTimeout(() => {{
+          if (button && button.getAttribute('data-confirmed') === '1') {{
+            button.removeAttribute('data-confirmed');
+            button.textContent = originalText;
+          }}
+        }}, 4200);
+        return;
+      }}
+      const payload = ongoingDeletePayload(form);
+      const endpoint = isLocalRemove ? '/api/ongoing-items/remove-local' : '/api/ongoing-items/delete';
+      setLiteFormDirty(false);
+      setFormSubmitBusy(form, true);
+      setLiteStatus(isLocalRemove ? '正在移除显示...' : '正在删除通告和对应多维记录...');
+      try {{
+        const response = await fetch(endpoint, {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          credentials: 'same-origin',
+          body: JSON.stringify(payload),
+        }});
+        const data = await response.json().catch(() => ({{}}));
+        if (handleLiteAuthRequired(response, data)) return;
+        if (!response.ok || data.ok === false) {{
+          throw new Error(data.error || (data.data && data.data.error) || (isLocalRemove ? '移除失败' : '删除失败'));
+        }}
+        const row = findOngoingRowByDraft(payload);
+        if (row) removeOngoingRow(row);
+        const result = data.data || {{}};
+        const message = isLocalRemove
+          ? '已移除显示，Qt 和前端将同步消失，多维未删除。'
+          : (result.remote_deleted ? '已删除通告，并同步删除对应多维记录。' : '已删除通告，本地显示已同步。');
+        setLiteStatus(message);
+        await navigateLite(workbenchBaseUrl(payload.scope, payload.work_type), {{
+          push: true,
+          label: message,
+          selectors: ['.status', '.summary', '.workbench-guide', '.workspace'],
+        }});
+      }} catch (error) {{
+        const message = error && error.message ? error.message : (isLocalRemove ? '移除失败' : '删除失败');
+        showLiteError(message);
+      }} finally {{
+        button.removeAttribute('data-confirmed');
+        button.textContent = originalText;
+        setFormSubmitBusy(form, false);
+      }}
     }}
     function setFormValue(form, name, value) {{
       const field = form.querySelector(`[name="${{CSS.escape(name)}}"]`);
@@ -3241,6 +3353,12 @@ def render_workbench_lite(
         }}
         return;
       }}
+      const ongoingDeleteButton = target.closest('button[data-ongoing-delete-mode]');
+      if (ongoingDeleteButton) {{
+        event.preventDefault();
+        await deleteOngoingFromForm(ongoingDeleteButton);
+        return;
+      }}
       const endCancel = target.closest('#lite-end-check-cancel');
       if (endCancel) {{
         event.preventDefault();
@@ -3368,6 +3486,10 @@ def render_workbench_lite(
       patch.target_record_id = targetRecordId;
       patch.record_id = submitRecordId;
       patch.operation_id = `${{patch.scope}}:${{patch.work_type}}:${{operationIdentity}}:${{action}}:${{Date.now()}}`;
+      if (patch.work_type === 'repair') {{
+        patch.fault_time = patch.end_time || patch.fault_time || '';
+        patch.expected_time = patch.start_time || patch.expected_time || '';
+      }}
       delete patch.site_photos_json;
       if (photos.length) {{
         patch.site_photos = photos;

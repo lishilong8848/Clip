@@ -16171,6 +16171,7 @@ class MaintenancePortalService:
         self, request_payload: dict[str, Any], *, job_id: str
     ) -> dict[str, Any]:
         request_payload = normalize_notice_identity_payload(request_payload)
+        request_payload = self._normalize_repair_time_fields(request_payload)
         action = str(request_payload.get("action") or "").strip().lower()
         status_map = {"start": "开始", "update": "更新", "end": "结束"}
         status = status_map.get(action)
@@ -16647,6 +16648,31 @@ class MaintenancePortalService:
             "operation_id": str(request_payload.get("operation_id") or "").strip()
             or job_id,
         }
+
+    @staticmethod
+    def _normalize_repair_time_fields(payload: dict[str, Any]) -> dict[str, Any]:
+        """Keep repair-specific time aliases aligned with the web form fields.
+
+        The lightweight workbench stores repair "发现故障时间" in end_time and
+        "期望完成时间" in start_time. The backend also carries explicit
+        fault_time/expected_time for source-table and Qt projections. Normalize
+        once at the service boundary so generated text and bitable payloads
+        always use the latest user-edited values.
+        """
+        normalized = dict(payload or {})
+        start_time = str(normalized.get("start_time") or "").strip()
+        end_time = str(normalized.get("end_time") or "").strip()
+        fault_time = str(normalized.get("fault_time") or "").strip()
+        expected_time = str(normalized.get("expected_time") or "").strip()
+        if end_time:
+            normalized["fault_time"] = end_time
+        elif fault_time:
+            normalized["end_time"] = fault_time
+        if start_time:
+            normalized["expected_time"] = start_time
+        elif expected_time:
+            normalized["start_time"] = expected_time
+        return normalized
 
     def send_action_personal_message(self, prepared: dict[str, Any]) -> tuple[bool, str]:
         if (prepared or {}).get("skip_personal_message"):
