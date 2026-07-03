@@ -12,7 +12,7 @@
       </button>
     </div>
     <div v-if="activeSheet?.truncated" class="sheet-note">
-      表格较大，当前预览已限制显示前 {{ activeSheet.row_count }} 行 / {{ activeSheet.column_count }} 列。
+      已显示 {{ activeSheet.row_count }} 行 / {{ activeSheet.column_count }} 列
     </div>
   </section>
 </template>

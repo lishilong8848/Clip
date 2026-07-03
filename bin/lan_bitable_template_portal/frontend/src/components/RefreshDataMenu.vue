@@ -5,15 +5,14 @@
       type="button"
       aria-haspopup="menu"
       :aria-expanded="open"
-      title="刷新当前页面或查找新记录，失败不会清空当前页面"
+      title="刷新数据"
       @click.stop="emit('update:open', !open)"
     >
       刷新数据
     </button>
     <div v-if="open" class="refresh-menu-panel" role="menu" @click.stop>
       <div class="refresh-menu-head">
-        <strong>低频刷新数据</strong>
-        <small>只读取最新快照，不发送通告；失败不会清空页面。</small>
+        <strong>刷新数据</strong>
       </div>
       <button
         class="refresh-option"
@@ -25,7 +24,6 @@
       >
         <span>
           <strong>刷新事件</strong>
-          <small>{{ optionHint("查找本月最新事件记录", eventRefreshing, cooldownEvent, eventTitle) }}</small>
         </span>
         <b>{{ eventRefreshing ? "读取中" : cooldownEvent ? "稍后再试" : "读取" }}</b>
       </button>

@@ -1,13 +1,11 @@
 <template>
   <section class="history-memory">
+    <div class="page-back-row">
+      <VnetBackButton to="/" />
+    </div>
     <header class="page-head">
       <div>
         <strong>历史通告记忆导入</strong>
-        <p>扫描近 3 个月历史通告，匹配当前月事项；确认后只保存为本地记忆。</p>
-      </div>
-      <div class="head-actions">
-        <button class="btn ghost" @click="goHome">返回工作台</button>
-        <a class="btn ghost" href="/">功能选择</a>
       </div>
     </header>
 
@@ -19,19 +17,7 @@
     <div v-else-if="!isAdmin" class="notice-box danger">仅管理员可使用历史通告记忆导入。</div>
 
     <template v-else>
-      <section class="history-steps" aria-label="历史记忆导入步骤">
-        <article
-          v-for="step in historySteps"
-          :key="step.key"
-          :class="{ active: historyStep === step.key, done: step.done }"
-        >
-          <span>{{ step.index }}</span>
-          <div>
-            <strong>{{ step.title }}</strong>
-            <small>{{ step.text }}</small>
-          </div>
-        </article>
-      </section>
+      <HistoryMemorySteps :steps="historySteps" :active-key="historyStep" />
       <section class="scan-bar">
         <div class="scan-fields">
           <label>
@@ -104,13 +90,13 @@
         </div>
       </section>
 
-      <section class="summary-grid">
-        <article><span>当前月事项</span><strong>{{ sourceItems.length }}</strong></article>
-        <article><span>历史候选</span><strong>{{ candidates.length }}</strong></article>
-        <article><span>已勾选</span><strong>{{ selectedCount }}</strong></article>
-        <article><span>可一键填充</span><strong>{{ recommendedMatchCount }}</strong></article>
-        <article><span>可保存覆盖</span><strong>{{ overwriteHint }}</strong></article>
-      </section>
+      <HistoryMemorySummaryGrid
+        :source-count="sourceItems.length"
+        :candidate-count="candidates.length"
+        :selected-count="selectedCount"
+        :recommended-count="recommendedMatchCount"
+        :overwrite-hint="overwriteHint"
+      />
 
       <section class="match-layout">
         <aside class="panel source-panel">
@@ -141,7 +127,7 @@
               </label>
             </article>
             <div v-if="!filteredSources.length" class="panel-empty">
-              当前筛选下没有事项。可清空筛选或重新扫描历史通告。
+              暂无事项
             </div>
           </div>
         </aside>
@@ -194,9 +180,6 @@
               </div>
 
               <section v-if="extraFieldDefs.length" class="extra-field-section" :class="{ open: showExtraFields }">
-                <div class="extra-field-hint">
-                  检修、智航等扩展字段默认收起，展开后仍可完整编辑。
-                </div>
                 <div v-show="showExtraFields" class="form-grid compact extra-grid">
                   <label
                     v-for="field in extraFieldDefs"
@@ -244,7 +227,7 @@
               </div>
             </article>
             <div v-if="!candidateOptions.length" class="panel-empty">
-              当前事项没有可用历史候选。可切换左侧事项或扩大扫描月份。
+              暂无候选
             </div>
           </div>
         </aside>
@@ -284,12 +267,25 @@
 
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from "vue";
-import { requestJson } from "../api/client";
+import { requestJson, type Dict } from "../api/client";
+import {
+  HISTORY_MEMORY_EDITABLE_FIELD_DEFS as editableFieldDefs,
+  HISTORY_MEMORY_PRIMARY_FIELD_KEYS as primaryFieldKeys,
+  HISTORY_MEMORY_WORK_TYPES as workTypes,
+  buildHistoryMemorySavePayload,
+  historyMemoryFieldVisible,
+  historyMemoryOriginLabel,
+  historyMemorySourceHasMemory as sourceHasMemory,
+  historyMemorySourceInitialFields as sourceInitialFields,
+  historyMemorySourceInitialOrigin as sourceInitialOrigin,
+  historyMemoryWorkTypeLabel as workTypeLabel,
+} from "../historyMemoryUtils";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import DisabledReason from "./DisabledReason.vue";
+import HistoryMemorySteps from "./HistoryMemorySteps.vue";
+import HistoryMemorySummaryGrid from "./HistoryMemorySummaryGrid.vue";
 import MessageBanner from "./MessageBanner.vue";
-
-type Dict = Record<string, any>;
+import VnetBackButton from "./VnetBackButton.vue";
 
 defineProps<{
   checking: boolean;
@@ -298,32 +294,6 @@ defineProps<{
   loginUrl: string;
 }>();
 
-const workTypes = [
-  { value: "maintenance", label: "维保" },
-  { value: "change", label: "变更" },
-  { value: "repair", label: "检修" },
-];
-
-const editableFieldDefs = [
-  { key: "location", label: "位置/地点" },
-  { key: "content", label: "内容", multi: true },
-  { key: "reason", label: "原因/故障原因", multi: true },
-  { key: "impact", label: "影响/影响范围", multi: true },
-  { key: "progress", label: "进度/完成情况", multi: true },
-  { key: "specialty", label: "专业" },
-  { key: "level", label: "等级/紧急程度" },
-  { key: "repair_device", label: "维修设备" },
-  { key: "repair_fault", label: "维修故障" },
-  { key: "fault_type", label: "故障类型" },
-  { key: "repair_mode", label: "维修方式" },
-  { key: "discovery", label: "故障发现方式" },
-  { key: "symptom", label: "故障现象", multi: true },
-  { key: "solution", label: "解决方案", multi: true },
-  { key: "zhihang_title", label: "智航关联标题" },
-  { key: "zhihang_record_id", label: "智航关联记录" },
-  { key: "zhihang_progress", label: "智航进展" },
-] as Array<{ key: string; label: string; multi?: boolean }>;
-
 const busy = ref(false);
 const months = ref(3);
 const selectedWorkTypes = ref(["maintenance", "change", "repair"]);
@@ -331,7 +301,7 @@ const sourceItems = ref<Dict[]>([]);
 const candidates = ref<Dict[]>([]);
 const matches = ref<Dict[]>([]);
 const warnings = ref<string[]>([]);
-const message = ref("点击扫描历史通告开始匹配。");
+const message = ref("");
 const messageType = ref("");
 const activeSourceId = ref("");
 const showExtraFields = ref(false);
@@ -376,11 +346,10 @@ const activeCandidateHint = computed(() => {
     return `已套用历史候选：${activeCandidate.value.title || "未命名候选"}`;
   }
   if (activeCandidate.value) {
-    return `右侧有推荐候选：${activeCandidate.value.title || "未命名候选"}；点击候选后会覆盖当前字段。`;
+    return `推荐候选：${activeCandidate.value.title || "未命名候选"}`;
   }
-  return activeMatch.value?.reason || "可在右侧选择历史候选。";
+  return activeMatch.value?.reason || "";
 });
-const primaryFieldKeys = new Set(["location", "content", "reason", "impact", "progress", "specialty", "level"]);
 const primaryFieldDefs = computed(() => editableFieldDefs.filter((field) => fieldVisible(field.key) && primaryFieldKeys.has(field.key)));
 const extraFieldDefs = computed(() => editableFieldDefs.filter((field) => fieldVisible(field.key) && !primaryFieldKeys.has(field.key)));
 const activeFields = computed(() => {
@@ -411,7 +380,7 @@ const scanDisabledReason = computed(() => {
 });
 const fillRecommendedDisabledReason = computed(() => {
   if (busy.value) return "正在处理历史记忆，请等待当前操作完成。";
-  if (!recommendedMatchCount.value) return "当前没有可自动填充的推荐候选。";
+  if (!recommendedMatchCount.value) return "没有推荐候选。";
   return "";
 });
 const saveSelectedDisabledReason = computed(() => {
@@ -421,7 +390,7 @@ const saveSelectedDisabledReason = computed(() => {
 });
 const historySaveDisabledReason = computed(() => {
   if (selectedCount.value || recommendedMatchCount.value) return "";
-  return "暂无可保存内容：可先扫描历史通告，或在左侧勾选事项。";
+  return "暂无可保存内容。";
 });
 const saveSummary = computed(() => {
   const payload = pendingSavePayload.value;
@@ -434,9 +403,9 @@ const saveSummary = computed(() => {
 const saveConfirmTitle = computed(() => saveConfirmMode.value === "filled" ? "确认一键填充并保存" : "确认保存已勾选记忆");
 const saveConfirmSubtitle = computed(() => {
   if (saveConfirmMode.value === "filled") {
-    return "系统会把所有已匹配历史候选的字段填入当前月事项，并批量保存本地记忆。";
+    return "保存匹配记忆。";
   }
-  return "系统会保存当前已勾选事项的字段内容，同键旧记忆会被覆盖。";
+  return "保存已勾选记忆。";
 });
 const savePreviewItems = computed(() => pendingSavePayload.value.slice(0, 6).map((item, index) => {
   const source = item.source_item || {};
@@ -459,9 +428,7 @@ const saveConfirmDetails = computed(() => {
     rows.push(`${item.type} · ${item.building || "-"} · ${item.title}（${item.origin}）`);
   }
   const hiddenCount = summary.total - savePreviewItems.value.length;
-  if (hiddenCount > 0) {
-    rows.push(`还有 ${hiddenCount} 条未展示，确认后会一起保存。`);
-  }
+  if (hiddenCount > 0) rows.push(`未展示 ${hiddenCount} 条`);
   return rows;
 });
 const historyStep = computed(() => {
@@ -474,21 +441,21 @@ const historySteps = computed(() => [
     key: "scan",
     index: "1",
     title: "扫描历史",
-    text: sourceItems.value.length ? `已识别 ${sourceItems.value.length} 条当前月事项` : "先读取近三个月历史记录",
+    text: sourceItems.value.length ? `已识别 ${sourceItems.value.length}` : "待扫描",
     done: sourceItems.value.length > 0 || candidates.value.length > 0,
   },
   {
     key: "review",
     index: "2",
     title: "确认匹配",
-    text: recommendedMatchCount.value ? `有 ${recommendedMatchCount.value} 条推荐可填充` : "选择左侧事项并核对字段",
+    text: recommendedMatchCount.value ? `推荐 ${recommendedMatchCount.value}` : "待选择",
     done: selectedCount.value > 0,
   },
   {
     key: "confirm",
     index: "3",
     title: "保存记忆",
-    text: selectedCount.value ? `准备保存 ${selectedCount.value} 条` : "确认后保存本地记忆",
+    text: selectedCount.value ? `准备保存 ${selectedCount.value}` : "待保存",
     done: false,
   },
 ]);
@@ -534,10 +501,6 @@ watch(activeSourceId, () => {
 
 const api = requestJson;
 
-function workTypeLabel(value: string): string {
-  return workTypes.find((item) => item.value === value)?.label || "维保";
-}
-
 function candidateIdFor(sourceId: string): string {
   return candidateMap[sourceId] || "";
 }
@@ -546,33 +509,8 @@ function isSelected(sourceId: string): boolean {
   return Boolean(selectedMap[sourceId]);
 }
 
-function hasMeaningfulFields(fields: Dict | undefined): boolean {
-  const payload = fields || {};
-  return Object.entries(payload).some(([key, value]) => {
-    if (["updated_at", "history_imported_at", "imported_by", "imported_from"].includes(key)) return false;
-    return String(value ?? "").trim() !== "";
-  });
-}
-
-function sourceHasMemory(source: Dict | undefined): boolean {
-  return hasMeaningfulFields(source?.memory);
-}
-
-function sourceInitialFields(source: Dict): Dict {
-  if (sourceHasMemory(source)) return { ...(source.memory || {}) };
-  return { ...(source.current_fields || {}) };
-}
-
-function sourceInitialOrigin(source: Dict): string {
-  return sourceHasMemory(source) ? "memory" : "current";
-}
-
 function sourceFieldOriginLabel(sourceId: string): string {
-  const origin = fieldOriginMap[sourceId] || "";
-  if (origin === "candidate") return "当前显示：历史候选";
-  if (origin === "memory") return "当前显示：已有记忆";
-  if (origin === "current") return "当前显示：当前事项";
-  return "当前显示：未初始化";
+  return historyMemoryOriginLabel(fieldOriginMap[sourceId] || "");
 }
 
 function selectSource(item: Dict): void {
@@ -584,13 +522,7 @@ function selectSource(item: Dict): void {
 }
 
 function fieldVisible(key: string): boolean {
-  const type = activeSource.value?.work_type || "maintenance";
-  if (key.startsWith("repair_") || ["fault_type", "repair_mode", "discovery", "symptom", "solution"].includes(key)) {
-    return type === "repair";
-  }
-  if (key.startsWith("zhihang_")) return type === "change";
-  if (key === "level") return type !== "maintenance";
-  return true;
+  return historyMemoryFieldVisible(key, activeSource.value?.work_type || "maintenance");
 }
 
 function applyScanPayload(data: Dict): void {
@@ -625,7 +557,7 @@ function clearHistoryFilters(): void {
 
 async function scanHistory(): Promise<void> {
   busy.value = true;
-  message.value = "正在扫描历史多维记录...";
+  message.value = "扫描中...";
   messageType.value = "";
   try {
     const data = await api("/api/admin/notice-memory/history-scan", {
@@ -664,15 +596,13 @@ function touchFields(): void {
 }
 
 function buildSavePayloadForSources(sources: Dict[]): Dict[] {
-  return sources
-    .filter((source) => isSelected(source.id))
-    .map((source) => ({
-      selected: true,
-      source_item: source,
-      candidate_id: candidateMap[source.id],
-      fields: fieldEdits[source.id] || {},
-      field_origin: fieldOriginMap[source.id] || sourceInitialOrigin(source),
-    }));
+  return buildHistoryMemorySavePayload({
+    sources,
+    selectedMap,
+    candidateMap,
+    fieldEdits,
+    fieldOriginMap,
+  });
 }
 
 function buildSavePayload(): Dict[] {
@@ -693,7 +623,7 @@ function saveSelected(): void {
 
 function fillCandidatesAndConfirmSave(): void {
   if (!recommendedMatches.value.length) {
-    message.value = "当前没有可一键填充的推荐历史候选。";
+    message.value = "没有推荐候选。";
     messageType.value = "failed";
     return;
   }
@@ -704,7 +634,7 @@ function fillCandidatesAndConfirmSave(): void {
   }
   activeSourceId.value = recommendedMatches.value[0]?.source?.id || activeSourceId.value;
   const payload = buildSavePayloadForSources(filledSources);
-  message.value = `已填充 ${payload.length} 条推荐历史候选，确认后会批量保存。`;
+  message.value = `已填充 ${payload.length} 条推荐历史候选。`;
   messageType.value = "success";
   openSaveConfirm("filled", payload);
 }
@@ -747,9 +677,6 @@ async function confirmSaveSelected(): Promise<void> {
   }
 }
 
-function goHome(): void {
-  window.location.href = "/";
-}
 </script>
 
 <style scoped>
@@ -760,11 +687,26 @@ function goHome(): void {
   padding-bottom: 118px;
 }
 
+.page-back-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+}
+
+.page-back-btn {
+  min-height: 36px;
+  padding: 0 13px;
+  border-radius: 999px;
+}
+
+.page-back-btn span {
+  font-size: 19px;
+  line-height: 1;
+}
+
 .page-head,
-.history-steps,
 .scan-bar,
 .filters,
-.summary-grid,
 .match-layout,
 .panel {
   border: 1px solid #dbe3ee;
@@ -790,65 +732,6 @@ function goHome(): void {
 .candidate-row small,
 .match-note span {
   color: #64748b;
-}
-
-.history-steps {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
-  padding: 10px;
-}
-
-.history-steps article {
-  display: grid;
-  grid-template-columns: 34px minmax(0, 1fr);
-  align-items: center;
-  gap: 10px;
-  border: 1px solid #dbeafe;
-  border-radius: 12px;
-  background: #f8fbff;
-  padding: 10px;
-}
-
-.history-steps article > span {
-  display: grid;
-  width: 34px;
-  height: 34px;
-  place-items: center;
-  border-radius: 12px;
-  background: #eaf3ff;
-  color: #0757d7;
-  font-weight: 900;
-}
-
-.history-steps article.active {
-  border-color: #1678ff;
-  background: #eff6ff;
-}
-
-.history-steps article.done > span,
-.history-steps article.active > span {
-  background: linear-gradient(135deg, #0757d7, #1678ff);
-  color: #ffffff;
-}
-
-.history-steps strong,
-.history-steps small {
-  display: block;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.history-steps strong {
-  color: #09204a;
-  font-size: 14px;
-}
-
-.history-steps small {
-  color: #64748b;
-  font-size: 12px;
 }
 
 .head-actions,
@@ -978,30 +861,6 @@ textarea {
   gap: 4px;
   background: #fff7ed;
   color: #c2410c;
-}
-
-.summary-grid {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-}
-
-.summary-grid article {
-  padding: 12px;
-  border-right: 1px solid #e2e8f0;
-}
-
-.summary-grid article:last-child {
-  border-right: 0;
-}
-
-.summary-grid span {
-  display: block;
-  color: #64748b;
-  font-size: 12px;
-}
-
-.summary-grid strong {
-  font-size: 22px;
 }
 
 .match-layout {
@@ -1288,9 +1147,6 @@ textarea {
     border-right: 0;
     border-bottom: 1px solid #e2e8f0;
   }
-  .summary-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
 }
 
 /* VNET history memory skin */
@@ -1303,7 +1159,6 @@ textarea {
 .page-head,
 .scan-bar,
 .filters,
-.summary-grid,
 .match-layout,
 .notice-box,
 .message,
@@ -1327,19 +1182,6 @@ textarea {
 .scan-bar,
 .filters {
   padding: 14px;
-}
-
-.summary-grid {
-  overflow: hidden;
-}
-
-.summary-grid article {
-  padding: 16px;
-}
-
-.summary-grid strong {
-  color: #0757d7;
-  font-size: 26px;
 }
 
 .match-layout {
@@ -1470,7 +1312,6 @@ textarea:focus {
 .page-head,
 .scan-bar,
 .filters,
-.summary-grid,
 .match-layout,
 .notice-box,
 .message,
@@ -1499,8 +1340,7 @@ textarea {
 .page-head strong,
 .panel-head h2,
 .source-row strong,
-.candidate-row strong,
-.summary-grid strong {
+.candidate-row strong {
   font-weight: 820;
   letter-spacing: 0;
 }
@@ -1547,7 +1387,6 @@ textarea {
 .page-head,
 .scan-bar,
 .filters,
-.summary-grid,
 .match-layout,
 .notice-box,
 .message,
@@ -1645,7 +1484,6 @@ textarea {
 .page-head,
 .scan-bar,
 .filters,
-.summary-grid,
 .match-layout,
 .notice-box,
 .message,

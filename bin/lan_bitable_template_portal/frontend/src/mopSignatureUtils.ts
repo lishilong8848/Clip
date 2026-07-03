@@ -1,5 +1,11 @@
 import type { LooseDict } from "./types";
 
+type MopSignatureRole = "implementer" | "auditor";
+
+function roleLabel(role: MopSignatureRole): string {
+  return role === "auditor" ? "维护审核人" : "维护实施人";
+}
+
 export function mopPersonHasUsableSignature(person: LooseDict | null | undefined): boolean {
   return Boolean(person?.has_signature && String(person?.signature_preview_url || "").trim());
 }
@@ -79,4 +85,40 @@ export function temporarySignatureDisplayName(person: LooseDict, index = 0): str
   if (explicitName) return explicitName;
   const fallbackIndex = Math.max(1, Number(index || 0) + 1);
   return `临时人员${fallbackIndex}`;
+}
+
+export function buildMopSignaturePayload(input: {
+  formalImplementers: LooseDict[];
+  formalAuditors: LooseDict[];
+  otherImplementers: LooseDict[];
+  otherAuditors: LooseDict[];
+}): LooseDict[] {
+  const staffPayload = (role: MopSignatureRole, people: LooseDict[]) => people
+    .filter((person) => mopPersonHasUsableSignature(person))
+    .map((person) => ({
+      source: "staff",
+      role,
+      label: roleLabel(role),
+      record_id: person.record_id,
+    }));
+
+  const otherPayload = (role: MopSignatureRole, people: LooseDict[]) => people
+    .filter((person) => mopPersonHasUsableSignature(person))
+    .map((person) => {
+      const source = String(person.source || "") === "external" ? "external" : "temporary";
+      return {
+        source,
+        role,
+        label: roleLabel(role),
+        temp_id: source === "temporary" ? person.temp_id : "",
+        record_id: person.record_id || "",
+      };
+    });
+
+  return [
+    ...staffPayload("implementer", input.formalImplementers),
+    ...staffPayload("auditor", input.formalAuditors),
+    ...otherPayload("implementer", input.otherImplementers),
+    ...otherPayload("auditor", input.otherAuditors),
+  ];
 }

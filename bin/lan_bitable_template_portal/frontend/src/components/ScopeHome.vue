@@ -1,45 +1,15 @@
 <template>
   <section class="home-shell">
-    <div v-if="!activeMode" class="home-metrics">
-      <article>
-        <span class="metric-icon grid" aria-hidden="true"></span>
-        <div>
-          <strong>业务模块</strong>
-          <p>统一业务导航</p>
-        </div>
-        <b>已开放 {{ enabledModuleCount }} / {{ moduleCards.length }}</b>
-      </article>
-      <article>
-        <span class="metric-icon work" aria-hidden="true"></span>
-        <div>
-          <strong>工作台</strong>
-          <p>通告集中处理</p>
-        </div>
-        <b>统一待办</b>
-      </article>
-      <article>
-        <span class="metric-icon link" aria-hidden="true"></span>
-        <div>
-          <strong>审核中心</strong>
-          <p>交接班审核页</p>
-        </div>
-        <b>{{ configuredHandoverCount ? "已配置" : "待配置" }}</b>
-      </article>
-      <article>
-        <span class="metric-icon user" aria-hidden="true"></span>
-        <div>
-          <strong>访问权限</strong>
-          <p>按角色展示</p>
-        </div>
-        <b>{{ scopeOptions.length }} 个入口</b>
-      </article>
-    </div>
+    <HomeBroadcastTicker
+      v-if="!activeMode"
+      :items="homeBroadcastItems"
+      :summary="homeBroadcastSummary"
+    />
 
     <div v-if="canRequestMoreScopes" class="permission-more-card">
       <div>
         <span class="section-kicker">权限申请</span>
         <strong>需要访问其他楼栋？</strong>
-        <p>提交申请后，管理员会在门户审批，通过后自动追加楼栋权限。</p>
       </div>
       <button class="secondary" @click="$emit('request-permission')">申请其他楼权限</button>
     </div>
@@ -48,7 +18,6 @@
       <div class="module-heading">
         <div>
           <h2>业务工作台</h2>
-          <p>按事件、维护、变更、演练、容量、风险和其他业务域统一进入</p>
         </div>
         <span>已开放 {{ enabledModuleCount }} / 共 {{ moduleCards.length }} 个模块</span>
       </div>
@@ -60,7 +29,7 @@
           class="module-card"
           :class="[module.tone, module.size || 'compact', { disabled: module.disabled }]"
           :aria-disabled="module.disabled ? 'true' : 'false'"
-          :title="module.disabled ? '该模块建设中，当前无需操作' : ''"
+          :title="module.disabled ? '暂未开放' : ''"
         >
           <div class="module-card__head">
             <span class="module-icon" :class="module.icon" aria-hidden="true"></span>
@@ -68,8 +37,7 @@
           </div>
           <div class="module-card__body">
             <strong>{{ module.title }}</strong>
-            <p>{{ module.description }}</p>
-            <span v-if="module.disabled" class="module-disabled-note">暂未开放，不影响当前工作</span>
+            <span v-if="module.disabled" class="module-disabled-note">暂未开放</span>
             <div class="module-tags">
               <span v-for="tag in module.tags" :key="tag">{{ tag }}</span>
             </div>
@@ -81,7 +49,7 @@
               type="button"
               :class="action.primary ? 'primary' : 'secondary'"
               :disabled="module.disabled || action.disabled"
-              :title="module.disabled || action.disabled ? '该模块建设中，当前无需操作' : ''"
+              :title="module.disabled || action.disabled ? '暂未开放' : ''"
               @click.stop="selectModuleAction(action, module.disabled)"
             >
               {{ action.label }}
@@ -92,16 +60,31 @@
       </div>
     </template>
 
-    <section v-else class="feature-section">
-      <header class="feature-section__head">
-        <div>
+    <section v-else class="feature-section" :class="{ 'scope-selection': activeMode !== 'tools' }">
+      <div class="page-back-row">
+        <VnetBackButton @click="returnFromFeature" />
+      </div>
+      <header class="feature-section__head" :class="{ 'scope-section-head': activeMode !== 'tools' }">
+        <div class="feature-title-block">
           <span class="section-kicker">{{ activeConfig.kicker }}</span>
           <h2>{{ activeConfig.title }}</h2>
-          <p>{{ activeConfig.description }}</p>
         </div>
-        <div class="feature-section__actions">
-          <button v-if="isToolScopeMode" class="secondary" @click="activeMode = 'tools'">返回其他工具</button>
-          <button class="secondary" @click="activeMode = ''">返回功能选择</button>
+        <div v-if="activeMode !== 'tools'" class="scope-summary-strip" aria-label="当前模块楼栋统计">
+          <article>
+            <span class="summary-icon pending" aria-hidden="true"></span>
+            <small>总待发起</small>
+            <strong>{{ activeAggregate.pending }}</strong>
+          </article>
+          <article>
+            <span class="summary-icon ongoing" aria-hidden="true"></span>
+            <small>进行中</small>
+            <strong>{{ activeAggregate.ongoing }}</strong>
+          </article>
+          <article>
+            <span class="summary-icon coverage" aria-hidden="true"></span>
+            <small>覆盖对象</small>
+            <strong>{{ displayScopeOptions.length }}</strong>
+          </article>
         </div>
       </header>
 
@@ -118,21 +101,25 @@
           <span class="tool-icon" :class="tool.icon" aria-hidden="true"></span>
           <span>
             <strong>{{ tool.title }}</strong>
-            <small>{{ tool.description }}</small>
           </span>
           <b>{{ tool.badge }}</b>
         </button>
       </div>
 
-      <div v-else class="scope-grid">
+      <div v-else class="scope-grid scope-overview-grid">
         <article
-          v-for="scope in scopeOptions"
+          v-for="scope in displayScopeOptions"
           :key="scope.value"
           class="scope-card"
+          :class="scopeCardClass(scope.value)"
         >
-          <div>
-            <strong>{{ scope.label }}</strong>
-            <span>{{ scopeMetricText(scope.value) }}</span>
+          <div class="scope-card__main">
+            <span class="scope-building-icon" :class="scopeIconClass(scope.value)" aria-hidden="true"></span>
+            <strong>{{ scopeDisplayLabel(scope) }}</strong>
+          </div>
+          <div class="scope-badges">
+            <span>{{ scopePrimaryMetricLabel(scope.value) }} {{ scopeCounts(scope.value).pending }}</span>
+            <span>{{ scopeSecondaryMetricLabel(scope.value) }} {{ scopeCounts(scope.value).ongoing }}</span>
           </div>
           <div class="scope-actions">
             <button
@@ -169,7 +156,7 @@
               v-else-if="activeMode === 'handover'"
               class="secondary"
               disabled
-              title="该楼栋暂未配置交接班审核页链接"
+              title="未配置"
             >
               未配置
             </button>
@@ -181,6 +168,7 @@
               {{ activeConfig.actionLabel }}
             </button>
           </div>
+          <span class="scope-building-art" aria-hidden="true"></span>
         </article>
       </div>
     </section>
@@ -189,10 +177,29 @@
 
 <script setup lang="ts">
 import { computed, ref } from "vue";
+import {
+  SCOPE_HOME_ENTRY_CONFIGS as entryConfigs,
+  SCOPE_HOME_MODULE_CARDS as moduleCards,
+  SCOPE_HOME_TOOL_ENTRIES as toolEntries,
+  normalizeScopeValue,
+  scopeCardClass,
+  scopeDisplayLabel,
+  scopeIconClass,
+  scopeSortIndex,
+  typedScopeCounts as resolveTypedScopeCounts,
+  type ScopeHomeEntryKey as EntryKey,
+  type ScopeHomeModuleAction as ModuleAction,
+} from "../scopeHomeUtils";
+import HomeBroadcastTicker from "./HomeBroadcastTicker.vue";
+import VnetBackButton from "./VnetBackButton.vue";
 
 type Dict = Record<string, any>;
-type EntryKey = "" | "event" | "maintenance" | "maintenance_mop" | "change" | "repair_management" | "repair" | "tools" | "power" | "polling" | "adjust" | "handover";
-type ModuleAction = { key: EntryKey; label: string; primary?: boolean; disabled?: boolean };
+type HomeBroadcastItem = {
+  key: string;
+  label: string;
+  text: string;
+  tone: "ongoing" | "pending" | "event" | "quiet";
+};
 
 const props = defineProps<{
   scopeOptions: Array<{ value: string; label: string }>;
@@ -211,218 +218,160 @@ const emit = defineEmits<{
 
 const activeMode = ref<EntryKey>("");
 
-const moduleCards: Array<{
-  key: string;
-  tone: string;
-  icon: string;
-  badge: string;
-  title: string;
-  description: string;
-  tags: string[];
-  size?: "main" | "compact";
-  disabled?: boolean;
-  actions: ModuleAction[];
-}> = [
-  {
-    key: "event",
-    tone: "orange",
-    icon: "event",
-    badge: "全流程",
-    title: "事件管理",
-    description: "覆盖事件发现、分级响应、处置升级与复盘归档",
-    tags: ["事件上报", "处置跟踪", "复盘归档"],
-    size: "main",
-    actions: [{ key: "event", label: "进入事件管理", primary: true }],
-  },
-  {
-    key: "maintenance",
-    tone: "blue",
-    icon: "wrench",
-    badge: "核心模块",
-    title: "维护管理",
-    description: "统一管理维保计划、MOP 执行、签名与维护单归档",
-    tags: ["维保计划", "MOP 执行", "工单归档"],
-    size: "main",
-    actions: [
-      { key: "maintenance", label: "进入维护管理", primary: true },
-      { key: "maintenance_mop", label: "维护单管理" },
-    ],
-  },
-  {
-    key: "change",
-    tone: "violet",
-    icon: "switch",
-    badge: "流程审批",
-    title: "变更管理",
-    description: "进入变更通告，处理风险评估、实施更新与回退确认",
-    tags: ["变更申请", "风险评估", "回退确认"],
-    size: "main",
-    actions: [{ key: "change", label: "进入变更管理", primary: true }],
-  },
-  {
-    key: "repair_management",
-    tone: "blue",
-    icon: "repair",
-    badge: "检修单",
-    title: "检修管理",
-    description: "查看检修源表全部内容，支持新增、修改、删除检修记录",
-    tags: ["检修单", "增删改", "转检修"],
-    actions: [{ key: "repair_management", label: "进入检修管理", primary: true }],
-  },
-  {
-    key: "drill",
-    tone: "cyan",
-    icon: "drill",
-    badge: "计划管理",
-    title: "演练管理",
-    description: "沉淀演练计划、场景脚本和评估改进",
-    tags: ["演练计划", "场景脚本", "评估改进"],
-    disabled: true,
-    actions: [{ key: "", label: "建设中", disabled: true }],
-  },
-  {
-    key: "capacity",
-    tone: "emerald",
-    icon: "capacity",
-    badge: "数据洞察",
-    title: "容量管理",
-    description: "管理电力、制冷、空间及端口容量",
-    tags: ["容量台账", "趋势预测", "阈值预警"],
-    disabled: true,
-    actions: [{ key: "", label: "建设中", disabled: true }],
-  },
-  {
-    key: "risk",
-    tone: "rose",
-    icon: "risk",
-    badge: "闭环管理",
-    title: "风险管理",
-    description: "风险识别、分级管控、整改跟踪与闭环验收",
-    tags: ["风险识别", "整改跟踪", "闭环验收"],
-    disabled: true,
-    actions: [{ key: "", label: "建设中", disabled: true }],
-  },
-  {
-    key: "tools",
-    tone: "slate",
-    icon: "more",
-    badge: "辅助入口",
-    title: "其他工具",
-    description: "汇总检修、上/下电、轮巡、调整、交接班等辅助入口",
-    tags: ["检修", "上/下电", "轮巡", "交接班"],
-    actions: [
-      { key: "repair", label: "检修", primary: true },
-      { key: "power", label: "上/下电" },
-      { key: "polling", label: "轮巡" },
-      { key: "adjust", label: "调整" },
-      { key: "handover", label: "交接班" },
-    ],
-  },
-];
-
-const entryConfigs: Record<Exclude<EntryKey, "">, {
-  kicker: string;
-  title: string;
-  description: string;
-  actionLabel: string;
-  workType?: string;
-}> = {
-  event: {
-    kicker: "事件管理",
-    title: "选择楼栋进入事件管理",
-    description: "查看本月事件、筛选状态等级并打开完整详情。",
-    actionLabel: "进入事件管理",
-  },
-  maintenance: {
-    kicker: "维护管理",
-    title: "选择楼栋进入维护管理",
-    description: "进入后自动选中维保通告。",
-    actionLabel: "进入维护管理",
-    workType: "maintenance",
-  },
-  maintenance_mop: {
-    kicker: "维护单管理",
-    title: "选择楼栋进入 MOP 填写",
-    description: "进入后选择维保通告、绑定 MOP 表格、写入签名并上传维护单。",
-    actionLabel: "进入维护单管理",
-  },
-  change: {
-    kicker: "变更管理",
-    title: "选择楼栋进入变更管理",
-    description: "进入后自动选中变更通告。",
-    actionLabel: "进入变更管理",
-    workType: "change",
-  },
-  repair: {
-    kicker: "检修通告",
-    title: "选择楼栋进入检修通告",
-    description: "进入后自动选中检修通告。",
-    actionLabel: "进入检修通告",
-    workType: "repair",
-  },
-  repair_management: {
-    kicker: "检修管理",
-    title: "选择楼栋进入检修管理",
-    description: "进入后显示检修源表全部记录，可新增、修改、删除。",
-    actionLabel: "进入检修管理",
-  },
-  tools: {
-    kicker: "其他工具",
-    title: "选择辅助工具",
-    description: "选择上/下电、轮巡、调整或交接班审核页。",
-    actionLabel: "选择工具",
-  },
-  power: {
-    kicker: "其他工具",
-    title: "选择楼栋进入上/下电通告",
-    description: "进入后可选择上电通告或下电通告。",
-    actionLabel: "进入上/下电通告",
-    workType: "power",
-  },
-  polling: {
-    kicker: "其他工具",
-    title: "选择楼栋进入设备轮巡",
-    description: "进入后自动选中设备轮巡。",
-    actionLabel: "进入设备轮巡",
-    workType: "polling",
-  },
-  adjust: {
-    kicker: "其他工具",
-    title: "选择楼栋进入设备调整",
-    description: "进入后自动选中设备调整。",
-    actionLabel: "进入设备调整",
-    workType: "adjust",
-  },
-  handover: {
-    kicker: "外部链接",
-    title: "选择楼栋打开交接班审核页",
-    description: "按楼栋打开已配置的交接班审核页面。",
-    actionLabel: "打开审核页",
-  },
-};
-
-const toolEntries: Array<{
-  key: EntryKey;
-  title: string;
-  description: string;
-  badge: string;
-  icon: string;
-  tone: string;
-}> = [
-  { key: "repair", title: "检修通告", description: "故障发现、检修过程和闭环确认", badge: "通告", icon: "repair", tone: "blue" },
-  { key: "power", title: "上/下电通告", description: "机柜上电、下电、数量和进度确认", badge: "通告", icon: "power", tone: "blue" },
-  { key: "polling", title: "设备轮巡", description: "设备轮巡切换和影响确认", badge: "通告", icon: "polling", tone: "cyan" },
-  { key: "adjust", title: "设备调整", description: "设备运行模式调整与现场进度", badge: "通告", icon: "adjust", tone: "emerald" },
-  { key: "handover", title: "交接班审核页", description: "按楼栋跳转审核链接", badge: "链接", icon: "link", tone: "slate" },
-];
-
-const configuredHandoverCount = computed(() => {
-  return Object.values(props.handoverLinks || {}).filter((value) => String(value || "").trim()).length;
-});
-
 const enabledModuleCount = computed(() => moduleCards.filter((item) => !item.disabled).length);
 const activeConfig = computed(() => entryConfigs[activeMode.value || "tools"]);
 const isToolScopeMode = computed(() => ["repair", "power", "polling", "adjust", "handover"].includes(activeMode.value));
+const activeMetricWorkType = computed(() => {
+  if (activeMode.value === "maintenance_mop") return "maintenance";
+  if (activeMode.value === "repair_management") return "repair";
+  if (activeMode.value === "event") return "event";
+  if (activeMode.value === "handover") return "handover";
+  return activeConfig.value.workType || "maintenance";
+});
+const displayScopeOptions = computed(() => {
+  return [...props.scopeOptions].sort((left, right) => {
+    const leftIndex = scopeSortIndex(left.value);
+    const rightIndex = scopeSortIndex(right.value);
+    if (leftIndex !== rightIndex) return leftIndex - rightIndex;
+    return String(left.label || left.value).localeCompare(String(right.label || right.value), "zh-CN");
+  });
+});
+const activeAggregate = computed(() => {
+  const allCounts = scopeCounts("ALL");
+  if (allCounts.pending || allCounts.ongoing) return allCounts;
+  return displayScopeOptions.value.reduce(
+    (total, scope) => {
+      const code = normalizeScopeValue(scope.value, "");
+      if (!code || code === "ALL") return total;
+      const current = scopeCounts(code);
+      total.pending += current.pending;
+      total.ongoing += current.ongoing;
+      return total;
+    },
+    { pending: 0, ongoing: 0 },
+  );
+});
+
+const broadcastWorkTypes = [
+  { key: "maintenance", label: "维保" },
+  { key: "change", label: "变更" },
+  { key: "repair", label: "检修" },
+  { key: "power", label: "上/下电" },
+  { key: "polling", label: "轮巡" },
+  { key: "adjust", label: "调整" },
+] as const;
+
+const broadcastScopes = computed(() => {
+  const scopes = new Map<string, { value: string; label: string }>();
+  for (const scope of displayScopeOptions.value) {
+    const code = normalizeScopeValue(scope.value, "");
+    if (!code || code === "ALL") continue;
+    scopes.set(code, { value: code, label: scopeDisplayLabel(scope) });
+  }
+  if (!scopes.size) {
+    for (const rawCode of Object.keys(props.overview || {})) {
+      const code = normalizeScopeValue(rawCode, "");
+      if (!code || code === "ALL") continue;
+      scopes.set(code, { value: code, label: scopeDisplayLabel({ value: code, label: "" }) });
+    }
+  }
+  if (!scopes.size && displayScopeOptions.value.length) {
+    const scope = displayScopeOptions.value[0];
+    const code = normalizeScopeValue(scope.value, "ALL");
+    scopes.set(code, { value: code, label: scopeDisplayLabel(scope) });
+  }
+  return [...scopes.values()].sort((left, right) => {
+    const leftIndex = scopeSortIndex(left.value);
+    const rightIndex = scopeSortIndex(right.value);
+    if (leftIndex !== rightIndex) return leftIndex - rightIndex;
+    return left.label.localeCompare(right.label, "zh-CN");
+  });
+});
+
+const homeBroadcastStats = computed(() => {
+  let ongoing = 0;
+  let pending = 0;
+  let events = 0;
+  const ongoingItems: HomeBroadcastItem[] = [];
+  const fallbackItems: HomeBroadcastItem[] = [];
+
+  for (const scope of broadcastScopes.value) {
+    let scopeOngoing = 0;
+    let scopePending = 0;
+    const scopeOngoingItems: HomeBroadcastItem[] = [];
+    const scopePendingParts: string[] = [];
+
+    for (const workType of broadcastWorkTypes) {
+      const counts = typedScopeCounts(scope.value, workType.key);
+      if (counts.ongoing > 0) {
+        scopeOngoing += counts.ongoing;
+        scopeOngoingItems.push({
+          key: `ongoing-${scope.value}-${workType.key}`,
+          label: "进行中",
+          text: `${scope.label} · ${workType.label} ${counts.ongoing} 条`,
+          tone: "ongoing",
+        });
+      }
+      if (counts.pending > 0) {
+        scopePending += counts.pending;
+        scopePendingParts.push(`${workType.label}${counts.pending}`);
+      }
+    }
+
+    ongoing += scopeOngoing;
+    pending += scopePending;
+    ongoingItems.push(...scopeOngoingItems);
+
+    const eventCounts = eventScopeCounts(scope.value);
+    const eventTotal = eventCounts.total;
+    const eventProcessing = eventCounts.processing;
+    events += eventTotal;
+
+    if (scopePending > 0) {
+      fallbackItems.push({
+        key: `pending-${scope.value}`,
+        label: "待发起",
+        text: `${scope.label} · ${scopePendingParts.join("、")}，共 ${scopePending} 条`,
+        tone: "pending",
+      });
+    }
+    if (eventTotal > 0) {
+      fallbackItems.push({
+        key: `event-${scope.value}`,
+        label: "事件",
+        text: `${scope.label} · 本月 ${eventTotal} 条，处理中 ${eventProcessing} 条`,
+        tone: "event",
+      });
+    }
+  }
+
+  return {
+    ongoing,
+    pending,
+    events,
+    items: ongoing > 0 ? ongoingItems : fallbackItems,
+  };
+});
+
+const homeBroadcastItems = computed<HomeBroadcastItem[]>(() => {
+  const items = homeBroadcastStats.value.items;
+  if (items.length) return items;
+  return [{
+    key: "quiet",
+    label: "就绪",
+    text: "当前账号暂无进行中、待发起或事件提醒",
+    tone: "quiet",
+  }];
+});
+
+const homeBroadcastSummary = computed(() => {
+  const stats = homeBroadcastStats.value;
+  const scopeCount = broadcastScopes.value.length || displayScopeOptions.value.length;
+  if (stats.ongoing > 0) return `有权限楼栋 ${scopeCount} 个 · 进行中 ${stats.ongoing} 条`;
+  if (stats.pending > 0) return `有权限楼栋 ${scopeCount} 个 · 待发起 ${stats.pending} 条`;
+  if (stats.events > 0) return `有权限楼栋 ${scopeCount} 个 · 事件 ${stats.events} 条`;
+  return `有权限楼栋 ${scopeCount} 个 · 数据就绪`;
+});
 
 function selectEntry(key: EntryKey): void {
   if (!key) return;
@@ -439,12 +388,8 @@ function selectModuleAction(action: ModuleAction, disabled?: boolean): void {
   selectEntry(action.key);
 }
 
-function normalizeScopeValue(value: string, fallback = "ALL"): string {
-  const text = String(value || "").trim().toUpperCase();
-  if (!text) return fallback;
-  if (["ALL", "CAMPUS", "110"].includes(text)) return text;
-  const match = text.match(/[ABCDEH]/);
-  return match ? match[0] : fallback;
+function returnFromFeature(): void {
+  activeMode.value = isToolScopeMode.value ? "tools" : "";
 }
 
 function enterNoticeWorkbench(scope: string): void {
@@ -460,24 +405,49 @@ function defaultEventScope(): string {
     || "";
 }
 
-function countText(scope: string, workType: string): string {
-  const item = props.overview[normalizeScopeValue(scope, "ALL")] || {};
-  const pending = Number(item[`${workType}_pending`] || 0);
-  const ongoing = Number(item[`${workType}_ongoing`] || 0);
-  return `待发起 ${pending} / 进行中 ${ongoing}`;
+function typedScopeCounts(scope: string, workType: string): { pending: number; ongoing: number } {
+  return resolveTypedScopeCounts(props.overview, scope, workType);
 }
 
-function scopeMetricText(scope: string): string {
-  if (activeMode.value === "event") return "本月事件 / 处理中 / 已结束";
-  if (activeMode.value === "repair_management") return "检修记录 / 新增 / 修改";
-  if (activeMode.value === "maintenance") return countText(scope, "maintenance");
-  if (activeMode.value === "change") return countText(scope, "change");
-  if (activeMode.value === "repair") return countText(scope, "repair");
-  if (activeMode.value === "maintenance_mop") return "MOP 填写 / 签名 / 上传";
-  if (activeMode.value === "handover") return props.handoverLinks[scope] ? "审核页已配置" : "暂未配置审核页链接";
-  if (["power", "polling", "adjust"].includes(activeMode.value)) return "进入后显示该类型通告";
-  return "";
+function eventScopeCounts(scope: string): { total: number; processing: number } {
+  const code = normalizeScopeValue(scope, "ALL");
+  const item = props.overview[code] || {};
+  return {
+    total: Number(item.event_total || item.event_pending || item.event_count || 0),
+    processing: Number(item.event_processing || item.event_ongoing || item.event_open || 0),
+  };
 }
+
+function scopeCounts(scope: string): { pending: number; ongoing: number } {
+  const code = normalizeScopeValue(scope, "ALL");
+  const item = props.overview[code] || {};
+  if (activeMetricWorkType.value === "event") {
+    return {
+      pending: Number(item.event_total || item.total || 0),
+      ongoing: Number(item.event_processing || item.processing || 0),
+    };
+  }
+  if (activeMetricWorkType.value === "handover") {
+    return {
+      pending: props.handoverLinks[code] ? 1 : 0,
+      ongoing: 0,
+    };
+  }
+  return typedScopeCounts(code, activeMetricWorkType.value);
+}
+
+function scopePrimaryMetricLabel(scope: string): string {
+  if (activeMetricWorkType.value === "event") return "本月";
+  if (activeMetricWorkType.value === "handover") return props.handoverLinks[normalizeScopeValue(scope, "")] ? "已配置" : "未配置";
+  return "待发起";
+}
+
+function scopeSecondaryMetricLabel(_scope: string): string {
+  if (activeMetricWorkType.value === "event") return "处理中";
+  if (activeMetricWorkType.value === "handover") return "待配置";
+  return "进行中";
+}
+
 </script>
 
 <style scoped>
@@ -487,7 +457,6 @@ function scopeMetricText(scope: string): string {
   gap: 12px;
 }
 
-.home-metrics,
 .module-grid,
 .scope-grid,
 .tool-grid {
@@ -495,11 +464,6 @@ function scopeMetricText(scope: string): string {
   gap: 14px;
 }
 
-.home-metrics {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-}
-
-.home-metrics article,
 .permission-more-card,
 .module-card,
 .feature-section,
@@ -510,19 +474,6 @@ function scopeMetricText(scope: string): string {
   box-shadow: 0 18px 42px rgba(15, 73, 153, 0.12);
 }
 
-.home-metrics article {
-  position: relative;
-  overflow: hidden;
-  min-height: 76px;
-  display: grid;
-  grid-template-columns: 46px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 12px;
-  padding: 12px 16px;
-  border-radius: 17px;
-}
-
-.home-metrics article::after,
 .module-card::after,
 .scope-card::after {
   content: "";
@@ -539,7 +490,6 @@ function scopeMetricText(scope: string): string {
   transform: rotate(-14deg);
 }
 
-.home-metrics strong,
 .module-card strong,
 .scope-card strong,
 .tool-card strong {
@@ -547,7 +497,6 @@ function scopeMetricText(scope: string): string {
   font-weight: 900;
 }
 
-.home-metrics p,
 .module-card p,
 .feature-section__head p,
 .scope-card span,
@@ -559,20 +508,6 @@ function scopeMetricText(scope: string): string {
   line-height: 1.7;
 }
 
-.home-metrics p {
-  margin-top: 2px;
-  font-size: 12px;
-}
-
-.home-metrics b {
-  position: relative;
-  z-index: 1;
-  color: #075bd8;
-  font-size: 15px;
-  white-space: nowrap;
-}
-
-.metric-icon,
 .module-icon,
 .tool-icon {
   display: inline-grid;
@@ -582,25 +517,6 @@ function scopeMetricText(scope: string): string {
   box-shadow: 0 14px 24px rgba(21, 92, 214, 0.22);
 }
 
-.metric-icon {
-  width: 46px;
-  height: 46px;
-  background: linear-gradient(135deg, #2a77ff, #004fc4);
-}
-
-.metric-icon.work {
-  background: linear-gradient(135deg, #20c4d2, #0b8fd0);
-}
-
-.metric-icon.link {
-  background: linear-gradient(135deg, #4e9cff, #1d5bd7);
-}
-
-.metric-icon.user {
-  background: linear-gradient(135deg, #2ecb87, #0a9a5b);
-}
-
-.metric-icon::before,
 .module-icon::before,
 .tool-icon::before {
   content: "";
@@ -610,32 +526,17 @@ function scopeMetricText(scope: string): string {
   border-radius: 7px;
 }
 
-.metric-icon.grid::before {
-  box-shadow: inset 10px 0 0 transparent;
-  background:
-    linear-gradient(currentColor, currentColor) 50% 0 / 3px 100% no-repeat,
-    linear-gradient(currentColor, currentColor) 0 50% / 100% 3px no-repeat;
-}
-
-.metric-icon.work::before,
 .module-icon.wrench::before {
   width: 25px;
   height: 16px;
   border-radius: 5px;
 }
 
-.metric-icon.link::before,
 .tool-icon.link::before {
   width: 28px;
   height: 14px;
   border-radius: 999px;
   transform: rotate(-35deg);
-}
-
-.metric-icon.user::before {
-  width: 22px;
-  height: 22px;
-  border-radius: 50% 50% 45% 45%;
 }
 
 .permission-more-card {
@@ -964,11 +865,55 @@ function scopeMetricText(scope: string): string {
   gap: 22px;
 }
 
+.feature-section.scope-selection {
+  position: relative;
+  overflow: hidden;
+  padding: 30px;
+  border-radius: 30px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(249, 252, 255, 0.94)),
+    radial-gradient(circle at 84% 8%, rgba(66, 153, 255, 0.14), transparent 32%);
+  box-shadow:
+    0 26px 68px rgba(18, 73, 140, 0.13),
+    inset 0 1px 0 rgba(255, 255, 255, 0.86);
+}
+
 .feature-section__head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 18px;
+}
+
+.feature-section__head.scope-section-head {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.92fr) minmax(420px, 1.35fr);
+  align-items: center;
+  gap: 22px;
+}
+
+.page-back-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+}
+
+.page-back-btn {
+  min-height: 36px;
+  padding: 0 13px;
+  border-radius: 999px;
+  box-shadow: 0 8px 20px rgba(22, 78, 151, 0.08);
+}
+
+.page-back-btn span {
+  margin-top: 0 !important;
+  font-size: 19px;
+  line-height: 1;
+}
+
+.feature-title-block {
+  min-width: 0;
 }
 
 .feature-section__head h2 {
@@ -978,11 +923,111 @@ function scopeMetricText(scope: string): string {
   font-weight: 950;
 }
 
+.scope-section-head h2 {
+  font-size: 28px;
+  line-height: 1.12;
+}
+
+.scope-summary-strip {
+  min-height: 86px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid #e1ebf8;
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow:
+    0 16px 34px rgba(28, 84, 161, 0.09),
+    inset 0 1px 0 rgba(255, 255, 255, 0.78);
+}
+
+.scope-summary-strip article {
+  min-width: 0;
+  height: 100%;
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  align-content: center;
+  column-gap: 12px;
+  row-gap: 3px;
+  padding: 16px 20px;
+  border-left: 1px solid #e6eef8;
+}
+
+.scope-summary-strip article:first-child {
+  border-left: 0;
+}
+
+.scope-summary-strip small {
+  color: #73839c;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.scope-summary-strip strong {
+  color: #075bd8;
+  font-size: 27px;
+  line-height: 1;
+  font-weight: 950;
+}
+
+.summary-icon {
+  grid-row: 1 / span 2;
+  width: 44px;
+  height: 44px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 15px;
+  background: linear-gradient(135deg, #2a77ff, #0055d8);
+  box-shadow: 0 12px 24px rgba(31, 101, 255, 0.18);
+}
+
+.summary-icon::before {
+  content: "";
+  width: 19px;
+  height: 23px;
+  border: 3px solid #ffffff;
+  border-radius: 5px;
+}
+
+.summary-icon.ongoing {
+  background: linear-gradient(135deg, #2bd4be, #0a9c86);
+}
+
+.summary-icon.ongoing::before {
+  width: 21px;
+  height: 21px;
+  border-radius: 50%;
+  background: linear-gradient(#ffffff, #ffffff) 50% 28% / 3px 9px no-repeat;
+}
+
+.summary-icon.coverage {
+  background: linear-gradient(135deg, #a46cff, #6b4be8);
+}
+
+.summary-icon.coverage::before {
+  width: 22px;
+  height: 17px;
+  border-radius: 999px 999px 7px 7px;
+}
+
 .feature-section__actions {
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 10px;
+}
+
+.feature-section__actions .back-button {
+  min-width: 154px;
+  border-radius: 14px;
+}
+
+.feature-section__actions .back-button span {
+  margin-top: 0;
+  font-size: 20px;
+  line-height: 1;
 }
 
 .section-kicker {
@@ -1000,21 +1045,39 @@ function scopeMetricText(scope: string): string {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.scope-overview-grid {
+  gap: 18px 20px;
+}
+
 .scope-card {
   position: relative;
   overflow: hidden;
-  min-height: 148px;
+  min-height: 168px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  gap: 18px;
-  padding: 22px;
+  gap: 13px;
+  padding: 22px 24px;
   border-radius: 20px;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.98), rgba(247, 251, 255, 0.94)),
+    radial-gradient(circle at 92% 14%, rgba(28, 108, 255, 0.12), transparent 31%);
+  isolation: isolate;
+}
+
+.scope-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto auto 0;
+  width: 100%;
+  height: 4px;
+  background: linear-gradient(90deg, #2c7cff, #0bc2d6);
 }
 
 .scope-card strong {
   display: block;
-  font-size: 21px;
+  font-size: 23px;
+  line-height: 1.12;
 }
 
 .scope-card span {
@@ -1023,9 +1086,136 @@ function scopeMetricText(scope: string): string {
   font-size: 13px;
 }
 
+.scope-card__main {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.scope-building-icon {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  margin-top: 0 !important;
+  border-radius: 11px;
+  background: #eaf4ff;
+  color: #1e72df;
+  box-shadow: inset 0 0 0 1px rgba(80, 139, 222, 0.12);
+}
+
+.scope-building-icon::before {
+  content: "";
+  display: block;
+  width: 18px;
+  height: 22px;
+  margin: 6px auto;
+  border: 2px solid currentColor;
+  border-radius: 3px;
+  background:
+    linear-gradient(currentColor, currentColor) 5px 4px / 3px 3px no-repeat,
+    linear-gradient(currentColor, currentColor) 11px 4px / 3px 3px no-repeat,
+    linear-gradient(currentColor, currentColor) 5px 10px / 3px 3px no-repeat,
+    linear-gradient(currentColor, currentColor) 11px 10px / 3px 3px no-repeat;
+}
+
+.scope-building-icon.all::before {
+  width: 22px;
+  height: 18px;
+  margin-top: 8px;
+  border: 0;
+  border-radius: 3px;
+  background:
+    linear-gradient(currentColor, currentColor) 50% 0 / 22px 4px no-repeat,
+    linear-gradient(currentColor, currentColor) 50% 7px / 22px 4px no-repeat,
+    linear-gradient(currentColor, currentColor) 50% 14px / 22px 4px no-repeat;
+}
+
+.scope-building-icon.campus::before {
+  border-radius: 50%;
+}
+
+.scope-badges {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.scope-badges span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  margin-top: 0;
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: #eef5ff;
+  color: #1763d7;
+  font-size: 12px;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.scope-badges span + span {
+  background: #e9fbf7;
+  color: #087c67;
+}
+
+.scope-hint {
+  position: relative;
+  z-index: 1;
+  min-height: 18px;
+  margin: -2px 0 0;
+  color: #6d7f98;
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .scope-actions {
   position: relative;
   z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 6px;
+}
+
+.scope-actions .primary,
+.scope-actions .secondary {
+  min-height: 38px;
+  border-radius: 999px;
+  padding-inline: 16px;
+}
+
+.scope-building-art {
+  position: absolute;
+  right: 14px;
+  bottom: 10px;
+  z-index: 0;
+  width: 118px;
+  height: 74px;
+  margin-top: 0 !important;
+  opacity: 0.22;
+  pointer-events: none;
+  background:
+    linear-gradient(180deg, rgba(38, 122, 230, 0.1), rgba(38, 122, 230, 0.26)),
+    linear-gradient(90deg, transparent 0 17%, rgba(22, 101, 216, 0.32) 17% 19%, transparent 19% 38%, rgba(22, 101, 216, 0.32) 38% 40%, transparent 40% 59%, rgba(22, 101, 216, 0.32) 59% 61%, transparent 61%),
+    repeating-linear-gradient(0deg, transparent 0 12px, rgba(22, 101, 216, 0.28) 12px 14px);
+  clip-path: polygon(16% 28%, 43% 10%, 68% 28%, 68% 100%, 16% 100%);
+}
+
+.scope-card.scope-all {
+  border-color: #82b5ef;
+  background:
+    linear-gradient(135deg, rgba(247, 252, 255, 0.98), rgba(235, 246, 255, 0.95)),
+    radial-gradient(circle at 88% 16%, rgba(32, 113, 225, 0.18), transparent 34%);
+}
+
+.scope-card.scope-all .scope-building-icon {
+  color: #1763d7;
+  background: #e4f0ff;
 }
 
 .tool-grid {
@@ -1160,10 +1350,6 @@ a.secondary {
 }
 
 @media (max-width: 1280px) {
-  .home-metrics {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
   .module-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1176,6 +1362,18 @@ a.secondary {
   .scope-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .feature-section__head.scope-section-head {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .scope-summary-strip {
+    width: 100%;
+  }
+
+  .feature-section__actions {
+    justify-content: flex-start;
+  }
 }
 
 @media (max-width: 760px) {
@@ -1183,19 +1381,16 @@ a.secondary {
     padding: 22px 18px 30px;
   }
 
-  .home-metrics,
   .module-grid,
   .scope-grid,
   .tool-grid {
     grid-template-columns: 1fr;
   }
 
-  .home-metrics article,
   .tool-card {
     grid-template-columns: 54px minmax(0, 1fr);
   }
 
-  .home-metrics b,
   .tool-card b {
     grid-column: 2;
     justify-self: start;
@@ -1206,6 +1401,24 @@ a.secondary {
   .module-heading {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .feature-section.scope-selection {
+    padding: 22px;
+    border-radius: 22px;
+  }
+
+  .scope-summary-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .scope-summary-strip article {
+    border-left: 0;
+    border-top: 1px solid #e6eef8;
+  }
+
+  .scope-summary-strip article:first-child {
+    border-top: 0;
   }
 
   .module-card {

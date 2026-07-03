@@ -1,11 +1,14 @@
 <template>
   <section class="event-page">
+    <div class="page-back-row">
+      <VnetBackButton v-if="showingDetails" @click="returnToOverview" />
+      <VnetBackButton v-else to="/" />
+    </div>
     <div class="event-command-card">
       <div class="event-command-head">
         <div class="event-title-block">
           <span class="section-kicker">事件管理</span>
           <h2>事件态势与楼栋入口</h2>
-          <p>先查看全局事件态势，再按楼栋进入详情处理</p>
         </div>
         <div class="event-command-actions">
           <span class="update-pill">{{ lastRefreshCompactText }}</span>
@@ -16,7 +19,7 @@
           <button class="btn quiet" type="button" :disabled="loading" title="只重新读取当前页面数据" @click="loadEvents()">
             {{ loading ? "刷新中" : "刷新本页" }}
           </button>
-          <button class="btn secondary source-refresh" type="button" :disabled="refreshing" title="读取最新事件数据，失败不会清空当前页面" @click="refreshEvents()">
+          <button class="btn secondary source-refresh" type="button" :disabled="refreshing" title="刷新事件" @click="refreshEvents()">
             {{ refreshing ? "刷新中" : "刷新事件" }}
           </button>
         </div>
@@ -33,132 +36,28 @@
         tone="warning"
         :text="`最近刷新失败，当前仍显示上一次成功数据：${lastFailedError}`"
       />
-      <div v-if="eventActionHint" class="event-inline-hint">{{ eventActionHint }}</div>
-
-      <div class="event-stats">
-        <article v-for="card in statCards" :key="card.key" :class="card.tone">
-          <span class="stat-icon">{{ card.icon }}</span>
-          <div class="stat-main">
-            <small>{{ card.label }}</small>
-            <strong>{{ card.value }}</strong>
-            <em>{{ card.unit }}</em>
-          </div>
-          <span class="stat-badge">{{ card.badge }}</span>
-          <span class="stat-bars" aria-hidden="true">
-            <i v-for="index in 6" :key="index"></i>
-          </span>
-        </article>
-      </div>
+      <EventStatsCards :cards="statCards" />
 
       <div class="event-work-surface" :class="{ detail: showingDetails }">
-        <section v-if="!showingDetails" class="building-panel">
-          <div class="surface-head">
-            <div>
-              <h3>楼栋事件概览</h3>
-              <p>点击有权限楼栋进入事件明细；无权限楼栋仅展示态势数据</p>
-            </div>
-          </div>
-
-          <div v-if="loading" class="event-empty compact">
-            <strong>正在读取事件数据</strong>
-            <p>页面会保留上次筛选状态。</p>
-          </div>
-          <div v-else class="building-grid">
-            <button
-              v-for="card in buildingCards"
-              :key="card.code"
-              class="building-card"
-              :class="[card.tone, { active: activeBuildingCode === card.code, disabled: !card.allowed }]"
-              type="button"
-              :disabled="!card.allowed"
-              :title="card.allowed ? '进入该楼栋事件明细' : '当前账号无该楼栋权限，仅展示态势数据'"
-              @click="openBuilding(card.code)"
-            >
-              <span class="building-card__bar"></span>
-              <div class="building-card__head">
-                <span class="building-icon">▦</span>
-                <strong>{{ card.label }}</strong>
-                <em>{{ card.statusLabel }}</em>
-              </div>
-              <div class="building-card__numbers">
-                <span><b>{{ card.total }}</b><small>本月</small></span>
-                <span><b>{{ card.processing }}</b><small>处理中</small></span>
-                <span><b>{{ card.pending }}</b><small>挂起</small></span>
-                <span><b>{{ card.ended }}</b><small>已闭环</small></span>
-              </div>
-              <div class="building-card__action">{{ card.allowed ? "进入管理 ›" : "仅可查看态势" }}</div>
-            </button>
-          </div>
-        </section>
-
-        <aside v-if="showingDetails" class="priority-panel">
-          <div class="surface-head tight">
-            <div>
-              <h3>{{ detailScopeLabel }}重点与挂起事件</h3>
-              <p>优先处理影响范围较大的事项</p>
-            </div>
-            <button class="btn quiet" type="button" @click="returnToOverview">
-              返回态势
-            </button>
-          </div>
-          <div class="priority-tabs">
-            <span>重点 {{ highPriorityEvents.length }}</span>
-            <span>挂起 {{ pendingEventsCount }}</span>
-            <span>全部事件 {{ events.length }}</span>
-          </div>
-          <div v-if="priorityEvents.length" class="priority-list">
-            <button
-              v-for="item in priorityEvents"
-              :key="eventKey(item)"
-              type="button"
-              class="priority-row"
-              @click="selectedEvent = item"
-            >
-              <span class="priority-level" :class="levelTone(item.level)">{{ item.level || "P2" }}</span>
-              <div>
-                <small>{{ item.building || scopeLabel }} · {{ item.occurrence_time || "未填写时间" }}</small>
-                <strong>{{ item.title || item.alarm_desc || "未命名事件" }}</strong>
-              </div>
-              <em :class="statusTone(item.status)">{{ item.status || "未知" }}</em>
-            </button>
-          </div>
-          <div v-else class="event-empty compact">
-            <strong>暂无重点或挂起事件</strong>
-            <p>当前筛选范围内没有需要优先处理的事件。</p>
-          </div>
-          <div class="priority-note">
-            {{ priorityNote }}
-          </div>
-        </aside>
-        <aside v-else class="priority-panel overview-panel">
-          <div class="surface-head tight">
-            <div>
-              <h3>态势查看方式</h3>
-              <p>当前页面只展示全局态势，楼栋明细需点击楼栋卡片进入</p>
-            </div>
-          </div>
-          <div class="overview-guide-grid">
-            <span>
-              <small>可查看楼栋</small>
-              <strong>{{ allowedBuildingCodes.size }}</strong>
-            </span>
-            <span>
-              <small>本月事件</small>
-              <strong>{{ Number(overviewStats.total || 0) }}</strong>
-            </span>
-            <span>
-              <small>挂起</small>
-              <strong>{{ Number(overviewStats.pending || 0) }}</strong>
-            </span>
-            <span>
-              <small>重点</small>
-              <strong>{{ Number(overviewStats.high_level || 0) }}</strong>
-            </span>
-          </div>
-          <div class="priority-note">
-            点击楼栋卡片后才会加载该楼栋“事件明细”和“月度事件列表”，避免态势页混入明细内容。
-          </div>
-        </aside>
+        <EventBuildingOverview
+          v-if="!showingDetails"
+          :cards="buildingCards"
+          :active-code="activeBuildingCode"
+          :loading="loading"
+          @select="openBuilding"
+        />
+        <EventPriorityPanel
+          :detail="showingDetails"
+          :detail-scope-label="detailScopeLabel"
+          :scope-label="scopeLabel"
+          :priority-events="priorityEvents"
+          :high-priority-count="highPriorityEvents.length"
+          :pending-count="pendingEventsCount"
+          :events-count="events.length"
+          :overview-stats="overviewStats"
+          :allowed-count="allowedBuildingCodes.size"
+          @select="selectedEvent = $event || null"
+        />
       </div>
     </div>
 
@@ -202,15 +101,12 @@
 
       <div v-if="loading" class="event-empty">
         <strong>正在读取事件数据</strong>
-        <p>正在读取当前页面数据，不会影响筛选和查看。</p>
       </div>
       <div v-else-if="!events.length" class="event-empty">
         <strong>本月暂无事件</strong>
-        <p>可切换月份，或点击刷新事件读取最新数据。</p>
       </div>
       <div v-else-if="!filteredEvents.length" class="event-empty">
         <strong>没有符合筛选条件的事件</strong>
-        <p>可清空筛选条件，或调整关键词、状态、等级和专业。</p>
       </div>
       <EventVirtualList
         v-else
@@ -322,9 +218,36 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { requestJson } from "../api/client";
+import {
+  EVENT_BUILDING_SCOPE_CODES as BUILDING_SCOPE_CODES,
+  EVENT_BUILDING_ORDER as BUILDING_ORDER,
+  type EventBuildingCard as BuildingCard,
+  buildEventBuildingCardFromStats as buildBuildingCardFromStats,
+  eventBuildingCodesForItem as buildingCodesForItem,
+  eventBuildingSortIndex as buildingSortIndex,
+  eventLevelTone as levelTone,
+  eventMatchesBuilding,
+  eventPriorityScore as priorityScore,
+  eventRecordId,
+  eventRepairFlowHint,
+  eventRepairFlowLabel,
+  eventScopeText as scopeText,
+  eventStatusTone as statusTone,
+  eventTransferEnabled,
+  formatEventEpoch as formatEpoch,
+  isHighLevelEvent as isHighLevel,
+  isTechnicalEventDisplayField as isTechnicalDisplayField,
+  normalizeEventScope as normalizeScope,
+  uniqueEventOptions as uniqueOptions,
+} from "../eventManagementUtils";
+import { navigate } from "../navigation";
 import type { LooseDict, ScopeOption } from "../types";
+import EventBuildingOverview from "./EventBuildingOverview.vue";
+import EventPriorityPanel from "./EventPriorityPanel.vue";
+import EventStatsCards from "./EventStatsCards.vue";
 import EventVirtualList from "./EventVirtualList.vue";
 import MessageBanner from "./MessageBanner.vue";
+import VnetBackButton from "./VnetBackButton.vue";
 
 const props = defineProps<{
   scope: string;
@@ -336,24 +259,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   refreshing: [value: boolean];
   status: [value: string];
-  "switch-scope": [scope: string];
+  "switch-scope": [scope: string, detail?: boolean];
 }>();
-
-type BuildingCard = {
-  code: string;
-  label: string;
-  total: number;
-  processing: number;
-  pending: number;
-  ended: number;
-  high: number;
-  tone: string;
-  statusLabel: string;
-  allowed: boolean;
-};
-
-const BUILDING_SCOPE_CODES = ["110", "A", "B", "C", "D", "E", "H"];
-const BUILDING_ORDER = ["110", "A", "B", "C", "D", "E", "H", "CAMPUS", "ALL"];
 
 const selectedMonth = ref(new Date().toISOString().slice(0, 7));
 const loading = ref(false);
@@ -373,8 +280,10 @@ const statusFilter = ref("");
 const levelFilter = ref("");
 const sourceFilter = ref("");
 const specialtyFilter = ref("");
-const detailScope = ref("");
-const detailRequested = ref(false);
+const initialDetailRequested = new URLSearchParams(window.location.search).get("detail") === "1";
+const initialDetailScope = initialDetailRequested ? normalizeScope(props.scope) : "";
+const detailScope = ref(initialDetailScope);
+const detailRequested = ref(initialDetailRequested);
 const selectedEvent = ref<LooseDict | null>(null);
 const selectedEventDetailTab = ref<"summary" | "timeline" | "fields">("summary");
 const eventTransferBusy = ref(false);
@@ -386,21 +295,6 @@ const scopeLabel = computed(() => {
 const showingDetails = computed(() => Boolean(detailScope.value));
 const detailScopeLabel = computed(() => detailScope.value ? scopeText(detailScope.value) : "");
 const activeBuildingCode = computed(() => detailScope.value || "");
-
-const statusLine = computed(() => {
-  if (refreshing.value) return "正在读取最新事件数据，失败不会清空当前页面。";
-  if (loading.value) return "正在读取当前页面数据。";
-  if (!showingDetails.value) return `显示 ${selectedMonth.value} 全局事件态势。`;
-  if (!events.value.length) return "当前月份没有可展示事件。";
-  return `显示 ${selectedMonth.value} 的事件数据。`;
-});
-const eventActionHint = computed(() => {
-  if (refreshing.value) return "正在刷新事件；失败时仍保留上次成功数据。";
-  if (loading.value) return "正在刷新本页；请稍候。";
-  if (configMissing.value) return "事件表未配置，刷新前需先在 Qt 设置中补齐。";
-  if (lastFailedError.value) return "最近刷新失败，当前显示上次成功数据。";
-  return "";
-});
 
 const lastFailedError = computed(() => String(lastFailed.value?.error || "").trim());
 const lastRefreshText = computed(() => {
@@ -482,7 +376,7 @@ const allowedBuildingCodes = computed(() => {
 const buildingCards = computed<BuildingCard[]>(() => {
   if (overviewBuildingStats.value.length) {
     return overviewBuildingStats.value
-      .map((item) => buildBuildingCardFromStats(item))
+      .map((item) => buildBuildingCardFromStats(item, allowedBuildingCodes.value))
       .sort((left, right) => buildingSortIndex(left.code) - buildingSortIndex(right.code));
   }
   const codes = new Set<string>();
@@ -497,13 +391,9 @@ const buildingCards = computed<BuildingCard[]>(() => {
   }
   const current = normalizeScope(props.scope);
   if (current && !["ALL", "CAMPUS"].includes(current)) codes.add(current);
-  const sortedCodes = Array.from(codes).sort((left, right) => {
-    const leftIndex = BUILDING_ORDER.indexOf(left);
-    const rightIndex = BUILDING_ORDER.indexOf(right);
-    return (leftIndex < 0 ? 99 : leftIndex) - (rightIndex < 0 ? 99 : rightIndex);
-  });
+  const sortedCodes = Array.from(codes).sort((left, right) => buildingSortIndex(left) - buildingSortIndex(right));
   return sortedCodes.map((code) => {
-    const rows = events.value.filter((item) => eventMatchesBuilding(item, code));
+    const rows = events.value.filter((item) => eventMatchesBuilding(item, code, props.scope));
     const processing = rows.filter((item) => statusTone(item.status) === "processing").length;
     const pending = rows.filter((item) => statusTone(item.status) === "recovered").length;
     const ended = rows.filter((item) => statusTone(item.status) === "ended").length;
@@ -529,7 +419,7 @@ const filteredEvents = computed(() => {
   if (!showingDetails.value) return [];
   const query = searchText.value.trim().toLowerCase();
   return events.value.filter((item) => {
-    if (buildingFilter.value && !eventMatchesBuilding(item, buildingFilter.value)) return false;
+    if (buildingFilter.value && !eventMatchesBuilding(item, buildingFilter.value, props.scope)) return false;
     if (statusFilter.value && String(item.status || "") !== statusFilter.value) return false;
     if (levelFilter.value && String(item.level || "") !== levelFilter.value) return false;
     if (sourceFilter.value && String(item.source || "") !== sourceFilter.value) return false;
@@ -559,14 +449,6 @@ const priorityEvents = computed(() => {
     })
     .slice(0, 6);
 });
-const priorityNote = computed(() => {
-  if (!showingDetails.value) return "点击楼栋卡片后查看该楼栋的重点与挂起事件。";
-  if (!events.value.length) return "暂无事件数据，可点击刷新事件读取最新快照。";
-  if (pendingEventsCount.value) return `挂起提醒：当前有 ${pendingEventsCount.value} 条事件需要跟进。`;
-  if (highPriorityEvents.value.length) return `重点提醒：当前有 ${highPriorityEvents.value.length} 条高等级事件。`;
-  return "当前范围未发现挂起或高等级事件。";
-});
-
 const statusOptions = computed(() => uniqueOptions(events.value.map((item) => item.status)));
 const levelOptions = computed(() => uniqueOptions(events.value.map((item) => item.level)));
 const sourceOptions = computed(() => uniqueOptions(events.value.map((item) => item.source)));
@@ -619,135 +501,6 @@ const visibleDisplayFields = computed(() => {
     .slice(0, 80);
 });
 
-function isTechnicalDisplayField(key: string): boolean {
-  const text = String(key || "").trim();
-  if (!text) return true;
-  return /(record_id|active_item_id|source_record_id|target_record_id|app_token|table_id|file_token|open_id|openid|session_id|snapshot_id|payload_json)$/i.test(text);
-}
-
-function normalizeScope(value: string): string {
-  const text = String(value || "").trim().toUpperCase();
-  if (text === "CAMPUS" || text === "ALL" || text === "110") return text;
-  const match = text.match(/[ABCDEH]/);
-  return match ? match[0] : text;
-}
-
-function scopeText(value: string): string {
-  if (value === "110") return "110站";
-  if (value === "CAMPUS") return "园区";
-  if (value === "ALL") return "全部";
-  return value ? `${value}楼` : "未选择楼栋";
-}
-
-function uniqueOptions(values: unknown[]): string[] {
-  return Array.from(new Set(values.map((value) => String(value || "").trim()).filter(Boolean))).sort();
-}
-
-function formatEpoch(value: unknown): string {
-  const seconds = Number(value || 0);
-  if (!seconds) return "";
-  const date = new Date(seconds * 1000);
-  if (Number.isNaN(date.getTime())) return "";
-  return date.toLocaleString("zh-CN", { hour12: false });
-}
-
-function statusTone(status: unknown): string {
-  const text = String(status || "");
-  if (text.includes("结束")) return "ended";
-  if (text.includes("恢复") || text.includes("挂起")) return "recovered";
-  return "processing";
-}
-
-function buildingSortIndex(code: string): number {
-  const index = BUILDING_ORDER.indexOf(code);
-  return index < 0 ? 99 : index;
-}
-
-function buildBuildingCardFromStats(item: LooseDict): BuildingCard {
-  const code = normalizeScope(String(item.code || item.scope || ""));
-  const total = Number(item.total || 0);
-  const processing = Number(item.processing || 0);
-  const pending = Number(item.pending || 0);
-  const ended = Number(item.ended || 0);
-  const high = Number(item.high_level || item.high || 0);
-  const tone = high ? "critical" : pending ? "warning" : processing ? "active" : "stable";
-  const statusLabel = high ? `重点 ${high}` : pending ? `挂起 ${pending}` : processing ? "待处理" : "运行平稳";
-  return {
-    code,
-    label: String(item.label || scopeText(code)),
-    total,
-    processing,
-    pending,
-    ended,
-    high,
-    tone,
-    statusLabel,
-    allowed: allowedBuildingCodes.value.has(code),
-  };
-}
-
-function levelTone(level: unknown): string {
-  const text = String(level || "").toUpperCase();
-  if (/(I1|一级|紧急|严重|高)/.test(text)) return "critical";
-  if (/(I2|I3|二级|三级|中)/.test(text)) return "warning";
-  return "normal";
-}
-
-function isHighLevel(item: LooseDict): boolean {
-  return Boolean(item.high_level) || levelTone(item.level) === "critical";
-}
-
-function priorityScore(item: LooseDict): number {
-  let score = 0;
-  if (isHighLevel(item)) score += 100;
-  if (statusTone(item.status) === "recovered") score += 60;
-  if (statusTone(item.status) === "processing") score += 20;
-  return score;
-}
-
-function buildingCodesForItem(item: LooseDict): string[] {
-  const raw = item.building_codes;
-  const codes = Array.isArray(raw)
-    ? raw.map((value) => normalizeScope(String(value || ""))).filter(Boolean)
-    : [];
-  if (codes.length) return Array.from(new Set(codes));
-  const fallback = normalizeScope(String(item.building || ""));
-  return fallback ? [fallback] : [];
-}
-
-function eventMatchesBuilding(item: LooseDict, code: string): boolean {
-  const normalized = normalizeScope(code);
-  if (!normalized) return true;
-  const codes = buildingCodesForItem(item);
-  return codes.includes(normalized) || (!codes.length && normalized === normalizeScope(props.scope));
-}
-
-function eventKey(item: LooseDict | undefined): string {
-  if (!item) return "";
-  return String(item.source_record_id || item.record_id || `${item.title}-${item.occurrence_time}`);
-}
-
-function eventRecordId(item: LooseDict | null | undefined): string {
-  if (!item) return "";
-  return String(item.source_record_id || item.record_id || "").trim();
-}
-
-function eventTransferEnabled(item: LooseDict | null | undefined): boolean {
-  const text = String(item?.transfer_to_overhaul ?? "").trim().toLowerCase();
-  return ["true", "1", "是", "已转", "已转检修", "yes", "y"].includes(text);
-}
-
-function eventRepairFlowLabel(item: LooseDict | null | undefined): string {
-  return eventTransferEnabled(item) ? "已转检修" : "未转检修";
-}
-
-function eventRepairFlowHint(item: LooseDict | null | undefined): string {
-  if (eventTransferEnabled(item)) {
-    return "下一步：填写维修单，再从检修通告页选择记录发起通告。";
-  }
-  return "如需转检修，先标记转检修，再填写维修单。";
-}
-
 function setEventTransferState(recordId: string): void {
   if (!recordId) return;
   if (selectedEvent.value && eventRecordId(selectedEvent.value) === recordId) {
@@ -793,7 +546,7 @@ function openRepairManagementForSelectedEvent(): void {
   if (recordId) url.searchParams.set("from_event_record_id", recordId);
   const title = String(item.title || item.alarm_desc || "").trim();
   if (title) url.searchParams.set("event_title", title);
-  window.location.href = url.toString();
+  navigate(url);
 }
 
 function openBuilding(code: string): void {
@@ -801,10 +554,11 @@ function openBuilding(code: string): void {
   if (!allowedBuildingCodes.value.has(nextScope)) return;
   detailRequested.value = true;
   detailScope.value = nextScope;
+  setEventDetailUrlFlag(true);
   clearFilters();
   selectedEvent.value = null;
   if (nextScope && nextScope !== normalizeScope(props.scope)) {
-    emit("switch-scope", nextScope);
+    emit("switch-scope", nextScope, true);
     return;
   }
   void loadEvents();
@@ -813,11 +567,22 @@ function openBuilding(code: string): void {
 function returnToOverview(): void {
   detailRequested.value = false;
   detailScope.value = "";
+  setEventDetailUrlFlag(false);
   selectedEvent.value = null;
   clearFilters();
   events.value = [];
   stats.value = {};
   void loadEvents();
+}
+
+function setEventDetailUrlFlag(enabled: boolean): void {
+  const url = new URL(window.location.href);
+  if (enabled) {
+    url.searchParams.set("detail", "1");
+  } else {
+    url.searchParams.delete("detail");
+  }
+  window.history.replaceState({}, "", url.toString());
 }
 
 function clearFilters(): void {
@@ -881,7 +646,7 @@ async function refreshEvents(): Promise<void> {
   if (!props.scope) return;
   refreshing.value = true;
   emit("refreshing", true);
-  emit("status", "正在读取最新事件数据，失败不会清空当前页面。");
+  emit("status", "正在刷新事件。");
   errorText.value = "";
   try {
     const refreshScope = detailScope.value || props.scope;
@@ -902,7 +667,7 @@ async function refreshEvents(): Promise<void> {
     emit("status", "事件已刷新，页面已更新。");
   } catch (error: unknown) {
     errorText.value = error instanceof Error ? error.message : "事件刷新失败。";
-    emit("status", `事件刷新失败，仍显示上次成功数据：${errorText.value}`);
+    emit("status", `事件刷新失败：${errorText.value}`);
     await loadEvents();
   } finally {
     refreshing.value = false;
@@ -959,6 +724,25 @@ onMounted(() => {
   gap: 18px;
 }
 
+.page-back-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+}
+
+.page-back-btn {
+  min-height: 36px;
+  padding: 0 13px;
+  border-radius: 999px;
+}
+
+.page-back-btn span {
+  font-size: 19px;
+  line-height: 1;
+}
+
 .event-command-card,
 .event-list-panel {
   border: 1px solid #d8e5f7;
@@ -976,7 +760,6 @@ onMounted(() => {
 }
 
 .event-command-head,
-.surface-head,
 .event-list-head {
   display: flex;
   align-items: flex-start;
@@ -993,9 +776,7 @@ onMounted(() => {
 }
 
 .event-title-block p,
-.surface-head p,
 .event-empty,
-.priority-note,
 .event-list-head span,
 .timeline small,
 .full-fields dd {
@@ -1051,8 +832,6 @@ onMounted(() => {
 }
 
 .month-picker input,
-.compact-filters input,
-.compact-filters select,
 .event-list-tools input,
 .event-list-tools select {
   min-height: 42px;
@@ -1106,117 +885,6 @@ onMounted(() => {
   opacity: 0.65;
 }
 
-.event-stats {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 28px;
-}
-
-.event-stats article {
-  position: relative;
-  min-height: 112px;
-  overflow: hidden;
-  display: grid;
-  grid-template-columns: 58px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 14px;
-  padding: 20px 22px;
-  border: 1px solid #d8e5f7;
-  border-radius: 22px;
-  background: rgba(255, 255, 255, 0.95);
-  box-shadow: 0 18px 42px rgba(15, 73, 153, 0.11);
-}
-
-.stat-icon {
-  grid-row: span 2;
-  width: 58px;
-  height: 58px;
-  display: grid;
-  place-items: center;
-  border-radius: 18px;
-  background: linear-gradient(135deg, #2a77ff, #0050d9);
-  color: #fff;
-  font-size: 27px;
-  font-weight: 950;
-  box-shadow: 0 16px 24px rgba(21, 92, 214, 0.2);
-}
-
-.event-stats article.amber .stat-icon { background: linear-gradient(135deg, #f59e0b, #fb923c); }
-.event-stats article.rose .stat-icon { background: linear-gradient(135deg, #fb7185, #e11d48); }
-.event-stats article.emerald .stat-icon { background: linear-gradient(135deg, #22c55e, #059669); }
-
-.stat-main {
-  min-width: 0;
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.stat-main small {
-  width: 100%;
-  color: #43536a;
-  font-size: 14px;
-  font-weight: 950;
-}
-
-.stat-main strong {
-  color: #06152f;
-  font-size: 32px;
-  font-weight: 950;
-  line-height: 1;
-}
-
-.stat-main em {
-  color: #6b7f9d;
-  font-style: normal;
-  font-weight: 850;
-}
-
-.stat-badge {
-  align-self: start;
-  max-width: 120px;
-  overflow: hidden;
-  padding: 8px 12px;
-  border-radius: 999px;
-  background: #eff6ff;
-  color: #1d4ed8;
-  font-size: 12px;
-  font-weight: 950;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.event-stats article.amber .stat-badge { background: #fff7ed; color: #c2410c; }
-.event-stats article.rose .stat-badge { background: #fff1f2; color: #be123c; }
-.event-stats article.emerald .stat-badge { background: #ecfdf5; color: #047857; }
-
-.stat-bars {
-  position: absolute;
-  right: 22px;
-  bottom: 15px;
-  display: flex;
-  align-items: end;
-  gap: 6px;
-}
-
-.stat-bars i {
-  width: 8px;
-  border-radius: 999px;
-  background: #1e63ff;
-}
-
-.stat-bars i:nth-child(1) { height: 7px; opacity: 0.55; }
-.stat-bars i:nth-child(2) { height: 13px; opacity: 0.65; }
-.stat-bars i:nth-child(3) { height: 18px; opacity: 0.75; }
-.stat-bars i:nth-child(4) { height: 23px; opacity: 0.84; }
-.stat-bars i:nth-child(5) { height: 29px; opacity: 0.92; }
-.stat-bars i:nth-child(6) { height: 35px; }
-
-.event-stats article.amber .stat-bars i { background: #f59e0b; }
-.event-stats article.rose .stat-bars i { background: #e11d48; }
-.event-stats article.emerald .stat-bars i { background: #059669; }
-
 .event-work-surface {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(360px, 0.36fr);
@@ -1225,323 +893,6 @@ onMounted(() => {
 
 .event-work-surface.detail {
   grid-template-columns: 1fr;
-}
-
-.building-panel,
-.priority-panel {
-  min-width: 0;
-  border: 1px solid rgba(216, 229, 247, 0.92);
-  border-radius: 24px;
-  background: rgba(255, 255, 255, 0.74);
-  padding: 18px;
-}
-
-.surface-head h3 {
-  margin: 0 0 4px;
-  color: #071a39;
-  font-size: 20px;
-  font-weight: 950;
-}
-
-.surface-head p {
-  margin: 0;
-  font-size: 13px;
-  font-weight: 760;
-}
-
-.surface-head.tight {
-  align-items: center;
-}
-
-.surface-head.tight .btn {
-  flex: 0 0 auto;
-}
-
-.compact-filters {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.compact-filters input {
-  width: 210px;
-}
-
-.building-grid {
-  margin-top: 18px;
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 16px;
-}
-
-.building-card {
-  position: relative;
-  min-width: 0;
-  overflow: hidden;
-  display: grid;
-  gap: 14px;
-  padding: 18px 18px 14px;
-  border: 1px solid #d8e5f7;
-  border-radius: 20px;
-  background: rgba(255, 255, 255, 0.96);
-  text-align: left;
-  cursor: pointer;
-  box-shadow: 0 12px 26px rgba(15, 73, 153, 0.08);
-  transition: transform 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
-}
-
-.building-card:hover,
-.building-card.active {
-  transform: translateY(-2px);
-  border-color: #9cc7ff;
-  box-shadow: 0 18px 36px rgba(15, 86, 228, 0.12);
-}
-
-.building-card.disabled {
-  cursor: not-allowed;
-  opacity: 0.72;
-  transform: none;
-}
-
-.building-card.disabled:hover {
-  border-color: #d8e5f7;
-  box-shadow: 0 12px 26px rgba(15, 73, 153, 0.08);
-}
-
-.building-card.disabled .building-card__action {
-  background: #f1f5f9;
-  color: #64748b;
-}
-
-.building-card__bar {
-  position: absolute;
-  inset: 0 0 auto;
-  height: 5px;
-  background: #1e63ff;
-}
-
-.building-card.warning .building-card__bar { background: #f59e0b; }
-.building-card.critical .building-card__bar { background: #e11d48; }
-.building-card.stable .building-card__bar { background: #10b981; }
-
-.building-card__head {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: 38px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 12px;
-}
-
-.building-icon {
-  width: 38px;
-  height: 38px;
-  display: grid;
-  place-items: center;
-  border-radius: 14px;
-  background: #edf5ff;
-  color: #1d4ed8;
-  font-size: 18px;
-  font-weight: 950;
-}
-
-.building-card__head strong {
-  min-width: 0;
-  overflow: hidden;
-  color: #071a39;
-  font-size: 20px;
-  font-weight: 950;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.building-card__head em {
-  padding: 7px 12px;
-  border-radius: 999px;
-  background: #eff6ff;
-  color: #1d4ed8;
-  font-size: 12px;
-  font-style: normal;
-  font-weight: 950;
-  white-space: nowrap;
-}
-
-.building-card.warning .building-card__head em { background: #fff7ed; color: #c2410c; }
-.building-card.critical .building-card__head em { background: #fff1f2; color: #be123c; }
-.building-card.stable .building-card__head em { background: #ecfdf5; color: #047857; }
-
-.building-card__numbers {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.building-card__numbers span {
-  min-width: 0;
-  display: grid;
-  gap: 2px;
-  padding-right: 8px;
-  border-right: 1px solid #e5edf8;
-}
-
-.building-card__numbers span:last-child {
-  border-right: 0;
-}
-
-.building-card__numbers b {
-  color: #1d4ed8;
-  font-size: 17px;
-  font-weight: 950;
-}
-
-.building-card__numbers small {
-  color: #6b7f9d;
-  font-size: 11px;
-  font-weight: 850;
-}
-
-.building-card__action {
-  justify-self: end;
-  min-height: 30px;
-  display: inline-flex;
-  align-items: center;
-  padding: 0 13px;
-  border-radius: 999px;
-  background: #edf5ff;
-  color: #0e5bd8;
-  font-size: 12px;
-  font-weight: 950;
-}
-
-.priority-tabs {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-  margin-top: 16px;
-}
-
-.priority-tabs span {
-  min-width: 0;
-  overflow: hidden;
-  padding: 10px 12px;
-  border-radius: 999px;
-  background: #edf5ff;
-  color: #1d4ed8;
-  font-size: 12px;
-  font-weight: 950;
-  text-align: center;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.priority-tabs span:first-child { background: #fff1f2; color: #be123c; }
-.priority-tabs span:nth-child(2) { background: #fff7ed; color: #c2410c; }
-
-.overview-panel {
-  align-content: start;
-}
-
-.overview-guide-grid {
-  margin-top: 16px;
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.overview-guide-grid span {
-  min-width: 0;
-  display: grid;
-  gap: 5px;
-  padding: 14px;
-  border: 1px solid #d8e5f7;
-  border-radius: 18px;
-  background: rgba(248, 251, 255, 0.92);
-}
-
-.overview-guide-grid small {
-  color: #6b7f9d;
-  font-size: 12px;
-  font-weight: 850;
-}
-
-.overview-guide-grid strong {
-  color: #0e4fb2;
-  font-size: 26px;
-  font-weight: 950;
-  line-height: 1;
-}
-
-.priority-list {
-  margin-top: 12px;
-  display: grid;
-  gap: 8px;
-}
-
-.priority-row {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: 46px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 12px;
-  padding: 11px 0;
-  border: 0;
-  border-bottom: 1px solid #edf2f8;
-  background: transparent;
-  text-align: left;
-  cursor: pointer;
-}
-
-.priority-level {
-  min-width: 42px;
-  min-height: 28px;
-  display: grid;
-  place-items: center;
-  border-radius: 999px;
-  background: #eff6ff;
-  color: #1d4ed8;
-  font-size: 12px;
-  font-weight: 950;
-}
-
-.priority-level.warning { background: #fff7ed; color: #c2410c; }
-.priority-level.critical { background: #fff1f2; color: #be123c; }
-
-.priority-row div {
-  min-width: 0;
-  display: grid;
-  gap: 3px;
-}
-
-.priority-row small,
-.priority-row em {
-  color: #6b7f9d;
-  font-size: 12px;
-  font-style: normal;
-  font-weight: 850;
-}
-
-.priority-row strong {
-  min-width: 0;
-  overflow: hidden;
-  color: #071a39;
-  font-size: 14px;
-  font-weight: 950;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.priority-row em.processing { color: #c2410c; }
-.priority-row em.recovered { color: #1d4ed8; }
-.priority-row em.ended { color: #047857; }
-
-.priority-note {
-  margin-top: 14px;
-  padding: 9px 12px;
-  border-radius: 14px;
-  background: #f1f6ff;
-  font-size: 12px;
-  font-weight: 850;
 }
 
 .event-list-panel {
@@ -1941,22 +1292,14 @@ onMounted(() => {
     padding-inline: 28px;
   }
 
-  .event-stats {
-    gap: 14px;
-  }
-
   .event-work-surface {
     grid-template-columns: minmax(0, 1fr) minmax(330px, 0.36fr);
   }
 
-  .building-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
 }
 
 @media (max-width: 1120px) {
   .event-command-head,
-  .surface-head,
   .event-list-head {
     flex-direction: column;
     align-items: stretch;
@@ -1966,9 +1309,6 @@ onMounted(() => {
     grid-template-columns: 1fr;
   }
 
-  .event-stats {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
 }
 
 @media (max-width: 760px) {
@@ -1982,19 +1322,15 @@ onMounted(() => {
   }
 
   .event-command-actions,
-  .compact-filters,
   .event-list-tools {
     justify-content: stretch;
   }
 
   .event-command-actions > *,
-  .compact-filters > *,
   .event-list-tools > * {
     width: 100%;
   }
 
-  .event-stats,
-  .building-grid,
   .detail-grid {
     grid-template-columns: 1fr;
   }

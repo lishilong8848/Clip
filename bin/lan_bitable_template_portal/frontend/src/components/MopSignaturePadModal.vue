@@ -4,14 +4,13 @@
       <header>
         <div>
           <strong>{{ title || "手写签名" }}</strong>
-          <p>{{ roleLabel }} · 手写后保存</p>
         </div>
         <button type="button" class="btn ghost" :disabled="saving" @click="emit('close')">关闭</button>
       </header>
       <slot />
       <footer>
         <span class="sign-status" :class="{ failed: messageType === 'failed', success: messageType === 'success' }">
-          {{ message || saveDisabledReason || "签好后保存。" }}
+          {{ message || saveDisabledReason || roleLabel }}
         </span>
         <div class="signature-pad-actions">
           <button class="btn ghost" type="button" :disabled="saving" @click="emit('clear')">清空</button>

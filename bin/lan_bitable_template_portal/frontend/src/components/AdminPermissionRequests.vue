@@ -3,7 +3,6 @@
     <div class="section-title">
       <div>
         <strong>权限申请审批</strong>
-        <span>用户提交申请后，管理员在这里集中通过或拒绝</span>
       </div>
       <div class="section-title-stats" aria-label="权限申请数量">
         <b>{{ pendingCount }}</b>
@@ -45,7 +44,7 @@
       <span :class="{ ready: selectedPendingCount > 0 }">
         <b>{{ selectedPendingCount }}</b> 条已选
       </span>
-      <em>{{ selectedPendingCount ? "可直接批量通过或拒绝。" : "勾选待审批申请后可批量处理。" }}</em>
+      <em>{{ selectedPendingCount ? "已勾选" : "未勾选" }}</em>
     </div>
     <label v-if="items.length" class="select-all-line">
       <input
@@ -108,7 +107,6 @@
     </div>
     <div v-else class="empty-review">
       <strong>当前没有符合条件的权限申请</strong>
-      <span>可切换状态筛选，或点击刷新申请重新读取。</span>
     </div>
   </section>
 </template>

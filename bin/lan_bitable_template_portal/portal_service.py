@@ -44,6 +44,12 @@ from .identity_utils import (
     is_local_record_id,
     normalize_notice_identity_payload,
 )
+from .signature_crypto import (
+    SIGNATURE_ENCRYPTED_MAGIC,
+    SignatureCryptoError,
+    SignatureCryptoManager,
+    encrypted_signature_file_name,
+)
 
 
 DEFAULT_APP_TOKEN = "HU38bc1vnamMK9sCeOgclUvXnFc"
@@ -105,6 +111,7 @@ SIGNATURE_VIEW_ID = ""
 SIGNATURE_NAME_FIELD = "姓名"
 SIGNATURE_USER_FIELD = "员工姓名"
 SIGNATURE_ATTACHMENT_FIELD = "手写签名"
+SIGNATURE_KEY_FIELD = "密钥"
 SIGNATURE_INACTIVE_FIELD = "离职/异动情况"
 SIGNATURE_PEOPLE_CACHE_TTL_SECONDS = 5 * 60
 SIGNATURE_LINK_TOKEN_TTL_SECONDS = 60 * 60
@@ -113,6 +120,7 @@ TEMP_SIGNATURE_NAME_FIELD = "员工姓名"
 TEMP_SIGNATURE_EMPLOYEE_NO_FIELD = "员工工号"
 TEMP_SIGNATURE_CERT_FIELD = "持证"
 TEMP_SIGNATURE_ATTACHMENT_FIELD = "手写签名"
+TEMP_SIGNATURE_KEY_FIELD = "密钥"
 TEMP_SIGNATURE_BUILDING_FIELD = "楼栋"
 TEMP_SIGNATURE_SPECIALTY_FIELD = "专业"
 MOP_SIGNED_ATTACHMENT_FIELD = "维护保养单"
@@ -510,16 +518,72 @@ class MaintenancePortalService:
         self._signature_people_cache: dict[str, Any] | None = None
         self._external_signature_people_cache_lock = threading.RLock()
         self._external_signature_people_cache: dict[str, Any] | None = None
+        self._signature_crypto = SignatureCryptoManager()
+        self._signature_crypto_migration_lock = threading.RLock()
+        self._signature_crypto_migration_running = False
+        self._signature_crypto_plain_migrations: set[tuple[str, str]] = set()
         self._attachment_cache_lock = threading.RLock()
         self._attachment_cache_refresh_lock = threading.RLock()
         self._attachment_cache_refresh_running = False
         self._jobs_lock = threading.RLock()
         self._jobs: dict[str, dict[str, Any]] = self._load_action_jobs_from_state()
         self._handover_password_reset: dict[str, Any] | None = None
+        self._ensure_signature_crypto_ready()
+
+    def _ensure_signature_crypto_ready(self) -> None:
+        try:
+            fingerprint = self._signature_crypto.master_key_fingerprint()
+            with suppress(Exception):
+                self._state_store.put_settings(
+                    {"signature_master_key_fingerprint": fingerprint}
+                )
+            with suppress(Exception):
+                self._state_store.put_backend_runtime(
+                    "signature_crypto",
+                    {
+                        "status": "ready",
+                        "master_key_exists": True,
+                        "fingerprint": fingerprint,
+                        "master_key_path": str(self._signature_crypto.master_key_path),
+                        "updated_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    },
+                )
+        except Exception as exc:
+            with suppress(Exception):
+                self._state_store.put_backend_runtime(
+                    "signature_crypto",
+                    {
+                        "status": "failed",
+                        "master_key_exists": self._signature_crypto.master_key_exists(),
+                        "error": str(exc),
+                        "updated_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    },
+                )
 
     def state_cache_version(self) -> int:
         with self._state_version_lock:
             return int(self._state_version)
+
+    def signature_crypto_status(self) -> dict[str, Any]:
+        runtime = self._state_store.get_backend_runtime("signature_crypto") or {}
+        summary = self._state_store.signature_crypto_migration_summary()
+        try:
+            fingerprint = self._signature_crypto.master_key_fingerprint()
+            key_status = "ready"
+            error = ""
+        except Exception as exc:
+            fingerprint = str(runtime.get("fingerprint") or "")
+            key_status = "failed"
+            error = str(exc)
+        return {
+            "status": key_status if key_status == "failed" else str(runtime.get("status") or "ready"),
+            "master_key_exists": self._signature_crypto.master_key_exists(),
+            "fingerprint": fingerprint,
+            "master_key_path": str(self._signature_crypto.master_key_path),
+            "migration": summary,
+            "error": error or str(runtime.get("error") or ""),
+            "updated_at": str(runtime.get("updated_at") or ""),
+        }
 
     def _touch_state_cache_version(self) -> None:
         with self._state_version_lock:
@@ -9994,11 +10058,12 @@ class MaintenancePortalService:
             size_text = str(item.get("size") or "").strip()
             if size_text in {"0", "0.0"}:
                 continue
+            encrypted_like = name.endswith(".sigenc")
             image_like = (
                 mime_type.startswith("image/")
                 or name.endswith((".png", ".jpg", ".jpeg", ".webp", ".bmp"))
             )
-            if token and image_like:
+            if token and (image_like or encrypted_like):
                 usable.append(item)
         return usable
 
@@ -10459,6 +10524,405 @@ class MaintenancePortalService:
                 with suppress(Exception):
                     os.remove(temp_file_path)
 
+    def _upload_encrypted_signature_file(self, *, encrypted_bytes: bytes, file_name: str) -> str:
+        token = str(ensure_feishu_token() or config.user_token or "").strip()
+        if not token:
+            raise PortalError("未配置有效的飞书 user_token，无法上传签名。")
+        if not encrypted_bytes:
+            raise PortalError("加密签名文件为空，无法上传。")
+        upload_name = str(file_name or "").strip() or encrypted_signature_file_name("signature")
+        if not upload_name.lower().endswith(".sigenc"):
+            upload_name = f"{upload_name}.sigenc"
+        temp_file_path = ""
+        try:
+            with tempfile.NamedTemporaryFile(
+                delete=False,
+                prefix="clipflow_signature_",
+                suffix=".sigenc",
+            ) as tmp:
+                tmp.write(encrypted_bytes)
+                temp_file_path = tmp.name
+
+            def attempt_upload(upload_token: str) -> Any:
+                with open(temp_file_path, "rb") as file_obj:
+                    client = (
+                        lark.Client.builder()
+                        .enable_set_token(True)
+                        .log_level(lark.LogLevel.ERROR)
+                        .build()
+                    )
+                    request = (
+                        UploadAllMediaRequest.builder()
+                        .request_body(
+                            UploadAllMediaRequestBody.builder()
+                            .file_name(upload_name)
+                            .parent_type("bitable_file")
+                            .parent_node(SIGNATURE_APP_TOKEN)
+                            .size(str(len(encrypted_bytes)))
+                            .file(file_obj)
+                            .build()
+                        )
+                        .build()
+                    )
+                    option = lark.RequestOption.builder().user_access_token(upload_token).build()
+                    return client.drive.v1.media.upload_all(request, option)
+
+            response = attempt_upload(token)
+            if not response.success() and self._lark_response_is_token_error(response):
+                token = str(refresh_feishu_token() or config.user_token or "").strip()
+                response = attempt_upload(token)
+            if not response.success():
+                raise PortalError(
+                    f"签名加密文件上传失败: {response.code} - {response.msg}"
+                )
+            file_token = str(getattr(response.data, "file_token", "") or "").strip()
+            if not file_token:
+                raise PortalError("签名加密文件上传成功但未返回 file_token。")
+            return file_token
+        finally:
+            if temp_file_path:
+                with suppress(Exception):
+                    os.remove(temp_file_path)
+
+    def _save_encrypted_signature_record(
+        self,
+        *,
+        table_id: str,
+        record_id: str,
+        attachment_field: str,
+        key_field: str,
+        signature_bytes: bytes,
+        display_name: str,
+        source: str,
+        open_id: str = "",
+        employee_no: str = "",
+    ) -> tuple[str, dict[str, Any]]:
+        aad = self._signature_crypto.build_aad(
+            app_token=SIGNATURE_APP_TOKEN,
+            table_id=table_id,
+            record_id=record_id,
+            source=source,
+            open_id=open_id,
+            employee_no=employee_no,
+            display_name=display_name,
+        )
+        encrypted_bytes, metadata = self._signature_crypto.encrypt_signature(
+            signature_bytes,
+            aad,
+        )
+        file_token = self._upload_encrypted_signature_file(
+            encrypted_bytes=encrypted_bytes,
+            file_name=encrypted_signature_file_name(display_name),
+        )
+        try:
+            self._patch_record_fields(
+                app_token=SIGNATURE_APP_TOKEN,
+                table_id=table_id,
+                record_id=record_id,
+                fields={
+                    attachment_field: [{"file_token": file_token}],
+                    key_field: self._signature_crypto.metadata_to_text(metadata),
+                },
+            )
+        except PortalError as exc:
+            message = str(exc)
+            if key_field in message or "FieldNameNotFound" in message or "字段" in message:
+                raise PortalError(
+                    f"签名加密字段【{key_field}】不可写或不存在，请在签名多维表中添加文本字段【{key_field}】后重试。"
+                ) from exc
+            raise
+        return file_token, metadata
+
+    def _mark_signature_crypto_migration(
+        self,
+        *,
+        table_id: str,
+        record_id: str,
+        status: str,
+        error: str = "",
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        with suppress(Exception):
+            self._state_store.upsert_signature_crypto_migration(
+                table_id=table_id,
+                record_id=record_id,
+                status=status,
+                error=error,
+                payload=payload or {},
+            )
+
+    def _decode_signature_attachment_bytes(
+        self,
+        *,
+        record_id: str,
+        fields: dict[str, Any],
+        attachment: dict[str, Any],
+        table_id: str,
+        source: str,
+        person: dict[str, Any] | None = None,
+    ) -> bytes:
+        key_field = SIGNATURE_KEY_FIELD if table_id == SIGNATURE_TABLE_ID else TEMP_SIGNATURE_KEY_FIELD
+        metadata = self._signature_crypto.metadata_from_field(fields.get(key_field))
+        signature_sha = str(metadata.get("signature_sha256") or "").strip()
+        if self._signature_crypto.is_encrypted_metadata(metadata) and signature_sha:
+            cached = self._signature_crypto.read_cache(record_id, signature_sha)
+            if cached:
+                return cached
+        content, _content_type = self._download_mop_attachment(attachment)
+        if self._signature_crypto.is_encrypted_bytes(content):
+            try:
+                plain = self._signature_crypto.decrypt_signature(content, metadata)
+            except SignatureCryptoError as exc:
+                self._mark_signature_crypto_migration(
+                    table_id=table_id,
+                    record_id=record_id,
+                    status="failed",
+                    error=str(exc),
+                    payload={"source": source},
+                )
+                raise PortalError(str(exc)) from exc
+            png = self._transparent_signature_png(plain)
+            signature_sha = signature_sha or hashlib.sha256(png).hexdigest()
+            self._signature_crypto.write_cache(record_id, signature_sha, png)
+            self._mark_signature_crypto_migration(
+                table_id=table_id,
+                record_id=record_id,
+                status="encrypted",
+                payload={"source": source},
+            )
+            return png
+
+        png = self._transparent_signature_png(content)
+        self._mark_signature_crypto_migration(
+            table_id=table_id,
+            record_id=record_id,
+            status="pending",
+            payload={"source": source},
+        )
+        self._maybe_migrate_plain_signature_async(
+            table_id=table_id,
+            record_id=record_id,
+            fields=fields,
+            signature_bytes=png,
+            person=person or {},
+            source=source,
+        )
+        return png
+
+    def _maybe_migrate_plain_signature_async(
+        self,
+        *,
+        table_id: str,
+        record_id: str,
+        fields: dict[str, Any],
+        signature_bytes: bytes,
+        person: dict[str, Any],
+        source: str,
+    ) -> None:
+        key_field = SIGNATURE_KEY_FIELD if table_id == SIGNATURE_TABLE_ID else TEMP_SIGNATURE_KEY_FIELD
+        if self._signature_crypto.is_encrypted_metadata(
+            self._signature_crypto.metadata_from_field(fields.get(key_field))
+        ):
+            return
+        migration_key = (str(table_id or ""), str(record_id or ""))
+        with self._signature_crypto_migration_lock:
+            if migration_key in self._signature_crypto_plain_migrations:
+                return
+            self._signature_crypto_plain_migrations.add(migration_key)
+
+        def worker() -> None:
+            try:
+                self._mark_signature_crypto_migration(
+                    table_id=table_id,
+                    record_id=record_id,
+                    status="migrating",
+                    payload={"source": source},
+                )
+                if table_id == SIGNATURE_TABLE_ID:
+                    attachment_field = SIGNATURE_ATTACHMENT_FIELD
+                    display_name = str(person.get("name") or "signature")
+                else:
+                    attachment_field = TEMP_SIGNATURE_ATTACHMENT_FIELD
+                    display_name = str(person.get("name") or "external_signature")
+                file_token, metadata = self._save_encrypted_signature_record(
+                    table_id=table_id,
+                    record_id=record_id,
+                    attachment_field=attachment_field,
+                    key_field=key_field,
+                    signature_bytes=signature_bytes,
+                    display_name=display_name,
+                    source=source,
+                    open_id=str(person.get("open_id") or ""),
+                    employee_no=str(person.get("employee_no") or ""),
+                )
+                self._signature_crypto.write_cache(
+                    record_id,
+                    str(metadata.get("signature_sha256") or ""),
+                    signature_bytes,
+                )
+                self._mark_signature_crypto_migration(
+                    table_id=table_id,
+                    record_id=record_id,
+                    status="done",
+                    payload={"file_token": file_token, "source": source},
+                )
+                if table_id == SIGNATURE_TABLE_ID:
+                    with self._signature_people_cache_lock:
+                        self._signature_people_cache = None
+                else:
+                    with self._external_signature_people_cache_lock:
+                        self._external_signature_people_cache = None
+            except Exception as exc:
+                self._mark_signature_crypto_migration(
+                    table_id=table_id,
+                    record_id=record_id,
+                    status="failed",
+                    error=str(exc),
+                    payload={"source": source},
+                )
+            finally:
+                with self._signature_crypto_migration_lock:
+                    self._signature_crypto_plain_migrations.discard(migration_key)
+
+        threading.Thread(
+            target=worker,
+            name=f"signature-crypto-migrate-{record_id}",
+            daemon=True,
+        ).start()
+
+    def start_signature_crypto_migration_async(self, *, delay_seconds: float = 8.0) -> bool:
+        with self._signature_crypto_migration_lock:
+            if self._signature_crypto_migration_running:
+                return False
+            self._signature_crypto_migration_running = True
+
+        def worker() -> None:
+            try:
+                if delay_seconds > 0:
+                    time.sleep(delay_seconds)
+                self._run_signature_crypto_migration()
+            finally:
+                with self._signature_crypto_migration_lock:
+                    self._signature_crypto_migration_running = False
+
+        threading.Thread(
+            target=worker,
+            name="signature-crypto-migration",
+            daemon=True,
+        ).start()
+        return True
+
+    def _run_signature_crypto_migration(self) -> None:
+        summary = {"checked": 0, "done": 0, "skipped": 0, "failed": 0}
+        tables = (
+            (SIGNATURE_TABLE_ID, SIGNATURE_ATTACHMENT_FIELD, SIGNATURE_KEY_FIELD, "staff", self._load_signature_people),
+            (TEMP_SIGNATURE_TABLE_ID, TEMP_SIGNATURE_ATTACHMENT_FIELD, TEMP_SIGNATURE_KEY_FIELD, "external", self._load_external_signature_people),
+        )
+        for table_id, _attachment_field, key_field, source, loader in tables:
+            try:
+                people = loader(force=True)
+            except Exception as exc:
+                with suppress(Exception):
+                    self._state_store.put_backend_runtime(
+                        "signature_crypto",
+                        {
+                            "status": "migration_failed",
+                            "error": str(exc),
+                            "summary": summary,
+                            "updated_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        },
+                    )
+                continue
+            for person in people:
+                record_id = str(person.get("record_id") or "").strip()
+                if not record_id:
+                    continue
+                fields = person.get("raw_fields") if isinstance(person.get("raw_fields"), dict) else {}
+                attachments = [
+                    self._attachment_with_cache_context(
+                        attachment,
+                        category="signature" if table_id == SIGNATURE_TABLE_ID else "temporary_signature",
+                        app_token=SIGNATURE_APP_TOKEN,
+                        table_id=table_id,
+                        record_id=record_id,
+                        latest_publish_time=str(person.get("latest_publish_time") or self._attachment_latest_publish_time(fields)),
+                    )
+                    for attachment in self._extract_signature_attachments(fields)
+                ]
+                if not attachments:
+                    continue
+                summary["checked"] += 1
+                metadata = self._signature_crypto.metadata_from_field(fields.get(key_field))
+                if self._signature_crypto.is_encrypted_metadata(metadata):
+                    self._mark_signature_crypto_migration(
+                        table_id=table_id,
+                        record_id=record_id,
+                        status="encrypted",
+                        payload={"source": source},
+                    )
+                    summary["skipped"] += 1
+                    continue
+                try:
+                    content, _content_type = self._download_mop_attachment(attachments[0])
+                    if content.startswith(SIGNATURE_ENCRYPTED_MAGIC):
+                        raise PortalError("签名附件已加密但密钥字段缺失，无法迁移。")
+                    signature_bytes = self._transparent_signature_png(content)
+                    self._mark_signature_crypto_migration(
+                        table_id=table_id,
+                        record_id=record_id,
+                        status="migrating",
+                        payload={"source": source},
+                    )
+                    if table_id == SIGNATURE_TABLE_ID:
+                        display_name = str(person.get("name") or "signature")
+                        attachment_field = SIGNATURE_ATTACHMENT_FIELD
+                    else:
+                        display_name = str(person.get("name") or "external_signature")
+                        attachment_field = TEMP_SIGNATURE_ATTACHMENT_FIELD
+                    file_token, saved_metadata = self._save_encrypted_signature_record(
+                        table_id=table_id,
+                        record_id=record_id,
+                        attachment_field=attachment_field,
+                        key_field=key_field,
+                        signature_bytes=signature_bytes,
+                        display_name=display_name,
+                        source=source,
+                        open_id=str(person.get("open_id") or ""),
+                        employee_no=str(person.get("employee_no") or ""),
+                    )
+                    self._signature_crypto.write_cache(
+                        record_id,
+                        str(saved_metadata.get("signature_sha256") or ""),
+                        signature_bytes,
+                    )
+                    self._mark_signature_crypto_migration(
+                        table_id=table_id,
+                        record_id=record_id,
+                        status="done",
+                        payload={"file_token": file_token, "source": source},
+                    )
+                    summary["done"] += 1
+                except Exception as exc:
+                    self._mark_signature_crypto_migration(
+                        table_id=table_id,
+                        record_id=record_id,
+                        status="failed",
+                        error=str(exc),
+                        payload={"source": source},
+                    )
+                    summary["failed"] += 1
+        with suppress(Exception):
+            self._state_store.put_backend_runtime(
+                "signature_crypto",
+                {
+                    "status": "ready",
+                    "master_key_exists": self._signature_crypto.master_key_exists(),
+                    "fingerprint": self._signature_crypto.master_key_fingerprint(),
+                    "summary": summary,
+                    "updated_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                },
+            )
+
     def _upload_bitable_file(
         self,
         *,
@@ -10895,20 +11359,20 @@ class MaintenancePortalService:
             signer_name or str(person.get("name") or "signature"),
             "signature",
         )
-        file_name = f"{safe_name}_{dt.datetime.now().strftime('%Y%m%d%H%M%S')}.png"
-        file_token = self._upload_signature_image(
-            signature_bytes=signature_bytes,
-            file_name=file_name,
-        )
-        self._patch_record_fields(
-            app_token=SIGNATURE_APP_TOKEN,
+        file_token, metadata = self._save_encrypted_signature_record(
             table_id=SIGNATURE_TABLE_ID,
             record_id=record_id,
-            fields={SIGNATURE_ATTACHMENT_FIELD: [{"file_token": file_token}]},
+            attachment_field=SIGNATURE_ATTACHMENT_FIELD,
+            key_field=SIGNATURE_KEY_FIELD,
+            signature_bytes=signature_bytes,
+            display_name=safe_name,
+            source="staff",
+            open_id=str(person.get("open_id") or ""),
+            employee_no=str(person.get("employee_no") or ""),
         )
         with self._signature_people_cache_lock:
             self._signature_people_cache = None
-        signature_version = hashlib.sha1(file_token.encode("utf-8")).hexdigest()[:12]
+        signature_version = str(metadata.get("signature_sha256") or hashlib.sha1(file_token.encode("utf-8")).hexdigest())[:12]
         notification_warning = ""
         notification_result: dict[str, Any] = {}
         operator_open_id = str(operator_open_id or "").strip()
@@ -10981,20 +11445,19 @@ class MaintenancePortalService:
             signer_name or str(person.get("name") or "external_signature"),
             "external_signature",
         )
-        file_name = f"{safe_name}_{dt.datetime.now().strftime('%Y%m%d%H%M%S')}.png"
-        file_token = self._upload_signature_image(
-            signature_bytes=signature_bytes,
-            file_name=file_name,
-        )
-        self._patch_record_fields(
-            app_token=SIGNATURE_APP_TOKEN,
+        file_token, metadata = self._save_encrypted_signature_record(
             table_id=TEMP_SIGNATURE_TABLE_ID,
             record_id=record_id,
-            fields={TEMP_SIGNATURE_ATTACHMENT_FIELD: [{"file_token": file_token}]},
+            attachment_field=TEMP_SIGNATURE_ATTACHMENT_FIELD,
+            key_field=TEMP_SIGNATURE_KEY_FIELD,
+            signature_bytes=signature_bytes,
+            display_name=safe_name,
+            source="external",
+            employee_no=str(person.get("employee_no") or ""),
         )
         with self._external_signature_people_cache_lock:
             self._external_signature_people_cache = None
-        signature_version = hashlib.sha1(file_token.encode("utf-8")).hexdigest()[:12]
+        signature_version = str(metadata.get("signature_sha256") or hashlib.sha1(file_token.encode("utf-8")).hexdigest())[:12]
         name = str(person.get("name") or signer_name or "其他人员")
         return {
             "source": "external",
@@ -11048,8 +11511,17 @@ class MaintenancePortalService:
         ]
         if not attachments:
             raise PortalError("该人员还没有可用签名。")
-        content, _content_type = self._download_mop_attachment(attachments[0])
-        return self._transparent_signature_png(content), "image/png"
+        return (
+            self._decode_signature_attachment_bytes(
+                record_id=record_id,
+                fields=fields,
+                attachment=attachments[0],
+                table_id=SIGNATURE_TABLE_ID,
+                source="staff",
+                person=person,
+            ),
+            "image/png",
+        )
 
     def external_signature_image_bytes(self, *, record_id: str) -> tuple[bytes, str]:
         record_id = str(record_id or "").strip()
@@ -11082,8 +11554,17 @@ class MaintenancePortalService:
         ]
         if not attachments:
             raise PortalError("该其他人员还没有可用签名。")
-        content, _content_type = self._download_mop_attachment(attachments[0])
-        return self._transparent_signature_png(content), "image/png"
+        return (
+            self._decode_signature_attachment_bytes(
+                record_id=record_id,
+                fields=fields,
+                attachment=attachments[0],
+                table_id=TEMP_SIGNATURE_TABLE_ID,
+                source="external",
+                person=person,
+            ),
+            "image/png",
+        )
 
     @staticmethod
     def _url_host_for_display(host: str) -> str:
@@ -11571,11 +12052,6 @@ class MaintenancePortalService:
             self._decode_signature_png(signature_png)
         )
         display_name = str(session.get("display_name") or "临时人员").strip()
-        file_name = f"{self._safe_mop_path_part(display_name, 'temporary')}_{dt.datetime.now().strftime('%Y%m%d%H%M%S')}.png"
-        file_token = self._upload_signature_image(
-            signature_bytes=signature_bytes,
-            file_name=file_name,
-        )
         _metas, meta_by_name = self._load_table_fields(
             app_token=SIGNATURE_APP_TOKEN,
             table_id=TEMP_SIGNATURE_TABLE_ID,
@@ -11593,7 +12069,6 @@ class MaintenancePortalService:
         )
         fields: dict[str, Any] = {
             TEMP_SIGNATURE_NAME_FIELD: display_name,
-            TEMP_SIGNATURE_ATTACHMENT_FIELD: [{"file_token": file_token}],
         }
         if building_values:
             fields[TEMP_SIGNATURE_BUILDING_FIELD] = building_values
@@ -11619,12 +12094,25 @@ class MaintenancePortalService:
             record_id = str(record.get("record_id") or record.get("id") or "").strip()
             if not record_id:
                 raise PortalError("临时签名保存成功但未返回记录 ID。")
+        safe_name = self._safe_mop_path_part(display_name, "temporary")
+        file_token, metadata = self._save_encrypted_signature_record(
+            table_id=TEMP_SIGNATURE_TABLE_ID,
+            record_id=record_id,
+            attachment_field=TEMP_SIGNATURE_ATTACHMENT_FIELD,
+            key_field=TEMP_SIGNATURE_KEY_FIELD,
+            signature_bytes=signature_bytes,
+            display_name=safe_name,
+            source="temporary",
+        )
         updated = self._state_store.update_mop_temporary_signature_session(
             temp_id=str(session.get("temp_id") or ""),
             status="signed",
             temporary_record_id=record_id,
             signature_file_token=file_token,
-            payload_patch={"saved_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+            payload_patch={
+                "saved_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "signature_crypto": metadata,
+            },
         )
         with self._external_signature_people_cache_lock:
             self._external_signature_people_cache = None
@@ -11641,6 +12129,9 @@ class MaintenancePortalService:
         session = self._state_store.get_mop_temporary_signature_session(temp_id=temp_id)
         if not session:
             raise PortalError("临时签名记录不存在。")
+        record_id = str(session.get("temporary_record_id") or "").strip()
+        if record_id:
+            return self.external_signature_image_bytes(record_id=record_id)
         file_token = str(session.get("signature_file_token") or "").strip()
         if not file_token:
             raise PortalError("临时人员还没有可用签名。")

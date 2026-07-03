@@ -751,6 +751,7 @@ class FastAPIPortalController:
             schema_status: dict = {}
             runtime_health: dict = {}
             upload_attachment_stats: dict = {}
+            signature_crypto_stats: dict = {}
             slow_jobs: list[dict] = []
             with suppress(Exception):
                 sqlite_stats = PortalRuntime.state_store.get_database_stats()
@@ -767,6 +768,8 @@ class FastAPIPortalController:
             with suppress(Exception):
                 upload_attachment_stats = PortalRuntime.state_store.notice_upload_attachment_stats()
                 upload_attachment_stats["max_pending_bytes"] = MAX_NOTICE_ATTACHMENT_PENDING_BYTES
+            with suppress(Exception):
+                signature_crypto_stats = service.signature_crypto_status()
             with suppress(Exception):
                 last_loaded_at = str(getattr(service, "_last_loaded_at", "") or "")
                 last_loaded_ts = float(getattr(service, "_last_loaded_ts", 0.0) or 0.0)
@@ -870,6 +873,7 @@ class FastAPIPortalController:
                     "event_snapshot": event_snapshot_stats if isinstance(event_snapshot_stats, dict) else {},
                     "source_type_summary": source_type_stats if isinstance(source_type_stats, dict) else {},
                     "upload_attachments": upload_attachment_stats if isinstance(upload_attachment_stats, dict) else {},
+                    "signature_crypto": signature_crypto_stats if isinstance(signature_crypto_stats, dict) else {},
                     "job_batch": self._job_batch_snapshot(),
                     "read_cache": self._read_cache_stats(),
                     "static_cache": self._static_cache_stats(),
@@ -4448,6 +4452,10 @@ class FastAPIPortalController:
             pass
         try:
             PortalRuntime.service._maybe_start_daily_attachment_cache_refresh()
+        except Exception:
+            pass
+        try:
+            PortalRuntime.service.start_signature_crypto_migration_async(delay_seconds=30.0)
         except Exception:
             pass
         PortalRuntime.auth_manager = PortalAuthManager()

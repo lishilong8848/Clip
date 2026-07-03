@@ -3,7 +3,6 @@
     <div class="panel-head">
       <div>
         <h2>选择 MOP 表格</h2>
-        <p>推荐表格已置顶，选中后直接打开填写。</p>
       </div>
       <span>{{ mopCandidates.length }}</span>
     </div>
@@ -60,11 +59,11 @@
       </label>
       <div class="candidate-summary">
         <span>{{ mopCandidates.length }} 个可选 MOP</span>
-        <strong v-if="recommendedCount">推荐 {{ recommendedCount }} 个已置顶</strong>
-        <strong v-else>可搜索名称、编号、专业</strong>
+        <strong v-if="recommendedCount">推荐 {{ recommendedCount }}</strong>
+        <strong v-else>候选 MOP</strong>
       </div>
       <div v-if="!mopCandidates.length" class="empty-box">
-        当前关键词下没有可选 MOP 表格。可清空搜索或刷新 MOP 数据后再试。
+        暂无可选 MOP 表格
       </div>
       <div v-else class="mop-candidate-list">
         <button
@@ -202,12 +201,12 @@ const nextStepTitle = computed(() => {
 });
 
 const nextStepText = computed(() => {
-  if (!props.selectedMop) return "推荐项会自动排在最上方；选中后再打开填写。";
-  if (!props.selectedAttachment) return "当前 MOP 没有可用 xlsx/csv 附件，需更换表格或刷新数据。";
+  if (!props.selectedMop) return "";
+  if (!props.selectedAttachment) return "无可用附件";
   if (props.bindingError) return props.bindingError;
   if (props.bindingStatus) return props.bindingStatus;
-  if (props.canPreview) return "点击已选表格卡片里的“打开填写”，系统会先自动绑定。";
-  return props.disabledReason || "请核对当前 MOP 是否有可预览附件。";
+  if (props.canPreview) return "";
+  return props.disabledReason || "";
 });
 
 const nextStepTone = computed(() => {
@@ -224,10 +223,10 @@ const localUploadTitle = computed(() => {
 });
 
 const localUploadHint = computed(() => {
-  if (props.localUploadBusy) return "正在保存并识别表格，请稍候。";
-  if (props.localUploadStatus === "success") return "已自动选中，可点击“打开填写”。";
-  if (props.localUploadStatus === "failed") return "请更换文件，或拖入/粘贴 Excel 文件重试。";
-  return "支持点击选择、拖入文件、Ctrl+V 粘贴 Excel 文件。";
+  if (props.localUploadBusy) return "识别中";
+  if (props.localUploadStatus === "success") return "已选中";
+  if (props.localUploadStatus === "failed") return "上传失败";
+  return ".xlsx / .xlsm / .xls";
 });
 
 function recommended(mop: Dict): boolean {
@@ -235,9 +234,9 @@ function recommended(mop: Dict): boolean {
 }
 
 function recommendationReason(mop: Dict): string {
-  if (props.selectedNotice?.mop_binding?.inherited) return "推荐原因：继承上次同类通告绑定";
-  if (String(mop.record_id || "") === String(props.selectedNotice?.mop_binding?.mop_record_id || "")) return "推荐原因：该通告已绑定过这个 MOP";
-  return "推荐原因：与当前维保通告匹配";
+  if (props.selectedNotice?.mop_binding?.inherited) return "继承绑定";
+  if (String(mop.record_id || "") === String(props.selectedNotice?.mop_binding?.mop_record_id || "")) return "已绑定";
+  return "匹配";
 }
 
 function triggerLocalFileInput(): void {

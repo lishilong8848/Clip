@@ -27,8 +27,7 @@
         </button>
       </div>
       <small v-if="fillDisabledReason" class="disabled-hint">{{ fillDisabledReason }}</small>
-      <small v-else-if="filledMopAvailable" class="warning-hint">已生成，可覆盖写入。</small>
-      <small v-else>把当前签名写入表格。</small>
+      <small v-else-if="filledMopAvailable" class="warning-hint">已生成</small>
     </div>
   </div>
 </template>

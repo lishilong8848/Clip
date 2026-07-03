@@ -6,15 +6,15 @@
 
   <section v-else-if="!loggedIn" class="center-state">
     <strong>请先使用飞书登录</strong>
-    <p>登录后会根据飞书身份显示可访问楼栋。</p>
-    <span class="login-hint">登录过期后会自动回到这里重新授权</span>
     <a class="btn blue" :href="loginUrl || '/api/auth/login'">飞书扫码登录</a>
   </section>
 
   <section v-else class="center-state request-panel">
-    <button v-if="showBack" class="back-link" type="button" @click="$emit('back')">返回功能选择</button>
+    <button v-if="showBack" class="back-link" type="button" @click="$emit('back')">
+      <span aria-hidden="true">‹</span>
+      返回
+    </button>
     <strong>{{ title || "当前账号暂无门户权限" }}</strong>
-    <p>{{ description || "请选择需要访问的楼栋或园区，提交后由管理员在门户审批。" }}</p>
     <p class="user-line" :title="userOpenId ? `飞书身份：${userOpenId}` : ''">{{ userLineText }}</p>
     <div class="request-steps" aria-label="权限申请流程">
       <span class="active">
@@ -30,7 +30,7 @@
       <span :class="{ active: Boolean(request.requestId), rejected: request.status === 'rejected' }">
         <b>3</b>
         <strong>{{ request.status === "rejected" ? "调整重提" : "等待生效" }}</strong>
-        <small>{{ request.requestId ? requestStatusTitle : "通过后自动追加" }}</small>
+        <small>{{ request.requestId ? requestStatusTitle : "待审批" }}</small>
       </span>
     </div>
     <div v-if="requestableScopes.length" class="scope-checks">
@@ -94,7 +94,6 @@ const props = defineProps<{
   };
   requestableScopes: Array<{ value: string; label: string }>;
   title?: string;
-  description?: string;
   emptyText?: string;
   showBack?: boolean;
 }>();
@@ -123,7 +122,7 @@ const requestStatusDescription = computed(() => {
     const reason = String(props.request.rejectReason || "").trim();
     return reason ? `拒绝原因：${reason}。可调整楼栋或原因后重新提交。` : "管理员未通过该申请，可调整楼栋或原因后重新提交。";
   }
-  return "管理员审批通过后，系统会更新可访问楼栋；如长时间未变化，可重新打开功能选择确认。";
+  return "等待管理员审批。";
 });
 
 const submitTitle = computed(() => {
@@ -203,14 +202,24 @@ const userLineText = computed(() => {
 }
 
 .back-link {
-  min-height: 34px;
-  border: 0;
-  padding: 0;
-  background: transparent;
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid #d4e3f7;
+  border-radius: 999px;
+  padding: 0 13px;
+  background: rgba(255, 255, 255, 0.9);
   color: #0757d7;
   font-size: 13px;
   font-weight: 900;
   cursor: pointer;
+  box-shadow: 0 8px 20px rgba(22, 78, 151, 0.08);
+}
+
+.back-link span {
+  font-size: 19px;
+  line-height: 1;
 }
 
 .spinner {

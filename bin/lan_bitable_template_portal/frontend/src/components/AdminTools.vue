@@ -4,59 +4,19 @@
       <header>
         <div>
           <strong>管理员工具</strong>
-          <p>审批权限、查看后台状态、维护配置和运行预检。</p>
         </div>
         <button class="btn ghost" @click="$emit('close')">关闭</button>
       </header>
 
-      <section class="admin-overview" aria-label="管理员概览">
-        <button
-          v-for="item in adminOverviewItems"
-          :key="item.key"
-          type="button"
-          :class="item.tone"
-          :aria-label="item.ariaLabel"
-          :title="`打开${item.targetLabel}`"
-          @click="selectAdminTab(item.target)"
-        >
-          <span>{{ item.label }}</span>
-          <strong>{{ item.value }}</strong>
-          <small>{{ item.hint }}</small>
-        </button>
-      </section>
-
-      <nav class="tabs admin-workspace-tabs" aria-label="管理员工作区">
-        <button
-          v-for="item in adminTabs"
-          :key="item.key"
-          :class="{ active: tab === item.key }"
-          type="button"
-          @click="selectAdminTab(item.key)"
-        >
-          <strong>{{ item.label }}</strong>
-          <small>{{ item.description }}</small>
-          <b v-if="item.badge">{{ item.badge }}</b>
-        </button>
-      </nav>
-
-      <div class="admin-advanced-toggle">
-        <span>低频工具默认收起，避免误触离线压测。</span>
-        <button
-          class="btn ghost"
-          type="button"
-          @click="toggleAdvancedDiagnostics"
-        >
-          {{ advancedDiagnosticsVisible ? "收起高级诊断" : "显示高级诊断" }}
-        </button>
-      </div>
-
-      <section class="admin-current-guide" :class="tab" aria-live="polite">
-        <div>
-          <strong>{{ activeAdminGuide.title }}</strong>
-          <p>{{ activeAdminGuide.text }}</p>
-        </div>
-        <span>{{ activeAdminGuide.badge }}</span>
-      </section>
+      <AdminWorkspaceChrome
+        :overview-items="adminOverviewItems"
+        :tabs="adminTabs"
+        :active-tab="tab"
+        :active-guide="activeAdminGuide"
+        :advanced-visible="advancedDiagnosticsVisible"
+        @select-tab="selectAdminTab"
+        @toggle-advanced="toggleAdvancedDiagnostics"
+      />
 
       <MessageBanner v-if="message" :text="message" />
       <ConfirmDialog
@@ -94,247 +54,73 @@
         @clear-job="clearJob"
       />
 
-      <section v-else-if="tab === 'permissions'" class="pane">
-        <div class="actions permission-command-bar">
-          <div class="command-copy">
-            <strong>权限管理</strong>
-            <span>先处理申请，再维护已有用户；保存后立即影响门户访问。</span>
-          </div>
-          <button class="btn ghost" :disabled="busy" @click="loadPermissions">刷新权限</button>
-          <button class="btn ghost" :disabled="busy" @click="addPermissionUser">添加用户</button>
-          <button class="btn green" :disabled="busy" @click="savePermissions">保存权限</button>
-        </div>
-        <section class="permission-metrics" aria-label="权限概览">
-          <article>
-            <span>待审批</span>
-            <strong>{{ pendingPermissionRequestCount }}</strong>
-          </article>
-          <article>
-            <span>已启用用户</span>
-            <strong>{{ enabledPermissionUserCount }}</strong>
-          </article>
-          <article>
-            <span>管理员</span>
-            <strong>{{ adminPermissionUserCount }}</strong>
-          </article>
-          <article>
-            <span>当前筛选</span>
-            <strong>{{ filteredPermissionUsers.length }}</strong>
-          </article>
-        </section>
-        <AdminPermissionRequests
-          v-model:search="permissionRequestSearch"
-          v-model:status="permissionRequestStatus"
-          v-model:reject-reason="permissionRejectReason"
-          :items="filteredPermissionRequests"
-          :scope-options="scopeOptions"
-          :busy="busy"
-          :selected-ids="selectedRequestIds"
-          :all-filtered-pending-selected="allFilteredPendingSelected"
-          :selected-pending-count="selectedPendingRequestIds.length"
-          :status-label="permissionRequestStatusLabel"
-          :request-scope-labels="requestScopeLabels"
-          :current-scope-labels="currentScopeLabels"
-          :review-scopes="reviewScopes"
-          @load="loadPermissionRequests"
-          @approve-selected="approveSelectedPermissionRequests"
-          @reject-selected="rejectSelectedPermissionRequests"
-          @toggle-all="toggleAllFilteredPermissionRequests"
-          @toggle-selection="togglePermissionRequestSelection"
-          @toggle-review-scope="toggleReviewScope"
-          @approve="approvePermissionRequest"
-          @reject="rejectPermissionRequest"
-        />
-        <section class="permission-user-tools">
-          <div>
-            <strong>已授权用户</strong>
-            <span>共 {{ permissions.users.length }} 人，当前显示 {{ filteredPermissionUsers.length }} 人</span>
-          </div>
-          <label class="permission-user-search">
-            <span>搜索用户</span>
-            <input v-model="permissionUserSearch" placeholder="姓名、openid、楼栋" />
-          </label>
-          <label class="permission-user-filter">
-            <span>筛选</span>
-            <select v-model="permissionUserFilter">
-              <option value="all">全部用户</option>
-              <option value="admin">管理员</option>
-              <option value="building">普通用户</option>
-              <option value="disabled">已禁用</option>
-              <option value="locked">固定管理员</option>
-            </select>
-          </label>
-        </section>
-        <div class="permission-list">
-          <div v-if="!filteredPermissionUsers.length" class="permission-empty">
-            没有符合当前筛选条件的用户。
-          </div>
-          <article v-for="user in filteredPermissionUsers" :key="user.open_id" class="permission-row" :class="{ locked: user.locked, disabled: !user.enabled }">
-            <div class="permission-row-head">
-              <div>
-                <strong>{{ user.name || "未命名用户" }}</strong>
-                <span>{{ user.open_id || "未填写 openid" }}</span>
-              </div>
-              <div class="permission-badges">
-                <b v-if="user.locked" class="locked">固定管理员</b>
-                <b v-else-if="String(user.role || 'building') === 'admin'" class="admin">管理员</b>
-                <b v-else class="user">普通用户</b>
-                <b :class="user.enabled === false ? 'disabled' : 'enabled'">{{ user.enabled === false ? "已禁用" : "已启用" }}</b>
-              </div>
-            </div>
-            <label class="permission-field">
-              <span>姓名</span>
-              <input v-model="user.name" placeholder="姓名" :disabled="user.locked" />
-            </label>
-            <label class="permission-field openid-field">
-              <span>openid</span>
-              <input v-model="user.open_id" placeholder="openid" :disabled="user.locked" />
-            </label>
-            <label class="permission-field role-field">
-              <span>角色</span>
-              <select v-model="user.role" :disabled="user.locked">
-                <option value="building">用户</option>
-                <option value="admin">管理员</option>
-              </select>
-            </label>
-            <label class="permission-enable"><input v-model="user.enabled" type="checkbox" :disabled="user.locked" /> 启用</label>
-            <button class="btn danger" :disabled="user.locked" @click="removePermissionUser(user)">删除</button>
-            <details class="scope-checks-wrap">
-              <summary>
-                <span>楼栋权限</span>
-                <b>{{ permissionUserScopeSummary(user) }}</b>
-              </summary>
-              <div class="scope-checks">
-                <label v-for="scope in scopeOptions" :key="scope.value">
-                  <input
-                    type="checkbox"
-                    :checked="user.scopes?.includes(scope.value)"
-                    :disabled="user.locked || user.role === 'admin'"
-                    @change="toggleUserScope(user, scope.value, ($event.target as HTMLInputElement).checked)"
-                  />
-                  {{ scope.label }}
-                </label>
-              </div>
-            </details>
-          </article>
-        </div>
-      </section>
+      <AdminPermissionPane
+        v-else-if="tab === 'permissions'"
+        v-model:request-search="permissionRequestSearch"
+        v-model:request-status="permissionRequestStatus"
+        v-model:reject-reason="permissionRejectReason"
+        v-model:user-search="permissionUserSearch"
+        v-model:user-filter="permissionUserFilter"
+        :busy="busy"
+        :pending-request-count="pendingPermissionRequestCount"
+        :enabled-user-count="enabledPermissionUserCount"
+        :admin-user-count="adminPermissionUserCount"
+        :request-items="filteredPermissionRequests"
+        :scope-options="scopeOptions"
+        :selected-request-ids="selectedRequestIds"
+        :all-filtered-pending-selected="allFilteredPendingSelected"
+        :selected-pending-count="selectedPendingRequestIds.length"
+        :request-status-label="permissionRequestStatusLabel"
+        :request-scope-labels="requestScopeLabels"
+        :current-scope-labels="currentScopeLabels"
+        :review-scopes="reviewScopes"
+        :users="filteredPermissionUsers"
+        :users-total="permissions.users.length"
+        :user-scope-summary="permissionUserScopeSummary"
+        @load-permissions="loadPermissions"
+        @load-requests="loadPermissionRequests"
+        @add-user="addPermissionUser"
+        @save="savePermissions"
+        @approve-selected="approveSelectedPermissionRequests"
+        @reject-selected="rejectSelectedPermissionRequests"
+        @toggle-all="toggleAllFilteredPermissionRequests"
+        @toggle-selection="togglePermissionRequestSelection"
+        @toggle-review-scope="toggleReviewScope"
+        @approve="approvePermissionRequest"
+        @reject="rejectPermissionRequest"
+        @toggle-user-scope="toggleUserScope"
+        @remove-user="removePermissionUser"
+      />
 
-      <section v-else-if="tab === 'handover'" class="pane">
-        <div class="actions">
-          <button class="btn blue" @click="loadHandover">刷新链接</button>
-          <button class="btn green" @click="saveHandover">保存链接</button>
-        </div>
-        <label class="password-line">
-          设置密码
-          <input v-model="handoverPassword" type="password" placeholder="输入交接班链接设置密码" />
-        </label>
-        <div class="handover-grid">
-          <label v-for="scope in buildingScopes" :key="scope.value">
-            {{ scope.label }}
-            <input v-model="handoverLinks[scope.value]" placeholder="https://..." />
-          </label>
-        </div>
-      </section>
+      <AdminHandoverPane
+        v-else-if="tab === 'handover'"
+        :building-scopes="buildingScopes"
+        :links="handoverLinks"
+        :password="handoverPassword"
+        :busy="busy"
+        @refresh="loadHandover"
+        @save="saveHandover"
+        @update-link="updateHandoverLink"
+        @update-password="updateHandoverPassword"
+      />
 
-      <section v-else-if="tab === 'mop'" class="pane">
-        <div class="actions">
-          <button class="btn blue" @click="loadMopSettings">刷新配置</button>
-          <button class="btn green" @click="saveMopSettings">保存配置</button>
-        </div>
-        <div class="mop-settings-grid">
-          <label>
-            MOP app_token
-            <input v-model="mopSettings.mop_app_token" placeholder="维保MOP所在多维表 app_token" />
-          </label>
-          <label>
-            MOP table_id
-            <input v-model="mopSettings.mop_table_id" placeholder="维保MOP所在表 table_id" />
-          </label>
-          <label>
-            MOP view_id
-            <input v-model="mopSettings.mop_view_id" placeholder="可选，默认读取 MOP 文件视图" />
-          </label>
-          <label>
-            标题字段名
-            <input v-model="mopSettings.mop_title_field" placeholder="文件名" />
-          </label>
-          <label>
-            附件字段名
-            <input v-model="mopSettings.mop_attachment_field" placeholder="文件" />
-          </label>
-        </div>
-        <p class="muted-line">
-          该配置只用于工程师 MOP 页面读取候选表格与附件预览，不触发通告发送或多维写入。
-        </p>
-      </section>
+      <AdminMopSettingsPane
+        v-else-if="tab === 'mop'"
+        :settings="mopSettings"
+        :busy="busy"
+        @refresh="loadMopSettings"
+        @save="saveMopSettings"
+        @update-field="updateMopSettingField"
+      />
 
-      <section v-else class="pane">
-        <div class="pressure-form">
-          <label>数量 <input v-model.number="pressure.count" type="number" min="1" max="60" /></label>
-          <label>并发 <input v-model.number="pressure.concurrency" type="number" min="1" max="10" /></label>
-          <label class="inline-check">
-            <input v-model="pressure.include_site_photos" type="checkbox" />
-            带现场照片
-          </label>
-          <label>每条照片数 <input v-model.number="pressure.site_photo_count" type="number" min="1" max="3" /></label>
-          <label>照片大小 KB <input v-model.number="pressure.site_photo_kb" type="number" min="1" max="512" /></label>
-          <label>平均提交阈值 ms <input v-model.number="pressure.max_submit_average_ms" type="number" min="1" max="10000" /></label>
-          <label>总耗时阈值 s <input v-model.number="pressure.max_total_seconds" type="number" min="1" max="600" /></label>
-          <label>允许失败数 <input v-model.number="pressure.max_failed" type="number" min="0" max="60" /></label>
-          <label>
-            场景
-            <select v-model="pressure.scenario">
-              <option value="accepted">全部正常受理</option>
-              <option value="mixed">成功和失败混合</option>
-              <option value="failed-network">模拟网络失败</option>
-              <option value="failed-remote-missing">模拟远端记录缺失</option>
-            </select>
-          </label>
-          <button class="btn blue" :disabled="busy" @click="runMockPressure">运行离线压测</button>
-        </div>
-        <section
-          v-if="pressureResult.assessment"
-          :class="['pressure-assessment', pressureResult.assessment.ok ? 'good' : 'bad']"
-        >
-          <div>
-            <span>压测判定</span>
-            <strong>{{ pressureResult.assessment.summary || (pressureResult.assessment.ok ? "达标" : "未达标") }}</strong>
-          </div>
-          <p>
-            受理 {{ pressureResult.assessment.observed?.accepted ?? "-" }} /
-            {{ pressureResult.assessment.observed?.count ?? "-" }}，
-            失败 {{ pressureResult.assessment.observed?.failed ?? 0 }}，
-            平均 {{ pressureResult.assessment.observed?.submit_average_ms ?? "-" }} ms，
-            总耗时 {{ pressureResult.assessment.observed?.elapsed_seconds ?? "-" }} s
-          </p>
-          <ul v-if="pressureResult.assessment.failures?.length">
-            <li v-for="item in pressureResult.assessment.failures" :key="item">{{ item }}</li>
-          </ul>
-        </section>
-        <div v-if="pressureResult.site_photos" class="pressure-summary">
-          <article>
-            <span>照片上传</span>
-            <strong>{{ pressureResult.site_photos.enabled ? "已启用" : "未启用" }}</strong>
-          </article>
-          <article>
-            <span>预期附件数</span>
-            <strong>{{ pressureResult.site_photos.expected_uploads ?? 0 }}</strong>
-          </article>
-          <article>
-            <span>预期附件大小</span>
-            <strong>{{ formatBytes(pressureResult.site_photos.expected_bytes) }}</strong>
-          </article>
-          <article>
-            <span>提交平均耗时</span>
-            <strong>{{ pressureResult.submit_average_ms ?? "-" }} ms</strong>
-          </article>
-        </div>
-        <details class="raw-diagnostic" :open="Boolean(pressureResult.assessment)">
-          <summary>查看详细压测数据</summary>
-          <pre>{{ pretty(pressureResult) }}</pre>
-        </details>
-      </section>
+      <AdminPressurePane
+        v-else
+        :pressure="pressure"
+        :pressure-result="pressureResult"
+        :busy="busy"
+        @update-pressure="updatePressureField"
+        @run="runMockPressure"
+      />
     </div>
   </section>
 </template>
@@ -342,32 +128,36 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from "vue";
 import { requestJson } from "../api/client";
-import AdminPermissionRequests from "./AdminPermissionRequests.vue";
+import {
+  adminBuildingScopes,
+  cleanupRemovedTotal,
+  scopeOptionLabel as resolveScopeOptionLabel,
+  shortId,
+  type AdminTabKey,
+} from "../adminToolsUtils";
+import { navigate } from "../navigation";
+import AdminHandoverPane from "./AdminHandoverPane.vue";
+import AdminMopSettingsPane from "./AdminMopSettingsPane.vue";
+import AdminPermissionPane from "./AdminPermissionPane.vue";
+import AdminPressurePane from "./AdminPressurePane.vue";
 import AdminStatusPane from "./AdminStatusPane.vue";
+import AdminWorkspaceChrome from "./AdminWorkspaceChrome.vue";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import MessageBanner from "./MessageBanner.vue";
 
 type Dict = Record<string, any>;
-type AdminTabKey = "status" | "permissions" | "handover" | "mop" | "pressure";
+type MopSettingsKey = "mop_app_token" | "mop_table_id" | "mop_view_id" | "mop_title_field" | "mop_attachment_field";
 
 const props = defineProps<{
   open: boolean;
   scopeOptions: Array<{ value: string; label: string }>;
 }>();
 
-defineEmits<{
+const emit = defineEmits<{
   close: [];
 }>();
 
-const buildingScopes = [
-  { value: "110", label: "110站" },
-  { value: "A", label: "A楼" },
-  { value: "B", label: "B楼" },
-  { value: "C", label: "C楼" },
-  { value: "D", label: "D楼" },
-  { value: "E", label: "E楼" },
-  { value: "H", label: "H楼" },
-];
+const buildingScopes = adminBuildingScopes;
 
 const tab = ref<AdminTabKey>("status");
 const busy = ref(false);
@@ -516,25 +306,25 @@ const adminTabs = computed(() => {
     {
       key: "status" as AdminTabKey,
       label: "后台状态",
-      description: "队列、错误、预检",
+      description: "",
       badge: backendQueueTotal.value ? `${backendQueueTotal.value}` : "",
     },
     {
       key: "permissions" as AdminTabKey,
       label: "权限管理",
-      description: "审批申请和用户",
+      description: "",
       badge: pendingPermissionRequestCount.value ? `${pendingPermissionRequestCount.value}` : "",
     },
     {
       key: "handover" as AdminTabKey,
       label: "交接班链接",
-      description: "楼栋审核入口",
+      description: "",
       badge: "",
     },
     {
       key: "mop" as AdminTabKey,
       label: "MOP 配置",
-      description: "维护单来源表",
+      description: "",
       badge: mopSettingsLoaded.value && !mopConfigured.value ? "待配置" : "",
     },
   ];
@@ -542,7 +332,7 @@ const adminTabs = computed(() => {
     tabs.push({
       key: "pressure" as AdminTabKey,
       label: "高级诊断",
-      description: "离线压测",
+      description: "",
       badge: "",
     });
   }
@@ -552,27 +342,27 @@ const activeAdminGuide = computed(() => {
   const guides: Record<AdminTabKey, { title: string; text: string; badge: string }> = {
     status: {
       title: "后台状态",
-      text: "先看队列、失败任务和预检结果；异常任务可在这里重试或清理。",
+      text: "",
       badge: backendQueueTotal.value ? `${backendQueueTotal.value} 条排队` : "队列空闲",
     },
     permissions: {
       title: "权限管理",
-      text: "先处理权限申请，再维护已授权用户；管理员身份只在用户列表中设置。",
+      text: "",
       badge: pendingPermissionRequestCount.value ? `${pendingPermissionRequestCount.value} 待审批` : "暂无申请",
     },
     handover: {
       title: "交接班链接",
-      text: "配置各楼交接班审核页链接，保存后普通用户可从功能页打开。",
+      text: "",
       badge: "楼栋链接",
     },
     mop: {
       title: "MOP 配置",
-      text: "配置维护单候选表格来源；这里只影响工程师 MOP 页面。",
+      text: "",
       badge: mopConfigured.value ? "已配置" : "待配置",
     },
     pressure: {
       title: "高级诊断",
-      text: "只做离线链路验证，不发送飞书消息，也不写真实多维记录。",
+      text: "",
       badge: "离线测试",
     },
   };
@@ -639,60 +429,13 @@ function toggleAdvancedDiagnostics(): void {
   }
 }
 
-function pretty(value: unknown): string {
-  return JSON.stringify(value || {}, null, 2);
-}
-
-function formatBytes(value: unknown): string {
-  const bytes = Number(value || 0);
-  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB"];
-  let size = bytes;
-  let unit = 0;
-  while (size >= 1024 && unit < units.length - 1) {
-    size /= 1024;
-    unit += 1;
-  }
-  return `${size.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
-}
-
-function formatTime(value: unknown): string {
-  const ts = Number(value || 0);
-  if (!ts) return "暂无";
-  const date = new Date(ts * 1000);
-  if (Number.isNaN(date.getTime())) return "暂无";
-  return date.toLocaleString("zh-CN", { hour12: false });
-}
-
-function shortId(value: unknown): string {
-  const text = String(value || "").trim();
-  if (!text) return "-";
-  return text.length > 12 ? `${text.slice(0, 8)}...${text.slice(-4)}` : text;
-}
-
 function scopeOptionLabel(value: unknown): string {
-  const text = String(value || "").trim();
-  if (!text) return "";
-  return props.scopeOptions.find((item) => String(item.value) === text)?.label || text;
-}
-
-function cleanupRemovedTotal(value: Dict): number {
-  const keys = [
-    "deleted",
-    "runtime_queue_removed",
-    "outbox_removed",
-    "append_events_removed",
-    "undo_removed",
-    "attachment_removed",
-    "clipboard_removed",
-    "dialog_removed",
-    "mop_temp_signature_removed",
-  ];
-  return keys.reduce((total, key) => total + Number(value?.[key] || 0), 0);
+  return resolveScopeOptionLabel(props.scopeOptions, value);
 }
 
 function openHistoryMemory(): void {
-  window.location.href = "/admin/history-memory";
+  emit("close");
+  navigate("/admin/history-memory");
 }
 
 async function loadStatus(): Promise<void> {
@@ -1196,6 +939,14 @@ async function saveHandover(): Promise<void> {
   }
 }
 
+function updateHandoverLink(scope: string, value: string): void {
+  handoverLinks[scope] = value;
+}
+
+function updateHandoverPassword(value: string): void {
+  handoverPassword.value = value;
+}
+
 async function loadMopSettings(): Promise<void> {
   message.value = "";
   busy.value = true;
@@ -1212,6 +963,10 @@ async function loadMopSettings(): Promise<void> {
   } finally {
     busy.value = false;
   }
+}
+
+function updateMopSettingField(key: MopSettingsKey, value: string): void {
+  mopSettings[key] = value;
 }
 
 async function saveMopSettings(): Promise<void> {
@@ -1233,6 +988,10 @@ async function saveMopSettings(): Promise<void> {
   } finally {
     busy.value = false;
   }
+}
+
+function updatePressureField(key: keyof typeof pressure, value: number | string | boolean): void {
+  (pressure[key] as number | string | boolean) = value;
 }
 
 async function runMockPressure(): Promise<void> {
@@ -1280,8 +1039,7 @@ async function runMockPressure(): Promise<void> {
 
 header,
 .actions,
-.tabs,
-.pressure-form {
+.tabs {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1332,81 +1090,6 @@ button {
   cursor: pointer;
 }
 
-.admin-overview {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.admin-overview button {
-  min-width: 0;
-  display: grid;
-  gap: 4px;
-  padding: 12px 14px;
-  border: 1px solid #d8e5f7;
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.86);
-  box-shadow: 0 10px 24px rgba(15, 73, 153, 0.07);
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  transition:
-    border-color 0.16s ease,
-    box-shadow 0.16s ease,
-    transform 0.16s ease;
-}
-
-.admin-overview button:hover {
-  border-color: #a7c7ff;
-  box-shadow: 0 14px 30px rgba(15, 73, 153, 0.12);
-  transform: translateY(-1px);
-}
-
-.admin-overview button:focus-visible {
-  outline: 3px solid rgba(30, 99, 255, 0.18);
-  outline-offset: 2px;
-}
-
-.admin-overview button span,
-.admin-overview button small {
-  min-width: 0;
-  overflow: hidden;
-  color: #64748b;
-  font-size: 12px;
-  font-weight: 850;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.admin-overview button strong {
-  min-width: 0;
-  overflow: hidden;
-  color: #075bd8;
-  font-size: 20px;
-  font-weight: 950;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.admin-overview button.good {
-  border-color: #bbf7d0;
-  background: #f0fdf4;
-}
-
-.admin-overview button.good strong {
-  color: #047857;
-}
-
-.admin-overview button.warn {
-  border-color: #fde68a;
-  background: #fffbeb;
-}
-
-.admin-overview button.warn strong {
-  color: #b45309;
-}
-
 .btn.blue,
 .tabs button.active {
   border-color: #2563eb;
@@ -1429,87 +1112,6 @@ button {
 button:disabled {
   cursor: not-allowed;
   opacity: 0.58;
-}
-
-.tabs {
-  padding: 6px;
-  border: 1px solid #d8e5f7;
-  border-radius: 18px;
-  background: rgba(248, 251, 255, 0.88);
-}
-
-.tabs button {
-  border: 1px solid transparent;
-  background: transparent;
-}
-
-.admin-workspace-tabs {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 6px;
-}
-
-.admin-workspace-tabs button {
-  position: relative;
-  min-width: 0;
-  min-height: 62px;
-  display: grid;
-  gap: 4px;
-  align-content: center;
-  justify-items: start;
-  padding: 10px 12px;
-  border-radius: 14px;
-  color: #475569;
-  text-align: left;
-}
-
-.admin-workspace-tabs button.active {
-  border-color: #1e63ff;
-  background: linear-gradient(135deg, #1e63ff, #1554df);
-  color: #fff;
-  box-shadow: 0 12px 24px rgba(30, 99, 255, 0.2);
-}
-
-.admin-workspace-tabs strong,
-.admin-workspace-tabs small {
-  min-width: 0;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.admin-workspace-tabs strong {
-  font-size: 14px;
-  font-weight: 950;
-}
-
-.admin-workspace-tabs small {
-  color: inherit;
-  font-size: 12px;
-  font-weight: 750;
-  opacity: 0.82;
-}
-
-.admin-workspace-tabs b {
-  position: absolute;
-  top: 6px;
-  right: 7px;
-  min-width: 22px;
-  height: 22px;
-  display: inline-grid;
-  place-items: center;
-  padding: 0 6px;
-  border-radius: 999px;
-  background: #fff7ed;
-  color: #c2410c;
-  font-size: 11px;
-  font-weight: 950;
-}
-
-.admin-workspace-tabs button.active b {
-  background: rgba(255, 255, 255, 0.92);
-  color: #075bd8;
 }
 
 .pane {
@@ -1750,125 +1352,10 @@ button:disabled {
   justify-content: flex-end;
 }
 
-.pressure-summary {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-  gap: 8px;
-}
-
-.pressure-assessment {
-  display: grid;
-  gap: 8px;
-  padding: 12px;
-  border: 1px solid #dbe3ee;
-  border-radius: 8px;
-  background: #f8fafc;
-}
-
-.pressure-assessment.good {
-  border-color: #bbf7d0;
-  background: #f0fdf4;
-}
-
-.pressure-assessment.bad {
-  border-color: #fecaca;
-  background: #fef2f2;
-}
-
-.pressure-assessment div {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.pressure-assessment span {
-  color: #64748b;
-  font-size: 12px;
-}
-
-.pressure-assessment strong {
-  color: #0f172a;
-  font-size: 20px;
-}
-
-.pressure-assessment p {
-  margin: 0;
-}
-
-.pressure-assessment ul {
-  margin: 0;
-  padding-left: 18px;
-  color: #991b1b;
-}
-
-.pressure-summary article {
-  padding: 10px;
-  border: 1px solid #dbe3ee;
-  border-radius: 8px;
-  background: #f8fafc;
-}
-
-.pressure-summary span {
-  color: #64748b;
-  font-size: 12px;
-}
-
-.pressure-summary strong {
-  display: block;
-  margin-top: 4px;
-  font-size: 18px;
-}
-
-pre {
-  max-height: 320px;
-  overflow: auto;
-  padding: 12px;
-  border-radius: 8px;
-  background: #0f172a;
-  color: #e2e8f0;
-  font-size: 12px;
-}
-
-.raw-diagnostic {
-  border: 1px solid #dbe3ee;
-  border-radius: 8px;
-  background: #ffffff;
-}
-
-.raw-diagnostic summary {
-  padding: 10px 12px;
-  color: #334155;
-  cursor: pointer;
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.raw-diagnostic pre {
-  margin: 0 10px 10px;
-}
-
-.permission-list,
 .handover-grid,
 .mop-settings-grid {
   display: grid;
   gap: 10px;
-}
-
-.permission-row {
-  display: grid;
-  grid-template-columns: minmax(120px, 0.7fr) minmax(180px, 1.2fr) 110px 90px auto;
-  gap: 8px;
-  padding: 10px;
-  border: 1px solid #dbe3ee;
-  border-radius: 8px;
-}
-
-.scope-checks {
-  grid-column: 1 / -1;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
 }
 
 label {
@@ -1904,12 +1391,6 @@ select {
   border-radius: 8px;
   background: #eff6ff;
   color: #1d4ed8;
-}
-
-@media (max-width: 820px) {
-  .permission-row {
-    grid-template-columns: 1fr;
-  }
 }
 
 /* VNET admin skin */
@@ -2003,9 +1484,6 @@ button:hover:not(:disabled) {
 .metric-grid article,
 .status-card,
 .diagnostic-section,
-.pressure-assessment,
-.pressure-summary article,
-.permission-row,
 .warning-list,
 .message {
   border-color: #d8e7f8;
@@ -2017,9 +1495,7 @@ button:hover:not(:disabled) {
 
 .metric-grid article:hover,
 .status-card:hover,
-.diagnostic-section:hover,
-.pressure-assessment:hover,
-.pressure-summary article:hover {
+.diagnostic-section:hover {
   border-color: #9cc7ff;
   background: #ffffff;
   box-shadow: 0 14px 32px rgba(22, 78, 151, 0.12);
@@ -2027,7 +1503,6 @@ button:hover:not(:disabled) {
 
 .metric-grid strong,
 .source-type-grid strong,
-.pressure-summary strong,
 .status-card strong {
   color: #0757d7;
 }
@@ -2054,42 +1529,6 @@ select:focus {
   box-shadow: 0 0 0 3px rgba(22, 120, 255, 0.12);
 }
 
-pre {
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 14px;
-  background: #071634;
-}
-
-.raw-diagnostic {
-  border-color: #d8e7f8;
-  border-radius: 14px;
-  box-shadow: 0 12px 30px rgba(22, 78, 151, 0.06);
-}
-
-.raw-diagnostic summary {
-  color: #0757d7;
-}
-
-.permission-list {
-  grid-template-columns: 1fr;
-}
-
-.permission-row {
-  grid-template-columns: minmax(160px, 0.8fr) minmax(220px, 1.2fr) 116px 92px auto;
-  align-items: center;
-  border-color: #d8e7f8;
-  border-radius: 14px;
-  background:
-    linear-gradient(180deg, #ffffff, #f9fcff),
-    radial-gradient(circle at 5% 0%, rgba(22, 120, 255, 0.08), transparent 28%);
-  box-shadow: 0 10px 24px rgba(22, 78, 151, 0.08);
-}
-
-.permission-row:hover {
-  border-color: #9cc7ff;
-  box-shadow: 0 14px 30px rgba(22, 78, 151, 0.12);
-}
-
 /* Softer rounded and text polish */
 .admin-card {
   border-radius: 24px;
@@ -2098,16 +1537,11 @@ pre {
 .metric-grid article,
 .status-card,
 .diagnostic-section,
-.pressure-assessment,
-.pressure-summary article,
-.permission-row,
 .warning-list,
 .message,
 .source-type-grid article,
 .slow-job-list article,
-.job-row,
-.raw-diagnostic,
-pre {
+.job-row {
   border-radius: 18px;
 }
 
@@ -2122,7 +1556,6 @@ select {
 header strong,
 .metric-grid strong,
 .source-type-grid strong,
-.pressure-summary strong,
 .status-card strong {
   font-weight: 820;
   letter-spacing: 0;
@@ -2138,105 +1571,6 @@ p,
 .btn,
 button {
   font-weight: 720;
-}
-
-.permission-row > label {
-  min-height: 36px;
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  border: 1px solid #d8e7f8;
-  border-radius: 999px;
-  padding: 7px 11px;
-  background: #f7fbff;
-  color: #37536f;
-  font-weight: 800;
-}
-
-.permission-row > label input[type="checkbox"],
-.scope-checks input[type="checkbox"] {
-  width: 15px;
-  min-width: 15px;
-  height: 15px;
-  accent-color: #1678ff;
-}
-
-.scope-checks {
-  padding-top: 2px;
-}
-
-.scope-checks-wrap {
-  grid-column: 1 / -1;
-  border: 1px solid #d8e7f8;
-  border-radius: 16px;
-  background: rgba(248, 251, 255, 0.86);
-  overflow: hidden;
-}
-
-.scope-checks-wrap summary {
-  min-height: 42px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 0 12px;
-  color: #37536f;
-  font-size: 13px;
-  font-weight: 900;
-  cursor: pointer;
-  user-select: none;
-}
-
-.scope-checks-wrap summary span {
-  white-space: nowrap;
-}
-
-.scope-checks-wrap summary b {
-  min-width: 0;
-  overflow: hidden;
-  border: 1px solid #cfe0ff;
-  border-radius: 999px;
-  padding: 5px 9px;
-  background: #ffffff;
-  color: #0757d7;
-  font-size: 12px;
-  font-weight: 950;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.scope-checks-wrap[open] summary {
-  border-bottom: 1px solid #e5eefb;
-  background: #ffffff;
-}
-
-.scope-checks-wrap .scope-checks {
-  padding: 10px;
-}
-
-.scope-checks label {
-  min-height: 34px;
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  border: 1px solid #c8dcf3;
-  border-radius: 999px;
-  padding: 7px 11px;
-  background: #fbfdff;
-  color: #37536f;
-  font-size: 12px;
-  font-weight: 750;
-}
-
-.scope-checks label:has(input:checked) {
-  border-color: transparent;
-  background: linear-gradient(135deg, #0757d7, #1678ff);
-  color: #ffffff;
-  box-shadow: 0 10px 20px rgba(20, 103, 226, 0.18);
-}
-
-.scope-checks label:has(input:disabled) {
-  opacity: 0.62;
 }
 
 /* Panorama construction-management polish */
@@ -2270,16 +1604,11 @@ button {
 .metric-grid article,
 .status-card,
 .diagnostic-section,
-.pressure-assessment,
-.pressure-summary article,
-.permission-row,
 .warning-list,
 .message,
 .source-type-grid article,
 .slow-job-list article,
-.job-row,
-.raw-diagnostic,
-pre {
+.job-row {
   border-color: rgba(216, 231, 248, 0.95);
   box-shadow: 0 10px 24px rgba(20, 70, 138, 0.07);
 }
@@ -2287,22 +1616,12 @@ pre {
 .metric-grid article,
 .status-card,
 .diagnostic-section,
-.pressure-assessment,
-.pressure-summary article,
 .warning-list,
 .message,
 .source-type-grid article,
 .slow-job-list article,
-.job-row,
-.raw-diagnostic,
-pre {
+.job-row {
   background: rgba(255, 255, 255, 0.96);
-}
-
-.permission-row {
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.99), rgba(249, 252, 255, 0.97)),
-    radial-gradient(circle at 4% 0%, rgba(48, 128, 255, 0.08), transparent 32%);
 }
 
 .btn,
@@ -2345,22 +1664,13 @@ select {
 .metric-grid article,
 .status-card,
 .diagnostic-section,
-.pressure-assessment,
-.pressure-summary article,
-.permission-row,
 .warning-list,
 .message,
 .source-type-grid article,
 .slow-job-list article,
-.job-row,
-.raw-diagnostic,
-pre {
+.job-row {
   border-color: #d8e5f7;
   box-shadow: 0 8px 18px rgba(0, 47, 135, 0.06);
-}
-
-.permission-row {
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(248, 251, 255, 0.88));
 }
 
 input,
@@ -2374,20 +1684,6 @@ select:focus {
   border-color: #005bff;
   outline: none;
   box-shadow: 0 0 0 3px rgba(0, 91, 255, 0.14);
-}
-
-.scope-checks label:has(input:checked) {
-  background: linear-gradient(135deg, #1e63ff, #1554df);
-}
-
-@media (max-width: 1120px) {
-  .permission-row {
-    grid-template-columns: 1fr 1fr;
-  }
-
-  .permission-row .scope-checks {
-    grid-column: 1 / -1;
-  }
 }
 
 /* Final admin usability pass: compact command area and bounded long lists */
@@ -2442,86 +1738,12 @@ select:focus {
   box-shadow: 0 10px 24px rgba(0, 47, 135, 0.07);
 }
 
-.permission-list {
-  max-height: min(54vh, 620px);
-  overflow: auto;
-  padding-right: 4px;
-  overscroll-behavior: contain;
-}
-
-.permission-user-tools {
-  display: grid;
-  grid-template-columns: minmax(180px, 1fr) minmax(220px, 1.2fr) minmax(160px, auto);
-  align-items: end;
-  gap: 10px;
-  border: 1px solid rgba(216, 229, 247, 0.92);
-  border-radius: 20px;
-  padding: 12px;
-  background:
-    linear-gradient(135deg, rgba(239, 246, 255, 0.9), rgba(255, 255, 255, 0.94)),
-    #ffffff;
-  box-shadow: 0 10px 24px rgba(0, 47, 135, 0.07);
-}
-
-.permission-user-tools > div {
-  display: grid;
-  gap: 4px;
-}
-
-.permission-user-tools strong {
-  color: #071a39;
-  font-size: 15px;
-  font-weight: 950;
-}
-
-.permission-user-tools span {
-  color: #64748b;
-  font-size: 12px;
-  font-weight: 850;
-}
-
-.permission-user-search,
-.permission-user-filter {
-  display: grid;
-  gap: 6px;
-}
-
-.permission-user-search input,
-.permission-user-filter select {
-  min-height: 38px;
-}
-
-.permission-empty {
-  border: 1px dashed #cfe0ff;
-  border-radius: 18px;
-  padding: 16px;
-  background: #f8fbff;
-  color: #48627f;
-  font-size: 13px;
-  font-weight: 850;
-  text-align: center;
-}
-
-.permission-row {
-  align-items: stretch;
-}
-
-.permission-row input,
-.permission-row select {
-  min-height: 40px;
-}
-
 .mop-settings-grid,
-.handover-grid,
-.pressure-form {
+.handover-grid {
   border: 1px solid rgba(216, 229, 247, 0.9);
   border-radius: 20px;
   padding: 12px;
   background: rgba(248, 251, 255, 0.76);
-}
-
-.pressure-form label {
-  min-width: 160px;
 }
 
 /* Final density pass: keep admin controls readable without taking over the modal. */
@@ -2539,232 +1761,6 @@ select:focus {
   padding: 7px 12px;
   border-radius: 999px;
   font-size: 13px;
-}
-
-.permission-row {
-  grid-template-columns: minmax(140px, 0.75fr) minmax(200px, 1fr) 104px 82px auto;
-  gap: 7px;
-  padding: 9px;
-}
-
-.permission-command-bar {
-  display: grid;
-  grid-template-columns: minmax(220px, 1fr) repeat(3, max-content);
-  align-items: center;
-}
-
-.command-copy {
-  display: grid;
-  gap: 3px;
-  min-width: 0;
-}
-
-.command-copy strong {
-  color: #071a39;
-  font-size: 15px;
-  font-weight: 950;
-}
-
-.command-copy span {
-  min-width: 0;
-  overflow: hidden;
-  color: #64748b;
-  font-size: 12px;
-  font-weight: 800;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.permission-metrics {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.permission-metrics article {
-  min-height: 72px;
-  display: grid;
-  align-content: center;
-  gap: 4px;
-  border: 1px solid rgba(216, 229, 247, 0.95);
-  border-radius: 18px;
-  padding: 11px 13px;
-  background:
-    linear-gradient(135deg, rgba(255, 255, 255, 0.98), rgba(239, 246, 255, 0.82)),
-    #ffffff;
-  box-shadow: 0 8px 18px rgba(0, 47, 135, 0.06);
-}
-
-.permission-metrics span {
-  color: #64748b;
-  font-size: 12px;
-  font-weight: 850;
-}
-
-.permission-metrics strong {
-  color: #075bd8;
-  font-size: 24px;
-  font-weight: 950;
-}
-
-.permission-row-head {
-  grid-column: 1 / -1;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  border-bottom: 1px solid rgba(216, 229, 247, 0.75);
-  padding: 0 1px 8px;
-}
-
-.permission-row-head > div:first-child {
-  display: grid;
-  gap: 3px;
-  min-width: 0;
-}
-
-.permission-row-head strong {
-  overflow: hidden;
-  color: #071a39;
-  font-size: 14px;
-  font-weight: 950;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.permission-row-head span {
-  overflow: hidden;
-  color: #64748b;
-  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
-  font-size: 11px;
-  font-weight: 760;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.permission-badges {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 6px;
-}
-
-.permission-badges b {
-  border: 1px solid #d8e5f7;
-  border-radius: 999px;
-  padding: 4px 8px;
-  background: #ffffff;
-  color: #48627f;
-  font-size: 11px;
-  font-weight: 950;
-  line-height: 1;
-  white-space: nowrap;
-}
-
-.permission-badges b.admin,
-.permission-badges b.locked {
-  border-color: #bfdbfe;
-  background: #eff6ff;
-  color: #075bd8;
-}
-
-.permission-badges b.enabled {
-  border-color: #bbf7d0;
-  background: #ecfdf5;
-  color: #047857;
-}
-
-.permission-badges b.disabled {
-  border-color: #fecaca;
-  background: #fef2f2;
-  color: #b91c1c;
-}
-
-.permission-row.locked {
-  border-color: #cfe0ff;
-  background:
-    linear-gradient(180deg, rgba(248, 251, 255, 0.96), rgba(255, 255, 255, 0.92)),
-    #ffffff;
-}
-
-.permission-row.disabled {
-  opacity: 0.72;
-}
-
-.permission-row input,
-.permission-row select {
-  min-height: 36px;
-  padding: 7px 10px;
-}
-
-.permission-row > .permission-field {
-  min-height: auto;
-  display: grid;
-  align-items: stretch;
-  gap: 4px;
-  border: 0;
-  border-radius: 0;
-  padding: 0;
-  background: transparent;
-  color: #37536f;
-  font-weight: 850;
-}
-
-.permission-row > .permission-field span {
-  color: #64748b;
-  font-size: 11px;
-  font-weight: 950;
-  line-height: 1.1;
-}
-
-.permission-row > .permission-field input,
-.permission-row > .permission-field select {
-  width: 100%;
-  min-width: 0;
-}
-
-.permission-row > .permission-field.openid-field input {
-  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
-  font-size: 12px;
-}
-
-.permission-row > .permission-enable {
-  justify-content: center;
-  align-self: end;
-  min-height: 36px;
-  white-space: nowrap;
-}
-
-.permission-row > .btn.danger {
-  align-self: end;
-  min-height: 36px;
-  padding: 7px 12px;
-  border-radius: 999px;
-  font-size: 13px;
-}
-
-.scope-checks {
-  max-height: 82px;
-  overflow: auto;
-  padding: 3px 2px 0;
-  overscroll-behavior: contain;
-}
-
-.scope-checks-wrap {
-  grid-column: 1 / -1;
-}
-
-.scope-checks-wrap .scope-checks {
-  max-height: 112px;
-  padding: 9px;
-}
-
-.scope-checks label {
-  min-height: 30px;
-  padding: 5px 10px;
-  font-size: 12px;
 }
 
 @media (max-width: 820px) {
@@ -2787,27 +1783,6 @@ select:focus {
     position: static;
   }
 
-  .permission-list {
-    max-height: none;
-  }
-
-  .permission-user-tools {
-    grid-template-columns: 1fr;
-  }
-
-  .permission-command-bar,
-  .permission-metrics {
-    grid-template-columns: 1fr;
-  }
-
-  .command-copy span {
-    white-space: normal;
-  }
-
-  .permission-row-head {
-    align-items: flex-start;
-    flex-direction: column;
-  }
 }
 
 /* Final admin workspace navigation pass */
@@ -2828,144 +1803,5 @@ select:focus {
 .admin-card .btn:hover:not(:disabled),
 .admin-card button:hover:not(:disabled) {
   transform: translateY(-1px);
-}
-
-.admin-card > .admin-overview {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-}
-
-.admin-card > .admin-workspace-tabs {
-  position: sticky;
-  top: 72px;
-  z-index: 2;
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 6px;
-  border-radius: 20px;
-  background: rgba(255, 255, 255, 0.76);
-  overflow: visible;
-}
-
-.admin-advanced-toggle {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 10px;
-  min-width: 0;
-  margin-top: -4px;
-  color: #64748b;
-  font-size: 12px;
-  font-weight: 800;
-}
-
-.admin-advanced-toggle span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.admin-advanced-toggle .btn {
-  min-height: 32px;
-  border-radius: 999px;
-  padding: 6px 12px;
-  color: #3156c9;
-  background: rgba(248, 251, 255, 0.86);
-  font-size: 12px;
-}
-
-.admin-card > .admin-workspace-tabs button {
-  min-width: 0;
-  min-height: 58px;
-  border-radius: 16px;
-  padding: 9px 12px;
-  white-space: normal;
-}
-
-.admin-card > .admin-workspace-tabs button:not(.active) {
-  border-color: transparent;
-  background: rgba(248, 251, 255, 0.72);
-}
-
-.admin-card > .admin-workspace-tabs button.active {
-  border-color: #1e63ff;
-  background: linear-gradient(135deg, #1e63ff, #1554df);
-  box-shadow: 0 12px 26px rgba(30, 99, 255, 0.22);
-}
-
-.admin-current-guide {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-  border: 1px solid rgba(191, 219, 254, 0.86);
-  border-radius: 18px;
-  padding: 12px 14px;
-  background:
-    linear-gradient(135deg, rgba(239, 246, 255, 0.96), rgba(255, 255, 255, 0.92)),
-    #ffffff;
-  box-shadow: 0 10px 22px rgba(0, 47, 135, 0.06);
-}
-
-.admin-current-guide strong {
-  display: block;
-  color: #071a39;
-  font-size: 15px;
-  font-weight: 950;
-}
-
-.admin-current-guide p {
-  margin: 4px 0 0;
-  color: #52657f;
-  font-size: 13px;
-  font-weight: 800;
-  line-height: 1.45;
-}
-
-.admin-current-guide span {
-  flex: 0 0 auto;
-  border: 1px solid #cfe0ff;
-  border-radius: 999px;
-  padding: 6px 10px;
-  background: #eff6ff;
-  color: #075bd8;
-  font-size: 12px;
-  font-weight: 950;
-  white-space: nowrap;
-}
-
-.admin-current-guide.permissions span {
-  border-color: #fed7aa;
-  background: #fff7ed;
-  color: #9a3412;
-}
-
-.admin-current-guide.mop span {
-  border-color: #bbf7d0;
-  background: #ecfdf5;
-  color: #047857;
-}
-
-@media (max-width: 980px) {
-  .admin-card > .admin-overview {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .admin-card > .admin-workspace-tabs {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    position: static;
-  }
-
-  .admin-current-guide {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-}
-
-@media (max-width: 560px) {
-  .admin-card > .admin-overview,
-  .admin-card > .admin-workspace-tabs {
-    grid-template-columns: 1fr;
-  }
 }
 </style>

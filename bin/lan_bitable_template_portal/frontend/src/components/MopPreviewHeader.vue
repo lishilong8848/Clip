@@ -1,6 +1,9 @@
 <template>
   <header class="preview-head">
-    <button class="btn ghost preview-back" type="button" @click="$emit('back')">返回</button>
+    <button class="btn ghost preview-back" type="button" @click="$emit('back')">
+      <span aria-hidden="true">‹</span>
+      返回
+    </button>
     <div class="preview-title">
       <strong>{{ title }}</strong>
       <p>
@@ -63,6 +66,11 @@ defineEmits<{
   color: #1d4ed8;
   font-weight: 900;
   cursor: pointer;
+}
+
+.btn span {
+  font-size: 18px;
+  line-height: 1;
 }
 
 .preview-back {

@@ -3,7 +3,6 @@
     <div class="panel-head">
       <div>
         <h2>本月维保通告</h2>
-        <p>显示本月维保，未绑定或未上传维护保养单的优先显示。</p>
       </div>
       <span>{{ items.length }}</span>
     </div>
@@ -20,7 +19,7 @@
       </select>
     </div>
     <div v-if="!items.length" class="empty-box">
-      当前筛选下没有维保通告。可切换状态筛选或刷新本页后再试。
+      暂无维保通告
     </div>
     <div v-else class="list notice-list">
       <button

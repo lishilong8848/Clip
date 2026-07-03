@@ -28,7 +28,6 @@
     </div>
 
     <div class="selected-file-actions">
-      <small class="open-hint">{{ canPreview ? "点击后自动绑定，并进入表格填写页" : "请先选择可预览附件" }}</small>
       <button
         class="btn blue"
         type="button"

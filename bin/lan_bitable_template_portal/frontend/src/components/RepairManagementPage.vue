@@ -1,13 +1,14 @@
 <template>
   <section class="repair-management-page">
+    <div class="page-back-row">
+      <VnetBackButton to="/" />
+    </div>
     <div class="repair-hero">
       <div>
         <span class="section-kicker">检修管理</span>
         <h2>检修记录管理</h2>
-        <p>查看当前楼栋检修记录，直接新增、修改、删除；从事件进入时会自动带上来源事件。</p>
       </div>
       <div class="hero-actions">
-        <button class="btn ghost" type="button" @click="returnHome">返回功能选择</button>
         <button class="btn secondary" type="button" :disabled="loading" @click="loadRecords">
           {{ loading ? "读取中" : "刷新" }}
         </button>
@@ -43,7 +44,6 @@
         <div>
           <span class="section-kicker">来源事件</span>
           <h3>选择事件后填写检修单</h3>
-          <p>先选本月事件，系统会带出标题、专业、故障时间和故障描述；其余字段仍由人工确认。</p>
         </div>
         <div class="event-search">
           <input
@@ -124,10 +124,6 @@
             <span class="section-kicker">{{ editingRecordId ? "编辑记录" : "新增记录" }}</span>
             <h3>{{ editingRecordId ? selectedRecordTitle : "填写检修单" }}</h3>
             <p v-if="eventTitle">来自事件：{{ eventTitle }}</p>
-            <p v-if="sourceEventId && !editingRecordId" class="source-event-note">
-              已关联来源事件，创建时会写入检修表中可用的来源事件字段。
-            </p>
-            <p v-else>{{ formHelpText }}</p>
           </div>
           <div class="editor-actions">
             <button class="btn quiet" type="button" :disabled="saving" @click="resetDraft">重置</button>
@@ -152,7 +148,6 @@
           <div>
             <span class="section-kicker">下一步</span>
             <strong>检修记录已就绪</strong>
-            <p>后续请到检修通告页选择这条检修记录，再发起开始、更新或结束通告。</p>
           </div>
           <div class="next-step-actions">
             <button class="btn quiet" type="button" :disabled="repairNoticeOpening" @click="openRepairNoticeWorkbench(true)">
@@ -165,9 +160,7 @@
         </section>
 
         <div v-if="!fields.length && loading" class="empty-state">正在读取字段...</div>
-        <div v-else-if="!editableFields.length" class="empty-state">
-          当前检修表没有可直接填写的字段；请检查多维表字段权限或字段类型。
-        </div>
+        <div v-else-if="!editableFields.length" class="empty-state">暂无可填写字段</div>
         <div v-else class="field-grid">
           <label
             v-for="field in editableFields"
@@ -202,9 +195,6 @@
           <summary>
             {{ editingRecordId ? "查看只读字段" : "只读核心字段" }}（{{ readonlyFields.length }} 项）
           </summary>
-          <p v-if="!editingRecordId" class="readonly-hint">
-            这些字段由公式、查找或关联记录生成，不能在本页直接填写；创建时会写入可写字段和来源事件关联。
-          </p>
           <div class="readonly-grid">
             <div v-for="field in readonlyPreviewFields" :key="field.field_name" class="readonly-line">
               <b>{{ field.field_name }}</b>
@@ -220,8 +210,24 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { requestJson } from "../api/client";
+import { navigateHard } from "../navigation";
+import {
+  REPAIR_REQUIRED_FIELD_GROUPS,
+  isRequiredRepairField as isRequiredField,
+  parseRepairDraftValue as parseDraftValue,
+  repairCurrentScopeLabel,
+  repairEventMeta as eventMeta,
+  repairEventRecordId as eventRecordId,
+  repairFieldBadge,
+  repairFieldValueToText as fieldValueToText,
+  repairRecordBuildingLabel as recordBuildingLabel,
+  repairRecordSpecialtyLabel as recordSpecialtyLabel,
+  repairRecordTimeLabel as recordTimeLabel,
+  sortedRepairFields as sortedFields,
+} from "../repairManagementUtils";
 import type { LooseDict, ScopeOption } from "../types";
 import MessageBanner from "./MessageBanner.vue";
+import VnetBackButton from "./VnetBackButton.vue";
 
 const props = defineProps<{
   scope: string;
@@ -250,38 +256,6 @@ const repairNoticeOpening = ref(false);
 const routeParams = new URLSearchParams(window.location.search);
 const eventTitle = ref(String(routeParams.get("event_title") || "").trim());
 const sourceEventId = ref(String(routeParams.get("from_event_record_id") || "").trim());
-const REQUIRED_FIELD_GROUPS = [
-  ["检修通告名称", "维修名称", "标题", "名称"],
-  ["地点"],
-  ["紧急程度"],
-  ["专业"],
-  ["发现故障时间"],
-  ["期望完成时间"],
-  ["维修设备"],
-  ["维修故障"],
-  ["故障类型"],
-  ["维修方式"],
-  ["影响范围"],
-  ["故障发现方式"],
-  ["故障现象"],
-  ["故障原因"],
-  ["解决方案"],
-  ["完成情况"],
-];
-
-function sortedFields(source: LooseDict[]): LooseDict[] {
-  const ordered = source.slice();
-  ordered.sort((left, right) => {
-    const leftRequired = isRequiredField(left.field_name);
-    const rightRequired = isRequiredField(right.field_name);
-    if (leftRequired && !rightRequired) return -1;
-    if (!leftRequired && rightRequired) return 1;
-    if (left.is_primary && !right.is_primary) return -1;
-    if (!left.is_primary && right.is_primary) return 1;
-    return String(left.field_name || "").localeCompare(String(right.field_name || ""), "zh-Hans-CN");
-  });
-  return ordered;
-}
 
 const editableFields = computed(() => sortedFields(fields.value.filter((field) => field.editable)));
 const readonlyFields = computed(() => sortedFields(fields.value.filter((field) => !field.editable)));
@@ -301,7 +275,7 @@ const missingRequiredEditableFields = computed(() => {
   if (editingRecordId.value) return [];
   const editableNames = new Set(editableFields.value.map((field) => String(field.field_name || "")));
   const missing: string[] = [];
-  for (const group of REQUIRED_FIELD_GROUPS) {
+  for (const group of REPAIR_REQUIRED_FIELD_GROUPS) {
     const available = group.filter((name) => editableNames.has(name));
     if (!available.length) continue;
     if (!available.some((name) => String(fieldDraft[name] ?? "").trim())) {
@@ -316,29 +290,10 @@ const canSaveRecord = computed(() => {
 });
 
 const selectedRecordTitle = computed(() => selectedRecord.value?.title || "未命名检修记录");
-const currentScopeLabel = computed(() => {
-  const normalized = String(props.scope || "ALL").trim().toUpperCase();
-  const matched = props.scopeOptions.find((item) => String(item.value || "").toUpperCase() === normalized);
-  if (matched?.label) return matched.label;
-  if (normalized === "ALL") return "全部";
-  if (normalized === "110") return "110站";
-  return normalized ? `${normalized}楼` : "全部";
-});
-const formHelpText = computed(() => (
-  editingRecordId.value
-    ? "只保存右侧修改内容；公式、查找、创建时间等只读字段不会写回。"
-    : "先填写必填字段，再创建检修记录；公式、查找字段由多维表自动生成。"
-));
-
-function isRequiredField(fieldName: unknown): boolean {
-  const name = String(fieldName || "");
-  return REQUIRED_FIELD_GROUPS.some((group) => group.includes(name));
-}
+const currentScopeLabel = computed(() => repairCurrentScopeLabel(props.scope, props.scopeOptions));
 
 function fieldBadge(field: LooseDict): string {
-  if (isRequiredField(field.field_name) && !editingRecordId.value) return "必填";
-  if (field.options?.length) return "下拉选择";
-  return field.ui_type || "可编辑";
+  return repairFieldBadge(field, editingRecordId.value);
 }
 
 function scopedQuery(): string {
@@ -350,50 +305,9 @@ function currentMonthKey(): string {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
 }
 
-function eventRecordId(item: LooseDict | null | undefined): string {
-  if (!item) return "";
-  return String(item.record_id || item.source_record_id || "").trim();
-}
-
-function eventMeta(item: LooseDict | null | undefined): string {
-  if (!item) return "";
-  return [
-    item.building,
-    item.specialty,
-    item.level,
-    item.source,
-    item.status,
-    item.occurrence_time,
-  ].map((value) => String(value || "").trim()).filter(Boolean).join(" · ");
-}
-
 function showMessage(text: string, tone: "success" | "warning" | "failed" = "success"): void {
   messageText.value = text;
   messageTone.value = tone;
-}
-
-function fieldValueToText(value: unknown): string {
-  if (value === null || value === undefined) return "";
-  if (typeof value === "string") return value;
-  if (typeof value === "number" || typeof value === "boolean") return String(value);
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
-}
-
-function parseDraftValue(value: string): unknown {
-  const text = String(value ?? "").trim();
-  if (!text) return "";
-  if ((text.startsWith("{") && text.endsWith("}")) || (text.startsWith("[") && text.endsWith("]"))) {
-    try {
-      return JSON.parse(text);
-    } catch {
-      return text;
-    }
-  }
-  return text;
 }
 
 function resetDraft(): void {
@@ -615,47 +529,20 @@ function displayReadonlyValue(fieldName: string): string {
   return fieldValueToText(displayFields[fieldName]);
 }
 
-function recordBuildingLabel(record: LooseDict): string {
-  const fields = record.display_fields || {};
-  const explicit = fields["楼栋"] || fields["所属数据中心/楼栋-使用"] || fields["所属数据中心/楼栋（关联CMDB唯一ID关联,DE不选）"];
-  const text = String(explicit || "").trim();
-  if (text) return text;
-  const codes = Array.isArray(record.building_codes) ? record.building_codes : [];
-  if (codes.length) {
-    return codes.map((code) => (String(code).toUpperCase() === "110" ? "110站" : `${String(code).toUpperCase()}楼`)).join("、");
-  }
-  return "楼栋未填";
-}
-
-function recordSpecialtyLabel(record: LooseDict): string {
-  const fields = record.display_fields || {};
-  return String(fields["专业"] || fields["所属专业"] || fields["专业（推送消息用）"] || "专业未填").trim();
-}
-
-function recordTimeLabel(record: LooseDict): string {
-  const fields = record.display_fields || {};
-  const time = fields["发现故障时间"] || fields["期望完成时间"] || fields["维修开始时间"] || record.last_modified_time;
-  return String(time || "时间未填").trim();
-}
-
-function returnHome(): void {
-  window.location.href = "/";
-}
-
 async function openRepairNoticeWorkbench(refreshFirst = false): Promise<void> {
   const url = new URL("/workbench-lite", window.location.origin);
   url.searchParams.set("scope", props.scope || "ALL");
   url.searchParams.set("work_type", "repair");
   if (editingRecordId.value) url.searchParams.set("record_id", editingRecordId.value);
   if (!refreshFirst) {
-    window.location.href = url.toString();
+    navigateHard(url);
     return;
   }
   repairNoticeOpening.value = true;
   try {
     const params = new URLSearchParams({ scope: props.scope || "ALL" });
     await requestJson(`/api/repair-refresh?${params.toString()}`);
-    window.location.href = url.toString();
+    navigateHard(url);
   } catch (error: unknown) {
     showMessage(error instanceof Error ? error.message : "刷新检修失败，请稍后再试。", "failed");
   } finally {
@@ -689,6 +576,23 @@ onMounted(() => {
   padding: 18px 32px 40px;
   display: grid;
   gap: 14px;
+}
+
+.page-back-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+}
+
+.page-back-btn {
+  min-height: 36px;
+  padding: 0 13px;
+  border-radius: 999px;
+}
+
+.page-back-btn span {
+  font-size: 19px;
+  line-height: 1;
 }
 
 .repair-hero,

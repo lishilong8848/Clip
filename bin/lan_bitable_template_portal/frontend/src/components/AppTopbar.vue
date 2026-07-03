@@ -11,15 +11,6 @@
       <span v-if="auth.loggedIn" class="user-chip" :title="auth.user?.open_id ? `飞书身份：${auth.user.open_id}` : ''">
         {{ auth.user?.name || "已登录" }}
       </span>
-      <button
-        v-if="auth.loggedIn && (isEngineerMopPage || isEventPage)"
-        class="btn ghost"
-        type="button"
-        title="返回功能选择页"
-        @click="emit('return-home')"
-      >
-        功能选择
-      </button>
       <label v-if="auth.loggedIn && isEventPage && visibleScopeOptions.length > 1" class="scope-switch">
         <b class="scope-icon" aria-hidden="true">楼</b>
         <span>当前楼栋</span>
@@ -38,7 +29,16 @@
         @update:open="emit('update:refreshMenuOpen', $event)"
         @refresh-event="emit('refresh-event')"
       />
-      <button v-if="isAdmin" class="btn ghost admin-entry" type="button" title="打开管理员诊断和权限管理" @click="emit('open-admin')">管理/诊断</button>
+      <button
+        v-if="isAdmin"
+        class="btn ghost admin-entry settings-entry"
+        type="button"
+        aria-label="打开管理员诊断和权限管理"
+        title="打开管理员诊断和权限管理"
+        @click="emit('open-admin')"
+      >
+        <span class="settings-icon" aria-hidden="true"></span>
+      </button>
       <button v-if="auth.loggedIn" class="btn danger-text" type="button" title="退出当前飞书登录" @click="emit('logout')">退出</button>
     </div>
   </header>
@@ -68,7 +68,6 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  "return-home": [];
   "switch-scope": [value: string];
   "update:refreshMenuOpen": [value: boolean];
   "refresh-event": [];
@@ -303,6 +302,53 @@ header.app-topbar .danger-text {
 
 .admin-entry {
   opacity: 0.92;
+}
+
+header.app-topbar .settings-entry {
+  width: 42px;
+  min-width: 42px;
+  flex: 0 0 42px;
+  padding: 0;
+  border-radius: 16px;
+}
+
+.settings-icon {
+  position: relative;
+  width: 20px;
+  height: 20px;
+  display: inline-block;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 50% 50%, transparent 0 4px, currentColor 4.5px 6px, transparent 6.5px),
+    conic-gradient(
+      from 0deg,
+      transparent 0deg 18deg,
+      currentColor 18deg 34deg,
+      transparent 34deg 63deg,
+      currentColor 63deg 79deg,
+      transparent 79deg 108deg,
+      currentColor 108deg 124deg,
+      transparent 124deg 153deg,
+      currentColor 153deg 169deg,
+      transparent 169deg 198deg,
+      currentColor 198deg 214deg,
+      transparent 214deg 243deg,
+      currentColor 243deg 259deg,
+      transparent 259deg 288deg,
+      currentColor 288deg 304deg,
+      transparent 304deg 333deg,
+      currentColor 333deg 349deg,
+      transparent 349deg 360deg
+    );
+  color: #ffffff;
+}
+
+.settings-icon::after {
+  content: "";
+  position: absolute;
+  inset: 5px;
+  border: 2px solid currentColor;
+  border-radius: 50%;
 }
 
 @media (max-width: 1360px) {

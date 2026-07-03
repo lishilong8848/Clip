@@ -323,7 +323,7 @@ def check_frontend_dist() -> tuple[bool, str, bool]:
     if missing_css_markers:
         return False, "Vue dist CSS 缺少 VNET 蓝白生产样式: " + ", ".join(missing_css_markers), False
     js_text = dist_text_by_suffix.get(".js", "")
-    js_markers = ("南通基地-运维灯塔工作台", "业务模块", "维护管理", "变更管理", "检修管理")
+    js_markers = ("南通基地-运维灯塔工作台", "实时动态", "维护管理", "变更管理", "检修管理")
     missing_js_markers = [marker for marker in js_markers if marker not in js_text]
     if missing_js_markers:
         return False, "Vue dist JS 缺少生产页面关键文案: " + ", ".join(missing_js_markers), False
@@ -538,7 +538,9 @@ def check_frontend_vnet_skin() -> tuple[bool, list[str]]:
     app_status_notices = src_dir / "components" / "AppStatusNotices.vue"
     auth_panels = src_dir / "components" / "AuthPanels.vue"
     admin_tools = src_dir / "components" / "AdminTools.vue"
+    admin_permission_users = src_dir / "components" / "AdminPermissionUsers.vue"
     scope_home = src_dir / "components" / "ScopeHome.vue"
+    scope_home_utils = src_dir / "scopeHomeUtils.ts"
     history_memory = src_dir / "components" / "HistoryMemoryPage.vue"
     workbench_lite = BIN_DIR / "lan_bitable_template_portal" / "workbench_lite.py"
     smoke_script = BIN_DIR / "tools" / "frontend_runtime_smoke.py"
@@ -550,8 +552,10 @@ def check_frontend_vnet_skin() -> tuple[bool, list[str]]:
         ("AppTopbar.vue", app_topbar),
         ("AppStatusNotices.vue", app_status_notices),
         ("AdminTools.vue", admin_tools),
+        ("AdminPermissionUsers.vue", admin_permission_users),
         ("AuthPanels.vue", auth_panels),
         ("ScopeHome.vue", scope_home),
+        ("scopeHomeUtils.ts", scope_home_utils),
         ("HistoryMemoryPage.vue", history_memory),
         ("workbench_lite.py", workbench_lite),
         ("frontend_runtime_smoke.py", smoke_script),
@@ -602,12 +606,17 @@ def check_frontend_vnet_skin() -> tuple[bool, list[str]]:
     admin_text = files["AdminTools.vue"]
     for marker in (
         "VNET admin skin",
-        ".permission-row:hover",
-        ".scope-checks label:has(input:checked)",
-        "grid-template-columns: minmax(160px, 0.8fr) minmax(220px, 1.2fr)",
     ):
         if marker not in admin_text:
             errors.append(f"AdminTools.vue 管理员页缺少蓝白权限卡片样式: {marker}")
+    admin_permission_users_text = files["AdminPermissionUsers.vue"]
+    for marker in (
+        ".permission-row:hover",
+        ".scope-checks label:has(input:checked)",
+        "grid-template-columns: minmax(140px, 0.75fr) minmax(200px, 1fr)",
+    ):
+        if marker not in admin_permission_users_text:
+            errors.append(f"AdminPermissionUsers.vue 管理员权限用户列表缺少蓝白权限卡片样式: {marker}")
 
     auth_text = files["AuthPanels.vue"]
     for marker in (
@@ -622,9 +631,13 @@ def check_frontend_vnet_skin() -> tuple[bool, list[str]]:
             errors.append(f"AuthPanels.vue 权限申请楼栋选择未统一蓝白胶囊样式: {marker}")
 
     scope_text = files["ScopeHome.vue"]
-    for marker in ("home-metrics", "module-card", "module-icon", "交接班审核页"):
+    for marker in ("HomeBroadcastTicker", "module-card", "module-icon"):
         if marker not in scope_text:
             errors.append(f"ScopeHome.vue 功能选择页缺少生产入口样式/文案: {marker}")
+    scope_home_utils_text = files["scopeHomeUtils.ts"]
+    for marker in ("交接班审核页", "维护单管理", "进入事件管理", "进入变更管理"):
+        if marker not in scope_home_utils_text:
+            errors.append(f"scopeHomeUtils.ts 功能选择页缺少生产入口配置: {marker}")
 
     lite_text = files["workbench_lite.py"]
     for marker in (
@@ -703,6 +716,8 @@ def check_package_portable_distribution_rules() -> tuple[bool, list[str]]:
         PROJECT_ROOT / "bin" / "data" / "lan_portal_state.sqlite3",
         PROJECT_ROOT / "bin" / "data" / "lan_portal_state.sqlite3-wal",
         PROJECT_ROOT / "bin" / "data" / "lan_portal_state.sqlite3-shm",
+        PROJECT_ROOT / "bin" / "data" / "secure" / "signature_master.key",
+        PROJECT_ROOT / "bin" / "data" / "signature_cache" / "rec_xxx.png",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "frontend" / "node_modules" / "vue" / "index.js",
     ]
     for path in excluded_paths:

@@ -55,7 +55,7 @@ class LanPortalStateStore:
     are migration inputs only and are never deleted or overwritten here.
     """
 
-    SCHEMA_VERSION = 22
+    SCHEMA_VERSION = 23
     SOURCE_SCOPE_TABLES = {
         "110": "source_records_110",
         "A": "source_records_a",
@@ -101,6 +101,7 @@ class LanPortalStateStore:
         "engineer_mop_local_files",
         "signature_link_tokens",
         "mop_temporary_signature_sessions",
+        "signature_crypto_migrations",
         "schema_migrations",
     ]
     REQUIRED_INDEXES = [
@@ -128,6 +129,8 @@ class LanPortalStateStore:
         "idx_signature_link_tokens_expiry",
         "idx_mop_temp_signature_notice",
         "idx_mop_temp_signature_expiry",
+        "idx_signature_crypto_migrations_status",
+        "idx_signature_crypto_migrations_updated",
     ]
 
     def __init__(self, db_path: str | Path | None = None):
@@ -617,6 +620,33 @@ class LanPortalStateStore:
             """
             CREATE INDEX IF NOT EXISTS idx_mop_temp_signature_expiry
             ON mop_temporary_signature_sessions(expires_at)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS signature_crypto_migrations (
+                table_id TEXT NOT NULL,
+                record_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                error TEXT,
+                payload_json TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY(table_id, record_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_signature_crypto_migrations_status
+            ON signature_crypto_migrations(status, updated_at)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_signature_crypto_migrations_updated
+            ON signature_crypto_migrations(updated_at)
             """
         )
         conn.execute(
@@ -5766,6 +5796,91 @@ class LanPortalStateStore:
                 removed = int(cursor.rowcount or 0)
                 conn.commit()
         return removed
+
+    def upsert_signature_crypto_migration(
+        self,
+        *,
+        table_id: str,
+        record_id: str,
+        status: str,
+        error: str = "",
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        table_id = self._text(table_id)
+        record_id = self._text(record_id)
+        status = self._text(status) or "unknown"
+        if not table_id or not record_id:
+            return
+        now = time.time()
+        payload = dict(payload or {})
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    """
+                    SELECT attempts, created_at
+                    FROM signature_crypto_migrations
+                    WHERE table_id = ? AND record_id = ?
+                    """,
+                    (table_id, record_id),
+                ).fetchone()
+                attempts = int(row["attempts"] or 0) if row else 0
+                created_at = float(row["created_at"] or now) if row else now
+                if status in {"migrating", "failed"}:
+                    attempts += 1
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO signature_crypto_migrations(
+                        table_id, record_id, status, attempts, error, payload_json, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        table_id,
+                        record_id,
+                        status,
+                        attempts,
+                        self._text(error),
+                        self._json(payload),
+                        created_at,
+                        now,
+                    ),
+                )
+                conn.commit()
+
+    def signature_crypto_migration_summary(self) -> dict[str, Any]:
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                rows = conn.execute(
+                    """
+                    SELECT status, COUNT(*) AS count
+                    FROM signature_crypto_migrations
+                    GROUP BY status
+                    """
+                ).fetchall()
+                recent = conn.execute(
+                    """
+                    SELECT table_id, record_id, status, error, updated_at
+                    FROM signature_crypto_migrations
+                    ORDER BY updated_at DESC
+                    LIMIT 10
+                    """
+                ).fetchall()
+        counts = {str(row["status"] or ""): int(row["count"] or 0) for row in rows}
+        return {
+            "counts": counts,
+            "recent": [
+                {
+                    "table_id": str(row["table_id"] or ""),
+                    "record_id": str(row["record_id"] or ""),
+                    "status": str(row["status"] or ""),
+                    "error": str(row["error"] or ""),
+                    "updated_at": float(row["updated_at"] or 0.0),
+                }
+                for row in recent
+            ],
+        }
 
     def _mop_binding_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
         payload = self._loads(str(row["payload_json"] or ""), {})

@@ -14,6 +14,7 @@ DEFAULT_MODULE_TO_PACKAGE = {
     "requests": "requests",
     "urllib3": "urllib3",
     "httpx": "httpx",
+    "cryptography": "cryptography",
     "PIL": "Pillow",
     "anyio": "anyio",
     "pydantic": "pydantic",

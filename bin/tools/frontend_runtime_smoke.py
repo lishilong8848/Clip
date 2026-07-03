@@ -109,6 +109,7 @@ class _SmokePortalService:
         ongoing_items: list[dict] | None = None,
         work_type: str = "",
         sections: set[str] | list[str] | tuple[str, ...] | None = None,
+        **_ignored: object,
     ) -> dict:
         today = time.strftime("%Y-%m-%d")
         records = [
@@ -601,6 +602,9 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             if (issues.length) throw new Error(`layout issues at ${{stage}}: ${{issues.join('; ')}}`);
           }}
           async function assertVnetSkin(targetPage, stage) {{
+            await targetPage.waitForFunction(() => Boolean(document.querySelector(
+              '.center-state, .feature-card, .panel, .permission-row, .match-layout, .module-card, .home-metrics article'
+            )), null, {{ timeout: 10000 }}).catch(() => null);
             const issues = await targetPage.evaluate(() => {{
               const result = [];
               const styleText = (node, prop) => node ? String(getComputedStyle(node)[prop] || '') : '';
@@ -779,8 +783,13 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             throw new Error(`handover link href mismatch: ${{handoverHref}}`);
           }}
           await assertLayout(page, 'handover-feature');
-          await page.getByRole('button', {{ name: '返回功能选择' }}).click();
-          await page.waitForSelector('text=业务工作台', {{ timeout: 10000 }});
+          await page.getByRole('button', {{ name: /^返回$/ }}).first().click();
+          try {{
+            await page.waitForSelector('text=业务工作台', {{ timeout: 2500 }});
+          }} catch (err) {{
+            await page.getByRole('button', {{ name: /^返回$/ }}).first().click();
+            await page.waitForSelector('text=业务工作台', {{ timeout: 10000 }});
+          }}
           await assertHeaderSubtitle(page, '功能选择 · 请选择功能', 'home-after-handover');
           await page.getByRole('button', {{ name: '进入检修管理', exact: true }}).click();
           await page.waitForSelector('text=选择楼栋进入检修管理', {{ timeout: 10000 }});
@@ -839,18 +848,18 @@ def _build_playwright_script(url: str, session_id: str) -> str:
               const scriptText = Array.from(document.scripts).map(node => node.textContent || '').join('\\n');
               return {{
                 hasSchedule: scriptText.includes('function schedulePostSubmitRefresh'),
-                hasWorkspaceRefresh1800: scriptText.includes('workspaceRefresh(1800'),
-                hasWorkspaceRefresh5200: scriptText.includes('workspaceRefresh(5200'),
-                hasWorkspaceRefresh12000: scriptText.includes('workspaceRefresh(12000'),
-                hasWorkspaceSelectorRefresh: scriptText.includes("['.status', '.summary', '.workspace']"),
+                hasJobPolling: scriptText.includes('pollSubmittedJob(jobId'),
+                hasDirtyGuard: scriptText.includes('if (liteFormDirty)'),
+                hasStatusSummaryRefresh: scriptText.includes("refreshCurrentLite('后台状态校准中...', ['.status', '.summary'])"),
+                hasCurrentLiteRefresh: scriptText.includes('function refreshCurrentLite'),
               }};
             }});
             if (
               !liteSubmitScriptProbe.hasSchedule
-              || !liteSubmitScriptProbe.hasWorkspaceRefresh1800
-              || !liteSubmitScriptProbe.hasWorkspaceRefresh5200
-              || !liteSubmitScriptProbe.hasWorkspaceRefresh12000
-              || !liteSubmitScriptProbe.hasWorkspaceSelectorRefresh
+              || !liteSubmitScriptProbe.hasJobPolling
+              || !liteSubmitScriptProbe.hasDirtyGuard
+              || !liteSubmitScriptProbe.hasStatusSummaryRefresh
+              || !liteSubmitScriptProbe.hasCurrentLiteRefresh
             ) {{
               throw new Error(`lite submit workspace refresh guards missing: ${{JSON.stringify(liteSubmitScriptProbe)}}`);
             }}
@@ -875,17 +884,22 @@ def _build_playwright_script(url: str, session_id: str) -> str:
               throw new Error(`lite row click did not preserve list scroll: ${{JSON.stringify(restoredScroll)}}`);
             }}
             const sourceLinkProbe = await page.evaluate(() => {{
+              const field = document.querySelector('.source-link-field');
               const select = document.querySelector('select[name="source_record_id"]');
               const hidden = document.querySelector('input[type="hidden"][name="source_record_id"]');
               return {{
+                hasField: !!field,
+                text: field?.textContent || '',
                 hasSelect: !!select,
                 hiddenValue: hidden?.value || '',
                 options: select ? Array.from(select.options).map(node => node.textContent || '') : [],
               }};
             }});
             if (
-              !sourceLinkProbe.hiddenValue
+              !sourceLinkProbe.hasField
+              || (!sourceLinkProbe.hiddenValue
               && !sourceLinkProbe.options.some(text => text.includes('冷机月度巡检'))
+              && !sourceLinkProbe.text.includes('当前通告没有源表 ID'))
             ) {{
               throw new Error(`source link options missing expected record: ${{JSON.stringify(sourceLinkProbe)}}`);
             }}

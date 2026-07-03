@@ -15,10 +15,8 @@
       <strong>日期/签名位 {{ maintenanceFieldCount }} 个</strong>
       <em v-if="!isCover && filledCount">已填写 {{ filledCount }} 项</em>
     </div>
-    <div v-if="isCover" class="detect-empty">封面页无需填写，切换到记录页继续。</div>
-    <div v-else class="detect-empty">
-      未识别到选择项或日期签名位，普通单元格仍可编辑。
-    </div>
+    <div v-if="isCover" class="detect-empty">封面页</div>
+    <div v-else class="detect-empty">未识别</div>
   </div>
 </template>
 

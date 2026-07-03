@@ -3,8 +3,7 @@
     <span class="state-mark" aria-hidden="true"></span>
     <div class="state-copy">
       <strong>{{ error ? "页面加载失败" : "正在打开页面" }}</strong>
-      <p>{{ error ? (error.message || "当前模块没有加载成功，请重试。") : "正在准备页面内容，请稍候。" }}</p>
-      <small v-if="attempts && !error">已尝试 {{ attempts }} 次，仍在准备页面。</small>
+      <p v-if="error">{{ error.message || "当前模块没有加载成功。" }}</p>
     </div>
     <button v-if="error && retry" class="btn blue" type="button" @click="retry">
       重新加载

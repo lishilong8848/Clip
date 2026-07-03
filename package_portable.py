@@ -174,6 +174,8 @@ RUNTIME_MODULE_TO_PACKAGE = {
 
     "httpx": "httpx",
 
+    "cryptography": "cryptography",
+
     "PIL": "Pillow",
 
     "anyio": "anyio",
@@ -223,6 +225,8 @@ RUNTIME_PACKAGE_INSTALL_ORDER = [
     "urllib3",
 
     "httpx",
+
+    "cryptography",
 
     "PIL",
 

@@ -4,7 +4,6 @@
       <div>
         <span>线上手写签名</span>
         <h2>选择人员后在手机上签名保存</h2>
-        <p>签名会保存到该人员在签名表中的“手写签名”附件字段，后续 MOP 填写可直接复用。</p>
       </div>
     </header>
 
@@ -72,7 +71,7 @@
             <template v-if="selectedPerson.building">{{ selectedPerson.building }} · </template>
             {{ selectedPerson.position || selectedPerson.team || selectedPerson.role_label || "签名记录" }}
           </small>
-          <small v-else>{{ linkMode ? "请稍候，正在打开专属签名页" : "左侧选中人员后开始签名" }}</small>
+          <small v-else>{{ linkMode ? "读取中" : "未选择" }}</small>
         </div>
 
         <div class="canvas-wrap" :class="{ disabled: !selectedPerson }">
@@ -115,12 +114,8 @@
           </button>
           <span v-if="saveDisabledReason && !signaturePreviewUrl" class="signature-action-hint">{{ saveDisabledReason }}</span>
           <span v-if="signaturePreviewUrl && !hasInk" class="saved-inline">
-            {{ linkMode ? "签名已保存并显示在上方，可关闭页面。" : temporaryMode ? "临时签名已保存，可重新手写覆盖。" : "已有签名已加载，可直接复用或重新手写覆盖。" }}
+            {{ linkMode ? "已保存" : temporaryMode ? "已保存" : "已有签名" }}
           </span>
-        </div>
-
-        <div v-if="!linkMode" class="signature-note">
-          保存后会覆盖该人员原有“手写签名”附件。表外临时签名仍只在 MOP 填写会话中使用，不会写入签名库。
         </div>
       </section>
     </section>
@@ -412,7 +407,7 @@ async function saveSignature(): Promise<void> {
           signature_png: signaturePng,
         }),
       });
-    setMessage(temporaryMode.value ? "签名已保存，可返回 MOP 页面。" : `${data.name || selectedPerson.value.name || "签名"} 已保存。`, "success");
+    setMessage(temporaryMode.value ? "签名已保存。" : `${data.name || selectedPerson.value.name || "签名"} 已保存。`, "success");
     selectedPerson.value.has_signature = true;
     selectedPerson.value.signature_count = 1;
     selectedPerson.value.signature_preview_url = data.signature_preview_url || selectedPerson.value.signature_preview_url || "";

@@ -29,6 +29,7 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
     (20, "event_month_snapshots"),
     (21, "mop_fill_memory"),
     (22, "engineer_mop_local_files"),
+    (23, "signature_crypto_migrations"),
 )
 
 

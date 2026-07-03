@@ -1,5 +1,10 @@
 <template>
-  <section class="message-banner" :class="tone" role="status">
+  <section
+    class="message-banner"
+    :class="tone"
+    :role="tone === 'failed' || tone === 'warning' ? 'alert' : 'status'"
+    :aria-live="tone === 'failed' || tone === 'warning' ? 'assertive' : 'polite'"
+  >
     <span class="message-dot" aria-hidden="true"></span>
     <div>
       <strong v-if="title">{{ title }}</strong>

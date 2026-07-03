@@ -15,7 +15,6 @@
       :refresh-cooldown="refreshCooldown"
       :event-refresh-title="refreshButtonTitle('event')"
       :is-admin="isAdmin"
-      @return-home="returnToHome"
       @switch-scope="switchScope"
       @update:refresh-menu-open="refreshMenuOpen = $event"
       @refresh-event="refreshEvent"
@@ -72,7 +71,6 @@
       :request="permissionRequest"
       :requestable-scopes="permissionPanelRequestableScopes"
       :title="permissionPanelTitle"
-      :description="permissionPanelDescription"
       :empty-text="permissionPanelEmptyText"
       :show-back="showPermissionRequestPanel && auth.scopeOptions.length > 0"
       @update-request="updatePermissionRequest"
@@ -113,9 +111,8 @@ import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, reactive, r
 import AppStatusNotices from "./components/AppStatusNotices.vue";
 import AppTopbar from "./components/AppTopbar.vue";
 import AsyncPageState from "./components/AsyncPageState.vue";
-import AuthPanels from "./components/AuthPanels.vue";
-import ScopeHome from "./components/ScopeHome.vue";
 import { AUTH_EXPIRED_EVENT, requestJson } from "./api/client";
+import { navigate, navigateHard } from "./navigation";
 import type { LooseDict, ScopeOption } from "./types";
 
 function asyncPage(loader: () => Promise<unknown>) {
@@ -129,11 +126,13 @@ function asyncPage(loader: () => Promise<unknown>) {
 }
 
 const AdminTools = asyncPage(() => import("./components/AdminTools.vue"));
+const AuthPanels = asyncPage(() => import("./components/AuthPanels.vue"));
 const EngineerMopPage = asyncPage(() => import("./components/EngineerMopPage.vue"));
 const EventManagementPage = asyncPage(() => import("./components/EventManagementPage.vue"));
 const HistoryMemoryPage = asyncPage(() => import("./components/HistoryMemoryPage.vue"));
 const RepairManagementPage = asyncPage(() => import("./components/RepairManagementPage.vue"));
 const SignaturePage = asyncPage(() => import("./components/SignaturePage.vue"));
+const ScopeHome = asyncPage(() => import("./components/ScopeHome.vue"));
 
 type Dict = LooseDict;
 
@@ -217,11 +216,6 @@ const permissionPanelTitle = computed(() => (
   showPermissionRequestPanel.value && auth.scopeOptions.length
     ? "申请其他楼栋权限"
     : "当前账号暂无门户权限"
-));
-const permissionPanelDescription = computed(() => (
-  showPermissionRequestPanel.value && auth.scopeOptions.length
-    ? "选择还需要访问的楼栋或园区，管理员审批后会追加到当前账号。"
-    : "请选择需要访问的楼栋或园区，提交后由管理员在门户审批。"
 ));
 const permissionPanelEmptyText = computed(() => (
   showPermissionRequestPanel.value && auth.scopeOptions.length
@@ -429,35 +423,32 @@ function enterScope(scope: string, workType = "maintenance"): void {
   const url = new URL("/workbench-lite", window.location.origin);
   url.searchParams.set("scope", normalizeScopeValue(scope));
   url.searchParams.set("work_type", workType || "maintenance");
-  window.location.href = url.toString();
+  navigateHard(url);
 }
 
-function enterEventManagement(scope: string): void {
+function enterEventManagement(scope: string, detail = false): void {
   const url = new URL("/", window.location.origin);
   url.searchParams.set("scope", normalizeScopeValue(scope));
   url.searchParams.set("mode", "events");
-  window.location.href = url.toString();
+  if (detail) url.searchParams.set("detail", "1");
+  navigate(url);
 }
 
 function enterEngineerMop(scope: string): void {
   const url = new URL("/engineer/mop", window.location.origin);
   url.searchParams.set("scope", normalizeScopeValue(scope));
-  window.location.href = url.toString();
+  navigate(url);
 }
 
 function enterRepairManagement(scope: string): void {
   const url = new URL("/repair-management", window.location.origin);
   url.searchParams.set("scope", normalizeScopeValue(scope));
-  window.location.href = url.toString();
-}
-
-function returnToHome(): void {
-  window.location.href = "/";
+  navigate(url);
 }
 
 function switchScope(scope: string): void {
   if (isEventPage.value) {
-    enterEventManagement(scope);
+    enterEventManagement(scope, true);
   }
 }
 
@@ -471,7 +462,7 @@ function refreshEvent(): void {
 async function logout(): Promise<void> {
   clearAuthKeepalive();
   await portalRequest("/api/auth/logout", { method: "POST", body: "{}" }).catch(() => null);
-  window.location.href = "/";
+  navigateHard("/");
 }
 
 function updatePermissionRequest(patch: Partial<typeof permissionRequest>): void {
@@ -1141,7 +1132,7 @@ textarea {
 }
 
 textarea {
-  min-height: 88px;
+  min-height: 42px;
 }
 
 select {

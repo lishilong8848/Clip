@@ -144,6 +144,34 @@ export function makeRawMopCellKey(sheetName: string, rowIndex: number, colIndex:
   return `${sheetName || ""}:${rowIndex}:${colIndex}`;
 }
 
+export function parseMopCellKey(key: unknown): MopCellPosition | null {
+  const parts = String(key || "").split(":");
+  const row = Number(parts[parts.length - 2]);
+  const col = Number(parts[parts.length - 1]);
+  if (!Number.isFinite(row) || !Number.isFinite(col)) return null;
+  return { row, col };
+}
+
+export function parseMopCellKeyList(keys: unknown[]): MopCellPosition[] {
+  const positions: MopCellPosition[] = [];
+  for (const key of keys) {
+    const position = parseMopCellKey(key);
+    if (position) positions.push(position);
+  }
+  return positions;
+}
+
+export function parseMopCellEditKey(key: unknown): { sheet: string; row: number; col: number } | null {
+  const parts = String(key || "").split(":");
+  const position = parseMopCellKey(key);
+  if (!position) return null;
+  return {
+    sheet: parts.slice(0, -2).join(":"),
+    row: position.row,
+    col: position.col,
+  };
+}
+
 export function roleForMopMaintenanceLabel(label: unknown): MopSignatureRole | "" {
   const text = String(label || "");
   if (text.includes("维护实施人")) return "implementer";
