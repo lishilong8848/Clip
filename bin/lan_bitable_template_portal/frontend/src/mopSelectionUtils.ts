@@ -12,6 +12,58 @@ export function compactSearchText(value: unknown): string {
   return String(value || "").replace(/\s+/g, "").toLowerCase();
 }
 
+function fieldValueText(value: unknown): string {
+  if (Array.isArray(value)) return value.map((item) => fieldValueText(item)).filter(Boolean).join(" ");
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    for (const key of ["text", "name", "value", "display_value", "field_value"]) {
+      const text = fieldValueText(record[key]);
+      if (text) return text;
+    }
+    return Object.values(record).map((item) => fieldValueText(item)).filter(Boolean).join(" ");
+  }
+  return String(value || "").trim();
+}
+
+export function normalizeMopSpecialtyText(value: unknown): string {
+  const text = compactSearchText(fieldValueText(value))
+    .replace(/专业|类别|所属/g, "");
+  for (const name of ["电气", "暖通", "消防", "弱电"]) {
+    if (text.includes(name)) return name;
+  }
+  return text;
+}
+
+export function mopSpecialtyText(item: Dict | null | undefined): string {
+  const fields = item?.fields && typeof item.fields === "object" ? item.fields as Dict : {};
+  return fieldValueText(
+    item?.specialty
+    || item?.专业
+    || item?.专业类别
+    || item?.所属专业
+    || fields["专业"]
+    || fields["专业类别"]
+    || fields["所属专业"]
+    || fields["机楼/专业"]
+    || "",
+  );
+}
+
+export function mopCandidateMatchesSpecialty(mop: Dict, specialty: unknown): boolean {
+  const target = normalizeMopSpecialtyText(specialty);
+  if (!target) return true;
+  const direct = normalizeMopSpecialtyText(mopSpecialtyText(mop));
+  if (direct) return direct === target || direct.includes(target) || target.includes(direct);
+  const fields = mop?.fields && typeof mop.fields === "object" ? Object.values(mop.fields as Dict) : [];
+  const haystack = normalizeMopSpecialtyText([
+    mop?.title,
+    mop?.file_no,
+    mop?.maintenance_type,
+    ...fields.map((value) => fieldValueText(value)),
+  ].join(" "));
+  return Boolean(haystack && haystack.includes(target));
+}
+
 export function mopAttachmentKey(attachment: Dict): string {
   return String(attachment?.file_token || attachment?.url || attachment?.name || "").trim();
 }

@@ -1217,18 +1217,15 @@ def _source_link_select(
     _ = ongoing_item
     if current_source_id:
         return (
-            "<label class=\"source-link-field readonly\"><span>关联源表事项</span>"
-            "<div class=\"source-link-title\">已关联当前源表事项</div>"
-            "<select disabled><option>后续更新/结束会继续使用这个源表关系</option></select>"
+            "<label class=\"source-link-field readonly\"><span>源表</span>"
+            "<div class=\"source-link-title\">已关联</div>"
             f"<input type=\"hidden\" name=\"source_record_id\" value=\"{_e(current_source_id)}\">"
             "</label>"
         )
     if not options:
         return (
-            "<label class=\"source-link-field readonly\"><span>关联源表事项</span>"
-            "<div class=\"source-link-title\">当前通告没有源表 ID</div>"
-            "<select disabled><option>暂无可关联的未开始 / 延期未开始 / 进行中源表事项</option></select>"
-            "<em>可能是左侧对应事项已被其他进行中通告占用，或该类型当前没有可关联事项。</em>"
+            "<label class=\"source-link-field readonly\"><span>源表</span>"
+            "<div class=\"source-link-title\">未关联</div>"
             "</label>"
         )
     option_html = [
@@ -1247,10 +1244,9 @@ def _source_link_select(
             f"<option value=\"{_e(item.get('source_record_id'))}\">{_e(label)}</option>"
         )
     return (
-        "<label class=\"source-link-field\"><span>关联源表事项</span>"
-        "<div class=\"source-link-title\">纯手填、解析通告或进行中通告可在这里绑定源表</div>"
+        "<label class=\"source-link-field\"><span>源表</span>"
+        "<div class=\"source-link-title\">可关联</div>"
         f"<select name=\"source_record_id\">{''.join(option_html)}</select>"
-        "<em>已被其他进行中通告占用的事项不会出现；选择后可再查找目标多维记录。</em>"
         "</label>"
     )
 
@@ -1260,13 +1256,14 @@ def _target_link_panel(work_type: str, target_record_id: str) -> str:
     if work not in BINDABLE_TARGET_WORK_TYPES:
         return ""
     linked = bool(str(target_record_id or "").strip())
+    status_text = "已绑定" if linked else "未绑定"
     return f"""
         <section class="target-link-panel">
           <div>
-            <strong>目标多维关系</strong>
-            <span id="lite-target-link-status">{_e('已关联目标多维记录，后续更新/结束会继续使用同一条。' if linked else '未关联目标多维记录，可按当前字段查找相似记录。')}</span>
+            <strong>目标多维</strong>
+            <span id="lite-target-link-status">{_e(status_text)}</span>
           </div>
-          <button class="btn ghost" id="lite-target-search" type="button">{_e('更换目标记录' if linked else '查找目标记录')}</button>
+          <button class="btn ghost" id="lite-target-search" type="button">{_e('更换' if linked else '查找')}</button>
         </section>
     """
 
@@ -1291,34 +1288,34 @@ def _detail_status_board(
     mop_status: str,
 ) -> str:
     work = _work_type(work_type)
-    source_text = "源表已关联" if source_record_id else ("纯手填/复制" if detail_mode in {"manual", "ongoing"} else "待选择事项")
+    source_text = "已关联" if source_record_id else ("纯手填" if detail_mode in {"manual", "ongoing"} else "待选择")
     source_tone = "ok" if source_record_id else ("ready" if detail_mode in {"manual", "ongoing"} else "warn")
     if target_record_id:
-        target_text, target_tone = "目标已绑定", "ok"
+        target_text, target_tone = "已绑定", "ok"
     elif detail_mode == "ongoing":
-        target_text, target_tone = "需绑定目标", "blocked"
+        target_text, target_tone = "需绑定", "blocked"
     else:
-        target_text, target_tone = "发送后创建", "ready"
+        target_text, target_tone = "发送创建", "ready"
     if work in SITE_PHOTO_REQUIRED_WORK_TYPES:
         if site_photo_count > 0:
-            site_text, site_tone = f"现场图 {site_photo_count} 张", "ok"
+            site_text, site_tone = f"{site_photo_count}张", "ok"
         else:
-            site_text, site_tone = "现场图待补", "warn"
+            site_text, site_tone = "待补", "warn"
     else:
-        site_text, site_tone = "无需现场图", "muted"
+        site_text, site_tone = "无需", "muted"
     if work == "maintenance":
         mop_text = mop_status or "MOP未绑定"
         mop_tone = "ok" if ("已上传" in mop_text or "已确认" in mop_text) else ("warn" if "未" in mop_text else "ready")
     else:
-        mop_text, mop_tone = "不要求MOP", "muted"
-    qt_text = "已进入同步视图" if detail_mode == "ongoing" else "发送后同步Qt"
+        mop_text, mop_tone = "不要求", "muted"
+    qt_text = "已同步" if detail_mode == "ongoing" else "发送后同步"
     return (
         "<section class=\"detail-status-board\" aria-label=\"当前通告办理状态\">"
-        + _detail_status_item("源表关系", source_text, source_tone)
-        + _detail_status_item("目标多维", target_text, target_tone)
-        + _detail_status_item("现场照片", site_text, site_tone)
-        + _detail_status_item("维护单", mop_text, mop_tone)
-        + _detail_status_item("Qt显示", qt_text, "ready")
+        + _detail_status_item("源表", source_text, source_tone)
+        + _detail_status_item("目标", target_text, target_tone)
+        + _detail_status_item("现场", site_text, site_tone)
+        + _detail_status_item("MOP", mop_text, mop_tone)
+        + _detail_status_item("Qt", qt_text, "ready")
         + "</section>"
     )
 
@@ -1338,25 +1335,26 @@ def _mop_next_action_panel(
     mop_url = _query_url("/engineer/mop", **params)
     status = mop_status or "MOP未绑定"
     if "已上传" in status or "已确认" in status:
-        title = "维护单已处理"
-        detail = "可进入维护单页面查看绑定和上传状态。"
-        action = "查看维护单"
+        title = "维护单"
+        detail = ""
+        action = "查看MOP"
         tone = "ok"
     elif "未绑定" in status:
-        title = "维护单待绑定"
-        detail = "选择或上传对应 MOP 表格后，填写签名并上传维护保养单。"
-        action = "去绑定MOP"
+        title = "维护单"
+        detail = ""
+        action = "绑定MOP"
         tone = "warn"
     else:
-        title = "维护单待上传"
-        detail = "维护单已有关联状态，请继续填写、签名或上传源表。"
-        action = "继续处理MOP"
+        title = "维护单"
+        detail = ""
+        action = "处理MOP"
         tone = "ready"
+    detail_html = f"<span>{_e(detail)}</span>" if detail else ""
     return (
         f"<section class=\"mop-action-panel {tone}\">"
         "<div>"
         f"<strong>{_e(title)}</strong>"
-        f"<span>{_e(detail)}</span>"
+        f"{detail_html}"
         f"<em>{_e(status)}</em>"
         "</div>"
         f"<a class=\"btn ghost\" href=\"{_e(mop_url)}\">{_e(action)}</a>"
@@ -1380,15 +1378,15 @@ def _detail_mode_note(
 ) -> str:
     if ongoing_item:
         if source_record_id and target_record_id:
-            return "已关联源表与目标多维，更新/结束会继续使用同一目标记录。"
+            return ""
         if target_record_id:
-            return "纯手填或复制通告，已绑定目标多维，后续更新/结束继续使用同一目标记录。"
-        return "进行中通告缺少目标多维 ID，提交时后端会要求先绑定目标记录。"
+            return ""
+        return "需绑定目标"
     if manual or parsed_draft:
-        return "纯手填或解析通告，提交后只创建目标多维记录，不要求源表 ID。"
+        return "纯手填"
     if source_record_id:
-        return "源表事项，提交后后端会创建并绑定目标多维记录。"
-    return "请选择左侧事项或使用纯手填。"
+        return ""
+    return "待选择"
 
 
 def _detail_form(
@@ -1435,6 +1433,11 @@ def _detail_form(
         parsed_draft=parsed_draft,
         source_record_id=source_record_id,
         target_record_id=target_record_id,
+    )
+    mode_note_html = (
+        f"<small class=\"detail-mode-note\">{_e(mode_note)}</small>"
+        if mode_note
+        else "<small class=\"detail-mode-note\" hidden></small>"
     )
     status_board = _detail_status_board(
         work_type=work,
@@ -1495,8 +1498,7 @@ def _detail_form(
         <header class="detail-head">
           <span>{_e(WORK_TYPE_LABELS.get(work, '通告'))}</span>
           <strong>{_e(title)}</strong>
-          <em>{_e('后端驱动表单，提交后进入后台队列')}</em>
-          <small class="detail-mode-note">{_e(mode_note)}</small>
+          {mode_note_html}
         </header>
         {status_board}
         {mop_action_panel}
@@ -1512,6 +1514,7 @@ def _detail_form(
           <pre id="lite-notice-preview"></pre>
         </section>
         <div class="form-actions">
+          <label class="actual-action-time"><span>实际发送时间</span><input type="datetime-local" name="actual_action_time" data-auto-actual-time="1"></label>
           <span id="lite-job-status" class="job-status" aria-live="polite">等待操作</span>
           <span id="lite-action-reason" class="action-reason">请先确认标题和进度。</span>
           {action_buttons}
@@ -1787,7 +1790,20 @@ def render_workbench_lite(
     .undo-row strong {{ display:block; color:#0c244d; }}
     .undo-row span {{ color:#0a57d8; font-weight:900; font-size:12px; }}
     .empty.compact {{ padding:10px; }}
-    .workspace {{ display:grid; grid-template-columns:minmax(280px, .9fr) minmax(520px, 1.55fr) minmax(300px, .95fr); gap:12px; margin-top:12px; align-items:start; }}
+    .workspace {{ display:grid; grid-template-columns:minmax(320px,380px) minmax(0,1fr); gap:14px; margin-top:12px; align-items:start; }}
+    .task-inbox {{ position:sticky; top:12px; display:grid; gap:10px; max-height:calc(100vh - 24px); overflow:auto; align-self:start; }}
+    .task-inbox.panel {{ padding:12px; }}
+    .inbox-head {{ display:grid; gap:8px; }}
+    .inbox-title {{ margin:0; display:flex; align-items:center; justify-content:space-between; gap:10px; font-size:16px; }}
+    .inbox-summary {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:7px; }}
+    .inbox-summary span {{ min-width:0; display:flex; align-items:center; justify-content:space-between; gap:6px; border:1px solid #dce8f8; border-radius:13px; padding:7px 9px; color:#53677f; background:#f8fbff; font-size:11px; font-weight:950; }}
+    .inbox-summary b {{ color:#0a57d8; font-size:14px; }}
+    .inbox-section {{ border:1px solid #d8e5f7; border-radius:16px; padding:10px; background:linear-gradient(180deg,#fff,#f8fbff); box-shadow:0 6px 16px rgba(15,73,153,.04); }}
+    .inbox-section h3 {{ margin:0 0 8px; display:flex; align-items:center; justify-content:space-between; gap:10px; color:#0c244d; font-size:14px; line-height:1.2; }}
+    .inbox-section h3 b {{ min-width:28px; height:22px; border-radius:999px; display:inline-flex; align-items:center; justify-content:center; color:#0a57d8; background:#eaf3ff; font-size:12px; font-weight:950; }}
+    .inbox-section .list {{ max-height:30vh; }}
+    .inbox-section.ongoing-inbox-panel h3 b {{ color:#087443; background:#e8fff3; }}
+    .detail-panel {{ min-width:0; }}
     .panel {{ position:relative; border:1px solid #d8e5f7; border-radius:18px; padding:12px; background:rgba(255,255,255,.95); box-shadow:0 10px 24px rgba(15,73,153,.08); }}
     .panel::before {{ content:""; position:absolute; left:14px; right:14px; top:0; height:3px; border-radius:0 0 999px 999px; background:linear-gradient(90deg,#1f63ff,#00aeda); opacity:.72; }}
     .panel.loading {{ position:relative; opacity:.7; pointer-events:none; }}
@@ -1804,7 +1820,6 @@ def render_workbench_lite(
     .page-btn.current {{ color:#fff; border-color:#1f63ff; background:linear-gradient(180deg,#1f63ff,#00aeda); box-shadow:0 6px 14px rgba(31,99,255,.16); }}
     .page-btn.disabled {{ color:#94a3b8; background:#f3f7fd; cursor:not-allowed; }}
     .page-ellipsis {{ min-width:16px; color:#94a3b8; text-align:center; font-size:11px; font-weight:950; }}
-    .result-rail {{ display:grid; gap:10px; }}
     .rail-panel {{ position:relative; border:1px solid #d8e5f7; border-radius:18px; padding:12px; background:rgba(255,255,255,.95); box-shadow:0 10px 24px rgba(15,73,153,.07); overflow:hidden; }}
     .rail-panel::before {{ content:""; position:absolute; left:14px; right:14px; top:0; height:3px; border-radius:0 0 999px 999px; background:linear-gradient(90deg,#1f63ff,#00aeda); opacity:.62; }}
     .rail-panel h2 {{ margin:0 0 9px; font-size:16px; }}
@@ -1857,15 +1872,15 @@ def render_workbench_lite(
     .meta-chip.success {{ color:#087443; background:#e8fff3; }}
     .meta-chip.source {{ color:#0a57d8; background:#eaf3ff; }}
     .meta-chip.manual {{ color:#7c3aed; background:#f3e8ff; }}
-    .detail-head {{ display:grid; gap:4px; margin-bottom:9px; border:1px solid #e3edf9; border-radius:14px; padding:9px; background:linear-gradient(135deg,#f8fbff,#eef6ff); }}
-    .detail-head span {{ width:max-content; border-radius:999px; padding:4px 8px; color:#0a57d8; background:#eaf3ff; font-size:12px; font-weight:900; }}
-    .detail-head strong {{ font-size:17px; line-height:1.25; }}
+    .detail-head {{ display:grid; gap:3px; margin-bottom:6px; border:1px solid #e3edf9; border-radius:13px; padding:7px 9px; background:linear-gradient(135deg,#f8fbff,#eef6ff); }}
+    .detail-head span {{ width:max-content; border-radius:999px; padding:3px 7px; color:#0a57d8; background:#eaf3ff; font-size:11px; font-weight:900; }}
+    .detail-head strong {{ font-size:15px; line-height:1.22; }}
     .detail-head em {{ color:#64748b; font-style:normal; }}
-    .detail-mode-note {{ width:max-content; max-width:100%; border-radius:999px; padding:5px 8px; color:#0a57d8; background:#fff; box-shadow:inset 0 0 0 1px rgba(31,99,255,.12); font-size:11px; font-weight:900; line-height:1.3; }}
-    .detail-status-board {{ display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:7px; }}
-    .detail-status-item {{ min-width:0; border:1px solid #d8e5f7; border-radius:14px; padding:8px 9px; background:linear-gradient(180deg,#fff,#f8fbff); box-shadow:0 6px 14px rgba(15,73,153,.04); }}
-    .detail-status-item span {{ display:block; margin:0 0 3px; color:#64748b; font-size:10px; font-weight:950; line-height:1.2; }}
-    .detail-status-item strong {{ display:block; min-width:0; color:#0c244d; font-size:12px; line-height:1.25; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+    .detail-mode-note {{ width:max-content; max-width:100%; border-radius:999px; padding:3px 7px; color:#0a57d8; background:#fff; box-shadow:inset 0 0 0 1px rgba(31,99,255,.12); font-size:10px; font-weight:900; line-height:1.25; }}
+    .detail-status-board {{ display:flex; flex-wrap:wrap; gap:5px; align-items:center; margin-bottom:5px; }}
+    .detail-status-item {{ min-width:0; max-width:100%; display:inline-flex; align-items:center; gap:5px; border:1px solid #d8e5f7; border-radius:999px; padding:4px 7px; background:linear-gradient(180deg,#fff,#f8fbff); box-shadow:0 4px 10px rgba(15,73,153,.035); }}
+    .detail-status-item span {{ display:block; margin:0; color:#64748b; font-size:10px; font-weight:950; line-height:1.1; white-space:nowrap; }}
+    .detail-status-item strong {{ display:block; min-width:0; max-width:122px; color:#0c244d; font-size:11px; line-height:1.18; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
     .detail-status-item.ok {{ border-color:#b7efd1; background:linear-gradient(180deg,#fff,#ecfff5); }}
     .detail-status-item.ok strong {{ color:#087443; }}
     .detail-status-item.ready {{ border-color:#b9d7ff; background:linear-gradient(180deg,#fff,#eef6ff); }}
@@ -1875,7 +1890,7 @@ def render_workbench_lite(
     .detail-status-item.blocked {{ border-color:#ffc7bf; background:linear-gradient(180deg,#fff,#fff1f0); }}
     .detail-status-item.blocked strong {{ color:#b42318; }}
     .detail-status-item.muted {{ background:#f7f9fc; }}
-    .detail-form {{ display:grid; gap:9px; }}
+    .detail-form {{ display:grid; gap:7px; }}
     .site-photo-panel {{ border:1px solid #cfe0f5; border-radius:16px; padding:10px; background:linear-gradient(135deg,#f8fbff,#eef6ff); display:grid; gap:9px; }}
     .site-photo-head {{ display:flex; justify-content:space-between; gap:10px; align-items:flex-start; }}
     .site-photo-head strong {{ display:block; color:#0c244d; font-size:14px; line-height:1.25; }}
@@ -1909,24 +1924,25 @@ def render_workbench_lite(
     label span {{ display:block; margin:0 0 4px; color:#51677f; font-size:11px; font-weight:900; }}
     label.required > span::after {{ content:"必填"; display:inline-flex; margin-left:6px; border-radius:999px; padding:1px 6px; color:#b42318; background:#fff1f0; font-size:10px; font-weight:950; vertical-align:middle; }}
     input:required:invalid,textarea:required:invalid {{ border-color:#ffc7bf; background:#fffafa; }}
-    label:has(textarea), label:nth-last-child(1) {{ grid-column:span 2; }}
-    .source-link-field {{ display:grid; gap:8px; margin:0 0 12px; border:1px solid #a8cdfa; border-radius:16px; padding:12px; background:linear-gradient(135deg,#f5fbff,#eef6ff); }}
-    .source-link-field span {{ margin:0; color:#0a57d8; }}
-    .source-link-title {{ color:#0c244d; font-size:13px; font-weight:900; }}
-    .source-link-field em {{ color:#64748b; font-style:normal; font-size:12px; line-height:1.45; }}
-    .source-link-field.readonly select {{ color:#64748b; background:#eef4fb; }}
-    .mop-action-panel {{ display:flex; align-items:center; justify-content:space-between; gap:12px; margin:0 0 12px; border:1px solid #bfdbfe; border-radius:16px; padding:10px 12px; background:linear-gradient(135deg,#f5fbff,#ffffff); }}
+    .form-grid > label {{ min-width:0; }}
+    .source-link-field {{ display:flex; flex-wrap:wrap; align-items:center; gap:6px; width:max-content; max-width:100%; margin:0 0 5px; border:1px solid #a8cdfa; border-radius:999px; padding:4px 6px; background:linear-gradient(135deg,#f5fbff,#eef6ff); }}
+    .source-link-field span {{ margin:0; border-radius:999px; padding:3px 7px; color:#0a57d8; background:#fff; font-size:10px; font-weight:950; }}
+    .source-link-title {{ color:#0c244d; font-size:11px; font-weight:950; line-height:1.2; }}
+    .source-link-field select {{ flex:1 1 220px; min-width:160px; min-height:28px; border-radius:999px; padding:3px 9px; font-size:12px; }}
+    .source-link-field.readonly {{ padding-right:9px; }}
+    .mop-action-panel {{ display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:6px; width:max-content; max-width:100%; margin:0 0 5px; border:1px solid #bfdbfe; border-radius:999px; padding:4px 6px 4px 9px; background:linear-gradient(135deg,#f5fbff,#ffffff); }}
     .mop-action-panel.warn {{ border-color:#fbd38d; background:linear-gradient(135deg,#fff8ed,#ffffff); }}
     .mop-action-panel.ok {{ border-color:#bbf7d0; background:linear-gradient(135deg,#f0fdf4,#ffffff); }}
-    .mop-action-panel > div {{ min-width:0; display:grid; gap:2px; }}
-    .mop-action-panel strong {{ color:#0c244d; font-size:13px; line-height:1.3; }}
-    .mop-action-panel span,.mop-action-panel em {{ color:#64748b; font-size:12px; font-style:normal; line-height:1.45; }}
+    .mop-action-panel > div {{ min-width:0; display:flex; align-items:center; gap:6px; }}
+    .mop-action-panel strong {{ color:#0c244d; font-size:11px; line-height:1.2; white-space:nowrap; }}
+    .mop-action-panel span,.mop-action-panel em {{ color:#64748b; font-size:11px; font-style:normal; line-height:1.2; }}
     .mop-action-panel em {{ color:#0a57d8; font-weight:900; }}
-    .mop-action-panel .btn {{ flex:0 0 auto; min-height:34px; }}
-    .target-link-panel {{ display:flex; align-items:center; justify-content:space-between; gap:12px; border:1px solid #a8cdfa; border-radius:16px; padding:10px 12px; background:linear-gradient(135deg,#f5fbff,#ffffff); }}
-    .target-link-panel strong {{ display:block; color:#0c244d; font-size:13px; line-height:1.3; }}
-    .target-link-panel span {{ display:block; margin-top:2px; color:#64748b; font-size:12px; line-height:1.45; }}
-    .target-link-panel .btn {{ flex:0 0 auto; min-height:34px; }}
+    .mop-action-panel .btn {{ flex:0 0 auto; min-height:28px; padding:5px 9px; border-radius:999px; }}
+    .target-link-panel {{ display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:6px; width:max-content; max-width:100%; border:1px solid #a8cdfa; border-radius:999px; padding:4px 6px 4px 9px; background:linear-gradient(135deg,#f5fbff,#ffffff); }}
+    .target-link-panel > div {{ min-width:0; display:flex; align-items:center; gap:6px; }}
+    .target-link-panel strong {{ display:block; color:#0c244d; font-size:11px; line-height:1.2; white-space:nowrap; }}
+    .target-link-panel span {{ display:block; margin:0; color:#64748b; font-size:11px; font-weight:900; line-height:1.2; }}
+    .target-link-panel .btn {{ flex:0 0 auto; min-height:28px; padding:5px 9px; border-radius:999px; }}
     .notice-preview {{ border:1px solid #d8e5f7; border-radius:14px; background:#fbfdff; overflow:hidden; }}
     .preview-head {{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 12px; border-bottom:1px solid #e5edf8; background:linear-gradient(180deg,#f8fbff,#eef6ff); }}
     .preview-head span {{ color:#0a57d8; font-size:13px; font-weight:900; }}
@@ -1934,6 +1950,10 @@ def render_workbench_lite(
     .notice-preview pre {{ margin:0; max-height:112px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; padding:10px; color:#0c244d; background:#fff; font:12px/1.55 "Microsoft YaHei", Arial, sans-serif; }}
     .notice-preview:focus-within pre,.notice-preview:hover pre {{ max-height:112px; }}
     .form-actions {{ position:sticky; bottom:8px; z-index:8; display:flex; justify-content:flex-end; gap:8px; align-items:center; margin-top:0; border:1px solid #d8e5f7; border-radius:15px; padding:8px; background:linear-gradient(135deg,rgba(255,255,255,.98),rgba(247,251,255,.96)); box-shadow:0 12px 26px rgba(15,73,153,.12); backdrop-filter:blur(8px); }}
+    .actual-action-time {{ flex:0 1 210px; min-width:180px; display:grid; gap:2px; border:1px solid #d8e5f7; border-radius:12px; padding:5px 8px; background:#fff; }}
+    .actual-action-time span {{ margin:0; color:#0a57d8; font-size:10px; font-weight:950; line-height:1.1; }}
+    .actual-action-time input {{ min-height:26px; border:0; border-radius:8px; padding:0; color:#0c244d; background:transparent; font-size:12px; font-weight:900; box-shadow:none; }}
+    .actual-action-time input:focus {{ outline:2px solid rgba(31,99,255,.16); outline-offset:2px; }}
     .job-status {{ color:#64748b; font-size:12px; font-weight:800; }}
     .form-actions .job-status {{ margin-right:auto; }}
     .action-reason {{ max-width:220px; border-radius:999px; padding:5px 8px; color:#64748b; background:#f1f6fd; font-size:11px; font-weight:900; line-height:1.25; }}
@@ -1969,7 +1989,7 @@ def render_workbench_lite(
     .empty {{ border:1px dashed #cbdaf0; border-radius:16px; padding:18px; color:#64748b; text-align:center; background:#f8fbff; }}
     @keyframes liteSpin {{ to {{ transform:rotate(360deg); }} }}
     @media (prefers-reduced-motion: reduce) {{ *, *::before, *::after {{ transition:none !important; animation:none !important; scroll-behavior:auto !important; }} }}
-    @media (max-width: 1180px) {{ .workspace,.summary,.lite-tools,.workbench-guide {{ grid-template-columns:1fr; }} .toolbar {{ flex-wrap:wrap; }} }}
+    @media (max-width: 1180px) {{ .workspace,.summary,.lite-tools,.workbench-guide {{ grid-template-columns:1fr; }} .task-inbox {{ position:relative; top:auto; max-height:none; overflow:visible; }} .inbox-section .list {{ max-height:42vh; }} .toolbar {{ flex-wrap:wrap; }} }}
     @media (max-width: 900px) {{
       .topbar {{ min-height:auto; padding:18px 20px; flex-direction:column; align-items:stretch; gap:16px; }}
       .brand {{ gap:14px; align-items:flex-start; }}
@@ -1988,7 +2008,8 @@ def render_workbench_lite(
       .manual-menu,.refresh-menu {{ left:0; right:auto; max-width:calc(100vw - 32px); }}
       .form-grid {{ grid-template-columns:1fr; }}
       .site-photo-upload {{ grid-template-columns:1fr; }}
-      .detail-status-board {{ grid-template-columns:repeat(2,minmax(0,1fr)); }}
+      .detail-status-board {{ gap:4px; }}
+      .detail-status-item strong {{ max-width:96px; }}
       label:has(textarea), label:nth-last-child(1) {{ grid-column:auto; }}
       .form-actions {{ flex-wrap:wrap; }}
       .form-actions .btn {{ flex:1 1 140px; }}
@@ -2009,7 +2030,6 @@ def render_workbench_lite(
     </nav>
   </header>
   <main class="shell">
-    <div class="status" id="lite-page-status" aria-live="polite">数据已就绪 · 源表 {_e(source_loaded_text)} · 当前用户 {_e(user.get('name') or user.get('open_id') or '')}</div>
     <section class="summary">
       <article><strong>已发起</strong><b>{_e(stats.get('started') or 0)}</b></article>
       <article><strong>有更新</strong><b>{_e(stats.get('updated') or 0)}</b></article>
@@ -2046,14 +2066,30 @@ def render_workbench_lite(
         <button class="btn primary" type="submit">筛选</button>
       </form>
     </section>
-    <section class="workbench-guide" aria-label="通告办理步骤">
-      <article class="guide-step" data-step="1"><strong>左侧选事项</strong><span>待发起、延期未开始、进行中事项都在这里找。</span></article>
-      <article class="guide-step" data-step="2"><strong>中间编辑当前通告</strong><span>只处理当前一条，字段和发送文本实时预览。</span></article>
-      <article class="guide-step" data-step="3"><strong>右侧看结果</strong><span>进行中、失败待处理和可回退通告集中查看。</span></article>
-    </section>
+    <section class="workbench-guide" aria-label="通告办理步骤" hidden></section>
     <section class="workspace">
-      <aside class="panel"><h2 class="panel-title"><span>待发起事项</span><b class="panel-count">{_e(current_pending_count)}</b></h2><div class="list">{_record_rows(visible_records, scope=scope, work_type=view_work, search=search, specialty=specialty, selected_id=selected_record_id, pending_page=pending_page_num, ongoing_page=ongoing_page_num)}</div>{pending_pager}</aside>
-      <section class="panel" id="detail-panel">
+      <aside class="task-inbox panel" aria-label="通告任务收件箱">
+        <div class="inbox-head">
+          <h2 class="inbox-title"><span>任务收件箱</span></h2>
+          <div class="inbox-summary" aria-label="任务数量">
+            <span>待发起 <b>{_e(current_pending_count)}</b></span>
+            <span>进行中 <b data-inbox-ongoing-count>{_e(current_ongoing_count)}</b></span>
+          </div>
+        </div>
+        <section class="inbox-section pending-inbox-panel">
+          <h3><span>待发起事项</span><b>{_e(current_pending_count)}</b></h3>
+          <div class="list">{_record_rows(visible_records, scope=scope, work_type=view_work, search=search, specialty=specialty, selected_id=selected_record_id, pending_page=pending_page_num, ongoing_page=ongoing_page_num)}</div>
+          {pending_pager}
+        </section>
+        <section class="inbox-section ongoing-inbox-panel" data-ongoing-panel>
+          <h3><span>已开始未结束</span><b class="panel-count">{_e(current_ongoing_count)}</b></h3>
+          <div class="list">{_ongoing_rows(visible_ongoing, scope=scope, work_type=view_work, selected_id=active_item_id, pending_page=pending_page_num, ongoing_page=ongoing_page_num)}</div>
+          {ongoing_pager}
+        </section>
+        <details class="rail-fold attention"{' open' if attention_count else ''}><summary>待处理问题 <b class="panel-count">{_e(attention_count)}</b></summary><section class="rail-panel attention"><h2>待处理问题</h2><div class="attention-list">{attention_html}</div></section></details>
+        <details class="rail-fold undo"><summary>近三天可回退 <b class="panel-count">{_e(undo_count)}</b></summary><section class="rail-panel undo"><h2>近三天可回退</h2><div class="undo-panel-list">{undo_html}</div></section></details>
+      </aside>
+      <section class="panel detail-panel" id="detail-panel">
         <h2>当前通告</h2>
         <details class="paste-drawer"{' open' if parsed_draft else ''}>
           <summary>解析粘贴通告</summary>
@@ -2066,11 +2102,6 @@ def render_workbench_lite(
         </details>
         {_detail_form(record=selected_record, ongoing_item=selected_ongoing, scope=scope, work_type=detail_work, manual=manual or bool(parsed_draft), parsed_draft=parsed_draft, parsed_action=parsed_action, source_link_options=source_options, is_admin=is_admin_session)}
       </section>
-      <aside class="result-rail">
-        <section class="rail-panel"><h2 class="panel-title"><span>已开始未结束</span><b class="panel-count">{_e(current_ongoing_count)}</b></h2><div class="list">{_ongoing_rows(visible_ongoing, scope=scope, work_type=view_work, selected_id=active_item_id, pending_page=pending_page_num, ongoing_page=ongoing_page_num)}</div>{ongoing_pager}</section>
-        <details class="rail-fold attention"{' open' if attention_count else ''}><summary>待处理问题 <b class="panel-count">{_e(attention_count)}</b></summary><section class="rail-panel attention"><h2>待处理问题</h2><div class="attention-list">{attention_html}</div></section></details>
-        <details class="rail-fold undo"><summary>近三天可回退 <b class="panel-count">{_e(undo_count)}</b></summary><section class="rail-panel undo"><h2>近三天可回退</h2><div class="undo-panel-list">{undo_html}</div></section></details>
-      </aside>
     </section>
   </main>
   <div class="end-check-backdrop" id="lite-end-check" hidden>
@@ -2337,6 +2368,7 @@ def render_workbench_lite(
       'action', 'operation_id', 'active_item_id', 'source_record_id', 'target_record_id', 'record_id',
       'manual_id', 'scope', 'work_type', 'notice_type', 'title', 'building', 'buildings', 'specialty',
       'maintenance_cycle', 'level', 'start_time', 'end_time', 'status', 'site_photo_count', 'mop_status',
+      'actual_action_time',
       'name', 'location', 'content', 'reason', 'impact', 'progress',
       'repair_device', 'repair_fault', 'fault_type', 'repair_mode', 'discovery',
       'symptom', 'solution', 'spare_parts', 'fault_time', 'expected_time',
@@ -2394,6 +2426,7 @@ def render_workbench_lite(
       'paired_maintenance_actual_start_time',
       'building', 'buildings', 'building_code', 'building_codes', 'title', 'name',
       'specialty', 'maintenance_cycle', 'level', 'start_time', 'end_time',
+      'actual_action_time', 'response_time',
       'location', 'content', 'reason', 'impact', 'progress',
       'repair_device', 'repair_fault', 'fault_type', 'repair_mode', 'discovery',
       'symptom', 'solution', 'spare_parts', 'fault_time', 'expected_time',
@@ -2522,8 +2555,8 @@ def render_workbench_lite(
       const select = sourceField.querySelector('select');
       if (title) {{
         title.textContent = normalized
-          ? (titleText || '已关联源表记录')
-          : '当前通告没有源表 ID';
+          ? (titleText || '已关联')
+          : '未关联';
       }}
       if (!select) return;
       if (select.disabled) {{
@@ -2736,7 +2769,9 @@ def render_workbench_lite(
     }}
     function setDetailModeNote(text) {{
       const note = document.querySelector('.detail-mode-note');
-      if (note) note.textContent = text || '';
+      if (!note) return;
+      note.textContent = text || '';
+      note.hidden = !text;
     }}
     const previewTemplates = {{
       maintenance: {{
@@ -2783,6 +2818,10 @@ def render_workbench_lite(
     }}
     function previewDate(value) {{
       return String(value || '').trim().replace('T', ' ');
+    }}
+    const previewDateFieldKeys = new Set(['start_time', 'end_time', 'fault_time', 'expected_time', 'response_time']);
+    function isPreviewDateField(key) {{
+      return previewDateFieldKeys.has(String(key || ''));
     }}
     function previewActionLabel(action) {{
       return action === 'end' ? '结束' : (action === 'update' ? '更新' : '开始');
@@ -2867,7 +2906,8 @@ def render_workbench_lite(
         const end = previewDate(previewValue(form, 'end_time'));
         value = start && end ? `${{start}}~${{end}}` : (start || end);
       }} else {{
-        value = previewDate(previewValue(form, key));
+        const rawValue = previewValue(form, key);
+        value = isPreviewDateField(key) ? previewDate(rawValue) : rawValue;
       }}
       return `【${{label}}】${{value}}`;
     }}
@@ -3068,8 +3108,8 @@ def render_workbench_lite(
         form.dataset.targetEnded = isEndedCandidate(candidate) ? '1' : '';
         const status = document.getElementById('lite-target-link-status');
         if (status) status.textContent = isEndedCandidate(candidate)
-          ? '已关联已结束目标记录，左侧事项将作为已闭环关系处理。'
-          : '已关联目标多维记录，后续更新/结束会继续使用同一条。';
+          ? '已闭环'
+          : '已绑定';
         if (isEndedCandidate(candidate)) {{
           updateNoticePreview(form);
         }} else {{
@@ -3087,6 +3127,7 @@ def render_workbench_lite(
     function hydrateLitePreview() {{
       const form = document.getElementById('lite-notice-form');
       resetSitePhotoState(form);
+      resetActualActionTime(form);
       updateNoticePreview(form);
     }}
     function setSubmitButtons(form, action) {{
@@ -3100,6 +3141,7 @@ def render_workbench_lite(
       button.value = action === 'update' ? 'update' : 'start';
       button.textContent = action === 'update' ? '发送更新' : '发送开始';
       actions.appendChild(button);
+      resetActualActionTime(form);
       updateNoticePreview(form);
     }}
     function setOngoingSubmitButtons(form) {{
@@ -3134,6 +3176,7 @@ def render_workbench_lite(
         localRemoveButton.textContent = '移除显示';
         actions.appendChild(localRemoveButton);
       }}
+      resetActualActionTime(form);
       updateNoticePreview(form);
     }}
     function applySourceRowToDetail(link) {{
@@ -3151,7 +3194,7 @@ def render_workbench_lite(
       setFormValue(form, 'manual_id', '');
       setFormValue(form, 'record_id', link.getAttribute('data-record-id') || '');
       setFormValue(form, 'source_record_id', link.getAttribute('data-source-record-id') || link.getAttribute('data-record-id') || '');
-      setSourceLinkDisplay(form, link.getAttribute('data-source-record-id') || link.getAttribute('data-record-id') || '', '已关联源表记录');
+      setSourceLinkDisplay(form, link.getAttribute('data-source-record-id') || link.getAttribute('data-record-id') || '', '已关联');
       setFormValue(form, 'target_record_id', '');
       setFormValue(form, 'active_item_id', '');
       setFormValue(form, 'site_photo_count', link.getAttribute('data-site-photo-count') || '0');
@@ -3160,9 +3203,7 @@ def render_workbench_lite(
         setFormValue(form, key, value);
       }}
       form.querySelector('.detail-head strong')?.replaceChildren(document.createTextNode(title));
-      const hint = form.querySelector('.detail-head em');
-      if (hint) hint.textContent = '后端驱动表单，提交后进入后台队列';
-      setDetailModeNote('源表事项，提交后后端会创建并绑定目标多维记录。');
+      setDetailModeNote('');
       resetSitePhotoState(form, Number(link.getAttribute('data-site-photo-count') || 0));
       setSubmitButtons(form, action);
       updateNoticePreview(form);
@@ -3183,7 +3224,7 @@ def render_workbench_lite(
       setFormValue(form, 'manual_id', '');
       setFormValue(form, 'record_id', link.getAttribute('data-target-record-id') || link.getAttribute('data-record-id') || '');
       setFormValue(form, 'source_record_id', link.getAttribute('data-source-record-id') || '');
-      setSourceLinkDisplay(form, link.getAttribute('data-source-record-id') || '', '已关联源表记录');
+      setSourceLinkDisplay(form, link.getAttribute('data-source-record-id') || '', '已关联');
       setFormValue(form, 'target_record_id', link.getAttribute('data-target-record-id') || link.getAttribute('data-record-id') || '');
       setFormValue(form, 'active_item_id', link.getAttribute('data-active-item-id') || '');
       setFormValue(form, 'site_photo_count', link.getAttribute('data-site-photo-count') || '0');
@@ -3193,12 +3234,12 @@ def render_workbench_lite(
       }}
       form.querySelector('.detail-head strong')?.replaceChildren(document.createTextNode(title));
       const hint = form.querySelector('.detail-head em');
-      if (hint) hint.textContent = '已开始未结束通告，可在这里更新或结束';
+      if (hint) hint.textContent = '';
       const sourceId = link.getAttribute('data-source-record-id') || '';
       const targetId = link.getAttribute('data-target-record-id') || link.getAttribute('data-record-id') || '';
       setDetailModeNote(sourceId && targetId
-        ? '已关联源表与目标多维，更新/结束会继续使用同一目标记录。'
-        : (targetId ? '纯手填或复制通告，已绑定目标多维，后续更新/结束继续使用同一目标记录。' : '进行中通告缺少目标多维 ID，提交时后端会要求先绑定目标记录。')
+        ? ''
+        : (targetId ? '' : '需绑定目标')
       );
       resetSitePhotoState(form, Number(link.getAttribute('data-site-photo-count') || 0));
       setOngoingSubmitButtons(form);
@@ -3444,6 +3485,35 @@ def render_workbench_lite(
         setPickerOpen('refresh-picker', 'refresh-open', false);
       }}
     }});
+    function padLiteNumber(value) {{
+      return String(value).padStart(2, '0');
+    }}
+    function currentLiteDatetimeLocal() {{
+      const now = new Date();
+      return [
+        now.getFullYear(),
+        padLiteNumber(now.getMonth() + 1),
+        padLiteNumber(now.getDate()),
+      ].join('-') + 'T' + [
+        padLiteNumber(now.getHours()),
+        padLiteNumber(now.getMinutes()),
+      ].join(':');
+    }}
+    function resetActualActionTime(form) {{
+      const field = form?.querySelector('[name="actual_action_time"]');
+      if (!field) return;
+      field.dataset.autoActualTime = '1';
+      field.value = currentLiteDatetimeLocal();
+    }}
+    function ensureActualActionTime(form) {{
+      const field = form?.querySelector('[name="actual_action_time"]');
+      if (!field) return '';
+      if (field.dataset.autoActualTime !== '0' || !field.value) {{
+        field.value = currentLiteDatetimeLocal();
+        field.dataset.autoActualTime = '1';
+      }}
+      return field.value;
+    }}
     document.addEventListener('change', async (event) => {{
       if (event.target && event.target.id === 'lite-scope-select') {{
         if (!(await confirmDiscardLiteChanges())) {{
@@ -3467,10 +3537,13 @@ def render_workbench_lite(
         const sourceId = event.target.value || '';
         setFormValue(form, 'record_id', sourceId);
         setFormValue(form, 'target_record_id', '');
-        setSourceLinkDisplay(form, sourceId, sourceId ? '已选择源表记录' : '当前通告没有源表 ID');
+        setSourceLinkDisplay(form, sourceId, sourceId ? '已选择' : '未关联');
         form.dataset.targetEnded = '';
         const status = document.getElementById('lite-target-link-status');
-        if (status) status.textContent = '已切换源表事项，请重新查找或确认目标多维记录。';
+        if (status) status.textContent = '需确认';
+      }}
+      if (event.target && event.target.name === 'actual_action_time' && event.target.closest('#lite-notice-form')) {{
+        event.target.dataset.autoActualTime = event.target.value ? '0' : '1';
       }}
       if (event.target && event.target.closest('#lite-notice-form')) {{
         setLiteFormDirty(true);
@@ -3517,6 +3590,7 @@ def render_workbench_lite(
       navigateLite(location.href, {{ push: false, label: '正在恢复页面...' }}).catch(() => location.reload());
     }});
     function formPayload(form, submitter, actionOverride) {{
+      const actualActionTime = ensureActualActionTime(form);
       const fd = new FormData(form);
       const action = actionOverride || (submitter && submitter.value ? submitter.value : (form.dataset.action || 'start'));
       const patch = Object.fromEntries(fd.entries());
@@ -3541,6 +3615,8 @@ def render_workbench_lite(
         : (targetRecordId || patch.active_item_id || rawRecordId || '');
       patch.action = action;
       patch.manual = patch.manual === '1';
+      patch.actual_action_time = actualActionTime || patch.actual_action_time || '';
+      patch.response_time = patch.actual_action_time || patch.response_time || '';
       patch.source_record_id = sourceRecordId;
       patch.target_record_id = targetRecordId;
       patch.record_id = submitRecordId;
@@ -3565,6 +3641,7 @@ def render_workbench_lite(
         source_record_id: sourceRecordId,
         target_record_id: targetRecordId,
         record_id: submitRecordId,
+        actual_action_time: patch.actual_action_time || '',
         operation_id: patch.operation_id,
         patch: commandPatch
       }};
@@ -3593,7 +3670,7 @@ def render_workbench_lite(
       }}) || null;
     }}
     function ongoingListElements() {{
-      const panel = document.querySelector('.result-rail .rail-panel');
+      const panel = document.querySelector('[data-ongoing-panel]');
       return {{
         panel,
         list: panel ? panel.querySelector('.list') : null,
@@ -3608,6 +3685,8 @@ def render_workbench_lite(
       const {{ count }} = ongoingListElements();
       const current = Number(count?.textContent || 0);
       setPanelCountValue(count, current + delta);
+      const inboxOngoingCount = document.querySelector('[data-inbox-ongoing-count]');
+      setPanelCountValue(inboxOngoingCount, Number(inboxOngoingCount?.textContent || 0) + delta);
       document.querySelectorAll('.summary article').forEach(card => {{
         const label = card.querySelector('strong')?.textContent?.trim();
         if (label !== '进行中') return;
@@ -3995,6 +4074,9 @@ def render_workbench_lite(
     }});
     document.addEventListener('input', (event) => {{
       if (event.target && event.target.closest('#lite-notice-form')) {{
+        if (event.target.name === 'actual_action_time') {{
+          event.target.dataset.autoActualTime = event.target.value ? '0' : '1';
+        }}
         setLiteFormDirty(true);
         updateNoticePreview(event.target.closest('#lite-notice-form'));
       }}

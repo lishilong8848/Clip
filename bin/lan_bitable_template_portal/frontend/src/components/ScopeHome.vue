@@ -260,6 +260,9 @@ const broadcastWorkTypes = [
   { key: "polling", label: "轮巡" },
   { key: "adjust", label: "调整" },
 ] as const;
+const broadcastWorkTypeLabelByKey: Record<string, string> = Object.fromEntries(
+  broadcastWorkTypes.map((item) => [item.key, item.label]),
+);
 
 const broadcastScopes = computed(() => {
   const scopes = new Map<string, { value: string; label: string }>();
@@ -300,6 +303,8 @@ const homeBroadcastStats = computed(() => {
     let scopePending = 0;
     const scopeOngoingItems: HomeBroadcastItem[] = [];
     const scopePendingParts: string[] = [];
+    const overviewItem = props.overview[scope.value] || {};
+    const titleItems = Array.isArray(overviewItem.ongoing_titles) ? overviewItem.ongoing_titles : [];
 
     for (const workType of broadcastWorkTypes) {
       const counts = typedScopeCounts(scope.value, workType.key);
@@ -315,6 +320,20 @@ const homeBroadcastStats = computed(() => {
       if (counts.pending > 0) {
         scopePending += counts.pending;
         scopePendingParts.push(`${workType.label}${counts.pending}`);
+      }
+    }
+    if (titleItems.length) {
+      scopeOngoingItems.splice(0, scopeOngoingItems.length);
+      for (const item of titleItems) {
+        const workType = String(item?.work_type || "");
+        const title = String(item?.title || "").trim();
+        if (!title) continue;
+        scopeOngoingItems.push({
+          key: `ongoing-title-${scope.value}-${String(item?.key || title)}`,
+          label: "进行中",
+          text: `${scope.label} · ${broadcastWorkTypeLabelByKey[workType] || "通告"} · ${title}`,
+          tone: "ongoing",
+        });
       }
     }
 

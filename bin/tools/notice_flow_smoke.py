@@ -61,6 +61,7 @@ def main() -> int:
         (workbench_lite_py, "'upload_id', 'file_token', 'token'", "现场照片提交保留 upload_id"),
         (workbench_lite_py, "const targetRecordId = previewValue(form, 'target_record_id');", "结束校验只认显式目标多维 ID"),
         (workbench_lite_py, "command_format: 'notice_command'", "工作台最小命令提交"),
+        (workbench_lite_py, "isPreviewDateField(key) ? previewDate(rawValue) : rawValue", "通告预览普通文本不得按时间字段清理 T"),
         (server_py, 'extra_images = payload.get("site_photos")', "Qt 现场照片兼容 site_photos"),
         (server_py, 'data["site_photo_count"] = max(previous_count, uploaded_site_photo_count)', "Qt 现场照片上传后回写计数"),
         (workbench_lite_py, "appliedOngoingLocally = isRow && navLink.matches('.ongoing-row')", "进行中通告本地切换"),

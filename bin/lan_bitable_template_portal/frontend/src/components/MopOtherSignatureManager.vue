@@ -12,7 +12,7 @@
         :title="addDisabledReason"
         @click="emit('add-other')"
       >
-        添加
+        添加人员
       </button>
     </div>
     <p v-if="addDisabledReason" class="other-signature-disabled">{{ addDisabledReason }}</p>
@@ -39,7 +39,7 @@
           :class="{ ready: displayRows.length > 0 && !unsignedCount, pending: unsignedCount > 0 }"
           type="button"
           :aria-expanded="drawerOpen"
-          :title="unsignedCount ? `${unsignedCount} 人未签名，点击查看处理` : '临时/外部人员签名已齐全，点击查看'"
+          :title="unsignedCount ? `${unsignedCount} 人未签名，点击处理` : '临时/外部人员签名已齐全，点击查看'"
           @click.stop="emit('update:drawerOpen', !drawerOpen)"
         >
           {{ drawerButtonText }}
@@ -48,7 +48,7 @@
         <MopSignatureDrawer
           :open="drawerOpen"
           tone="temporary"
-          :title="`${role === 'implementer' ? '维护实施人' : '维护审核人'}临时/外部人员`"
+          :title="`${role === 'implementer' ? '维护实施人' : '维护审核人'} · 临时/外部人员`"
           @close="emit('update:drawerOpen', false)"
         >
           <div class="drawer-filter-bar temporary-filter-bar">
@@ -285,7 +285,7 @@ const summaryTone = computed(() => ({
   empty: props.displayRows.length === 0,
 }));
 const drawerButtonText = computed(() => {
-  return `查看临时 ${props.displayRows.length}`;
+  return props.unsignedCount ? "处理临时人员" : "查看临时人员";
 });
 
 const emit = defineEmits<{

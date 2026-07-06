@@ -168,6 +168,15 @@ class SignatureSendLinkRequest(APIModel):
     request_base_url: str = ""
 
 
+class SignatureUsageConfirmationSendRequest(APIModel):
+    scope: str = "ALL"
+    notice_key: str = ""
+    notice_title: str = ""
+    mop_attachment_name: str = ""
+    signatures: list[dict[str, Any]] = Field(default_factory=list)
+    request_base_url: str = ""
+
+
 class TemporarySignatureSendLinkRequest(APIModel):
     temporary_id: str = ""
     scope: str = "ALL"

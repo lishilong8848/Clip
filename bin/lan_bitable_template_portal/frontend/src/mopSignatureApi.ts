@@ -4,6 +4,7 @@ export type SignaturePeopleQuery = {
   scope: string;
   q?: string;
   recordId?: string;
+  noticeKey?: string;
   refresh?: boolean;
   limit?: number;
 };
@@ -12,6 +13,7 @@ function appendCommonSignatureQuery(url: URLSearchParams, query: SignaturePeople
   url.set("scope", query.scope);
   if (query.q?.trim()) url.set("q", query.q.trim());
   if (query.recordId?.trim()) url.set("record_id", query.recordId.trim());
+  if (query.noticeKey?.trim()) url.set("notice_key", query.noticeKey.trim());
   if (query.refresh) url.set("refresh", "1");
   url.set("limit", String(query.limit || 60));
 }
@@ -67,6 +69,25 @@ export function sendStaffSignatureLink(recordId: string, signerName: string, sco
       record_id: recordId,
       signer_name: signerName,
       scope,
+    }),
+  });
+}
+
+export function sendSignatureUsageConfirmations(payload: {
+  scope: string;
+  noticeKey: string;
+  noticeTitle: string;
+  mopAttachmentName?: string;
+  signatures: Dict[];
+}): Promise<Dict> {
+  return requestJson("/api/signatures/usage-confirmations/send", {
+    method: "POST",
+    body: JSON.stringify({
+      scope: payload.scope,
+      notice_key: payload.noticeKey,
+      notice_title: payload.noticeTitle,
+      mop_attachment_name: payload.mopAttachmentName || "",
+      signatures: payload.signatures,
     }),
   });
 }

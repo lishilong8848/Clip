@@ -645,8 +645,9 @@ def check_frontend_vnet_skin() -> tuple[bool, list[str]]:
         ".notice-row,.ongoing-row",
         "text-overflow:ellipsis",
         ".source-link-field",
-        "关联源表事项",
-        "已被其他进行中通告占用的事项不会出现",
+        "source-link-title",
+        "target-link-panel",
+        "detail-status-board",
     ):
         if marker not in lite_text:
             errors.append(f"workbench_lite.py 轻量工作台缺少蓝白/关联交互样式: {marker}")

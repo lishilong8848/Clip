@@ -101,6 +101,7 @@ class LanPortalStateStore:
         "engineer_mop_local_files",
         "signature_link_tokens",
         "mop_temporary_signature_sessions",
+        "mop_signature_usage_confirmations",
         "signature_crypto_migrations",
         "schema_migrations",
     ]
@@ -129,6 +130,8 @@ class LanPortalStateStore:
         "idx_signature_link_tokens_expiry",
         "idx_mop_temp_signature_notice",
         "idx_mop_temp_signature_expiry",
+        "idx_mop_signature_usage_notice",
+        "idx_mop_signature_usage_token",
         "idx_signature_crypto_migrations_status",
         "idx_signature_crypto_migrations_updated",
     ]
@@ -620,6 +623,39 @@ class LanPortalStateStore:
             """
             CREATE INDEX IF NOT EXISTS idx_mop_temp_signature_expiry
             ON mop_temporary_signature_sessions(expires_at)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mop_signature_usage_confirmations (
+                confirmation_id TEXT PRIMARY KEY,
+                scope TEXT,
+                notice_key TEXT,
+                role TEXT NOT NULL,
+                signer_record_id TEXT NOT NULL,
+                signer_open_id TEXT,
+                signer_name TEXT,
+                requested_by_openid TEXT,
+                requested_by_name TEXT,
+                status TEXT NOT NULL,
+                token_hash TEXT NOT NULL UNIQUE,
+                payload_json TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                expires_at REAL NOT NULL,
+                confirmed_at REAL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_mop_signature_usage_notice
+            ON mop_signature_usage_confirmations(scope, notice_key, signer_record_id, status)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_mop_signature_usage_token
+            ON mop_signature_usage_confirmations(token_hash, expires_at)
             """
         )
         conn.execute(
@@ -5509,6 +5545,247 @@ class LanPortalStateStore:
                     (now, record_id, token_hash, now),
                 )
                 conn.commit()
+
+    def create_mop_signature_usage_confirmation(
+        self,
+        *,
+        scope: str,
+        notice_key: str,
+        role: str,
+        signer_record_id: str,
+        signer_open_id: str,
+        signer_name: str = "",
+        requested_by_openid: str = "",
+        requested_by_name: str = "",
+        ttl_seconds: int = 7 * 24 * 3600,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        role = self._text(role)
+        signer_record_id = self._text(signer_record_id)
+        signer_open_id = self._text(signer_open_id)
+        if role not in {"implementer", "auditor"}:
+            raise ValueError("签名确认角色无效。")
+        if not signer_record_id or not signer_open_id:
+            raise ValueError("签名确认缺少人员信息。")
+        ttl_seconds = max(3600, min(int(ttl_seconds or 0), 30 * 24 * 3600))
+        token = secrets.token_urlsafe(32)
+        token_hash = self._signature_link_token_hash(token)
+        confirmation_id = uuid.uuid4().hex
+        now = time.time()
+        expires_at = now + ttl_seconds
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute(
+                    "DELETE FROM mop_signature_usage_confirmations WHERE expires_at < ? AND status != 'confirmed'",
+                    (now - 24 * 3600,),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO mop_signature_usage_confirmations(
+                        confirmation_id, scope, notice_key, role,
+                        signer_record_id, signer_open_id, signer_name,
+                        requested_by_openid, requested_by_name, status,
+                        token_hash, payload_json, created_at, expires_at, confirmed_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, NULL)
+                    """,
+                    (
+                        confirmation_id,
+                        self._text(scope),
+                        self._text(notice_key),
+                        role,
+                        signer_record_id,
+                        signer_open_id,
+                        self._text(signer_name),
+                        self._text(requested_by_openid),
+                        self._text(requested_by_name),
+                        token_hash,
+                        self._json(payload or {}),
+                        now,
+                        expires_at,
+                    ),
+                )
+                conn.commit()
+        return {
+            "confirmation_id": confirmation_id,
+            "token": token,
+            "expires_at": expires_at,
+            "created_at": now,
+        }
+
+    def _mop_signature_usage_result(self, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        result = dict(row)
+        result["payload"] = self._loads(self._text(result.get("payload_json")), {})
+        return result
+
+    def get_mop_signature_usage_confirmation(self, *, token: str) -> dict[str, Any]:
+        token_hash = self._signature_link_token_hash(token)
+        if not token_hash:
+            raise ValueError("签名确认链接无效。")
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    """
+                    SELECT * FROM mop_signature_usage_confirmations
+                    WHERE token_hash = ?
+                    """,
+                    (token_hash,),
+                ).fetchone()
+        if not row:
+            raise ValueError("签名确认链接无效或已过期。")
+        status = self._text(row["status"]) or "pending"
+        if status == "pending" and float(row["expires_at"] or 0) < now:
+            raise ValueError("签名确认链接已过期。")
+        return self._mop_signature_usage_result(row)
+
+    def decide_mop_signature_usage(self, *, token: str, decision: str) -> dict[str, Any]:
+        decision_text = self._text(decision).lower()
+        if decision_text in {"confirm", "confirmed", "approve", "approved", "yes", "allow"}:
+            final_status = "confirmed"
+        elif decision_text in {"reject", "rejected", "deny", "denied", "no", "refuse"}:
+            final_status = "rejected"
+        else:
+            raise ValueError("签名使用确认动作无效。")
+        token_hash = self._signature_link_token_hash(token)
+        if not token_hash:
+            raise ValueError("签名确认链接无效。")
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    """
+                    SELECT * FROM mop_signature_usage_confirmations
+                    WHERE token_hash = ?
+                    """,
+                    (token_hash,),
+                ).fetchone()
+                if not row:
+                    conn.rollback()
+                    raise ValueError("签名确认链接无效或已过期。")
+                current_status = self._text(row["status"]) or "pending"
+                if current_status == "pending" and float(row["expires_at"] or 0) < now:
+                    conn.rollback()
+                    raise ValueError("签名确认链接已过期。")
+                if current_status == "pending":
+                    conn.execute(
+                        """
+                        UPDATE mop_signature_usage_confirmations
+                        SET status = ?, confirmed_at = COALESCE(confirmed_at, ?)
+                        WHERE status = 'pending'
+                          AND scope = ?
+                          AND notice_key = ?
+                          AND signer_record_id = ?
+                          AND requested_by_openid = ?
+                        """,
+                        (
+                            final_status,
+                            now,
+                            self._text(row["scope"]),
+                            self._text(row["notice_key"]),
+                            self._text(row["signer_record_id"]),
+                            self._text(row["requested_by_openid"]),
+                        ),
+                    )
+                conn.commit()
+        result = self._mop_signature_usage_result(row)
+        result["status"] = current_status if current_status != "pending" else final_status
+        result["confirmed_at"] = result.get("confirmed_at") or now
+        return result
+
+    def confirm_mop_signature_usage(self, *, token: str) -> dict[str, Any]:
+        return self.decide_mop_signature_usage(token=token, decision="confirmed")
+
+    def reject_mop_signature_usage(self, *, token: str) -> dict[str, Any]:
+        return self.decide_mop_signature_usage(token=token, decision="rejected")
+
+    def mop_signature_usage_status(
+        self,
+        *,
+        scope: str,
+        notice_key: str,
+        signer_record_id: str,
+        requested_by_openid: str = "",
+    ) -> str:
+        signer_record_id = self._text(signer_record_id)
+        if not signer_record_id:
+            return ""
+        now = time.time()
+        clauses = [
+            "scope = ?",
+            "notice_key = ?",
+            "signer_record_id = ?",
+            "expires_at >= ?",
+        ]
+        params: list[Any] = [
+            self._text(scope),
+            self._text(notice_key),
+            signer_record_id,
+            now,
+        ]
+        if self._text(requested_by_openid):
+            clauses.append("requested_by_openid = ?")
+            params.append(self._text(requested_by_openid))
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    f"""
+                    SELECT status FROM mop_signature_usage_confirmations
+                    WHERE {' AND '.join(clauses)}
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    params,
+                ).fetchone()
+        return self._text(row["status"]) if row else ""
+
+    def has_confirmed_mop_signature_usage(
+        self,
+        *,
+        scope: str,
+        notice_key: str,
+        signer_record_id: str,
+        requested_by_openid: str = "",
+    ) -> bool:
+        signer_record_id = self._text(signer_record_id)
+        if not signer_record_id:
+            return False
+        now = time.time()
+        clauses = [
+            "scope = ?",
+            "notice_key = ?",
+            "signer_record_id = ?",
+            "status = 'confirmed'",
+            "expires_at >= ?",
+        ]
+        params: list[Any] = [
+            self._text(scope),
+            self._text(notice_key),
+            signer_record_id,
+            now,
+        ]
+        if self._text(requested_by_openid):
+            clauses.append("requested_by_openid = ?")
+            params.append(self._text(requested_by_openid))
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    f"""
+                    SELECT confirmation_id FROM mop_signature_usage_confirmations
+                    WHERE {' AND '.join(clauses)}
+                    ORDER BY confirmed_at DESC
+                    LIMIT 1
+                    """,
+                    params,
+                ).fetchone()
+        return bool(row)
 
     def create_mop_temporary_signature_session(
         self,

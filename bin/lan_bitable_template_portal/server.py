@@ -560,6 +560,191 @@ class PortalRuntime:
             body,
         )
 
+    def _send_signature_usage_confirmation_page(
+        self,
+        *,
+        token: str,
+        data: dict,
+        result_message: str = "",
+    ) -> None:
+        payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
+        status = str(data.get("status") or "pending")
+        signer_name = str(data.get("signer_name") or "签名人员")
+        role_text = str(payload.get("role_text") or "")
+        if not role_text:
+            role_text = "维护审核人" if str(data.get("role") or "") == "auditor" else "维护实施人"
+        notice_title = str(payload.get("notice_title") or "未命名维保通告")
+        mop_attachment_name = str(payload.get("mop_attachment_name") or "当前选中附件")
+        requested_by = str(data.get("requested_by_name") or "未知操作人")
+        requested_by_openid = str(data.get("requested_by_openid") or "")
+        operator_text = requested_by
+        if requested_by_openid:
+            operator_text = f"{requested_by}（{requested_by_openid}）"
+        status_label = {
+            "pending": "等待确认",
+            "confirmed": "已确认",
+            "rejected": "已拒绝",
+        }.get(status, status or "等待确认")
+        status_class = {
+            "pending": "pending",
+            "confirmed": "confirmed",
+            "rejected": "rejected",
+        }.get(status, "pending")
+        action_html = ""
+        if status == "pending":
+            escaped_token = html.escape(str(token or ""), quote=True)
+            action_html = f"""
+            <form method="post" action="/api/signatures/usage-confirm" class="actions">
+              <input type="hidden" name="token" value="{escaped_token}">
+              <button class="btn approve" type="submit" name="decision" value="confirmed">确认使用</button>
+              <button class="btn reject" type="submit" name="decision" value="rejected">拒绝使用</button>
+            </form>
+            """
+        result_html = (
+            f"<div class=\"result {status_class}\">{html.escape(result_message)}</div>"
+            if result_message
+            else ""
+        )
+        body = f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MOP签名使用确认</title>
+  <style>
+    :root {{
+      color-scheme: light;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+      background: linear-gradient(180deg, #eaf3ff 0%, #f7fbff 48%, #ffffff 100%);
+      color: #0f172a;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 20px;
+    }}
+    .card {{
+      width: min(560px, 100%);
+      border: 1px solid #d8e6f8;
+      border-radius: 24px;
+      background: rgba(255, 255, 255, 0.96);
+      box-shadow: 0 22px 60px rgba(17, 72, 166, 0.15);
+      padding: 26px;
+    }}
+    .badge {{
+      display: inline-flex;
+      border-radius: 999px;
+      background: #eaf2ff;
+      color: #1d4ed8;
+      padding: 7px 12px;
+      font-size: 14px;
+      font-weight: 800;
+    }}
+    h1 {{
+      margin: 18px 0 12px;
+      font-size: clamp(24px, 7vw, 34px);
+      line-height: 1.18;
+      letter-spacing: 0;
+    }}
+    .status {{
+      display: inline-flex;
+      margin-bottom: 18px;
+      border-radius: 999px;
+      padding: 8px 12px;
+      font-weight: 900;
+      font-size: 15px;
+    }}
+    .status.pending {{ background: #fff7ed; color: #c2410c; }}
+    .status.confirmed {{ background: #ecfdf5; color: #047857; }}
+    .status.rejected {{ background: #fef2f2; color: #b91c1c; }}
+    dl {{ display: grid; gap: 12px; margin: 0; padding: 0; }}
+    .row {{
+      border: 1px solid #e5edf8;
+      border-radius: 16px;
+      padding: 12px 14px;
+      background: #fbfdff;
+    }}
+    dt {{
+      margin: 0 0 4px;
+      color: #64748b;
+      font-size: 13px;
+      font-weight: 800;
+    }}
+    dd {{
+      margin: 0;
+      color: #0f172a;
+      font-size: 17px;
+      font-weight: 850;
+      line-height: 1.45;
+      word-break: break-word;
+    }}
+    .actions {{
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-top: 22px;
+    }}
+    .btn {{
+      min-height: 54px;
+      border: 0;
+      border-radius: 16px;
+      font-size: 18px;
+      font-weight: 950;
+      cursor: pointer;
+      touch-action: manipulation;
+    }}
+    .btn.approve {{
+      background: linear-gradient(135deg, #0f6bff, #0ea5e9);
+      color: #fff;
+      box-shadow: 0 12px 26px rgba(15, 107, 255, 0.24);
+    }}
+    .btn.reject {{
+      background: #fff1f2;
+      color: #be123c;
+      border: 1px solid #fecdd3;
+    }}
+    .result {{
+      margin: 0 0 16px;
+      border-radius: 16px;
+      padding: 12px 14px;
+      font-weight: 900;
+    }}
+    .result.confirmed {{ background: #ecfdf5; color: #047857; }}
+    .result.rejected {{ background: #fef2f2; color: #b91c1c; }}
+    @media (max-width: 480px) {{
+      body {{ padding: 12px; place-items: stretch; }}
+      .card {{ padding: 20px; border-radius: 20px; }}
+      .actions {{ grid-template-columns: 1fr; }}
+      .btn {{ min-height: 58px; }}
+    }}
+  </style>
+</head>
+<body>
+  <main class="card">
+    <span class="badge">MOP签名使用确认</span>
+    <h1>是否允许本次使用你的已保存签名？</h1>
+    {result_html}
+    <div class="status {html.escape(status_class, quote=True)}">{html.escape(status_label)}</div>
+    <dl>
+      <div class="row"><dt>签名人员</dt><dd>{html.escape(signer_name)}</dd></div>
+      <div class="row"><dt>签名角色</dt><dd>{html.escape(role_text)}</dd></div>
+      <div class="row"><dt>维护通告</dt><dd>{html.escape(notice_title)}</dd></div>
+      <div class="row"><dt>MOP附件</dt><dd>{html.escape(mop_attachment_name)}</dd></div>
+      <div class="row"><dt>操作人</dt><dd>{html.escape(operator_text)}</dd></div>
+    </dl>
+    {action_html}
+  </main>
+</body>
+</html>""".encode("utf-8")
+        self._write_response(
+            200,
+            {"Content-Type": "text/html; charset=utf-8"},
+            body,
+        )
+
     def _require_auth(self) -> dict | None:
         session = self._current_session()
         if session is not None:
@@ -1119,6 +1304,16 @@ class PortalRuntime:
             "/engineer/mop/",
         }:
             return self._send_html(portal_index_file())
+        if parsed.path == "/api/signatures/usage-confirm":
+            try:
+                token = (parse_qs(parsed.query).get("token") or [""])[0]
+                data = self.service.signature_usage_confirmation(token=token)
+                return self._send_signature_usage_confirmation_page(
+                    token=token,
+                    data=data,
+                )
+            except (PortalError, ValueError) as exc:
+                return self._send_html_message(400, "签名确认失败", str(exc))
         if parsed.path.startswith("/assets/"):
             relative_text = parsed.path[len("/assets/") :]
             relative = Path(*relative_text.split("/")) if relative_text else Path()
@@ -1187,6 +1382,8 @@ class PortalRuntime:
                     query=(qs.get("q") or [""])[0],
                     record_id=record_id,
                     link_token=link_token if session is None else "",
+                    notice_key=(qs.get("notice_key") or [""])[0],
+                    operator_open_id=str((session.get("user") or {}).get("open_id") or "") if isinstance(session, dict) and isinstance(session.get("user"), dict) else "",
                     limit=int((qs.get("limit") or ["80"])[0] or 80),
                     refresh=str((qs.get("refresh") or [""])[0]).lower() in {"1", "true", "yes"},
                 )
@@ -1740,6 +1937,28 @@ class PortalRuntime:
                 },
                 body,
             )
+        if parsed.path == "/api/signatures/usage-confirm":
+            try:
+                length = int(self.headers.get("Content-Length") or "0")
+                if length > 16 * 1024:
+                    raise ValueError("签名确认请求过大。")
+                raw = self.rfile.read(max(0, length)).decode("utf-8", errors="ignore")
+                form = parse_qs(raw)
+                token = (form.get("token") or [""])[0]
+                decision = (form.get("decision") or form.get("action") or [""])[0]
+                data = self.service.decide_signature_usage(
+                    token=token,
+                    decision=decision,
+                )
+                return self._send_signature_usage_confirmation_page(
+                    token=token,
+                    data=data,
+                    result_message="已确认允许使用签名。"
+                    if str(data.get("status") or "") == "confirmed"
+                    else "已拒绝本次使用签名。",
+                )
+            except (PortalError, ValueError) as exc:
+                return self._send_html_message(400, "签名确认失败", str(exc))
         if parsed.path == "/api/events/refresh":
             session = self._require_auth_json()
             if session is None:
@@ -1774,13 +1993,15 @@ class PortalRuntime:
                     token=link_token,
                 ):
                     return self._send_json(403, {"ok": False, "error": "签名链接无效或已过期。"})
+                user = session.get("user") if isinstance(session, dict) and isinstance(session.get("user"), dict) else {}
                 data = self.service.save_signature_for_person(
                     record_id=record_id,
                     signature_png=str(payload.get("signature_png") or ""),
                     signer_name=str(payload.get("signer_name") or ""),
                     link_token=link_token if session is None else "",
-                    operator_open_id=str((session or {}).get("open_id") or ""),
-                    operator_name=str((session or {}).get("name") or ""),
+                    operator_open_id=str(user.get("open_id") or ""),
+                    operator_name=str(user.get("name") or user.get("en_name") or ""),
+                    require_operator_match=session is not None,
                 )
                 if session is None:
                     self.service.mark_signature_link_token_used(
@@ -1902,6 +2123,63 @@ class PortalRuntime:
                 )
             except (PortalError, ValueError, json.JSONDecodeError) as exc:
                 return self._send_json(400, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/signatures/usage-confirmations/send":
+            session = self._require_auth_json()
+            if session is None:
+                return
+            try:
+                payload = self._read_json_body(max_bytes=256 * 1024)
+                scope = self._authorized_scope_or_error(
+                    session,
+                    str(payload.get("scope") or "ALL"),
+                )
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                data = self.service.build_signature_usage_confirmation_messages(
+                    scope=scope,
+                    notice_key=str(payload.get("notice_key") or ""),
+                    notice_title=str(payload.get("notice_title") or ""),
+                    signatures=[
+                        item for item in (payload.get("signatures") or [])
+                        if isinstance(item, dict)
+                    ],
+                    mop_attachment_name=str(payload.get("mop_attachment_name") or ""),
+                    request_base_url=str(payload.get("request_base_url") or "")
+                    or self._request_base_url(),
+                    operator_open_id=str(user.get("open_id") or ""),
+                    operator_name=str(user.get("name") or user.get("en_name") or ""),
+                )
+                messages = list(data.get("messages") or [])
+                results: list[dict] = []
+                for item in messages:
+                    open_id = str(item.get("open_id") or "")
+                    ok, message, send_results = _send_text_to_open_ids_guarded(
+                        str(item.get("text") or ""),
+                        [open_id],
+                    )
+                    send_result = (send_results or [{}])[0] if send_results else {}
+                    results.append(
+                        {
+                            "record_id": item.get("record_id") or "",
+                            "open_id": open_id,
+                            "ok": bool(ok and send_result.get("ok", ok)),
+                            "message": str(send_result.get("message") or message or ""),
+                        }
+                    )
+                failed = [item for item in results if not item.get("ok")]
+                return self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "data": {
+                            "sent_count": len(results) - len(failed),
+                            "failed_count": len(failed),
+                            "results": results,
+                            "skipped": data.get("skipped") or [],
+                        },
+                    },
+                )
+            except (PortalError, ValueError, json.JSONDecodeError) as exc:
+                return self._send_json(400, {"ok": False, "error": str(exc)})
         if parsed.path == "/api/signatures/temporary/send-link":
             session = self._require_auth_json()
             if session is None:
@@ -2017,8 +2295,10 @@ class PortalRuntime:
                 scope = self._authorized_scope_or_error(
                     session, str(payload.get("scope") or "ALL")
                 )
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
                 data = self.service.fill_engineer_mop_file(
                     **engineer_mop_fill_kwargs_from_payload(payload, scope=scope),
+                    operator_open_id=str(user.get("open_id") or ""),
                 )
                 return self._send_json(
                     200,

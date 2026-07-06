@@ -133,6 +133,40 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
         self.assertEqual(result.get("target_record_id"), "recTarget456")
         self.assertEqual(result.get("record_id"), "recTarget456")
 
+    def test_action_response_time_uses_web_actual_action_time(self) -> None:
+        self.assertEqual(
+            MaintenancePortalService._action_response_time(
+                {"actual_action_time": "2026-07-06T09:15"}
+            ),
+            "2026-07-06 09:15",
+        )
+
+    def test_command_expansion_preserves_actual_action_time_patch(self) -> None:
+        payload = {
+            "command_format": "notice_command",
+            "action": "start",
+            "scope": "C",
+            "work_type": "maintenance",
+            "source_record_id": "recSource123",
+            "record_id": "recSource123",
+            "patch": {
+                "scope": "C",
+                "work_type": "maintenance",
+                "title": "测试维保",
+                "source_record_id": "recSource123",
+                "record_id": "recSource123",
+                "actual_action_time": "2026-07-06T10:30",
+            },
+        }
+
+        result = self.service.expand_workbench_action_command(
+            payload,
+            scope="C",
+            ongoing_items=[],
+        )
+
+        self.assertEqual(result.get("actual_action_time"), "2026-07-06T10:30")
+
     def test_existing_site_photo_count_satisfies_end_check(self) -> None:
         class EmptyStateStore:
             def list_qt_active_items(self, include_deleted: bool = False) -> list[dict]:

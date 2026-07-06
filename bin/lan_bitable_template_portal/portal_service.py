@@ -369,6 +369,7 @@ def engineer_mop_fill_kwargs_from_payload(
         "mop_record_id": str(payload.get("mop_record_id") or ""),
         "mop_title": str(payload.get("mop_title") or ""),
         "mop_file_name": str(payload.get("mop_file_name") or ""),
+        "notice_key": str(payload.get("notice_key") or ""),
         "sheet_name": str(payload.get("sheet_name") or ""),
         "fields": _payload_list(payload, "fields"),
         "checkboxes": _payload_list(payload, "checkboxes"),
@@ -2592,6 +2593,14 @@ class MaintenancePortalService:
     def _format_input_datetime(value: Any) -> str:
         text = str(value or "").strip()
         return text.replace("T", " ")
+
+    @classmethod
+    def _action_response_time(cls, request_payload: dict[str, Any]) -> str:
+        explicit = (
+            cls._format_input_datetime((request_payload or {}).get("actual_action_time"))
+            or cls._format_input_datetime((request_payload or {}).get("response_time"))
+        ).strip()
+        return explicit or dt.datetime.now().strftime("%Y-%m-%d %H:%M")
 
     @classmethod
     def _parse_notice_datetime(cls, value: Any) -> dt.datetime | None:
@@ -4890,6 +4899,27 @@ class MaintenancePortalService:
                 pending_records.append(record)
             pending_counts = self._work_type_counts(pending_records)
             ongoing_counts = self._work_type_counts(merged_ongoing)
+            ongoing_titles: list[dict[str, str]] = []
+            for index, item in enumerate(merged_ongoing[:30]):
+                fields = item.get("fields") if isinstance(item.get("fields"), dict) else {}
+                title = str(
+                    item.get("title")
+                    or item.get("name")
+                    or fields.get("标题")
+                    or fields.get("名称")
+                    or item.get("content")
+                    or ""
+                ).strip()
+                if not title:
+                    continue
+                item_work_type = self._item_work_type(item)
+                ongoing_titles.append(
+                    {
+                        "key": str(item.get("active_item_id") or item.get("record_id") or index),
+                        "work_type": item_work_type,
+                        "title": title,
+                    }
+                )
             stats = daily_summary.get("stats") or {}
             overview[scope] = {
                 "scope": scope,
@@ -4897,9 +4927,17 @@ class MaintenancePortalService:
                 "maintenance_pending": pending_counts[WORK_TYPE_MAINTENANCE],
                 "change_pending": pending_counts[WORK_TYPE_CHANGE],
                 "repair_pending": pending_counts[WORK_TYPE_REPAIR],
+                "power_pending": pending_counts[WORK_TYPE_POWER],
+                "polling_pending": pending_counts[WORK_TYPE_POLLING],
+                "adjust_pending": pending_counts[WORK_TYPE_ADJUST],
                 "maintenance_ongoing": ongoing_counts[WORK_TYPE_MAINTENANCE],
                 "change_ongoing": ongoing_counts[WORK_TYPE_CHANGE],
                 "repair_ongoing": ongoing_counts[WORK_TYPE_REPAIR],
+                "power_ongoing": ongoing_counts[WORK_TYPE_POWER],
+                "polling_ongoing": ongoing_counts[WORK_TYPE_POLLING],
+                "adjust_ongoing": ongoing_counts[WORK_TYPE_ADJUST],
+                "ongoing_title_count": len(merged_ongoing),
+                "ongoing_titles": ongoing_titles,
                 "closed_today": int(stats.get("ended") or 0),
             }
             if include_prepared:
@@ -11096,12 +11134,16 @@ class MaintenancePortalService:
         query: str = "",
         record_id: str = "",
         link_token: str = "",
+        notice_key: str = "",
+        operator_open_id: str = "",
         limit: int = 80,
         refresh: bool = False,
     ) -> dict[str, Any]:
         scope = self._normalize_scope(scope or "ALL")
         query_text = re.sub(r"\s+", "", str(query or "")).lower()
         record_id = str(record_id or "").strip()
+        notice_key = str(notice_key or "").strip()
+        operator_open_id = str(operator_open_id or "").strip()
         people = self._load_signature_people(force=bool(refresh or record_id))
         self._maybe_start_daily_attachment_cache_refresh()
 
@@ -11152,6 +11194,35 @@ class MaintenancePortalService:
                         signature_version=signature_version,
                         link_token=link_token,
                     )
+        if notice_key and operator_open_id:
+            for person in limited:
+                signer_record_id = str(person.get("record_id") or "").strip()
+                signer_open_id = str(person.get("open_id") or "").strip()
+                confirmed = bool(
+                    signer_open_id
+                    and signer_open_id == operator_open_id
+                )
+                usage_status = "confirmed" if confirmed else ""
+                if not confirmed and signer_record_id and signer_open_id:
+                    usage_status = self._state_store.mop_signature_usage_status(
+                        scope=scope,
+                        notice_key=notice_key,
+                        signer_record_id=signer_record_id,
+                        requested_by_openid=operator_open_id,
+                    )
+                    confirmed = usage_status == "confirmed"
+                rejected = usage_status == "rejected"
+                pending = usage_status == "pending"
+                person["usage_status"] = usage_status
+                person["usage_confirmed"] = confirmed
+                person["usage_rejected"] = rejected
+                person["usage_confirmation_required"] = bool(
+                    signer_open_id
+                    and signer_open_id != operator_open_id
+                    and not confirmed
+                    and not rejected
+                )
+                person["usage_confirmation_pending"] = pending
         return {
             "people": limited,
             "count": len(filtered),
@@ -11341,13 +11412,11 @@ class MaintenancePortalService:
         link_token: str = "",
         operator_open_id: str = "",
         operator_name: str = "",
+        require_operator_match: bool = False,
     ) -> dict[str, Any]:
         record_id = str(record_id or "").strip()
         if not record_id:
             raise PortalError("请选择要保存签名的人员。")
-        signature_bytes = self._transparent_signature_png(
-            self._decode_signature_png(signature_png)
-        )
         people = self._load_signature_people(force=True)
         person = next(
             (item for item in people if str(item.get("record_id") or "") == record_id),
@@ -11355,6 +11424,17 @@ class MaintenancePortalService:
         )
         if not person:
             raise PortalError("签名人员记录不存在或无权访问。")
+        operator_open_id = str(operator_open_id or "").strip()
+        operator_name = str(operator_name or "").strip()
+        person_open_id = str(person.get("open_id") or "").strip()
+        if require_operator_match:
+            if not operator_open_id:
+                raise PortalError("请先登录后再网页手写签名。")
+            if not person_open_id or person_open_id != operator_open_id:
+                raise PortalError("网页手写只能保存当前登录用户本人的签名，请发送签名链接给对方。")
+        signature_bytes = self._transparent_signature_png(
+            self._decode_signature_png(signature_png)
+        )
         safe_name = self._safe_mop_path_part(
             signer_name or str(person.get("name") or "signature"),
             "signature",
@@ -11375,9 +11455,6 @@ class MaintenancePortalService:
         signature_version = str(metadata.get("signature_sha256") or hashlib.sha1(file_token.encode("utf-8")).hexdigest())[:12]
         notification_warning = ""
         notification_result: dict[str, Any] = {}
-        operator_open_id = str(operator_open_id or "").strip()
-        operator_name = str(operator_name or "").strip()
-        person_open_id = str(person.get("open_id") or "").strip()
         if operator_open_id or operator_name:
             if person_open_id:
                 lines = [
@@ -11583,9 +11660,11 @@ class MaintenancePortalService:
     ) -> str:
         """Build the public portal URL used in signature links.
 
-        The configured handover/portal LAN address has the highest priority,
-        because signature links are usually opened from another phone. A
-        browser-origin URL is only used as fallback when no public handover
+        The configured handover LAN address is used as the public host,
+        because signature links are usually opened from another phone. The
+        actual signature endpoint still belongs to this portal service, so the
+        portal port is kept instead of reusing a handover/review service port.
+        A browser-origin URL is only used as fallback when no public handover
         address has been configured.
         """
 
@@ -11632,6 +11711,7 @@ class MaintenancePortalService:
         normalized_scope = self._normalize_scope(scope or "ALL")
         handover_links = self.get_handover_links().get("links") or {}
         handover_url = ""
+        handover_host_selected = False
         if isinstance(handover_links, dict):
             handover_url = str(handover_links.get(normalized_scope) or "").strip()
             if not handover_url and normalized_scope != "ALL":
@@ -11645,11 +11725,14 @@ class MaintenancePortalService:
                     if parsed_handover.scheme in {"http", "https"}
                     else scheme
                 )
-                if parsed_handover.netloc:
-                    return f"{handover_scheme}://{parsed_handover.netloc}"
+                scheme = handover_scheme
                 host = handover_host
+                handover_host_selected = True
         except Exception:
             pass
+
+        if handover_host_selected:
+            return f"{scheme}://{self._url_host_for_display(host)}:{port}"
 
         if (
             parsed_base
@@ -11739,6 +11822,128 @@ class MaintenancePortalService:
             "expires_at": token_data.get("expires_at"),
             "text": text,
         }
+
+    def build_signature_usage_confirmation_messages(
+        self,
+        *,
+        scope: str,
+        notice_key: str,
+        notice_title: str,
+        signatures: list[dict[str, Any]],
+        mop_attachment_name: str = "",
+        request_base_url: str = "",
+        operator_open_id: str = "",
+        operator_name: str = "",
+    ) -> dict[str, Any]:
+        operator_open_id = str(operator_open_id or "").strip()
+        operator_name = str(operator_name or "").strip()
+        mop_attachment_name = str(mop_attachment_name or "").strip()
+        people = self._load_signature_people(force=False)
+        people_by_id = {
+            str(item.get("record_id") or "").strip(): item
+            for item in people
+            if str(item.get("record_id") or "").strip()
+        }
+        requested: dict[str, set[str]] = {}
+        for item in signatures or []:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("source") or "staff").strip() not in {"", "staff"}:
+                continue
+            record_id = str(item.get("record_id") or "").strip()
+            role = str(item.get("role") or "").strip()
+            if not record_id or role not in {"implementer", "auditor"}:
+                continue
+            requested.setdefault(record_id, set()).add(role)
+        missing = [record_id for record_id in requested if record_id not in people_by_id]
+        if missing:
+            people = self._load_signature_people(force=True)
+            people_by_id = {
+                str(item.get("record_id") or "").strip(): item
+                for item in people
+                if str(item.get("record_id") or "").strip()
+            }
+        base_url = self._signature_public_base_url(
+            scope=scope,
+            request_base_url=request_base_url,
+        )
+        messages: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        for record_id, roles in requested.items():
+            person = people_by_id.get(record_id)
+            if not person:
+                skipped.append({"record_id": record_id, "reason": "签名人员记录不存在"})
+                continue
+            person_open_id = str(person.get("open_id") or "").strip()
+            if not person_open_id:
+                skipped.append({"record_id": record_id, "name": person.get("name") or "", "reason": "缺少 openid"})
+                continue
+            if operator_open_id and person_open_id == operator_open_id:
+                skipped.append({"record_id": record_id, "name": person.get("name") or "", "reason": "本人签名无需确认"})
+                continue
+            role_text = "、".join(self._mop_role_label(role) for role in ("implementer", "auditor") if role in roles)
+            confirmation = self._state_store.create_mop_signature_usage_confirmation(
+                scope=scope,
+                notice_key=notice_key,
+                role="auditor" if "auditor" in roles else "implementer",
+                signer_record_id=record_id,
+                signer_open_id=person_open_id,
+                signer_name=str(person.get("name") or ""),
+                requested_by_openid=operator_open_id,
+                requested_by_name=operator_name,
+                payload={
+                    "notice_title": notice_title,
+                    "mop_attachment_name": mop_attachment_name,
+                    "roles": sorted(roles),
+                    "role_text": role_text,
+                },
+            )
+            token = str(confirmation.get("token") or "").strip()
+            link_url = f"{base_url}/api/signatures/usage-confirm?token={quote(token, safe='')}"
+            text = "\n".join(
+                [
+                    "【MOP签名使用确认】",
+                    "",
+                    f"签名人员：{person.get('name') or record_id}",
+                    f"签名角色：{role_text or '签名人员'}",
+                    f"维护通告：{notice_title or '未命名维保通告'}",
+                    f"MOP附件：{mop_attachment_name or '当前选中附件'}",
+                    f"操作人：{operator_name or '未知'}"
+                    + (f"（{operator_open_id}）" if operator_open_id else ""),
+                    "",
+                    f"确认链接：{link_url}",
+                    "请确认是否允许本次 MOP 使用你的已保存签名。",
+                ]
+            )
+            messages.append(
+                {
+                    "record_id": record_id,
+                    "person": {key: value for key, value in person.items() if key != "raw_fields"},
+                    "open_id": person_open_id,
+                    "link_url": link_url,
+                    "text": text,
+                    "confirmation_id": confirmation.get("confirmation_id"),
+                }
+            )
+        return {
+            "messages": messages,
+            "skipped": skipped,
+        }
+
+    def confirm_signature_usage(self, *, token: str) -> dict[str, Any]:
+        return self._state_store.confirm_mop_signature_usage(token=token)
+
+    def signature_usage_confirmation(self, *, token: str) -> dict[str, Any]:
+        return self._state_store.get_mop_signature_usage_confirmation(token=token)
+
+    def decide_signature_usage(self, *, token: str, decision: str) -> dict[str, Any]:
+        return self._state_store.decide_mop_signature_usage(
+            token=token,
+            decision=decision,
+        )
+
+    def reject_signature_usage(self, *, token: str) -> dict[str, Any]:
+        return self._state_store.reject_mop_signature_usage(token=token)
 
     @staticmethod
     def _mop_role_label(role: str) -> str:
@@ -13535,6 +13740,8 @@ class MaintenancePortalService:
         self,
         *,
         scope: str = "ALL",
+        notice_key: str = "",
+        operator_open_id: str = "",
         local_file_path: str = "",
         mop_record_id: str = "",
         mop_title: str = "",
@@ -13569,6 +13776,13 @@ class MaintenancePortalService:
         signatures = [item for item in (signatures or []) if isinstance(item, dict)]
         if not signatures:
             raise PortalError("请选择至少一个维护实施人或维护审核人签名。")
+        if operator_open_id:
+            self._ensure_mop_staff_signature_usage_confirmed(
+                signatures=signatures,
+                scope=scope,
+                notice_key=notice_key,
+                operator_open_id=operator_open_id,
+            )
 
         role_to_label = {
             "implementer": "维护实施人",
@@ -13837,6 +14051,64 @@ class MaintenancePortalService:
             )
         return entries
 
+    def _ensure_mop_staff_signature_usage_confirmed(
+        self,
+        *,
+        signatures: list[dict[str, Any]],
+        scope: str,
+        notice_key: str,
+        operator_open_id: str,
+    ) -> None:
+        record_ids = {
+            str(item.get("record_id") or "").strip()
+            for item in signatures
+            if isinstance(item, dict)
+            and str(item.get("source") or "staff").strip() in {"", "staff"}
+            and str(item.get("record_id") or "").strip()
+        }
+        if not record_ids:
+            return
+        operator_open_id = str(operator_open_id or "").strip()
+        if not operator_open_id:
+            raise PortalError("缺少当前登录人 openid，无法校验他人签名确认。")
+        people = self._load_signature_people(force=False)
+        people_by_id = {
+            str(item.get("record_id") or "").strip(): item
+            for item in people
+            if str(item.get("record_id") or "").strip()
+        }
+        if any(record_id not in people_by_id for record_id in record_ids):
+            people = self._load_signature_people(force=True)
+            people_by_id = {
+                str(item.get("record_id") or "").strip(): item
+                for item in people
+                if str(item.get("record_id") or "").strip()
+            }
+        missing_confirmations: list[str] = []
+        for record_id in sorted(record_ids):
+            person = people_by_id.get(record_id)
+            if not person:
+                raise PortalError("签名人员记录不存在，请刷新后重试。")
+            person_open_id = str(person.get("open_id") or "").strip()
+            if person_open_id == operator_open_id:
+                continue
+            if not person_open_id:
+                missing_confirmations.append(f"{person.get('name') or record_id}（缺少openid）")
+                continue
+            if self._state_store.has_confirmed_mop_signature_usage(
+                scope=scope,
+                notice_key=notice_key,
+                signer_record_id=record_id,
+                requested_by_openid=operator_open_id,
+            ):
+                continue
+            missing_confirmations.append(str(person.get("name") or record_id))
+        if missing_confirmations:
+            raise PortalError(
+                "使用他人已保存签名前，请先发送确认并等待确认："
+                + "、".join(missing_confirmations)
+            )
+
     def _send_mop_signature_upload_notifications(
         self,
         *,
@@ -14052,9 +14324,14 @@ class MaintenancePortalService:
         if not self._scope_matches_buildings(normalized_scope, building_codes):
             raise PortalError("当前账号无权上传该楼栋的 MOP。")
 
-        signature_people = self._mop_signature_people_for_upload(
-            [item for item in (signatures or []) if isinstance(item, dict)]
+        signature_items = [item for item in (signatures or []) if isinstance(item, dict)]
+        self._ensure_mop_staff_signature_usage_confirmed(
+            signatures=signature_items,
+            scope=scope,
+            notice_key=notice_key,
+            operator_open_id=operator_open_id,
         )
+        signature_people = self._mop_signature_people_for_upload(signature_items)
         filled = self.fill_engineer_mop_file(
             scope=scope,
             local_file_path=local_file_path,
@@ -15702,7 +15979,7 @@ class MaintenancePortalService:
         )
         if recipient_error:
             raise PortalError(recipient_error)
-        response_time = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+        response_time = self._action_response_time(request_payload)
         return {
             "job_id": job_id,
             "work_type": work_type,
@@ -15941,7 +16218,7 @@ class MaintenancePortalService:
         if recipient_error:
             raise PortalError(recipient_error)
 
-        response_time = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+        response_time = self._action_response_time(request_payload)
         return {
             "job_id": job_id,
             "work_type": WORK_TYPE_MAINTENANCE,
@@ -16493,7 +16770,7 @@ class MaintenancePortalService:
         if recipient_error:
             raise PortalError(recipient_error)
         skip_personal_message = False
-        response_time = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+        response_time = self._action_response_time(request_payload)
         sync_maintenance_target = self._sync_maintenance_target_requested(
             request_payload,
             source_work_type=source_work_type,
@@ -17077,7 +17354,7 @@ class MaintenancePortalService:
         if recipient_error:
             raise PortalError(recipient_error)
         skip_personal_message = False
-        response_time = now_text
+        response_time = self._action_response_time(request_payload)
         return {
             "job_id": job_id,
             "work_type": WORK_TYPE_REPAIR,

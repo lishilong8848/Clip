@@ -64,7 +64,10 @@
         >
           <div class="sign-panel-head">
             <div>
-              <strong>维护人员签名</strong>
+              <strong>签名任务中心</strong>
+              <p v-if="signatureManagerOpen">
+                {{ signatureTaskSummaryText }}
+              </p>
             </div>
             <button
               v-if="signatureManagerOpen"
@@ -99,28 +102,35 @@
             />
             <div class="sign-canvas-card signature-zone">
               <div class="signature-zone-head">
-                <strong>{{ signatureRole === 'implementer' ? '维护实施人' : '维护审核人' }}</strong>
+                <strong>{{ signatureRole === 'implementer' ? '维护实施人签名' : '维护审核人签名' }}</strong>
                 <small>{{ selectedRoleSignatureStatusText }}</small>
               </div>
               <MopCompanySelectedSignatures
                 :role="signatureRole"
                 :people="selectedFormalSignaturePeople(signatureRole)"
                 :active-record-id="activeSignatureRecordId"
-                :unsigned-count="selectedFormalSignatureUnsignedCount(signatureRole)"
+                :unsigned-count="selectedFormalSignatureNotReadyCount(signatureRole)"
+                :unsigned-signature-count="selectedFormalSignatureMissingSignatureCount(signatureRole)"
                 :drawer-open="selectedSignatureDrawerOpen"
                 :link-sending-by-id="signatureLinkSendingById"
                 :link-sent-at-by-id="signatureLinkSentAtById"
                 :link-error-by-id="signatureLinkErrorById"
-                :has-usable-signature="personHasUsableSignature"
+                :has-usable-signature="personReadyForMop"
                 :person-key="signaturePersonKey"
                 :display-name="signaturePersonDisplayName"
                 :link-title="personSignatureLinkTitle"
+                :web-sign-disabled-reason="staffSignatureWebSignDisabledReason"
+                :bulk-link-sending="signatureBulkLinkSending"
+                :confirm-sending="signatureUsageConfirmSending"
+                :confirmable-count="signatureUsageConfirmationCount(signatureRole)"
                 @activate="activateSelectedSignaturePerson"
                 @toggle-drawer="toggleSelectedSignatureDrawer"
                 @close-drawer="setSelectedSignatureDrawerOpen(false)"
                 @image-error="handleSelectedSignatureImageError"
                 @web-sign="openSignaturePadForPerson"
                 @send-link="sendSignatureLinkForPerson"
+                @send-unsigned-links="sendUnsignedSignatureLinksForRole(signatureRole)"
+                @send-confirmations="sendSignatureUsageConfirmationsForRole(signatureRole)"
                 @remove="removeSignaturePerson(signatureRole, $event)"
               />
               <MopOtherSignatureManager
@@ -368,8 +378,10 @@ import {
 } from "../mopSignatureUtils";
 import {
   compactSearchText,
+  mopCandidateMatchesSpecialty,
   mopAttachmentKey,
   mopNoticeNeedsAction,
+  mopSpecialtyText,
   normalizeMopScope,
   noticeIsEnded,
   noticeMopUploaded,
@@ -384,10 +396,7 @@ import {
   fillMopDisabledReason as resolveFillMopDisabledReason,
   maintenanceTimeValidationMessage,
   requiredImplementerSignatureCount as resolveRequiredImplementerSignatureCount,
-  selectedSignaturesReady,
   signatureDisplayCount,
-  signedPeopleCount,
-  unsignedPeopleCount,
   uploadSignedMopDisabledReason as resolveUploadSignedMopDisabledReason,
 } from "../mopUploadReadiness";
 import {
@@ -398,6 +407,7 @@ import {
   saveExternalSignature,
   saveStaffSignature,
   saveTemporarySignature,
+  sendSignatureUsageConfirmations,
   sendStaffSignatureLink,
   sendTemporarySignatureLink,
 } from "../mopSignatureApi";
@@ -450,6 +460,7 @@ const message = ref("");
 const messageType = ref("");
 const mopBindingStatus = ref("");
 const mopBindingError = ref("");
+const currentAuthUser = ref<Dict>({});
 const localMopUpload = useLocalMopUpload();
 const localMopUploadBusy = localMopUpload.busy;
 const localMopUploadStatus = localMopUpload.status;
@@ -487,7 +498,6 @@ const {
   selectedFormalSignaturePeople,
   selectedTemporarySignaturePeople,
   selectedSignaturePeople,
-  selectedFormalSignatureUnsignedCount,
   selectedTemporarySignatureUnsignedCount,
   nextOtherSignatureDisplayName,
   ensureOtherSignatureDraftName: ensureOtherSignatureDraftNameByRole,
@@ -508,6 +518,8 @@ const signatureSaving = ref(false);
 const signatureLinkSendingById = ref<Record<string, boolean>>({});
 const signatureLinkSentAtById = ref<Record<string, string>>({});
 const signatureLinkErrorById = ref<Record<string, string>>({});
+const signatureBulkLinkSending = ref(false);
+const signatureUsageConfirmSending = ref(false);
 const temporarySignatureLinkSendingById = ref<Record<string, boolean>>({});
 const temporarySignatureLinkSentAtById = ref<Record<string, string>>({});
 const temporarySignatureLinkErrorById = ref<Record<string, string>>({});
@@ -587,12 +599,7 @@ const selectedNoticeSourceRecordId = computed(() => String(
   || "",
 ).trim());
 const selectedNoticeSpecialty = computed(() => String(
-  selectedNotice.value?.specialty
-  || selectedNotice.value?.专业
-  || selectedNotice.value?.专业类别
-  || selectedNotice.value?.fields?.专业
-  || selectedNotice.value?.fields?.专业类别
-  || "",
+  mopSpecialtyText(selectedNotice.value)
 ).trim());
 const selectedMop = computed(() => mopCandidates.value.find((item) => item.record_id === selectedMopRecordId.value) || null);
 const recommendedMopRecordId = computed(() => String(selectedNotice.value?.mop_binding?.mop_record_id || "").trim());
@@ -603,6 +610,31 @@ const selectedMopAttachments = computed(() => {
 const selectedAttachment = computed(() => {
   const key = selectedAttachmentToken.value;
   return selectedMopAttachments.value.find((item) => mopAttachmentKey(item) === key) || selectedMopAttachments.value[0] || null;
+});
+const signatureUsageNoticeKey = computed(() => {
+  const noticeKey = String(selectedNotice.value?.notice_key || selectedNoticeKey.value || "").trim();
+  if (!noticeKey) return "";
+  const mopRecordId = String(
+    selectedMop.value?.record_id
+    || selectedMopRecordId.value
+    || preview.value?.mop_record_id
+    || "",
+  ).trim();
+  const attachment = selectedAttachment.value || {};
+  const attachmentKey = String(
+    mopAttachmentKey(attachment)
+    || selectedAttachmentToken.value
+    || selectedMop.value?.upload_id
+    || attachment.upload_id
+    || preview.value?.local_file?.upload_id
+    || preview.value?.mop_file_name
+    || "",
+  ).trim();
+  return [
+    noticeKey,
+    `mop:${mopRecordId || "none"}`,
+    `attachment:${attachmentKey || "none"}`,
+  ].join("|");
 });
 const mopEditSessionLock = useMopEditSessionLock({
   scope,
@@ -619,13 +651,26 @@ const claimMopEditSession = mopEditSessionLock.claim;
 const releaseMopEditSession = mopEditSessionLock.release;
 const filteredMopCandidates = computed(() => {
   const query = compactSearchText(mopSearch.value);
-  const items = query ? mopCandidates.value.filter((item) => compactSearchText([
+  const specialty = selectedNoticeSpecialty.value;
+  const keepRecordIds = new Set(
+    [
+      selectedMopRecordId.value,
+      recommendedMopRecordId.value,
+    ].map((item) => String(item || "").trim()).filter(Boolean),
+  );
+  const specialtyMatched = mopCandidates.value.filter((item) => {
+    const recordId = String(item.record_id || "").trim();
+    if (recordId && keepRecordIds.has(recordId)) return true;
+    if (item.local_upload || item.source === "local_upload") return true;
+    return mopCandidateMatchesSpecialty(item, specialty);
+  });
+  const items = query ? specialtyMatched.filter((item) => compactSearchText([
     item.title,
     ...Object.values(item.fields || {}),
-  ].join(" ")).includes(query)) : mopCandidates.value;
+  ].join(" ")).includes(query)) : specialtyMatched;
   return sortRecommendedMopCandidates(items, recommendedMopRecordId.value);
 });
-const orderedMopCandidates = computed(() => sortRecommendedMopCandidates(mopCandidates.value, recommendedMopRecordId.value));
+const orderedMopCandidates = computed(() => sortRecommendedMopCandidates(filteredMopCandidates.value, recommendedMopRecordId.value));
 const canBind = computed(() => Boolean(selectedNotice.value && selectedMop.value));
 const canPreview = computed(() => Boolean(selectedNotice.value && selectedMop.value && selectedAttachment.value));
 const openMopDisabledReason = computed(() => {
@@ -705,7 +750,7 @@ const activeSignatureRecordId = computed(() => {
 });
 const selectedRoleSignaturePeople = computed(() => selectedSignaturePeople(signatureRole.value));
 const selectedRoleUnsignedCount = computed(() => (
-  selectedRoleSignaturePeople.value.filter((person) => !personHasUsableSignature(person)).length
+  selectedRoleSignaturePeople.value.filter((person) => !personReadyForMop(person)).length
 ));
 const selectedRoleSignatureStatusText = computed(() => {
   const total = selectedRoleSignaturePeople.value.length;
@@ -722,7 +767,7 @@ const signatureRoleSummaryItems = computed<MopSignatureRoleSummaryItem[]>(() => 
     label,
     totalCount: selectedSignaturePeople(role).length,
     companyCount: selectedFormalSignaturePeople(role).length,
-    companyUnsigned: selectedFormalSignatureUnsignedCount(role),
+    companyUnsigned: selectedFormalSignatureNotReadyCount(role),
     temporaryCount: selectedTemporarySignaturePeople(role).length,
     temporaryUnsigned: selectedTemporarySignatureUnsignedCount(role),
   }))
@@ -765,11 +810,33 @@ const signatureGuideItems = computed(() => [
     role: "" as MopSignatureRole | "",
   },
 ]);
+const signatureTaskSummaryText = computed(() => {
+  const items: string[] = [];
+  if (mopMaintenanceTimeValidationMessage.value) items.push("时间待补");
+  if (!implementerSignatureReady.value) {
+    items.push(`实施人 ${implementerSignatureDisplayCount.value}/${requiredImplementerSignatureCount.value || 1}`);
+  }
+  if (!auditorSignatureReady.value) {
+    items.push(`审核人 ${auditorSignatureDisplayCount.value}/${requiredAuditorSignatureCount.value}`);
+  }
+  if (unsignedSelectedSignatureCount.value > 0) items.push(`${unsignedSelectedSignatureCount.value} 人待处理`);
+  return items.length ? items.join(" · ") : "签名已齐全，可写入 MOP";
+});
 const activeSignaturePerson = computed(() => (
   signaturePadTarget.value
   || selectedFormalSignaturePeople(signatureRole.value).find((item) => item.record_id === activeSignatureRecordId.value)
   || null
 ));
+const currentUserOpenId = computed(() => String(currentAuthUser.value?.open_id || "").trim());
+function isCurrentUserSignaturePerson(person: Dict | null | undefined): boolean {
+  const personOpenId = String(person?.open_id || "").trim();
+  return Boolean(personOpenId && currentUserOpenId.value && personOpenId === currentUserOpenId.value);
+}
+function staffSignatureWebSignDisabledReason(person: Dict | null | undefined): string {
+  if (!String(person?.record_id || "").trim()) return "该人员资料不完整，无法网页手写";
+  if (!isCurrentUserSignaturePerson(person)) return "网页手写只能保存当前登录用户本人的签名，请发送签名链接给对方";
+  return "";
+}
 const currentRoleOtherSignatureDrafts = computed(() => (
   otherSignatureDrafts.value.filter((item) => String(item.role || "") === signatureRole.value)
 ));
@@ -824,7 +891,7 @@ const allSelectedSignaturePeople = computed(() => [
   ...selectedSignaturePeople("implementer"),
   ...selectedSignaturePeople("auditor"),
 ]);
-const allSelectedSignaturesReady = computed(() => selectedSignaturesReady(allSelectedSignaturePeople.value));
+const allSelectedSignaturesReady = computed(() => allSelectedSignaturePeople.value.every((person) => personReadyForMop(person)));
 const openSignaturePadDisabledReason = computed(() => {
   if (signatureSaving.value) return "";
   if (!activeSignaturePerson.value) return "请先选择签名人员";
@@ -834,6 +901,8 @@ const openSignaturePadDisabledReason = computed(() => {
     return "";
   }
   if (!activeSignaturePerson.value.record_id) return "该人员资料不完整，无法手写签名";
+  const staffReason = staffSignatureWebSignDisabledReason(activeSignaturePerson.value);
+  if (staffReason) return staffReason;
   return "";
 });
 const saveSignatureDisabledReason = computed(() => {
@@ -845,11 +914,11 @@ const canFillMopSignatures = computed(() => {
   if (!preview.value?.local_file?.path || !activeSheet.value) return false;
   return allSelectedSignaturesReady.value;
 });
-const hasImplementerSignature = computed(() => selectedSignaturePeople("implementer").some((person) => personHasUsableSignature(person)));
-const hasAuditorSignature = computed(() => selectedSignaturePeople("auditor").some((person) => personHasUsableSignature(person)));
-const signedImplementerCount = computed(() => signedPeopleCount(selectedSignaturePeople("implementer")));
-const signedAuditorCount = computed(() => signedPeopleCount(selectedSignaturePeople("auditor")));
-const unsignedSelectedSignatureCount = computed(() => unsignedPeopleCount(allSelectedSignaturePeople.value));
+const hasImplementerSignature = computed(() => selectedSignaturePeople("implementer").some((person) => personReadyForMop(person)));
+const hasAuditorSignature = computed(() => selectedSignaturePeople("auditor").some((person) => personReadyForMop(person)));
+const signedImplementerCount = computed(() => selectedSignaturePeople("implementer").filter((person) => personReadyForMop(person)).length);
+const signedAuditorCount = computed(() => selectedSignaturePeople("auditor").filter((person) => personReadyForMop(person)).length);
+const unsignedSelectedSignatureCount = computed(() => allSelectedSignaturePeople.value.filter((person) => !personReadyForMop(person)).length);
 const involvedPeopleRequirement = computed(() => detectInvolvedPeopleRequirement());
 const mopMaintenanceStartTimeText = computed(() => maintenanceFieldValueByLabel("维护开始时间"));
 const mopMaintenanceFinishTimeText = computed(() => maintenanceFieldValueByLabel("维护完成时间"));
@@ -1024,8 +1093,8 @@ const activeSheetColumnIndexes = computed(() => {
   return Array.from({ length: count }, (_value, index) => index);
 });
 const signedSelectedPeopleByRole = computed(() => ({
-  implementer: selectedSignaturePeople("implementer").filter((person) => personHasUsableSignature(person)),
-  auditor: selectedSignaturePeople("auditor").filter((person) => personHasUsableSignature(person)),
+  implementer: selectedSignaturePeople("implementer").filter((person) => personReadyForMop(person)),
+  auditor: selectedSignaturePeople("auditor").filter((person) => personReadyForMop(person)),
 }));
 const activeSheetSignatureCellMap = computed(() => {
   const map = new Map<string, Dict[]>();
@@ -1792,10 +1861,10 @@ function buildMopCellEditPayload(): Dict[] {
 
 function buildMopSignaturePayload(): Dict[] {
   return buildMopSignaturePayloadFromPeople({
-    formalImplementers: selectedFormalSignaturePeople("implementer"),
-    formalAuditors: selectedFormalSignaturePeople("auditor"),
-    otherImplementers: selectedTemporarySignaturePeople("implementer"),
-    otherAuditors: selectedTemporarySignaturePeople("auditor"),
+    formalImplementers: selectedFormalSignaturePeople("implementer").filter((person) => personReadyForMop(person)),
+    formalAuditors: selectedFormalSignaturePeople("auditor").filter((person) => personReadyForMop(person)),
+    otherImplementers: selectedTemporarySignaturePeople("implementer").filter((person) => personReadyForMop(person)),
+    otherAuditors: selectedTemporarySignaturePeople("auditor").filter((person) => personReadyForMop(person)),
   });
 }
 
@@ -1806,6 +1875,7 @@ function buildMopRequestPayload(extra: Dict = {}): Dict {
     mop_record_id: preview.value?.mop_record_id || selectedMop.value?.record_id || "",
     mop_title: preview.value?.mop_title || selectedMop.value?.title || "",
     mop_file_name: preview.value?.mop_file_name || selectedAttachment.value?.name || preview.value?.local_file?.file_name || "",
+    notice_key: selectedNotice.value?.notice_key || selectedNoticeKey.value || "",
     sheet_name: activeSheet.value?.name || "",
     fields: buildMopFieldPayload(),
     checkboxes: buildMopCheckboxPayload(),
@@ -1817,6 +1887,22 @@ function buildMopRequestPayload(extra: Dict = {}): Dict {
 
 function personHasUsableSignature(person: Dict | null | undefined): boolean {
   return mopPersonHasUsableSignature(person);
+}
+
+function personReadyForMop(person: Dict | null | undefined): boolean {
+  if (!personHasUsableSignature(person)) return false;
+  const source = String(person?.source || "");
+  if (source === "temporary" || source === "external" || person?.temp_id) return true;
+  if (person?.usage_rejected) return false;
+  return isCurrentUserSignaturePerson(person) || Boolean(person?.usage_confirmed);
+}
+
+function selectedFormalSignatureNotReadyCount(role: MopSignatureRole): number {
+  return selectedFormalSignaturePeople(role).filter((person) => !personReadyForMop(person)).length;
+}
+
+function selectedFormalSignatureMissingSignatureCount(role: MopSignatureRole): number {
+  return selectedFormalSignaturePeople(role).filter((person) => !personHasUsableSignature(person)).length;
 }
 
 function handleSignatureImageError(recordId: unknown): void {
@@ -1873,6 +1959,12 @@ async function openSignaturePadForPerson(person: Dict): Promise<void> {
     signaturePadTarget.value = person;
   } else {
     if (!recordId) return;
+    const disabledReason = staffSignatureWebSignDisabledReason(person);
+    if (disabledReason) {
+      signatureMessage.value = disabledReason;
+      signatureMessageType.value = "failed";
+      return;
+    }
     signaturePadTarget.value = null;
     setActiveSignaturePerson(recordId);
   }
@@ -2097,6 +2189,7 @@ async function loadSignaturePeople(options: { silent?: boolean } = {}): Promise<
     const data = await fetchSignaturePeople({
       scope: scope.value,
       q: signatureSearch.value,
+      noticeKey: signatureUsageNoticeKey.value,
       refresh: !options.silent,
       limit: 60,
     });
@@ -2288,6 +2381,27 @@ function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
 }
 
+function unsignedStaffSignaturePeople(role: MopSignatureRole): Dict[] {
+  return selectedFormalSignaturePeople(role)
+    .filter((person) => !personHasUsableSignature(person))
+    .filter((person) => String(person.record_id || "").trim());
+}
+
+function staffSignaturesRequiringConfirmation(role: MopSignatureRole): Dict[] {
+  return selectedFormalSignaturePeople(role)
+    .filter((person) => personHasUsableSignature(person))
+    .filter((person) => String(person.record_id || "").trim())
+    .filter((person) => !personReadyForMop(person))
+    .filter((person) => {
+      const openId = String(person.open_id || "").trim();
+      return Boolean(openId && currentUserOpenId.value && openId !== currentUserOpenId.value);
+    });
+}
+
+function signatureUsageConfirmationCount(role: MopSignatureRole): number {
+  return staffSignaturesRequiringConfirmation(role).length;
+}
+
 async function sendSignatureLinkForPerson(person: Dict, forceResign = false): Promise<boolean> {
   const recordId = String(person?.record_id || "").trim();
   if (!recordId) return false;
@@ -2326,6 +2440,57 @@ async function sendSignatureLinkForPerson(person: Dict, forceResign = false): Pr
     const next = { ...signatureLinkSendingById.value };
     delete next[recordId];
     signatureLinkSendingById.value = next;
+  }
+}
+
+async function sendUnsignedSignatureLinksForRole(role: MopSignatureRole): Promise<void> {
+  const people = unsignedStaffSignaturePeople(role);
+  if (!people.length || signatureBulkLinkSending.value) return;
+  signatureBulkLinkSending.value = true;
+  let okCount = 0;
+  try {
+    for (const person of people) {
+      if (await sendSignatureLinkForPerson(person, false)) okCount += 1;
+    }
+    signatureMessage.value = okCount === people.length
+      ? `已发送 ${okCount} 个待签名链接。`
+      : `已发送 ${okCount}/${people.length} 个待签名链接，请查看失败项。`;
+    signatureMessageType.value = okCount ? "success" : "failed";
+  } finally {
+    signatureBulkLinkSending.value = false;
+  }
+}
+
+async function sendSignatureUsageConfirmationsForRole(role: MopSignatureRole): Promise<void> {
+  const people = staffSignaturesRequiringConfirmation(role);
+  if (!people.length || signatureUsageConfirmSending.value) return;
+  signatureUsageConfirmSending.value = true;
+  signatureMessage.value = "";
+  signatureMessageType.value = "";
+  try {
+    const data = await sendSignatureUsageConfirmations({
+      scope: scope.value,
+      noticeKey: signatureUsageNoticeKey.value,
+      noticeTitle: selectedNotice.value?.title || "",
+      mopAttachmentName: String(selectedAttachment.value?.name || selectedMop.value?.title || ""),
+      signatures: people.map((person) => ({
+        source: "staff",
+        role,
+        record_id: String(person.record_id || ""),
+      })),
+    });
+    const sent = Number(data.sent_count || data.sent || 0);
+    const failed = Number(data.failed_count || 0);
+    signatureMessage.value = failed
+      ? `已发送 ${sent} 个签名使用确认，${failed} 个失败。`
+      : `已发送 ${sent} 个签名使用确认。`;
+    signatureMessageType.value = failed ? "failed" : "success";
+    updateFormalSignaturePolling();
+  } catch (error) {
+    signatureMessage.value = errorMessage(error, "发送签名使用确认失败");
+    signatureMessageType.value = "failed";
+  } finally {
+    signatureUsageConfirmSending.value = false;
   }
 }
 
@@ -2506,23 +2671,23 @@ function temporarySignatureRowDisabledReason(draft: Dict): string {
   return "";
 }
 
-function selectedUnsignedFormalSignaturePeople(): Dict[] {
+function selectedPendingFormalSignaturePeople(): Dict[] {
   return [
     ...selectedFormalSignaturePeople("implementer"),
     ...selectedFormalSignaturePeople("auditor"),
   ].filter((person, index, items) => (
-    !personHasUsableSignature(person)
+    !personReadyForMop(person)
     && String(person.record_id || "").trim()
     && items.findIndex((item) => String(item.record_id || "") === String(person.record_id || "")) === index
   ));
 }
 
 function formalSignaturePollNeeded(): boolean {
-  return selectedUnsignedFormalSignaturePeople().length > 0;
+  return selectedPendingFormalSignaturePeople().length > 0;
 }
 
 async function refreshSelectedFormalSignatures(): Promise<void> {
-  const targets = selectedUnsignedFormalSignaturePeople();
+  const targets = selectedPendingFormalSignaturePeople();
   if (!targets.length) {
     updateFormalSignaturePolling();
     return;
@@ -2534,6 +2699,7 @@ async function refreshSelectedFormalSignatures(): Promise<void> {
       const data = await fetchSignaturePeople({
         scope: scope.value,
         recordId,
+        noticeKey: signatureUsageNoticeKey.value,
         refresh: true,
         limit: 1,
       });
@@ -2662,6 +2828,7 @@ function selectNotice(noticeKey: string): void {
   const notice = selectedNotice.value;
   const applied = notice ? applyNoticeBinding(notice) : false;
   if (!applied || !selectedMop.value) selectDefaultMopCandidate();
+  void loadSignaturePeople({ silent: true });
   void loadTemporarySignatures({ silent: true });
 }
 
@@ -2707,6 +2874,7 @@ async function loadPage(): Promise<void> {
   messageType.value = "";
   try {
     const data = await fetchEngineerMopBootstrap(scope.value);
+    currentAuthUser.value = (data.auth?.user || data.user || {}) as Dict;
     notices.value = Array.isArray(data.notices) ? data.notices : [];
     mopCandidates.value = Array.isArray(data.mop_candidates) ? data.mop_candidates : [];
     warnings.value = Array.isArray(data.warnings) ? data.warnings.map((item: unknown) => String(item)) : [];
@@ -2722,6 +2890,7 @@ async function loadPage(): Promise<void> {
     if (!applied || !selectedMop.value) {
       selectDefaultMopCandidate();
     }
+    void loadSignaturePeople({ silent: true });
     void loadTemporarySignatures({ silent: true });
   } catch (error) {
     message.value = error instanceof Error ? error.message : "加载工程师 MOP 数据失败";
@@ -2964,6 +3133,12 @@ watch(signatureRole, () => {
 watch(signatureSelectedRecords, () => {
   updateFormalSignaturePolling();
 }, { deep: true });
+
+watch(signatureUsageNoticeKey, () => {
+  if (!props.loggedIn) return;
+  void loadSignaturePeople({ silent: true });
+  updateFormalSignaturePolling();
+});
 
 watch(signatureSearch, () => {
   scheduleSignaturePeopleSearch();
@@ -3301,8 +3476,17 @@ watch(() => props.scopeOptions, (items) => {
   min-height: 0;
 }
 
-.mop-preview-page .sign-panel-head p {
+.mop-preview-page .mop-sign-panel:not(.manager-open) .sign-panel-head p {
   display: none;
+}
+
+.mop-preview-page .mop-sign-panel.manager-open .sign-panel-head p {
+  display: block;
+  margin: 2px 0 0;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 850;
+  line-height: 1.35;
 }
 
 .mop-preview-page .sign-workspace {
@@ -3371,7 +3555,7 @@ watch(() => props.scopeOptions, (items) => {
   display: block;
   color: #0f172a;
   font-size: 16px;
-  font-weight: 850;
+  font-weight: 950;
 }
 
 .mop-preview-page .mop-sign-panel:not(.manager-open) .sign-panel-head strong {

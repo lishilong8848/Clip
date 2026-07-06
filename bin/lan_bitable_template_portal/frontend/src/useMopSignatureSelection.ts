@@ -79,8 +79,9 @@ export function useMopSignatureSelection(
       || signaturePeopleById.value[recordText];
     if (person) rememberSignaturePeople([person]);
     const existing = signatureSelectedRecords.value[role] || [];
-    const next = existing.includes(recordText) ? existing.filter((item) => item !== recordText) : [...existing, recordText];
-    if (existing.includes(recordText)) next.push(recordText);
+    const next = existing.includes(recordText)
+      ? [...existing.filter((item) => item !== recordText), recordText]
+      : [...existing, recordText];
     signatureSelectedRecords.value = {
       ...signatureSelectedRecords.value,
       [role]: [...new Set(next)],

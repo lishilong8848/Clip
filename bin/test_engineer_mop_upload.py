@@ -114,9 +114,42 @@ class EngineerMopUploadTests(unittest.TestCase):
             {"role": "auditor", "record_id": "person-2"},
         ]
 
+    def _confirm_staff_usage(
+        self,
+        service: FakeMopUploadService,
+        *,
+        requested_by: str = "ou_operator",
+        notice_key: str = "",
+        records: list[tuple[str, str]] | None = None,
+    ) -> None:
+        people = {
+            str(item.get("record_id") or ""): item
+            for item in service._load_signature_people(force=False)
+        }
+        for role, record_id in records or [
+            ("implementer", "person-1"),
+            ("auditor", "person-2"),
+        ]:
+            person = people[record_id]
+            confirmation = service._state_store.create_mop_signature_usage_confirmation(
+                scope="A",
+                notice_key=notice_key,
+                role=role,
+                signer_record_id=record_id,
+                signer_open_id=str(person.get("open_id") or ""),
+                signer_name=str(person.get("name") or ""),
+                requested_by_openid=requested_by,
+                requested_by_name="操作人",
+            )
+            service._state_store.decide_mop_signature_usage(
+                token=confirmation["token"],
+                decision="confirmed",
+            )
+
     def test_upload_signed_mop_overwrites_attachment_and_confirms(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             service = FakeMopUploadService(tmpdir)
+            self._confirm_staff_usage(service)
             service._records = [
                 {
                     "record_id": "src-1",
@@ -177,11 +210,26 @@ class EngineerMopUploadTests(unittest.TestCase):
 
     def test_notification_failure_does_not_block_upload(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            service = FakeMopUploadService(tmpdir, missing_auditor_open_id=True)
+            service = FakeMopUploadService(tmpdir)
+            self._confirm_staff_usage(service)
+
+            def fake_notifications(**kwargs):
+                return [
+                    {
+                        "open_id": "ou_impl",
+                        "name": "实施人",
+                        "roles": "维护实施人",
+                        "ok": False,
+                        "message": "模拟通知失败",
+                    }
+                ], "签名人员通知失败：实施人(维护实施人)：模拟通知失败"
+
+            service._send_mop_signature_upload_notifications = fake_notifications
             result = service.upload_signed_engineer_mop_file(
                 scope="A",
                 source_record_id="src-1",
                 notice_title="A楼测试维保",
+                operator_open_id="ou_operator",
                 local_file_path=str(Path(tmpdir) / "source.xlsx"),
                 signatures=self._signatures(),
             )
@@ -212,6 +260,7 @@ class EngineerMopUploadTests(unittest.TestCase):
                 scope="A",
                 source_record_id="src-1",
                 notice_title="A楼测试维保",
+                operator_open_id="ou_audit",
                 local_file_path=str(Path(tmpdir) / "source.xlsx"),
                 signatures=[
                     {
@@ -236,6 +285,7 @@ class EngineerMopUploadTests(unittest.TestCase):
                 scope="A",
                 source_record_id="src-1",
                 notice_title="A楼测试维保",
+                operator_open_id="ou_audit",
                 local_file_path=str(Path(tmpdir) / "source.xlsx"),
                 signatures=[
                     {
@@ -252,6 +302,19 @@ class EngineerMopUploadTests(unittest.TestCase):
             self.assertEqual(service.external_image_calls, ["external-rec-1"])
             self.assertEqual(len(result["notification_results"]), 1)
             self.assertEqual(result["notification_results"][0]["open_id"], "ou_audit")
+
+    def test_temporary_and_external_signatures_do_not_require_operator_openid(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = FakeMopUploadService(tmpdir)
+            service._ensure_mop_staff_signature_usage_confirmed(
+                signatures=[
+                    {"source": "temporary", "role": "implementer", "record_id": "temp-rec-1"},
+                    {"source": "external", "role": "auditor", "record_id": "external-rec-1"},
+                ],
+                scope="A",
+                notice_key="notice-1",
+                operator_open_id="",
+            )
 
     def test_temporary_signature_link_uses_custom_display_name(self):
         with tempfile.TemporaryDirectory() as tmpdir:

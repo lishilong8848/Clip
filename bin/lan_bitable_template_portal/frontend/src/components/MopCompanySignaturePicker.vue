@@ -60,6 +60,8 @@
 </template>
 
 <script setup lang="ts">
+import { mopPersonHasUsableSignature } from "../mopSignatureUtils";
+
 type Dict = Record<string, any>;
 
 withDefaults(defineProps<{
@@ -87,12 +89,7 @@ function personInitial(person: Dict): string {
 }
 
 function personHasUsableSignature(person: Dict | null | undefined): boolean {
-  if (!person) return false;
-  if (person.signature_preview_url || person.signature_url || person.signature_file_token || person.signature_token) return true;
-  if (Array.isArray(person.signature_files) && person.signature_files.length) return true;
-  if (Array.isArray(person.signature) && person.signature.length) return true;
-  if (Array.isArray(person["手写签名"]) && person["手写签名"].length) return true;
-  return false;
+  return mopPersonHasUsableSignature(person);
 }
 </script>
 
