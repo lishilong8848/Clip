@@ -716,6 +716,20 @@ class MainWindowWorkflowMixin:
         real_record_id = str(result.get("real_record_id") or "").strip()
         if success and name in {"上传", "归档"} and real_record_id:
             message = real_record_id
+        message_warning = str(
+            result.get("message_warning")
+            or result.get("last_robot_error")
+            or ""
+        ).strip()
+        if success and message_warning:
+            try:
+                log_warning(message_warning)
+            except Exception:
+                pass
+            try:
+                self.show_message(message_warning)
+            except Exception:
+                pass
         self._post_request_finished(
             name or self._backend_upload_action_name(action_type),
             success,

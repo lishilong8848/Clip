@@ -461,26 +461,44 @@ def _resolve_handler(notice_type: str):
 
 
 def _send_robot_message(handler, payload: NoticePayload):
+    setattr(payload, "_clipflow_robot_sent", False)
+    setattr(payload, "_clipflow_robot_error", "")
+    setattr(payload, "_clipflow_robot_skipped", False)
+
+    def _set_robot_result(*, sent: bool = False, error: str = "", skipped: bool = False):
+        setattr(payload, "_clipflow_robot_sent", bool(sent))
+        setattr(payload, "_clipflow_robot_error", str(error or ""))
+        setattr(payload, "_clipflow_robot_skipped", bool(skipped))
+
     try:
         title, content, notice_type, level = handler.build_robot_message(payload)
         if not title and not content:
+            _set_robot_result(skipped=True)
             return
         choice = str(getattr(payload, "robot_group_choice", "") or "").strip().lower()
         is_change_notice = notice_type == "变更通告"
         if choice == "skip":
             log_info("群机器人发送: 按用户选择跳过本次群消息发送")
+            _set_robot_result(skipped=True)
             return
         if choice == "i2":
             if is_change_notice:
                 log_info("群机器人发送: 变更类 I2 群发送已移除，按跳过处理")
+                _set_robot_result(skipped=True)
                 return
             level = "I2"
         elif choice == "i3":
             level = "I3"
         ok, msg = handler.send_group_robot_message(title, content, notice_type, level)
         if not ok and msg != "skip":
+            _set_robot_result(error=str(msg or "群机器人发送失败"))
             log_error(f"群机器人发送失败: {msg}")
+        elif not ok and msg == "skip":
+            _set_robot_result(skipped=True)
+        else:
+            _set_robot_result(sent=True)
     except Exception as exc:
+        _set_robot_result(error=str(exc))
         log_error(f"群机器人发送异常: {exc}")
 
 

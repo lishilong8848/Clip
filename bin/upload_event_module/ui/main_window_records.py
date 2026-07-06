@@ -1056,11 +1056,33 @@ class MainWindowRecordsMixin:
         if not resolved_notice_type or not resolved_title:
             return resolved_title, ""
         if self._is_event_notice(resolved_notice_type):
-            if not resolved_time:
+            event_buildings = self._normalize_buildings_value(
+                self._infer_buildings_from_notice_text(text)
+            )
+            event_building_key = ",".join(
+                self._normalize_match_text(item) for item in event_buildings if item
+            )
+            event_source = self._normalize_match_text(
+                info.get("source")
+                or self._extract_section_text(text, ("来源", "事件发现来源"))
+            )
+            event_level = self._normalize_match_text(
+                info.get("level")
+                or self._extract_section_text(text, ("等级", "事件等级"))
+            ).upper()
+            if not (resolved_time and event_building_key and event_source and event_level):
                 return resolved_title, ""
+            component_text = "|".join(
+                (
+                    f"时间:{resolved_time}",
+                    f"楼栋:{event_building_key}",
+                    f"来源:{event_source}",
+                    f"等级:{event_level}",
+                )
+            )
             return (
-                resolved_title,
-                f"{resolved_notice_type}|{resolved_title}|{resolved_time}",
+                f"{resolved_title}|{component_text}",
+                f"{resolved_notice_type}|{resolved_title}|{component_text}",
             )
         components = self._build_notice_match_components(
             resolved_notice_type,
@@ -1199,8 +1221,13 @@ class MainWindowRecordsMixin:
             ensured.pop("match_title", None)
         if match_key:
             ensured["match_key"] = match_key
+            if self._is_event_notice(
+                str(ensured.get("notice_type") or parsed_info.get("notice_type") or "")
+            ):
+                ensured["event_identity_key"] = match_key
         else:
             ensured.pop("match_key", None)
+            ensured.pop("event_identity_key", None)
         routing_state = self._normalize_routing_state(ensured.get("routing_state"))
         if routing_state == "conflicted":
             ensured["routing_state"] = "conflicted"

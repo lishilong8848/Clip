@@ -13,6 +13,7 @@ import re
 import socket
 import threading
 import time
+import uuid
 from contextlib import suppress
 from http import HTTPStatus
 from pathlib import Path
@@ -4005,18 +4006,243 @@ class PortalRuntime:
         return re.sub(r"\D+", "", raw_time)
 
     @classmethod
+    def _event_notice_building_key(cls, data: dict) -> str:
+        data = data if isinstance(data, dict) else {}
+        values: list[Any] = []
+        for key in ("building_codes", "buildings"):
+            raw = data.get(key)
+            if isinstance(raw, list):
+                values.extend(raw)
+            elif raw:
+                values.append(raw)
+        for key in ("building", "机楼", "楼栋", "title", "name", "event_title"):
+            if data.get(key):
+                values.append(data.get(key))
+        codes: list[str] = []
+        for value in values:
+            try:
+                for code in cls.service._building_codes_from_value(value):
+                    normalized = str(code or "").strip().upper()
+                    if normalized and normalized not in codes:
+                        codes.append(normalized)
+            except Exception:
+                continue
+        if codes:
+            return ",".join(sorted(codes))
+        text = str(data.get("text") or "")
+        if text:
+            try:
+                for code in cls.service._building_codes_from_value(text):
+                    normalized = str(code or "").strip().upper()
+                    if normalized and normalized not in codes:
+                        codes.append(normalized)
+            except Exception:
+                pass
+        return ",".join(sorted(codes))
+
+    @classmethod
+    def _event_notice_source_key(cls, data: dict) -> str:
+        data = data if isinstance(data, dict) else {}
+        text = str(data.get("text") or "")
+        source = str(
+            data.get("event_source")
+            or data.get("source")
+            or data.get("事件发现来源")
+            or data.get("来源")
+            or ""
+        ).strip()
+        if not source and text:
+            match = re.search(r"【(?:来源|事件发现来源)】(.*?)(?:【|$)", text, re.DOTALL)
+            source = str(match.group(1) if match else "").strip()
+        return re.sub(r"\s+", "", source).upper()
+
+    @classmethod
+    def _event_notice_level_key(cls, data: dict) -> str:
+        data = data if isinstance(data, dict) else {}
+        text = str(data.get("text") or "")
+        level = str(
+            data.get("level")
+            or data.get("事件等级")
+            or data.get("等级")
+            or ""
+        ).strip()
+        if not level and text:
+            match = re.search(r"【(?:等级|事件等级)】(.*?)(?:【|$)", text, re.DOTALL)
+            level = str(match.group(1) if match else "").strip()
+        upper = level.upper()
+        match = re.search(r"(I3\s*[→>\-]\s*I2|I3\s*[→>\-]\s*I1|I3|I2|I1|E4|E3|E2|E1|E0)", upper)
+        if match:
+            return re.sub(r"\s+", "", match.group(1).upper())
+        return re.sub(r"\s+", "", level).upper()
+
+    @classmethod
     def _event_notice_identity_key(cls, data: dict) -> str:
         title_key = cls._event_notice_title_key(data)
         time_key = cls._event_notice_time_key(data)
-        if not title_key or not time_key:
+        building_key = cls._event_notice_building_key(data)
+        source_key = cls._event_notice_source_key(data)
+        level_key = cls._event_notice_level_key(data)
+        if not (title_key and time_key and building_key and source_key and level_key):
             return ""
-        return f"{title_key}|{time_key}"
+        return f"{title_key}|{time_key}|{building_key}|{source_key}|{level_key}"
+
+    @classmethod
+    def _event_match_fields(cls, data: dict) -> dict[str, str]:
+        return {
+            "title": cls._event_notice_title_key(data),
+            "time": cls._event_notice_time_key(data),
+            "building": cls._event_notice_building_key(data),
+            "source": cls._event_notice_source_key(data),
+            "level": cls._event_notice_level_key(data),
+        }
+
+    @classmethod
+    def _event_operation_lock_key(
+        cls,
+        data: dict,
+        *,
+        target_record_id: str = "",
+        record_id: str = "",
+    ) -> str:
+        data = data if isinstance(data, dict) else {}
+        target_record_id = str(
+            target_record_id
+            or data.get("target_record_id")
+            or ""
+        ).strip()
+        if target_record_id and not is_local_record_id(target_record_id):
+            return f"event:target:{target_record_id}"
+        record_id = str(record_id or data.get("record_id") or "").strip()
+        if record_id and not is_local_record_id(record_id):
+            return f"event:target:{record_id}"
+        active_item_id = str(data.get("active_item_id") or "").strip()
+        if active_item_id:
+            return f"event:active:{active_item_id}"
+        event_identity_key = (
+            cls._event_notice_identity_key(data)
+            or str(data.get("event_identity_key") or "").strip()
+        )
+        if event_identity_key:
+            digest = hashlib.sha256(event_identity_key.encode("utf-8", errors="ignore")).hexdigest()
+            return f"event:key:{digest}"
+        return ""
+
+    @classmethod
+    def _acquire_event_operation_lock(
+        cls,
+        data: dict,
+        *,
+        action_type: str,
+        target_record_id: str = "",
+        record_id: str = "",
+    ) -> tuple[str, str, str]:
+        if str((data or {}).get("notice_type") or "").strip() != "事件通告":
+            return "", "", ""
+        lock_key = cls._event_operation_lock_key(
+            data,
+            target_record_id=target_record_id,
+            record_id=record_id,
+        )
+        if not lock_key:
+            return "", "", ""
+        acquire_lock = getattr(cls.state_store, "acquire_event_notice_operation_lock", None)
+        if not callable(acquire_lock):
+            return "", "", ""
+        owner = uuid.uuid4().hex
+        ok, result = acquire_lock(
+            lock_key,
+            owner=owner,
+            action=action_type,
+            ttl_seconds=180,
+            payload={
+                "record_id": record_id or data.get("record_id"),
+                "target_record_id": target_record_id or data.get("target_record_id"),
+                "active_item_id": data.get("active_item_id"),
+                "event_identity_key": (
+                    cls._event_notice_identity_key(data)
+                    or str(data.get("event_identity_key") or "")
+                ),
+            },
+        )
+        if not ok:
+            return lock_key, "", str(result or "该事件正在处理，请稍后再试。")
+        return lock_key, result, ""
+
+    @classmethod
+    def _release_event_operation_lock(cls, lock_key: str, owner: str) -> None:
+        if not lock_key or not owner:
+            return
+        try:
+            cls.state_store.release_event_notice_operation_lock(lock_key, owner)
+        except Exception as exc:
+            log_warning(f"事件操作锁释放失败: {exc}")
+
+    @staticmethod
+    def _robot_result_from_notice_payload(payload: NoticePayload) -> dict:
+        robot_sent = bool(getattr(payload, "_clipflow_robot_sent", False))
+        robot_error = str(getattr(payload, "_clipflow_robot_error", "") or "").strip()
+        robot_skipped = bool(getattr(payload, "_clipflow_robot_skipped", False))
+        result = {
+            "robot_sent": robot_sent,
+            "robot_skipped": robot_skipped,
+            "last_robot_error": robot_error,
+            "remote_written": True,
+        }
+        if robot_error:
+            result["message_warning"] = f"多维已上传，群消息发送失败：{robot_error}"
+        return result
+
+    @classmethod
+    def _record_event_notice_operation_result(
+        cls,
+        data: dict,
+        *,
+        action_type: str,
+        success: bool,
+        record_id: str = "",
+        message: str = "",
+        robot_result: dict | None = None,
+    ) -> None:
+        if str((data or {}).get("notice_type") or "").strip() != "事件通告":
+            return
+        robot_result = robot_result if isinstance(robot_result, dict) else {}
+        try:
+            cls.state_store.append_event_async(
+                "event_notice_operation_result",
+                {
+                    "action_type": str(action_type or ""),
+                    "success": bool(success),
+                    "record_id": str(record_id or ""),
+                    "active_item_id": str((data or {}).get("active_item_id") or ""),
+                    "target_record_id": str(
+                        record_id
+                        or (data or {}).get("target_record_id")
+                        or (data or {}).get("record_id")
+                        or ""
+                    ),
+                    "event_identity_key": (
+                        cls._event_notice_identity_key(data)
+                        or str((data or {}).get("event_identity_key") or "")
+                    ),
+                    "remote_written": bool(success),
+                    "robot_sent": bool(robot_result.get("robot_sent")),
+                    "robot_skipped": bool(robot_result.get("robot_skipped")),
+                    "last_robot_error": str(robot_result.get("last_robot_error") or ""),
+                    "message": str(message or ""),
+                    "created_at": time.time(),
+                },
+            )
+        except Exception as exc:
+            log_warning(f"事件通告操作结果记录失败: {exc}")
 
     @classmethod
     def _existing_event_target_for_local_notice(cls, data: dict, notice_type: str) -> str:
         if str(notice_type or "").strip() != "事件通告":
             return ""
-        identity_key = cls._event_notice_identity_key(data)
+        identity_key = (
+            cls._event_notice_identity_key(data)
+            or str((data or {}).get("event_identity_key") or "").strip()
+        )
         if not identity_key:
             return ""
         try:
@@ -4029,7 +4255,11 @@ class PortalRuntime:
             payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
             if str(payload.get("notice_type") or row.get("notice_type") or "").strip() != "事件通告":
                 continue
-            if cls._event_notice_identity_key(payload) != identity_key:
+            payload_identity_key = (
+                cls._event_notice_identity_key(payload)
+                or str(payload.get("event_identity_key") or "").strip()
+            )
+            if payload_identity_key != identity_key:
                 continue
             target_record_id = (
                 canonical_target_record_id(payload)
@@ -4077,44 +4307,29 @@ class PortalRuntime:
                 False,
                 "已阻止删除：无法读取目标多维记录，不能确认该记录就是当前事件。请先核对绑定记录，或使用“移除显示，不删除多维”。",
             )
-        local_time_key = cls._event_notice_time_key(payload)
-        remote_time_key = cls._remote_event_time_key_from_fields(remote_fields)
-        if not local_time_key:
-            return (
-                False,
-                "已阻止删除：当前事件缺少事件发生时间，不能安全删除目标多维记录。",
-            )
-        if not remote_time_key:
-            return (
-                False,
-                "已阻止删除：目标多维记录缺少事件发生时间，不能确认删除对象。",
-            )
-        if local_time_key != remote_time_key:
-            return (
-                False,
-                "已阻止删除：当前事件与目标多维记录的事件发生时间不一致，请先核对绑定记录。",
-            )
-        local_title_key = cls._event_notice_title_key(payload)
-        remote_title_key = cls._event_notice_title_key(
-            {
-                "title": remote_fields.get(EVENT_NOTICE_FIELDS["alarm_desc"]),
-            }
-        )
-        if not local_title_key:
-            return (
-                False,
-                "已阻止删除：当前事件缺少标题/告警描述，不能安全删除目标多维记录。",
-            )
-        if not remote_title_key:
-            return (
-                False,
-                "已阻止删除：目标多维记录缺少告警描述，不能确认删除对象。",
-            )
-        if local_title_key != remote_title_key:
-            return (
-                False,
-                "已阻止删除：当前事件与目标多维记录的告警描述不一致，请先核对绑定记录。",
-            )
+        remote_payload = {
+            "title": remote_fields.get(EVENT_NOTICE_FIELDS["alarm_desc"]),
+            "building": remote_fields.get(EVENT_NOTICE_FIELDS["building"]),
+            "source": remote_fields.get(EVENT_NOTICE_FIELDS["source"]),
+            "level": remote_fields.get(EVENT_NOTICE_FIELDS["level"]),
+        }
+        local_fields = cls._event_match_fields(payload)
+        remote_fields_for_match = cls._event_match_fields(remote_payload)
+        remote_fields_for_match["time"] = cls._remote_event_time_key_from_fields(remote_fields)
+        labels = {
+            "title": "告警描述",
+            "time": "事件发生时间",
+            "building": "机楼",
+            "source": "事件发现来源",
+            "level": "事件等级",
+        }
+        for key, label in labels.items():
+            if not local_fields.get(key):
+                return False, f"已阻止删除：当前事件缺少{label}，不能安全删除目标多维记录。"
+            if not remote_fields_for_match.get(key):
+                return False, f"已阻止删除：目标多维记录缺少{label}，不能确认删除对象。"
+            if local_fields.get(key) != remote_fields_for_match.get(key):
+                return False, f"已阻止删除：当前事件与目标多维记录的{label}不一致，请先核对绑定记录。"
         return True, ""
 
     @classmethod
@@ -4191,6 +4406,15 @@ class PortalRuntime:
             },
             action="update",
         )
+        if str(notice_type or "").strip() == "事件通告":
+            event_identity_key = (
+                cls._event_notice_identity_key(payload)
+                or str(payload.get("event_identity_key") or "").strip()
+            )
+            if event_identity_key:
+                payload["event_identity_key"] = event_identity_key
+                payload["event_match_fields"] = cls._event_match_fields(payload)
+            payload["last_remote_write_at"] = time.time()
         if not str(payload.get("action") or "").strip():
             payload["action"] = "start"
         if not str(payload.get("status") or "").strip():
@@ -5423,21 +5647,52 @@ class PortalRuntime:
                         notice_type=notice_type,
                         target_record_id=real_record_id,
                     )
+                robot_result = (
+                    cls._robot_result_from_notice_payload(notice_payload)
+                    if success
+                    else {}
+                )
+                cls._record_event_notice_operation_result(
+                    data,
+                    action_type=action_type,
+                    success=bool(success),
+                    record_id=real_record_id,
+                    message=str(result or ""),
+                    robot_result=robot_result,
+                )
                 return {
                     "ok": bool(success),
                     "name": "上传",
                     "message": str(result or ""),
                     "record_id": record_id,
                     "real_record_id": real_record_id,
+                    **robot_result,
                 }
 
-            if lock is None:
-                return _run_create_once()
-            with lock:
-                try:
+            event_lock_key, event_lock_owner, event_lock_error = cls._acquire_event_operation_lock(
+                data,
+                action_type=action_type,
+                target_record_id=target_record_id,
+                record_id=record_id,
+            )
+            if event_lock_error:
+                return {
+                    "ok": False,
+                    "name": "上传",
+                    "message": event_lock_error,
+                    "record_id": record_id,
+                    "real_record_id": "",
+                }
+            try:
+                if lock is None:
                     return _run_create_once()
-                finally:
-                    cls._release_local_upload_lock_for_key(dedupe_key, lock)
+                with lock:
+                    try:
+                        return _run_create_once()
+                    finally:
+                        cls._release_local_upload_lock_for_key(dedupe_key, lock)
+            finally:
+                cls._release_event_operation_lock(event_lock_key, event_lock_owner)
 
         existing_tokens: list[str] = []
         existing_extra_tokens: list[str] = []
@@ -5492,25 +5747,73 @@ class PortalRuntime:
         )
 
         if action_type == "upload_replace" and bool(data.get("_is_placeholder_record")):
-            success, result = create_bitable_record_by_payload(notice_type, notice_payload)
+            event_lock_key, event_lock_owner, event_lock_error = cls._acquire_event_operation_lock(
+                data,
+                action_type=action_type,
+                target_record_id=target_record_id,
+                record_id=record_id,
+            )
+            if event_lock_error:
+                return {
+                    "ok": False,
+                    "name": "归档",
+                    "message": event_lock_error,
+                    "record_id": record_id,
+                    "real_record_id": "",
+                }
+            try:
+                success, result = create_bitable_record_by_payload(notice_type, notice_payload)
+            finally:
+                cls._release_event_operation_lock(event_lock_key, event_lock_owner)
             real_record_id = str(result or "").strip() if success else ""
             if success and not real_record_id:
                 success = False
                 result = "多维创建未返回 record_id，已阻止标记归档成功。"
+            robot_result = (
+                cls._robot_result_from_notice_payload(notice_payload)
+                if success
+                else {}
+            )
+            cls._record_event_notice_operation_result(
+                data,
+                action_type=action_type,
+                success=bool(success),
+                record_id=real_record_id,
+                message=str(result or ""),
+                robot_result=robot_result,
+            )
             return {
                 "ok": bool(success),
                 "name": "归档",
                 "message": str(result or ""),
                 "record_id": record_id,
                 "real_record_id": real_record_id,
+                **robot_result,
             }
 
         action_name = "结束" if action_type == "end" else "更新" if action_type == "update" else "归档"
-        success, result = update_bitable_record_by_payload(
-            target_record_id,
-            notice_type,
-            notice_payload,
+        event_lock_key, event_lock_owner, event_lock_error = cls._acquire_event_operation_lock(
+            data,
+            action_type=action_type,
+            target_record_id=target_record_id,
+            record_id=record_id,
         )
+        if event_lock_error:
+            return {
+                "ok": False,
+                "name": action_name,
+                "message": event_lock_error,
+                "record_id": target_record_id or record_id,
+                "real_record_id": "",
+            }
+        try:
+            success, result = update_bitable_record_by_payload(
+                target_record_id,
+                notice_type,
+                notice_payload,
+            )
+        finally:
+            cls._release_event_operation_lock(event_lock_key, event_lock_owner)
         if not success and checkpoint_id:
             cls.state_store.mark_notice_undo_action(
                 checkpoint_id,
@@ -5539,12 +5842,26 @@ class PortalRuntime:
                 notice_type=notice_type,
                 target_record_id=target_record_id,
             )
+        robot_result = (
+            cls._robot_result_from_notice_payload(notice_payload)
+            if success
+            else {}
+        )
+        cls._record_event_notice_operation_result(
+            data,
+            action_type=action_type,
+            success=bool(success),
+            record_id=target_record_id if success else "",
+            message=str(result or ""),
+            robot_result=robot_result,
+        )
         return {
             "ok": bool(success),
             "name": action_name,
             "message": str(result or ""),
             "record_id": target_record_id or record_id,
             "real_record_id": target_record_id if success else "",
+            **robot_result,
         }
 
     @classmethod
@@ -5660,7 +5977,28 @@ class PortalRuntime:
             and not is_placeholder
             and not remote_missing_delete_warning
         ):
-            ok, result = delete_bitable_record(record_id, notice_type)
+            event_lock_key, event_lock_owner, event_lock_error = cls._acquire_event_operation_lock(
+                payload,
+                action_type="delete",
+                target_record_id=record_id,
+                record_id=record_id,
+            )
+            if event_lock_error:
+                if checkpoint_id:
+                    cls.state_store.mark_notice_undo_action(
+                        checkpoint_id,
+                        "failed",
+                        error=event_lock_error,
+                    )
+                return {
+                    "ok": False,
+                    "message": event_lock_error,
+                    "record_id": record_id,
+                }
+            try:
+                ok, result = delete_bitable_record(record_id, notice_type)
+            finally:
+                cls._release_event_operation_lock(event_lock_key, event_lock_owner)
             if not ok:
                 if checkpoint_id:
                     cls.state_store.mark_notice_undo_action(
@@ -5668,12 +6006,26 @@ class PortalRuntime:
                         "failed",
                         error=str(result or "多维记录删除失败。"),
                     )
+                cls._record_event_notice_operation_result(
+                    payload,
+                    action_type="delete",
+                    success=False,
+                    record_id=record_id,
+                    message=str(result or "多维记录删除失败。"),
+                )
                 return {
                     "ok": False,
                     "message": str(result or "多维记录删除失败。"),
                     "record_id": record_id,
                 }
             remote_deleted = True
+            cls._record_event_notice_operation_result(
+                payload,
+                action_type="delete",
+                success=True,
+                record_id=record_id,
+                message="远端记录已删除。",
+            )
         try:
             cls.state_store.delete_qt_active_item(
                 active_item_id=active_item_id,

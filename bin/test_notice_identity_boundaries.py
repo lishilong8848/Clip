@@ -302,6 +302,9 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
             "【事件通告】状态：新增\n"
             "【标题】BMS报E-217-CRAC-02压缩机高压报警: 告警\n"
             "【时间】{time}\n"
+            "【机楼】E楼\n"
+            "【来源】BMS\n"
+            "【等级】I2\n"
             "【进展】测试"
         )
         first = {"notice_type": "事件通告", "text": base_text.format(time="2026-06-24 17:20")}
@@ -321,6 +324,9 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
             "【事件通告】状态：新增\n"
             "【标题】EA118机房E楼I2级事件通报\n"
             "【时间】2026-06-24 17:20\n"
+            "【机楼】E楼\n"
+            "【来源】BMS\n"
+            "【等级】I2\n"
             "【概述】{summary}\n"
             "【进展】测试"
         )
@@ -355,6 +361,9 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
             "【事件通告】状态：新增\n"
             "【标题】BMS报E-217-CRAC-02压缩机高压报警: 告警\n"
             "【事件发生时间】2026-06-24 17:20\n"
+            "【机楼】E楼\n"
+            "【来源】BMS\n"
+            "【等级】I2\n"
             "【进展】测试"
         )
 
@@ -403,16 +412,25 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
                 "【事件通告】状态：新增\n"
                 "【标题】BMS报E-217-CRAC-02压缩机高压报警: 告警\n"
                 "【时间】2026-06-24 17:20\n"
+                "【机楼】E楼\n"
+                "【来源】BMS\n"
+                "【等级】I2\n"
                 "【进展】测试"
             ),
         }
         remote_fields = {
             EVENT_NOTICE_FIELDS["alarm_desc"]: "BMS报E-217-CRAC-02压缩机高压报警: 告警",
             EVENT_NOTICE_FIELDS["occurrence_time"]: "2026-06-24 17:20",
+            EVENT_NOTICE_FIELDS["building"]: "E楼",
+            EVENT_NOTICE_FIELDS["source"]: "BMS",
+            EVENT_NOTICE_FIELDS["level"]: "I2",
         }
         other_remote_fields = {
             EVENT_NOTICE_FIELDS["alarm_desc"]: "BMS报E-217-CRAC-02压缩机高压报警: 告警",
             EVENT_NOTICE_FIELDS["occurrence_time"]: "2026-06-24 18:20",
+            EVENT_NOTICE_FIELDS["building"]: "E楼",
+            EVENT_NOTICE_FIELDS["source"]: "BMS",
+            EVENT_NOTICE_FIELDS["level"]: "I2",
         }
 
         self.assertTrue(PortalRuntime._validate_event_delete_target(payload, remote_fields)[0])
@@ -425,6 +443,9 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
                 "【事件通告】状态：新增\n"
                 "【标题】EA118机房E楼I2级事件通报\n"
                 "【时间】2026-06-24 17:20\n"
+                "【机楼】E楼\n"
+                "【来源】BMS\n"
+                "【等级】I2\n"
                 "【概述】BMS报E-217-CRAC-02压缩机高压报警: 告警\n"
                 "【进展】测试"
             ),
@@ -432,6 +453,9 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
         remote_fields = {
             EVENT_NOTICE_FIELDS["alarm_desc"]: "BMS报E-217-CRAC-02压缩机高压报警: 告警",
             EVENT_NOTICE_FIELDS["occurrence_time"]: "2026-06-24 17:20",
+            EVENT_NOTICE_FIELDS["building"]: "E楼",
+            EVENT_NOTICE_FIELDS["source"]: "BMS",
+            EVENT_NOTICE_FIELDS["level"]: "I2",
         }
 
         self.assertTrue(PortalRuntime._validate_event_delete_target(payload, remote_fields)[0])
@@ -451,6 +475,9 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
                                 "【事件通告】状态：新增\n"
                                 "【标题】BMS报E-217-CRAC-02压缩机高压报警: 告警\n"
                                 "【时间】2026-06-24 17:20\n"
+                                "【机楼】E楼\n"
+                                "【来源】BMS\n"
+                                "【等级】I2\n"
                                 "【进展】测试"
                             ),
                         },
@@ -466,6 +493,9 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
                     "【事件通告】状态：新增\n"
                     "【标题】BMS报E-217-CRAC-02压缩机高压报警: 告警\n"
                     "【时间】2026-06-24 18:20\n"
+                    "【机楼】E楼\n"
+                    "【来源】BMS\n"
+                    "【等级】I2\n"
                     "【进展】测试"
                 ),
             }
@@ -496,6 +526,9 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
             "【事件通告】状态：新增\n"
             "【标题】EA118机房E楼I2级事件通报\n"
             "【时间】2026-06-24 17:20\n"
+            "【机楼】E楼\n"
+            "【来源】BMS\n"
+            "【等级】I2\n"
             "【概述】BMS报E-217-CRAC-02压缩机高压报警: 告警\n"
             "【进展】测试"
         )
@@ -561,6 +594,9 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
             "【事件通告】状态：新增\n"
             "【标题】EA118机房E楼I2级事件通报\n"
             "【时间】2026-06-24 17:20\n"
+            "【机楼】E楼\n"
+            "【来源】BMS\n"
+            "【等级】I2\n"
             "【概述】BMS报E-217-CRAC-02压缩机高压报警: 告警\n"
             "【进展】测试"
         )
@@ -624,6 +660,9 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
             "【事件通告】状态：新增\n"
             "【标题】BMS报E-217-CRAC-02压缩机高压报警: 告警\n"
             "【时间】2026-06-24 17:20\n"
+            "【机楼】E楼\n"
+            "【来源】BMS\n"
+            "【等级】I2\n"
             "【进展】测试"
         )
         payload = {

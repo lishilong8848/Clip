@@ -103,6 +103,7 @@ class LanPortalStateStore:
         "mop_temporary_signature_sessions",
         "mop_signature_usage_confirmations",
         "signature_crypto_migrations",
+        "event_notice_operation_locks",
         "schema_migrations",
     ]
     REQUIRED_INDEXES = [
@@ -134,6 +135,7 @@ class LanPortalStateStore:
         "idx_mop_signature_usage_token",
         "idx_signature_crypto_migrations_status",
         "idx_signature_crypto_migrations_updated",
+        "idx_event_notice_operation_locks_expiry",
     ]
 
     def __init__(self, db_path: str | Path | None = None):
@@ -354,6 +356,100 @@ class LanPortalStateStore:
         stats["alive"] = bool(self._write_thread and self._write_thread.is_alive())
         stats["enabled"] = bool(stats.get("enabled")) and self._write_worker_enabled()
         return stats
+
+    def acquire_event_notice_operation_lock(
+        self,
+        lock_key: str,
+        *,
+        owner: str = "",
+        action: str = "",
+        ttl_seconds: float = 180.0,
+        payload: dict[str, Any] | None = None,
+    ) -> tuple[bool, str]:
+        lock_key = str(lock_key or "").strip()
+        if not lock_key:
+            return False, "缺少事件操作锁标识。"
+        owner = str(owner or uuid.uuid4().hex).strip()
+        now = time.time()
+        lease_until = now + max(10.0, float(ttl_seconds or 180.0))
+        payload_json = json.dumps(payload or {}, ensure_ascii=False)
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    """
+                    SELECT owner, action, lease_until
+                    FROM event_notice_operation_locks
+                    WHERE lock_key=?
+                    """,
+                    (lock_key,),
+                ).fetchone()
+                if row and float(row["lease_until"] or 0) > now and row["owner"] != owner:
+                    conn.rollback()
+                    return (
+                        False,
+                        f"该事件正在处理，请稍后再试。当前动作：{row['action'] or '处理中'}",
+                    )
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO event_notice_operation_locks(
+                        lock_key, owner, action, payload_json, created_at, updated_at, lease_until
+                    ) VALUES(
+                        ?,
+                        ?,
+                        ?,
+                        ?,
+                        COALESCE((SELECT created_at FROM event_notice_operation_locks WHERE lock_key=?), ?),
+                        ?,
+                        ?
+                    )
+                    """,
+                    (
+                        lock_key,
+                        owner,
+                        str(action or ""),
+                        payload_json,
+                        lock_key,
+                        now,
+                        now,
+                        lease_until,
+                    ),
+                )
+                conn.commit()
+        return True, owner
+
+    def release_event_notice_operation_lock(self, lock_key: str, owner: str = "") -> bool:
+        lock_key = str(lock_key or "").strip()
+        if not lock_key:
+            return False
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                if owner:
+                    cursor = conn.execute(
+                        "DELETE FROM event_notice_operation_locks WHERE lock_key=? AND owner=?",
+                        (lock_key, str(owner or "").strip()),
+                    )
+                else:
+                    cursor = conn.execute(
+                        "DELETE FROM event_notice_operation_locks WHERE lock_key=?",
+                        (lock_key,),
+                    )
+                conn.commit()
+                return cursor.rowcount > 0
+
+    def cleanup_event_notice_operation_locks(self) -> int:
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                cursor = conn.execute(
+                    "DELETE FROM event_notice_operation_locks WHERE lease_until<=?",
+                    (now,),
+                )
+                conn.commit()
+                return int(cursor.rowcount or 0)
 
     def _ensure_schema_locked(self, conn: sqlite3.Connection) -> None:
         if self._initialized:
@@ -683,6 +779,25 @@ class LanPortalStateStore:
             """
             CREATE INDEX IF NOT EXISTS idx_signature_crypto_migrations_updated
             ON signature_crypto_migrations(updated_at)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS event_notice_operation_locks (
+                lock_key TEXT PRIMARY KEY,
+                owner TEXT NOT NULL,
+                action TEXT,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                lease_until REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_event_notice_operation_locks_expiry
+            ON event_notice_operation_locks(lease_until)
             """
         )
         conn.execute(
