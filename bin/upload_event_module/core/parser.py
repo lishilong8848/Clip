@@ -32,6 +32,7 @@ SUPPORTED_NOTICE_MARKERS = tuple(f"【{notice_type}】" for notice_type in SUPPO
 PATTERN_STATUS = re.compile(r"状态[：:]\s*(.*?)(?:\s*[\n【]|$)", re.DOTALL)
 PATTERN_TITLE = re.compile(r"【名称】(.*?)(?:【|$)", re.DOTALL)
 PATTERN_TITLE_ALT = re.compile(r"【标题】(.*?)(?:【|$)", re.DOTALL)  # 事件通告使用【标题】
+PATTERN_EVENT_TITLE = re.compile(r"【(?:告警描述|概述)】(.*?)(?:【|$)", re.DOTALL)
 PATTERN_TIME = re.compile(r"【(?:时间|事件发生时间|发生时间)】(.*?)(?:【|$)", re.DOTALL)
 PATTERN_LOCATION = re.compile(r"【位置】(.*?)(?:【|$)", re.DOTALL)
 PATTERN_LEVEL = re.compile(r"【等级】(.*?)(?:【|$)", re.DOTALL)  # 变更通告特有
@@ -119,6 +120,8 @@ def extract_notice_info(content):
     title_match = PATTERN_TITLE.search(raw_content)
     if not title_match:
         title_match = PATTERN_TITLE_ALT.search(raw_content)  # 尝试【标题】
+    if not title_match and notice_type == NOTICE_TYPE_SHIJIAN:
+        title_match = PATTERN_EVENT_TITLE.search(raw_content)
     if not title_match:
         return None
     title = title_match.group(1).replace("\n", " ").strip()
@@ -135,7 +138,7 @@ def extract_notice_info(content):
     # 提取来源（仅事件通告）
     source = ""
     if notice_type == NOTICE_TYPE_SHIJIAN:
-        pattern_source = re.compile(r"【来源】(.*?)(?:【|$)", re.DOTALL)
+        pattern_source = re.compile(r"【(?:来源|事件发现来源)】(.*?)(?:【|$)", re.DOTALL)
         source_match = pattern_source.search(raw_content)
         if source_match:
             source = source_match.group(1).strip()
@@ -143,7 +146,11 @@ def extract_notice_info(content):
     # 提取等级。事件也需要等级参与身份匹配，避免同标题同时间的事件串绑。
     level = None
     if notice_type in {NOTICE_TYPE_BIANGENG, NOTICE_TYPE_SHIJIAN}:
-        level_match = PATTERN_LEVEL.search(raw_content)
+        level_match = (
+            re.search(r"【(?:等级|事件等级)】(.*?)(?:【|$)", raw_content, re.DOTALL)
+            if notice_type == NOTICE_TYPE_SHIJIAN
+            else PATTERN_LEVEL.search(raw_content)
+        )
         raw_level = level_match.group(1).strip() if level_match else ""
         valid_level_match = re.search(
             r"(I3\s*[→>\-]\s*I2|I3\s*[→>\-]\s*I1|I3|I2|I1|E4|E3|E2|E1|E0|超低|极低|低|中|高)",

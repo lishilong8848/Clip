@@ -13,10 +13,9 @@
           {{ message || saveDisabledReason || roleLabel }}
         </span>
         <div class="signature-pad-actions">
-          <button class="btn ghost" type="button" :disabled="saving" @click="emit('clear')">清空</button>
-          <button
+          <button type="button" class="btn ghost" :disabled="saving" @click="emit('clear')">清空</button>
+          <button type="button"
             class="btn blue"
-            type="button"
             :disabled="saving || Boolean(saveDisabledReason)"
             :title="saveDisabledReason"
             @click="emit('save')"

@@ -33,7 +33,7 @@
           </label>
         </div>
         <div class="scan-actions">
-          <button class="btn blue" :disabled="Boolean(scanDisabledReason)" :title="scanDisabledReason" @click="scanHistory">
+          <button type="button" class="btn blue" :disabled="Boolean(scanDisabledReason)" :title="scanDisabledReason" @click="scanHistory">
             {{ busy ? "扫描中" : "扫描历史通告" }}
           </button>
           <DisabledReason v-if="scanDisabledReason && !busy" :text="scanDisabledReason" />
@@ -58,7 +58,7 @@
             <strong>筛选当前月事项</strong>
             <span>{{ filteredSources.length }} / {{ sourceItems.length }} 条</span>
           </div>
-          <button v-if="historyFilterCount" class="btn ghost compact-btn" type="button" @click="clearHistoryFilters">
+          <button type="button" v-if="historyFilterCount" class="btn ghost compact-btn" @click="clearHistoryFilters">
             清空筛选 {{ historyFilterCount }}
           </button>
         </div>
@@ -146,10 +146,9 @@
             <div class="field-scroll">
               <div class="field-summary">
                 <span>核心字段 {{ primaryFieldDefs.length }} 项</span>
-                <button
+                <button type="button"
                   v-if="extraFieldDefs.length"
                   class="field-toggle"
-                  type="button"
                   @click="showExtraFields = !showExtraFields"
                 >
                   {{ showExtraFields ? "收起扩展字段" : `展开扩展字段 ${extraFieldDefs.length} 项` }}
@@ -239,10 +238,10 @@
           <span>已勾选 {{ selectedCount }} 条 · 推荐可填充 {{ recommendedMatchCount }} 条 · 覆盖 {{ overwriteHint }}</span>
         </div>
         <div class="footer-actions">
-          <button class="btn green" :disabled="Boolean(fillRecommendedDisabledReason)" :title="fillRecommendedDisabledReason" @click="fillCandidatesAndConfirmSave">
+          <button type="button" class="btn green" :disabled="Boolean(fillRecommendedDisabledReason)" :title="fillRecommendedDisabledReason" @click="fillCandidatesAndConfirmSave">
             填充推荐并保存 {{ recommendedMatchCount }}
           </button>
-          <button class="btn blue" :disabled="Boolean(saveSelectedDisabledReason)" :title="saveSelectedDisabledReason" @click="saveSelected">
+          <button type="button" class="btn blue" :disabled="Boolean(saveSelectedDisabledReason)" :title="saveSelectedDisabledReason" @click="saveSelected">
             保存已勾选 {{ selectedCount }}
           </button>
           <DisabledReason v-if="historySaveDisabledReason && !busy" :text="historySaveDisabledReason" />

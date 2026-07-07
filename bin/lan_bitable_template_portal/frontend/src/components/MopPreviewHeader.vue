@@ -1,6 +1,6 @@
 <template>
   <header class="preview-head">
-    <button class="btn ghost preview-back" type="button" @click="$emit('back')">
+    <button type="button" class="btn ghost preview-back" @click="$emit('back')">
       <span aria-hidden="true">‹</span>
       返回
     </button>

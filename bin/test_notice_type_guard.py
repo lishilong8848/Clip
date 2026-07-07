@@ -118,7 +118,7 @@ class NoticeTypeGuardTests(unittest.TestCase):
                     }
                 )
 
-    def test_missing_work_type_still_supports_legacy_text_inference(self):
+    def test_missing_work_type_infers_text_type_and_uses_semantic_target_key(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._service(tmp)
             job_id, should_start = service.create_action_job(
@@ -134,9 +134,10 @@ class NoticeTypeGuardTests(unittest.TestCase):
             self.assertTrue(job_id)
             self.assertTrue(should_start)
             job = service.get_job(job_id)
-            self.assertEqual(job["target_key"], "adjust:manual-start:manual-legacy-adjust")
+            self.assertTrue(job["target_key"].startswith("adjust:manual-start:"))
+            self.assertNotIn("manual-legacy-adjust", job["target_key"])
 
-    def test_missing_work_type_uses_notice_type_for_legacy_requests(self):
+    def test_missing_work_type_uses_notice_type_and_semantic_target_key(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._service(tmp)
             job_id, should_start = service.create_action_job(
@@ -154,7 +155,8 @@ class NoticeTypeGuardTests(unittest.TestCase):
             job = service.get_job(job_id)
             self.assertEqual(job["request"]["work_type"], "adjust")
             self.assertEqual(job["request"]["notice_type"], "设备调整")
-            self.assertEqual(job["target_key"], "adjust:manual-start:manual-legacy-notice-type")
+            self.assertTrue(job["target_key"].startswith("adjust:manual-start:"))
+            self.assertNotIn("manual-legacy-notice-type", job["target_key"])
 
     def test_missing_work_type_update_target_key_uses_notice_type(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -206,7 +208,7 @@ class NoticeTypeGuardTests(unittest.TestCase):
             (WORK_TYPE_MAINTENANCE, NOTICE_TYPE_MAINTENANCE, "EA118机房A楼过滤网维护通告"),
             (WORK_TYPE_CHANGE, NOTICE_TYPE_CHANGE, "EA118机房A楼蓄电池放电变更通告"),
             (WORK_TYPE_REPAIR, NOTICE_TYPE_REPAIR, "EA118机房B楼恒湿机检修通告"),
-            (WORK_TYPE_POWER, NOTICE_TYPE_POWER, "EA118机房E楼设备上电通告"),
+            (WORK_TYPE_POWER, "上电通告", "EA118机房E楼设备上电通告"),
             (WORK_TYPE_POLLING, NOTICE_TYPE_POLLING, "EA118机房B楼制冷单元轮巡通告"),
             (WORK_TYPE_ADJUST, NOTICE_TYPE_ADJUST, "EA118机房C楼空调模式调整通告"),
         ]

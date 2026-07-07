@@ -6,19 +6,17 @@
     <div class="file-action-group">
       <strong>本地写入</strong>
       <div>
-        <button
+        <button type="button"
           class="btn ghost local-fill"
-          type="button"
           :disabled="fillSaving || uploadSaving || Boolean(fillDisabledReason)"
           :title="fillDisabledReason"
           @click="emit('fill')"
         >
           {{ fillSaving ? "写入中" : "签名写入MOP" }}
         </button>
-        <button
+        <button type="button"
           v-if="filledMopAvailable"
           class="btn ghost reset-clean"
-          type="button"
           :disabled="resetSaving || fillSaving || uploadSaving"
           title="删除当前已签名文件，并重新下载干净 MOP"
           @click="emit('reset')"

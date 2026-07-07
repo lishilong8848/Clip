@@ -21,7 +21,7 @@
           <option value="failed-remote-missing">模拟远端记录缺失</option>
         </select>
       </label>
-      <button class="btn blue" :disabled="busy" @click="$emit('run')">运行离线压测</button>
+      <button type="button" class="btn blue" :disabled="busy" @click="$emit('run')">运行离线压测</button>
     </div>
     <section
       v-if="pressureResult.assessment"

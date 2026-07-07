@@ -12,9 +12,8 @@
           </option>
         </select>
       </label>
-      <button
+      <button type="button"
         class="btn ghost refresh-mini"
-        type="button"
         :disabled="loading"
         :aria-busy="loading ? 'true' : 'false'"
         title="刷新本页数据"

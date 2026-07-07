@@ -1,9 +1,8 @@
 <template>
   <div class="signature-role-summary">
-    <button
+    <button type="button"
       v-for="item in items"
       :key="item.role"
-      type="button"
       :class="{
         active: currentRole === item.role,
         ready: item.totalCount > 0 && signedCount(item) >= item.totalCount,

@@ -45,22 +45,22 @@ const repeatedItems = computed(() => {
 });
 
 const trackStyle = computed(() => {
-  const duration = Math.max(26, props.items.length * 7);
+  const duration = Math.min(90, Math.max(26, props.items.length * 7));
   return { "--broadcast-duration": `${duration}s` };
 });
 </script>
 
 <style scoped>
 .home-broadcast-card {
-  min-height: 64px;
+  min-height: 54px;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
-  gap: 18px;
+  gap: 12px;
   overflow: hidden;
-  padding: 10px 14px 10px 16px;
+  padding: 8px 12px 8px 14px;
   border: 1px solid #d8e5f7;
-  border-radius: 20px;
+  border-radius: 18px;
   background:
     linear-gradient(135deg, rgba(255, 255, 255, 0.96), rgba(241, 247, 255, 0.92)),
     #fff;
@@ -69,21 +69,21 @@ const trackStyle = computed(() => {
 
 .broadcast-fixed {
   display: grid;
-  grid-template-columns: 12px auto;
+  grid-template-columns: 11px auto;
   grid-template-areas:
     "dot title"
     "dot summary";
   align-items: center;
-  column-gap: 9px;
-  min-width: 178px;
-  padding-right: 16px;
+  column-gap: 8px;
+  min-width: 154px;
+  padding-right: 12px;
   border-right: 1px solid rgba(195, 211, 234, 0.78);
 }
 
 .broadcast-dot {
   grid-area: dot;
-  width: 10px;
-  height: 10px;
+  width: 9px;
+  height: 9px;
   border-radius: 999px;
   background: linear-gradient(135deg, #1f6dff, #00b7d8);
   box-shadow: 0 0 0 6px rgba(31, 109, 255, 0.1);
@@ -92,7 +92,7 @@ const trackStyle = computed(() => {
 .broadcast-fixed strong {
   grid-area: title;
   color: #071a39;
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 950;
 }
 
@@ -114,7 +114,7 @@ const trackStyle = computed(() => {
   width: max-content;
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 9px;
   padding-left: 100%;
   animation: broadcast-scroll var(--broadcast-duration, 32s) linear infinite;
   will-change: transform;
@@ -127,14 +127,16 @@ const trackStyle = computed(() => {
 
 .broadcast-track.is-static {
   animation: none;
+  width: 100%;
+  padding-left: 0;
 }
 
 .broadcast-item {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  min-height: 36px;
-  padding: 7px 12px;
+  gap: 7px;
+  min-height: 30px;
+  padding: 5px 10px;
   border: 1px solid rgba(216, 229, 247, 0.95);
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.86);
@@ -146,15 +148,15 @@ const trackStyle = computed(() => {
 .broadcast-item b {
   display: inline-flex;
   align-items: center;
-  min-height: 22px;
-  padding: 2px 8px;
+  min-height: 20px;
+  padding: 2px 7px;
   border-radius: 999px;
   font-size: 12px;
   font-weight: 950;
 }
 
 .broadcast-item span {
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 850;
 }
 
@@ -197,19 +199,20 @@ const trackStyle = computed(() => {
   .broadcast-track {
     animation: none;
     will-change: auto;
+    padding-left: 0;
   }
 }
 
 @media (max-width: 760px) {
   .home-broadcast-card {
     grid-template-columns: 1fr;
-    gap: 10px;
+    gap: 8px;
   }
 
   .broadcast-fixed {
     min-width: 0;
     padding-right: 0;
-    padding-bottom: 10px;
+    padding-bottom: 8px;
     border-right: 0;
     border-bottom: 1px solid rgba(195, 211, 234, 0.78);
   }

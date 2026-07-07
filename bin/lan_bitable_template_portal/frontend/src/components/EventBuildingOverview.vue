@@ -10,12 +10,11 @@
       <strong>正在读取事件数据</strong>
     </div>
     <div v-else class="building-grid">
-      <button
+      <button type="button"
         v-for="card in cards"
         :key="card.code"
         class="building-card"
         :class="[card.tone, { active: activeCode === card.code, disabled: !card.allowed }]"
-        type="button"
         :disabled="!card.allowed"
         :title="card.allowed ? '进入该楼栋事件明细' : '当前账号无该楼栋权限，仅展示态势数据'"
         @click="$emit('select', card.code)"
@@ -56,30 +55,30 @@ defineEmits<{
 .building-panel {
   min-width: 0;
   border: 1px solid rgba(216, 229, 247, 0.92);
-  border-radius: 24px;
+  border-radius: 20px;
   background: rgba(255, 255, 255, 0.74);
-  padding: 18px;
+  padding: 14px;
 }
 
 .surface-head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 18px;
+  gap: 12px;
 }
 
 .surface-head h3 {
-  margin: 0 0 4px;
+  margin: 0;
   color: #071a39;
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 950;
 }
 
 .building-grid {
-  margin-top: 18px;
+  margin-top: 12px;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 16px;
+  gap: 12px;
 }
 
 .building-card {
@@ -87,10 +86,10 @@ defineEmits<{
   min-width: 0;
   overflow: hidden;
   display: grid;
-  gap: 14px;
-  padding: 18px 18px 14px;
+  gap: 10px;
+  padding: 14px 14px 12px;
   border: 1px solid #d8e5f7;
-  border-radius: 20px;
+  border-radius: 16px;
   background: rgba(255, 255, 255, 0.96);
   text-align: left;
   cursor: pointer;
@@ -135,20 +134,20 @@ defineEmits<{
 .building-card__head {
   min-width: 0;
   display: grid;
-  grid-template-columns: 38px minmax(0, 1fr) auto;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
 }
 
 .building-icon {
-  width: 38px;
-  height: 38px;
+  width: 34px;
+  height: 34px;
   display: grid;
   place-items: center;
-  border-radius: 14px;
+  border-radius: 12px;
   background: #edf5ff;
   color: #1d4ed8;
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 950;
 }
 
@@ -156,14 +155,14 @@ defineEmits<{
   min-width: 0;
   overflow: hidden;
   color: #071a39;
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 950;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .building-card__head em {
-  padding: 7px 12px;
+  padding: 6px 10px;
   border-radius: 999px;
   background: #eff6ff;
   color: #1d4ed8;
@@ -180,7 +179,7 @@ defineEmits<{
 .building-card__numbers {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
+  gap: 6px;
 }
 
 .building-card__numbers span {
@@ -197,7 +196,7 @@ defineEmits<{
 
 .building-card__numbers b {
   color: #1d4ed8;
-  font-size: 17px;
+  font-size: 15px;
   font-weight: 950;
 }
 
@@ -209,10 +208,10 @@ defineEmits<{
 
 .building-card__action {
   justify-self: end;
-  min-height: 30px;
+  min-height: 28px;
   display: inline-flex;
   align-items: center;
-  padding: 0 13px;
+  padding: 0 11px;
   border-radius: 999px;
   background: #edf5ff;
   color: #0e5bd8;
@@ -224,7 +223,7 @@ defineEmits<{
   color: #5e728f;
   display: grid;
   place-items: center;
-  min-height: 220px;
+  min-height: 160px;
   border: 1px dashed #cbd9ec;
   border-radius: 18px;
   background: rgba(248, 251, 255, 0.88);
@@ -232,7 +231,7 @@ defineEmits<{
 }
 
 .event-empty.compact {
-  min-height: 120px;
+  min-height: 88px;
 }
 
 .event-empty strong {

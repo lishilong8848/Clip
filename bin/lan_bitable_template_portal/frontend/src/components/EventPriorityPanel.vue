@@ -11,10 +11,9 @@
       <span>全部事件 {{ eventsCount }}</span>
     </div>
     <div v-if="priorityEvents.length" class="priority-list">
-      <button
+      <button type="button"
         v-for="item in priorityEvents"
         :key="eventKey(item)"
-        type="button"
         class="priority-row"
         @click="$emit('select', item)"
       >

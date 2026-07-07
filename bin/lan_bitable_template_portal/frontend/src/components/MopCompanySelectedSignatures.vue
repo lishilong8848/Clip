@@ -28,10 +28,9 @@
           {{ personBadgeText(person) }}
         </em>
       </span>
-      <button
+      <button type="button"
         class="selected-signature-open"
         :class="{ ready: people.length > 0 && !unsignedCount, pending: unsignedCount > 0 }"
-        type="button"
         :aria-expanded="drawerOpen"
         :title="unsignedCount ? `${unsignedCount} 人待处理，点击处理` : '签名已齐全，点击查看人员'"
         @click.stop="emit('toggle-drawer')"
@@ -60,8 +59,7 @@
             <button type="button" :class="{ active: drawerFilter === 'signed' }" @click="drawerFilter = 'signed'">可用</button>
           </div>
           <div class="drawer-bulk-actions">
-            <button
-              type="button"
+            <button type="button"
               class="drawer-bulk-action"
               :disabled="!unsignedSignatureCount || bulkLinkSending"
               title="给当前角色下所有未签名公司人员发送签名链接"
@@ -69,8 +67,7 @@
             >
               {{ bulkLinkSending ? "发送中" : `发未签 ${unsignedSignatureCount}` }}
             </button>
-            <button
-              type="button"
+            <button type="button"
               class="drawer-bulk-action"
               :disabled="!confirmableCount || confirmSending"
               title="向已选且非当前登录人的已签名人员发送使用确认"
@@ -97,27 +94,25 @@
             <small :class="{ failed: Boolean(linkErrorById[person.record_id]) }">{{ drawerPersonStatus(person) }}</small>
           </div>
           <div class="drawer-actions">
-            <button
+            <button type="button"
               v-if="!person.source || person.source === 'staff'"
               class="drawer-action"
-              type="button"
               :disabled="Boolean(webSignDisabledReason(person))"
               :title="webSignDisabledReason(person) || '在当前网页手写并保存到该人员签名库'"
               @click.stop="emit('web-sign', person)"
             >
               {{ personHasStoredSignature(person) ? "网页重签" : "网页手写" }}
             </button>
-            <button
+            <button type="button"
               v-if="!person.source || person.source === 'staff'"
               class="drawer-action link-action"
-              type="button"
               :disabled="Boolean(linkSendingById[person.record_id]) || !person.record_id"
               :title="linkTitle(person)"
               @click.stop="emit('send-link', person, personHasStoredSignature(person))"
             >
               {{ linkSendingById[person.record_id] ? "发送中" : (personHasStoredSignature(person) ? "重发链接" : "发链接") }}
             </button>
-            <button class="drawer-remove" type="button" @click.stop="emit('remove', personKey(person))">移除</button>
+            <button type="button" class="drawer-remove" @click.stop="emit('remove', personKey(person))">移除</button>
           </div>
         </article>
         <div v-if="!drawerVisiblePeople.length" class="drawer-empty">当前筛选下没有人员。</div>
@@ -318,6 +313,7 @@ function personBadgeTone(person: Dict): Record<string, boolean> {
 }
 
 .selected-signature-chip {
+  position: relative;
   display: inline-grid;
   grid-template-columns: 52px minmax(0, 1fr) auto;
   align-items: center;
@@ -330,11 +326,32 @@ function personBadgeTone(person: Dict): Record<string, boolean> {
   background: #ffffff;
   padding: 4px 6px;
   cursor: pointer;
+  transition:
+    border-color 0.16s ease,
+    box-shadow 0.16s ease,
+    background 0.16s ease;
 }
 
 .selected-signature-chip.active {
   border-color: #1e63ff;
-  box-shadow: 0 8px 18px rgba(30, 99, 255, 0.13);
+  background: linear-gradient(135deg, #ffffff, #eef6ff);
+  box-shadow:
+    0 0 0 3px rgba(30, 99, 255, 0.14),
+    0 8px 18px rgba(30, 99, 255, 0.14);
+}
+
+.selected-signature-chip.active::after {
+  content: "已选";
+  position: absolute;
+  right: 6px;
+  top: -8px;
+  border-radius: 999px;
+  padding: 1px 6px;
+  background: #1e63ff;
+  color: #ffffff;
+  font-size: 10px;
+  font-weight: 950;
+  line-height: 1.45;
 }
 
 .selected-signature-chip img {
@@ -438,7 +455,7 @@ function personBadgeTone(person: Dict): Record<string, boolean> {
 
 .drawer-filter-bar {
   display: grid;
-  grid-template-columns: minmax(104px, auto) minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(104px, auto) minmax(180px, 1fr) auto auto;
   align-items: center;
   gap: 8px;
   position: sticky;
@@ -516,6 +533,7 @@ function personBadgeTone(person: Dict): Record<string, boolean> {
   flex-wrap: wrap;
   gap: 5px;
   justify-content: flex-end;
+  min-width: 0;
 }
 
 .drawer-bulk-action {
@@ -568,6 +586,17 @@ function personBadgeTone(person: Dict): Record<string, boolean> {
 
   .drawer-filter-bar {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 1160px) {
+  .drawer-filter-bar {
+    grid-template-columns: minmax(104px, auto) minmax(0, 1fr);
+  }
+
+  .drawer-filter-tabs,
+  .drawer-bulk-actions {
+    justify-content: flex-start;
   }
 }
 </style>

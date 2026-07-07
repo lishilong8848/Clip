@@ -22,10 +22,9 @@
       暂无维保通告
     </div>
     <div v-else class="list notice-list">
-      <button
+      <button type="button"
         v-for="notice in items"
         :key="notice.notice_key"
-        type="button"
         class="notice-row"
         :class="{ active: notice.notice_key === selectedNoticeKey, closed: noticeIsEnded(notice), pending: mopNoticeNeedsAction(notice) }"
         @click="$emit('select', String(notice.notice_key || ''))"
@@ -97,15 +96,15 @@ function noticeIsEnded(notice: Dict): boolean {
 
 <style scoped>
 .panel {
-  height: min(760px, calc(100vh - 300px));
-  min-height: min(560px, calc(100vh - 220px));
+  height: min(720px, calc(100vh - 300px));
+  min-height: min(500px, calc(100vh - 220px));
   overflow: hidden;
-  padding: 18px;
+  padding: 12px;
   display: grid;
   grid-template-rows: auto auto 1fr;
-  gap: 14px;
+  gap: 9px;
   border: 1px solid #d8e5f7;
-  border-radius: 22px;
+  border-radius: 20px;
   background: rgba(255, 255, 255, 0.92);
   box-shadow: 0 16px 36px rgba(0, 47, 135, 0.08);
 }
@@ -120,7 +119,7 @@ function noticeIsEnded(notice: Dict): boolean {
 .panel-head h2 {
   margin: 0;
   color: #0f172a;
-  font-size: 18px;
+  font-size: 17px;
 }
 
 .panel-head p {
@@ -141,14 +140,14 @@ function noticeIsEnded(notice: Dict): boolean {
 .filters {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(156px, 0.36fr);
-  gap: 10px;
+  gap: 8px;
 }
 
 .filters input,
 .filters select {
-  min-height: 38px;
+  min-height: 32px;
   border: 1px solid #c8dcf3;
-  border-radius: 14px;
+  border-radius: 13px;
   background: #fbfdff;
   padding: 0 12px;
   color: #0f172a;
@@ -158,7 +157,7 @@ function noticeIsEnded(notice: Dict): boolean {
   min-height: 0;
   overflow: auto;
   display: grid;
-  gap: 10px;
+  gap: 6px;
   align-content: start;
   padding-right: 4px;
 }
@@ -166,10 +165,10 @@ function noticeIsEnded(notice: Dict): boolean {
 .empty-box {
   display: grid;
   place-items: center;
-  min-height: 180px;
+  min-height: 140px;
   border: 1px dashed #bdd2f4;
-  border-radius: 18px;
-  padding: 18px;
+  border-radius: 16px;
+  padding: 14px;
   background: rgba(248, 251, 255, 0.86);
   color: #516a88;
   font-size: 13px;
@@ -182,8 +181,8 @@ function noticeIsEnded(notice: Dict): boolean {
   position: relative;
   width: 100%;
   border: 1px solid #d8e5f7;
-  border-radius: 16px;
-  padding: 13px 14px 13px 18px;
+  border-radius: 13px;
+  padding: 8px 10px 8px 15px;
   text-align: left;
   color: #0f172a;
   background: #ffffff;
@@ -194,8 +193,8 @@ function noticeIsEnded(notice: Dict): boolean {
 .notice-row::before {
   content: "";
   position: absolute;
-  top: 14px;
-  bottom: 14px;
+  top: 10px;
+  bottom: 10px;
   left: 8px;
   width: 3px;
   border-radius: 999px;
@@ -230,14 +229,15 @@ function noticeIsEnded(notice: Dict): boolean {
 
 .notice-row strong {
   display: block;
-  margin-top: 8px;
-  line-height: 1.45;
+  margin-top: 3px;
+  line-height: 1.35;
+  font-size: 13px;
 }
 
 .notice-row small,
 .notice-row em {
   display: block;
-  margin-top: 7px;
+  margin-top: 4px;
   color: #64748b;
   font-size: 12px;
   font-style: normal;
@@ -246,17 +246,17 @@ function noticeIsEnded(notice: Dict): boolean {
 .notice-mop-tags {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 8px;
+  gap: 5px;
+  margin-top: 4px;
 }
 
 .notice-mop-tags em {
   display: inline-flex;
   align-items: center;
   max-width: 100%;
-  min-height: 24px;
+  min-height: 20px;
   margin-top: 0;
-  padding: 4px 8px;
+  padding: 2px 7px;
   border-radius: 999px;
   border: 1px solid #cfe0ff;
   background: #eff6ff;
@@ -279,8 +279,8 @@ function noticeIsEnded(notice: Dict): boolean {
 .row-status {
   display: inline-flex;
   align-items: center;
-  min-height: 24px;
-  padding: 4px 9px;
+  min-height: 22px;
+  padding: 3px 8px;
   border-radius: 999px;
   color: #047857;
   background: #ecfdf5;

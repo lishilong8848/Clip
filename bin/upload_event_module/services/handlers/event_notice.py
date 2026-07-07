@@ -48,10 +48,7 @@ class EventNoticeHandler(BaseNoticeHandler):
 
         fields = {}
 
-        summary = self._extract_section(payload.text, "概述") or self._extract_section(
-            payload.text,
-            "标题",
-        )
+        summary = self._event_summary(payload.text)
         if summary:
             fields[EVENT_NOTICE_FIELDS["alarm_desc"]] = summary
 
@@ -112,10 +109,7 @@ class EventNoticeHandler(BaseNoticeHandler):
 
         fields = {}
 
-        summary = self._extract_section(payload.text, "概述") or self._extract_section(
-            payload.text,
-            "标题",
-        )
+        summary = self._event_summary(payload.text)
         if summary:
             fields[EVENT_NOTICE_FIELDS["alarm_desc"]] = summary
 
@@ -193,7 +187,7 @@ class EventNoticeHandler(BaseNoticeHandler):
 
     def build_robot_message(self, payload: NoticePayload):
         title, content, notice_type, level = super().build_robot_message(payload)
-        summary = self._extract_section(payload.text or "", "概述")
+        summary = self._event_summary(payload.text or "")
         payload_level = str(payload.level or "").strip()
         normalized_level = self._normalize_event_level(payload.level, payload.text)
         if not payload_level and summary and "负载功率过高" in summary:
@@ -208,6 +202,13 @@ class EventNoticeHandler(BaseNoticeHandler):
         if not match:
             return ""
         return match.group(1).strip()
+
+    def _event_summary(self, text: str) -> str:
+        for label in ("概述", "告警描述", "标题", "名称"):
+            value = self._extract_section(text or "", label)
+            if value:
+                return value
+        return ""
 
     def _normalize_event_level(self, level: str, text: str) -> str:
         raw_level = (level or "").strip().upper()
@@ -228,7 +229,7 @@ class EventNoticeHandler(BaseNoticeHandler):
         return LEVEL_I2
 
     def _detect_event_level_from_text(self, text: str) -> str:
-        title = self._extract_section(text or "", "标题") or (text or "")
+        title = self._event_summary(text or "") or (text or "")
         title_upper = title.upper()
         if re.search(rf"{LEVEL_I3}\s*[→>\\-]\s*{LEVEL_I2}", title_upper):
             return EVENT_LEVEL_UPGRADE_I3_TO_I2
@@ -251,7 +252,9 @@ class EventNoticeHandler(BaseNoticeHandler):
         return ""
 
     def _detect_event_source(self, text: str) -> str:
-        source_text = self._extract_section(text or "", "来源")
+        source_text = self._extract_section(text or "", "来源") or self._extract_section(
+            text or "", "事件发现来源"
+        )
         if not source_text:
             return ""
         source_upper = source_text.upper()

@@ -32,34 +32,37 @@ class NoticeUndoTests(unittest.TestCase):
     def test_checkpoint_supersedes_prior_available(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             store = LanPortalStateStore(Path(tmpdir) / "state.sqlite3")
-            first = store.create_notice_undo_action(
-                {
-                    "identity_key": "maintenance:active:aid-1",
-                    "action_type": "update",
-                    "scope": "A",
-                    "work_type": "maintenance",
-                    "notice_type": "维保通告",
-                    "active_item_id": "aid-1",
-                    "payload": {"n": 1},
-                }
-            )
-            second = store.create_notice_undo_action(
-                {
-                    "identity_key": "maintenance:active:aid-1",
-                    "action_type": "end",
-                    "scope": "A",
-                    "work_type": "maintenance",
-                    "notice_type": "维保通告",
-                    "active_item_id": "aid-1",
-                    "payload": {"n": 2},
-                }
-            )
+            try:
+                first = store.create_notice_undo_action(
+                    {
+                        "identity_key": "maintenance:active:aid-1",
+                        "action_type": "update",
+                        "scope": "A",
+                        "work_type": "maintenance",
+                        "notice_type": "维保通告",
+                        "active_item_id": "aid-1",
+                        "payload": {"n": 1},
+                    }
+                )
+                second = store.create_notice_undo_action(
+                    {
+                        "identity_key": "maintenance:active:aid-1",
+                        "action_type": "end",
+                        "scope": "A",
+                        "work_type": "maintenance",
+                        "notice_type": "维保通告",
+                        "active_item_id": "aid-1",
+                        "payload": {"n": 2},
+                    }
+                )
 
-            self.assertTrue(first)
-            self.assertTrue(second)
-            available = store.list_notice_undo_actions(scope="A")
-            self.assertEqual([item["undo_id"] for item in available], [second])
-            self.assertEqual(store.get_notice_undo_action(first)["status"], "superseded")
+                self.assertTrue(first)
+                self.assertTrue(second)
+                available = store.list_notice_undo_actions(scope="A")
+                self.assertEqual([item["undo_id"] for item in available], [second])
+                self.assertEqual(store.get_notice_undo_action(first)["status"], "superseded")
+            finally:
+                store.shutdown_write_worker(timeout=1.0)
 
     def test_restore_local_snapshot_returns_ended_item_to_ongoing(self):
         with tempfile.TemporaryDirectory() as tmpdir:

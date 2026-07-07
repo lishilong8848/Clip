@@ -69,9 +69,8 @@
                 {{ signatureTaskSummaryText }}
               </p>
             </div>
-            <button
+            <button type="button"
               v-if="signatureManagerOpen"
-              type="button"
               class="sign-close-inline"
               @click="closeSignatureManager"
             >
@@ -194,9 +193,8 @@
           @save="saveMopSignature"
         >
             <div class="mop-sign-canvas signature-pad-canvas" :class="{ disabled: !activeSignaturePerson }">
-              <button
+              <button type="button"
                 class="sign-clear-inline"
-                type="button"
                 :disabled="signatureSaving"
                 @click="clearSignatureCanvas"
               >
@@ -3165,9 +3163,9 @@ watch(() => props.scopeOptions, (items) => {
 .engineer-mop {
   width: min(1800px, 100%);
   margin: 0 auto;
-  padding: 28px 32px 42px;
+  padding: 22px 28px 38px;
   display: grid;
-  gap: 20px;
+  gap: 16px;
 }
 
 .engineer-mop.preview-open {
@@ -3211,7 +3209,7 @@ watch(() => props.scopeOptions, (items) => {
 }
 
 .btn {
-  min-height: 44px;
+  min-height: 40px;
   border: 1px solid #d8e5f7;
   border-radius: 12px;
   padding: 8px 14px;
@@ -3289,7 +3287,7 @@ watch(() => props.scopeOptions, (items) => {
 .notice-box,
 .message,
 .warning-list {
-  padding: 18px;
+  padding: 14px;
   color: #475569;
 }
 
@@ -3329,8 +3327,8 @@ watch(() => props.scopeOptions, (items) => {
   display: grid;
   position: relative;
   z-index: 20;
-  gap: 12px;
-  padding: 14px;
+  gap: 10px;
+  padding: 12px;
   border: 1px solid #d8e5f7;
   border-radius: 18px;
   background: rgba(255, 255, 255, 0.92);
@@ -3363,7 +3361,7 @@ watch(() => props.scopeOptions, (items) => {
   right: 18px;
   bottom: 18px;
   left: auto;
-  width: min(980px, calc(100vw - 36px));
+  width: min(1120px, calc(100vw - 36px));
   max-height: none;
   display: grid;
   grid-template-rows: auto auto auto minmax(0, 1fr);

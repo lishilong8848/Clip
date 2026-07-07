@@ -10,6 +10,10 @@ from PyQt6.QtWidgets import QInputDialog
 from PyQt6.QtCore import Qt, QSize, QTimer, QPoint, QObject
 from PyQt6 import sip
 
+from lan_bitable_template_portal.identity_utils import (
+    canonical_target_record_id,
+    is_local_record_id,
+)
 from ..config import get_field_config
 from ..logger import LOG_FILE, log_error, log_info, log_warning
 from ..utils import WHITESPACE_TRANSLATOR
@@ -1248,12 +1252,44 @@ class MainWindowRecordsMixin:
         active_item_id = str(existing_data.get("active_item_id") or "").strip()
         if active_item_id:
             updated["active_item_id"] = active_item_id
+
+        existing_target_id = canonical_target_record_id(existing_data)
+        if not existing_target_id and not self._is_placeholder_record(existing_data):
+            legacy_record_id = str(existing_data.get("record_id") or "").strip()
+            if legacy_record_id.startswith("rec") and not is_local_record_id(legacy_record_id):
+                existing_target_id = legacy_record_id
+
+        current_target_id = canonical_target_record_id(updated)
+        if not current_target_id and not self._is_placeholder_record(updated):
+            legacy_record_id = str(updated.get("record_id") or "").strip()
+            if legacy_record_id.startswith("rec") and not is_local_record_id(legacy_record_id):
+                current_target_id = legacy_record_id
+        if (
+            existing_target_id
+            and (
+                not current_target_id
+                or is_local_record_id(current_target_id)
+                or bool(updated.get("_is_placeholder_record", False))
+            )
+        ):
+            updated["record_id"] = existing_target_id
+            updated["target_record_id"] = existing_target_id
+            updated["_is_placeholder_record"] = False
         for key in (
             "today_in_progress_state",
             "record_binding_state",
             "record_binding_error",
             "routing_state",
             "routing_error",
+            "source",
+            "event_source",
+            "level",
+            "event_identity_key",
+            "event_match_fields",
+            "transfer_to_overhaul",
+            "last_remote_write_at",
+            "site_photo_count",
+            "extra_image_count",
         ):
             if key not in updated and key in existing_data:
                 updated[key] = existing_data.get(key)
@@ -3165,6 +3201,7 @@ class MainWindowRecordsMixin:
             target_data["level"] = info.get("level")
         if info.get("source"):
             target_data["source"] = info.get("source")
+            target_data["event_source"] = info.get("source")
         if info.get("time_str"):
             target_data["time_str"] = info.get("time_str")
         return target_data
@@ -3538,12 +3575,17 @@ class MainWindowRecordsMixin:
         existing_buildings = self._normalize_buildings_value(data_dict.get("buildings"))
         existing_specialty = str(data_dict.get("specialty") or "").strip()
         existing_maintenance_cycle = str(data_dict.get("maintenance_cycle") or "").strip()
+        existing_event_source = str(
+            data_dict.get("event_source") or data_dict.get("source") or ""
+        ).strip()
         if not resolved["buildings"]:
             resolved["buildings"] = existing_buildings
         if not resolved["specialty"] and not specialty_cleared:
             resolved["specialty"] = existing_specialty
         if not resolved["maintenance_cycle"] and not maintenance_cycle_cleared:
             resolved["maintenance_cycle"] = existing_maintenance_cycle
+        if not resolved["event_source"]:
+            resolved["event_source"] = existing_event_source
 
         record_id = self._get_cache_identity(data_dict)
         active_item_id = str(data_dict.get("active_item_id") or "").strip()
@@ -3657,8 +3699,10 @@ class MainWindowRecordsMixin:
             data_dict.pop("level", None)
         if resolved["event_source"]:
             data_dict["event_source"] = resolved["event_source"]
+            data_dict["source"] = resolved["event_source"]
         elif "event_source" in dialog_fields:
             data_dict.pop("event_source", None)
+            data_dict.pop("source", None)
         if resolved["maintenance_cycle"]:
             data_dict["maintenance_cycle"] = resolved["maintenance_cycle"]
             data_dict.pop("_upload_maintenance_cycle_cleared", None)

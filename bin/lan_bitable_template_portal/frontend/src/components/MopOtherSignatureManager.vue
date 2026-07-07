@@ -5,9 +5,8 @@
         <strong>临时/外部人员</strong>
         <small :class="summaryTone">{{ summaryText }}</small>
       </div>
-      <button
+      <button type="button"
         class="btn ghost"
-        type="button"
         :disabled="Boolean(addDisabledReason)"
         :title="addDisabledReason"
         @click="emit('add-other')"
@@ -34,10 +33,9 @@
             <strong>{{ previewRow.display_name }}</strong>
           </span>
         </template>
-        <button
+        <button type="button"
           class="selected-signature-open temporary-open"
           :class="{ ready: displayRows.length > 0 && !unsignedCount, pending: unsignedCount > 0 }"
-          type="button"
           :aria-expanded="drawerOpen"
           :title="unsignedCount ? `${unsignedCount} 人未签名，点击处理` : '临时/外部人员签名已齐全，点击查看'"
           @click.stop="emit('update:drawerOpen', !drawerOpen)"
@@ -89,26 +87,24 @@
                 </small>
               </div>
               <div class="drawer-actions">
-                <button
+                <button type="button"
                   class="drawer-action"
-                  type="button"
                   :disabled="Boolean(personWebSignDisabledReason(row.person))"
                   :title="personWebSignDisabledReason(row.person)"
                   @click.stop="emit('web-sign-person', row.person)"
                 >
                   {{ row.signed ? "网页重签" : "网页签名" }}
                 </button>
-                <button
+                <button type="button"
                   v-if="row.person.source !== 'external'"
                   class="drawer-action link-action"
-                  type="button"
                   :disabled="Boolean(temporaryLinkSendingById[row.person.temp_id]) || !row.person.temp_id"
                   :title="row.person.temp_id ? '重新发送该临时人员签名链接' : '该临时人员签名会话不完整，无法发送链接'"
                   @click.stop="emit('send-temp-person', row.person)"
                 >
                   {{ temporaryLinkSendingById[row.person.temp_id] ? "发送中" : (row.signed ? "重发链接" : "发链接") }}
                 </button>
-                <button class="drawer-remove" type="button" @click.stop="emit('remove-person', signaturePersonKey(row.person))">移除</button>
+                <button type="button" class="drawer-remove" @click.stop="emit('remove-person', signaturePersonKey(row.person))">移除</button>
               </div>
             </article>
             <article
@@ -131,25 +127,23 @@
                 <small v-else>可网页签名或发送链接</small>
               </div>
               <div class="drawer-actions">
-                <button
+                <button type="button"
                   class="drawer-action"
-                  type="button"
                   :disabled="Boolean(draftSendingById[String(row.draft.draft_id || '')])"
                   :title="draftSendingById[String(row.draft.draft_id || '')] ? '正在创建临时人员' : '在当前网页手写签名'"
                   @click.stop="emit('web-sign-draft', row.draft)"
                 >
                   网页签名
                 </button>
-                <button
+                <button type="button"
                   class="drawer-action link-action"
-                  type="button"
                   :disabled="Boolean(draftDisabledReason(row.draft))"
                   :title="draftDisabledReason(row.draft)"
                   @click.stop="emit('send-draft-link', row.draft)"
                 >
                   {{ draftSendingById[String(row.draft.draft_id || '')] ? '发送中' : '发送链接' }}
                 </button>
-                <button class="drawer-remove" type="button" @click.stop="emit('remove-draft', String(row.draft.draft_id || ''))">移除</button>
+                <button type="button" class="drawer-remove" @click.stop="emit('remove-draft', String(row.draft.draft_id || ''))">移除</button>
               </div>
             </article>
           </template>
@@ -161,9 +155,8 @@
       未添加人员。
     </div>
     <div class="external-signature-reuse">
-      <button
+      <button type="button"
         class="reuse-toggle"
-        type="button"
         :class="{ open: externalReuseOpen }"
         :aria-expanded="externalReuseOpen"
         @click="externalReuseOpen = !externalReuseOpen"
@@ -180,9 +173,8 @@
               placeholder="姓名、楼栋、专业"
               @input="emit('update:externalSearch', ($event.target as HTMLInputElement).value)"
             />
-            <button
+            <button type="button"
               class="btn ghost signature-refresh"
-              type="button"
               :disabled="externalLoading"
               title="重新读取其他人员签名"
               @click="emit('refresh-external')"
@@ -193,10 +185,9 @@
           <small class="search-inline-status">{{ externalStatusText }}</small>
         </label>
         <div v-if="externalPeople.length" class="external-signature-results">
-          <button
+          <button type="button"
             v-for="person in externalPeople"
             :key="String(person.record_id || person.name || '')"
-            type="button"
             @click="emit('add-external', person)"
           >
             <img :src="person.signature_preview_url" alt="已有其他人员签名" @error="emit('image-error', person)" />
@@ -609,7 +600,7 @@ function drawerPersonStatus(row: OtherSignatureRow): string {
 
 .drawer-filter-bar {
   display: grid;
-  grid-template-columns: minmax(104px, auto) minmax(0, 1fr) auto;
+  grid-template-columns: minmax(104px, auto) minmax(180px, 1fr) auto;
   align-items: center;
   gap: 8px;
   position: sticky;
@@ -742,6 +733,23 @@ function drawerPersonStatus(row: OtherSignatureRow): string {
   background: rgba(255, 251, 235, 0.56);
 }
 
+.external-signature-reuse-body,
+.external-signature-results {
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+.external-signature-reuse-body::-webkit-scrollbar,
+.external-signature-results::-webkit-scrollbar {
+  width: 8px;
+}
+
+.external-signature-reuse-body::-webkit-scrollbar-thumb,
+.external-signature-results::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(194, 65, 12, 0.28);
+}
+
 .search-inline-status {
   display: block;
   margin-top: 5px;
@@ -856,6 +864,16 @@ function drawerPersonStatus(row: OtherSignatureRow): string {
 
   .drawer-filter-bar {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 1160px) {
+  .drawer-filter-bar {
+    grid-template-columns: minmax(104px, auto) minmax(0, 1fr);
+  }
+
+  .drawer-filter-tabs {
+    justify-content: flex-start;
   }
 }
 </style>

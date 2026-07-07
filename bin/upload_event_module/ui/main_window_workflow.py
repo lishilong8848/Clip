@@ -2361,8 +2361,10 @@ class MainWindowWorkflowMixin:
                 data_dict.pop("level", None)
             if event_source:
                 data_dict["event_source"] = event_source
+                data_dict["source"] = event_source
             else:
                 data_dict.pop("event_source", None)
+                data_dict.pop("source", None)
         if maintenance_cycle:
             data_dict["maintenance_cycle"] = maintenance_cycle
         else:

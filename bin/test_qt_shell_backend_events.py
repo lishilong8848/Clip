@@ -10,6 +10,8 @@ if str(BIN_DIR) not in sys.path:
 
 from upload_event_module.ui.main_window_runtime import MainWindowRuntimeMixin  # noqa: E402
 from upload_event_module.ui.main_window_clipboard import MainWindowClipboardMixin  # noqa: E402
+from upload_event_module.ui.main_window_records import MainWindowRecordsMixin  # noqa: E402
+from upload_event_module.core.parser import extract_notice_info  # noqa: E402
 from clipflow_backend.main import FastAPIPortalController  # noqa: E402
 from lan_bitable_template_portal.server import PortalRuntime  # noqa: E402
 from lan_bitable_template_portal.portal_service import MaintenancePortalService  # noqa: E402
@@ -109,7 +111,102 @@ class _ClipboardHarness(MainWindowClipboardMixin):
         self.failures.append(reason)
 
 
+class _RecordsHarness(MainWindowRecordsMixin):
+    pass
+
+
 class QtShellBackendEventTests(unittest.TestCase):
+    def test_event_parser_accepts_long_source_and_level_labels(self):
+        text = (
+            "【事件通告】状态：开始\n"
+            "【标题】A楼冷机告警\n"
+            "【事件发生时间】2026-06-24 10:00\n"
+            "【机楼】A楼\n"
+            "【事件等级】I2\n"
+            "【事件发现来源】BMS"
+        )
+
+        info = extract_notice_info(text)
+
+        self.assertIsNotNone(info)
+        self.assertEqual(info["source"], "BMS")
+        self.assertEqual(info["level"], "I2")
+        self.assertIn("BMS", info["unique_key"])
+        self.assertIn("I2", info["unique_key"])
+
+    def test_event_parser_accepts_alarm_description_as_title(self):
+        text = (
+            "【事件通告】状态：开始\n"
+            "【告警描述】BMS报A楼冷机高压告警\n"
+            "【事件发生时间】2026-06-24 10:00\n"
+            "【机楼】A楼\n"
+            "【事件等级】I2\n"
+            "【事件发现来源】BMS"
+        )
+
+        info = extract_notice_info(text)
+
+        self.assertIsNotNone(info)
+        self.assertEqual(info["title"], "BMS报A楼冷机高压告警")
+        self.assertEqual(info["source"], "BMS")
+        self.assertEqual(info["level"], "I2")
+
+    def test_backend_event_clipboard_entry_does_not_use_clipboard_as_event_source(self):
+        text = (
+            "【事件通告】状态：开始\n"
+            "【标题】A楼冷机告警\n"
+            "【事件发生时间】2026-06-24 10:00\n"
+            "【机楼】A楼\n"
+            "【事件等级】I2"
+        )
+
+        entry = FastAPIPortalController._clipboard_entry_from_content(text)
+
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry["source"], "")
+        self.assertEqual(entry["origin"], "clipboard")
+
+    def test_event_active_update_inherits_existing_target_record_id(self):
+        existing = {
+            "active_item_id": "event-active-1",
+            "record_id": "rec_event_target_1",
+            "target_record_id": "rec_event_target_1",
+            "_is_placeholder_record": False,
+            "event_source": "BMS",
+            "source": "BMS",
+            "event_identity_key": "事件|2026-06-24 10:00|A楼|BMS|I2",
+            "event_match_fields": {
+                "title": "A楼冷机告警",
+                "event_time": "2026-06-24 10:00",
+                "building": "A楼",
+                "source": "BMS",
+                "level": "I2",
+            },
+            "site_photo_count": 1,
+            "extra_image_count": 2,
+        }
+        incoming = {
+            "active_item_id": "localid_event_active_1",
+            "record_id": "localid_event_update_1",
+            "target_record_id": "localid_event_update_1",
+            "_is_placeholder_record": True,
+            "notice_type": "事件通告",
+            "text": "【事件通告】状态：更新\n【标题】A楼冷机告警",
+        }
+
+        updated = _RecordsHarness()._inherit_active_runtime_fields(incoming, existing)
+
+        self.assertEqual(updated["active_item_id"], "event-active-1")
+        self.assertEqual(updated["record_id"], "rec_event_target_1")
+        self.assertEqual(updated["target_record_id"], "rec_event_target_1")
+        self.assertFalse(updated["_is_placeholder_record"])
+        self.assertEqual(updated["event_source"], "BMS")
+        self.assertEqual(updated["source"], "BMS")
+        self.assertEqual(updated["event_identity_key"], existing["event_identity_key"])
+        self.assertEqual(updated["event_match_fields"], existing["event_match_fields"])
+        self.assertEqual(updated["site_photo_count"], 1)
+        self.assertEqual(updated["extra_image_count"], 2)
+
     def test_notice_text_projection_covers_all_non_event_work_types(self):
         cases = [
             (
@@ -236,16 +333,23 @@ class QtShellBackendEventTests(unittest.TestCase):
             finally:
                 PortalRuntime.state_store = original_store
 
-    def test_event_clipboard_projection_reuses_existing_target_record_by_title(self):
+    def test_event_clipboard_projection_reuses_existing_target_record_by_event_identity(self):
         first_text = (
             "【事件通告】状态：开始\n"
             "【标题】D楼直流屏系统总故障\n"
-            "【时间】2026-06-24 10:00"
+            "【时间】2026-06-24 10:00\n"
+            "【机楼】D楼\n"
+            "【来源】BMS\n"
+            "【等级】I2"
         )
         update_text = (
             "【事件通告】状态：更新\n"
             "【标题】D楼直流屏系统总故障\n"
-            "【时间】2026-06-24 10:30"
+            "【时间】2026-06-24 10:00\n"
+            "【机楼】D楼\n"
+            "【来源】BMS\n"
+            "【等级】I2\n"
+            "【进展】处理中"
         )
         with tempfile.TemporaryDirectory() as tmp:
             original_store = PortalRuntime.state_store
@@ -286,12 +390,19 @@ class QtShellBackendEventTests(unittest.TestCase):
         first_text = (
             "【事件通告】状态：开始\n"
             "【标题】D楼直流屏系统总故障\n"
-            "【时间】2026-06-24 10:00"
+            "【时间】2026-06-24 10:00\n"
+            "【机楼】D楼\n"
+            "【来源】BMS\n"
+            "【等级】I2"
         )
         update_text = (
             "【事件通告】状态：更新\n"
             "【标题】D楼直流屏系统总故障\n"
-            "【时间】2026-06-24 10:30"
+            "【时间】2026-06-24 10:00\n"
+            "【机楼】D楼\n"
+            "【来源】BMS\n"
+            "【等级】I2\n"
+            "【进展】处理中"
         )
         with tempfile.TemporaryDirectory() as tmp:
             original_store = PortalRuntime.state_store
@@ -363,12 +474,19 @@ class QtShellBackendEventTests(unittest.TestCase):
         first_text = (
             "【事件通告】状态：开始\n"
             "【标题】D楼直流屏系统总故障\n"
-            "【时间】2026-06-24 10:00"
+            "【时间】2026-06-24 10:00\n"
+            "【机楼】D楼\n"
+            "【来源】BMS\n"
+            "【等级】I2"
         )
         update_text = (
             "【事件通告】状态：更新\n"
             "【标题】D楼直流屏系统总故障\n"
-            "【时间】2026-06-24 10:30"
+            "【时间】2026-06-24 10:00\n"
+            "【机楼】D楼\n"
+            "【来源】BMS\n"
+            "【等级】I2\n"
+            "【进展】处理中"
         )
         with tempfile.TemporaryDirectory() as tmp:
             original_store = PortalRuntime.state_store
@@ -416,6 +534,58 @@ class QtShellBackendEventTests(unittest.TestCase):
                 self.assertEqual(result["record_id"], "rec-event-target")
             finally:
                 PortalRuntime.state_store = original_store
+
+    def test_event_clipboard_projection_recovers_target_from_identity_map(self):
+        first_text = (
+            "【事件通告】状态：新增\n"
+            "【标题】D楼直流屏系统总故障\n"
+            "【时间】2026-06-24 10:00\n"
+            "【机楼】D楼\n"
+            "【来源】BMS\n"
+            "【等级】I2"
+        )
+        update_text = (
+            "【事件通告】状态：更新\n"
+            "【标题】D楼直流屏系统总故障\n"
+            "【时间】2026-06-24 10:00\n"
+            "【机楼】D楼\n"
+            "【来源】BMS\n"
+            "【等级】I2\n"
+            "【进展】处理中"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            original_store = PortalRuntime.state_store
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            PortalRuntime.state_store = store
+            try:
+                store.upsert_notice_identity(
+                    {
+                        "active_item_id": "event-active-1",
+                        "record_id": "rec-event-target",
+                        "target_record_id": "rec-event-target",
+                        "notice_type": "事件通告",
+                        "work_type": "event",
+                        "title": "D楼直流屏系统总故障",
+                        "text": first_text,
+                    },
+                    origin="qt_upload",
+                )
+
+                entry = FastAPIPortalController._clipboard_entry_from_content(update_text)
+                self.assertIsNotNone(entry)
+                result = FastAPIPortalController._project_clipboard_entry_to_active(entry or {})
+
+                self.assertFalse(result.get("ignored"))
+                self.assertEqual(result["record_id"], "rec-event-target")
+                payload = result["item"]["payload"]
+                self.assertEqual(payload["target_record_id"], "rec-event-target")
+                self.assertFalse(payload["_is_placeholder_record"])
+            finally:
+                PortalRuntime.state_store = original_store
+
+    def test_record_not_found_variants_are_treated_as_missing_remote_record(self):
+        self.assertTrue(PortalRuntime._remote_record_not_found("1254043-RecordIdNotFound"))
+        self.assertTrue(PortalRuntime._remote_record_not_found("1254043-RecordldNotFo"))
 
     def test_sparse_qt_active_payload_is_backfilled_from_notice_text(self):
         text = (

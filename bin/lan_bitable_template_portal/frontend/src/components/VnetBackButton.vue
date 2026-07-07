@@ -1,7 +1,6 @@
 <template>
-  <button
+  <button type="button"
     class="vnet-back-button"
-    type="button"
     :disabled="disabled"
     :title="title || '返回'"
     @click="handleClick"

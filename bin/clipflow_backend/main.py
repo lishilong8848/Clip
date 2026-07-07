@@ -6314,13 +6314,16 @@ class FastAPIPortalController:
         info = extract_event_info(content) or {}
         if not info:
             return None
+        notice_type = str(info.get("notice_type") or "").strip()
+        event_source = str(info.get("source") or "").strip()
         entry = {
             "content": info.get("content") or content,
             "status": str(info.get("status") or "").strip(),
             "title": str(info.get("title") or "").strip(),
-            "notice_type": str(info.get("notice_type") or "").strip(),
+            "notice_type": notice_type,
             "level": info.get("level"),
-            "source": str(info.get("source") or source or "").strip(),
+            "source": event_source if notice_type == "事件通告" else str(info.get("source") or "").strip(),
+            "origin": str(source or "clipboard").strip() or "clipboard",
             "time_str": str(info.get("time_str") or "").strip(),
             "reason": str(info.get("reason") or "").strip(),
             "unique_key": str(info.get("unique_key") or "").strip(),
@@ -6353,6 +6356,15 @@ class FastAPIPortalController:
                 return item
             info = extract_event_info(str(payload.get("text") or "")) or {}
             item_key = str(info.get("unique_key") or "").strip()
+            item_event_identity_key = str(payload.get("event_identity_key") or "").strip()
+            incoming_event_identity_key = ""
+            if notice_type == "事件通告":
+                try:
+                    incoming_event_identity_key = PortalRuntime._event_notice_identity_key(
+                        {"notice_type": notice_type, "text": str(entry.get("content") or "")}
+                    )
+                except Exception:
+                    incoming_event_identity_key = ""
             item_title = str(
                 payload.get("match_title")
                 or info.get("title")
@@ -6361,6 +6373,13 @@ class FastAPIPortalController:
             ).strip()
             item_reason = str(info.get("reason") or payload.get("reason") or "").strip()
             if unique_key and item_key and item_key == unique_key:
+                return item
+            if (
+                notice_type == "事件通告"
+                and incoming_event_identity_key
+                and item_event_identity_key
+                and incoming_event_identity_key == item_event_identity_key
+            ):
                 return item
             if (
                 normalized_title
@@ -6661,7 +6680,33 @@ class FastAPIPortalController:
         else:
             data = {}
         if status not in {"", "开始", "新增"} and not data and not entry_target_record_id:
-            return {"ok": True, "ignored": True, "reason": "未找到可更新的活动条目。"}
+            if notice_type == "事件通告":
+                projected_for_lookup = cls._projected_notice_fields_from_text(
+                    content,
+                    entry=entry,
+                )
+                lookup_payload = {
+                    **projected_for_lookup,
+                    "notice_type": notice_type,
+                    "text": content,
+                    "source": entry.get("source"),
+                    "event_source": entry.get("source"),
+                    "level": entry.get("level"),
+                    "time_str": entry.get("time_str"),
+                }
+                entry_target_record_id = PortalRuntime._event_target_from_identity_map(
+                    lookup_payload
+                )
+                if entry_target_record_id:
+                    data = {
+                        **lookup_payload,
+                        "target_record_id": entry_target_record_id,
+                        "record_id": entry_target_record_id,
+                        "_is_placeholder_record": False,
+                        "binding_status": "bound",
+                    }
+            if not data and not entry_target_record_id:
+                return {"ok": True, "ignored": True, "reason": "未找到可更新的活动条目。"}
         if not active_item_id:
             active_item_id = str(entry.get("entry_id") or "").strip() or uuid.uuid4().hex
         record_id = str(
@@ -6728,6 +6773,29 @@ class FastAPIPortalController:
                 "lan_work_type": work_type,
             }
         )
+        if notice_type == "事件通告":
+            event_source = str(data.get("source") or "").strip()
+            if event_source:
+                data["event_source"] = event_source
+            else:
+                data.pop("event_source", None)
+            data.update(PortalRuntime._event_identity_payload_patch(data))
+            recovered_target_record_id = PortalRuntime._event_target_from_identity_map(data)
+            current_target_record_id = str(data.get("target_record_id") or "").strip()
+            if (
+                recovered_target_record_id
+                and (
+                    not current_target_record_id
+                    or is_local_record_id(current_target_record_id)
+                    or bool(data.get("_is_placeholder_record"))
+                )
+            ):
+                data["target_record_id"] = recovered_target_record_id
+                data["record_id"] = recovered_target_record_id
+                data["_is_placeholder_record"] = False
+                data["binding_status"] = "bound"
+                record_id = recovered_target_record_id
+                projected_target_record_id = recovered_target_record_id
         cls._reset_projected_upload_state(data)
         section = "event" if notice_type == "事件通告" else "other"
         projected_item = {
@@ -7486,6 +7554,24 @@ class FastAPIPortalController:
         payload["target_record_id"] = target_record_id
         payload["_is_placeholder_record"] = False
         payload["binding_status"] = "bound"
+        notice_type = str(
+            payload.get("notice_type") or matched_item.get("notice_type") or ""
+        ).strip()
+        if notice_type == "事件通告":
+            source = str(payload.get("event_source") or payload.get("source") or "").strip()
+            if source:
+                payload["event_source"] = source
+                payload["source"] = source
+            try:
+                event_identity_key = PortalRuntime._event_notice_identity_key(payload)
+            except Exception:
+                event_identity_key = ""
+            if event_identity_key:
+                payload["event_identity_key"] = event_identity_key
+                try:
+                    payload["event_match_fields"] = PortalRuntime._event_match_fields(payload)
+                except Exception:
+                    pass
         section = str(matched_item.get("section") or "").strip()
         sort_order = int(matched_item.get("sort_order") or 0)
         origin = str(matched_item.get("origin") or payload.get("origin") or "").strip()
@@ -7498,9 +7584,7 @@ class FastAPIPortalController:
         projected_item = {
             "active_item_id": active_item_id,
             "record_id": target_record_id,
-            "notice_type": str(
-                payload.get("notice_type") or matched_item.get("notice_type") or ""
-            ).strip(),
+            "notice_type": notice_type,
             "section": section,
             "sort_order": sort_order,
             "origin": origin,

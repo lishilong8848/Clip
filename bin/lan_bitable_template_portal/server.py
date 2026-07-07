@@ -17,6 +17,7 @@ import uuid
 from contextlib import suppress
 from http import HTTPStatus
 from pathlib import Path
+from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from .portal_auth import AUTH_COOKIE_NAME, PortalAuthManager
@@ -3713,7 +3714,9 @@ class PortalRuntime:
             level=level or None,
             buildings=buildings or None,
             specialty=str(prepared.get("specialty") or "").strip() or None,
-            event_source=str(prepared.get("event_source") or "").strip() or None,
+            event_source=str(
+                prepared.get("event_source") or prepared.get("source") or ""
+            ).strip() or None,
             response_time=str(prepared.get("response_time") or "").strip() or None,
             occurrence_date=str(prepared.get("time_str") or "").strip() or None,
             file_tokens=list(file_tokens or []) or None,
@@ -3878,13 +3881,16 @@ class PortalRuntime:
     @staticmethod
     def _remote_record_not_found(message: object) -> bool:
         text = str(message or "")
+        normalized = re.sub(r"[\s_\-:：]+", "", text).lower()
         return any(
-            token in text
+            token in normalized
             for token in (
                 "1254043",
-                "RecordidNotFound",
-                "RecordIdNotFound",
-                "record not found",
+                "recordidnotfound",
+                "recordidnotfo",
+                "recordldnotfound",
+                "recordldnotfo",
+                "recordnotfound",
                 "记录不存在",
             )
         )
@@ -4249,6 +4255,7 @@ class PortalRuntime:
             active_items = cls.state_store.list_qt_active_items(include_deleted=False)
         except Exception:
             active_items = []
+        matched_targets: list[str] = []
         for row in active_items:
             if not isinstance(row, dict):
                 continue
@@ -4266,8 +4273,95 @@ class PortalRuntime:
                 or str(row.get("record_id") or "").strip()
             )
             if target_record_id and not is_local_record_id(target_record_id):
-                return target_record_id
+                if target_record_id not in matched_targets:
+                    matched_targets.append(target_record_id)
+        if len(matched_targets) == 1:
+            return matched_targets[0]
+        if len(matched_targets) > 1:
+            log_warning(
+                "事件通告目标记录匹配到多条，已阻止自动复用: "
+                f"event_identity_key={identity_key} targets={matched_targets[:5]}"
+            )
+            return ""
+        identity_target = cls._event_target_from_identity_map(data)
+        if identity_target:
+            return identity_target
         return ""
+
+    @classmethod
+    def _event_target_from_identity_map(cls, data: dict) -> str:
+        """Resolve a previously bound event target from the SQLite identity map.
+
+        Event notices cannot be matched by title alone.  This resolver only
+        trusts the strict event identity key: alarm/title + occurrence time +
+        building + source + level.  It returns a target only when exactly one
+        non-local target is found.
+        """
+
+        if str((data or {}).get("notice_type") or "").strip() != "事件通告":
+            return ""
+        identity_key = (
+            cls._event_notice_identity_key(data)
+            or str((data or {}).get("event_identity_key") or "").strip()
+        )
+        if not identity_key:
+            return ""
+        try:
+            identities = cls.state_store.list_notice_identities(
+                include_deleted=False,
+                limit=5000,
+            )
+        except Exception as exc:
+            log_warning(f"事件通告身份映射读取失败: {exc}")
+            return ""
+        matched_targets: list[str] = []
+        for identity in identities:
+            if not isinstance(identity, dict):
+                continue
+            if str(identity.get("notice_type") or "").strip() != "事件通告":
+                continue
+            payload = identity.get("payload") if isinstance(identity.get("payload"), dict) else {}
+            merged = {
+                **payload,
+                "notice_type": "事件通告",
+                "target_record_id": str(identity.get("target_record_id") or payload.get("target_record_id") or ""),
+                "record_id": str(identity.get("target_record_id") or payload.get("record_id") or ""),
+            }
+            current_key = (
+                cls._event_notice_identity_key(merged)
+                or str(payload.get("event_identity_key") or identity.get("event_identity_key") or "").strip()
+            )
+            if current_key != identity_key:
+                continue
+            target_record_id = str(identity.get("target_record_id") or "").strip()
+            if target_record_id and not is_local_record_id(target_record_id):
+                if target_record_id not in matched_targets:
+                    matched_targets.append(target_record_id)
+        if len(matched_targets) == 1:
+            return matched_targets[0]
+        if len(matched_targets) > 1:
+            log_warning(
+                "事件通告身份映射匹配到多条目标记录，已阻止自动复用: "
+                f"event_identity_key={identity_key} targets={matched_targets[:5]}"
+            )
+        return ""
+
+    @classmethod
+    def _event_identity_payload_patch(cls, data: dict) -> dict:
+        if str((data or {}).get("notice_type") or "").strip() != "事件通告":
+            return {}
+        try:
+            identity_key = cls._event_notice_identity_key(data)
+        except Exception:
+            identity_key = ""
+        if not identity_key:
+            return {}
+        patch: dict[str, Any] = {"event_identity_key": identity_key}
+        try:
+            patch["event_match_fields"] = cls._event_match_fields(data)
+        except Exception:
+            pass
+        return patch
 
     @classmethod
     def _remote_event_time_key_from_fields(cls, fields: dict | None) -> str:
@@ -5418,6 +5512,15 @@ class PortalRuntime:
                 data["target_record_id"] = target_record_id
                 data["record_id"] = target_record_id
                 data["_is_placeholder_record"] = False
+        if notice_type == "事件通告":
+            data.update(cls._event_identity_payload_patch(data))
+            if action_type in {"update", "end"} and not target_record_id:
+                target_record_id = cls._event_target_from_identity_map(data)
+                if target_record_id:
+                    data["target_record_id"] = target_record_id
+                    data["record_id"] = target_record_id
+                    data["_is_placeholder_record"] = False
+                    data["binding_status"] = "bound"
         if action_type in {"update", "end"} and not target_record_id:
             if record_id and not is_local_record_id(record_id):
                 ok_query, query_result = query_record_by_id(record_id, notice_type)
@@ -5508,11 +5611,14 @@ class PortalRuntime:
         file_tokens: list[str] = []
 
         screenshot_upload_id = str(payload.get("screenshot_upload_id") or "").strip()
-        if action_type == "update" and not screenshot_upload_id:
+        if (
+            (action_type == "update" or (notice_type == "事件通告" and action_type == "end"))
+            and not screenshot_upload_id
+        ):
             return {
                 "ok": False,
-                "name": "更新",
-                "message": "Qt 更新通告必须上传通告截图，未检测到截图。请重新点击更新并完成截图。",
+                "name": "结束" if action_type == "end" else "更新",
+                "message": "Qt 更新通告或事件结束必须上传通告截图，未检测到截图。请重新点击并完成截图。",
                 "record_id": target_record_id or record_id,
                 "real_record_id": "",
             }
@@ -5894,6 +6000,12 @@ class PortalRuntime:
                     target_record_id = resolved_target
                     record_id = resolved_target
         notice_type = str(payload.get("notice_type") or "").strip()
+        if not target_record_id and notice_type == "事件通告":
+            target_record_id = cls._event_target_from_identity_map(payload)
+            if target_record_id:
+                record_id = target_record_id
+                payload["target_record_id"] = target_record_id
+                payload["record_id"] = target_record_id
         is_placeholder = bool(payload.get("_is_placeholder_record"))
         remote_deleted = False
         remote_missing_delete_warning = ""

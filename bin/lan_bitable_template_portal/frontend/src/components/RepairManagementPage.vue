@@ -9,10 +9,10 @@
         <h2>检修记录管理</h2>
       </div>
       <div class="hero-actions">
-        <button class="btn secondary" type="button" :disabled="loading" @click="loadRecords">
+        <button type="button" class="btn secondary" :disabled="loading" @click="loadRecords">
           {{ loading ? "读取中" : "刷新" }}
         </button>
-        <button class="btn primary" type="button" @click="startCreate">
+        <button type="button" class="btn primary" @click="startCreate">
           新增检修记录
         </button>
       </div>
@@ -52,7 +52,7 @@
             placeholder="搜索事件标题、来源、专业"
             @keydown.enter.prevent="loadEventCandidates"
           />
-          <button class="btn quiet" type="button" :disabled="eventLoading" @click="loadEventCandidates">
+          <button type="button" class="btn quiet" :disabled="eventLoading" @click="loadEventCandidates">
             {{ eventLoading ? "读取中" : "查找事件" }}
           </button>
         </div>
@@ -63,12 +63,11 @@
         <small>{{ eventMeta(selectedEvent) }}</small>
       </div>
       <div v-if="eventCandidates.length" class="event-candidates">
-        <button
+        <button type="button"
           v-for="item in eventCandidates"
           :key="eventRecordId(item)"
           class="event-candidate"
           :class="{ active: eventRecordId(item) === sourceEventId }"
-          type="button"
           @click="applyEventPrefill(eventRecordId(item))"
         >
           <span>{{ item.title || "未命名事件" }}</span>
@@ -95,18 +94,17 @@
           />
         </div>
         <div class="record-actions">
-          <button class="btn quiet" type="button" :disabled="loading" @click="loadRecords">搜索</button>
-          <button class="btn quiet" type="button" :disabled="loading || !searchText" @click="clearSearch">清空</button>
+          <button type="button" class="btn quiet" :disabled="loading" @click="loadRecords">搜索</button>
+          <button type="button" class="btn quiet" :disabled="loading || !searchText" @click="clearSearch">清空</button>
         </div>
         <div v-if="loading" class="empty-state">正在读取检修表...</div>
         <div v-else-if="!records.length" class="empty-state">暂无检修记录</div>
-        <button
+        <button type="button"
           v-for="record in records"
           v-else
           :key="record.record_id"
           class="record-row"
           :class="{ active: selectedRecord?.record_id === record.record_id }"
-          type="button"
           @click="selectRecord(record)"
         >
           <span class="record-title">{{ record.title || "未命名检修记录" }}</span>
@@ -126,17 +124,16 @@
             <p v-if="eventTitle">来自事件：{{ eventTitle }}</p>
           </div>
           <div class="editor-actions">
-            <button class="btn quiet" type="button" :disabled="saving" @click="resetDraft">重置</button>
-            <button
+            <button type="button" class="btn quiet" :disabled="saving" @click="resetDraft">重置</button>
+            <button type="button"
               v-if="editingRecordId"
               class="btn danger"
-              type="button"
               :disabled="saving"
               @click="deleteRecord"
             >
               {{ deleteConfirmRecordId === editingRecordId ? "确认删除" : "删除" }}
             </button>
-            <button class="btn primary" type="button" :disabled="saving || !canSaveRecord" @click="saveRecord">
+            <button type="button" class="btn primary" :disabled="saving || !canSaveRecord" @click="saveRecord">
               {{ saving ? "保存中" : editingRecordId ? "保存修改" : "创建记录" }}
             </button>
           </div>
@@ -150,10 +147,10 @@
             <strong>检修记录已就绪</strong>
           </div>
           <div class="next-step-actions">
-            <button class="btn quiet" type="button" :disabled="repairNoticeOpening" @click="openRepairNoticeWorkbench(true)">
+            <button type="button" class="btn quiet" :disabled="repairNoticeOpening" @click="openRepairNoticeWorkbench(true)">
               {{ repairNoticeOpening ? "刷新中" : "刷新检修后查看" }}
             </button>
-            <button class="btn primary" type="button" @click="openRepairNoticeWorkbench(false)">
+            <button type="button" class="btn primary" @click="openRepairNoticeWorkbench(false)">
               去发检修通告
             </button>
           </div>

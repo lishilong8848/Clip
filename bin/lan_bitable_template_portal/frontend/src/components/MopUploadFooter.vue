@@ -17,10 +17,9 @@
           <strong>{{ personReadyCount }}/{{ personItems.length || 0 }}</strong>
         </span>
       </div>
-      <button
+      <button type="button"
         v-if="items.length"
         class="detail-toggle"
-        type="button"
         :aria-expanded="detailsOpen"
         @click="detailsOpen = !detailsOpen"
       >
@@ -28,11 +27,11 @@
       </button>
     </div>
 
-    <p v-if="uploadReadinessHint" class="floating-upload-hint" :class="{ ready: allReady }">
+    <p v-if="uploadReadinessHint && detailsOpen" class="floating-upload-hint" :class="{ ready: allReady }">
       {{ uploadReadinessHint }}
     </p>
 
-    <div v-if="detailsOpen || missingCount" class="floating-upload-checks" :class="{ compact: !detailsOpen && Boolean(missingCount) }">
+    <div v-if="detailsOpen" class="floating-upload-checks">
       <div v-if="timeItems.length" class="floating-upload-group time-group">
         <span class="floating-upload-group-label">时间</span>
         <div class="floating-upload-signature-counts">
@@ -68,9 +67,8 @@
       <span v-if="uploadedAtText" class="floating-uploaded-at">
         {{ uploadedAtText }}
       </span>
-      <button
+      <button type="button"
         class="btn blue floating-upload-signed-mop"
-        type="button"
         :disabled="disabled"
         :title="disabledReason"
         @click="emit('upload')"
@@ -79,7 +77,7 @@
       </button>
     </div>
     <DisabledReason
-      v-if="disabledReason && !saving"
+      v-if="disabledReason && !saving && detailsOpen"
       :text="disabledReason"
       tone="warning"
     />
@@ -109,7 +107,6 @@ const detailsOpen = ref(false);
 const missingCount = computed(() => Math.max(0, props.items.length - readyCount.value));
 const timeReadyCount = computed(() => timeItems.value.filter((item) => item.ready).length);
 const personReadyCount = computed(() => personItems.value.filter((item) => item.ready).length);
-const missingItems = computed(() => props.items.filter((item) => !item.ready));
 const visibleTimeItems = computed(() => (
   detailsOpen.value ? timeItems.value : timeItems.value.filter((item) => !item.ready)
 ));
@@ -131,8 +128,8 @@ const uploadButtonText = computed(() => {
 });
 const uploadReadinessHint = computed(() => {
   if (props.saving) return "正在上传维护单，请不要重复点击。";
-  if (allReady.value) return props.uploadedAtText ? "已满足，可覆盖上传最新维护单。" : "已满足，可以上传维护单。";
-  if (missingCount.value > 0) return `还差：${missingItems.value.map((item) => `${item.label}${item.text && item.text !== "未填" ? ` ${item.text}` : ""}`).join("、")}`;
+  if (allReady.value) return props.uploadedAtText ? "可覆盖上传最新维护单。" : "可以上传维护单。";
+  if (missingCount.value > 0) return `还差 ${missingCount.value} 项`;
   return "";
 });
 
@@ -160,14 +157,14 @@ const emit = defineEmits<{
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(168px, auto);
   align-items: center;
-  gap: 6px 8px;
+  gap: 5px 8px;
   width: 100%;
   max-height: none;
   overflow: visible;
-  margin: 16px 0 0;
-  padding: 8px 10px;
-  border: 1px solid rgba(191, 219, 254, 0.88);
-  border-radius: 16px;
+  margin: 12px 0 0;
+  padding: 7px 9px;
+  border: 1px solid rgba(191, 219, 254, 0.82);
+  border-radius: 15px;
   background:
     linear-gradient(135deg, rgba(255, 255, 255, 0.97), rgba(248, 251, 255, 0.92)),
     #fff;
@@ -184,7 +181,7 @@ const emit = defineEmits<{
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
   min-width: 0;
 }
 
@@ -193,15 +190,10 @@ const emit = defineEmits<{
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   align-items: start;
-  gap: 7px;
-  min-width: 0;
-  padding-top: 6px;
-  border-top: 1px solid rgba(216, 229, 247, 0.86);
-}
-
-.floating-upload-checks.compact {
   gap: 6px;
+  min-width: 0;
   padding-top: 5px;
+  border-top: 1px solid rgba(216, 229, 247, 0.86);
 }
 
 .floating-upload-hint {
@@ -228,7 +220,7 @@ const emit = defineEmits<{
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  min-height: 24px;
+  min-height: 22px;
   min-width: 0;
   color: #0f2f6a;
   font-size: 11px;
@@ -256,7 +248,7 @@ const emit = defineEmits<{
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   min-width: 0;
 }
 
@@ -265,7 +257,7 @@ const emit = defineEmits<{
   grid-template-columns: auto auto minmax(36px, auto);
   align-items: center;
   gap: 5px;
-  min-height: 22px;
+  min-height: 21px;
   max-width: min(100%, 188px);
   border: 1px solid #fed7aa;
   border-radius: 999px;
@@ -312,7 +304,7 @@ const emit = defineEmits<{
 }
 
 .detail-toggle {
-  min-height: 26px;
+  min-height: 24px;
   border: 1px solid #cfe0ff;
   border-radius: 999px;
   padding: 0 9px;
@@ -331,7 +323,7 @@ const emit = defineEmits<{
 
 .floating-upload-group {
   display: grid;
-  grid-template-columns: 42px minmax(0, 1fr);
+  grid-template-columns: 40px minmax(0, 1fr);
   align-items: start;
   gap: 6px;
   min-width: 0;
@@ -341,7 +333,7 @@ const emit = defineEmits<{
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 27px;
+  min-height: 25px;
   border: 1px solid #d8e5f7;
   border-radius: 999px;
   padding: 0 8px;
@@ -374,14 +366,10 @@ const emit = defineEmits<{
   gap: 5px;
   align-items: center;
   min-width: 0;
-  max-height: 62px;
+  max-height: 56px;
   overflow: auto;
   padding: 1px 2px 3px 0;
   scrollbar-width: thin;
-}
-
-.floating-upload-checks.compact .floating-upload-signature-counts {
-  max-height: 74px;
 }
 
 .floating-upload-signature-counts span {
@@ -393,10 +381,10 @@ const emit = defineEmits<{
   flex: 1 1 190px;
   min-width: 180px;
   max-width: 360px;
-  min-height: 28px;
+  min-height: 26px;
   border: 1px solid #fed7aa;
   border-radius: 14px;
-  padding: 4px 7px;
+  padding: 3px 7px;
   color: #9a3412;
   background: #fff7ed;
   font-size: 11px;
@@ -467,7 +455,7 @@ const emit = defineEmits<{
   justify-content: center;
   box-sizing: border-box;
   flex: 1 1 180px;
-  min-height: 26px;
+  min-height: 24px;
   min-width: 0;
   max-width: 230px;
   border: 1px solid #bbf7d0;
@@ -487,7 +475,7 @@ const emit = defineEmits<{
 
 .floating-upload-signed-mop {
   min-width: 152px;
-  min-height: 36px;
+  min-height: 34px;
   border-radius: 13px;
   padding: 0 16px;
   font-size: 13px;

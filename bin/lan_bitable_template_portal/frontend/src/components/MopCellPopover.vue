@@ -10,10 +10,9 @@
     <template v-if="mode === 'checkbox'">
       <span class="popover-label">{{ label }}</span>
       <div class="popover-actions compact-actions">
-        <button
+        <button type="button"
           v-for="option in checkboxOptions"
           :key="option.value || option.label"
-          type="button"
           :class="{ active: checkboxValue === option.value }"
           @click.stop="emit('select-checkbox', option.value)"
         >
@@ -30,13 +29,13 @@
         step="3600"
         @input="emit('update:dateTime', ($event.target as HTMLInputElement).value)"
       />
-      <button class="primary-action" type="button" @click.stop="emit('fill-date')">填入</button>
+      <button type="button" class="primary-action" @click.stop="emit('fill-date')">填入</button>
     </template>
 
     <template v-else-if="mode === 'field-completion'">
       <span class="popover-label">{{ label }}</span>
       <div class="popover-actions compact-actions">
-        <button class="primary-action" type="button" @click.stop="emit('fill-completion', '已完成[√] 未完成[ ]')">已完成</button>
+        <button type="button" class="primary-action" @click.stop="emit('fill-completion', '已完成[√] 未完成[ ]')">已完成</button>
         <button type="button" @click.stop="emit('fill-completion', '已完成[ ] 未完成[√]')">未完成</button>
       </div>
     </template>
@@ -52,9 +51,9 @@
       ></textarea>
       <div class="popover-actions raw-actions">
         <button type="button" @click.stop="emit('copy')">复制</button>
-        <button class="primary-action" type="button" @click.stop="emit('paste')">粘贴</button>
+        <button type="button" class="primary-action" @click.stop="emit('paste')">粘贴</button>
         <button type="button" @click.stop="emit('restore')">还原</button>
-        <button class="quiet-action" type="button" @click.stop="emit('cancel')">取消</button>
+        <button type="button" class="quiet-action" @click.stop="emit('cancel')">取消</button>
       </div>
     </template>
 
@@ -62,9 +61,9 @@
       <span class="popover-label selection-label">已选 {{ selectedCount }} 个单元格</span>
       <div class="popover-actions selection-actions">
         <button type="button" @click.stop="emit('copy')">复制</button>
-        <button class="primary-action" type="button" @click.stop="emit('paste')">粘贴</button>
+        <button type="button" class="primary-action" @click.stop="emit('paste')">粘贴</button>
         <button type="button" @click.stop="emit('restore')">还原</button>
-        <button class="quiet-action" type="button" @click.stop="emit('cancel')">取消</button>
+        <button type="button" class="quiet-action" @click.stop="emit('cancel')">取消</button>
       </div>
     </template>
   </div>

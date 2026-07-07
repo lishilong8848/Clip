@@ -1,8 +1,8 @@
 <template>
   <section class="pane admin-handover-pane">
     <div class="actions">
-      <button class="btn blue" :disabled="busy" @click="$emit('refresh')">刷新链接</button>
-      <button class="btn green" :disabled="busy" @click="$emit('save')">保存链接</button>
+      <button type="button" class="btn blue" :disabled="busy" @click="$emit('refresh')">刷新链接</button>
+      <button type="button" class="btn green" :disabled="busy" @click="$emit('save')">保存链接</button>
     </div>
     <label class="password-line">
       设置密码

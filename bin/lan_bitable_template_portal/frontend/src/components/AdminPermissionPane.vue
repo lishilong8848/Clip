@@ -4,9 +4,9 @@
       <div class="command-copy">
         <strong>权限管理</strong>
       </div>
-      <button class="btn ghost" :disabled="busy" @click="$emit('load-permissions')">刷新权限</button>
-      <button class="btn ghost" :disabled="busy" @click="$emit('add-user')">添加用户</button>
-      <button class="btn green" :disabled="busy" @click="$emit('save')">保存权限</button>
+      <button type="button" class="btn ghost" :disabled="busy" @click="$emit('load-permissions')">刷新权限</button>
+      <button type="button" class="btn ghost" :disabled="busy" @click="$emit('add-user')">添加用户</button>
+      <button type="button" class="btn green" :disabled="busy" @click="$emit('save')">保存权限</button>
     </div>
 
     <section class="permission-metrics" aria-label="权限概览">

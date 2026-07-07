@@ -1,9 +1,8 @@
 <template>
   <Teleport to="body">
     <div v-if="open" class="signature-drawer-shell">
-      <button
+      <button type="button"
         class="signature-drawer-backdrop"
-        type="button"
         :aria-label="`关闭${title}`"
         @click="emit('close')"
       ></button>
@@ -52,7 +51,7 @@ const emit = defineEmits<{
   right: 24px;
   bottom: 24px;
   z-index: var(--cf-z-signature-drawer, 860);
-  width: min(780px, calc(100vw - 48px));
+  width: min(1080px, calc(100vw - 48px));
   height: auto;
   max-width: calc(100vw - 48px);
   pointer-events: none;
@@ -90,7 +89,7 @@ const emit = defineEmits<{
   top: 76px;
   right: 24px;
   bottom: 24px;
-  width: min(780px, calc(100vw - 48px));
+  width: min(1080px, calc(100vw - 48px));
   height: auto;
 }
 
@@ -99,7 +98,7 @@ const emit = defineEmits<{
   top: 76px;
   right: 24px;
   bottom: 24px;
-  width: min(780px, calc(100vw - 48px));
+  width: min(1080px, calc(100vw - 48px));
   height: auto;
   max-width: calc(100vw - 48px);
   max-height: none;
@@ -191,15 +190,16 @@ const emit = defineEmits<{
 .drawer-signature-list {
   display: grid;
   align-content: start;
-  gap: 5px;
+  gap: 4px;
   min-height: 0;
   max-height: none;
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 7px;
+  padding: 6px;
   scrollbar-width: thin;
   scrollbar-gutter: stable;
+  contain: layout paint;
 }
 
 .drawer-signature-list::-webkit-scrollbar {
@@ -221,14 +221,15 @@ const emit = defineEmits<{
 
 .drawer-signature-list :deep(article) {
   display: grid;
-  grid-template-columns: 68px minmax(0, 1fr) minmax(214px, auto);
+  grid-template-columns: 66px minmax(0, 1fr) minmax(224px, auto);
   align-items: center;
-  gap: 6px 8px;
-  min-height: 52px;
+  gap: 5px 7px;
+  min-height: 46px;
   border: 1px solid #d8e5f7;
-  border-radius: 14px;
+  border-radius: 13px;
   background: #f8fbff;
-  padding: 5px;
+  padding: 4px 5px;
+  cursor: default;
 }
 
 .drawer-signature-list :deep(article.ready) {
@@ -242,17 +243,17 @@ const emit = defineEmits<{
 }
 
 .drawer-signature-list :deep(img) {
-  width: 64px;
-  height: 24px;
+  width: 58px;
+  height: 22px;
   object-fit: contain;
 }
 
 .drawer-signature-list :deep(input) {
   width: 100%;
   min-width: 0;
-  height: 28px;
+  height: 26px;
   border: 1px solid rgba(234, 88, 12, 0.22);
-  border-radius: 10px;
+  border-radius: 999px;
   background: #ffffff;
   color: #0f172a;
   padding: 0 8px;
@@ -289,10 +290,10 @@ const emit = defineEmits<{
 .drawer-signature-list :deep(.drawer-actions) {
   display: grid;
   grid-column: auto;
-  grid-template-columns: repeat(3, minmax(64px, 1fr));
+  grid-template-columns: repeat(3, minmax(66px, 1fr));
   align-items: center;
   justify-content: stretch;
-  gap: 5px;
+  gap: 4px;
   max-width: none;
   min-width: 0;
   padding-top: 0;
@@ -303,8 +304,8 @@ const emit = defineEmits<{
   min-width: 0;
   border: 0;
   border-radius: 999px;
-  min-height: 24px;
-  padding: 3px 6px;
+  min-height: 22px;
+  padding: 2px 6px;
   font-size: 11px;
   font-weight: 900;
   overflow: hidden;
@@ -365,18 +366,18 @@ const emit = defineEmits<{
 
   .drawer-signature-list :deep(.drawer-actions) {
     grid-column: 1 / -1;
-    grid-template-columns: repeat(3, minmax(72px, 1fr));
+    grid-template-columns: repeat(3, minmax(68px, 1fr));
   }
 }
 
 @media (max-width: 980px) {
   .drawer-signature-list :deep(article) {
-    grid-template-columns: 58px minmax(0, 1fr);
+    grid-template-columns: 62px minmax(0, 1fr);
   }
 
   .drawer-signature-list :deep(.drawer-actions) {
     grid-column: 1 / -1;
-    grid-template-columns: repeat(3, minmax(72px, 1fr));
+    grid-template-columns: repeat(3, minmax(68px, 1fr));
   }
 }
 </style>

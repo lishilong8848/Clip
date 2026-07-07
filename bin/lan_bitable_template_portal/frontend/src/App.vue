@@ -237,6 +237,7 @@ const pageStatusText = computed(() => {
   if (signatureLinkMode.value) return "";
   const text = String(syncText.value || "").trim();
   if (!text || ["准备中", "请选择功能", "切换中"].includes(text)) return "";
+  if (isRoutinePageStatus(text)) return "";
   if (/^HTTP\s+\d+/i.test(text)) return "服务暂未就绪，页面会在连接恢复后自动刷新。";
   return text;
 });
@@ -260,6 +261,12 @@ function scopeLabel(value: string): string {
   const normalized = normalizeScopeValue(value, "ALL");
   const found = [...visibleScopeOptions.value, { value: "ALL", label: "全部" }].find((item) => normalizeScopeValue(item.value, "") === normalized);
   return found?.label || normalized;
+}
+
+function isRoutinePageStatus(text: string): boolean {
+  const needsAttention = /(失败|异常|过期|离线|未配置|不可用|错误|无法|请先|登录|超时|拒绝|缺少|未找到|无权限|服务暂未就绪)/.test(text);
+  if (needsAttention) return false;
+  return /(数据已就绪|本月暂无事件|正在读取事件数据|已刷新|已更新|已保存|已自动绑定)/.test(text);
 }
 
 function currentLoginUrl(): string {

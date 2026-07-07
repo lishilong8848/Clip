@@ -505,6 +505,17 @@ class MainWindowRuntimeMixin:
             data["active_item_id"] = active_item_id
         if record_id and not data.get("record_id"):
             data["record_id"] = record_id
+        target_record_id = str(
+            data.get("target_record_id")
+            or item_payload.get("target_record_id")
+            or ""
+        ).strip()
+        if target_record_id and target_record_id.startswith("rec"):
+            data["target_record_id"] = target_record_id
+            data["record_id"] = target_record_id
+            data["_is_placeholder_record"] = False
+            record_id = target_record_id
+        data = self._ensure_active_item_identity(data)
         list_widget = None
         item = None
         if active_item_id:

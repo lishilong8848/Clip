@@ -5,7 +5,7 @@
         <div>
           <strong>管理员工具</strong>
         </div>
-        <button class="btn ghost" @click="$emit('close')">关闭</button>
+        <button type="button" class="btn ghost" @click="$emit('close')">关闭</button>
       </header>
 
       <AdminWorkspaceChrome

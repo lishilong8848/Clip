@@ -22,9 +22,8 @@
               placeholder="输入姓名、工号、楼栋"
               @keyup.enter="loadPeople()"
             />
-            <button
+            <button type="button"
               class="btn ghost refresh-mini"
-              type="button"
               :disabled="loading"
               title="重新读取签名人员"
               aria-label="重新读取签名人员"
@@ -36,12 +35,11 @@
           <small class="search-inline-status">{{ searchStatusText }}</small>
         </label>
         <div class="person-list">
-          <button
+          <button type="button"
             v-for="person in people"
             :key="personKey(person)"
             class="person-card"
             :class="{ active: personKey(person) === selectedRecordId }"
-            type="button"
             @click="selectPerson(person)"
           >
             <span class="avatar">{{ personInitial(person) }}</span>
@@ -75,10 +73,9 @@
         </div>
 
         <div class="canvas-wrap" :class="{ disabled: !selectedPerson }">
-          <button
+          <button type="button"
             v-if="selectedPerson"
             class="signature-clear-inline"
-            type="button"
             :disabled="saving"
             @click="clearCanvas"
           >
@@ -109,7 +106,7 @@
         </div>
 
         <div class="signature-actions">
-          <button class="btn blue" type="button" :disabled="Boolean(saveDisabledReason)" :title="saveDisabledReason" @click="saveSignature">
+          <button type="button" class="btn blue" :disabled="Boolean(saveDisabledReason)" :title="saveDisabledReason" @click="saveSignature">
             {{ saving ? "保存中" : (temporaryMode ? "保存临时签名" : "保存到签名表") }}
           </button>
           <span v-if="saveDisabledReason && !signaturePreviewUrl" class="signature-action-hint">{{ saveDisabledReason }}</span>

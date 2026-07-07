@@ -1,8 +1,7 @@
 <template>
   <div ref="rootRef" class="refresh-menu">
-    <button
+    <button type="button"
       class="btn ghost"
-      type="button"
       aria-haspopup="menu"
       :aria-expanded="open"
       title="刷新数据"
@@ -11,12 +10,8 @@
       刷新数据
     </button>
     <div v-if="open" class="refresh-menu-panel" role="menu" @click.stop>
-      <div class="refresh-menu-head">
-        <strong>刷新数据</strong>
-      </div>
-      <button
+      <button type="button"
         class="refresh-option"
-        type="button"
         role="menuitem"
         :disabled="eventRefreshing || cooldownEvent"
         :title="eventTitle"
@@ -52,11 +47,6 @@ let listenersAttached = false;
 function emitRefresh(): void {
   emit("refresh-event");
   emit("update:open", false);
-}
-
-function optionHint(defaultText: string, busy?: boolean, cooldown?: boolean, title?: string): string {
-  if (busy || cooldown) return String(title || (busy ? "正在刷新，请稍后。" : "刚刷新过，稍后再试。"));
-  return defaultText;
 }
 
 function handlePointerDown(event: MouseEvent): void {
@@ -99,18 +89,18 @@ onBeforeUnmount(() => setListeners(false));
 }
 
 .refresh-menu > .btn {
-  min-height: 42px;
+  min-height: 36px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
-  padding: 0 16px;
+  padding: 0 13px;
   border: 1px solid rgba(255, 255, 255, 0.34);
-  border-radius: 16px;
+  border-radius: 999px;
   background: rgba(255, 255, 255, 0.14);
   color: #ffffff;
   font: inherit;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 900;
   line-height: 1;
   cursor: pointer;
@@ -142,13 +132,13 @@ onBeforeUnmount(() => setListeners(false));
   top: calc(100% + 10px);
   right: 0;
   z-index: var(--cf-z-dropdown, 720);
-  width: min(316px, calc(100vw - 36px));
-  max-height: min(390px, calc(100vh - 132px));
+  width: min(238px, calc(100vw - 36px));
+  max-height: min(280px, calc(100vh - 132px));
   display: grid;
-  gap: 8px;
-  padding: 10px;
+  gap: 6px;
+  padding: 8px;
   border: 1px solid #d8e5f7;
-  border-radius: 20px;
+  border-radius: 18px;
   background: rgba(255, 255, 255, 0.98);
   box-shadow: 0 20px 44px rgba(7, 37, 86, 0.24);
   overflow: auto;
@@ -169,44 +159,18 @@ onBeforeUnmount(() => setListeners(false));
   transform: rotate(45deg);
 }
 
-.refresh-menu-head {
-  position: relative;
-  z-index: 1;
-  display: grid;
-  gap: 3px;
-  border: 1px solid rgba(191, 219, 254, 0.82);
-  border-radius: 15px;
-  background:
-    linear-gradient(135deg, rgba(239, 246, 255, 0.96), rgba(255, 255, 255, 0.86)),
-    #f8fbff;
-  padding: 9px 11px;
-}
-
-.refresh-menu-head strong {
-  color: #071a39;
-  font-size: 14px;
-  font-weight: 950;
-}
-
-.refresh-menu-head small {
-  color: #1d4ed8;
-  font-size: 12px;
-  font-weight: 850;
-  line-height: 1.35;
-}
-
 .refresh-option {
   position: relative;
   z-index: 1;
   width: 100%;
-  min-height: 48px;
+  min-height: 42px;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
-  padding: 8px 10px;
+  padding: 7px 9px;
   border: 1px solid #dbe7f5;
-  border-radius: 16px;
+  border-radius: 14px;
   color: #0e4fb2;
   background: linear-gradient(135deg, #ffffff, #f7fbff);
   text-align: left;
@@ -247,9 +211,9 @@ onBeforeUnmount(() => setListeners(false));
 }
 
 .refresh-option b {
-  min-width: 56px;
+  min-width: 48px;
   border-radius: 999px;
-  padding: 6px 9px;
+  padding: 5px 8px;
   background: #eff6ff;
   color: #075bd8;
   font-size: 12px;

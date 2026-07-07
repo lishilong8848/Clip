@@ -14,17 +14,17 @@
             <span>{{ kicker || "操作确认" }}</span>
             <strong id="confirm-dialog-title">{{ title }}</strong>
           </div>
-          <button class="confirm-close" type="button" aria-label="关闭确认弹窗" @click="emit('resolve', false)">×</button>
+          <button type="button" class="confirm-close" aria-label="关闭确认弹窗" @click="emit('resolve', false)">×</button>
         </header>
         <p>{{ message }}</p>
         <ul v-if="details.length">
           <li v-for="item in details" :key="item">{{ item }}</li>
         </ul>
         <footer>
-          <button class="btn ghost" type="button" @click="emit('resolve', false)">
+          <button type="button" class="btn ghost" @click="emit('resolve', false)">
             {{ cancelLabel || "取消" }}
           </button>
-          <button class="btn" :class="confirmClass || defaultConfirmClass" type="button" @click="emit('resolve', true)">
+          <button type="button" class="btn" :class="confirmClass || defaultConfirmClass" @click="emit('resolve', true)">
             {{ confirmLabel || "确认" }}
           </button>
         </footer>

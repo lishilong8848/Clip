@@ -1,10 +1,9 @@
 <template>
   <section class="mop-sheet-tabs" aria-label="MOP Sheet 切换">
     <div class="sheet-tabs">
-      <button
+      <button type="button"
         v-for="sheet in sheets"
         :key="String(sheet.name || '')"
-        type="button"
         :class="{ active: String(sheet.name || '') === modelValue }"
         @click="$emit('update:modelValue', String(sheet.name || ''))"
       >

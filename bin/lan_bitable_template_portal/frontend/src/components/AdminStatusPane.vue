@@ -1,10 +1,10 @@
 <template>
   <section class="pane">
     <div class="actions">
-      <button class="btn blue" @click="emit('refresh')">刷新状态</button>
-      <button class="btn green" @click="emit('open-history-memory')">历史记忆导入</button>
-      <button class="btn ghost" @click="emit('preflight')">真实联调预检</button>
-      <button class="btn ghost" @click="emit('cleanup')">清理已完成任务</button>
+      <button type="button" class="btn blue" @click="emit('refresh')">刷新状态</button>
+      <button type="button" class="btn green" @click="emit('open-history-memory')">历史记忆导入</button>
+      <button type="button" class="btn ghost" @click="emit('preflight')">真实联调预检</button>
+      <button type="button" class="btn ghost" @click="emit('cleanup')">清理已完成任务</button>
     </div>
     <div class="metric-grid">
       <article>
@@ -98,7 +98,7 @@
         <span>{{ consistency.ok ? "一致" : "需关注" }} · {{ formatTime(consistency.checked_at) }}</span>
       </div>
       <div class="diagnostic-inline-actions">
-        <button class="btn ghost" type="button" :disabled="busy" @click="emit('repair-notice-projection')">
+        <button type="button" class="btn ghost" :disabled="busy" @click="emit('repair-notice-projection')">
           修复本地映射
         </button>
         <small>只修复 SQLite 投影，不写飞书多维。</small>
@@ -151,7 +151,7 @@
           placeholder="输入标题、active/source/target ID"
           @input="emit('update:noticeDiagnosticQuery', ($event.target as HTMLInputElement).value)"
         />
-        <button class="btn blue" type="submit" :disabled="busy || noticeDiagnosticLoading">
+        <button type="button" class="btn blue" :disabled="busy || noticeDiagnosticLoading">
           {{ noticeDiagnosticLoading ? "检查中" : "检查链路" }}
         </button>
       </form>
@@ -197,17 +197,17 @@
             <p v-if="job.error" class="danger-text">{{ job.error }}</p>
           </div>
           <div class="job-actions">
-            <button
+            <button type="button"
               class="btn ghost"
               :disabled="busy || !job.can_mark_stuck_failed"
               @click="emit('mark-stuck-failed', job)"
             >
               标记卡住
             </button>
-            <button class="btn blue" :disabled="busy || !job.can_retry" @click="emit('retry-job', job)">
+            <button type="button" class="btn blue" :disabled="busy || !job.can_retry" @click="emit('retry-job', job)">
               重试
             </button>
-            <button class="btn danger" :disabled="busy || !job.can_clear" @click="emit('clear-job', job)">
+            <button type="button" class="btn danger" :disabled="busy || !job.can_clear" @click="emit('clear-job', job)">
               清理
             </button>
           </div>

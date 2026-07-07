@@ -24,11 +24,11 @@
         <input v-model="rejectReasonModel" placeholder="批量拒绝时使用，可不填" />
       </div>
       <div class="toolbar-actions">
-        <button class="btn ghost" :disabled="busy" :title="busy ? '正在处理权限申请' : '重新读取申请列表'" @click="$emit('load')">刷新申请</button>
-        <button class="btn blue" :disabled="busy || !selectedPendingCount" :title="batchActionTitle" @click="$emit('approve-selected')">
+        <button type="button" class="btn ghost" :disabled="busy" :title="busy ? '正在处理权限申请' : '重新读取申请列表'" @click="$emit('load')">刷新申请</button>
+        <button type="button" class="btn blue" :disabled="busy || !selectedPendingCount" :title="batchActionTitle" @click="$emit('approve-selected')">
           批量通过{{ selectedPendingCount ? ` ${selectedPendingCount}` : "" }}
         </button>
-        <button class="btn danger" :disabled="busy || !selectedPendingCount" :title="batchActionTitle" @click="$emit('reject-selected')">
+        <button type="button" class="btn danger" :disabled="busy || !selectedPendingCount" :title="batchActionTitle" @click="$emit('reject-selected')">
           批量拒绝{{ selectedPendingCount ? ` ${selectedPendingCount}` : "" }}
         </button>
       </div>
@@ -96,10 +96,10 @@
           </div>
         </div>
         <div class="request-actions">
-          <button class="btn blue" :disabled="busy || item.status !== 'pending'" :title="rowActionTitle(item)" @click="$emit('approve', item)">
+          <button type="button" class="btn blue" :disabled="busy || item.status !== 'pending'" :title="rowActionTitle(item)" @click="$emit('approve', item)">
             通过
           </button>
-          <button class="btn danger" :disabled="busy || item.status !== 'pending'" :title="rowActionTitle(item)" @click="$emit('reject', item)">
+          <button type="button" class="btn danger" :disabled="busy || item.status !== 'pending'" :title="rowActionTitle(item)" @click="$emit('reject', item)">
             拒绝
           </button>
         </div>

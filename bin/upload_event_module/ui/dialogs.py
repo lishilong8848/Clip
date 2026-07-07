@@ -902,9 +902,12 @@ class AddDialog(QDialog):
 
         # 4. 简单的结构检查 (名称/标题后要有内容)
 
-        # 兼容 【名称】 或 【标题】
+        # 兼容 【名称】、【标题】和事件通告常用的【告警描述】/【概述】
 
-        key_pattern = r"(?<=【名称】)(.*?)(?=【)|(?<=【标题】)(.*?)(?=【)"
+        key_pattern = (
+            r"(?<=【名称】)(.*?)(?=【)|(?<=【标题】)(.*?)(?=【)|"
+            r"(?<=【告警描述】)(.*?)(?=【)|(?<=【概述】)(.*?)(?=【)"
+        )
 
         # 如果是最后一行，可能没有后续的【
 
@@ -914,7 +917,7 @@ class AddDialog(QDialog):
 
                 self,
 
-                "无法提取唯一标识（名称或标题）。\n请确保【名称】或【标题】后面紧跟其他标签（如【时间】）。",
+                "无法提取唯一标识（名称、标题或告警描述）。\n请确保对应字段后面紧跟其他标签（如【时间】）。",
 
                 self.theme,
 
@@ -3513,7 +3516,11 @@ class ScreenshotConfirmDialog(QDialog):
 
             cached_source = str(cache_state.get("event_source") or "").strip()
 
-            saved_source = str((self.data_dict or {}).get("event_source") or "").strip()
+            saved_source = str(
+                (self.data_dict or {}).get("event_source")
+                or (self.data_dict or {}).get("source")
+                or ""
+            ).strip()
 
             detected_source = self._detect_event_source(
 
@@ -4154,6 +4161,7 @@ class ScreenshotConfirmDialog(QDialog):
             )
 
             self._update_data_dict_field("event_source", "", remove_when_empty=True)
+            self._update_data_dict_field("source", "", remove_when_empty=True)
 
             return
 
@@ -4176,6 +4184,7 @@ class ScreenshotConfirmDialog(QDialog):
             )
 
             self._update_data_dict_field("event_source", "", remove_when_empty=True)
+            self._update_data_dict_field("source", "", remove_when_empty=True)
 
             return
 
@@ -4196,6 +4205,11 @@ class ScreenshotConfirmDialog(QDialog):
         self._update_data_dict_field(
 
             "event_source", self.selected_event_source, remove_when_empty=True
+
+        )
+        self._update_data_dict_field(
+
+            "source", self.selected_event_source, remove_when_empty=True
 
         )
 
@@ -4236,6 +4250,11 @@ class ScreenshotConfirmDialog(QDialog):
         self._update_data_dict_field(
 
             "event_source", self.selected_event_source, remove_when_empty=True
+
+        )
+        self._update_data_dict_field(
+
+            "source", self.selected_event_source, remove_when_empty=True
 
         )
 

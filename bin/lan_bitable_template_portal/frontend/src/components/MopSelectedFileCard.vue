@@ -28,9 +28,8 @@
     </div>
 
     <div class="selected-file-actions">
-      <button
+      <button type="button"
         class="btn blue"
-        type="button"
         :disabled="!canPreview || busy"
         :title="disabledReason"
         @click="$emit('open')"

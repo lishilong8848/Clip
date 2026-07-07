@@ -1,12 +1,11 @@
 <template>
   <div ref="parentRef" class="event-virtual-list">
     <div class="event-virtual-spacer" :style="{ height: `${totalSize}px` }">
-      <button
+      <button type="button"
         v-for="virtualRow in virtualRows"
         :key="rowKey(virtualRow)"
         class="event-row"
         :class="[statusTone(rowAt(virtualRow.index)?.status), levelTone(rowAt(virtualRow.index)?.level)]"
-        type="button"
         :style="{ transform: `translateY(${virtualRow.start}px)` }"
         @click="emit('select', rowAt(virtualRow.index))"
       >

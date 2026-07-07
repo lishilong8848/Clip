@@ -918,9 +918,12 @@ def _is_required_upload_field(work_type: str, name: str) -> bool:
 def _field_group(title: str, description: str, fields: list[str]) -> str:
     if not fields:
         return ""
+    description_html = (
+        f"<span>{_e(description)}</span>" if str(description or "").strip() else ""
+    )
     return (
         "<section class=\"form-section\">"
-        f"<header><strong>{_e(title)}</strong><span>{_e(description)}</span></header>"
+        f"<header><strong>{_e(title)}</strong>{description_html}</header>"
         f"<div class=\"form-grid\">{''.join(fields)}</div>"
         "</section>"
     )
@@ -980,8 +983,8 @@ def _form_fields(work_type: str, draft: dict[str, str]) -> str:
         ])
     notice_fields.append(field("progress", "进度" if work_type != "repair" else "完成情况", draft.get("progress"), textarea=True))
     return "\n".join([
-        _field_group("基础必填", "带“必填”的字段是上传多维表需要的字段，缺失时不能发送。", primary_fields),
-        _field_group("通告内容字段", "这些字段会进入飞书通告文本，也会作为多维上传内容。", notice_fields),
+        _field_group("基础必填", "", primary_fields),
+        _field_group("通告内容字段", "", notice_fields),
     ])
 
 
@@ -1770,16 +1773,16 @@ def render_workbench_lite(
     .manual-menu a {{ border:1px solid #dce8f8; border-radius:14px; padding:10px 12px; color:#12345f; background:#f7fbff; text-decoration:none; font-weight:900; text-align:center; }}
     .manual-menu a:hover {{ border-color:#1f63ff; background:#eaf3ff; }}
     .refresh-picker {{ position:relative; display:inline-flex; }}
-    .refresh-menu {{ position:absolute; z-index:20; top:50px; left:0; width:286px; display:none; gap:8px; padding:10px; border:1px solid #c9def8; border-radius:18px; background:#fff; box-shadow:0 18px 42px rgba(15,73,153,.18); }}
+    .refresh-menu {{ position:absolute; z-index:20; top:50px; left:0; width:230px; display:none; gap:6px; padding:8px; border:1px solid #c9def8; border-radius:18px; background:#fff; box-shadow:0 18px 42px rgba(15,73,153,.18); }}
     .refresh-picker.open .refresh-menu {{ display:grid; }}
-    .refresh-menu-head {{ display:grid; gap:3px; border:1px solid #dce8f8; border-radius:14px; padding:10px 12px; background:linear-gradient(135deg,#f8fbff,#eef6ff); color:#12345f; }}
-    .refresh-menu-head strong {{ font-size:13px; font-weight:950; }}
-    .refresh-menu-head span {{ color:#64748b; font-size:11px; font-weight:800; line-height:1.4; }}
-    .refresh-menu button {{ width:100%; min-height:44px; border:1px solid #dce8f8; border-radius:14px; padding:9px 12px; color:#12345f; background:#f7fbff; font-weight:900; text-align:left; cursor:pointer; }}
+    .refresh-menu-head {{ display:flex; align-items:center; justify-content:space-between; gap:8px; border:1px solid #dce8f8; border-radius:14px; padding:8px 10px; background:linear-gradient(135deg,#f8fbff,#eef6ff); color:#12345f; }}
+    .refresh-menu-head strong {{ font-size:12px; font-weight:950; white-space:nowrap; }}
+    .refresh-menu-head span {{ min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#64748b; font-size:11px; font-weight:800; line-height:1.2; }}
+    .refresh-menu button {{ width:100%; min-height:36px; border:1px solid #dce8f8; border-radius:13px; padding:7px 10px; color:#12345f; background:#f7fbff; font-weight:900; text-align:left; cursor:pointer; }}
     .refresh-menu button:hover {{ border-color:#1f63ff; background:#eaf3ff; }}
     .refresh-menu button[aria-busy="true"] {{ position:relative; color:transparent; pointer-events:none; }}
     .refresh-menu button[aria-busy="true"]::after {{ content:""; width:16px; height:16px; border-radius:999px; border:2px solid rgba(10,79,196,.25); border-top-color:#0a4fc4; animation:liteSpin .8s linear infinite; position:absolute; left:18px; top:50%; margin-top:-8px; }}
-    .refresh-menu small {{ display:block; margin-top:2px; color:#64748b; font-size:11px; font-weight:700; }}
+    .refresh-menu small {{ display:none; }}
     .lite-tools {{ display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:16px; }}
     .paste-box,.undo-box {{ border:1px solid #d8e5f7; border-radius:22px; padding:14px; background:rgba(255,255,255,.94); box-shadow:0 12px 30px rgba(15,73,153,.07); }}
     .paste-box h2,.undo-box h2 {{ margin:0 0 10px; font-size:16px; }}
@@ -1790,21 +1793,21 @@ def render_workbench_lite(
     .undo-row strong {{ display:block; color:#0c244d; }}
     .undo-row span {{ color:#0a57d8; font-weight:900; font-size:12px; }}
     .empty.compact {{ padding:10px; }}
-    .workspace {{ display:grid; grid-template-columns:minmax(320px,380px) minmax(0,1fr); gap:14px; margin-top:12px; align-items:start; }}
+    .workspace {{ display:grid; grid-template-columns:minmax(300px,360px) minmax(0,1fr); gap:12px; margin-top:10px; align-items:start; }}
     .task-inbox {{ position:sticky; top:12px; display:grid; gap:10px; max-height:calc(100vh - 24px); overflow:auto; align-self:start; }}
-    .task-inbox.panel {{ padding:12px; }}
+    .task-inbox.panel {{ padding:10px; }}
     .inbox-head {{ display:grid; gap:8px; }}
     .inbox-title {{ margin:0; display:flex; align-items:center; justify-content:space-between; gap:10px; font-size:16px; }}
     .inbox-summary {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:7px; }}
     .inbox-summary span {{ min-width:0; display:flex; align-items:center; justify-content:space-between; gap:6px; border:1px solid #dce8f8; border-radius:13px; padding:7px 9px; color:#53677f; background:#f8fbff; font-size:11px; font-weight:950; }}
     .inbox-summary b {{ color:#0a57d8; font-size:14px; }}
-    .inbox-section {{ border:1px solid #d8e5f7; border-radius:16px; padding:10px; background:linear-gradient(180deg,#fff,#f8fbff); box-shadow:0 6px 16px rgba(15,73,153,.04); }}
+    .inbox-section {{ border:1px solid #d8e5f7; border-radius:16px; padding:8px; background:linear-gradient(180deg,#fff,#f8fbff); box-shadow:0 6px 16px rgba(15,73,153,.04); }}
     .inbox-section h3 {{ margin:0 0 8px; display:flex; align-items:center; justify-content:space-between; gap:10px; color:#0c244d; font-size:14px; line-height:1.2; }}
     .inbox-section h3 b {{ min-width:28px; height:22px; border-radius:999px; display:inline-flex; align-items:center; justify-content:center; color:#0a57d8; background:#eaf3ff; font-size:12px; font-weight:950; }}
     .inbox-section .list {{ max-height:30vh; }}
     .inbox-section.ongoing-inbox-panel h3 b {{ color:#087443; background:#e8fff3; }}
     .detail-panel {{ min-width:0; }}
-    .panel {{ position:relative; border:1px solid #d8e5f7; border-radius:18px; padding:12px; background:rgba(255,255,255,.95); box-shadow:0 10px 24px rgba(15,73,153,.08); }}
+    .panel {{ position:relative; border:1px solid #d8e5f7; border-radius:18px; padding:10px; background:rgba(255,255,255,.95); box-shadow:0 10px 24px rgba(15,73,153,.08); }}
     .panel::before {{ content:""; position:absolute; left:14px; right:14px; top:0; height:3px; border-radius:0 0 999px 999px; background:linear-gradient(90deg,#1f63ff,#00aeda); opacity:.72; }}
     .panel.loading {{ position:relative; opacity:.7; pointer-events:none; }}
     .panel.loading::after {{ content:"正在加载"; position:absolute; right:14px; top:14px; border-radius:999px; padding:5px 10px; color:#075bd8; background:#eaf3ff; font-size:12px; font-weight:900; }}
@@ -1853,7 +1856,7 @@ def render_workbench_lite(
     .notice-row.is-loading,.ongoing-row.is-loading {{ border-color:#1f63ff; background:#eef6ff; box-shadow:0 0 0 3px rgba(31,99,255,.14); }}
     .notice-row.is-loading::after,.ongoing-row.is-loading::after {{ content:"正在打开"; width:max-content; justify-self:end; border-radius:999px; padding:3px 8px; color:#0a57d8; background:#fff; font-size:11px; font-weight:900; }}
     .ongoing-row.optimistic {{ border-color:#6aa8ff; background:linear-gradient(180deg,#f7fbff,#eef6ff); }}
-    .ongoing-row.optimistic::after {{ content:"后台同步中"; width:max-content; justify-self:end; border-radius:999px; padding:3px 8px; color:#0a57d8; background:#fff; font-size:11px; font-weight:900; }}
+    .ongoing-row.optimistic::after {{ content:"同步中"; width:max-content; justify-self:end; border-radius:999px; padding:3px 8px; color:#0a57d8; background:#fff; font-size:11px; font-weight:900; }}
     .ongoing-row.failed {{ border-color:#f5a3aa; background:linear-gradient(180deg,#fffafa,#fff1f0); }}
     .ongoing-row.failed::before {{ background:#e04d5f; }}
     .notice-row strong,.ongoing-row strong {{ min-width:0; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; overflow-wrap:anywhere; font-size:12px; line-height:1.32; }}
@@ -1872,15 +1875,15 @@ def render_workbench_lite(
     .meta-chip.success {{ color:#087443; background:#e8fff3; }}
     .meta-chip.source {{ color:#0a57d8; background:#eaf3ff; }}
     .meta-chip.manual {{ color:#7c3aed; background:#f3e8ff; }}
-    .detail-head {{ display:grid; gap:3px; margin-bottom:6px; border:1px solid #e3edf9; border-radius:13px; padding:7px 9px; background:linear-gradient(135deg,#f8fbff,#eef6ff); }}
+    .detail-head {{ display:grid; grid-template-columns:auto minmax(0,1fr) auto; align-items:center; gap:6px; margin-bottom:5px; border:1px solid #e3edf9; border-radius:13px; padding:6px 8px; background:linear-gradient(135deg,#f8fbff,#eef6ff); }}
     .detail-head span {{ width:max-content; border-radius:999px; padding:3px 7px; color:#0a57d8; background:#eaf3ff; font-size:11px; font-weight:900; }}
-    .detail-head strong {{ font-size:15px; line-height:1.22; }}
+    .detail-head strong {{ min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:14px; line-height:1.22; }}
     .detail-head em {{ color:#64748b; font-style:normal; }}
     .detail-mode-note {{ width:max-content; max-width:100%; border-radius:999px; padding:3px 7px; color:#0a57d8; background:#fff; box-shadow:inset 0 0 0 1px rgba(31,99,255,.12); font-size:10px; font-weight:900; line-height:1.25; }}
-    .detail-status-board {{ display:flex; flex-wrap:wrap; gap:5px; align-items:center; margin-bottom:5px; }}
-    .detail-status-item {{ min-width:0; max-width:100%; display:inline-flex; align-items:center; gap:5px; border:1px solid #d8e5f7; border-radius:999px; padding:4px 7px; background:linear-gradient(180deg,#fff,#f8fbff); box-shadow:0 4px 10px rgba(15,73,153,.035); }}
+    .detail-status-board {{ display:flex; flex-wrap:wrap; gap:4px; align-items:center; margin-bottom:4px; }}
+    .detail-status-item {{ min-width:0; max-width:100%; display:inline-flex; align-items:center; gap:4px; border:1px solid #d8e5f7; border-radius:999px; padding:3px 6px; background:linear-gradient(180deg,#fff,#f8fbff); box-shadow:0 4px 10px rgba(15,73,153,.035); }}
     .detail-status-item span {{ display:block; margin:0; color:#64748b; font-size:10px; font-weight:950; line-height:1.1; white-space:nowrap; }}
-    .detail-status-item strong {{ display:block; min-width:0; max-width:122px; color:#0c244d; font-size:11px; line-height:1.18; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+    .detail-status-item strong {{ display:block; min-width:0; max-width:108px; color:#0c244d; font-size:10px; line-height:1.18; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
     .detail-status-item.ok {{ border-color:#b7efd1; background:linear-gradient(180deg,#fff,#ecfff5); }}
     .detail-status-item.ok strong {{ color:#087443; }}
     .detail-status-item.ready {{ border-color:#b9d7ff; background:linear-gradient(180deg,#fff,#eef6ff); }}
@@ -1890,7 +1893,7 @@ def render_workbench_lite(
     .detail-status-item.blocked {{ border-color:#ffc7bf; background:linear-gradient(180deg,#fff,#fff1f0); }}
     .detail-status-item.blocked strong {{ color:#b42318; }}
     .detail-status-item.muted {{ background:#f7f9fc; }}
-    .detail-form {{ display:grid; gap:7px; }}
+    .detail-form {{ display:grid; gap:6px; }}
     .site-photo-panel {{ border:1px solid #cfe0f5; border-radius:16px; padding:10px; background:linear-gradient(135deg,#f8fbff,#eef6ff); display:grid; gap:9px; }}
     .site-photo-head {{ display:flex; justify-content:space-between; gap:10px; align-items:flex-start; }}
     .site-photo-head strong {{ display:block; color:#0c244d; font-size:14px; line-height:1.25; }}
@@ -1918,9 +1921,9 @@ def render_workbench_lite(
     .form-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }}
     .form-section {{ border:1px solid #d8e5f7; border-radius:14px; padding:9px; background:#fff; }}
     .form-section + .form-section {{ margin-top:2px; }}
-    .form-section header {{ display:flex; justify-content:space-between; gap:10px; align-items:flex-start; margin-bottom:8px; }}
+    .form-section header {{ display:flex; justify-content:space-between; gap:10px; align-items:center; margin-bottom:8px; }}
     .form-section header strong {{ color:#0c244d; font-size:13px; }}
-    .form-section header span {{ margin:0; color:#64748b; font-size:11px; line-height:1.35; text-align:right; }}
+    .form-section header span {{ margin:0; color:#64748b; font-size:11px; line-height:1.25; text-align:right; }}
     label span {{ display:block; margin:0 0 4px; color:#51677f; font-size:11px; font-weight:900; }}
     label.required > span::after {{ content:"必填"; display:inline-flex; margin-left:6px; border-radius:999px; padding:1px 6px; color:#b42318; background:#fff1f0; font-size:10px; font-weight:950; vertical-align:middle; }}
     input:required:invalid,textarea:required:invalid {{ border-color:#ffc7bf; background:#fffafa; }}
@@ -1947,16 +1950,16 @@ def render_workbench_lite(
     .preview-head {{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 12px; border-bottom:1px solid #e5edf8; background:linear-gradient(180deg,#f8fbff,#eef6ff); }}
     .preview-head span {{ color:#0a57d8; font-size:13px; font-weight:900; }}
     .preview-head b {{ color:#7c5a00; border-radius:999px; padding:5px 9px; background:#fff8db; font-size:12px; line-height:1.25; text-align:right; }}
-    .notice-preview pre {{ margin:0; max-height:112px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; padding:10px; color:#0c244d; background:#fff; font:12px/1.55 "Microsoft YaHei", Arial, sans-serif; }}
-    .notice-preview:focus-within pre,.notice-preview:hover pre {{ max-height:112px; }}
-    .form-actions {{ position:sticky; bottom:8px; z-index:8; display:flex; justify-content:flex-end; gap:8px; align-items:center; margin-top:0; border:1px solid #d8e5f7; border-radius:15px; padding:8px; background:linear-gradient(135deg,rgba(255,255,255,.98),rgba(247,251,255,.96)); box-shadow:0 12px 26px rgba(15,73,153,.12); backdrop-filter:blur(8px); }}
-    .actual-action-time {{ flex:0 1 210px; min-width:180px; display:grid; gap:2px; border:1px solid #d8e5f7; border-radius:12px; padding:5px 8px; background:#fff; }}
+    .notice-preview pre {{ margin:0; max-height:88px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; padding:9px 10px; color:#0c244d; background:#fff; font:12px/1.5 "Microsoft YaHei", Arial, sans-serif; }}
+    .notice-preview:focus-within pre,.notice-preview:hover pre {{ max-height:160px; }}
+    .form-actions {{ position:sticky; bottom:8px; z-index:8; display:flex; justify-content:flex-end; gap:7px; align-items:center; margin-top:0; border:1px solid #d8e5f7; border-radius:15px; padding:7px; background:linear-gradient(135deg,rgba(255,255,255,.98),rgba(247,251,255,.96)); box-shadow:0 12px 26px rgba(15,73,153,.12); backdrop-filter:blur(8px); }}
+    .actual-action-time {{ flex:0 1 190px; min-width:168px; display:grid; gap:2px; border:1px solid #d8e5f7; border-radius:12px; padding:4px 7px; background:#fff; }}
     .actual-action-time span {{ margin:0; color:#0a57d8; font-size:10px; font-weight:950; line-height:1.1; }}
     .actual-action-time input {{ min-height:26px; border:0; border-radius:8px; padding:0; color:#0c244d; background:transparent; font-size:12px; font-weight:900; box-shadow:none; }}
     .actual-action-time input:focus {{ outline:2px solid rgba(31,99,255,.16); outline-offset:2px; }}
     .job-status {{ color:#64748b; font-size:12px; font-weight:800; }}
     .form-actions .job-status {{ margin-right:auto; }}
-    .action-reason {{ max-width:220px; border-radius:999px; padding:5px 8px; color:#64748b; background:#f1f6fd; font-size:11px; font-weight:900; line-height:1.25; }}
+    .action-reason {{ max-width:190px; border-radius:999px; padding:4px 7px; color:#64748b; background:#f1f6fd; font-size:11px; font-weight:900; line-height:1.25; }}
     .action-reason.warn {{ color:#8a4b00; background:#fff4d6; }}
     .action-reason.ready {{ color:#087443; background:#e8fff3; }}
     .action-reason.blocked {{ color:#b42318; background:#fff1f0; }}
@@ -1964,19 +1967,19 @@ def render_workbench_lite(
     .end-check-backdrop {{ position:fixed; inset:0; z-index:60; display:grid; place-items:center; padding:24px; background:rgba(8,32,74,.36); backdrop-filter:blur(8px); }}
     .end-check-backdrop[hidden] {{ display:none; }}
     .end-check-dialog {{ width:min(560px,100%); border:1px solid #d8e5f7; border-radius:24px; background:#fff; box-shadow:0 28px 70px rgba(8,32,74,.24); overflow:hidden; }}
-    .end-check-head {{ padding:18px 20px; background:linear-gradient(135deg,#f8fbff,#eef6ff); border-bottom:1px solid #e5edf8; }}
+    .end-check-head {{ padding:15px 18px; background:linear-gradient(135deg,#f8fbff,#eef6ff); border-bottom:1px solid #e5edf8; }}
     .end-check-head span {{ display:inline-flex; width:max-content; border-radius:999px; padding:5px 10px; color:#0a57d8; background:#eaf3ff; font-weight:900; font-size:12px; }}
-    .end-check-head strong {{ display:block; margin-top:8px; color:#0c244d; font-size:20px; }}
-    .end-check-head p {{ margin:6px 0 0; color:#64748b; line-height:1.5; }}
-    .end-check-list {{ display:grid; gap:9px; margin:0; padding:16px 20px; list-style:none; }}
-    .end-check-list li {{ display:grid; grid-template-columns:22px minmax(0,1fr); gap:10px; align-items:start; border:1px solid #dce8f8; border-radius:16px; padding:11px 12px; background:#fbfdff; }}
+    .end-check-head strong {{ display:block; margin-top:7px; color:#0c244d; font-size:18px; line-height:1.25; }}
+    .end-check-head p {{ display:none; }}
+    .end-check-list {{ display:grid; gap:7px; margin:0; padding:14px 18px; list-style:none; }}
+    .end-check-list li {{ display:grid; grid-template-columns:20px minmax(0,1fr); gap:9px; align-items:start; border:1px solid #dce8f8; border-radius:15px; padding:9px 10px; background:#fbfdff; }}
     .end-check-list li::before {{ content:""; width:14px; height:14px; margin-top:2px; border-radius:999px; background:#94a3b8; box-shadow:0 0 0 4px #f1f5f9; }}
     .end-check-list li.ok::before {{ background:#12b886; box-shadow:0 0 0 4px #e8fff3; }}
     .end-check-list li.warn::before {{ background:#f59e0b; box-shadow:0 0 0 4px #fff4d6; }}
     .end-check-list li.blocked::before {{ background:#e04d5f; box-shadow:0 0 0 4px #fff1f0; }}
     .end-check-list b {{ display:block; color:#0c244d; font-size:14px; }}
     .end-check-list small {{ display:block; margin-top:3px; color:#64748b; line-height:1.45; }}
-    .end-check-actions {{ display:flex; justify-content:flex-end; gap:10px; padding:14px 20px 18px; border-top:1px solid #e5edf8; background:#fbfdff; }}
+    .end-check-actions {{ display:flex; justify-content:flex-end; gap:10px; padding:12px 18px 15px; border-top:1px solid #e5edf8; background:#fbfdff; }}
     .target-candidate-dialog {{ width:min(760px,100%); max-height:min(760px,88vh); display:grid; grid-template-rows:auto minmax(0,1fr) auto; }}
     .target-candidate-list {{ display:grid; gap:9px; overflow:auto; padding:16px 20px; }}
     .target-candidate-row {{ border:1px solid #dce8f8; border-radius:16px; padding:12px; background:#fff; text-align:left; cursor:pointer; display:grid; gap:7px; color:#0c244d; }}
@@ -2009,6 +2012,7 @@ def render_workbench_lite(
       .form-grid {{ grid-template-columns:1fr; }}
       .site-photo-upload {{ grid-template-columns:1fr; }}
       .detail-status-board {{ gap:4px; }}
+      .detail-head {{ grid-template-columns:1fr; }}
       .detail-status-item strong {{ max-width:96px; }}
       label:has(textarea), label:nth-last-child(1) {{ grid-column:auto; }}
       .form-actions {{ flex-wrap:wrap; }}
@@ -2020,11 +2024,11 @@ def render_workbench_lite(
   <header class="topbar">
     <div class="brand">
       <div class="logo brand-logo">世纪互联<br>VNET</div>
-      <div><h1>南通基地-运维灯塔工作台</h1><p id="lite-workbench-subtitle">{_e(WORK_TYPE_FILTER_LABELS.get(view_work, '通告'))} · 后端驱动工作台</p></div>
+      <div><h1>南通基地-运维灯塔工作台</h1><p id="lite-workbench-subtitle">{_e(WORK_TYPE_FILTER_LABELS.get(view_work, '通告'))} · 工作台</p></div>
     </div>
     <nav class="top-actions">
       <label class="scope-switch"><b class="scope-icon" aria-hidden="true">楼</b><span>当前楼栋</span><select class="scope-select" id="lite-scope-select" aria-label="切换楼栋">{scope_select}</select></label>
-      <a class="top-link" href="/" aria-label="返回功能选择">功能选择</a>
+      <a class="top-link" href="/" aria-label="返回">返回</a>
       <a class="top-link" href="/engineer/mop?scope={_e(scope)}" aria-label="打开维护单管理">维护单</a>
       <a class="exit" href="/api/auth/logout" aria-label="退出登录">退出</a>
     </nav>
@@ -2047,10 +2051,10 @@ def render_workbench_lite(
       <div class="refresh-picker" id="refresh-picker">
         <button class="btn ghost" id="refresh-open" type="button" aria-expanded="false" aria-controls="refresh-menu">刷新数据</button>
         <div class="refresh-menu" id="refresh-menu">
-          <div class="refresh-menu-head"><strong>低频刷新</strong><span>最近源表同步：{_e(source_loaded_text)}</span></div>
-          <button id="lite-refresh-page" type="button">刷新本页<small>只重新读取当前楼栋和类型</small></button>
-          <button id="lite-refresh-repair" type="button">刷新检修<small>全局同步检修源表快照</small></button>
-          <button id="lite-refresh-change" type="button">刷新变更<small>全局同步阿里和智航变更</small></button>
+          <div class="refresh-menu-head"><strong>刷新数据</strong><span>{_e(source_loaded_text)}</span></div>
+          <button id="lite-refresh-page" type="button">刷新本页</button>
+          <button id="lite-refresh-repair" type="button">刷新检修</button>
+          <button id="lite-refresh-change" type="button">刷新变更</button>
         </div>
       </div>
       <form method="get" action="/workbench-lite">
@@ -2096,7 +2100,7 @@ def render_workbench_lite(
           <form method="post" action="/workbench-lite/parse">
             <input type="hidden" name="scope" value="{_e(scope)}">
             <input type="hidden" name="work_type" value="{_e(view_work)}">
-            <textarea name="paste_text" placeholder="粘贴完整通告文本，后端解析后会填入当前通告。">{_e(paste_text)}</textarea>
+            <textarea name="paste_text" placeholder="粘贴完整通告文本">{_e(paste_text)}</textarea>
             <button class="btn primary" type="submit">解析到当前通告</button>
           </form>
         </details>
@@ -2109,7 +2113,6 @@ def render_workbench_lite(
       <header class="end-check-head">
         <span>结束前检查</span>
         <strong id="lite-end-check-title">确认发送结束通告</strong>
-        <p>请确认下面几项，确认后才会把结束任务交给后端队列。</p>
       </header>
       <ul class="end-check-list" id="lite-end-check-list"></ul>
       <footer class="end-check-actions">
@@ -2123,7 +2126,6 @@ def render_workbench_lite(
       <header class="end-check-head">
         <span>目标多维关系</span>
         <strong id="lite-target-candidates-title">选择对应目标记录</strong>
-        <p id="lite-target-candidates-desc">按当前通告标题、时间、内容和原因查找目标多维表中的相似记录。</p>
       </header>
       <div class="target-candidate-list" id="lite-target-candidate-list"></div>
       <footer class="end-check-actions">
@@ -2137,7 +2139,6 @@ def render_workbench_lite(
       <header class="end-check-head">
         <span>未发送修改</span>
         <strong id="lite-discard-title">切换会丢失当前修改</strong>
-        <p>当前通告有未发送的编辑内容。继续切换会放弃这些修改。</p>
       </header>
       <footer class="end-check-actions">
         <button class="btn ghost" type="button" id="lite-discard-cancel">继续编辑</button>
@@ -2295,7 +2296,7 @@ def render_workbench_lite(
           ? ['现场图片', `已累计上传${{sitePhotoCount}}张，满足结束条件。`, 'ok']
           : ['现场图片', '还没有现场照片。请先在当前通告里上传至少 1 张现场照片，再发送结束。', 'blocked']);
       }} else {{
-        checks.push(['现场图片', '当前通告类型不强制现场图片。', 'ok']);
+        checks.push(['现场图片', '无要求', 'ok']);
       }}
       checks.push(isMissingTargetRecordId(targetRecordId)
         ? ['目标多维', '缺少目标多维记录 ID，不能直接结束，请先绑定或重新选择目标记录。', 'blocked']
@@ -2307,7 +2308,7 @@ def render_workbench_lite(
       }} else {{
         checks.push(['MOP状态', '当前通告类型不要求MOP。', 'ok']);
       }}
-      checks.push(['飞书消息', '确认后将创建后台任务发送结束通告；如个人消息失败，页面会保留可复制文本。', 'ok']);
+      checks.push(['飞书消息', '确认后发送结束通告；如个人消息失败，可复制文本。', 'ok']);
       list.replaceChildren(...checks.map(([title, detail, tone]) => endCheckItem(title, detail, tone)));
       confirmButton.disabled = checks.some(([, , tone]) => tone === 'blocked');
       pendingEndSubmitter = submitter || null;
@@ -2969,7 +2970,7 @@ def render_workbench_lite(
         }}
         return;
       }}
-      setActionReason('字段可发送，后台排队处理', 'ready');
+      setActionReason('字段可发送', 'ready');
     }}
     let liteTargetCandidates = [];
     let liteSelectedTargetIndex = -1;
@@ -3345,7 +3346,7 @@ def render_workbench_lite(
       if (navLink) {{
         event.preventDefault();
         if (navLink.matches('.ongoing-row.optimistic')) {{
-          setLiteStatus('该通告正在后台同步，成功后会自动变为可更新状态');
+          setLiteStatus('该通告正在同步，完成后可继续处理');
           return;
         }}
         if (navLink.matches('.notice-row.is-disabled')) {{
@@ -3587,7 +3588,9 @@ def render_workbench_lite(
       }}
     }});
     window.addEventListener('popstate', () => {{
-      navigateLite(location.href, {{ push: false, label: '正在恢复页面...' }}).catch(() => location.reload());
+      navigateLite(location.href, {{ push: false, label: '正在恢复页面...' }}).catch(() => {{
+        setLiteStatus('页面状态恢复失败，请点击刷新本页');
+      }});
     }});
     function formPayload(form, submitter, actionOverride) {{
       const actualActionTime = ensureActualActionTime(form);
@@ -3704,7 +3707,7 @@ def render_workbench_lite(
     function renderOngoingRow(row, draft, action) {{
       const title = String(draft.title || '进行中通告').trim();
       const isEnding = action === 'end';
-      const status = isEnding ? '结束处理中' : '后台处理中';
+      const status = isEnding ? '结束发送中' : '发送中';
       row.className = 'ongoing-row active optimistic';
       row.href = '#';
       row.title = title;
@@ -3754,7 +3757,7 @@ def render_workbench_lite(
       if (!row) return;
       row.classList.add('is-disabled');
       row.setAttribute('aria-disabled', 'true');
-      row.setAttribute('data-disabled-reason', '已提交后台处理');
+      row.setAttribute('data-disabled-reason', '已提交');
       row.querySelector('.row-status')?.replaceChildren(document.createTextNode('处理中'));
     }}
     function applyOptimisticSubmission(form, action, payload) {{
@@ -3768,7 +3771,7 @@ def render_workbench_lite(
       const row = findOngoingRowByDraft(draft);
       if (row) {{
         row.classList.add('optimistic');
-        row.querySelector('.row-status')?.replaceChildren(document.createTextNode('后台处理中'));
+        row.querySelector('.row-status')?.replaceChildren(document.createTextNode('发送中'));
       }} else if (action === 'start') {{
         const {{ list }} = ongoingListElements();
         if (list) {{
@@ -3781,11 +3784,11 @@ def render_workbench_lite(
       }}
       if (action === 'start') {{
         removeSourceRowForDraft(draft);
-        setLiteStatus('开始任务已提交后台，发送成功后自动加入进行中');
+        setLiteStatus('开始已提交，发送中');
       }} else if (action === 'end') {{
-        setLiteStatus('结束任务已提交后台，成功后自动移出进行中');
+        setLiteStatus('结束已提交，发送中');
       }} else {{
-        setLiteStatus('更新任务已提交后台，成功后自动刷新当前通告');
+        setLiteStatus('更新已提交，发送中');
       }}
       return true;
     }}
@@ -3929,7 +3932,7 @@ def render_workbench_lite(
         success: '发送成功',
         failed: '发送失败'
       }};
-      return map[String(phase || '')] || String(phase || '后台处理中');
+      return map[String(phase || '')] || String(phase || '发送中');
     }}
     async function pollSubmittedJob(jobId, label, payload) {{
       if (!jobId) return false;
@@ -3950,32 +3953,32 @@ def render_workbench_lite(
             return true;
           }}
           if (phase === 'failed') {{
-            const message = job.error || job.upload_message || job.message_error || '后台任务失败';
+            const message = job.error || job.upload_message || job.message_error || '发送失败';
             applyJobPatch(job.frontend_patch, payload, false, message);
             showLiteError(message);
             setLiteStatus('发送失败：' + message);
             setLiteStatus('发送失败：' + friendlyLiteMessage(message));
             return true;
           }}
-          setLiteStatus('后台处理中：' + jobPhaseText(phase));
+          setLiteStatus('发送中：' + jobPhaseText(phase));
         }} catch (error) {{
-          setLiteStatus('后台任务状态读取中...');
+          setLiteStatus('正在读取任务状态...');
         }}
         delay = Math.min(2600, Math.round(delay * 1.25));
       }}
-      setLiteStatus('后台仍在处理，请稍后刷新本页查看结果');
+      setLiteStatus('仍在处理，请稍后刷新本页查看结果');
       return false;
     }}
     function schedulePostSubmitRefresh(label, jobId, payload) {{
       if (jobId) {{
         pollSubmittedJob(jobId, label || '任务已完成，正在更新列表...', payload).catch(() => {{
-          setLiteStatus('后台任务仍在处理，请稍后刷新本页');
+          setLiteStatus('仍在处理，请稍后刷新本页');
         }});
         return;
       }}
       setTimeout(() => {{
         if (liteFormDirty) {{
-          setLiteStatus('后台有更新，当前正在编辑，暂不刷新列表');
+          setLiteStatus('有新状态，当前正在编辑，暂不刷新列表');
           return;
         }}
         refreshCurrentLite('后台状态校准中...', ['.status', '.summary']).catch(() => null);
@@ -4044,12 +4047,12 @@ def render_workbench_lite(
       }}
       setLiteFormDirty(false);
       setFormSubmitBusy(form, true);
-      setLiteStatus('已加入后台发送队列，后端正在受理，页面不会执行飞书或多维写入');
+      setLiteStatus('已提交，发送中');
       let payload = null;
       try {{
         await nextBrowserTurn();
         payload = formPayload(form, submitter, submitAction);
-        setLiteStatus('正在提交后端，页面只负责排队展示');
+        setLiteStatus('正在提交');
         await nextBrowserTurn();
         const response = await fetch('/api/workbench-actions', {{
           method: 'POST',

@@ -5,7 +5,7 @@
       <strong>{{ error ? "页面加载失败" : "正在打开页面" }}</strong>
       <p v-if="error">{{ error.message || "当前模块没有加载成功。" }}</p>
     </div>
-    <button v-if="error && retry" class="btn blue" type="button" @click="retry">
+    <button type="button" v-if="error && retry" class="btn blue" @click="retry">
       重新加载
     </button>
   </section>

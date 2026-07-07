@@ -265,6 +265,7 @@ NOTICE_WORK_TYPE_LABELS = {
     WORK_TYPE_POWER: "上电",
     WORK_TYPE_POLLING: "轮巡",
     WORK_TYPE_ADJUST: "调整",
+    WORK_TYPE_EVENT: "事件",
 }
 NOTICE_TYPE_BY_WORK_TYPE = {
     WORK_TYPE_MAINTENANCE: NOTICE_TYPE_MAINTENANCE,
@@ -273,6 +274,7 @@ NOTICE_TYPE_BY_WORK_TYPE = {
     WORK_TYPE_POWER: NOTICE_TYPE_POWER_UP,
     WORK_TYPE_POLLING: NOTICE_TYPE_POLLING,
     WORK_TYPE_ADJUST: NOTICE_TYPE_ADJUST,
+    WORK_TYPE_EVENT: NOTICE_TYPE_EVENT,
 }
 WORK_TYPE_BY_NOTICE_TYPE = {
     NOTICE_TYPE_MAINTENANCE: WORK_TYPE_MAINTENANCE,
@@ -288,6 +290,7 @@ WORK_TYPE_BY_NOTICE_TYPE = {
     "轮巡通告": WORK_TYPE_POLLING,
     NOTICE_TYPE_ADJUST: WORK_TYPE_ADJUST,
     "调整通告": WORK_TYPE_ADJUST,
+    NOTICE_TYPE_EVENT: WORK_TYPE_EVENT,
 }
 END_SITE_PHOTO_REQUIRED_WORK_TYPES = {
     WORK_TYPE_MAINTENANCE,
@@ -5968,6 +5971,7 @@ class MaintenancePortalService:
             WORK_TYPE_POWER: "上电",
             WORK_TYPE_POLLING: "轮巡",
             WORK_TYPE_ADJUST: "调整",
+            WORK_TYPE_EVENT: "事件",
         }.get(str(work_type or ""), "维保")
 
     @classmethod
@@ -6000,6 +6004,9 @@ class MaintenancePortalService:
             "adjust": WORK_TYPE_ADJUST,
             "调整": WORK_TYPE_ADJUST,
             "设备调整": WORK_TYPE_ADJUST,
+            "event": WORK_TYPE_EVENT,
+            "事件": WORK_TYPE_EVENT,
+            "事件通告": WORK_TYPE_EVENT,
         }
         result: list[str] = []
         for value in raw_values:
@@ -7851,6 +7858,13 @@ class MaintenancePortalService:
                 field_config.get("actual_start", ""),
                 field_config.get("actual_end", ""),
             ]
+        if work_type == WORK_TYPE_EVENT:
+            return [
+                field_config.get("occurrence_time", ""),
+                field_config.get("response_time", ""),
+                field_config.get("recover_time", ""),
+                field_config.get("end_time", ""),
+            ]
         return [
             field_config.get("actual_start", ""),
             field_config.get("plan_start", ""),
@@ -7916,6 +7930,9 @@ class MaintenancePortalService:
             "adjust": WORK_TYPE_ADJUST,
             "调整": WORK_TYPE_ADJUST,
             "设备调整": WORK_TYPE_ADJUST,
+            "event": WORK_TYPE_EVENT,
+            "事件": WORK_TYPE_EVENT,
+            "事件通告": WORK_TYPE_EVENT,
         }
         return aliases.get(text.lower()) or aliases.get(text) or WORK_TYPE_MAINTENANCE
 
@@ -8251,6 +8268,9 @@ class MaintenancePortalService:
             "adjust": WORK_TYPE_ADJUST,
             "调整": WORK_TYPE_ADJUST,
             "设备调整": WORK_TYPE_ADJUST,
+            "event": WORK_TYPE_EVENT,
+            "事件": WORK_TYPE_EVENT,
+            "事件通告": WORK_TYPE_EVENT,
         }
         work_type = aliases.get(work_type.lower()) or aliases.get(work_type) or WORK_TYPE_MAINTENANCE
         if work_type == WORK_TYPE_CHANGE:
@@ -8276,6 +8296,8 @@ class MaintenancePortalService:
             if work_type == WORK_TYPE_POLLING
             else NOTICE_TYPE_ADJUST
             if work_type == WORK_TYPE_ADJUST
+            else NOTICE_TYPE_EVENT
+            if work_type == WORK_TYPE_EVENT
             else NOTICE_TYPE_MAINTENANCE
         )
         scope = self._normalize_scope(scope)
@@ -8286,6 +8308,10 @@ class MaintenancePortalService:
         query_dates = self._date_keys_from_values(start_time, end_time)
         field_config = get_field_config(notice_type)
         title_field = (
+            field_config.get("alarm_desc")
+            if work_type == WORK_TYPE_EVENT
+            else ""
+        ) or (
             field_config.get("title")
             or field_config.get("name")
             or "名称"
@@ -8312,6 +8338,8 @@ class MaintenancePortalService:
             fields = target.get("display_fields") or {}
             target_title = str(
                 fields.get(title_field)
+                or fields.get("告警描述")
+                or fields.get("概述")
                 or fields.get("名称")
                 or fields.get("标题")
                 or fields.get("名称（标题）")
@@ -8348,20 +8376,24 @@ class MaintenancePortalService:
                 fields.get("计划时间"),
             )
             target_start = str(
-                fields.get(field_config.get("plan_start", ""))
+                fields.get(field_config.get("occurrence_time", ""))
+                or fields.get(field_config.get("plan_start", ""))
                 or fields.get(field_config.get("actual_start", ""))
                 or fields.get(field_config.get("start_time", ""))
                 or fields.get(field_config.get("expected_time", ""))
                 or ""
             ).strip()
             target_end = str(
-                fields.get(field_config.get("plan_end", ""))
+                fields.get(field_config.get("end_time", ""))
+                or fields.get(field_config.get("recover_time", ""))
+                or fields.get(field_config.get("plan_end", ""))
                 or fields.get(field_config.get("actual_end", ""))
-                or fields.get(field_config.get("end_time", ""))
                 or fields.get(field_config.get("fault_time", ""))
                 or ""
             ).strip()
             status = str(fields.get(status_field) or "").strip() if status_field else ""
+            if work_type == WORK_TYPE_EVENT:
+                status = self._event_status(fields)
             detail_fields = self._target_candidate_detail_fields(fields)
             date_matched = bool(query_dates and target_dates and (query_dates & target_dates))
             match_reason = self._target_candidate_match_reason(
@@ -8501,8 +8533,11 @@ class MaintenancePortalService:
             return 0
         aliases = {
             "title": [
+                field_config.get("alarm_desc"),
                 field_config.get("title"),
                 field_config.get("name"),
+                "告警描述",
+                "概述",
                 "名称",
                 "名称（标题）",
                 "标题",

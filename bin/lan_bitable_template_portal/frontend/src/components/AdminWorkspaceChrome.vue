@@ -1,9 +1,8 @@
 <template>
   <section class="admin-overview" aria-label="管理员概览">
-    <button
+    <button type="button"
       v-for="item in overviewItems"
       :key="item.key"
-      type="button"
       :class="item.tone"
       :aria-label="item.ariaLabel"
       :title="`打开${item.targetLabel}`"
@@ -16,11 +15,10 @@
   </section>
 
   <nav class="tabs admin-workspace-tabs" aria-label="管理员工作区">
-    <button
+    <button type="button"
       v-for="item in tabs"
       :key="item.key"
       :class="{ active: activeTab === item.key }"
-      type="button"
       @click="emit('select-tab', item.key)"
     >
       <strong>{{ item.label }}</strong>
@@ -30,7 +28,7 @@
   </nav>
 
   <div class="admin-advanced-toggle">
-    <button class="btn ghost" type="button" @click="emit('toggle-advanced')">
+    <button type="button" class="btn ghost" @click="emit('toggle-advanced')">
       {{ advancedVisible ? "收起高级诊断" : "显示高级诊断" }}
     </button>
   </div>

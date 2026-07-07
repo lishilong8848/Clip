@@ -12,6 +12,7 @@ import base64
 import ast
 import re
 import gc
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -89,6 +90,14 @@ from upload_event_module.ui.main_window_ui import MainWindowUiMixin  # noqa: E40
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+_TEST_MONTH_START = MaintenancePortalService._recent_month_starts()[0]
+_TEST_MONTH_LABEL = f"{_TEST_MONTH_START.month}月"
+_TEST_MONTH_KEY = _TEST_MONTH_START.strftime("%Y-%m")
+
+
+def _test_datetime(day: int = 8, time_text: str = "09:00") -> str:
+    return f"{_TEST_MONTH_KEY}-{day:02d} {time_text}"
+
 
 def _free_tcp_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -127,7 +136,7 @@ class _ChangeSourceFailureService(MaintenancePortalService):
         return []
 
     def _load_records(self):
-        self._records = [_build_record("m1", "A楼", "过滤网维护", "5月")]
+        self._records = [_build_record("m1", "A楼", "过滤网维护", _TEST_MONTH_LABEL)]
         self._maintenance_loaded_once = True
         return self._records
 
@@ -271,6 +280,10 @@ class _NativeFastAPIRouteService:
         ongoing_items,
         work_type="",
         sections=None,
+        records_page=1,
+        records_page_size=0,
+        ongoing_page=1,
+        ongoing_page_size=0,
     ):
         return {
             "scope": scope,
@@ -279,6 +292,10 @@ class _NativeFastAPIRouteService:
             "search": search,
             "work_type": work_type,
             "sections": list(sections or []),
+            "records_page": records_page,
+            "records_page_size": records_page_size,
+            "ongoing_page": ongoing_page,
+            "ongoing_page_size": ongoing_page_size,
             "ongoing": ongoing_items,
             "route": "workbench",
             "scope_options": [{"value": "ALL", "label": "全部"}],
@@ -440,9 +457,13 @@ def _build_change_record(
     building: str,
     progress: str,
     title: str = "测试变更",
-    start_time: str = "2026-05-08 09:00",
-    end_time: str = "2026-05-08 18:00",
+    start_time: str | None = None,
+    end_time: str | None = None,
 ):
+    if start_time is None:
+        start_time = _test_datetime(8, "09:00")
+    if end_time is None:
+        end_time = _test_datetime(8, "18:00")
     return {
         "record_id": record_id,
         "raw_fields": {},
@@ -472,12 +493,14 @@ def _build_repair_record(
     source: str = "",
     building: str = "D楼",
     specialty: str = "电气",
-    fault_time: str = "2026-05-08 08:20",
+    fault_time: str | None = None,
     expected_time: str = "",
     started: bool = False,
     ended: bool = False,
     target_record_id: str = "",
 ):
+    if fault_time is None:
+        fault_time = _test_datetime(8, "08:20")
     raw_fields = {}
     if target_record_id:
         raw_fields["设备检修关联"] = [
@@ -509,8 +532,8 @@ def _build_repair_record(
             "故障发生现象描述": "测试故障现象",
             "故障发生时间": fault_time,
             "期望完成时间": expected_time,
-            "维修开始时间": "2026-05-08 09:00" if started else "",
-            "维修结束时间": "2026-05-08 18:00" if ended else "",
+            "维修开始时间": _test_datetime(8, "09:00") if started else "",
+            "维修结束时间": _test_datetime(8, "18:00") if ended else "",
             "维修进展描述": "维修准备中",
             "流程": "流程",
             "区域": "D-UPS间",
@@ -523,9 +546,13 @@ def _build_zhihang_change_record(
     *,
     title: str,
     progress: str = "未开始",
-    plan_start: str = "2026-05-08 09:00",
-    plan_end: str = "2026-05-08 18:00",
+    plan_start: str | None = None,
+    plan_end: str | None = None,
 ):
+    if plan_start is None:
+        plan_start = _test_datetime(8, "09:00")
+    if plan_end is None:
+        plan_end = _test_datetime(8, "18:00")
     return {
         "record_id": record_id,
         "raw_fields": {},
@@ -1293,7 +1320,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             store = LanPortalStateStore(db_path)
             store.runtime_health_report()
             now = time.time()
-            with sqlite3.connect(str(db_path)) as conn:
+            with closing(sqlite3.connect(str(db_path))) as conn:
                 conn.execute(
                     """
                     INSERT INTO notice_identity_map(
@@ -2227,7 +2254,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             return (
                 f"【事件通告】状态：{status}\n"
                 "【标题】测试测试测试事件\n"
-                "【时间】2026-05-24 09:30~2026-05-24 18:30\n"
+                "【事件发生时间】2026-05-24 09:30\n"
+                "【机楼】A楼\n"
+                "【来源】BMS\n"
+                "【等级】I3\n"
                 "【概述】测试测试测试\n"
                 f"【进展】{progress}"
             )
@@ -2241,7 +2271,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "_is_placeholder_record": True,
                     "notice_type": "事件通告",
                     "text": event_text(status, f"{status}进展"),
-                    "time_str": "2026-05-24 09:30~2026-05-24 18:30",
+                    "time_str": "2026-05-24 09:30",
+                    "building": "A楼",
+                    "event_source": "BMS",
                     "level": "I3",
                 },
                 "response_time": "2026-05-24 09:30",
@@ -2263,6 +2295,12 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 file_name="event-update.png",
                 mime_type="image/png",
                 content=b"event-update-bytes",
+            )
+            end_screenshot = store.put_notice_upload_attachment(
+                open_id="qt-local",
+                file_name="event-end.png",
+                mime_type="image/png",
+                content=b"event-end-bytes",
             )
 
             def fake_update(record_id, notice_type, notice_payload):
@@ -2293,9 +2331,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     update_payload = payload("update", "localid-event-update", "更新")
                     update_payload["screenshot_upload_id"] = screenshot["upload_id"]
                     updated = PortalRuntime.execute_local_notice_upload(update_payload)
-                    ended = PortalRuntime.execute_local_notice_upload(
-                        payload("end", "localid-event-end", "结束")
-                    )
+                    end_payload = payload("end", "localid-event-end", "结束")
+                    end_payload["screenshot_upload_id"] = end_screenshot["upload_id"]
+                    ended = PortalRuntime.execute_local_notice_upload(end_payload)
             finally:
                 PortalRuntime.state_store = old_store
                 PortalRuntime.local_upload_locks = old_locks
@@ -2310,6 +2348,58 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual([call[0] for call in update_calls], ["rec-event-1", "rec-event-1"])
         create_record.assert_called_once()
         self.assertGreaterEqual(query_record.call_count, 2)
+
+    def test_local_event_end_requires_screenshot_before_remote_update(self):
+        request_payload = {
+            "action_type": "end",
+            "data_dict": {
+                "active_item_id": "event-active-end-no-shot",
+                "record_id": "rec-event-end-no-shot",
+                "target_record_id": "rec-event-end-no-shot",
+                "_is_placeholder_record": False,
+                "notice_type": "事件通告",
+                "text": (
+                    "【事件通告】状态：结束\n"
+                    "【标题】测试测试测试事件\n"
+                    "【事件发生时间】2026-05-24 09:30\n"
+                    "【机楼】A楼\n"
+                    "【来源】BMS\n"
+                    "【等级】I3\n"
+                    "【概述】测试测试测试\n"
+                    "【进展】结束"
+                ),
+                "time_str": "2026-05-24 09:30",
+                "building": "A楼",
+                "event_source": "BMS",
+                "level": "I3",
+            },
+            "response_time": "2026-05-24 09:30",
+            "recover_selected": False,
+            "robot_group_choice": "auto",
+        }
+
+        old_store = PortalRuntime.state_store
+        with tempfile.TemporaryDirectory() as tmp:
+            PortalRuntime.state_store = LanPortalStateStore(
+                Path(tmp) / "lan_portal_state.sqlite3"
+            )
+            try:
+                with patch.object(
+                    portal_server_module,
+                    "query_record_by_id",
+                    return_value=(True, {"fields": {"标题": "测试测试测试事件"}}),
+                ), patch.object(
+                    portal_server_module,
+                    "update_bitable_record_by_payload",
+                ) as update_record:
+                    result = PortalRuntime.execute_local_notice_upload(request_payload)
+            finally:
+                PortalRuntime.state_store = old_store
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["name"], "结束")
+        self.assertIn("必须上传通告截图", result["message"])
+        update_record.assert_not_called()
 
     def test_backend_source_start_reuses_existing_target_record(self):
         old_store = PortalRuntime.state_store
@@ -4166,7 +4256,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "title": "A楼网络设备变更测试",
                 "text": "【设备变更】状态：开始\n【名称】A楼网络设备变更测试",
             }
-            with sqlite3.connect(str(db_path)) as conn:
+            with closing(sqlite3.connect(str(db_path))) as conn:
                 conn.execute(
                     """
                     INSERT INTO qt_active_items(
@@ -4238,6 +4328,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(job_doc["prepared"]["notice_type"], "变更通告")
             self.assertIn("【变更通告】状态：开始", job_doc["prepared"]["text"])
             self.assertNotIn("【设备变更】", job_doc["prepared"]["text"])
+            migrated.shutdown_write_worker(timeout=1.0)
+            store.shutdown_write_worker(timeout=1.0)
             del migrated
             del store
             gc.collect()
@@ -4733,7 +4825,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            service._records = [_build_record("m1", "A楼", "过滤网维护", "5月")]
+            service._records = [_build_record("m1", "A楼", "过滤网维护", _TEST_MONTH_LABEL)]
             memory = service._get_record_memory(service._records[0])
             self.assertEqual(memory["location"], "旧位置")
 
@@ -5051,7 +5143,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
     def test_orphan_started_item_is_pruned_when_qt_and_target_record_are_gone(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp), service_cls=_TargetLookupService)
-            service._records = [_build_record("rec1", "A楼", "过滤网维护", "5月")]
+            service._records = [_build_record("rec1", "A楼", "过滤网维护", _TEST_MONTH_LABEL)]
 
             start_job_id, should_start = service.create_action_job(
                 {
@@ -5081,7 +5173,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             removed = service.reconcile_orphan_started_items(
                 scope="A", ongoing_items=[]
             )
-            result = service.query_records(month="5月", scope="A", ongoing_items=[])
+            result = service.query_records(month=_TEST_MONTH_LABEL, scope="A", ongoing_items=[])
             daily = service.get_daily_summary(scope="A", ongoing_items=[])
 
             self.assertEqual(removed["removed"], 1)
@@ -5091,7 +5183,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
     def test_started_item_is_kept_when_target_record_still_exists(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp), service_cls=_TargetLookupService)
-            service._records = [_build_record("rec1", "A楼", "过滤网维护", "5月")]
+            service._records = [_build_record("rec1", "A楼", "过滤网维护", _TEST_MONTH_LABEL)]
             service.target_record_ids = {"target-existing"}
 
             start_job_id, should_start = service.create_action_job(
@@ -5122,7 +5214,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             removed = service.reconcile_orphan_started_items(
                 scope="A", ongoing_items=[]
             )
-            result = service.query_records(month="5月", scope="A", ongoing_items=[])
+            result = service.query_records(month=_TEST_MONTH_LABEL, scope="A", ongoing_items=[])
 
             self.assertEqual(removed["removed"], 0)
             self.assertEqual(result["records"][0]["work_summary"]["status"], "进行中")
@@ -5130,7 +5222,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
     def test_orphan_reconcile_suppresses_transient_feishu_fail_warning(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
-            service._records = [_build_record("rec1", "A楼", "过滤网维护", "5月")]
+            service._records = [_build_record("rec1", "A楼", "过滤网维护", _TEST_MONTH_LABEL)]
             start_job_id, _ = service.create_action_job(
                 {
                     "action": "start",
@@ -5164,7 +5256,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     scope="A", ongoing_items=[]
                 )
 
-            result = service.query_records(month="5月", scope="A", ongoing_items=[])
+            result = service.query_records(month=_TEST_MONTH_LABEL, scope="A", ongoing_items=[])
             self.assertEqual(removed["removed"], 0)
             self.assertEqual(result["records"][0]["work_summary"]["status"], "进行中")
             self.assertFalse(
@@ -5174,7 +5266,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
     def test_deleted_ongoing_item_clears_today_summary_and_work_status(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
-            service._records = [_build_record("rec1", "A楼", "过滤网维护", "5月")]
+            service._records = [_build_record("rec1", "A楼", "过滤网维护", _TEST_MONTH_LABEL)]
 
             start_job_id, should_start = service.create_action_job(
                 {
@@ -5214,7 +5306,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 },
                 scope="A",
             )
-            result = service.query_records(month="5月", scope="A", ongoing_items=[])
+            result = service.query_records(month=_TEST_MONTH_LABEL, scope="A", ongoing_items=[])
             daily = service.get_daily_summary(scope="A", ongoing_items=[])
 
             self.assertEqual(removed["work_status_removed"], 1)
@@ -5285,7 +5377,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
             service._records = [
-                _build_record("m-running", "A楼", "过滤网维护", "5月", status="进行中")
+                _build_record("m-running", "A楼", "过滤网维护", _TEST_MONTH_LABEL, status="进行中")
             ]
             service._upsert_work_status_item_locked(
                 {
@@ -5304,7 +5396,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 now="2026-05-08 09:30",
             )
 
-            result = service.query_records(month="5月", scope="A", ongoing_items=[])
+            result = service.query_records(month=_TEST_MONTH_LABEL, scope="A", ongoing_items=[])
             self.assertEqual([item["record_id"] for item in result["records"]], ["m-running"])
             self.assertEqual(result["records"][0]["source_progress"], "进行中")
 
@@ -5336,7 +5428,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
             service._records = [
-                _build_record("m-running", "A楼", "过滤网维护", "5月", status="进行中")
+                _build_record("m-running", "A楼", "过滤网维护", _TEST_MONTH_LABEL, status="进行中")
             ]
             service._upsert_work_status_item_locked(
                 {
@@ -5383,7 +5475,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
     def test_change_records_use_precise_scope_and_allowed_progress(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
-            service._records = [_build_record("m1", "A楼", "过滤网维护", "5月")]
+            service._records = [_build_record("m1", "A楼", "过滤网维护", _TEST_MONTH_LABEL)]
             service._change_records = [
                 _build_change_record("c1", building="A楼", progress="未开始", title="单楼变更"),
                 _build_change_record("c2", building="A楼、B楼", progress="未开始", title="园区变更"),
@@ -5395,7 +5487,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             with patch.object(
                 service, "_target_records_for_notice_type", return_value=[]
             ):
-                campus = service.query_records(month="5月", scope="CAMPUS")
+                campus = service.query_records(month=_TEST_MONTH_LABEL, scope="CAMPUS")
             self.assertEqual(
                 [item["record_id"] for item in campus["records"]],
                 ["c2", "c3"],
@@ -5405,10 +5497,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             with patch.object(
                 service, "_target_records_for_notice_type", return_value=[]
             ):
-                single = service.query_records(month="5月", scope="A")
+                single = service.query_records(month=_TEST_MONTH_LABEL, scope="A")
             self.assertEqual(
                 [item["record_id"] for item in single["records"]],
-                ["m1", "c1"],
+                ["m1", "c1", "c2", "c3"],
             )
 
     def test_workbench_records_are_limited_to_current_and_previous_month(self):
@@ -5482,7 +5574,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 _build_change_record("c-e", building="E楼", progress="进行中", title="E楼进行中变更")
             ]
 
-            result = service.query_records(month="5月", scope="E")
+            result = service.query_records(month=_TEST_MONTH_LABEL, scope="E")
             self.assertEqual([item["record_id"] for item in result["records"]], ["c-e"])
 
             job_id, should_start = service.create_action_job(
@@ -5874,6 +5966,46 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             result["source_candidates"][0]["source_app_token"],
             "AnEBwJlvGiJfDdkOB32cUPuknzg",
         )
+
+    def test_notice_target_candidates_support_event_lookup(self):
+        service = _TestMaintenancePortalService()
+        target_records = [
+            {
+                "record_id": "event-target",
+                "display_fields": {
+                    "告警描述": "BMS报A楼冷机高压告警",
+                    "机楼": "A楼",
+                    "事件等级": "I2",
+                    "事件发现来源": "BMS",
+                    "事件发生时间": "2026-06-24 10:00",
+                    "事件结束时间": "",
+                },
+            }
+        ]
+        called_notice_types: list[str] = []
+
+        def fake_target_records(notice_type: str, *_args, **_kwargs):
+            called_notice_types.append(notice_type)
+            return target_records
+
+        with patch.object(
+            service,
+            "_target_records_for_notice_type",
+            side_effect=fake_target_records,
+        ):
+            result = service.lookup_notice_target_candidates(
+                work_type="event",
+                scope="A",
+                title="BMS报A楼冷机高压告警",
+                start_time="2026-06-24 10:00",
+                action="update",
+            )
+
+        self.assertEqual(called_notice_types, ["事件通告"])
+        self.assertEqual(result["candidates"][0]["target_record_id"], "event-target")
+        self.assertEqual(result["candidates"][0]["notice_type"], "事件通告")
+        self.assertEqual(result["candidates"][0]["status"], "处理中")
+        self.assertEqual(result["candidates"][0]["start_time"], "2026-06-24 10:00")
 
     def test_simple_manual_power_action_prepares_upload_payload(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -6714,7 +6846,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 active_item_id="active-change-1",
             )
 
-            result = service.query_records(month="5月", scope="CAMPUS")
+            result = service.query_records(month=_TEST_MONTH_LABEL, scope="CAMPUS")
             summary = result["records"][0]["work_summary"]
             self.assertEqual(summary["work_type"], WORK_TYPE_CHANGE)
             self.assertEqual(summary["notice_type"], "变更通告")
@@ -6731,7 +6863,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 _build_repair_record("r3", building="CMDB唯一ID关联", title="无法识别楼栋"),
             ]
 
-            result = service.query_records(month="5月", scope="D")
+            result = service.query_records(month=_TEST_MONTH_LABEL, scope="D")
 
             self.assertEqual([item["record_id"] for item in result["records"]], ["r1"])
             self.assertEqual(result["records"][0]["work_type"], WORK_TYPE_REPAIR)
@@ -7111,7 +7243,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 )
             ]
 
-            result = service.query_records(month="5月", scope="D")
+            result = service.query_records(month=_TEST_MONTH_LABEL, scope="D")
 
             self.assertEqual([item["record_id"] for item in result["records"]], ["r1"])
             self.assertEqual(result["records"][0]["source_progress"], "进行中")
@@ -7215,14 +7347,14 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             service = self._new_temp_service(Path(tmp), _ChangeSourceFailureService)
             service.refresh()
 
-            result = service.query_records(month="5月", scope="A")
+            result = service.query_records(month=_TEST_MONTH_LABEL, scope="A")
             self.assertEqual([item["record_id"] for item in result["records"]], ["m1"])
             self.assertIn("变更源表同步失败", result["warnings"][0])
 
     def test_start_action_uses_cached_records_without_forced_refresh(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
-            service._records = [_build_record("rec1", "A楼", "过滤网维护", "5月")]
+            service._records = [_build_record("rec1", "A楼", "过滤网维护", _TEST_MONTH_LABEL)]
 
             def fail_refresh():
                 raise AssertionError("start action should not force source refresh")
@@ -7364,7 +7496,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
             def _load_records(self):
                 self.record_load_count += 1
-                self._records = [_build_record("m1", "A楼", "过滤网维护", "5月")]
+                self._records = [_build_record("m1", "A楼", "过滤网维护", _TEST_MONTH_LABEL)]
                 self._maintenance_loaded_once = True
                 return self._records
 
@@ -7403,7 +7535,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             service.refresh()
             service._last_loaded_ts = time.time() - 9999
 
-            result = service.query_records(month="5月", scope="A")
+            result = service.query_records(month=_TEST_MONTH_LABEL, scope="A")
 
             self.assertEqual([item["record_id"] for item in result["records"]], ["m1"])
             self.assertEqual(service.record_load_count, 1)
@@ -7522,7 +7654,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             a_records = service._filter_zhihang_change_records(scope="A")
             campus_records = service._filter_zhihang_change_records(scope="CAMPUS")
 
-            self.assertEqual([record["record_id"] for record in a_records], ["z-a", "z-all"])
+            self.assertEqual(
+                [record["record_id"] for record in a_records],
+                ["z-a", "z-campus", "z-ab", "z-abc", "z-all"],
+            )
             self.assertEqual(
                 [record["record_id"] for record in campus_records],
                 ["z-campus", "z-ab", "z-abc", "z-all"],
@@ -9854,7 +9989,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 {
                     "ALL": {
                         "records": [
-                            _build_record("m-old", "A楼", "维护", "5月"),
+                            _build_record("m-old", "A楼", "维护", _TEST_MONTH_LABEL),
                             _build_repair_record("r-old", building="A楼"),
                         ],
                         "zhihang_records": [],
@@ -11863,7 +11998,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertIn('name="manual" value="1"', html)
         self.assertIn('name="manual_id" value="manual:lite:E:polling"', html)
         self.assertIn("纯手填通告", html)
-        self.assertIn("纯手填或解析通告，提交后只创建目标多维记录，不要求源表 ID。", html)
+        self.assertIn("发送创建", html)
 
     def test_workbench_lite_specialty_field_uses_fixed_select_options(self):
         from lan_bitable_template_portal.workbench_lite import _detail_form

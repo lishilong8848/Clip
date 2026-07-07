@@ -10,7 +10,7 @@
   </section>
 
   <section v-else class="center-state request-panel">
-    <button v-if="showBack" class="back-link" type="button" @click="$emit('back')">
+    <button type="button" v-if="showBack" class="back-link" @click="$emit('back')">
       <span aria-hidden="true">‹</span>
       返回
     </button>
@@ -61,7 +61,7 @@
       @input="$emit('update-request', { reason: ($event.target as HTMLTextAreaElement).value })"
     ></textarea>
     <div class="row-actions">
-      <button class="btn blue" :disabled="!canSubmit" :title="submitTitle" @click="$emit('submit')">提交给管理员</button>
+      <button type="button" class="btn blue" :disabled="!canSubmit" :title="submitTitle" @click="$emit('submit')">提交给管理员</button>
       <span v-if="!canSubmit" class="submit-hint">{{ submitTitle }}</span>
     </div>
     <div v-if="request.requestId" class="verify-box" :class="`status-${request.status || 'pending'}`">
@@ -149,12 +149,12 @@ const userLineText = computed(() => {
   position: relative;
   z-index: 0;
   overflow: hidden;
-  width: min(720px, calc(100vw - 32px));
-  margin: 58px auto;
+  width: min(660px, calc(100vw - 32px));
+  margin: 44px auto;
   display: grid;
-  gap: 14px;
+  gap: 12px;
   justify-items: start;
-  padding: 32px;
+  padding: 26px;
   border: 1px solid #d8e5f7;
   border-radius: 24px;
   background:
@@ -167,11 +167,11 @@ const userLineText = computed(() => {
 .center-state::after {
   content: "";
   position: absolute;
-  right: -70px;
-  bottom: -96px;
+  right: -80px;
+  bottom: -108px;
   z-index: -1;
-  width: 260px;
-  height: 180px;
+  width: 230px;
+  height: 160px;
   pointer-events: none;
   opacity: 0.5;
   background:
@@ -182,20 +182,20 @@ const userLineText = computed(() => {
 
 .center-state:not(:has(.spinner))::before {
   content: "";
-  width: 58px;
-  height: 58px;
-  border-radius: 18px;
+  width: 50px;
+  height: 50px;
+  border-radius: 16px;
   background:
-    linear-gradient(#ffffff, #ffffff) 18px 15px / 22px 5px no-repeat,
-    linear-gradient(#ffffff, #ffffff) 18px 26px / 22px 5px no-repeat,
-    linear-gradient(#ffffff, #ffffff) 18px 37px / 22px 5px no-repeat,
+    linear-gradient(#ffffff, #ffffff) 15px 13px / 20px 4px no-repeat,
+    linear-gradient(#ffffff, #ffffff) 15px 23px / 20px 4px no-repeat,
+    linear-gradient(#ffffff, #ffffff) 15px 33px / 20px 4px no-repeat,
     linear-gradient(135deg, #0757d7, #1681ff);
   box-shadow: 0 14px 30px rgba(20, 103, 226, 0.26);
 }
 
 .center-state > strong {
   color: #071a39;
-  font-size: 24px;
+  font-size: 22px;
   line-height: 1.25;
   font-weight: 950;
   letter-spacing: 0;
@@ -237,10 +237,10 @@ const userLineText = computed(() => {
 
 .btn,
 a.btn {
-  min-height: 40px;
+  min-height: 38px;
   border: 1px solid #c8dcf3;
-  border-radius: 16px;
-  padding: 10px 16px;
+  border-radius: 15px;
+  padding: 9px 15px;
   background: #ffffff;
   color: #09204a;
   font-size: 14px;
@@ -310,16 +310,16 @@ p,
 .request-steps span {
   min-width: 0;
   display: grid;
-  grid-template-columns: 28px minmax(0, 1fr);
+  grid-template-columns: 24px minmax(0, 1fr);
   grid-template-areas:
     "num title"
     "num hint";
   align-items: center;
-  column-gap: 8px;
-  min-height: 54px;
+  column-gap: 7px;
+  min-height: 46px;
   border: 1px solid #d8e5f7;
   border-radius: 16px;
-  padding: 8px 10px;
+  padding: 7px 9px;
   background: rgba(248, 251, 255, 0.86);
   color: #64748b;
 }
@@ -328,9 +328,9 @@ p,
   grid-area: num;
   display: grid;
   place-items: center;
-  width: 28px;
-  height: 28px;
-  border-radius: 10px;
+  width: 24px;
+  height: 24px;
+  border-radius: 9px;
   background: #e2e8f0;
   color: #52657f;
   font-size: 12px;
@@ -392,7 +392,7 @@ p,
 .scope-checks {
   width: 100%;
   border: 1px solid #d8e5f7;
-  border-radius: 18px;
+  border-radius: 16px;
   background: rgba(248, 251, 255, 0.82);
   padding: 10px;
 }
@@ -424,11 +424,11 @@ p,
 }
 
 .scope-pill {
-  min-height: 34px;
+  min-height: 32px;
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 7px 11px;
+  padding: 6px 10px;
   border: 1px solid #d8e5f7;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.9);
@@ -487,7 +487,7 @@ textarea:focus {
 }
 
 textarea {
-  min-height: 66px;
+  min-height: 54px;
   line-height: 1.55;
   resize: vertical;
 }
@@ -495,10 +495,10 @@ textarea {
 .verify-box {
   width: 100%;
   display: grid;
-  gap: 8px;
+  gap: 6px;
   border: 1px solid #bfdbfe;
-  border-radius: 18px;
-  padding: 12px;
+  border-radius: 16px;
+  padding: 10px;
   background:
     linear-gradient(135deg, rgba(239, 246, 255, 0.96), rgba(255, 255, 255, 0.92)),
     #ffffff;
@@ -512,8 +512,8 @@ textarea {
 
 .row-actions .btn {
   min-width: 136px;
-  min-height: 42px;
-  border-radius: 16px;
+  min-height: 38px;
+  border-radius: 15px;
   font-weight: 950;
 }
 
@@ -545,8 +545,8 @@ textarea {
 
 @media (max-width: 640px) {
   .center-state {
-    margin-block: 28px;
-    padding: 24px;
+    margin-block: 24px;
+    padding: 22px;
   }
 
   .scope-pill {

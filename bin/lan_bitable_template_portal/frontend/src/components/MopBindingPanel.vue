@@ -30,14 +30,6 @@
         </p>
       </article>
 
-      <article class="binding-next-step" :class="nextStepTone">
-        <span>下一步</span>
-        <div>
-          <strong>{{ nextStepTitle }}</strong>
-          <small>{{ nextStepText }}</small>
-        </div>
-      </article>
-
       <MopSelectedFileCard
         v-if="selectedMop"
         v-model:selected-attachment-token="selectedAttachmentModel"
@@ -66,10 +58,9 @@
         暂无可选 MOP 表格
       </div>
       <div v-else class="mop-candidate-list">
-        <button
+        <button type="button"
           v-for="mop in mopCandidates"
           :key="mop.record_id"
-          type="button"
           class="mop-row"
           :class="{ active: mop.record_id === selectedMopRecordId, recommended: recommended(mop) }"
           @click="$emit('select-mop', String(mop.record_id || ''))"
@@ -130,9 +121,8 @@
             {{ localUploadMessage }}
           </em>
         </div>
-        <button
+        <button type="button"
           class="local-upload-button"
-          type="button"
           :disabled="localUploadBusy"
           @click.stop="triggerLocalFileInput"
         >
@@ -192,28 +182,6 @@ const mopSearchModel = computed({
 });
 
 const recommendedCount = computed(() => props.mopCandidates.filter((item) => recommended(item)).length);
-
-const nextStepTitle = computed(() => {
-  if (!props.selectedMop) return "选择一个 MOP 表格";
-  if (!props.selectedAttachment) return "选择可预览的表格附件";
-  if (props.canPreview) return "已准备好，可以打开填写";
-  return "核对 MOP 附件状态";
-});
-
-const nextStepText = computed(() => {
-  if (!props.selectedMop) return "";
-  if (!props.selectedAttachment) return "无可用附件";
-  if (props.bindingError) return props.bindingError;
-  if (props.bindingStatus) return props.bindingStatus;
-  if (props.canPreview) return "";
-  return props.disabledReason || "";
-});
-
-const nextStepTone = computed(() => {
-  if (props.bindingError || (props.selectedMop && !props.selectedAttachment)) return "warning";
-  if (props.canPreview) return "ready";
-  return "active";
-});
 
 const localUploadTitle = computed(() => {
   if (props.localUploadBusy) return "上传中 / 识别中";
@@ -288,21 +256,21 @@ function handleLocalPaste(event: ClipboardEvent): void {
 
 <style scoped>
 .panel {
-  padding: 16px;
+  padding: 14px;
   display: grid;
-  gap: 12px;
+  gap: 10px;
   border: 1px solid #d8e5f7;
-  border-radius: 22px;
+  border-radius: 20px;
   background: rgba(255, 255, 255, 0.92);
   box-shadow: 0 16px 36px rgba(0, 47, 135, 0.08);
 }
 
 .binding-panel {
-  min-height: min(720px, calc(100vh - 180px));
+  min-height: min(680px, calc(100vh - 190px));
   height: auto;
   max-height: none;
   overflow: visible;
-  grid-template-rows: auto auto auto auto minmax(120px, 1fr);
+  grid-template-rows: auto auto auto minmax(120px, 1fr);
   align-content: stretch;
 }
 
@@ -338,8 +306,8 @@ function handleLocalPaste(event: ClipboardEvent): void {
 .selected-notice {
   width: 100%;
   border: 1px solid #d8e5f7;
-  border-radius: 16px;
-  padding: 12px 14px;
+  border-radius: 14px;
+  padding: 10px 12px;
   text-align: left;
   color: #0f172a;
   background:
@@ -349,9 +317,9 @@ function handleLocalPaste(event: ClipboardEvent): void {
 
 .selected-notice strong {
   display: block;
-  margin-top: 7px;
-  line-height: 1.45;
-  font-size: 14px;
+  margin-top: 5px;
+  line-height: 1.35;
+  font-size: 13px;
   font-weight: 950;
 }
 
@@ -366,8 +334,8 @@ function handleLocalPaste(event: ClipboardEvent): void {
 .selected-notice em {
   display: inline-flex;
   align-items: center;
-  min-height: 24px;
-  padding: 4px 9px;
+  min-height: 22px;
+  padding: 3px 8px;
   border-radius: 999px;
   font-size: 12px;
   font-style: normal;
@@ -385,93 +353,18 @@ function handleLocalPaste(event: ClipboardEvent): void {
 }
 
 .selected-notice p {
-  margin: 7px 0 0;
+  margin: 5px 0 0;
   color: #64748b;
   font-size: 12px;
-}
-
-.binding-next-step {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: center;
-  gap: 10px;
-  border: 1px solid #bfdbfe;
-  border-radius: 16px;
-  background:
-    linear-gradient(135deg, rgba(239, 246, 255, 0.96), rgba(255, 255, 255, 0.9)),
-    #ffffff;
-  padding: 10px 12px;
-  box-shadow: 0 10px 24px rgba(30, 99, 255, 0.08);
-}
-
-.binding-next-step > span {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 28px;
-  border-radius: 999px;
-  background: #1e63ff;
-  color: #ffffff;
-  padding: 0 10px;
-  font-size: 12px;
-  font-weight: 950;
-  white-space: nowrap;
-}
-
-.binding-next-step strong,
-.binding-next-step small {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.binding-next-step strong {
-  color: #0f2f6a;
-  font-size: 14px;
-  font-weight: 950;
-}
-
-.binding-next-step small {
-  margin-top: 3px;
-  color: #475569;
-  font-size: 12px;
-  font-weight: 800;
-  line-height: 1.4;
-  display: -webkit-box;
-  white-space: normal;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-}
-
-.binding-next-step.ready {
-  border-color: #bbf7d0;
-  background:
-    linear-gradient(135deg, rgba(236, 253, 245, 0.96), rgba(255, 255, 255, 0.9)),
-    #ffffff;
-}
-
-.binding-next-step.ready > span {
-  background: #059669;
-}
-
-.binding-next-step.warning {
-  border-color: #fed7aa;
-  background:
-    linear-gradient(135deg, rgba(255, 247, 237, 0.96), rgba(255, 255, 255, 0.92)),
-    #ffffff;
-}
-
-.binding-next-step.warning > span {
-  background: #ea580c;
 }
 
 .mop-flow-steps {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-  padding: 7px;
+  gap: 6px;
+  padding: 6px;
   border: 1px solid rgba(207, 224, 255, 0.9);
-  border-radius: 18px;
+  border-radius: 16px;
   background:
     linear-gradient(135deg, rgba(239, 246, 255, 0.86), rgba(255, 255, 255, 0.92)),
     #ffffff;
@@ -479,7 +372,7 @@ function handleLocalPaste(event: ClipboardEvent): void {
 
 .mop-flow-steps span {
   min-width: 0;
-  min-height: 31px;
+  min-height: 29px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -576,10 +469,10 @@ function handleLocalPaste(event: ClipboardEvent): void {
 
 .mop-candidate-list {
   max-height: clamp(260px, 46vh, 520px);
-  min-height: 220px;
+  min-height: 180px;
   overflow: auto;
   display: grid;
-  gap: 10px;
+  gap: 7px;
   align-content: start;
   padding-right: 4px;
 }
@@ -588,11 +481,11 @@ function handleLocalPaste(event: ClipboardEvent): void {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 12px;
-  min-height: 92px;
+  gap: 10px;
+  min-height: 74px;
   border: 1.5px dashed #9fc5ff;
-  border-radius: 18px;
-  padding: 14px;
+  border-radius: 16px;
+  padding: 10px;
   background:
     linear-gradient(135deg, rgba(239, 246, 255, 0.95), rgba(255, 255, 255, 0.88)),
     #ffffff;
@@ -632,15 +525,15 @@ function handleLocalPaste(event: ClipboardEvent): void {
 }
 
 .local-upload-icon {
-  width: 46px;
-  height: 46px;
+  width: 40px;
+  height: 40px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 16px;
+  border-radius: 14px;
   background: linear-gradient(135deg, #1e63ff, #005bd8);
   color: #ffffff;
-  font-size: 24px;
+  font-size: 21px;
   font-weight: 950;
   box-shadow: 0 12px 26px rgba(30, 99, 255, 0.22);
 }
@@ -705,7 +598,7 @@ function handleLocalPaste(event: ClipboardEvent): void {
 }
 
 .local-upload-button {
-  min-height: 34px;
+  min-height: 32px;
   border: 1px solid #bdd2f4;
   border-radius: 999px;
   padding: 0 13px;
@@ -727,10 +620,10 @@ function handleLocalPaste(event: ClipboardEvent): void {
   position: relative;
   width: 100%;
   display: grid;
-  gap: 6px;
-  padding: 9px 12px 9px 15px;
+  gap: 5px;
+  padding: 8px 11px 8px 14px;
   border: 1px solid #d8e5f7;
-  border-radius: 14px;
+  border-radius: 13px;
   color: #0f172a;
   background: #ffffff;
   line-height: 1.45;

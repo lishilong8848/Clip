@@ -29,17 +29,16 @@
         @update:open="emit('update:refreshMenuOpen', $event)"
         @refresh-event="emit('refresh-event')"
       />
-      <button
+      <button type="button"
         v-if="isAdmin"
         class="btn ghost admin-entry settings-entry"
-        type="button"
         aria-label="打开管理员诊断和权限管理"
         title="打开管理员诊断和权限管理"
         @click="emit('open-admin')"
       >
         <span class="settings-icon" aria-hidden="true"></span>
       </button>
-      <button v-if="auth.loggedIn" class="btn danger-text" type="button" title="退出当前飞书登录" @click="emit('logout')">退出</button>
+      <button type="button" v-if="auth.loggedIn" class="btn danger-text" title="退出当前飞书登录" @click="emit('logout')">退出</button>
     </div>
   </header>
 </template>
@@ -84,11 +83,11 @@ function onScopeChange(event: Event): void {
 header.app-topbar {
   position: relative;
   z-index: var(--cf-z-topbar, 40);
-  min-height: 112px;
+  min-height: 96px;
   display: flex;
   align-items: center;
-  gap: 28px;
-  padding: 20px 40px;
+  gap: 22px;
+  padding: 16px 34px;
   overflow: visible;
   border-bottom: 1px solid rgba(191, 219, 254, 0.24);
   background:
@@ -131,7 +130,7 @@ header.app-topbar::after {
   flex: 1 1 auto;
   display: flex;
   align-items: center;
-  gap: 24px;
+  gap: 20px;
 }
 
 .brand > div {
@@ -139,11 +138,11 @@ header.app-topbar::after {
 }
 
 .brand-logo {
-  width: clamp(116px, 10vw, 142px);
-  height: 54px;
+  width: clamp(108px, 9vw, 128px);
+  height: 48px;
   flex: 0 0 auto;
   object-fit: contain;
-  padding-right: 24px;
+  padding-right: 20px;
   border-right: 1px solid rgba(255, 255, 255, 0.38);
   filter: brightness(0) invert(1);
 }
@@ -154,7 +153,7 @@ header.app-topbar::after {
   text-overflow: ellipsis;
   margin: 0;
   color: #ffffff;
-  font-size: 30px;
+  font-size: 27px;
   line-height: 1.12;
   font-weight: 950;
   letter-spacing: 0;
@@ -162,9 +161,9 @@ header.app-topbar::after {
 }
 
 .brand p {
-  margin: 8px 0 0;
+  margin: 6px 0 0;
   color: rgba(255, 255, 255, 0.74);
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 800;
   letter-spacing: 0;
 }
@@ -185,18 +184,18 @@ header.app-topbar .btn,
 header.app-topbar button,
 header.app-topbar .user-chip,
 header.app-topbar .scope-switch {
-  min-height: 42px;
+  min-height: 38px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
-  padding: 0 16px;
+  padding: 0 14px;
   border: 1px solid rgba(255, 255, 255, 0.34);
-  border-radius: 16px;
+  border-radius: 15px;
   background: rgba(255, 255, 255, 0.14);
   color: #ffffff;
   font: inherit;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 900;
   line-height: 1;
   text-decoration: none;
@@ -240,9 +239,9 @@ header.app-topbar .user-chip {
 }
 
 header.app-topbar .scope-switch {
-  min-width: 188px;
-  gap: 10px;
-  padding: 6px 8px 6px 10px;
+  min-width: 176px;
+  gap: 8px;
+  padding: 5px 8px 5px 9px;
   border-color: rgba(255, 255, 255, 0.78);
   background: linear-gradient(135deg, #ffffff, #eff6ff);
   color: #0c3f99;
@@ -253,8 +252,8 @@ header.app-topbar .scope-switch {
 
 header.app-topbar .scope-icon {
   flex: 0 0 auto;
-  width: 32px;
-  height: 32px;
+  width: 30px;
+  height: 30px;
   display: grid;
   place-items: center;
   border-radius: 13px;
@@ -276,7 +275,7 @@ header.app-topbar .scope-switch span {
 header.app-topbar .scope-switch select {
   min-width: 88px;
   max-width: 148px;
-  height: 34px;
+  height: 32px;
   border: 1px solid #cfe0ff;
   border-radius: 14px;
   padding: 0 32px 0 12px;
@@ -305,9 +304,9 @@ header.app-topbar .danger-text {
 }
 
 header.app-topbar .settings-entry {
-  width: 42px;
-  min-width: 42px;
-  flex: 0 0 42px;
+  width: 38px;
+  min-width: 38px;
+  flex: 0 0 38px;
   padding: 0;
   border-radius: 16px;
 }
@@ -383,9 +382,9 @@ header.app-topbar .settings-entry {
   }
 
   .brand-logo {
-    width: 118px;
-    height: 46px;
-    padding-right: 18px;
+    width: 108px;
+    height: 42px;
+    padding-right: 16px;
   }
 
   .brand h1 {

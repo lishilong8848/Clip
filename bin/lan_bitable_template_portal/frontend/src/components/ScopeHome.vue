@@ -11,7 +11,7 @@
         <span class="section-kicker">权限申请</span>
         <strong>需要访问其他楼栋？</strong>
       </div>
-      <button class="secondary" @click="$emit('request-permission')">申请其他楼权限</button>
+      <button type="button" class="secondary" @click="$emit('request-permission')">申请其他楼权限</button>
     </div>
 
     <template v-if="!activeMode">
@@ -43,10 +43,9 @@
             </div>
           </div>
           <div class="module-actions">
-            <button
+            <button type="button"
               v-for="action in module.actions"
               :key="action.key"
-              type="button"
               :class="action.primary ? 'primary' : 'secondary'"
               :disabled="module.disabled || action.disabled"
               :title="module.disabled || action.disabled ? '暂未开放' : ''"
@@ -89,12 +88,11 @@
       </header>
 
       <div v-if="activeMode === 'tools'" class="tool-grid">
-        <button
+        <button type="button"
           v-for="tool in toolEntries"
           :key="tool.key"
           class="tool-card"
           :class="tool.tone"
-          type="button"
           :aria-label="`选择${tool.title}`"
           @click="selectEntry(tool.key)"
         >
@@ -122,21 +120,21 @@
             <span>{{ scopeSecondaryMetricLabel(scope.value) }} {{ scopeCounts(scope.value).ongoing }}</span>
           </div>
           <div class="scope-actions">
-            <button
+            <button type="button"
               v-if="activeMode === 'event'"
               class="primary"
               @click="$emit('event', scope.value)"
             >
               进入事件管理
             </button>
-            <button
+            <button type="button"
               v-else-if="activeMode === 'repair_management'"
               class="primary"
               @click="$emit('repair-management', scope.value)"
             >
               进入检修管理
             </button>
-            <button
+            <button type="button"
               v-else-if="activeMode === 'maintenance_mop'"
               class="primary"
               @click="$emit('engineer', scope.value)"
@@ -152,7 +150,7 @@
             >
               打开审核页
             </a>
-            <button
+            <button type="button"
               v-else-if="activeMode === 'handover'"
               class="secondary"
               disabled
@@ -160,7 +158,7 @@
             >
               未配置
             </button>
-            <button
+            <button type="button"
               v-else
               class="primary"
               @click="enterNoticeWorkbench(scope.value)"
@@ -260,6 +258,7 @@ const broadcastWorkTypes = [
   { key: "polling", label: "轮巡" },
   { key: "adjust", label: "调整" },
 ] as const;
+const BROADCAST_ITEM_LIMIT = 24;
 const broadcastWorkTypeLabelByKey: Record<string, string> = Object.fromEntries(
   broadcastWorkTypes.map((item) => [item.key, item.label]),
 );
@@ -374,6 +373,17 @@ const homeBroadcastStats = computed(() => {
 
 const homeBroadcastItems = computed<HomeBroadcastItem[]>(() => {
   const items = homeBroadcastStats.value.items;
+  if (items.length > BROADCAST_ITEM_LIMIT) {
+    return [
+      ...items.slice(0, BROADCAST_ITEM_LIMIT),
+      {
+        key: "broadcast-more",
+        label: "更多",
+        text: `还有 ${items.length - BROADCAST_ITEM_LIMIT} 条动态，进入对应模块查看`,
+        tone: "quiet",
+      },
+    ];
+  }
   if (items.length) return items;
   return [{
     key: "quiet",
@@ -471,16 +481,16 @@ function scopeSecondaryMetricLabel(_scope: string): string {
 
 <style scoped>
 .home-shell {
-  padding: 20px 26px 28px;
+  padding: 16px 22px 26px;
   display: grid;
-  gap: 12px;
+  gap: 10px;
 }
 
 .module-grid,
 .scope-grid,
 .tool-grid {
   display: grid;
-  gap: 14px;
+  gap: 12px;
 }
 
 .permission-more-card,
@@ -563,15 +573,15 @@ function scopeSecondaryMetricLabel(_scope: string): string {
   align-items: center;
   justify-content: space-between;
   gap: 18px;
-  padding: 16px 18px;
-  border-radius: 18px;
+  padding: 13px 16px;
+  border-radius: 16px;
 }
 
 .permission-more-card strong {
   display: block;
-  margin-top: 4px;
+  margin-top: 3px;
   color: #071a39;
-  font-size: 17px;
+  font-size: 16px;
   font-weight: 900;
 }
 
@@ -586,13 +596,13 @@ function scopeSecondaryMetricLabel(_scope: string): string {
 .module-heading h2 {
   margin: 0;
   color: #071a39;
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 950;
 }
 
 .module-heading span {
   align-self: center;
-  padding: 7px 14px;
+  padding: 6px 12px;
   border: 1px solid #d8e5f7;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.7);
@@ -610,11 +620,11 @@ function scopeSecondaryMetricLabel(_scope: string): string {
   position: relative;
   overflow: hidden;
   grid-column: span 3;
-  min-height: 142px;
+  min-height: 128px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 15px 16px;
+  gap: 7px;
+  padding: 13px 15px;
   border-radius: 18px;
   cursor: default;
   transition: transform 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease;
@@ -622,9 +632,9 @@ function scopeSecondaryMetricLabel(_scope: string): string {
 
 .module-card.main {
   grid-column: span 4;
-  min-height: 174px;
-  padding: 18px 20px;
-  gap: 10px;
+  min-height: 156px;
+  padding: 15px 18px;
+  gap: 8px;
 }
 
 .module-card.disabled {
@@ -812,18 +822,18 @@ function scopeSecondaryMetricLabel(_scope: string): string {
 }
 
 .module-card__body strong {
-  font-size: 20px;
+  font-size: 18px;
   line-height: 1.15;
 }
 
 .module-card.main .module-card__body strong {
-  font-size: 23px;
+  font-size: 21px;
 }
 
 .module-card__body p {
-  min-height: 30px;
+  min-height: 24px;
   font-size: 13px;
-  line-height: 1.45;
+  line-height: 1.35;
 }
 
 .module-card.compact .module-card__body p {
@@ -834,17 +844,17 @@ function scopeSecondaryMetricLabel(_scope: string): string {
 .module-tags {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 2px;
+  gap: 5px;
+  margin-top: 1px;
 }
 
 .module-tags span {
-  padding: 4px 8px;
+  padding: 3px 7px;
   border: 1px solid #e0e9f6;
   border-radius: 999px;
   background: #f7fbff;
   color: #4e6381;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 800;
 }
 
@@ -853,8 +863,8 @@ function scopeSecondaryMetricLabel(_scope: string): string {
   z-index: 1;
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-  padding-top: 7px;
+  gap: 5px;
+  padding-top: 6px;
   border-top: 1px solid #e8eef7;
 }
 
@@ -871,24 +881,24 @@ function scopeSecondaryMetricLabel(_scope: string): string {
 }
 
 .module-actions .secondary {
-  min-height: 44px;
+  min-height: 38px;
   padding: 0 12px;
   border-radius: 999px;
   box-shadow: none;
 }
 
 .feature-section {
-  padding: 28px;
-  border-radius: 22px;
+  padding: 20px;
+  border-radius: 20px;
   display: grid;
-  gap: 22px;
+  gap: 14px;
 }
 
 .feature-section.scope-selection {
   position: relative;
   overflow: hidden;
-  padding: 30px;
-  border-radius: 30px;
+  padding: 20px;
+  border-radius: 24px;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(249, 252, 255, 0.94)),
     radial-gradient(circle at 84% 8%, rgba(66, 153, 255, 0.14), transparent 32%);
@@ -906,9 +916,9 @@ function scopeSecondaryMetricLabel(_scope: string): string {
 
 .feature-section__head.scope-section-head {
   display: grid;
-  grid-template-columns: minmax(260px, 0.92fr) minmax(420px, 1.35fr);
+  grid-template-columns: minmax(240px, 0.88fr) minmax(390px, 1.32fr);
   align-items: center;
-  gap: 22px;
+  gap: 18px;
 }
 
 .page-back-row {
@@ -936,25 +946,25 @@ function scopeSecondaryMetricLabel(_scope: string): string {
 }
 
 .feature-section__head h2 {
-  margin: 8px 0 4px;
+  margin: 5px 0 2px;
   color: #071a39;
-  font-size: 24px;
+  font-size: 20px;
   font-weight: 950;
 }
 
 .scope-section-head h2 {
-  font-size: 28px;
+  font-size: 23px;
   line-height: 1.12;
 }
 
 .scope-summary-strip {
-  min-height: 86px;
+  min-height: 62px;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   align-items: center;
   overflow: hidden;
   border: 1px solid #e1ebf8;
-  border-radius: 22px;
+  border-radius: 20px;
   background: rgba(255, 255, 255, 0.82);
   box-shadow:
     0 16px 34px rgba(28, 84, 161, 0.09),
@@ -965,12 +975,12 @@ function scopeSecondaryMetricLabel(_scope: string): string {
   min-width: 0;
   height: 100%;
   display: grid;
-  grid-template-columns: 44px minmax(0, 1fr);
+  grid-template-columns: 34px minmax(0, 1fr);
   grid-template-rows: auto auto;
   align-content: center;
-  column-gap: 12px;
-  row-gap: 3px;
-  padding: 16px 20px;
+  column-gap: 9px;
+  row-gap: 2px;
+  padding: 10px 14px;
   border-left: 1px solid #e6eef8;
 }
 
@@ -986,15 +996,15 @@ function scopeSecondaryMetricLabel(_scope: string): string {
 
 .scope-summary-strip strong {
   color: #075bd8;
-  font-size: 27px;
+  font-size: 21px;
   line-height: 1;
   font-weight: 950;
 }
 
 .summary-icon {
   grid-row: 1 / span 2;
-  width: 44px;
-  height: 44px;
+  width: 34px;
+  height: 34px;
   display: inline-grid;
   place-items: center;
   border-radius: 15px;
@@ -1065,19 +1075,19 @@ function scopeSecondaryMetricLabel(_scope: string): string {
 }
 
 .scope-overview-grid {
-  gap: 18px 20px;
+  gap: 14px 16px;
 }
 
 .scope-card {
   position: relative;
   overflow: hidden;
-  min-height: 168px;
+  min-height: 144px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  gap: 13px;
-  padding: 22px 24px;
-  border-radius: 20px;
+  gap: 10px;
+  padding: 18px 20px;
+  border-radius: 18px;
   background:
     linear-gradient(135deg, rgba(255, 255, 255, 0.98), rgba(247, 251, 255, 0.94)),
     radial-gradient(circle at 92% 14%, rgba(28, 108, 255, 0.12), transparent 31%);
@@ -1095,7 +1105,7 @@ function scopeSecondaryMetricLabel(_scope: string): string {
 
 .scope-card strong {
   display: block;
-  font-size: 23px;
+  font-size: 21px;
   line-height: 1.12;
 }
 
@@ -1110,12 +1120,12 @@ function scopeSecondaryMetricLabel(_scope: string): string {
   z-index: 1;
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
 }
 
 .scope-building-icon {
-  width: 34px;
-  height: 34px;
+  width: 32px;
+  height: 32px;
   flex: 0 0 auto;
   margin-top: 0 !important;
   border-radius: 11px;
@@ -1160,15 +1170,15 @@ function scopeSecondaryMetricLabel(_scope: string): string {
   z-index: 1;
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 6px;
 }
 
 .scope-badges span {
   display: inline-flex;
   align-items: center;
-  min-height: 26px;
+  min-height: 24px;
   margin-top: 0;
-  padding: 4px 9px;
+  padding: 4px 8px;
   border-radius: 999px;
   background: #eef5ff;
   color: #1763d7;
@@ -1198,23 +1208,23 @@ function scopeSecondaryMetricLabel(_scope: string): string {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  padding-top: 6px;
+  padding-top: 4px;
 }
 
 .scope-actions .primary,
 .scope-actions .secondary {
-  min-height: 38px;
+  min-height: 34px;
   border-radius: 999px;
-  padding-inline: 16px;
+  padding-inline: 14px;
 }
 
 .scope-building-art {
   position: absolute;
-  right: 14px;
-  bottom: 10px;
+  right: 12px;
+  bottom: 8px;
   z-index: 0;
-  width: 118px;
-  height: 74px;
+  width: 104px;
+  height: 66px;
   margin-top: 0 !important;
   opacity: 0.22;
   pointer-events: none;

@@ -16,10 +16,10 @@
             <span>月份</span>
             <input v-model="selectedMonth" type="month" :disabled="loading || refreshing" />
           </label>
-          <button class="btn quiet" type="button" :disabled="loading" title="只重新读取当前页面数据" @click="loadEvents()">
+          <button type="button" class="btn quiet" :disabled="loading" title="只重新读取当前页面数据" @click="loadEvents()">
             {{ loading ? "刷新中" : "刷新本页" }}
           </button>
-          <button class="btn secondary source-refresh" type="button" :disabled="refreshing" title="刷新事件" @click="refreshEvents()">
+          <button type="button" class="btn secondary source-refresh" :disabled="refreshing" title="刷新事件" @click="refreshEvents()">
             {{ refreshing ? "刷新中" : "刷新事件" }}
           </button>
         </div>
@@ -86,7 +86,7 @@
             <option value="">全部专业</option>
             <option v-for="item in specialtyOptions" :key="item" :value="item">{{ item }}</option>
           </select>
-          <button v-if="activeFilterCount" class="btn quiet" type="button" @click="clearFilters">
+          <button type="button" v-if="activeFilterCount" class="btn quiet" @click="clearFilters">
             清空筛选
           </button>
         </div>
@@ -123,7 +123,7 @@
             <span class="section-kicker">事件详情</span>
             <h3>{{ selectedEvent.title || selectedEvent.alarm_desc || "未命名事件" }}</h3>
           </div>
-          <button class="drawer-close" type="button" @click="selectedEvent = null">关闭</button>
+          <button type="button" class="drawer-close" @click="selectedEvent = null">关闭</button>
         </header>
         <div class="event-detail-summary">
           <span class="event-level-chip" :class="levelTone(selectedEvent.level)">{{ selectedEvent.level || "未填写等级" }}</span>
@@ -138,36 +138,32 @@
             </strong>
             <em>{{ eventRepairFlowHint(selectedEvent) }}</em>
           </div>
-          <button
+          <button type="button"
             class="btn secondary"
-            type="button"
             :disabled="eventTransferBusy || eventTransferEnabled(selectedEvent)"
             @click="markSelectedEventTransferred"
           >
             {{ eventTransferBusy ? "处理中" : eventTransferEnabled(selectedEvent) ? "已转检修" : "标记转检修" }}
           </button>
-          <button class="btn primary" type="button" @click="openRepairManagementForSelectedEvent">
+          <button type="button" class="btn primary" @click="openRepairManagementForSelectedEvent">
             填写/选择维修单
           </button>
         </section>
         <div class="event-detail-tabs" aria-label="事件详情分区">
-          <button
-            type="button"
+          <button type="button"
             :class="{ active: selectedEventDetailTab === 'summary' }"
             @click="selectedEventDetailTab = 'summary'"
           >
             概要
           </button>
-          <button
-            type="button"
+          <button type="button"
             :class="{ active: selectedEventDetailTab === 'timeline' }"
             @click="selectedEventDetailTab = 'timeline'"
           >
             时间线
           </button>
-          <button
+          <button type="button"
             v-if="isAdmin"
-            type="button"
             :class="{ active: selectedEventDetailTab === 'fields' }"
             @click="selectedEventDetailTab = 'fields'"
           >

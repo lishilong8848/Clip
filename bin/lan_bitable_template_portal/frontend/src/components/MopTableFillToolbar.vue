@@ -6,7 +6,7 @@
         <span>单击编辑 · 拖选复制/粘贴/还原</span>
       </div>
       <div class="table-fill-actions">
-        <button v-if="bulkCount" class="btn blue" type="button" title="仅批量填写第10行之后识别到的正常/异常项" @click="emit('mark-all-normal')">
+        <button type="button" v-if="bulkCount" class="btn blue" title="仅批量填写第10行之后识别到的正常/异常项" @click="emit('mark-all-normal')">
           第10行后全正常
         </button>
         <em v-if="filledCount">已填 {{ filledCount }}</em>

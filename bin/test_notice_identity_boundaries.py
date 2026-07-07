@@ -372,11 +372,39 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
         self.assertEqual(info.get("time_str"), "2026-06-24 17:20")
         self.assertTrue(PortalRuntime._event_notice_identity_key({"notice_type": "事件通告", "text": text}))
 
+    def test_event_notice_payload_uses_source_alias_for_robot_and_remote_fields(self) -> None:
+        payload = PortalRuntime._prepared_to_notice_payload(
+            {
+                "notice_type": "事件通告",
+                "text": "【事件通告】状态：更新\n【标题】A楼冷机告警",
+                "source": "BMS",
+            }
+        )
+
+        self.assertEqual(payload.event_source, "BMS")
+
     def test_event_create_fields_use_title_when_summary_missing(self) -> None:
         text = (
             "【事件通告】状态：新增\n"
             "【标题】BMS报E-217-CRAC-02压缩机高压报警: 告警\n"
             "【时间】2026-06-24 17:20\n"
+            "【进展】测试"
+        )
+
+        fields = EventNoticeHandler("事件通告").build_create_fields(
+            NoticePayload(text=text)
+        )
+
+        self.assertEqual(
+            fields.get(EVENT_NOTICE_FIELDS["alarm_desc"]),
+            "BMS报E-217-CRAC-02压缩机高压报警: 告警",
+        )
+
+    def test_event_create_fields_use_alarm_description(self) -> None:
+        text = (
+            "【事件通告】状态：新增\n"
+            "【告警描述】BMS报E-217-CRAC-02压缩机高压报警: 告警\n"
+            "【事件发生时间】2026-06-24 17:20\n"
             "【进展】测试"
         )
 
@@ -517,6 +545,55 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
                     "事件通告",
                 ),
                 "recOldEvent",
+            )
+        finally:
+            PortalRuntime.state_store = old_state_store
+
+    def test_event_existing_target_does_not_auto_pick_duplicate_targets(self) -> None:
+        text = (
+            "【事件通告】状态：新增\n"
+            "【标题】BMS报E-217-CRAC-02压缩机高压报警: 告警\n"
+            "【时间】2026-06-24 17:20\n"
+            "【机楼】E楼\n"
+            "【来源】BMS\n"
+            "【等级】I2\n"
+            "【进展】测试"
+        )
+
+        class FakeStateStore:
+            def list_qt_active_items(self, include_deleted: bool = False) -> list[dict]:
+                return [
+                    {
+                        "record_id": "recEventA",
+                        "notice_type": "事件通告",
+                        "payload": {
+                            "notice_type": "事件通告",
+                            "target_record_id": "recEventA",
+                            "record_id": "recEventA",
+                            "text": text,
+                        },
+                    },
+                    {
+                        "record_id": "recEventB",
+                        "notice_type": "事件通告",
+                        "payload": {
+                            "notice_type": "事件通告",
+                            "target_record_id": "recEventB",
+                            "record_id": "recEventB",
+                            "text": text,
+                        },
+                    },
+                ]
+
+        old_state_store = PortalRuntime.state_store
+        PortalRuntime.state_store = FakeStateStore()
+        try:
+            self.assertEqual(
+                PortalRuntime._existing_event_target_for_local_notice(
+                    {"notice_type": "事件通告", "text": text},
+                    "事件通告",
+                ),
+                "",
             )
         finally:
             PortalRuntime.state_store = old_state_store

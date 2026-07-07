@@ -1,8 +1,8 @@
 <template>
   <section class="pane admin-mop-settings-pane">
     <div class="actions">
-      <button class="btn blue" :disabled="busy" @click="$emit('refresh')">刷新配置</button>
-      <button class="btn green" :disabled="busy" @click="$emit('save')">保存配置</button>
+      <button type="button" class="btn blue" :disabled="busy" @click="$emit('refresh')">刷新配置</button>
+      <button type="button" class="btn green" :disabled="busy" @click="$emit('save')">保存配置</button>
     </div>
     <div class="mop-settings-grid">
       <label v-for="field in fields" :key="field.key">

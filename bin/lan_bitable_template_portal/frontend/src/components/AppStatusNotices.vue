@@ -5,17 +5,15 @@
         <b>{{ connectionLabel(connectionNotice.tone) }}</b>
         <span class="status-banner__text" :title="connectionNotice.text">{{ connectionNotice.text }}</span>
       </div>
-      <button
+      <button type="button"
         v-if="connectionNotice.action"
         class="btn ghost small"
-        type="button"
         @click="connectionNotice.action"
       >
         {{ connectionNotice.actionLabel || "处理" }}
       </button>
     </div>
     <div v-if="pageStatusText" class="page-status">
-      <b>页面状态</b>
       <span :title="pageStatusText" role="status" aria-live="polite">{{ pageStatusText }}</span>
     </div>
   </div>
@@ -41,18 +39,17 @@ function connectionLabel(tone?: string): string {
 
 <style scoped>
 .app-status-notices {
-  width: min(1040px, calc(100% - 56px));
+  width: min(980px, calc(100% - 56px));
   display: grid;
   gap: 6px;
-  margin: 10px auto 0;
+  margin: 7px auto 0;
 }
 
 .app-status-notices.stacked {
   gap: 5px;
 }
 
-.status-banner,
-.page-status {
+.status-banner {
   width: 100%;
   border: 1px solid rgba(191, 219, 254, 0.78);
   border-radius: 16px;
@@ -61,6 +58,19 @@ function connectionLabel(tone?: string): string {
     #ffffff;
   box-shadow: 0 10px 22px rgba(37, 99, 235, 0.07);
   color: #1e3a8a;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.page-status {
+  width: min(100%, 860px);
+  min-height: 28px;
+  justify-self: center;
+  border: 1px solid rgba(191, 219, 254, 0.68);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.76);
+  box-shadow: 0 8px 18px rgba(37, 99, 235, 0.06);
+  color: #31516f;
   font-size: 12px;
   font-weight: 850;
 }
@@ -74,8 +84,7 @@ function connectionLabel(tone?: string): string {
   padding: 7px 8px 7px 12px;
 }
 
-.status-banner__main,
-.page-status {
+.status-banner__main {
   min-width: 0;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
@@ -83,8 +92,7 @@ function connectionLabel(tone?: string): string {
   gap: 8px;
 }
 
-.status-banner__main > b,
-.page-status > b {
+.status-banner__main > b {
   flex: 0 0 auto;
   border-radius: 999px;
   padding: 3px 8px;
@@ -159,21 +167,33 @@ function connectionLabel(tone?: string): string {
   box-shadow: 0 0 0 5px rgba(225, 29, 72, 0.1);
 }
 
-.page-status {
-  min-height: 34px;
-  padding: 7px 12px;
-  text-align: left;
-  color: #31516f;
-}
-
 .page-status span {
-  display: -webkit-box;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   overflow: hidden;
   overflow-wrap: anywhere;
   text-overflow: ellipsis;
-  white-space: normal;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  white-space: nowrap;
+}
+
+.page-status span::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: #3b82f6;
+  box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.1);
+}
+
+.page-status {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  padding: 5px 12px;
+  text-align: left;
 }
 
 .btn {
@@ -205,8 +225,7 @@ function connectionLabel(tone?: string): string {
     flex-direction: column;
   }
 
-  .status-banner__main,
-  .page-status {
+  .status-banner__main {
     grid-template-columns: 1fr;
     gap: 5px;
   }

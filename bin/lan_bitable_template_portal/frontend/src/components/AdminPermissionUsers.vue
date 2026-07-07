@@ -68,7 +68,7 @@
         <input v-model="user.enabled" type="checkbox" :disabled="Boolean(user.locked)" />
         启用
       </label>
-      <button class="btn danger" :disabled="Boolean(user.locked)" @click="$emit('remove', user)">
+      <button type="button" class="btn danger" :disabled="Boolean(user.locked)" @click="$emit('remove', user)">
         删除
       </button>
       <details class="scope-checks-wrap">
@@ -117,10 +117,10 @@ defineEmits<{
   display: grid;
   grid-template-columns: minmax(180px, 1fr) minmax(220px, 1.2fr) minmax(160px, auto);
   align-items: end;
-  gap: 10px;
+  gap: 9px;
   border: 1px solid rgba(216, 229, 247, 0.92);
-  border-radius: 20px;
-  padding: 12px;
+  border-radius: 18px;
+  padding: 10px;
   background:
     linear-gradient(135deg, rgba(239, 246, 255, 0.9), rgba(255, 255, 255, 0.94)),
     #ffffff;
@@ -152,12 +152,13 @@ defineEmits<{
 
 .permission-user-search input,
 .permission-user-filter select {
-  min-height: 38px;
+  min-height: 34px;
+  border-radius: 999px;
 }
 
 .permission-list {
   display: grid;
-  gap: 10px;
+  gap: 8px;
   max-height: min(54vh, 620px);
   overflow: auto;
   padding-right: 4px;
@@ -179,10 +180,10 @@ defineEmits<{
   display: grid;
   grid-template-columns: minmax(140px, 0.75fr) minmax(200px, 1fr) 104px 82px auto;
   align-items: stretch;
-  gap: 7px;
+  gap: 6px;
   border: 1px solid #d8e7f8;
   border-radius: 14px;
-  padding: 9px;
+  padding: 8px;
   background: rgba(255, 255, 255, 0.92);
   box-shadow: 0 12px 30px rgba(22, 78, 151, 0.08);
   transition: border-color 0.14s ease, box-shadow 0.14s ease, background-color 0.14s ease;
@@ -211,7 +212,7 @@ defineEmits<{
   justify-content: space-between;
   gap: 10px;
   border-bottom: 1px solid rgba(216, 229, 247, 0.75);
-  padding: 0 1px 8px;
+  padding: 0 1px 7px;
 }
 
 .permission-row-head > div:first-child {
@@ -283,13 +284,22 @@ defineEmits<{
 .permission-row select {
   width: 100%;
   min-width: 0;
-  min-height: 36px;
-  border: 1px solid #cbd5e1;
-  border-radius: 6px;
-  padding: 7px 10px;
+  min-height: 34px;
+  border: 1px solid #c8dcf3;
+  border-radius: 999px;
+  padding: 6px 10px;
   background: #ffffff;
   color: #0f172a;
   font: inherit;
+}
+
+.permission-row input:focus,
+.permission-row select:focus,
+.permission-user-search input:focus,
+.permission-user-filter select:focus {
+  outline: none;
+  border-color: #1e63ff;
+  box-shadow: 0 0 0 3px rgba(30, 99, 255, 0.12);
 }
 
 .permission-row > .permission-field {
@@ -320,7 +330,7 @@ defineEmits<{
   justify-content: center;
   align-self: end;
   gap: 6px;
-  min-height: 36px;
+  min-height: 34px;
   color: #475569;
   font-size: 13px;
   white-space: nowrap;
@@ -333,7 +343,7 @@ defineEmits<{
 
 .permission-row > .btn.danger {
   align-self: end;
-  min-height: 36px;
+  min-height: 34px;
   border-color: transparent;
   border-radius: 999px;
   padding: 7px 12px;
@@ -351,7 +361,7 @@ defineEmits<{
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  min-height: 36px;
+  min-height: 34px;
   border: 1px solid #d8e5f7;
   border-radius: 12px;
   padding: 7px 10px;
@@ -369,8 +379,8 @@ defineEmits<{
 .scope-checks {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
-  max-height: 112px;
+  gap: 6px;
+  max-height: 104px;
   overflow: auto;
   padding: 9px;
   overscroll-behavior: contain;
@@ -380,10 +390,10 @@ defineEmits<{
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  min-height: 30px;
+  min-height: 28px;
   border: 1px solid #d8e5f7;
   border-radius: 999px;
-  padding: 5px 10px;
+  padding: 4px 9px;
   background: #ffffff;
   color: #31506f;
   font-size: 12px;

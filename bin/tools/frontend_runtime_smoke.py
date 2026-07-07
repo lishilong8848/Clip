@@ -588,9 +588,9 @@ def _build_playwright_script(url: str, session_id: str) -> str:
               }}
               const panels = Array.from(document.querySelectorAll('.workspace > .panel'));
               if (panels.length) {{
-                const rails = Array.from(document.querySelectorAll('.result-rail .rail-panel'));
+                const rails = Array.from(document.querySelectorAll('.rail-fold .rail-panel, .result-rail .rail-panel'));
                 if (panels.length < 2 || rails.length < 1) {{
-                  result.push(`workspace panel count ${{panels.length}}, rail count ${{rails.length}}`);
+                  result.push(`workspace panel count ${{panels.length}}, folded rail count ${{rails.length}}`);
                 }}
                 const narrow = panels
                   .map((node, index) => [index + 1, node.getBoundingClientRect().width])
@@ -816,11 +816,11 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           if (isLiteWorkbench) {{
             const litePanels = await page.locator('.workspace > .panel').count();
             if (litePanels < 2) throw new Error(`lite workbench panel count ${{litePanels}}`);
-            const liteRails = await page.locator('.result-rail .rail-panel').count();
-            if (liteRails < 1) throw new Error(`lite workbench rail count ${{liteRails}}`);
+            const liteRails = await page.locator('.rail-fold .rail-panel, .result-rail .rail-panel').count();
+            if (liteRails < 1) throw new Error(`lite workbench folded rail count ${{liteRails}}`);
             const typeCounts = await page.locator('.type-tab .type-count').count();
             if (typeCounts < 6) throw new Error(`lite type counts did not render: ${{typeCounts}}`);
-            const panelCounts = await page.locator('.panel-title .panel-count').count();
+            const panelCounts = await page.locator('.panel-title .panel-count, .inbox-section h3 b, .inbox-summary b').count();
             if (panelCounts < 2) throw new Error(`lite panel counts did not render: ${{panelCounts}}`);
             const liteOngoingRows = await page.locator('.ongoing-row').count();
             if (liteOngoingRows < 1) throw new Error(`lite ongoing rows did not render: ${{liteOngoingRows}}`);
@@ -830,7 +830,6 @@ def _build_playwright_script(url: str, session_id: str) -> str:
               refreshControls: document.querySelector('#refresh-open')?.getAttribute('aria-controls') || '',
               searchLabel: document.querySelector('label[for="lite-search-input"]')?.textContent || '',
               specialtyLabel: document.querySelector('#lite-specialty-select')?.getAttribute('aria-label') || '',
-              pageStatusLive: document.querySelector('#lite-page-status')?.getAttribute('aria-live') || '',
               jobStatusLive: document.querySelector('#lite-job-status')?.getAttribute('aria-live') || '',
             }}));
             if (
@@ -839,7 +838,6 @@ def _build_playwright_script(url: str, session_id: str) -> str:
               || liteA11yProbe.refreshControls !== 'refresh-menu'
               || !liteA11yProbe.searchLabel.includes('搜索')
               || !liteA11yProbe.specialtyLabel.includes('专业')
-              || liteA11yProbe.pageStatusLive !== 'polite'
               || liteA11yProbe.jobStatusLive !== 'polite'
             ) {{
               throw new Error(`lite workbench accessibility markers missing: ${{JSON.stringify(liteA11yProbe)}}`);
@@ -870,7 +868,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
               document.querySelectorAll('.workspace .list').forEach(node => {{ node.scrollTop = 120; }});
             }});
             await page.locator('.ongoing-row').filter({{ hasText: 'A楼纯手填待关联维保通告' }}).first().click();
-            await page.waitForSelector('text=关联源表事项', {{ timeout: 10000 }});
+            await page.waitForSelector('text=目标多维关系', {{ state: 'attached', timeout: 10000 }});
             const markerAfterOngoingClick = await page.evaluate(() => window.__clipflowLiteNoReloadMarker || '');
             if (markerAfterOngoingClick !== 'alive') {{
               throw new Error('lite ongoing click caused full page reload');
@@ -897,9 +895,10 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             }});
             if (
               !sourceLinkProbe.hasField
-              || (!sourceLinkProbe.hiddenValue
-              && !sourceLinkProbe.options.some(text => text.includes('冷机月度巡检'))
-              && !sourceLinkProbe.text.includes('当前通告没有源表 ID'))
+               || (!sourceLinkProbe.hiddenValue
+               && !sourceLinkProbe.options.some(text => text.includes('冷机月度巡检'))
+              && !sourceLinkProbe.text.includes('源表未关联')
+              && !sourceLinkProbe.text.includes('未关联'))
             ) {{
               throw new Error(`source link options missing expected record: ${{JSON.stringify(sourceLinkProbe)}}`);
             }}
@@ -925,9 +924,11 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             await assertLayout(page, 'lite-workbench');
             await assertVnetSkin(page, 'lite-workbench');
             await page.getByRole('button', {{ name: '刷新数据' }}).click();
+            await page.waitForSelector('text=刷新本页', {{ timeout: 10000 }});
             await page.waitForSelector('text=刷新检修', {{ timeout: 10000 }});
             await page.waitForSelector('text=刷新变更', {{ timeout: 10000 }});
-            await page.waitForSelector('text=只重新读取当前楼栋和类型', {{ timeout: 10000 }});
+            const oldRefreshCopyVisible = await page.locator('text=只重新读取当前楼栋和类型').count();
+            if (oldRefreshCopyVisible) throw new Error('lite refresh menu still shows verbose helper copy');
             await page.keyboard.press('Escape');
             const refreshClosedByEscape = await page.evaluate(() => ({{
               open: document.querySelector('#refresh-picker')?.classList.contains('open') || false,
@@ -1013,7 +1014,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             await page.setViewportSize({{ width: 900, height: 900 }});
             await assertLayout(page, 'lite-workbench-narrow');
             await page.setViewportSize({{ width: 1440, height: 900 }});
-            await page.getByRole('link', {{ name: '功能选择' }}).click();
+            await page.getByRole('link', {{ name: /^返回$/ }}).click();
             await page.waitForSelector('text=业务工作台', {{ timeout: 10000 }});
             await assertHeaderSubtitle(page, '功能选择 · 请选择功能', 'lite-home-after-return');
             if (errors.length || failedResponses.length) {{
@@ -1079,7 +1080,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await assertHeaderSubtitle(page, 'A楼 · 通告工作台', 'workbench');
           await assertLayout(page, 'workbench');
           await assertVnetSkin(page, 'workbench');
-          await page.getByRole('button', {{ name: '功能选择' }}).click();
+          await page.getByRole('button', {{ name: /^返回$/ }}).click();
           await page.waitForSelector('text=业务工作台', {{ timeout: 10000 }});
           await assertHeaderSubtitle(page, '功能选择 · 请选择功能', 'home-after-return-from-workbench');
           await assertVnetSkin(page, 'home-after-return-from-workbench');

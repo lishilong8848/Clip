@@ -1,9 +1,8 @@
 <template>
   <div class="signature-guide-strip" aria-label="签名上传条件">
     <template v-for="item in items" :key="item.key">
-      <button
+      <button type="button"
         v-if="item.role"
-        type="button"
         class="signature-guide-item actionable"
         :class="[{ ready: item.ready }, item.tone]"
         @click="$emit('select-role', item.role)"

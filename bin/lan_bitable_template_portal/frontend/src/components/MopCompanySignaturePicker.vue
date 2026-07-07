@@ -14,9 +14,8 @@
           @input="emit('update:search', ($event.target as HTMLInputElement).value)"
           @keyup.enter="emit('refresh')"
         />
-        <button
+        <button type="button"
           class="btn ghost signature-refresh"
-          type="button"
           :disabled="loading"
           title="重新读取签名人员"
           @click="emit('refresh')"
@@ -27,10 +26,9 @@
       <small class="search-inline-status">{{ statusText }}</small>
     </label>
     <div class="sign-person-list">
-      <button
+      <button type="button"
         v-for="person in people"
         :key="String(person.record_id || person.open_id || person.name || '')"
-        type="button"
         class="sign-person"
         :class="{
           active: selectedIds.includes(String(person.record_id || '')),
