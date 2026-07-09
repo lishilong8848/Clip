@@ -836,7 +836,7 @@ def _draft_from_record(record: dict[str, Any], *, manual: bool = False, work_typ
     title = _record_title(record)
     if manual:
         title = ""
-    return {
+    draft = {
         "title": title,
         "notice_type": str(record.get("notice_type") or "").strip(),
         "building": _record_building(record),
@@ -862,6 +862,23 @@ def _draft_from_record(record: dict[str, Any], *, manual: bool = False, work_typ
         "cabinet": _first(record.get("cabinet"), _field(record, "柜号")),
         "quantity": _first(record.get("quantity"), _field(record, "数量")),
     }
+    source_work_type = str(record.get("source_work_type") or "").strip()
+    converted_from = str(record.get("converted_from_work_type") or "").strip()
+    converted_to = str(record.get("converted_to_work_type") or "").strip()
+    if work == "change" and (source_work_type == "maintenance" or converted_from == "maintenance"):
+        draft.update(
+            {
+                "source_work_type": "maintenance",
+                "converted_from_work_type": "maintenance",
+                "sync_maintenance_target": "1",
+                "paired_maintenance_original_title": title,
+            }
+        )
+    elif source_work_type:
+        draft["source_work_type"] = source_work_type
+    if converted_to:
+        draft["converted_to_work_type"] = converted_to
+    return draft
 
 
 def _input(
@@ -1469,8 +1486,14 @@ def _detail_form(
             f"{admin_remove_button}"
         )
     else:
+        convert_change_button = (
+            "<button class=\"btn ghost\" type=\"button\" data-convert-to-change=\"1\">转为变更通告</button>"
+            if work == "maintenance" and record_id and not effective_manual
+            else ""
+        )
         action_buttons = (
             f"<button class=\"btn primary\" type=\"submit\" name=\"submit_action\" value=\"{_e(action)}\"{disabled}>发送{_e('开始' if action == 'start' else '更新')}</button>"
+            f"{convert_change_button}"
         )
     datalists = (
         f"<datalist id=\"specialty-options\">{''.join(f'<option value=\"{_e(item)}\"></option>' for item in SPECIALTY_OPTIONS)}</datalist>"
@@ -1484,12 +1507,25 @@ def _detail_form(
         if work == "power"
         else f"<input type=\"hidden\" name=\"notice_type\" value=\"{_e(notice_type_value)}\">"
     )
+    converted_hidden_inputs = "".join(
+        f"<input type=\"hidden\" name=\"{_e(key)}\" value=\"{_e(draft.get(key) or '')}\">"
+        for key in [
+            "source_work_type",
+            "converted_from_work_type",
+            "converted_to_work_type",
+            "sync_maintenance_target",
+            "paired_maintenance_target_record_id",
+            "paired_maintenance_original_title",
+            "paired_maintenance_actual_start_time",
+        ]
+    )
     return f"""
       <form id="lite-notice-form" class="detail-form" data-action="{_e(action)}" data-detail-mode="{_e(detail_mode)}" data-work-type="{_e(work)}">
         {datalists}
         <input type="hidden" name="scope" value="{_e(scope)}">
         <input type="hidden" name="work_type" value="{_e(work)}">
         {notice_type_input}
+        {converted_hidden_inputs}
         <input type="hidden" name="manual" value="{_e('1' if effective_manual else '')}">
         <input type="hidden" name="manual_id" value="{_e(f'manual:lite:{scope}:{work}' if effective_manual else '')}">
         <input type="hidden" name="record_id" value="{_e(record_id)}">
@@ -2369,6 +2405,8 @@ def render_workbench_lite(
       'action', 'operation_id', 'active_item_id', 'source_record_id', 'target_record_id', 'record_id',
       'manual_id', 'scope', 'work_type', 'notice_type', 'title', 'building', 'buildings', 'specialty',
       'maintenance_cycle', 'level', 'start_time', 'end_time', 'status', 'site_photo_count', 'mop_status',
+      'source_work_type', 'converted_from_work_type', 'converted_to_work_type', 'sync_maintenance_target',
+      'paired_maintenance_target_record_id', 'paired_maintenance_original_title', 'paired_maintenance_actual_start_time',
       'actual_action_time',
       'name', 'location', 'content', 'reason', 'impact', 'progress',
       'repair_device', 'repair_fault', 'fault_type', 'repair_mode', 'discovery',
@@ -2422,7 +2460,7 @@ def render_workbench_lite(
     const commandPatchKeys = new Set([
       'manual', 'manual_id', 'scope', 'action', 'work_type', 'notice_type', 'operation_id',
       'active_item_id', 'source_record_id', 'target_record_id', 'record_id',
-      'source_work_type', 'converted_from_work_type', 'sync_maintenance_target',
+      'source_work_type', 'converted_from_work_type', 'converted_to_work_type', 'sync_maintenance_target',
       'paired_maintenance_target_record_id', 'paired_maintenance_original_title',
       'paired_maintenance_actual_start_time',
       'building', 'buildings', 'building_code', 'building_codes', 'title', 'name',
@@ -3134,7 +3172,7 @@ def render_workbench_lite(
     function setSubmitButtons(form, action) {{
       const actions = form.querySelector('.form-actions');
       if (!actions) return;
-      actions.querySelectorAll('button[name="submit_action"],button[data-ongoing-delete-mode]').forEach(node => node.remove());
+      actions.querySelectorAll('button[name="submit_action"],button[data-ongoing-delete-mode],button[data-convert-to-change]').forEach(node => node.remove());
       const button = document.createElement('button');
       button.className = 'btn primary';
       button.type = 'submit';
@@ -3142,13 +3180,25 @@ def render_workbench_lite(
       button.value = action === 'update' ? 'update' : 'start';
       button.textContent = action === 'update' ? '发送更新' : '发送开始';
       actions.appendChild(button);
+      if (
+        (previewValue(form, 'work_type') || form.dataset.workType) === 'maintenance' &&
+        form.dataset.detailMode === 'source' &&
+        previewValue(form, 'source_record_id')
+      ) {{
+        const convertButton = document.createElement('button');
+        convertButton.className = 'btn ghost';
+        convertButton.type = 'button';
+        convertButton.setAttribute('data-convert-to-change', '1');
+        convertButton.textContent = '转为变更通告';
+        actions.appendChild(convertButton);
+      }}
       resetActualActionTime(form);
       updateNoticePreview(form);
     }}
     function setOngoingSubmitButtons(form) {{
       const actions = form.querySelector('.form-actions');
       if (!actions) return;
-      actions.querySelectorAll('button[name="submit_action"],button[data-ongoing-delete-mode]').forEach(node => node.remove());
+      actions.querySelectorAll('button[name="submit_action"],button[data-ongoing-delete-mode],button[data-convert-to-change]').forEach(node => node.remove());
       const updateButton = document.createElement('button');
       updateButton.className = 'btn primary';
       updateButton.type = 'submit';
@@ -3274,9 +3324,56 @@ def render_workbench_lite(
       if (!response.ok || data.ok === false) throw new Error(data.error || label + '失败');
       await refreshCurrentLite(label + '完成，正在更新页面...');
     }}
+    async function convertCurrentMaintenanceToChange(button) {{
+      const form = button?.closest('#lite-notice-form') || document.getElementById('lite-notice-form');
+      if (!form) return;
+      const recordId = previewValue(form, 'source_record_id') || previewValue(form, 'record_id');
+      if (!recordId) {{
+        showLiteError('当前维保事项缺少源记录，无法转为变更通告');
+        return;
+      }}
+      setLiteFormDirty(false);
+      setButtonBusy(button, true);
+      setLiteStatus('正在转为变更通告...');
+      try {{
+        const response = await fetch('/api/notice-work-type-override', {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          credentials: 'same-origin',
+          body: JSON.stringify({{
+            scope: getCurrentScope(),
+            record_id: recordId,
+            source_work_type: 'maintenance',
+            target_work_type: 'change'
+          }})
+        }});
+        const data = await response.json().catch(() => ({{}}));
+        if (handleLiteAuthRequired(response, data)) return;
+        if (!response.ok || data.ok === false) {{
+          throw new Error(data.error || (data.data && data.data.error) || '转为变更通告失败');
+        }}
+        const url = workbenchBaseUrl(getCurrentScope(), 'change');
+        setLiteStatus('已转为变更通告，正在打开变更列表...');
+        await navigateLite(url, {{
+          push: true,
+          label: '已转为变更通告',
+          selectors: ['#lite-workbench-subtitle', '.status', '.summary', '.toolbar', '.workbench-guide', '.workspace']
+        }});
+      }} catch (error) {{
+        showLiteError(error && error.message ? error.message : '转为变更通告失败');
+      }} finally {{
+        setButtonBusy(button, false);
+      }}
+    }}
     document.addEventListener('click', async (event) => {{
       const target = event.target instanceof Element ? event.target : null;
       if (!target) return;
+      const convertButton = target.closest('button[data-convert-to-change]');
+      if (convertButton) {{
+        event.preventDefault();
+        await convertCurrentMaintenanceToChange(convertButton);
+        return;
+      }}
       const photoRemove = target.closest('[data-site-photo-remove]');
       if (photoRemove) {{
         event.preventDefault();
