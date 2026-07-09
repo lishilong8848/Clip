@@ -870,6 +870,7 @@ def _draft_from_record(record: dict[str, Any], *, manual: bool = False, work_typ
             {
                 "source_work_type": "maintenance",
                 "converted_from_work_type": "maintenance",
+                "converted_to_work_type": "change",
                 "sync_maintenance_target": "1",
                 "paired_maintenance_original_title": title,
             }
@@ -1491,9 +1492,18 @@ def _detail_form(
             if work == "maintenance" and record_id and not effective_manual
             else ""
         )
+        revert_maintenance_button = (
+            "<button class=\"btn ghost\" type=\"button\" data-revert-to-maintenance=\"1\">转回维保</button>"
+            if work == "change"
+            and record_id
+            and not effective_manual
+            and str(draft.get("converted_from_work_type") or draft.get("source_work_type") or "") == "maintenance"
+            else ""
+        )
         action_buttons = (
             f"<button class=\"btn primary\" type=\"submit\" name=\"submit_action\" value=\"{_e(action)}\"{disabled}>发送{_e('开始' if action == 'start' else '更新')}</button>"
             f"{convert_change_button}"
+            f"{revert_maintenance_button}"
         )
     datalists = (
         f"<datalist id=\"specialty-options\">{''.join(f'<option value=\"{_e(item)}\"></option>' for item in SPECIALTY_OPTIONS)}</datalist>"
@@ -1830,6 +1840,10 @@ def render_workbench_lite(
     .undo-row span {{ color:#0a57d8; font-weight:900; font-size:12px; }}
     .empty.compact {{ padding:10px; }}
     .workspace {{ display:grid; grid-template-columns:minmax(300px,360px) minmax(0,1fr); gap:12px; margin-top:10px; align-items:start; }}
+    .workspace.is-switching {{ position:relative; min-height:420px; }}
+    .workspace.is-switching > * {{ opacity:0; pointer-events:none; }}
+    .workspace.is-switching::before {{ content:""; position:absolute; inset:0; z-index:3; border:1px solid #d8e5f7; border-radius:20px; background:linear-gradient(135deg,rgba(255,255,255,.96),rgba(238,246,255,.94)); box-shadow:0 14px 32px rgba(15,73,153,.08); }}
+    .workspace.is-switching::after {{ content:attr(data-loading-text); position:absolute; left:50%; top:50%; z-index:4; transform:translate(-50%,-50%); min-width:180px; min-height:42px; border-radius:999px; padding:11px 22px; display:flex; align-items:center; justify-content:center; color:#0a57d8; background:#fff; border:1px solid #cfe0ff; box-shadow:0 12px 28px rgba(31,99,255,.14); font-size:14px; font-weight:950; }}
     .task-inbox {{ position:sticky; top:12px; display:grid; gap:10px; max-height:calc(100vh - 24px); overflow:auto; align-self:start; }}
     .task-inbox.panel {{ padding:10px; }}
     .inbox-head {{ display:grid; gap:8px; }}
@@ -2280,6 +2294,14 @@ def render_workbench_lite(
       const panel = document.getElementById('detail-panel');
       if (panel) panel.classList.toggle('loading', Boolean(enabled));
     }}
+    function setWorkspaceSwitching(enabled, label) {{
+      const workspace = document.querySelector('.workspace');
+      if (!workspace) return;
+      workspace.classList.toggle('is-switching', Boolean(enabled));
+      workspace.setAttribute('aria-busy', enabled ? 'true' : 'false');
+      if (enabled) workspace.dataset.loadingText = label || '正在加载通告';
+      else delete workspace.dataset.loadingText;
+    }}
     function setButtonBusy(button, enabled) {{
       if (!button) return;
       button.disabled = Boolean(enabled);
@@ -2395,6 +2417,33 @@ def render_workbench_lite(
       url.searchParams.set('work_type', nextWorkType);
       if (isManual) url.searchParams.set('manual', '1');
       return url.pathname + url.search;
+    }}
+    const liteHtmlCache = window.__clipflowLiteHtmlCache || (window.__clipflowLiteHtmlCache = new Map());
+    const liteHtmlCacheTtlMs = 25000;
+    let liteNavigateController = null;
+    function liteCacheKey(url) {{
+      try {{
+        const parsed = new URL(url, location.origin);
+        return parsed.pathname + parsed.search;
+      }} catch {{
+        return String(url || '');
+      }}
+    }}
+    function getLiteHtmlCache(url) {{
+      const item = liteHtmlCache.get(liteCacheKey(url));
+      if (!item || Date.now() - Number(item.at || 0) > liteHtmlCacheTtlMs) return '';
+      return String(item.html || '');
+    }}
+    function setLiteHtmlCache(url, html) {{
+      if (!html) return;
+      liteHtmlCache.set(liteCacheKey(url), {{ at: Date.now(), html: String(html) }});
+      if (liteHtmlCache.size > 12) {{
+        const keys = Array.from(liteHtmlCache.keys());
+        for (const key of keys.slice(0, liteHtmlCache.size - 12)) liteHtmlCache.delete(key);
+      }}
+    }}
+    function clearLiteHtmlCache() {{
+      liteHtmlCache.clear();
     }}
     function parseJsonAttr(node, attrName) {{
       try {{ return JSON.parse(node.getAttribute(attrName) || '{{}}'); }}
@@ -2544,6 +2593,7 @@ def render_workbench_lite(
       }}
       const payload = ongoingDeletePayload(form);
       const endpoint = isLocalRemove ? '/api/ongoing-items/remove-local' : '/api/ongoing-items/delete';
+      clearLiteHtmlCache();
       setLiteFormDirty(false);
       setFormSubmitBusy(form, true);
       setLiteStatus(isLocalRemove ? '正在移除显示...' : '正在删除通告和对应多维记录...');
@@ -3172,7 +3222,7 @@ def render_workbench_lite(
     function setSubmitButtons(form, action) {{
       const actions = form.querySelector('.form-actions');
       if (!actions) return;
-      actions.querySelectorAll('button[name="submit_action"],button[data-ongoing-delete-mode],button[data-convert-to-change]').forEach(node => node.remove());
+      actions.querySelectorAll('button[name="submit_action"],button[data-ongoing-delete-mode],button[data-convert-to-change],button[data-revert-to-maintenance]').forEach(node => node.remove());
       const button = document.createElement('button');
       button.className = 'btn primary';
       button.type = 'submit';
@@ -3192,13 +3242,26 @@ def render_workbench_lite(
         convertButton.textContent = '转为变更通告';
         actions.appendChild(convertButton);
       }}
+      if (
+        (previewValue(form, 'work_type') || form.dataset.workType) === 'change' &&
+        form.dataset.detailMode === 'source' &&
+        previewValue(form, 'source_record_id') &&
+        (previewValue(form, 'source_work_type') === 'maintenance' || previewValue(form, 'converted_from_work_type') === 'maintenance')
+      ) {{
+        const revertButton = document.createElement('button');
+        revertButton.className = 'btn ghost';
+        revertButton.type = 'button';
+        revertButton.setAttribute('data-revert-to-maintenance', '1');
+        revertButton.textContent = '转回维保';
+        actions.appendChild(revertButton);
+      }}
       resetActualActionTime(form);
       updateNoticePreview(form);
     }}
     function setOngoingSubmitButtons(form) {{
       const actions = form.querySelector('.form-actions');
       if (!actions) return;
-      actions.querySelectorAll('button[name="submit_action"],button[data-ongoing-delete-mode],button[data-convert-to-change]').forEach(node => node.remove());
+      actions.querySelectorAll('button[name="submit_action"],button[data-ongoing-delete-mode],button[data-convert-to-change],button[data-revert-to-maintenance]').forEach(node => node.remove());
       const updateButton = document.createElement('button');
       updateButton.className = 'btn primary';
       updateButton.type = 'submit';
@@ -3299,24 +3362,48 @@ def render_workbench_lite(
       return true;
     }}
     async function navigateLite(url, options = {{}}) {{
+      const useWorkspaceSwitch = Boolean(options.workspaceSwitch);
+      const useCache = Boolean(options.useCache);
       setPanelLoading(true);
+      if (useWorkspaceSwitch) setWorkspaceSwitching(true, options.loadingText || options.label || '正在加载通告');
       setLiteStatus(options.label || '正在切换...');
       const scrollPositions = options.preserveWorkspaceScroll ? captureWorkspaceScroll() : null;
+      let pushedWithCache = false;
       try {{
-        const response = await fetch(url, {{ credentials: 'same-origin' }});
+        if (useCache) {{
+          const cachedHtml = getLiteHtmlCache(url);
+          if (cachedHtml) {{
+            applyLiteHtml(cachedHtml, url, options.push !== false, options.selectors);
+            pushedWithCache = options.push !== false;
+            if (useWorkspaceSwitch) setWorkspaceSwitching(false);
+            setLiteStatus('已切换，正在校准最新数据...');
+          }}
+        }}
+        if (liteNavigateController) liteNavigateController.abort();
+        liteNavigateController = new AbortController();
+        const response = await fetch(url, {{
+          credentials: 'same-origin',
+          signal: liteNavigateController.signal,
+        }});
         const html = await response.text();
         if (handleLiteAuthRequired(response, null, html)) return;
         if (!response.ok) throw new Error(html || '页面加载失败');
-        applyLiteHtml(html, url, options.push !== false, options.selectors);
+        if (useCache) setLiteHtmlCache(url, html);
+        applyLiteHtml(html, url, !pushedWithCache && options.push !== false, options.selectors);
         if (options.preserveWorkspaceScroll) restoreWorkspaceScroll(scrollPositions);
+      }} catch (error) {{
+        if (error && error.name === 'AbortError') return;
+        throw error;
       }} finally {{
         setPanelLoading(false);
+        if (useWorkspaceSwitch) setWorkspaceSwitching(false);
       }}
     }}
     async function refreshCurrentLite(label, selectors) {{
       await navigateLite(location.href, {{ push: false, label: label || '正在刷新...', selectors, preserveWorkspaceScroll: true }});
     }}
     async function liteFetchThenRefresh(url, label) {{
+      clearLiteHtmlCache();
       setLiteStatus(label + '中...');
       const response = await fetch(url, {{ credentials: 'same-origin' }});
       const data = await response.json().catch(() => ({{}}));
@@ -3324,17 +3411,20 @@ def render_workbench_lite(
       if (!response.ok || data.ok === false) throw new Error(data.error || label + '失败');
       await refreshCurrentLite(label + '完成，正在更新页面...');
     }}
-    async function convertCurrentMaintenanceToChange(button) {{
+    async function applyCurrentMaintenanceWorkTypeOverride(button, targetWorkType) {{
       const form = button?.closest('#lite-notice-form') || document.getElementById('lite-notice-form');
       if (!form) return;
       const recordId = previewValue(form, 'source_record_id') || previewValue(form, 'record_id');
       if (!recordId) {{
-        showLiteError('当前维保事项缺少源记录，无法转为变更通告');
+        showLiteError('当前事项缺少源记录，无法转换');
         return;
       }}
+      const targetType = targetWorkType === 'maintenance' ? 'maintenance' : 'change';
+      const targetLabel = targetType === 'maintenance' ? '维保' : '变更通告';
       setLiteFormDirty(false);
+      clearLiteHtmlCache();
       setButtonBusy(button, true);
-      setLiteStatus('正在转为变更通告...');
+      setLiteStatus('正在转为' + targetLabel + '...');
       try {{
         const response = await fetch('/api/notice-work-type-override', {{
           method: 'POST',
@@ -3344,23 +3434,23 @@ def render_workbench_lite(
             scope: getCurrentScope(),
             record_id: recordId,
             source_work_type: 'maintenance',
-            target_work_type: 'change'
+            target_work_type: targetType
           }})
         }});
         const data = await response.json().catch(() => ({{}}));
         if (handleLiteAuthRequired(response, data)) return;
         if (!response.ok || data.ok === false) {{
-          throw new Error(data.error || (data.data && data.data.error) || '转为变更通告失败');
+          throw new Error(data.error || (data.data && data.data.error) || '转换失败');
         }}
-        const url = workbenchBaseUrl(getCurrentScope(), 'change');
-        setLiteStatus('已转为变更通告，正在打开变更列表...');
+        const url = workbenchBaseUrl(getCurrentScope(), targetType);
+        setLiteStatus('已转为' + targetLabel + '，正在打开列表...');
         await navigateLite(url, {{
           push: true,
-          label: '已转为变更通告',
+          label: '已转为' + targetLabel,
           selectors: ['#lite-workbench-subtitle', '.status', '.summary', '.toolbar', '.workbench-guide', '.workspace']
         }});
       }} catch (error) {{
-        showLiteError(error && error.message ? error.message : '转为变更通告失败');
+        showLiteError(error && error.message ? error.message : '转换失败');
       }} finally {{
         setButtonBusy(button, false);
       }}
@@ -3371,7 +3461,13 @@ def render_workbench_lite(
       const convertButton = target.closest('button[data-convert-to-change]');
       if (convertButton) {{
         event.preventDefault();
-        await convertCurrentMaintenanceToChange(convertButton);
+        await applyCurrentMaintenanceWorkTypeOverride(convertButton, 'change');
+        return;
+      }}
+      const revertButton = target.closest('button[data-revert-to-maintenance]');
+      if (revertButton) {{
+        event.preventDefault();
+        await applyCurrentMaintenanceWorkTypeOverride(revertButton, 'maintenance');
         return;
       }}
       const photoRemove = target.closest('[data-site-photo-remove]');
@@ -3481,7 +3577,14 @@ def render_workbench_lite(
         const selectors = isRow ? ['.status', '#detail-panel'] : (isTypeTab ? ['#lite-workbench-subtitle', '.status', '.summary', '.toolbar', '.workbench-guide', '.workspace'] : undefined);
         const rowGroupSelector = navLink.matches('.notice-row') ? '.notice-row' : '.ongoing-row';
         try {{
-          await navigateLite(navLink.href, {{ label: isTypeTab ? '正在切换分类...' : '正在打开通告...', selectors, preserveWorkspaceScroll: isRow }});
+          await navigateLite(navLink.href, {{
+            label: isTypeTab ? '正在切换分类...' : '正在打开通告...',
+            loadingText: isTypeTab ? '正在加载通告' : '正在打开通告',
+            selectors,
+            preserveWorkspaceScroll: isRow,
+            workspaceSwitch: isTypeTab,
+            useCache: isTypeTab
+          }});
           if (isRow) {{
             document.querySelectorAll(rowGroupSelector).forEach(node => {{
               node.classList.toggle('active', node === navLink);
@@ -3535,6 +3638,7 @@ def render_workbench_lite(
         const undoId = undoButton.getAttribute('data-undo-id');
         if (!undoId) return;
         undoButton.disabled = true;
+        clearLiteHtmlCache();
         try {{
           const response = await fetch('/api/notice-undo/' + encodeURIComponent(undoId) + '/apply', {{
             method: 'POST',
@@ -4143,6 +4247,7 @@ def render_workbench_lite(
         return;
       }}
       setLiteFormDirty(false);
+      clearLiteHtmlCache();
       setFormSubmitBusy(form, true);
       setLiteStatus('已提交，发送中');
       let payload = null;
