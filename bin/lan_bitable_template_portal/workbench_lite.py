@@ -1421,21 +1421,65 @@ def _detail_form(
     parsed_action: str = "",
     source_link_options: list[dict[str, str]] | None = None,
     is_admin: bool = False,
+    prefill_draft: dict[str, str] | None = None,
+    prefill_source_record_id: str = "",
+    prefill_target_record_id: str = "",
+    prefill_action: str = "",
+    prefill_context_id: str = "",
 ) -> str:
     source = ongoing_item or record or {}
     work = _work_type(work_type) if work_type else _item_work_type(source)
-    effective_manual = bool(manual or parsed_draft or (not ongoing_item and not record))
+    explicit_prefill_source_id = str(prefill_source_record_id or "").strip()
+    effective_manual = bool(
+        manual
+        or parsed_draft
+        or (
+            not ongoing_item
+            and not record
+            and not explicit_prefill_source_id
+        )
+    )
     draft = _draft_from_record(source, manual=effective_manual, work_type=work)
     if parsed_draft:
         draft.update(parsed_draft)
+    if prefill_draft:
+        draft.update(prefill_draft)
+        draft["start_time"] = _datetime_local(draft.get("start_time"))
+        draft["end_time"] = _datetime_local(draft.get("end_time"))
     action = "start" if effective_manual or not ongoing_item else "update"
     if record and not ongoing_item:
         action = _action_for_record(record)
     if parsed_action in {"start", "update", "end"}:
         action = parsed_action
-    record_id = "" if effective_manual else str((record or {}).get("record_id") or (record or {}).get("source_record_id") or "")
-    source_record_id = "" if effective_manual else str(source.get("source_record_id") or record_id)
-    target_record_id = str(source.get("target_record_id") or source.get("record_id") or "") if ongoing_item else ""
+    if prefill_draft and prefill_action in {"start", "update", "end"}:
+        action = prefill_action
+    record_id = (
+        explicit_prefill_source_id
+        if prefill_draft
+        else (
+            ""
+            if effective_manual
+            else str(
+                (record or {}).get("record_id")
+                or (record or {}).get("source_record_id")
+                or ""
+            )
+        )
+    )
+    source_record_id = (
+        explicit_prefill_source_id
+        if prefill_draft
+        else ("" if effective_manual else str(source.get("source_record_id") or record_id))
+    )
+    target_record_id = (
+        str(prefill_target_record_id or "").strip()
+        if prefill_draft
+        else (
+            str(source.get("target_record_id") or source.get("record_id") or "")
+            if ongoing_item
+            else ""
+        )
+    )
     active_item_id = str(source.get("active_item_id") or "") if ongoing_item else ""
     site_photo_count = _site_photo_count(source)
     mop_status = _mop_status_text(source, work)
@@ -1445,8 +1489,20 @@ def _detail_form(
         options=source_link_options or [],
     )
     hidden_source_input = "" if source_link_html else f'<input type="hidden" name="source_record_id" value="{_e(source_record_id)}">'
-    title = "解析粘贴通告" if parsed_draft else ("纯手填通告" if effective_manual else (_record_title(source) or "选择左侧事项"))
-    disabled = "" if source or effective_manual else " disabled"
+    title = (
+        "维修单生成检修通告"
+        if prefill_draft
+        else (
+            "解析粘贴通告"
+            if parsed_draft
+            else (
+                "纯手填通告"
+                if effective_manual
+                else (_record_title(source) or "选择左侧事项")
+            )
+        )
+    )
+    disabled = "" if source or effective_manual or prefill_draft else " disabled"
     detail_mode = "ongoing" if ongoing_item else ("manual" if effective_manual else "source")
     mode_note = _detail_mode_note(
         ongoing_item=ongoing_item,
@@ -1529,6 +1585,14 @@ def _detail_form(
             "paired_maintenance_actual_start_time",
         ]
     )
+    manual_id = ""
+    if effective_manual:
+        context_id = str(prefill_context_id or "").strip()
+        manual_id = (
+            f"manual:repair-management:{context_id}"
+            if context_id
+            else f"manual:lite:{scope}:{work}"
+        )
     return f"""
       <form id="lite-notice-form" class="detail-form" data-action="{_e(action)}" data-detail-mode="{_e(detail_mode)}" data-work-type="{_e(work)}">
         {datalists}
@@ -1537,7 +1601,7 @@ def _detail_form(
         {notice_type_input}
         {converted_hidden_inputs}
         <input type="hidden" name="manual" value="{_e('1' if effective_manual else '')}">
-        <input type="hidden" name="manual_id" value="{_e(f'manual:lite:{scope}:{work}' if effective_manual else '')}">
+        <input type="hidden" name="manual_id" value="{_e(manual_id)}">
         <input type="hidden" name="record_id" value="{_e(record_id)}">
         {hidden_source_input}
         <input type="hidden" name="target_record_id" value="{_e(target_record_id)}">
@@ -1590,6 +1654,11 @@ def render_workbench_lite(
     parsed_action: str = "",
     paste_text: str = "",
     notice_undos: list[dict[str, Any]] | None = None,
+    prefill_draft: dict[str, str] | None = None,
+    prefill_source_record_id: str = "",
+    prefill_target_record_id: str = "",
+    prefill_action: str = "",
+    prefill_context_id: str = "",
 ) -> str:
     records = payload.get("records") if isinstance(payload.get("records"), list) else []
     ongoing = payload.get("ongoing") if isinstance(payload.get("ongoing"), list) else []
@@ -1669,6 +1738,7 @@ def render_workbench_lite(
         "record_id": record_id,
         "active_item_id": active_item_id,
         "manual": "1" if manual else "",
+        "repair_management_record_id": prefill_context_id,
     }
     pending_pager = _pagination_controls(
         label="待发起事项",
@@ -1701,6 +1771,8 @@ def render_workbench_lite(
             if parsed_work in WORK_TYPE_LABELS
             else (WORK_TYPE_BY_NOTICE_TYPE.get(parsed_notice_type) or detail_work)
         )
+    elif prefill_draft:
+        detail_work = _work_type(prefill_draft.get("work_type") or work_filter or "repair")
     elif manual and work_filter:
         detail_work = work_filter
     source_options = _source_link_options(records, ongoing, work_type=detail_work)
@@ -2154,7 +2226,7 @@ def render_workbench_lite(
             <button class="btn primary" type="submit">解析到当前通告</button>
           </form>
         </details>
-        {_detail_form(record=selected_record, ongoing_item=selected_ongoing, scope=scope, work_type=detail_work, manual=manual or bool(parsed_draft), parsed_draft=parsed_draft, parsed_action=parsed_action, source_link_options=source_options, is_admin=is_admin_session)}
+        {_detail_form(record=selected_record, ongoing_item=selected_ongoing, scope=scope, work_type=detail_work, manual=manual or bool(parsed_draft), parsed_draft=parsed_draft, parsed_action=parsed_action, source_link_options=source_options, is_admin=is_admin_session, prefill_draft=prefill_draft, prefill_source_record_id=prefill_source_record_id, prefill_target_record_id=prefill_target_record_id, prefill_action=prefill_action, prefill_context_id=prefill_context_id)}
       </section>
     </section>
   </main>

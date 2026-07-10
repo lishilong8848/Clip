@@ -4012,9 +4012,29 @@ class ScreenshotConfirmDialog(QDialog):
 
 
 
+    def _normalize_event_source_option(self, source: str) -> str:
+
+        source = str(source or "").strip()
+
+        if not source:
+
+            return ""
+
+        if source in self.event_source_options:
+
+            return source
+
+        return self._detect_event_source(f"【来源】{source}")
+
+
+
     def _detect_event_source(self, text: str) -> str:
 
-        source_text = self._extract_section(text or "", "来源")
+        source_text = self._extract_section(text or "", "事件发现来源")
+
+        if not source_text:
+
+            source_text = self._extract_section(text or "", "来源")
 
         if not source_text:
 
@@ -4145,6 +4165,8 @@ class ScreenshotConfirmDialog(QDialog):
 
 
     def _set_event_source(self, source: str):
+
+        source = self._normalize_event_source_option(source)
 
         if not source:
 

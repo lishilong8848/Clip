@@ -3531,8 +3531,14 @@ class MainWindowRecordsMixin:
             event_source = str(cache_fields.get("event_source") or "").strip()
             if event_source:
                 data_dict["event_source"] = event_source
+                data_dict["source"] = event_source
             else:
-                data_dict.pop("event_source", None)
+                existing_event_source = str(
+                    data_dict.get("event_source") or data_dict.get("source") or ""
+                ).strip()
+                if existing_event_source:
+                    data_dict["event_source"] = existing_event_source
+                    data_dict["source"] = existing_event_source
         if "transfer_to_overhaul" in cache_fields:
             data_dict["transfer_to_overhaul"] = bool(
                 cache_fields.get("transfer_to_overhaul")
@@ -3670,10 +3676,12 @@ class MainWindowRecordsMixin:
                 data_dict["level_locked"] = True
             else:
                 data_dict.pop("level_locked", None)
-            if "event_source" in cache_fields:
-                resolved["event_source"] = str(
+            if not resolved["event_source"] and "event_source" in cache_fields:
+                cached_event_source = str(
                     cache_fields.get("event_source") or ""
                 ).strip()
+                if cached_event_source:
+                    resolved["event_source"] = cached_event_source
             if "transfer_to_overhaul" in cache_fields:
                 resolved["transfer_to_overhaul"] = bool(
                     cache_fields.get("transfer_to_overhaul")

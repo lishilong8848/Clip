@@ -132,7 +132,7 @@
               class="primary"
               @click="$emit('repair-management', scope.value)"
             >
-              进入检修管理
+              进入检修单管理
             </button>
             <button type="button"
               v-else-if="activeMode === 'maintenance_mop'"
@@ -218,7 +218,7 @@ const activeMode = ref<EntryKey>("");
 
 const enabledModuleCount = computed(() => moduleCards.filter((item) => !item.disabled).length);
 const activeConfig = computed(() => entryConfigs[activeMode.value || "tools"]);
-const isToolScopeMode = computed(() => ["repair", "power", "polling", "adjust", "handover"].includes(activeMode.value));
+const isToolScopeMode = computed(() => ["power", "polling", "adjust", "handover"].includes(activeMode.value));
 const activeMetricWorkType = computed(() => {
   if (activeMode.value === "maintenance_mop") return "maintenance";
   if (activeMode.value === "repair_management") return "repair";

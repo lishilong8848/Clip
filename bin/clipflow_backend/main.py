@@ -66,7 +66,9 @@ from clipflow_backend.api_models import (
     PermissionRequestConfirm,
     PermissionRequestCreate,
     PermissionRequestReviewRequest,
+    RepairManagementPrefillRequest,
     RepairManagementRecordRequest,
+    RepairFollowupRecordRequest,
     QtClipboardAckRequest,
     QtClipboardEventRequest,
     QtActiveItemsDeltaRequest,
@@ -482,6 +484,17 @@ class FastAPIPortalController:
                 work_type = str(request.query_params.get("work_type") or "maintenance").strip()
                 if work_type != "all" and work_type not in NOTICE_TYPE_BY_WORK_TYPE:
                     work_type = "maintenance"
+                repair_management_record_id = str(
+                    request.query_params.get("repair_management_record_id") or ""
+                ).strip()
+                repair_notice_prefill: dict[str, Any] = {}
+                if repair_management_record_id:
+                    work_type = "repair"
+                    repair_notice_prefill = await asyncio.to_thread(
+                        PortalRuntime.service.repair_management_notice_prefill,
+                        repair_management_record_id,
+                        scope=scope,
+                    )
                 search = str(request.query_params.get("search") or "")
                 specialty = str(request.query_params.get("specialty") or "")
                 record_id = str(request.query_params.get("record_id") or "")
@@ -532,6 +545,21 @@ class FastAPIPortalController:
                     manual=manual,
                     scope_options=scope_options,
                     notice_undos=notice_undos if isinstance(notice_undos, list) else [],
+                    prefill_draft=(
+                        repair_notice_prefill.get("draft")
+                        if isinstance(repair_notice_prefill.get("draft"), dict)
+                        else None
+                    ),
+                    prefill_source_record_id=str(
+                        repair_notice_prefill.get("source_record_id") or ""
+                    ),
+                    prefill_target_record_id=str(
+                        repair_notice_prefill.get("target_record_id") or ""
+                    ),
+                    prefill_action=str(
+                        repair_notice_prefill.get("action") or "start"
+                    ),
+                    prefill_context_id=repair_management_record_id,
                 )
                 return Response(
                     content=html_body.encode("utf-8"),
@@ -2733,6 +2761,176 @@ class FastAPIPortalController:
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
 
+        @app.get("/api/repair-management/repair-candidates")
+        async def repair_management_repair_candidates(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_scope_or_error(
+                    session, request.query_params.get("scope") or "ALL"
+                )
+                try:
+                    limit = int(request.query_params.get("limit") or 80)
+                except ValueError:
+                    limit = 80
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.list_repair_management_repair_candidates,
+                    scope=scope,
+                    event_record_id=str(request.query_params.get("event_record_id") or ""),
+                    month=str(request.query_params.get("month") or ""),
+                    query=str(request.query_params.get("q") or ""),
+                    limit=limit,
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.get("/api/repair-management/cmdb-candidates")
+        async def repair_management_cmdb_candidates(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_scope_or_error(
+                    session, request.query_params.get("scope") or "ALL"
+                )
+                try:
+                    limit = int(request.query_params.get("limit") or 160)
+                except ValueError:
+                    limit = 160
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.list_repair_management_cmdb_candidates,
+                    scope=scope,
+                    query=str(request.query_params.get("q") or ""),
+                    limit=limit,
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.get("/api/repair-management/followups")
+        async def repair_management_followups(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_scope_or_error(
+                    session, request.query_params.get("scope") or "ALL"
+                )
+                try:
+                    limit = int(request.query_params.get("limit") or 100)
+                except ValueError:
+                    limit = 100
+                try:
+                    offset = int(request.query_params.get("offset") or 0)
+                except ValueError:
+                    offset = 0
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.get_repair_followup_records,
+                    summary_record_id=str(
+                        request.query_params.get("summary_record_id") or ""
+                    ),
+                    scope=scope,
+                    query=str(request.query_params.get("q") or ""),
+                    limit=limit,
+                    offset=offset,
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.post("/api/repair-management/followups")
+        async def repair_management_followup_create(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                payload = (
+                    await self._read_model_request(request, RepairFollowupRecordRequest)
+                ).to_payload()
+                scope = self._authorized_scope_or_error(
+                    session, payload.get("scope") or "ALL"
+                )
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.create_repair_followup_record,
+                    summary_record_id=str(payload.get("summary_record_id") or ""),
+                    fields=payload.get("fields") or {},
+                    cmdb_record_id=str(payload.get("cmdb_record_id") or ""),
+                    scope=scope,
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.put("/api/repair-management/followups/{record_id}")
+        async def repair_management_followup_update(record_id: str, request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                payload = (
+                    await self._read_model_request(request, RepairFollowupRecordRequest)
+                ).to_payload()
+                scope = self._authorized_scope_or_error(
+                    session, payload.get("scope") or "ALL"
+                )
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.update_repair_followup_record,
+                    record_id,
+                    summary_record_id=str(payload.get("summary_record_id") or ""),
+                    fields=payload.get("fields") or {},
+                    cmdb_record_id=str(payload.get("cmdb_record_id") or ""),
+                    scope=scope,
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.delete("/api/repair-management/followups/{record_id}")
+        async def repair_management_followup_delete(record_id: str, request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_scope_or_error(
+                    session, request.query_params.get("scope") or "ALL"
+                )
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.delete_repair_followup_record,
+                    record_id,
+                    summary_record_id=str(
+                        request.query_params.get("summary_record_id") or ""
+                    ),
+                    scope=scope,
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.post("/api/repair-management/prefill")
+        async def repair_management_prefill(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                payload = (
+                    await self._read_model_request(request, RepairManagementPrefillRequest)
+                ).to_payload()
+                scope = self._authorized_scope_or_error(
+                    session, payload.get("scope") or "ALL"
+                )
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.repair_management_combined_prefill,
+                    scope=scope,
+                    event_record_id=str(payload.get("source_event_id") or ""),
+                    repair_record_ids=payload.get("source_repair_ids") or [],
+                    month=str(payload.get("source_month") or ""),
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
         @app.get("/api/repair-management/records")
         async def repair_management_records(request: Request):
             session = self._current_session(request)
@@ -2747,11 +2945,16 @@ class FastAPIPortalController:
                     limit = int(request.query_params.get("limit") or 200)
                 except ValueError:
                     limit = 200
+                try:
+                    offset = int(request.query_params.get("offset") or 0)
+                except ValueError:
+                    offset = 0
                 data = await asyncio.to_thread(
                     PortalRuntime.service.get_repair_management_records,
                     scope=request.query_params.get("scope") or "ALL",
                     query=query,
                     limit=limit,
+                    offset=offset,
                 )
                 return self._json_ok(request, session, data)
             except Exception as exc:
@@ -2771,6 +2974,8 @@ class FastAPIPortalController:
                     PortalRuntime.service.create_repair_management_record,
                     payload.get("fields") if isinstance(payload.get("fields"), dict) else {},
                     source_event_id=str(payload.get("source_event_id") or ""),
+                    source_repair_ids=payload.get("source_repair_ids") or [],
+                    source_month=str(payload.get("source_month") or ""),
                     scope=str(payload.get("scope") or "ALL"),
                 )
                 return self._json_ok(request, session, data)
@@ -2791,6 +2996,9 @@ class FastAPIPortalController:
                     PortalRuntime.service.update_repair_management_record,
                     record_id,
                     payload.get("fields") if isinstance(payload.get("fields"), dict) else {},
+                    source_event_id=str(payload.get("source_event_id") or ""),
+                    source_repair_ids=payload.get("source_repair_ids") or [],
+                    source_month=str(payload.get("source_month") or ""),
                     scope=str(payload.get("scope") or "ALL"),
                 )
                 return self._json_ok(request, session, data)
@@ -6729,6 +6937,10 @@ class FastAPIPortalController:
             projected_fields,
             overwrite=True,
         )
+        saved_event_source = str(
+            data.get("event_source") or data.get("source") or ""
+        ).strip()
+        incoming_event_source = str(entry.get("source") or "").strip()
         building_codes = data.get("building_codes")
         if not isinstance(building_codes, list):
             building_codes = PortalRuntime.service._building_codes_from_notice_text(
@@ -6764,7 +6976,11 @@ class FastAPIPortalController:
                 "action": projected_action or data.get("action") or "",
                 "status": projected_status or data.get("status") or "",
                 "level": data.get("level") or entry.get("level"),
-                "source": entry.get("source") or data.get("source", ""),
+                "source": (
+                    saved_event_source or incoming_event_source
+                    if notice_type == "事件通告"
+                    else incoming_event_source or data.get("source", "")
+                ),
                 "time_str": data.get("time_str") or entry.get("time_str") or "",
                 "reason": data.get("reason") or entry.get("reason") or "",
                 "origin": data.get("origin") or "clipboard",

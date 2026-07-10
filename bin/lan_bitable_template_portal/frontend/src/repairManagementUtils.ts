@@ -1,22 +1,11 @@
 import type { LooseDict, ScopeOption } from "./types";
 
 export const REPAIR_REQUIRED_FIELD_GROUPS = [
-  ["检修通告名称", "维修名称", "标题", "名称"],
-  ["地点"],
-  ["紧急程度"],
-  ["专业"],
-  ["发现故障时间"],
-  ["期望完成时间"],
-  ["维修设备"],
-  ["维修故障"],
-  ["故障类型"],
-  ["维修方式"],
-  ["影响范围"],
-  ["故障发现方式"],
-  ["故障现象"],
-  ["故障原因"],
-  ["解决方案"],
-  ["完成情况"],
+  ["维修名称"],
+  ["故障发生时间"],
+  ["故障维修原因"],
+  ["所属专业", "专业（推送消息用）"],
+  ["所属数据中心/楼栋-使用", "所属数据中心/楼栋（关联CMDB唯一ID关联,DE不选）"],
 ];
 
 export function isRequiredRepairField(fieldName: unknown): boolean {
@@ -40,8 +29,29 @@ export function sortedRepairFields(source: LooseDict[]): LooseDict[] {
 
 export function repairFieldBadge(field: LooseDict, editingRecordId = ""): string {
   if (isRequiredRepairField(field.field_name) && !editingRecordId) return "必填";
+  if (field.auto_filled) return "自动填写";
   if (field.options?.length) return "下拉选择";
   return String(field.ui_type || "可编辑");
+}
+
+export function repairDraftInputValue(field: LooseDict, value: unknown): string {
+  const uiType = String(field.ui_type || "").toLowerCase();
+  if (uiType.includes("datetime")) {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      const date = new Date(value);
+      if (!Number.isNaN(date.getTime())) {
+        const pad = (item: number) => String(item).padStart(2, "0");
+        return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+      }
+    }
+    const text = String(value ?? "").trim().replace(" ", "T");
+    return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(text) ? text.slice(0, 16) : "";
+  }
+  return repairFieldValueToText(value);
+}
+
+export function repairFieldUsesTextarea(fieldName: unknown): boolean {
+  return /(描述|原因|现象|措施|方案|跟进|进展|人员|附件)/.test(String(fieldName || ""));
 }
 
 export function repairFieldValueToText(value: unknown): string {
@@ -113,6 +123,6 @@ export function repairRecordSpecialtyLabel(record: LooseDict): string {
 
 export function repairRecordTimeLabel(record: LooseDict): string {
   const fields = record.display_fields || {};
-  const time = fields["发现故障时间"] || fields["期望完成时间"] || fields["维修开始时间"] || record.last_modified_time;
+  const time = fields["故障发生时间"] || fields["维修开始时间"] || fields["维修结束时间"] || record.last_modified_time;
   return String(time || "时间未填").trim();
 }

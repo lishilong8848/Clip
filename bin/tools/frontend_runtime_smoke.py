@@ -425,7 +425,14 @@ class _SmokePortalService:
             }
         ]
 
-    def get_repair_management_records(self, *, scope: str = "ALL", query: str = "", limit: int = 200) -> dict:
+    def get_repair_management_records(
+        self,
+        *,
+        scope: str = "ALL",
+        query: str = "",
+        limit: int = 200,
+        offset: int = 0,
+    ) -> dict:
         records = [
             {
                 "record_id": "repair-mgmt-a-001",
@@ -433,38 +440,64 @@ class _SmokePortalService:
                 "created_time": "2026-06-01 09:00:00",
                 "last_modified_time": "2026-06-01 10:00:00",
                 "display_fields": {
-                    "检修通告名称": "A楼测试检修管理记录",
-                    "楼栋": "A楼",
-                    "专业": "弱电",
+                    "维修名称": "A楼测试检修管理记录",
+                    "所属数据中心/楼栋-使用": "南通A楼",
+                    "所属专业": "弱电",
                 },
                 "raw_fields": {
-                    "检修通告名称": "A楼测试检修管理记录",
-                    "楼栋": "A楼",
-                    "专业": "弱电",
+                    "维修名称": "A楼测试检修管理记录",
+                    "所属数据中心/楼栋-使用": "南通A楼",
+                    "所属专业": "弱电",
+                    "关联事件单": "rec-smoke-event-a-001",
+                    "设备检修关联": "rec-smoke-repair-a-001",
                 },
                 "building_codes": ["A"],
+                "source_event_id": "rec-smoke-event-a-001",
+                "source_repair_ids": ["rec-smoke-repair-a-001"],
             }
         ]
         if str(scope or "").strip().upper() not in {"", "ALL", "A"}:
             records = []
         return {
             "app_token": "AnEBwJlvGiJfDdkOB32cUPuknzg",
-            "table_id": "tblschT48zXwigUG",
+            "table_id": "tblcws1gwaFQnU6H",
             "fields": [
-                {"field_name": "检修通告名称", "editable": True, "is_primary": True, "ui_type": "text"},
-                {"field_name": "楼栋", "editable": True, "ui_type": "text"},
-                {"field_name": "专业", "editable": True, "ui_type": "text"},
-                {"field_name": "创建时间", "editable": False, "ui_type": "created_time"},
+                {"field_name": "维修名称", "editable": True, "is_primary": True, "ui_type": "text"},
+                {"field_name": "故障发生时间", "editable": True, "ui_type": "datetime"},
+                {"field_name": "故障维修原因", "editable": True, "ui_type": "text"},
+                {"field_name": "所属数据中心/楼栋-使用", "editable": True, "ui_type": "text"},
+                {"field_name": "所属专业", "editable": True, "ui_type": "single_select", "options": ["弱电"]},
+                {"field_name": "关联事件单", "editable": False, "auto_filled": True, "ui_type": "text"},
+                {"field_name": "设备检修关联", "editable": False, "auto_filled": True, "ui_type": "text"},
+                {"field_name": "维修跟进记录", "editable": False, "auto_filled": True, "ui_type": "text"},
+                {"field_name": "创建日期", "editable": False, "ui_type": "datetime"},
             ],
-            "records": records[: max(1, min(int(limit or 200), 500))],
+            "records": records[max(0, int(offset or 0)) : max(0, int(offset or 0)) + max(1, min(int(limit or 200), 500))],
             "total": len(records),
-            "returned": len(records),
+            "returned": len(records[max(0, int(offset or 0)) : max(0, int(offset or 0)) + max(1, min(int(limit or 200), 500))]),
         }
 
-    def create_repair_management_record(self, fields: dict, *, source_event_id: str = "", scope: str = "ALL") -> dict:
+    def create_repair_management_record(
+        self,
+        fields: dict,
+        *,
+        source_event_id: str = "",
+        source_repair_ids=None,
+        source_month: str = "",
+        scope: str = "ALL",
+    ) -> dict:
         return {"record_id": "repair-mgmt-created-001", "fields": dict(fields or {}), "field_count": len(fields or {})}
 
-    def update_repair_management_record(self, record_id: str, fields: dict, *, scope: str = "ALL") -> dict:
+    def update_repair_management_record(
+        self,
+        record_id: str,
+        fields: dict,
+        *,
+        source_event_id: str = "",
+        source_repair_ids=None,
+        source_month: str = "",
+        scope: str = "ALL",
+    ) -> dict:
         return {"record_id": record_id, "fields": dict(fields or {}), "field_count": len(fields or {})}
 
     def delete_repair_management_record(self, record_id: str, *, scope: str = "ALL") -> dict:
@@ -517,6 +550,152 @@ class _SmokePortalService:
                 "楼栋": "A楼",
                 "专业": "弱电",
             },
+        }
+
+    def list_repair_management_repair_candidates(
+        self,
+        *,
+        scope: str = "ALL",
+        event_record_id: str = "",
+        month: str = "",
+        query: str = "",
+        limit: int = 80,
+    ) -> dict:
+        return {
+            "scope": scope,
+            "event_record_id": event_record_id,
+            "records": [
+                {
+                    "record_id": "rec-smoke-repair-a-001",
+                    "title": "A楼测试设备检修",
+                    "building": "A楼",
+                    "specialty": "弱电",
+                    "status": "开始",
+                    "score": 96,
+                    "recommended": True,
+                }
+            ],
+            "auto_selected_ids": ["rec-smoke-repair-a-001"],
+        }
+
+    def list_repair_management_cmdb_candidates(
+        self,
+        *,
+        scope: str = "ALL",
+        query: str = "",
+        limit: int = 160,
+    ) -> dict:
+        return {
+            "scope": scope,
+            "records": [
+                {
+                    "record_id": "rec-smoke-cmdb-a-001",
+                    "title": "A-219-CRAH-01",
+                    "unique_id": "ZH-A-219-01",
+                    "category": "精密空调",
+                    "building": "A楼",
+                    "location": "A-219",
+                }
+            ],
+            "total": 1,
+            "returned": 1,
+        }
+
+    def get_repair_followup_records(
+        self,
+        *,
+        summary_record_id: str,
+        scope: str = "ALL",
+        query: str = "",
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict:
+        return {
+            "summary_record_id": summary_record_id,
+            "fields": [
+                {"field_name": "设备名称-1", "field_type": 3, "ui_type": "SingleSelect", "options": ["精密空调"], "editable": True},
+                {"field_name": "设备编号-1", "field_type": 1, "ui_type": "Text", "options": [], "editable": True},
+                {"field_name": "维修进展描述", "field_type": 1, "ui_type": "Text", "options": [], "editable": True},
+                {"field_name": "维修进度", "field_type": 2, "ui_type": "Progress", "options": [], "editable": True},
+            ],
+            "records": [
+                {
+                    "record_id": "rec-smoke-followup-a-001",
+                    "title": "A楼测试维修跟进记录",
+                    "created_time": "2026-06-25 10:10",
+                    "progress": "0.5",
+                    "cmdb_record_id": "rec-smoke-cmdb-a-001",
+                    "display_fields": {
+                        "设备名称-1": "精密空调",
+                        "设备编号-1": "A-219-CRAH-01",
+                        "维修进展描述": "处理中",
+                        "维修进度": "0.5",
+                    },
+                    "raw_fields": {},
+                }
+            ],
+            "total": 1,
+            "returned": 1,
+        }
+
+    def create_repair_followup_record(
+        self,
+        *,
+        summary_record_id: str,
+        fields: dict,
+        cmdb_record_id: str = "",
+        scope: str = "ALL",
+    ) -> dict:
+        return {"record_id": "rec-smoke-followup-created", "warnings": []}
+
+    def update_repair_followup_record(
+        self,
+        record_id: str,
+        *,
+        summary_record_id: str,
+        fields: dict,
+        cmdb_record_id: str = "",
+        scope: str = "ALL",
+    ) -> dict:
+        return {"record_id": record_id, "warnings": []}
+
+    def delete_repair_followup_record(
+        self,
+        record_id: str,
+        *,
+        summary_record_id: str,
+        scope: str = "ALL",
+    ) -> dict:
+        return {"record_id": record_id, "deleted": True, "warnings": []}
+
+    def repair_management_combined_prefill(
+        self,
+        *,
+        scope: str = "ALL",
+        event_record_id: str = "",
+        repair_record_ids=None,
+        month: str = "",
+    ) -> dict:
+        return {
+            "event": {
+                "record_id": event_record_id,
+                "title": "A楼测试事件转检修",
+                "building": "A楼",
+                "specialty": "弱电",
+            },
+            "fields": {
+                "维修名称": "A楼测试事件转检修",
+                "故障维修原因": "测试告警",
+                "所属数据中心/楼栋-使用": "南通A楼",
+                "所属专业": "弱电",
+                "关联事件单": event_record_id,
+                "设备检修关联": str((repair_record_ids or [""])[0] or ""),
+            },
+            "relations": {
+                "event_record_id": event_record_id,
+                "repair_record_ids": list(repair_record_ids or []),
+            },
+            "warnings": [],
         }
 
 
@@ -791,12 +970,34 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             await page.waitForSelector('text=业务工作台', {{ timeout: 10000 }});
           }}
           await assertHeaderSubtitle(page, '功能选择 · 请选择功能', 'home-after-handover');
-          await page.getByRole('button', {{ name: '进入检修管理', exact: true }}).click();
-          await page.waitForSelector('text=选择楼栋进入检修管理', {{ timeout: 10000 }});
+          await page.getByRole('button', {{ name: '进入检修单管理', exact: true }}).click();
+          await page.waitForSelector('text=选择楼栋进入检修单管理', {{ timeout: 10000 }});
           const repairScopeCard = page.locator('article.scope-card').filter({{ hasText: 'A楼' }}).first();
-          await repairScopeCard.getByRole('button', {{ name: '进入检修管理' }}).click();
-          await waitForTextOrDump(page, '检修记录管理', 'repair-management-entry');
+          await repairScopeCard.getByRole('button', {{ name: '进入检修单管理' }}).click();
+          await waitForTextOrDump(page, '维修项目与跟进', 'repair-management-entry');
           await waitForTextOrDump(page, 'A楼测试检修管理记录', 'repair-management-entry');
+          await page.locator('.record-row').filter({{ hasText: 'A楼测试检修管理记录' }}).click();
+          await page.getByRole('button', {{ name: '更改来源', exact: true }}).click();
+          await page.locator('.source-relation-item').filter({{ hasText: '关联事件单' }}).getByRole('button').click();
+          const eventPicker = page.getByRole('dialog', {{ name: '选择关联事件单' }});
+          await eventPicker.locator('tbody tr').filter({{ hasText: 'A楼测试事件转检修' }}).click();
+          await eventPicker.getByRole('button', {{ name: '确认', exact: true }}).click();
+          await page.locator('.source-relation-item').filter({{ hasText: '设备检修关联' }}).getByRole('button').click();
+          const repairPicker = page.getByRole('dialog', {{ name: '选择设备检修通告' }});
+          await repairPicker.getByText('A楼测试设备检修', {{ exact: true }}).waitFor({{ state: 'visible' }});
+          await repairPicker.getByRole('button', {{ name: '确认', exact: true }}).click();
+          await waitForTextOrDump(page, 'A楼测试设备检修', 'repair-management-autofill');
+          await page.getByRole('button', {{ name: '跟进记录', exact: true }}).click();
+          await waitForTextOrDump(page, 'A楼测试维修跟进记录', 'repair-management-autofill');
+          const followupPanel = page.locator('.followup-panel');
+          await followupPanel.getByRole('button', {{ name: '新增跟进', exact: true }}).click();
+          await followupPanel.locator('label').filter({{ hasText: '维修进展描述' }}).locator('textarea').fill('烟测新增跟进');
+          await followupPanel.getByRole('button', {{ name: '保存跟进', exact: true }}).click();
+          await followupPanel.getByText('维修跟进已创建。', {{ exact: true }}).waitFor({{ state: 'visible' }});
+          await followupPanel.getByRole('button', {{ name: /A楼测试维修跟进记录/ }}).click();
+          await followupPanel.locator('label').filter({{ hasText: '维修进度' }}).locator('input').fill('0.6');
+          await followupPanel.getByRole('button', {{ name: '保存修改', exact: true }}).click();
+          await followupPanel.getByText('维修跟进已更新。', {{ exact: true }}).waitFor({{ state: 'visible' }});
           await assertLayout(page, 'repair-management-entry');
           await page.goto(cfg.url, {{
             waitUntil: 'domcontentloaded',
@@ -804,6 +1005,16 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           }});
           await page.waitForSelector('text=业务工作台', {{ timeout: 10000 }});
           await assertHeaderSubtitle(page, '功能选择 · 请选择功能', 'home-after-repair-management');
+          await page.getByRole('button', {{ name: '检修通告管理', exact: true }}).click();
+          await page.waitForSelector('text=选择楼栋进入检修通告管理', {{ timeout: 10000 }});
+          const repairNoticeScopeCard = page.locator('article.scope-card').filter({{ hasText: 'A楼' }}).first();
+          await repairNoticeScopeCard.getByRole('button', {{ name: '进入检修通告管理' }}).click();
+          await waitForTextOrDump(page, '待发起事项', 'repair-notice-entry');
+          if (!page.url().includes('work_type=repair')) {{
+            throw new Error(`repair notice entry work_type mismatch: ${{page.url()}}`);
+          }}
+          await page.goto(cfg.url, {{ waitUntil: 'domcontentloaded', timeout: 20000 }});
+          await page.waitForSelector('text=业务工作台', {{ timeout: 10000 }});
           await page.getByRole('button', {{ name: '进入维护管理', exact: true }}).click();
           await page.waitForSelector('text=选择楼栋进入维护管理', {{ timeout: 10000 }});
           const scopeCard = page.locator('article.scope-card').filter({{ hasText: 'A楼' }}).first();

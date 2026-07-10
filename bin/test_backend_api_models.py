@@ -15,6 +15,9 @@ from clipflow_backend.api_models import (  # noqa: E402
     PermissionRequestBulkReviewRequest,
     PermissionRequestCreate,
     PermissionRequestReviewRequest,
+    RepairManagementPrefillRequest,
+    RepairManagementRecordRequest,
+    RepairFollowupRecordRequest,
     QtClipboardAckRequest,
     QtActiveItemsDeltaRequest,
     QtCommandRequest,
@@ -35,7 +38,13 @@ class _FakeRepairEventRouteService:
     def __init__(self):
         self.calls: list[tuple] = []
 
-    def get_repair_management_records(self, scope: str = "ALL", query: str = "", limit: int = 200) -> dict:
+    def get_repair_management_records(
+        self,
+        scope: str = "ALL",
+        query: str = "",
+        limit: int = 200,
+        offset: int = 0,
+    ) -> dict:
         self.calls.append(("list_repair", scope, query, limit))
         return {
             "records": [],
@@ -48,13 +57,43 @@ class _FakeRepairEventRouteService:
         fields: dict,
         *,
         source_event_id: str = "",
+        source_repair_ids: list[str] | None = None,
+        source_month: str = "",
         scope: str = "ALL",
     ) -> dict:
-        self.calls.append(("create_repair", scope, dict(fields or {}), source_event_id))
+        self.calls.append(
+            (
+                "create_repair",
+                scope,
+                dict(fields or {}),
+                source_event_id,
+                tuple(source_repair_ids or []),
+                source_month,
+            )
+        )
         return {"record_id": "rec-new", "fields": dict(fields or {})}
 
-    def update_repair_management_record(self, record_id: str, fields: dict, *, scope: str = "ALL") -> dict:
-        self.calls.append(("update_repair", scope, record_id, dict(fields or {})))
+    def update_repair_management_record(
+        self,
+        record_id: str,
+        fields: dict,
+        *,
+        source_event_id: str = "",
+        source_repair_ids: list[str] | None = None,
+        source_month: str = "",
+        scope: str = "ALL",
+    ) -> dict:
+        self.calls.append(
+            (
+                "update_repair",
+                scope,
+                record_id,
+                dict(fields or {}),
+                source_event_id,
+                tuple(source_repair_ids or []),
+                source_month,
+            )
+        )
         return {"record_id": record_id, "fields": dict(fields or {})}
 
     def delete_repair_management_record(self, record_id: str, *, scope: str = "ALL") -> dict:
@@ -82,12 +121,129 @@ class _FakeRepairEventRouteService:
         self.calls.append(("repair_prefill", scope, record_id, month))
         return {"event": {"record_id": record_id}, "fields": {"维修名称": "事件检修"}}
 
+    def list_repair_management_repair_candidates(
+        self,
+        *,
+        scope: str = "ALL",
+        event_record_id: str = "",
+        month: str = "",
+        query: str = "",
+        limit: int = 80,
+    ) -> dict:
+        self.calls.append(("repair_candidates", scope, event_record_id, month, query, limit))
+        return {"records": [{"record_id": "rec-repair"}], "auto_selected_ids": ["rec-repair"]}
+
+    def repair_management_combined_prefill(
+        self,
+        *,
+        scope: str = "ALL",
+        event_record_id: str = "",
+        repair_record_ids: list[str] | None = None,
+        month: str = "",
+    ) -> dict:
+        self.calls.append(
+            (
+                "combined_prefill",
+                scope,
+                event_record_id,
+                tuple(repair_record_ids or []),
+                month,
+            )
+        )
+        return {"fields": {"维修名称": "组合预填"}, "warnings": []}
+
+    def list_repair_management_cmdb_candidates(
+        self,
+        *,
+        scope: str = "ALL",
+        query: str = "",
+        limit: int = 160,
+    ) -> dict:
+        self.calls.append(("cmdb_candidates", scope, query, limit))
+        return {"records": [{"record_id": "rec-cmdb"}], "total": 1}
+
+    def get_repair_followup_records(
+        self,
+        *,
+        summary_record_id: str,
+        scope: str = "ALL",
+        query: str = "",
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict:
+        self.calls.append(("list_followups", scope, summary_record_id, query, limit))
+        return {"records": [{"record_id": "rec-followup"}], "fields": [], "total": 1}
+
+    def create_repair_followup_record(
+        self,
+        *,
+        summary_record_id: str,
+        fields: dict,
+        cmdb_record_id: str = "",
+        scope: str = "ALL",
+    ) -> dict:
+        self.calls.append(
+            ("create_followup", scope, summary_record_id, cmdb_record_id, dict(fields or {}))
+        )
+        return {"record_id": "rec-followup-new"}
+
+    def update_repair_followup_record(
+        self,
+        record_id: str,
+        *,
+        summary_record_id: str,
+        fields: dict,
+        cmdb_record_id: str = "",
+        scope: str = "ALL",
+    ) -> dict:
+        self.calls.append(
+            (
+                "update_followup",
+                scope,
+                record_id,
+                summary_record_id,
+                cmdb_record_id,
+                dict(fields or {}),
+            )
+        )
+        return {"record_id": record_id}
+
+    def delete_repair_followup_record(
+        self,
+        record_id: str,
+        *,
+        summary_record_id: str,
+        scope: str = "ALL",
+    ) -> dict:
+        self.calls.append(("delete_followup", scope, record_id, summary_record_id))
+        return {"record_id": record_id, "deleted": True}
+
     def mark_event_transferred_to_repair(self, record_id: str = "", month: str = "") -> dict:
         self.calls.append(("transfer_repair", record_id, month))
         return {"record_id": record_id, "transfer_to_overhaul": True}
 
 
 class BackendApiModelTests(unittest.TestCase):
+    def test_repair_management_relations_are_single_select(self):
+        for model in (RepairManagementRecordRequest, RepairManagementPrefillRequest):
+            with self.assertRaises(ValueError):
+                parse_api_model(
+                    model,
+                    {
+                        "source_repair_ids": ["rec-repair-1", "rec-repair-2"],
+                    },
+                )
+            with self.assertRaises(ValueError):
+                parse_api_model(
+                    model,
+                    {
+                        "source_followup_ids": ["rec-followup-1"],
+                    },
+                )
+
+        with self.assertRaises(ValueError):
+            parse_api_model(RepairFollowupRecordRequest, {"scope": "E"})
+
     def test_repair_management_and_event_transfer_routes_are_native_and_authorized(self):
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)
         original_service = PortalRuntime.service
@@ -119,12 +275,24 @@ class BackendApiModelTests(unittest.TestCase):
                 created = client.post(
                     "/api/repair-management/records",
                     headers=headers,
-                    json={"scope": "E", "fields": {"维修名称": "测试检修"}},
+                    json={
+                        "scope": "E",
+                        "source_event_id": "rec-event",
+                        "source_repair_ids": ["rec-repair"],
+                        "source_month": "2026-06",
+                        "fields": {"维修名称": "测试检修"},
+                    },
                 )
                 updated = client.put(
                     "/api/repair-management/records/rec-1",
                     headers=headers,
-                    json={"scope": "E", "fields": {"专业": "电气"}},
+                    json={
+                        "scope": "E",
+                        "source_event_id": "rec-event",
+                        "source_repair_ids": ["rec-repair"],
+                        "source_month": "2026-06",
+                        "fields": {"专业": "电气"},
+                    },
                 )
                 deleted = client.delete(
                     "/api/repair-management/records/rec-1?scope=E",
@@ -138,6 +306,52 @@ class BackendApiModelTests(unittest.TestCase):
                     "/api/repair-management/event-prefill?scope=E&month=2026-06&record_id=rec-event",
                     headers=headers,
                 )
+                repair_candidates = client.get(
+                    "/api/repair-management/repair-candidates?scope=E&month=2026-06&event_record_id=rec-event&q=压缩机&limit=6",
+                    headers=headers,
+                )
+                cmdb_candidates = client.get(
+                    "/api/repair-management/cmdb-candidates?scope=E&q=CRAH&limit=8",
+                    headers=headers,
+                )
+                followups = client.get(
+                    "/api/repair-management/followups?scope=E&summary_record_id=rec-summary&q=进展&limit=9",
+                    headers=headers,
+                )
+                followup_created = client.post(
+                    "/api/repair-management/followups",
+                    headers=headers,
+                    json={
+                        "scope": "E",
+                        "summary_record_id": "rec-summary",
+                        "cmdb_record_id": "rec-cmdb",
+                        "fields": {"维修进展描述": "处理中"},
+                    },
+                )
+                followup_updated = client.put(
+                    "/api/repair-management/followups/rec-followup",
+                    headers=headers,
+                    json={
+                        "scope": "E",
+                        "summary_record_id": "rec-summary",
+                        "cmdb_record_id": "rec-cmdb",
+                        "fields": {"维修进度": 1},
+                    },
+                )
+                followup_deleted = client.delete(
+                    "/api/repair-management/followups/rec-followup?scope=E&summary_record_id=rec-summary",
+                    headers=headers,
+                )
+                combined_prefill = client.post(
+                    "/api/repair-management/prefill",
+                    headers=headers,
+                    json={
+                        "scope": "E",
+                        "source_event_id": "rec-event",
+                        "source_repair_ids": ["rec-repair"],
+                        "source_month": "2026-06",
+                    },
+                )
                 transferred = client.post(
                     "/api/events/transfer-repair",
                     headers=headers,
@@ -146,18 +360,68 @@ class BackendApiModelTests(unittest.TestCase):
 
             self.assertEqual(unauth.status_code, 401)
             self.assertEqual(denied.status_code, 403)
-            for response in [listed, created, updated, deleted, repair_events, repair_prefill, transferred]:
+            for response in [
+                listed,
+                created,
+                updated,
+                deleted,
+                repair_events,
+                repair_prefill,
+                repair_candidates,
+                cmdb_candidates,
+                followups,
+                followup_created,
+                followup_updated,
+                followup_deleted,
+                combined_prefill,
+                transferred,
+            ]:
                 self.assertEqual(response.status_code, 200, response.text)
                 self.assertTrue(response.json().get("ok"), response.text)
             self.assertEqual(
                 service.calls,
                 [
                     ("list_repair", "E", "冷站", 3),
-                    ("create_repair", "E", {"维修名称": "测试检修"}, ""),
-                    ("update_repair", "E", "rec-1", {"专业": "电气"}),
+                    (
+                        "create_repair",
+                        "E",
+                        {"维修名称": "测试检修"},
+                        "rec-event",
+                        ("rec-repair",),
+                        "2026-06",
+                    ),
+                    (
+                        "update_repair",
+                        "E",
+                        "rec-1",
+                        {"专业": "电气"},
+                        "rec-event",
+                        ("rec-repair",),
+                        "2026-06",
+                    ),
                     ("delete_repair", "E", "rec-1"),
                     ("repair_events", "E", "2026-06", "告警", 5),
                     ("repair_prefill", "E", "rec-event", "2026-06"),
+                    ("repair_candidates", "E", "rec-event", "2026-06", "压缩机", 6),
+                    ("cmdb_candidates", "E", "CRAH", 8),
+                    ("list_followups", "E", "rec-summary", "进展", 9),
+                    (
+                        "create_followup",
+                        "E",
+                        "rec-summary",
+                        "rec-cmdb",
+                        {"维修进展描述": "处理中"},
+                    ),
+                    (
+                        "update_followup",
+                        "E",
+                        "rec-followup",
+                        "rec-summary",
+                        "rec-cmdb",
+                        {"维修进度": 1},
+                    ),
+                    ("delete_followup", "E", "rec-followup", "rec-summary"),
+                    ("combined_prefill", "E", "rec-event", ("rec-repair",), "2026-06"),
                     ("transfer_repair", "rec-event", "2026-06"),
                 ],
             )

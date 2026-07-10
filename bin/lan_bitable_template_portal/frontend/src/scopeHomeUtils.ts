@@ -75,9 +75,12 @@ export const SCOPE_HOME_MODULE_CARDS: ScopeHomeModuleCard[] = [
     icon: "repair",
     badge: "检修单",
     title: "检修管理",
-    description: "查看检修源表全部内容，支持新增、修改、删除检修记录",
-    tags: ["检修单", "增删改", "转检修"],
-    actions: [{ key: "repair_management", label: "进入检修管理", primary: true }],
+    description: "统一处理检修单记录与检修通告",
+    tags: ["检修单", "检修通告", "转检修"],
+    actions: [
+      { key: "repair_management", label: "进入检修单管理", primary: true },
+      { key: "repair", label: "检修通告管理" },
+    ],
   },
   {
     key: "drill",
@@ -118,11 +121,10 @@ export const SCOPE_HOME_MODULE_CARDS: ScopeHomeModuleCard[] = [
     icon: "more",
     badge: "辅助入口",
     title: "其他工具",
-    description: "汇总检修、上/下电、轮巡、调整、交接班等辅助入口",
-    tags: ["检修", "上/下电", "轮巡", "交接班"],
+    description: "汇总上/下电、轮巡、调整和交接班入口",
+    tags: ["上/下电", "轮巡", "调整", "交接班"],
     actions: [
-      { key: "repair", label: "检修", primary: true },
-      { key: "power", label: "上/下电" },
+      { key: "power", label: "上/下电", primary: true },
       { key: "polling", label: "轮巡" },
       { key: "adjust", label: "调整" },
       { key: "handover", label: "交接班" },
@@ -158,17 +160,17 @@ export const SCOPE_HOME_ENTRY_CONFIGS: Record<Exclude<ScopeHomeEntryKey, "">, Sc
     workType: "change",
   },
   repair: {
-    kicker: "检修通告",
-    title: "选择楼栋进入检修通告",
+    kicker: "检修管理",
+    title: "选择楼栋进入检修通告管理",
     description: "",
-    actionLabel: "进入检修通告",
+    actionLabel: "进入检修通告管理",
     workType: "repair",
   },
   repair_management: {
-    kicker: "检修管理",
-    title: "选择楼栋进入检修管理",
+    kicker: "检修单管理",
+    title: "选择楼栋进入检修单管理",
     description: "",
-    actionLabel: "进入检修管理",
+    actionLabel: "进入检修单管理",
   },
   tools: {
     kicker: "其他工具",
@@ -206,7 +208,6 @@ export const SCOPE_HOME_ENTRY_CONFIGS: Record<Exclude<ScopeHomeEntryKey, "">, Sc
 };
 
 export const SCOPE_HOME_TOOL_ENTRIES: ScopeHomeToolEntry[] = [
-  { key: "repair", title: "检修通告", description: "故障发现、检修过程和闭环确认", badge: "通告", icon: "repair", tone: "blue" },
   { key: "power", title: "上/下电通告", description: "机柜上电、下电、数量和进度确认", badge: "通告", icon: "power", tone: "blue" },
   { key: "polling", title: "设备轮巡", description: "设备轮巡切换和影响确认", badge: "通告", icon: "polling", tone: "cyan" },
   { key: "adjust", title: "设备调整", description: "设备运行模式调整与现场进度", badge: "通告", icon: "adjust", tone: "emerald" },
