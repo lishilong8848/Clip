@@ -36,7 +36,8 @@ export function repairFieldBadge(field: LooseDict, editingRecordId = ""): string
 
 export function repairDraftInputValue(field: LooseDict, value: unknown): string {
   const uiType = String(field.ui_type || "").toLowerCase();
-  if (uiType.includes("datetime")) {
+  const fieldType = Number(field.field_type || 0);
+  if (fieldType === 5 || uiType.includes("datetime")) {
     if (typeof value === "number" && Number.isFinite(value)) {
       const date = new Date(value);
       if (!Number.isNaN(date.getTime())) {
@@ -44,8 +45,14 @@ export function repairDraftInputValue(field: LooseDict, value: unknown): string 
         return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
       }
     }
-    const text = String(value ?? "").trim().replace(" ", "T");
+    const text = repairFieldValueToText(value).trim().replace(" ", "T");
     return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(text) ? text.slice(0, 16) : "";
+  }
+  if (fieldType === 15 || uiType === "url") {
+    const link = value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>).link
+      : undefined;
+    return repairFieldValueToText(link ?? value);
   }
   return repairFieldValueToText(value);
 }
@@ -54,20 +61,84 @@ export function repairFieldUsesTextarea(fieldName: unknown): boolean {
   return /(描述|原因|现象|措施|方案|跟进|进展|人员|附件)/.test(String(fieldName || ""));
 }
 
-export function repairFieldValueToText(value: unknown): string {
-  if (value === null || value === undefined) return "";
-  if (typeof value === "string") return value;
-  if (typeof value === "number" || typeof value === "boolean") return String(value);
+function isValueRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function uniqueReadableValues(values: string[]): string[] {
+  return Array.from(new Set(values.map((item) => item.trim()).filter(Boolean)));
+}
+
+function decodedStructuredText(value: string): unknown | undefined {
+  const text = value.trim();
+  if (!text || !["[", "{"].includes(text[0])) return undefined;
   try {
-    return JSON.stringify(value, null, 2);
+    const decoded = JSON.parse(text);
+    return decoded && typeof decoded === "object" ? decoded : undefined;
   } catch {
-    return String(value);
+    return undefined;
   }
 }
 
-export function parseRepairDraftValue(value: string): unknown {
+function readableFieldValue(value: unknown, seen: WeakSet<object>, depth: number): string {
+  if (value === null || value === undefined) return "";
+  if (depth > 8) return "";
+  if (typeof value === "string") {
+    const decoded = decodedStructuredText(value);
+    return decoded === undefined ? value : readableFieldValue(decoded, seen, depth + 1);
+  }
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) {
+    if (
+      value.length > 0
+      && value.every((item) => isValueRecord(item) && typeof item.text === "string")
+    ) {
+      return value.map((item) => String((item as Record<string, unknown>).text || "")).join("");
+    }
+    return uniqueReadableValues(
+      value.map((item) => readableFieldValue(item, seen, depth + 1)),
+    ).join("、");
+  }
+  if (!isValueRecord(value)) return String(value);
+  if (seen.has(value)) return "";
+  seen.add(value);
+  try {
+    for (const key of ["text", "name", "title", "value", "file_name", "fileName"]) {
+      if (value[key] === null || value[key] === undefined || value[key] === "") continue;
+      const text = readableFieldValue(value[key], seen, depth + 1);
+      if (text) return text;
+    }
+    for (const key of ["text_arr", "users", "groups", "records", "record_ids", "link_record_ids"]) {
+      if (!Array.isArray(value[key])) continue;
+      const text = readableFieldValue(value[key], seen, depth + 1);
+      if (text) return text;
+    }
+    if (typeof value.link === "string" && value.link.trim()) return value.link.trim();
+    return uniqueReadableValues(
+      Object.entries(value)
+        .filter(([key]) => !["type", "id", "open_id", "user_id", "record_id"].includes(key))
+        .map(([, item]) => readableFieldValue(item, seen, depth + 1)),
+    ).join("、");
+  } finally {
+    seen.delete(value);
+  }
+}
+
+export function repairFieldValueToText(value: unknown): string {
+  return readableFieldValue(value, new WeakSet<object>(), 0);
+}
+
+export function repairFieldPreservesRawValue(field: LooseDict): boolean {
+  const fieldType = Number(field.field_type || 0);
+  const uiType = String(field.ui_type || "").toLowerCase();
+  return [4, 11, 15, 17, 18, 21].includes(fieldType)
+    || /(multiselect|user|url|attachment|link)/.test(uiType);
+}
+
+export function parseRepairDraftValue(value: string, field?: LooseDict): unknown {
   const text = String(value ?? "").trim();
   if (!text) return "";
+  if (field && !repairFieldPreservesRawValue(field)) return text;
   if ((text.startsWith("{") && text.endsWith("}")) || (text.startsWith("[") && text.endsWith("]"))) {
     try {
       return JSON.parse(text);

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import ast
 import datetime as dt
 import base64
 import csv
@@ -73,12 +74,37 @@ REPAIR_MANAGEMENT_REQUIRED_FIELD_GROUPS: tuple[tuple[str, ...], ...] = (
         "所属数据中心/楼栋（关联CMDB唯一ID关联,DE不选）",
     ),
 )
+REPAIR_MANAGEMENT_FORM_FIELD_NAMES = {
+    "维修名称",
+    "故障发生时间",
+    "故障维修原因",
+    "故障发生现象描述",
+    "所属专业",
+    "所属数据中心/楼栋-使用",
+}
 REPAIR_MANAGEMENT_EVENT_LINK_FIELD_NAMES = (
     "关联事件单",
 )
 REPAIR_MANAGEMENT_REPAIR_LINK_FIELD_NAMES = (
     "设备检修关联",
 )
+REPAIR_MANAGEMENT_CUSTOM_MULTI_SELECT_FIELDS = {
+    "对应来源",
+    "维修来源",
+}
+REPAIR_MANAGEMENT_SOURCE_OPTION_ALIASES = {
+    "bms": "BMS系统",
+    "bms系统": "BMS系统",
+    "方舟": "方舟系统",
+    "方舟系统": "方舟系统",
+    "巡检": "巡检发现",
+    "巡检发现": "巡检发现",
+}
+REPAIR_MANAGEMENT_LEGACY_OPTION_ALIASES = {
+    ("所属专业", "optassnaw3"): "电气",
+    ("维修来源", "optt3fgrvz"): "BMS系统",
+    ("维修方", "optt2azmkp"): "我方",
+}
 REPAIR_MANAGEMENT_PROTECTED_FIELD_NAMES = {
     "维修单号",
     "流程",
@@ -128,6 +154,7 @@ REPAIR_MANAGEMENT_REPAIR_AUTO_FIELD_NAMES = (
     "随工人员（或我方维修人员）",
 )
 REPAIR_MANAGEMENT_FOLLOWUP_AUTO_FIELD_NAMES = (
+    "维修跟进记录",
     "维修开始时间",
     "开始时间",
     "维修结束时间（2026）",
@@ -167,19 +194,60 @@ REPAIR_MANAGEMENT_PROTECTED_FIELD_NAMES.update(
 REPAIR_SYNC_TABLE_ID = "tblSA9euoote8aCA"
 REPAIR_MANAGEMENT_REPAIR_TABLE_ID = "tblpaHktT0mn0hwg"
 REPAIR_FOLLOWUP_TABLE_ID = "tblG4UpMdgYHykUY"
+REPAIR_EQUIPMENT_CATALOG_TABLE_ID = "tblkKnYwajfRmquQ"
 REPAIR_CMDB_TABLE_ID = "tblJTRguSUij2RUM"
 REPAIR_ROUTING_TABLE_ID = "tblWfnhqLlrtkIIg"
 REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME = "维修汇总记录ID"
 REPAIR_FOLLOWUP_CMDB_FIELD_NAME = "CMDB设备唯一ID"
+REPAIR_FOLLOWUP_DEVICE_NAME_FIELD_NAME = "设备名称"
+REPAIR_FOLLOWUP_DEVICE_NUMBER_FIELD_NAME = "设备编号"
+REPAIR_FOLLOWUP_BRAND_FIELD_NAME = "设备品牌"
+REPAIR_FOLLOWUP_MODEL_FIELD_NAME = "设备型号"
+REPAIR_FOLLOWUP_REPAIR_PARTY_FIELD_NAME = "维修方"
+REPAIR_FOLLOWUP_SUPPLIER_FIELD_NAME = "供应商名称"
+REPAIR_FOLLOWUP_SUPPLIER_PERSON_FIELD_NAME = "供应商维修人员"
+REPAIR_EQUIPMENT_CATALOG_BRAND_FIELD_NAME = "设备品牌"
+REPAIR_EQUIPMENT_CATALOG_MODEL_FIELD_NAME = "设备型号"
+REPAIR_FOLLOWUP_CATALOG_RUNTIME_KEY = "repair_equipment_brand_model_catalog"
+REPAIR_FOLLOWUP_CATALOG_CACHE_TTL_SECONDS = 24 * 60 * 60
+REPAIR_FOLLOWUP_CATALOG_MAX_RECORDS = 5000
+REPAIR_FOLLOWUP_SCHEMA_MIGRATION_RUNTIME_KEY = (
+    "repair_followup_canonical_fields_v1"
+)
+REPAIR_FOLLOWUP_LEGACY_FIELD_MAPPINGS: tuple[tuple[str, str], ...] = (
+    ("设备名称-1", REPAIR_FOLLOWUP_DEVICE_NAME_FIELD_NAME),
+    ("设备编号-1", REPAIR_FOLLOWUP_DEVICE_NUMBER_FIELD_NAME),
+    ("设备品牌 -1", REPAIR_FOLLOWUP_BRAND_FIELD_NAME),
+    ("设备型号 -1", REPAIR_FOLLOWUP_MODEL_FIELD_NAME),
+    ("维修方 -1", REPAIR_FOLLOWUP_REPAIR_PARTY_FIELD_NAME),
+    ("供应商名称 -1", REPAIR_FOLLOWUP_SUPPLIER_FIELD_NAME),
+    ("供应商维修人员-1", REPAIR_FOLLOWUP_SUPPLIER_PERSON_FIELD_NAME),
+)
+REPAIR_FOLLOWUP_CANONICAL_SELECT_SOURCES = {
+    REPAIR_FOLLOWUP_DEVICE_NAME_FIELD_NAME: "设备名称-1",
+    REPAIR_FOLLOWUP_BRAND_FIELD_NAME: "设备品牌 -1",
+    REPAIR_FOLLOWUP_MODEL_FIELD_NAME: "设备型号 -1",
+    REPAIR_FOLLOWUP_REPAIR_PARTY_FIELD_NAME: "维修方 -1",
+}
+REPAIR_FOLLOWUP_CUSTOM_SINGLE_SELECT_FIELDS = {
+    REPAIR_FOLLOWUP_DEVICE_NAME_FIELD_NAME,
+    REPAIR_FOLLOWUP_BRAND_FIELD_NAME,
+    REPAIR_FOLLOWUP_MODEL_FIELD_NAME,
+    REPAIR_FOLLOWUP_REPAIR_PARTY_FIELD_NAME,
+    "是否质保期内",
+    "所属专业",
+}
+REPAIR_FOLLOWUP_BACKFILL_RUNTIME_KEY = "repair_followup_parent_backfill_v1"
+REPAIR_FOLLOWUP_BACKFILL_INTERVAL_SECONDS = 24 * 60 * 60
 REPAIR_FOLLOWUP_WRITABLE_FIELD_NAMES = {
     "是否本维修单第一次提交跟进记录",
-    "设备名称-1",
-    "设备编号-1",
-    "设备品牌 -1",
-    "设备型号 -1",
-    "维修方 -1",
-    "供应商名称 -1",
-    "供应商维修人员-1",
+    REPAIR_FOLLOWUP_DEVICE_NAME_FIELD_NAME,
+    REPAIR_FOLLOWUP_DEVICE_NUMBER_FIELD_NAME,
+    REPAIR_FOLLOWUP_BRAND_FIELD_NAME,
+    REPAIR_FOLLOWUP_MODEL_FIELD_NAME,
+    REPAIR_FOLLOWUP_REPAIR_PARTY_FIELD_NAME,
+    REPAIR_FOLLOWUP_SUPPLIER_FIELD_NAME,
+    REPAIR_FOLLOWUP_SUPPLIER_PERSON_FIELD_NAME,
     "设备生产日期",
     "设备使用年限",
     "设备容量KW/AH",
@@ -194,11 +262,38 @@ REPAIR_FOLLOWUP_WRITABLE_FIELD_NAMES = {
     "跟进项（如有）",
     "后续整改措施（如有）",
 }
+REPAIR_FOLLOWUP_FORM_FIELD_NAMES = {
+    REPAIR_FOLLOWUP_DEVICE_NAME_FIELD_NAME,
+    REPAIR_FOLLOWUP_DEVICE_NUMBER_FIELD_NAME,
+    REPAIR_FOLLOWUP_BRAND_FIELD_NAME,
+    REPAIR_FOLLOWUP_MODEL_FIELD_NAME,
+    REPAIR_FOLLOWUP_REPAIR_PARTY_FIELD_NAME,
+    REPAIR_FOLLOWUP_SUPPLIER_FIELD_NAME,
+    REPAIR_FOLLOWUP_SUPPLIER_PERSON_FIELD_NAME,
+    "设备生产日期",
+    "设备使用年限",
+    "设备容量KW/AH",
+    "是否质保期内",
+    "随工人员（我方维修人员）",
+    "更换备件名称",
+    "更换备件数量",
+    "维修进展描述",
+    "维修进度",
+    "故障维修总费用",
+    "跟进项（如有）",
+    "后续整改措施（如有）",
+}
 REPAIR_FOLLOWUP_READ_FIELD_NAMES = (
     "维修简述",
     "维修名称",
     REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME,
     REPAIR_FOLLOWUP_CMDB_FIELD_NAME,
+    "区域",
+    "所属数据中心",
+    "维修来源",
+    "维修方",
+    "维修审批人",
+    "推送群组",
     "是否本维修单第一次提交跟进记录",
     "维修开始时间",
     "维修结束时间",
@@ -207,13 +302,13 @@ REPAIR_FOLLOWUP_READ_FIELD_NAMES = (
     "所属数据中心",
     "所属专业",
     "楼栋",
-    "设备名称-1",
-    "设备编号-1",
-    "设备品牌 -1",
-    "设备型号 -1",
-    "维修方 -1",
-    "供应商名称 -1",
-    "供应商维修人员-1",
+    REPAIR_FOLLOWUP_DEVICE_NAME_FIELD_NAME,
+    REPAIR_FOLLOWUP_DEVICE_NUMBER_FIELD_NAME,
+    REPAIR_FOLLOWUP_BRAND_FIELD_NAME,
+    REPAIR_FOLLOWUP_MODEL_FIELD_NAME,
+    REPAIR_FOLLOWUP_REPAIR_PARTY_FIELD_NAME,
+    REPAIR_FOLLOWUP_SUPPLIER_FIELD_NAME,
+    REPAIR_FOLLOWUP_SUPPLIER_PERSON_FIELD_NAME,
     "设备生产日期",
     "设备使用年限",
     "设备容量KW/AH",
@@ -226,6 +321,49 @@ REPAIR_FOLLOWUP_READ_FIELD_NAMES = (
     "后续整改措施（如有）",
     "超链接",
     "创建时间",
+)
+REPAIR_FOLLOWUP_SUMMARY_COPY_MAPPINGS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("维修简述", ("维修名称",)),
+    ("维修名称", ("维修名称",)),
+    ("区域", ("区域",)),
+    (
+        "所属数据中心",
+        (
+            "所属数据中心",
+            "所属数据中心/楼栋-使用",
+            "所属数据中心/楼栋（关联CMDB唯一ID关联,DE不选）",
+        ),
+    ),
+    ("所属专业", ("所属专业", "专业（推送消息用）")),
+    ("设备名称", ("设备名称",)),
+    ("设备品牌", ("设备品牌",)),
+    ("设备型号", ("设备型号",)),
+    ("设备编号", ("设备编号",)),
+    ("设备生产日期", ("设备生产日期",)),
+    ("设备使用年限", ("设备使用年限",)),
+    ("设备容量KW/AH", ("设备容量KW/AH",)),
+    ("是否质保期内", ("是否质保期内",)),
+    ("维修方", ("维修方",)),
+    ("供应商名称", ("供应商名称",)),
+    ("供应商维修人员", ("供应商维修人员",)),
+    ("维修开始时间", ("维修开始时间",)),
+    ("维修结束时间", ("维修结束时间",)),
+    ("结束时间", ("维修结束时间",)),
+    ("维修单号", ("维修单号",)),
+    ("维修来源", ("对应来源",)),
+    ("维修审批人", ("维修审批人",)),
+    ("推送群组", ("推送群组",)),
+    (
+        "随工人员（我方维修人员）",
+        ("随工人员（或我方维修人员）", "随工人员（我方维修人员）"),
+    ),
+    (
+        "楼栋",
+        (
+            "所属数据中心/楼栋-使用",
+            "所属数据中心/楼栋（关联CMDB唯一ID关联,DE不选）",
+        ),
+    ),
 )
 REPAIR_LINK_FIELD_NAME = "设备检修关联"
 REPAIR_LINK_DELAY_SECONDS = 70 * 60
@@ -639,7 +777,11 @@ class MaintenancePortalService:
         self._repair_management_routing_cache_lock = threading.RLock()
         self._repair_management_routing_cache: dict[str, Any] | None = None
         self._repair_followup_schema_lock = threading.RLock()
+        self._repair_followup_schema_ready = False
         self._repair_followup_sync_lock = threading.RLock()
+        self._repair_followup_backfill_lock = threading.RLock()
+        self._repair_followup_catalog_cache_lock = threading.RLock()
+        self._repair_followup_catalog_cache: dict[str, Any] | None = None
         self._maintenance_loaded_once = False
         self._change_loaded_once = False
         self._zhihang_change_loaded_once = False
@@ -716,6 +858,10 @@ class MaintenancePortalService:
     def _invalidate_repair_management_target_cache(self) -> None:
         with self._repair_management_target_cache_lock:
             self._repair_management_target_cache = None
+
+    def _invalidate_repair_followup_catalog_cache(self) -> None:
+        with self._repair_followup_catalog_cache_lock:
+            self._repair_followup_catalog_cache = None
 
     def state_cache_version(self) -> int:
         with self._state_version_lock:
@@ -865,7 +1011,566 @@ class MaintenancePortalService:
             )
         if table_id == REPAIR_MANAGEMENT_REPAIR_TABLE_ID:
             self._invalidate_repair_management_target_cache()
+        if table_id == REPAIR_FOLLOWUP_TABLE_ID:
+            self._invalidate_repair_followup_catalog_cache()
         return payload
+
+    @staticmethod
+    def _repair_followup_record_value(
+        record: dict[str, Any],
+        field_name: str,
+    ) -> Any:
+        display = (
+            record.get("display_fields")
+            if isinstance(record.get("display_fields"), dict)
+            else {}
+        )
+        raw = (
+            record.get("raw_fields")
+            if isinstance(record.get("raw_fields"), dict)
+            else {}
+        )
+        value = display.get(field_name)
+        if value in (None, "", [], {}):
+            value = raw.get(field_name)
+        return value
+
+    @staticmethod
+    def _repair_followup_option_specs(
+        raw_field: dict[str, Any] | None,
+        *,
+        keep_ids: bool,
+    ) -> list[dict[str, Any]]:
+        if not isinstance(raw_field, dict):
+            return []
+        options = (raw_field.get("property") or {}).get("options") or []
+        result: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for option in options:
+            if not isinstance(option, dict):
+                continue
+            name = str(option.get("name") or "").strip()
+            key = name.casefold()
+            if not name or key in seen:
+                continue
+            item: dict[str, Any] = {"name": name}
+            if keep_ids and str(option.get("id") or "").strip():
+                item["id"] = str(option.get("id") or "").strip()
+            color = option.get("color")
+            if isinstance(color, int):
+                item["color"] = color
+            result.append(item)
+            seen.add(key)
+        return result
+
+    def _update_repair_followup_field_definition(
+        self,
+        raw_field: dict[str, Any],
+        *,
+        field_type: int,
+        options: list[dict[str, Any]] | None = None,
+    ) -> None:
+        field_name = str(raw_field.get("field_name") or "").strip()
+        field_id = str(raw_field.get("field_id") or "").strip()
+        if not field_name or not field_id:
+            raise PortalError("维修跟进字段定义缺少字段名称或 field_id。")
+        request_body: dict[str, Any] = {
+            "field_name": field_name,
+            "type": int(field_type),
+        }
+        if int(field_type) == 3:
+            request_body["ui_type"] = "SingleSelect"
+            request_body["property"] = {"options": list(options or [])}
+        else:
+            ui_type = str(raw_field.get("ui_type") or "").strip()
+            if ui_type:
+                request_body["ui_type"] = ui_type
+            property_payload = copy.deepcopy(raw_field.get("property") or {})
+            if property_payload:
+                request_body["property"] = property_payload
+        description = raw_field.get("description")
+        if isinstance(description, str):
+            request_body["description"] = description
+        url = (
+            "https://open.feishu.cn/open-apis/bitable/v1/apps/"
+            f"{REPAIR_SOURCE_APP_TOKEN}/tables/{REPAIR_FOLLOWUP_TABLE_ID}/"
+            f"fields/{field_id}"
+        )
+
+        def do_update() -> dict[str, Any]:
+            return self._request_payload(
+                "PUT",
+                url,
+                context=f"维修跟进字段迁移({field_name})",
+                headers={**self._auth_headers(), "Content-Type": "application/json"},
+                json_payload=request_body,
+            )
+
+        payload = do_update()
+        if int(payload.get("code") or 0) in TOKEN_ERROR_CODES:
+            refresh_feishu_token()
+            payload = do_update()
+        code = int(payload.get("code") or 0)
+        if code != 0:
+            raise PortalError(
+                f"迁移维修跟进字段{field_name}失败: "
+                f"code={code}, msg={payload.get('msg') or 'unknown'}"
+            )
+
+    def _delete_repair_followup_field_definition(
+        self,
+        raw_field: dict[str, Any],
+    ) -> None:
+        field_name = str(raw_field.get("field_name") or "").strip()
+        field_id = str(raw_field.get("field_id") or "").strip()
+        if not field_name or not field_id:
+            raise PortalError("删除维修跟进重复字段时缺少字段名称或 field_id。")
+        url = (
+            "https://open.feishu.cn/open-apis/bitable/v1/apps/"
+            f"{REPAIR_SOURCE_APP_TOKEN}/tables/{REPAIR_FOLLOWUP_TABLE_ID}/"
+            f"fields/{field_id}"
+        )
+
+        def do_delete() -> dict[str, Any]:
+            return self._request_payload(
+                "DELETE",
+                url,
+                context=f"维修跟进重复字段删除({field_name})",
+                headers=self._auth_headers(),
+            )
+
+        payload = do_delete()
+        if int(payload.get("code") or 0) in TOKEN_ERROR_CODES:
+            refresh_feishu_token()
+            payload = do_delete()
+        code = int(payload.get("code") or 0)
+        if code != 0:
+            raise PortalError(
+                f"删除维修跟进重复字段{field_name}失败: "
+                f"code={code}, msg={payload.get('msg') or 'unknown'}"
+            )
+
+    @classmethod
+    def _repair_followup_migration_text(
+        cls,
+        value: Any,
+        legacy_meta: FieldMeta | None,
+    ) -> str:
+        text = cls._repair_management_plain_text(value).strip()
+        if not text:
+            return ""
+        if re.fullmatch(r"opt[A-Za-z0-9]+", text):
+            mapped = str((legacy_meta.options_map or {}).get(text) or "").strip() \
+                if legacy_meta is not None else ""
+            if not mapped:
+                raise PortalError(f"旧选项 ID {text} 无法还原为文本，已停止字段迁移。")
+            return mapped
+        return text
+
+    @staticmethod
+    def _repair_followup_merge_option_specs(
+        *groups: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for group in groups:
+            for option in group:
+                name = str(option.get("name") or "").strip()
+                key = name.casefold()
+                if not name or key in seen:
+                    continue
+                result.append(copy.deepcopy(option))
+                seen.add(key)
+        return result
+
+    def _migrate_repair_followup_duplicate_fields_unlocked(
+        self,
+        metas: list[FieldMeta],
+        meta_by_name: dict[str, FieldMeta],
+    ) -> tuple[list[FieldMeta], dict[str, FieldMeta]]:
+        raw_payload = self._request_json(
+            "fields",
+            params={"page_size": 500},
+            app_token=REPAIR_SOURCE_APP_TOKEN,
+            table_id=REPAIR_FOLLOWUP_TABLE_ID,
+        )
+        raw_fields = [
+            item
+            for item in (raw_payload.get("data", {}).get("items") or [])
+            if isinstance(item, dict)
+        ]
+        raw_by_name = {
+            str(item.get("field_name") or "").strip(): item
+            for item in raw_fields
+        }
+        legacy_names = [
+            legacy_name
+            for legacy_name, _canonical_name in REPAIR_FOLLOWUP_LEGACY_FIELD_MAPPINGS
+            if legacy_name in raw_by_name
+        ]
+        expected_types = {
+            REPAIR_FOLLOWUP_DEVICE_NAME_FIELD_NAME: 3,
+            REPAIR_FOLLOWUP_DEVICE_NUMBER_FIELD_NAME: 1,
+            REPAIR_FOLLOWUP_BRAND_FIELD_NAME: 3,
+            REPAIR_FOLLOWUP_MODEL_FIELD_NAME: 3,
+            REPAIR_FOLLOWUP_REPAIR_PARTY_FIELD_NAME: 3,
+            REPAIR_FOLLOWUP_SUPPLIER_FIELD_NAME: 1,
+            REPAIR_FOLLOWUP_SUPPLIER_PERSON_FIELD_NAME: 1,
+            "是否质保期内": 3,
+        }
+        missing = [name for name in expected_types if name not in raw_by_name]
+        if missing:
+            raise PortalError(
+                "维修跟进表缺少保留字段：" + "、".join(missing)
+            )
+        if not legacy_names:
+            invalid = [
+                f"{name}(当前类型{int(meta_by_name[name].field_type or 0)})"
+                for name, field_type in expected_types.items()
+                if int(meta_by_name[name].field_type or 0) != field_type
+            ]
+            if invalid:
+                raise PortalError(
+                    "维修跟进字段迁移不完整：" + "、".join(invalid)
+                )
+            current = self._state_store.get_backend_runtime(
+                REPAIR_FOLLOWUP_SCHEMA_MIGRATION_RUNTIME_KEY
+            ) or {}
+            if current.get("status") != "complete":
+                self._state_store.put_backend_runtime(
+                    REPAIR_FOLLOWUP_SCHEMA_MIGRATION_RUNTIME_KEY,
+                    {
+                        "status": "complete",
+                        "migrated_records": int(current.get("migrated_records") or 0),
+                        "deleted_fields": list(current.get("deleted_fields") or []),
+                        "finished_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    },
+                )
+            return metas, meta_by_name
+
+        records = self._load_table_records(
+            app_token=REPAIR_SOURCE_APP_TOKEN,
+            table_id=REPAIR_FOLLOWUP_TABLE_ID,
+            meta_by_name=meta_by_name,
+            work_type=WORK_TYPE_REPAIR,
+            notice_type=NOTICE_TYPE_REPAIR,
+        )
+        desired_by_record: dict[str, dict[str, str]] = {}
+        for record in records:
+            record_id = str(record.get("record_id") or "").strip()
+            if not record_id:
+                continue
+            desired: dict[str, str] = {}
+            for legacy_name, canonical_name in REPAIR_FOLLOWUP_LEGACY_FIELD_MAPPINGS:
+                legacy_value = self._repair_followup_record_value(record, legacy_name)
+                canonical_value = self._repair_followup_record_value(record, canonical_name)
+                source_value = (
+                    legacy_value
+                    if legacy_value not in (None, "", [], {})
+                    else canonical_value
+                )
+                text = self._repair_followup_migration_text(
+                    source_value,
+                    meta_by_name.get(legacy_name),
+                )
+                if text:
+                    desired[canonical_name] = text
+            desired_by_record[record_id] = desired
+
+        desired_options: dict[str, list[dict[str, Any]]] = {}
+        for canonical_name, legacy_name in REPAIR_FOLLOWUP_CANONICAL_SELECT_SOURCES.items():
+            legacy_specs = self._repair_followup_option_specs(
+                raw_by_name.get(legacy_name),
+                keep_ids=False,
+            )
+            current_specs = [
+                option
+                for option in self._repair_followup_option_specs(
+                    raw_by_name.get(canonical_name),
+                    keep_ids=True,
+                )
+                if not re.fullmatch(
+                    r"opt[A-Za-z0-9]+",
+                    str(option.get("name") or "").strip(),
+                )
+            ]
+            extra_specs = [
+                {"name": values[canonical_name]}
+                for values in desired_by_record.values()
+                if str(values.get(canonical_name) or "").strip()
+            ]
+            desired_options[canonical_name] = self._repair_followup_merge_option_specs(
+                legacy_specs,
+                current_specs,
+                extra_specs,
+            )
+            if not desired_options[canonical_name]:
+                raise PortalError(f"{canonical_name}没有可迁移的下拉选项。")
+
+        # Persist text targets first. This removes legacy option IDs before any
+        # in-place Text -> SingleSelect conversion is attempted.
+        for record in records:
+            record_id = str(record.get("record_id") or "").strip()
+            desired = desired_by_record.get(record_id) or {}
+            patch: dict[str, Any] = {}
+            for canonical_name, value in desired.items():
+                meta = meta_by_name.get(canonical_name)
+                if meta is None or int(meta.field_type or 0) != 1:
+                    continue
+                current = self._repair_followup_migration_text(
+                    self._repair_followup_record_value(record, canonical_name),
+                    meta_by_name.get(
+                        REPAIR_FOLLOWUP_CANONICAL_SELECT_SOURCES.get(
+                            canonical_name,
+                            "",
+                        )
+                    ),
+                )
+                if current != value:
+                    patch[canonical_name] = value
+            if patch:
+                self._patch_record_fields(
+                    app_token=REPAIR_SOURCE_APP_TOKEN,
+                    table_id=REPAIR_FOLLOWUP_TABLE_ID,
+                    record_id=record_id,
+                    fields=patch,
+                )
+
+        # Existing single-select targets first receive a merged option set so
+        # records can be normalized without invalid-option failures.
+        for canonical_name, options in desired_options.items():
+            raw_field = raw_by_name[canonical_name]
+            if int(raw_field.get("type") or 0) != 3:
+                continue
+            current_specs = self._repair_followup_option_specs(raw_field, keep_ids=True)
+            merged_specs = self._repair_followup_merge_option_specs(
+                current_specs,
+                options,
+            )
+            current_names = [str(item.get("name") or "") for item in current_specs]
+            merged_names = [str(item.get("name") or "") for item in merged_specs]
+            if current_names != merged_names:
+                self._update_repair_followup_field_definition(
+                    raw_field,
+                    field_type=3,
+                    options=merged_specs,
+                )
+
+        metas, meta_by_name = self._load_table_fields(
+            app_token=REPAIR_SOURCE_APP_TOKEN,
+            table_id=REPAIR_FOLLOWUP_TABLE_ID,
+        )
+        records = self._load_table_records(
+            app_token=REPAIR_SOURCE_APP_TOKEN,
+            table_id=REPAIR_FOLLOWUP_TABLE_ID,
+            meta_by_name=meta_by_name,
+            work_type=WORK_TYPE_REPAIR,
+            notice_type=NOTICE_TYPE_REPAIR,
+        )
+        for record in records:
+            record_id = str(record.get("record_id") or "").strip()
+            desired = desired_by_record.get(record_id) or {}
+            patch = {
+                name: value
+                for name, value in desired.items()
+                if self._repair_management_plain_text(
+                    self._repair_followup_record_value(record, name)
+                ).strip() != value
+            }
+            if patch:
+                self._patch_record_fields(
+                    app_token=REPAIR_SOURCE_APP_TOKEN,
+                    table_id=REPAIR_FOLLOWUP_TABLE_ID,
+                    record_id=record_id,
+                    fields=patch,
+                )
+
+        raw_payload = self._request_json(
+            "fields",
+            params={"page_size": 500},
+            app_token=REPAIR_SOURCE_APP_TOKEN,
+            table_id=REPAIR_FOLLOWUP_TABLE_ID,
+        )
+        raw_fields = [
+            item
+            for item in (raw_payload.get("data", {}).get("items") or [])
+            if isinstance(item, dict)
+        ]
+        raw_by_name = {
+            str(item.get("field_name") or "").strip(): item
+            for item in raw_fields
+        }
+        for canonical_name, options in desired_options.items():
+            raw_field = raw_by_name[canonical_name]
+            current_specs = self._repair_followup_option_specs(raw_field, keep_ids=True)
+            current_by_name = {
+                str(item.get("name") or "").strip().casefold(): item
+                for item in current_specs
+            }
+            final_specs = [
+                copy.deepcopy(
+                    current_by_name.get(
+                        str(option.get("name") or "").strip().casefold()
+                    )
+                    or option
+                )
+                for option in options
+            ]
+            final_names = [str(item.get("name") or "") for item in final_specs]
+            current_names = [str(item.get("name") or "") for item in current_specs]
+            if int(raw_field.get("type") or 0) != 3 or current_names != final_names:
+                self._update_repair_followup_field_definition(
+                    raw_field,
+                    field_type=3,
+                    options=final_specs,
+                )
+
+        metas, meta_by_name = self._load_table_fields(
+            app_token=REPAIR_SOURCE_APP_TOKEN,
+            table_id=REPAIR_FOLLOWUP_TABLE_ID,
+        )
+        records = self._load_table_records(
+            app_token=REPAIR_SOURCE_APP_TOKEN,
+            table_id=REPAIR_FOLLOWUP_TABLE_ID,
+            meta_by_name=meta_by_name,
+            work_type=WORK_TYPE_REPAIR,
+            notice_type=NOTICE_TYPE_REPAIR,
+        )
+        record_by_id = {
+            str(record.get("record_id") or "").strip(): record
+            for record in records
+        }
+        for record_id, desired in desired_by_record.items():
+            record = record_by_id.get(record_id)
+            if record is None:
+                raise PortalError(f"维修跟进记录{record_id}在迁移校验时不存在。")
+            select_patch: dict[str, Any] = {}
+            for name, value in desired.items():
+                current = self._repair_management_plain_text(
+                    self._repair_followup_record_value(record, name)
+                ).strip()
+                if current != value:
+                    select_patch[name] = value
+            if select_patch:
+                self._patch_record_fields(
+                    app_token=REPAIR_SOURCE_APP_TOKEN,
+                    table_id=REPAIR_FOLLOWUP_TABLE_ID,
+                    record_id=record_id,
+                    fields=select_patch,
+                )
+
+        metas, meta_by_name = self._load_table_fields(
+            app_token=REPAIR_SOURCE_APP_TOKEN,
+            table_id=REPAIR_FOLLOWUP_TABLE_ID,
+        )
+        records = self._load_table_records(
+            app_token=REPAIR_SOURCE_APP_TOKEN,
+            table_id=REPAIR_FOLLOWUP_TABLE_ID,
+            meta_by_name=meta_by_name,
+            work_type=WORK_TYPE_REPAIR,
+            notice_type=NOTICE_TYPE_REPAIR,
+        )
+        record_by_id = {
+            str(record.get("record_id") or "").strip(): record
+            for record in records
+        }
+        verification_errors: list[str] = []
+        for name, expected_type in expected_types.items():
+            meta = meta_by_name.get(name)
+            if meta is None or int(meta.field_type or 0) != expected_type:
+                verification_errors.append(f"{name}类型校验失败")
+        for canonical_name, options in desired_options.items():
+            actual = {
+                str(item or "").strip().casefold()
+                for item in (meta_by_name[canonical_name].option_names or [])
+            }
+            missing_options = [
+                str(item.get("name") or "").strip()
+                for item in options
+                if str(item.get("name") or "").strip().casefold() not in actual
+            ]
+            if missing_options:
+                verification_errors.append(
+                    f"{canonical_name}缺少{len(missing_options)}个选项"
+                )
+        for record_id, desired in desired_by_record.items():
+            record = record_by_id.get(record_id)
+            if record is None:
+                verification_errors.append(f"{record_id}记录不存在")
+                continue
+            for name, value in desired.items():
+                current = self._repair_management_plain_text(
+                    self._repair_followup_record_value(record, name)
+                ).strip()
+                if current != value:
+                    verification_errors.append(
+                        f"{record_id}.{name}={current!r}，期望{value!r}"
+                    )
+        if verification_errors:
+            result = {
+                "status": "failed",
+                "migrated_records": len(desired_by_record),
+                "errors": verification_errors[:50],
+                "finished_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            self._state_store.put_backend_runtime(
+                REPAIR_FOLLOWUP_SCHEMA_MIGRATION_RUNTIME_KEY,
+                result,
+            )
+            raise PortalError(
+                "维修跟进字段迁移校验失败：" + "；".join(verification_errors[:5])
+            )
+
+        deletion_errors: list[str] = []
+        deleted_fields: list[str] = []
+        for legacy_name, _canonical_name in REPAIR_FOLLOWUP_LEGACY_FIELD_MAPPINGS:
+            raw_field = raw_by_name.get(legacy_name)
+            if not isinstance(raw_field, dict):
+                continue
+            try:
+                self._delete_repair_followup_field_definition(raw_field)
+                deleted_fields.append(legacy_name)
+            except Exception as exc:
+                deletion_errors.append(str(exc))
+
+        metas, meta_by_name = self._load_table_fields(
+            app_token=REPAIR_SOURCE_APP_TOKEN,
+            table_id=REPAIR_FOLLOWUP_TABLE_ID,
+        )
+        remaining = [
+            name
+            for name, _canonical_name in REPAIR_FOLLOWUP_LEGACY_FIELD_MAPPINGS
+            if name in meta_by_name
+        ]
+        result = {
+            "status": "complete" if not remaining else "partial",
+            "migrated_records": len(desired_by_record),
+            "deleted_fields": deleted_fields,
+            "remaining_fields": remaining,
+            "errors": deletion_errors,
+            "finished_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        self._state_store.put_backend_runtime(
+            REPAIR_FOLLOWUP_SCHEMA_MIGRATION_RUNTIME_KEY,
+            result,
+        )
+        self._invalidate_repair_followup_catalog_cache()
+        return metas, meta_by_name
+
+    def migrate_repair_followup_duplicate_fields(self) -> dict[str, Any]:
+        with self._repair_followup_schema_lock:
+            metas, meta_by_name = self._load_table_fields(
+                app_token=REPAIR_SOURCE_APP_TOKEN,
+                table_id=REPAIR_FOLLOWUP_TABLE_ID,
+            )
+            self._migrate_repair_followup_duplicate_fields_unlocked(
+                metas,
+                meta_by_name,
+            )
+            self._repair_followup_schema_ready = True
+            return self._state_store.get_backend_runtime(
+                REPAIR_FOLLOWUP_SCHEMA_MIGRATION_RUNTIME_KEY
+            ) or {"status": "complete"}
 
     def _ensure_repair_followup_parent_id_field(
         self,
@@ -876,50 +1581,174 @@ class MaintenancePortalService:
                 table_id=REPAIR_FOLLOWUP_TABLE_ID,
             )
             existing = meta_by_name.get(REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME)
-            if existing is not None:
-                if int(existing.field_type or 0) != 1:
-                    raise PortalError(
-                        f"{REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME} 必须是文本字段。"
+            if existing is None:
+                url = (
+                    "https://open.feishu.cn/open-apis/bitable/v1/apps/"
+                    f"{REPAIR_SOURCE_APP_TOKEN}/tables/{REPAIR_FOLLOWUP_TABLE_ID}/fields"
+                )
+
+                def do_create() -> dict[str, Any]:
+                    return self._request_payload(
+                        "POST",
+                        url,
+                        context="维修跟进汇总ID字段创建",
+                        headers={
+                            **self._auth_headers(),
+                            "Content-Type": "application/json",
+                        },
+                        json_payload={
+                            "field_name": REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME,
+                            "type": 1,
+                        },
                     )
-                return metas, meta_by_name
 
-            url = (
-                "https://open.feishu.cn/open-apis/bitable/v1/apps/"
-                f"{REPAIR_SOURCE_APP_TOKEN}/tables/{REPAIR_FOLLOWUP_TABLE_ID}/fields"
-            )
-
-            def do_create() -> dict[str, Any]:
-                return self._request_payload(
-                    "POST",
-                    url,
-                    context="维修跟进汇总ID字段创建",
-                    headers={
-                        **self._auth_headers(),
-                        "Content-Type": "application/json",
-                    },
-                    json_payload={
-                        "field_name": REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME,
-                        "type": 1,
-                    },
-                )
-
-            payload = do_create()
-            if int(payload.get("code") or 0) in TOKEN_ERROR_CODES:
-                refresh_feishu_token()
                 payload = do_create()
-            code = int(payload.get("code") or 0)
-            if code not in {0, 1254014}:
-                raise PortalError(
-                    "创建维修跟进汇总记录ID字段失败: "
-                    f"code={code}, msg={payload.get('msg') or 'unknown'}"
+                if int(payload.get("code") or 0) in TOKEN_ERROR_CODES:
+                    refresh_feishu_token()
+                    payload = do_create()
+                code = int(payload.get("code") or 0)
+                if code not in {0, 1254014}:
+                    raise PortalError(
+                        "创建维修跟进汇总记录ID字段失败: "
+                        f"code={code}, msg={payload.get('msg') or 'unknown'}"
+                    )
+                metas, meta_by_name = self._load_table_fields(
+                    app_token=REPAIR_SOURCE_APP_TOKEN,
+                    table_id=REPAIR_FOLLOWUP_TABLE_ID,
                 )
-            metas, meta_by_name = self._load_table_fields(
+                existing = meta_by_name.get(REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME)
+            if existing is None:
+                raise PortalError("维修跟进汇总记录ID字段创建后仍无法读取。")
+            if int(existing.field_type or 0) != 1:
+                raise PortalError(
+                    f"{REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME} 必须是文本字段。"
+                )
+            if self._repair_followup_schema_ready:
+                return metas, meta_by_name
+            migrated = self._migrate_repair_followup_duplicate_fields_unlocked(
+                metas,
+                meta_by_name,
+            )
+            self._repair_followup_schema_ready = True
+            return migrated
+
+    def _ensure_repair_followup_select_options(
+        self,
+        fields: dict[str, Any],
+        meta_by_name: dict[str, FieldMeta],
+    ) -> tuple[list[FieldMeta], dict[str, FieldMeta]]:
+        desired_by_name: dict[str, list[str]] = {}
+        for field_name, value in (fields or {}).items():
+            meta = meta_by_name.get(str(field_name or "").strip())
+            if meta is None or int(meta.field_type or 0) not in {3, 4}:
+                continue
+            values = (
+                self._repair_management_select_items(value)
+                if int(meta.field_type or 0) == 4
+                else [value]
+            )
+            existing = {str(item or "").strip().casefold() for item in meta.option_names}
+            desired: list[str] = []
+            for item in values:
+                text = self._repair_management_canonical_select_text(
+                    meta.field_name,
+                    item,
+                ).strip()
+                if (
+                    not text
+                    or re.fullmatch(r"opt[A-Za-z0-9]+", text)
+                    or text.casefold() in existing
+                ):
+                    continue
+                if text not in desired:
+                    desired.append(text)
+            if desired:
+                desired_by_name[meta.field_name] = desired
+        if not desired_by_name:
+            return list(meta_by_name.values()), meta_by_name
+
+        with self._repair_followup_schema_lock:
+            payload = self._request_json(
+                "fields",
+                params={"page_size": 500},
                 app_token=REPAIR_SOURCE_APP_TOKEN,
                 table_id=REPAIR_FOLLOWUP_TABLE_ID,
             )
-            if REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME not in meta_by_name:
-                raise PortalError("维修跟进汇总记录ID字段创建后仍无法读取。")
-            return metas, meta_by_name
+            raw_fields = payload.get("data", {}).get("items") or []
+            raw_by_name = {
+                str(item.get("field_name") or "").strip(): item
+                for item in raw_fields
+                if isinstance(item, dict)
+            }
+            for field_name, desired in desired_by_name.items():
+                raw_field = raw_by_name.get(field_name)
+                if not isinstance(raw_field, dict):
+                    raise PortalError(f"维修跟进表缺少字段：{field_name}")
+                field_id = str(raw_field.get("field_id") or "").strip()
+                if not field_id:
+                    raise PortalError(f"维修跟进表字段缺少 field_id：{field_name}")
+                property_payload = copy.deepcopy(raw_field.get("property") or {})
+                options = property_payload.get("options")
+                if not isinstance(options, list):
+                    options = []
+                option_names = {
+                    str(option.get("name") or "").strip().casefold()
+                    for option in options
+                    if isinstance(option, dict)
+                }
+                changed = False
+                for option_name in desired:
+                    if option_name.casefold() in option_names:
+                        continue
+                    options.append({"name": option_name})
+                    option_names.add(option_name.casefold())
+                    changed = True
+                if not changed:
+                    continue
+                property_payload["options"] = options
+                url = (
+                    "https://open.feishu.cn/open-apis/bitable/v1/apps/"
+                    f"{REPAIR_SOURCE_APP_TOKEN}/tables/{REPAIR_FOLLOWUP_TABLE_ID}/"
+                    f"fields/{field_id}"
+                )
+                request_body: dict[str, Any] = {
+                    "field_name": field_name,
+                    "type": int(raw_field.get("type") or 0),
+                    "property": property_payload,
+                }
+                ui_type = str(raw_field.get("ui_type") or "").strip()
+                if ui_type:
+                    request_body["ui_type"] = ui_type
+                description = raw_field.get("description")
+                if isinstance(description, str):
+                    request_body["description"] = description
+
+                def do_update() -> dict[str, Any]:
+                    return self._request_payload(
+                        "PUT",
+                        url,
+                        context=f"维修跟进字段选项更新({field_name})",
+                        headers={
+                            **self._auth_headers(),
+                            "Content-Type": "application/json",
+                        },
+                        json_payload=request_body,
+                    )
+
+                update_payload = do_update()
+                if int(update_payload.get("code") or 0) in TOKEN_ERROR_CODES:
+                    refresh_feishu_token()
+                    update_payload = do_update()
+                code = int(update_payload.get("code") or 0)
+                if code != 0:
+                    raise PortalError(
+                        f"补齐{field_name}选项失败: code={code}, "
+                        f"msg={update_payload.get('msg') or 'unknown'}"
+                    )
+            return self._load_table_fields(
+                app_token=REPAIR_SOURCE_APP_TOKEN,
+                table_id=REPAIR_FOLLOWUP_TABLE_ID,
+            )
 
     def _create_record_fields(
         self,
@@ -959,6 +1788,8 @@ class MaintenancePortalService:
             )
         if table_id == REPAIR_MANAGEMENT_REPAIR_TABLE_ID:
             self._invalidate_repair_management_target_cache()
+        if table_id == REPAIR_FOLLOWUP_TABLE_ID:
+            self._invalidate_repair_followup_catalog_cache()
         return payload
 
     def _delete_record_fields(
@@ -997,6 +1828,8 @@ class MaintenancePortalService:
             )
         if table_id == REPAIR_MANAGEMENT_REPAIR_TABLE_ID:
             self._invalidate_repair_management_target_cache()
+        if table_id == REPAIR_FOLLOWUP_TABLE_ID:
+            self._invalidate_repair_followup_catalog_cache()
         return payload
 
     @staticmethod
@@ -1087,7 +1920,6 @@ class MaintenancePortalService:
                     has_formula=bool(
                         prop.get("formula_expression")
                         or prop.get("formula")
-                        or prop.get("formatter")
                     ),
                 )
             )
@@ -1410,7 +2242,8 @@ class MaintenancePortalService:
     def _field_meta_is_readonly(meta: FieldMeta) -> bool:
         ui_type = str(meta.ui_type or "").strip().lower()
         field_name = str(meta.field_name or "").strip()
-        if meta.has_formula:
+        field_type = int(meta.field_type or 0)
+        if meta.has_formula or field_type in {19, 20, 1001, 1002, 1003, 1004, 1005}:
             return True
         readonly_name_tokens = (
             "创建日期",
@@ -1451,19 +2284,16 @@ class MaintenancePortalService:
 
     @classmethod
     def _repair_management_field_is_readonly(cls, meta: FieldMeta) -> bool:
-        if str(meta.field_name or "").strip() in REPAIR_MANAGEMENT_PROTECTED_FIELD_NAMES:
+        field_name = str(meta.field_name or "").strip()
+        if field_name not in REPAIR_MANAGEMENT_FORM_FIELD_NAMES:
             return True
-        ui_type = str(meta.ui_type or "").strip().lower()
-        return any(
-            token in ui_type
-            for token in ("formula", "lookup", "created", "modified", "auto", "duplex", "stage")
-        )
+        return cls._field_meta_is_readonly(meta)
 
     @classmethod
     def _repair_management_field_payload(cls, meta: FieldMeta) -> dict[str, Any]:
         payload = cls._field_meta_payload(meta)
         payload["editable"] = not cls._repair_management_field_is_readonly(meta)
-        payload["auto_filled"] = str(meta.field_name or "").strip() in REPAIR_MANAGEMENT_PROTECTED_FIELD_NAMES
+        payload["auto_filled"] = not payload["editable"]
         return payload
 
     @classmethod
@@ -1675,11 +2505,12 @@ class MaintenancePortalService:
         if not text:
             return ""
         if text[:1] in {"[", "{"}:
-            with suppress(Exception):
-                decoded = json.loads(text)
-                normalized = cls._repair_management_plain_text(decoded)
-                if normalized:
-                    return normalized
+            for decoder in (json.loads, ast.literal_eval):
+                with suppress(Exception):
+                    decoded = decoder(text)
+                    normalized = cls._repair_management_plain_text(decoded)
+                    if normalized:
+                        return normalized
             matches = re.findall(
                 r"['\"](?:text|name)['\"]\s*:\s*['\"]([^'\"]+)['\"]",
                 text,
@@ -1687,6 +2518,48 @@ class MaintenancePortalService:
             if matches:
                 return "、".join(dict.fromkeys(matches))
         return text
+
+    @classmethod
+    def _repair_management_select_items(cls, value: Any) -> list[Any]:
+        if value in (None, "", [], {}):
+            return []
+        if isinstance(value, (list, tuple, set)):
+            flattened: list[Any] = []
+            for item in value:
+                flattened.extend(cls._repair_management_select_items(item))
+            return flattened
+        if isinstance(value, dict):
+            return [value]
+        text = str(value or "").strip()
+        if not text:
+            return []
+        if text[:1] in {"[", "{"}:
+            for decoder in (json.loads, ast.literal_eval):
+                with suppress(Exception):
+                    decoded = decoder(text)
+                    if decoded != value:
+                        return cls._repair_management_select_items(decoded)
+        return [
+            item.strip()
+            for item in re.split(r"[,，、;；]+", text)
+            if item.strip()
+        ]
+
+    @classmethod
+    def _repair_management_canonical_select_text(
+        cls,
+        field_name: str,
+        value: Any,
+    ) -> str:
+        text = cls._repair_management_plain_text(value)
+        legacy = REPAIR_MANAGEMENT_LEGACY_OPTION_ALIASES.get(
+            (str(field_name or "").strip(), text.casefold())
+        )
+        if legacy:
+            return legacy
+        if field_name not in REPAIR_MANAGEMENT_CUSTOM_MULTI_SELECT_FIELDS:
+            return text
+        return REPAIR_MANAGEMENT_SOURCE_OPTION_ALIASES.get(text.casefold(), text)
 
     @classmethod
     def _repair_management_unique_text(cls, values: list[Any]) -> str:
@@ -2133,10 +3006,13 @@ class MaintenancePortalService:
             "auto_selected_ids": auto_selected_ids,
         }
 
-    @staticmethod
-    def _repair_followup_field_payload(meta: FieldMeta) -> dict[str, Any]:
+    @classmethod
+    def _repair_followup_field_payload(cls, meta: FieldMeta) -> dict[str, Any]:
         field_name = str(meta.field_name or "").strip()
-        editable = field_name in REPAIR_FOLLOWUP_WRITABLE_FIELD_NAMES
+        editable = (
+            field_name in REPAIR_FOLLOWUP_FORM_FIELD_NAMES
+            and not cls._field_meta_is_readonly(meta)
+        )
         return {
             "field_id": meta.field_id,
             "field_name": field_name,
@@ -2145,6 +3021,210 @@ class MaintenancePortalService:
             "options": list(meta.option_names or []),
             "editable": editable,
         }
+
+    @classmethod
+    def _repair_followup_brand_model_options(
+        cls,
+        *,
+        records: list[dict[str, Any]],
+        summary_record: dict[str, Any] | None,
+        meta_by_name: dict[str, FieldMeta],
+    ) -> dict[str, list[str]]:
+        brand_meta = meta_by_name.get(REPAIR_FOLLOWUP_BRAND_FIELD_NAME)
+        model_meta = meta_by_name.get(REPAIR_FOLLOWUP_MODEL_FIELD_NAME)
+        if brand_meta is None or model_meta is None:
+            return {}
+
+        mapped: dict[str, list[str]] = {}
+
+        def add_pair(brand_value: Any, model_value: Any) -> None:
+            brand = cls._repair_management_option_name(brand_meta, brand_value)
+            model = cls._repair_management_option_name(model_meta, model_value)
+            if not brand or not model:
+                return
+            models = mapped.setdefault(brand, [])
+            if model not in models:
+                models.append(model)
+
+        for record in records:
+            display = record.get("display_fields") if isinstance(record.get("display_fields"), dict) else {}
+            raw = record.get("raw_fields") if isinstance(record.get("raw_fields"), dict) else {}
+            add_pair(
+                display.get(REPAIR_FOLLOWUP_BRAND_FIELD_NAME)
+                or raw.get(REPAIR_FOLLOWUP_BRAND_FIELD_NAME),
+                display.get(REPAIR_FOLLOWUP_MODEL_FIELD_NAME)
+                or raw.get(REPAIR_FOLLOWUP_MODEL_FIELD_NAME),
+            )
+
+        if isinstance(summary_record, dict):
+            display = summary_record.get("display_fields") if isinstance(summary_record.get("display_fields"), dict) else {}
+            raw = summary_record.get("raw_fields") if isinstance(summary_record.get("raw_fields"), dict) else {}
+            add_pair(
+                display.get("设备品牌") or raw.get("设备品牌"),
+                display.get("设备型号") or raw.get("设备型号"),
+            )
+
+        brand_order = {
+            name: index for index, name in enumerate(brand_meta.option_names)
+        }
+        model_order = {
+            name: index for index, name in enumerate(model_meta.option_names)
+        }
+        return {
+            brand: sorted(models, key=lambda item: (model_order.get(item, 10**9), item))
+            for brand, models in sorted(
+                mapped.items(),
+                key=lambda item: (brand_order.get(item[0], 10**9), item[0]),
+            )
+        }
+
+    @classmethod
+    def _repair_equipment_catalog_brand_model_options(
+        cls,
+        records: list[dict[str, Any]],
+    ) -> dict[str, list[str]]:
+        mapped: dict[str, list[str]] = {}
+        for record in records:
+            display = (
+                record.get("display_fields")
+                if isinstance(record.get("display_fields"), dict)
+                else {}
+            )
+            raw = (
+                record.get("raw_fields")
+                if isinstance(record.get("raw_fields"), dict)
+                else {}
+            )
+            brand = cls._repair_management_plain_text(
+                display.get(REPAIR_EQUIPMENT_CATALOG_BRAND_FIELD_NAME)
+                or raw.get(REPAIR_EQUIPMENT_CATALOG_BRAND_FIELD_NAME)
+            )
+            model = cls._repair_management_plain_text(
+                display.get(REPAIR_EQUIPMENT_CATALOG_MODEL_FIELD_NAME)
+                or raw.get(REPAIR_EQUIPMENT_CATALOG_MODEL_FIELD_NAME)
+            )
+            if not brand or not model:
+                continue
+            models = mapped.setdefault(brand, [])
+            if model not in models:
+                models.append(model)
+        return mapped
+
+    @staticmethod
+    def _normalize_repair_catalog_mapping(value: Any) -> dict[str, list[str]]:
+        if not isinstance(value, dict):
+            return {}
+        normalized: dict[str, list[str]] = {}
+        for brand_value, model_values in value.items():
+            brand = str(brand_value or "").strip()
+            if not brand or not isinstance(model_values, list):
+                continue
+            models = list(
+                dict.fromkeys(
+                    str(model or "").strip()
+                    for model in model_values
+                    if str(model or "").strip()
+                )
+            )
+            if models:
+                normalized[brand] = models
+        return normalized
+
+    def _load_repair_followup_brand_model_catalog(
+        self,
+        meta_by_name: dict[str, FieldMeta],
+        *,
+        force_refresh: bool = False,
+    ) -> dict[str, list[str]]:
+        del meta_by_name
+        now = time.time()
+        with self._repair_followup_catalog_cache_lock:
+            cached = self._repair_followup_catalog_cache
+            if (
+                not force_refresh
+                and isinstance(cached, dict)
+                and now - float(cached.get("refreshed_at") or 0)
+                <= REPAIR_FOLLOWUP_CATALOG_CACHE_TTL_SECONDS
+            ):
+                return self._normalize_repair_catalog_mapping(cached.get("mapping"))
+
+            persisted = self._state_store.get_backend_runtime(
+                REPAIR_FOLLOWUP_CATALOG_RUNTIME_KEY
+            ) or {}
+            persisted_mapping = self._normalize_repair_catalog_mapping(
+                persisted.get("mapping")
+            )
+            persisted_at = float(
+                persisted.get("refreshed_at") or persisted.get("updated_at") or 0
+            )
+            if (
+                not force_refresh
+                and persisted_mapping
+                and now - persisted_at <= REPAIR_FOLLOWUP_CATALOG_CACHE_TTL_SECONDS
+            ):
+                self._repair_followup_catalog_cache = {
+                    "refreshed_at": persisted_at,
+                    "mapping": persisted_mapping,
+                }
+                return persisted_mapping
+
+            try:
+                _metas, catalog_meta_by_name = self._load_table_fields(
+                    app_token=REPAIR_SOURCE_APP_TOKEN,
+                    table_id=REPAIR_EQUIPMENT_CATALOG_TABLE_ID,
+                )
+                missing_fields = [
+                    field_name
+                    for field_name in (
+                        REPAIR_EQUIPMENT_CATALOG_BRAND_FIELD_NAME,
+                        REPAIR_EQUIPMENT_CATALOG_MODEL_FIELD_NAME,
+                    )
+                    if field_name not in catalog_meta_by_name
+                ]
+                if missing_fields:
+                    raise PortalError(
+                        "设备目录缺少字段：" + "、".join(missing_fields)
+                    )
+                records = self._search_table_records(
+                    app_token=REPAIR_SOURCE_APP_TOKEN,
+                    table_id=REPAIR_EQUIPMENT_CATALOG_TABLE_ID,
+                    meta_by_name=catalog_meta_by_name,
+                    work_type=WORK_TYPE_REPAIR,
+                    notice_type=NOTICE_TYPE_REPAIR,
+                    field_names=(
+                        REPAIR_EQUIPMENT_CATALOG_BRAND_FIELD_NAME,
+                        REPAIR_EQUIPMENT_CATALOG_MODEL_FIELD_NAME,
+                    ),
+                    limit=REPAIR_FOLLOWUP_CATALOG_MAX_RECORDS,
+                )
+                mapping = self._repair_equipment_catalog_brand_model_options(records)
+                if not mapping:
+                    raise PortalError("设备目录没有可用的品牌型号数据。")
+            except Exception:
+                if persisted_mapping:
+                    self._repair_followup_catalog_cache = {
+                        "refreshed_at": persisted_at,
+                        "mapping": persisted_mapping,
+                    }
+                    return persisted_mapping
+                raise
+
+            self._repair_followup_catalog_cache = {
+                "refreshed_at": now,
+                "mapping": mapping,
+            }
+            self._state_store.put_backend_runtime(
+                REPAIR_FOLLOWUP_CATALOG_RUNTIME_KEY,
+                {
+                    "source_app_token": REPAIR_SOURCE_APP_TOKEN,
+                    "source_table_id": REPAIR_EQUIPMENT_CATALOG_TABLE_ID,
+                    "refreshed_at": now,
+                    "record_count": len(records),
+                    "brand_count": len(mapping),
+                    "mapping": mapping,
+                },
+            )
+            return mapping
 
     @classmethod
     def _repair_followup_parent_ids(cls, record: dict[str, Any]) -> list[str]:
@@ -2239,6 +3319,51 @@ class MaintenancePortalService:
             "returned": min(len(candidates), max_limit),
         }
 
+    def list_repair_followup_people(
+        self,
+        *,
+        scope: str = "ALL",
+        query: str = "",
+        limit: int = 80,
+        refresh: bool = False,
+    ) -> dict[str, Any]:
+        normalized_scope = self._normalize_scope(scope)
+        query_text = re.sub(r"\s+", "", str(query or "")).casefold()
+        people = self._load_signature_people(force=bool(refresh))
+        matched: list[dict[str, Any]] = []
+        for person in people:
+            name = str(person.get("name") or "").strip()
+            user_id = str(person.get("open_id") or "").strip()
+            if not name:
+                continue
+            if query_text and query_text not in re.sub(r"\s+", "", name).casefold():
+                continue
+            matched.append(
+                {
+                    "person_record_id": str(person.get("record_id") or "").strip(),
+                    "user_id": user_id,
+                    "name": name,
+                    "employee_no": str(person.get("employee_no") or "").strip(),
+                    "building": str(person.get("building") or "").strip(),
+                    "position": str(person.get("position") or "").strip(),
+                    "selectable": bool(user_id),
+                }
+            )
+        matched.sort(
+            key=lambda item: (
+                0 if item.get("selectable") else 1,
+                str(item.get("name") or ""),
+                str(item.get("employee_no") or ""),
+            )
+        )
+        max_limit = max(1, min(int(limit or 80), 200))
+        return {
+            "scope": normalized_scope,
+            "people": matched[:max_limit],
+            "total": len(matched),
+            "returned": min(len(matched), max_limit),
+        }
+
     def get_repair_followup_records(
         self,
         *,
@@ -2251,8 +3376,8 @@ class MaintenancePortalService:
         summary_id = str(summary_record_id or "").strip()
         if not summary_id:
             raise PortalError("读取维修跟进记录缺少维修项目记录。")
-        self._ensure_repair_management_record_in_scope(summary_id, scope)
-        metas, _meta_by_name, records = self._load_repair_followups_for_summary(
+        summary_record = self._ensure_repair_management_record_in_scope(summary_id, scope)
+        metas, meta_by_name, records = self._load_repair_followups_for_summary(
             summary_id,
             limit=500,
         )
@@ -2276,40 +3401,112 @@ class MaintenancePortalService:
                     "title": str(
                         self._repair_management_plain_text(fields.get("维修简述"))
                         or self._repair_management_plain_text(fields.get("维修进展描述"))
-                        or self._repair_management_plain_text(fields.get("设备名称-1"))
+                        or self._repair_management_plain_text(
+                            fields.get(REPAIR_FOLLOWUP_DEVICE_NAME_FIELD_NAME)
+                        )
                         or "未命名跟进记录"
                     ),
                     "created_time": str(fields.get("创建时间") or ""),
                     "progress": str(fields.get("维修进度") or ""),
                     "display_fields": fields,
                     "raw_fields": raw_fields,
-                    "cmdb_record_id": cmdb_ids[0] if cmdb_ids else "",
+                    "cmdb_record_ids": cmdb_ids,
                 }
             )
         selected.sort(key=lambda item: item.get("created_time") or "", reverse=True)
         max_limit = max(1, min(int(limit or 100), 200))
         page_offset = max(0, int(offset or 0))
         page_records = selected[page_offset : page_offset + max_limit]
+        current_mapping = self._repair_followup_brand_model_options(
+            records=records,
+            summary_record=summary_record,
+            meta_by_name=meta_by_name,
+        )
+        try:
+            brand_model_options = self._load_repair_followup_brand_model_catalog(
+                meta_by_name
+            )
+        except PortalError:
+            brand_model_options = {}
+        for brand, models in current_mapping.items():
+            merged_models = brand_model_options.setdefault(brand, [])
+            for model in models:
+                if model not in merged_models:
+                    merged_models.append(model)
+        field_payloads = [self._repair_followup_field_payload(meta) for meta in metas]
+        for field_payload in field_payloads:
+            if field_payload.get("field_name") != REPAIR_FOLLOWUP_BRAND_FIELD_NAME:
+                continue
+            field_payload["options"] = list(
+                dict.fromkeys(
+                    [
+                        *list(field_payload.get("options") or []),
+                        *brand_model_options.keys(),
+                    ]
+                )
+            )
         return {
             "summary_record_id": summary_id,
-            "fields": [self._repair_followup_field_payload(meta) for meta in metas],
+            "parent_id_field": REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME,
+            "relation_mode": "record_id",
+            "fields": field_payloads,
             "records": page_records,
             "total": len(selected),
             "returned": len(page_records),
             "offset": page_offset,
             "has_more": page_offset + len(page_records) < len(selected),
+            "brand_model_options": brand_model_options,
         }
+
+    @classmethod
+    def _repair_followup_summary_copy_fields(
+        cls,
+        summary_record: dict[str, Any] | None,
+        meta_by_name: dict[str, FieldMeta],
+    ) -> dict[str, Any]:
+        if not isinstance(summary_record, dict):
+            return {}
+        summary_display = (
+            summary_record.get("display_fields")
+            if isinstance(summary_record.get("display_fields"), dict)
+            else {}
+        )
+        summary_raw = (
+            summary_record.get("raw_fields")
+            if isinstance(summary_record.get("raw_fields"), dict)
+            else {}
+        )
+        copied: dict[str, Any] = {}
+        for target_name, source_names in REPAIR_FOLLOWUP_SUMMARY_COPY_MAPPINGS:
+            target_meta = meta_by_name.get(target_name)
+            if target_meta is None or cls._field_meta_is_readonly(target_meta):
+                continue
+            prefer_raw = int(target_meta.field_type or 0) in {4, 5, 11, 18, 21}
+            source_value: Any = None
+            for source_name in source_names:
+                primary = summary_raw if prefer_raw else summary_display
+                fallback = summary_display if prefer_raw else summary_raw
+                source_value = primary.get(source_name)
+                if source_value in (None, "", [], {}):
+                    source_value = fallback.get(source_name)
+                if source_value not in (None, "", [], {}):
+                    break
+            if source_value not in (None, "", [], {}):
+                copied[target_name] = source_value
+        return copied
 
     def _prepare_repair_followup_fields(
         self,
         *,
         summary_record_id: str,
         fields: dict[str, Any],
-        cmdb_record_id: str = "",
+        cmdb_record_ids: list[str] | tuple[str, ...] | None = None,
         summary_record: dict[str, Any] | None = None,
         existing_record: dict[str, Any] | None = None,
+        meta_by_name: dict[str, FieldMeta] | None = None,
     ) -> tuple[dict[str, Any], list[str]]:
-        _metas, meta_by_name = self._ensure_repair_followup_parent_id_field()
+        if meta_by_name is None:
+            _metas, meta_by_name = self._ensure_repair_followup_parent_id_field()
         cleaned = {
             str(name or "").strip(): value
             for name, value in (fields or {}).items()
@@ -2318,6 +3515,13 @@ class MaintenancePortalService:
         }
         submitted_names = set(cleaned)
         cleaned[REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME] = summary_record_id
+
+        for field_name, value in self._repair_followup_summary_copy_fields(
+            summary_record,
+            meta_by_name,
+        ).items():
+            if field_name not in submitted_names:
+                cleaned[field_name] = value
 
         if existing_record is None and isinstance(summary_record, dict):
             summary_display = (
@@ -2331,13 +3535,17 @@ class MaintenancePortalService:
                 else {}
             )
             summary_mappings = (
-                ("设备名称-1", "设备名称", False),
-                ("设备编号-1", "设备编号", False),
-                ("设备品牌 -1", "设备品牌", False),
-                ("设备型号 -1", "设备型号", False),
-                ("维修方 -1", "维修方", False),
-                ("供应商名称 -1", "供应商名称", False),
-                ("供应商维修人员-1", "供应商维修人员", False),
+                (REPAIR_FOLLOWUP_DEVICE_NAME_FIELD_NAME, "设备名称", False),
+                (REPAIR_FOLLOWUP_DEVICE_NUMBER_FIELD_NAME, "设备编号", False),
+                (REPAIR_FOLLOWUP_BRAND_FIELD_NAME, "设备品牌", False),
+                (REPAIR_FOLLOWUP_MODEL_FIELD_NAME, "设备型号", False),
+                (REPAIR_FOLLOWUP_REPAIR_PARTY_FIELD_NAME, "维修方", False),
+                (REPAIR_FOLLOWUP_SUPPLIER_FIELD_NAME, "供应商名称", False),
+                (
+                    REPAIR_FOLLOWUP_SUPPLIER_PERSON_FIELD_NAME,
+                    "供应商维修人员",
+                    False,
+                ),
                 ("设备生产日期", "设备生产日期", True),
                 ("设备使用年限", "设备使用年限", True),
                 ("设备容量KW/AH", "设备容量KW/AH", False),
@@ -2365,14 +3573,14 @@ class MaintenancePortalService:
                 if source_value not in (None, "", [], {}):
                     cleaned[target_name] = source_value
 
-        cmdb_id = str(cmdb_record_id or "").strip()
-        if not cmdb_id and existing_record:
+        cmdb_ids = self._repair_management_record_ids(list(cmdb_record_ids or []))
+        if not cmdb_ids and existing_record:
             existing_raw = existing_record.get("raw_fields") or {}
-            existing_cmdb_ids = self._repair_management_record_ids(
+            cmdb_ids = self._repair_management_record_ids(
                 existing_raw.get(REPAIR_FOLLOWUP_CMDB_FIELD_NAME)
             )
-            cmdb_id = existing_cmdb_ids[0] if existing_cmdb_ids else ""
-        if cmdb_id:
+        cmdb_warnings: list[str] = []
+        if cmdb_ids:
             _cmdb_metas, cmdb_meta_by_name, _cmdb_records = (
                 self._load_repair_management_cmdb_records()
             )
@@ -2382,19 +3590,157 @@ class MaintenancePortalService:
                 meta_by_name=cmdb_meta_by_name,
                 work_type=WORK_TYPE_REPAIR,
                 notice_type=NOTICE_TYPE_REPAIR,
-                record_ids=[cmdb_id],
+                record_ids=cmdb_ids,
             )
-            cmdb_fields = cmdb_records[0].get("display_fields") or {}
-            cleaned[REPAIR_FOLLOWUP_CMDB_FIELD_NAME] = [cmdb_id]
-            if "设备名称-1" not in submitted_names:
-                cleaned["设备名称-1"] = str(cmdb_fields.get("分类名称") or "").strip()
-            if "设备编号-1" not in submitted_names:
-                cleaned["设备编号-1"] = str(cmdb_fields.get("设备名称") or "").strip()
+            cmdb_fields_list = [
+                record.get("display_fields") or {}
+                for record in cmdb_records
+            ]
+            categories = list(
+                dict.fromkeys(
+                    str(item.get("分类名称") or "").strip()
+                    for item in cmdb_fields_list
+                    if str(item.get("分类名称") or "").strip()
+                )
+            )
+            device_names = list(
+                dict.fromkeys(
+                    str(item.get("设备名称") or "").strip()
+                    for item in cmdb_fields_list
+                    if str(item.get("设备名称") or "").strip()
+                )
+            )
+            cleaned[REPAIR_FOLLOWUP_CMDB_FIELD_NAME] = cmdb_ids
+            if REPAIR_FOLLOWUP_DEVICE_NAME_FIELD_NAME not in submitted_names:
+                if len(categories) == 1:
+                    cleaned[REPAIR_FOLLOWUP_DEVICE_NAME_FIELD_NAME] = categories[0]
+                elif len(categories) > 1:
+                    cmdb_warnings.append(
+                        "所选 CMDB 设备属于不同分类，请手动确认设备名称。"
+                    )
+            if REPAIR_FOLLOWUP_DEVICE_NUMBER_FIELD_NAME not in submitted_names and device_names:
+                cleaned[REPAIR_FOLLOWUP_DEVICE_NUMBER_FIELD_NAME] = "、".join(
+                    device_names
+                )
 
-        prepared, warnings = self._coerce_repair_management_fields(cleaned, meta_by_name)
+        existing_display = (
+            existing_record.get("display_fields")
+            if isinstance(existing_record, dict)
+            and isinstance(existing_record.get("display_fields"), dict)
+            else {}
+        )
+        existing_raw = (
+            existing_record.get("raw_fields")
+            if isinstance(existing_record, dict)
+            and isinstance(existing_record.get("raw_fields"), dict)
+            else {}
+        )
+        if "维修简述" in meta_by_name:
+            start_value = cleaned.get("维修开始时间")
+            worker_value = cleaned.get("随工人员（我方维修人员）")
+            if worker_value in (None, "", [], {}):
+                worker_value = existing_raw.get("随工人员（我方维修人员）")
+            worker_name = self._repair_management_plain_text(worker_value)
+            start_ms = self._repair_management_datetime_ms(start_value)
+            repair_name = self._repair_management_plain_text(cleaned.get("维修名称"))
+            if start_ms is not None and worker_name:
+                cleaned["维修简述"] = (
+                    f"{dt.datetime.fromtimestamp(start_ms / 1000).strftime('%Y/%m/%d')}"
+                    f" - {worker_name}"
+                )
+            elif repair_name:
+                cleaned["维修简述"] = repair_name
+            elif start_ms is not None:
+                cleaned["维修简述"] = dt.datetime.fromtimestamp(
+                    start_ms / 1000
+                ).strftime("%Y/%m/%d")
+
+        prepared, warnings = self._coerce_repair_management_fields(
+            cleaned,
+            meta_by_name,
+            custom_single_select_fields=REPAIR_FOLLOWUP_CUSTOM_SINGLE_SELECT_FIELDS,
+        )
         if not prepared:
             raise PortalError("没有可写入的维修跟进字段。")
-        return prepared, warnings
+        return prepared, list(dict.fromkeys([*cmdb_warnings, *warnings]))
+
+    @staticmethod
+    def _created_record_id(payload: dict[str, Any]) -> str:
+        return str(
+            (((payload.get("data") or {}).get("record") or {}).get("record_id"))
+            or ((payload.get("data") or {}).get("record_id"))
+            or ""
+        ).strip()
+
+    def _create_repair_followup_fields(
+        self,
+        fields: dict[str, Any],
+        meta_by_name: dict[str, FieldMeta],
+    ) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
+        try:
+            payload = self._create_record_fields(
+                app_token=REPAIR_SOURCE_APP_TOKEN,
+                table_id=REPAIR_FOLLOWUP_TABLE_ID,
+                fields=fields,
+            )
+            return payload, dict(fields), []
+        except PortalError as exc:
+            if "1254062" not in str(exc):
+                raise
+
+        single_select_fields = {
+            name: value
+            for name, value in fields.items()
+            if (meta := meta_by_name.get(name)) is not None
+            and (
+                int(meta.field_type or 0) == 3
+                or "singleselect" in str(meta.ui_type or "").strip().lower()
+            )
+        }
+        base_fields = {
+            name: value for name, value in fields.items() if name not in single_select_fields
+        }
+        if not single_select_fields or not base_fields:
+            raise PortalError(
+                "新增维修跟进失败：飞书无法转换单选字段，请刷新页面后重新选择。"
+            )
+
+        payload = self._create_record_fields(
+            app_token=REPAIR_SOURCE_APP_TOKEN,
+            table_id=REPAIR_FOLLOWUP_TABLE_ID,
+            fields=base_fields,
+        )
+        record_id = self._created_record_id(payload)
+        if not record_id:
+            raise PortalError("维修跟进基础记录已提交，但未返回记录 ID。")
+
+        effective_fields = dict(base_fields)
+        warnings: list[str] = []
+        try:
+            for field_name, value in single_select_fields.items():
+                try:
+                    self._patch_record_fields(
+                        app_token=REPAIR_SOURCE_APP_TOKEN,
+                        table_id=REPAIR_FOLLOWUP_TABLE_ID,
+                        record_id=record_id,
+                        fields={field_name: value},
+                    )
+                    effective_fields[field_name] = value
+                except PortalError as exc:
+                    if "1254062" not in str(exc):
+                        raise
+                    warnings.append(
+                        f"{field_name}未被飞书接受，已保留跟进记录，请重新选择后更新"
+                    )
+        except Exception:
+            with suppress(Exception):
+                self._delete_record_fields(
+                    app_token=REPAIR_SOURCE_APP_TOKEN,
+                    table_id=REPAIR_FOLLOWUP_TABLE_ID,
+                    record_id=record_id,
+                )
+            raise
+        return payload, effective_fields, warnings
 
     def _sync_repair_management_from_followup(
         self,
@@ -2479,6 +3825,10 @@ class MaintenancePortalService:
             allow_multiple_followups=True,
         )
         auto_fields = dict(auto.get("fields") or {})
+        if "维修跟进记录" in meta_by_name:
+            auto_fields["维修跟进记录"] = (
+                ",".join(followup_ids) if followup_ids else None
+            )
         for field_name in REPAIR_MANAGEMENT_FOLLOWUP_AUTO_FIELD_NAMES:
             if field_name in meta_by_name:
                 auto_fields.setdefault(field_name, None)
@@ -2500,7 +3850,7 @@ class MaintenancePortalService:
         *,
         summary_record_id: str,
         fields: dict[str, Any],
-        cmdb_record_id: str = "",
+        cmdb_record_ids: list[str] | tuple[str, ...] | None = None,
         scope: str = "ALL",
     ) -> dict[str, Any]:
         summary_id = str(summary_record_id or "").strip()
@@ -2515,22 +3865,23 @@ class MaintenancePortalService:
             "是否本维修单第一次提交跟进记录",
             "否" if int(existing.get("total") or 0) else "是",
         )
+        _metas, meta_by_name = self._ensure_repair_followup_parent_id_field()
         prepared, warnings = self._prepare_repair_followup_fields(
             summary_record_id=summary_id,
             fields=source_fields,
-            cmdb_record_id=cmdb_record_id,
+            cmdb_record_ids=cmdb_record_ids,
             summary_record=summary,
+            meta_by_name=meta_by_name,
         )
-        result = self._create_record_fields(
-            app_token=REPAIR_SOURCE_APP_TOKEN,
-            table_id=REPAIR_FOLLOWUP_TABLE_ID,
-            fields=prepared,
+        _metas, meta_by_name = self._ensure_repair_followup_select_options(
+            prepared,
+            meta_by_name,
         )
-        record_id = str(
-            (((result.get("data") or {}).get("record") or {}).get("record_id"))
-            or ((result.get("data") or {}).get("record_id"))
-            or ""
-        ).strip()
+        result, prepared, create_warnings = self._create_repair_followup_fields(
+            prepared,
+            meta_by_name,
+        )
+        record_id = self._created_record_id(result)
         if not record_id:
             raise PortalError("维修跟进记录已提交，但未返回记录 ID。")
         sync_warnings = self._sync_repair_management_from_followup(
@@ -2542,7 +3893,9 @@ class MaintenancePortalService:
             "record_id": record_id,
             "summary_record_id": summary_id,
             "fields": prepared,
-            "warnings": list(dict.fromkeys([*warnings, *sync_warnings])),
+            "warnings": list(
+                dict.fromkeys([*warnings, *create_warnings, *sync_warnings])
+            ),
         }
 
     def update_repair_followup_record(
@@ -2551,7 +3904,7 @@ class MaintenancePortalService:
         *,
         summary_record_id: str,
         fields: dict[str, Any],
-        cmdb_record_id: str = "",
+        cmdb_record_ids: list[str] | tuple[str, ...] | None = None,
         scope: str = "ALL",
     ) -> dict[str, Any]:
         summary_id = str(summary_record_id or "").strip()
@@ -2571,9 +3924,14 @@ class MaintenancePortalService:
         prepared, warnings = self._prepare_repair_followup_fields(
             summary_record_id=summary_id,
             fields=fields,
-            cmdb_record_id=cmdb_record_id,
+            cmdb_record_ids=cmdb_record_ids,
             summary_record=summary,
             existing_record=existing,
+            meta_by_name=meta_by_name,
+        )
+        _metas, meta_by_name = self._ensure_repair_followup_select_options(
+            prepared,
+            meta_by_name,
         )
         self._patch_record_fields(
             app_token=REPAIR_SOURCE_APP_TOKEN,
@@ -2630,13 +3988,259 @@ class MaintenancePortalService:
         }
 
     @classmethod
+    def _repair_followup_match_key(cls, value: Any) -> str:
+        text = cls._repair_management_plain_text(value).casefold()
+        return re.sub(r"[\s\u3000,，。.;；:：\-—_/\\]+", "", text)
+
+    @classmethod
+    def _repair_followup_comparable_value(
+        cls,
+        meta: FieldMeta | None,
+        value: Any,
+    ) -> Any:
+        if value in (None, "", [], {}):
+            return None
+        field_type = int(meta.field_type or 0) if meta is not None else 0
+        ui_type = str(meta.ui_type or "").strip().lower() if meta is not None else ""
+        if field_type == 5 or "datetime" in ui_type:
+            return cls._repair_management_datetime_ms(value)
+        if field_type == 2 or ui_type in {"number", "progress", "currency"}:
+            with suppress(TypeError, ValueError):
+                return float(value)
+        if field_type in {18, 21} or "link" in ui_type:
+            return tuple(cls._repair_management_record_ids(value))
+        if field_type == 11 or ui_type == "user":
+            users = cls._repair_management_users(value)
+            return tuple(
+                sorted(
+                    str(user.get("id") or user.get("name") or "").strip()
+                    for user in users
+                    if str(user.get("id") or user.get("name") or "").strip()
+                )
+            )
+        if field_type in {3, 4} or "select" in ui_type:
+            items = cls._repair_management_select_items(value)
+            normalized = [
+                cls._repair_management_canonical_select_text(
+                    meta.field_name if meta is not None else "",
+                    item,
+                )
+                for item in items
+            ]
+            return tuple(item for item in normalized if item)
+        return cls._repair_management_plain_text(value)
+
+    def backfill_repair_followup_records(
+        self,
+        *,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        now = time.time()
+        runtime = self._state_store.get_backend_runtime(
+            REPAIR_FOLLOWUP_BACKFILL_RUNTIME_KEY
+        ) or {}
+        last_finished = float(runtime.get("finished_ts") or 0)
+        if (
+            not force
+            and last_finished > 0
+            and now - last_finished < REPAIR_FOLLOWUP_BACKFILL_INTERVAL_SECONDS
+        ):
+            return {**runtime, "skipped": True}
+
+        with self._repair_followup_backfill_lock:
+            summary_metas, summary_meta_by_name = self._load_table_fields(
+                app_token=REPAIR_SOURCE_APP_TOKEN,
+                table_id=REPAIR_MANAGEMENT_TABLE_ID,
+            )
+            summaries = self._load_table_records(
+                app_token=REPAIR_SOURCE_APP_TOKEN,
+                table_id=REPAIR_MANAGEMENT_TABLE_ID,
+                meta_by_name=summary_meta_by_name,
+                work_type=WORK_TYPE_REPAIR,
+                notice_type=NOTICE_TYPE_REPAIR,
+            )
+            followup_metas, followup_meta_by_name = (
+                self._ensure_repair_followup_parent_id_field()
+            )
+            followups = self._load_table_records(
+                app_token=REPAIR_SOURCE_APP_TOKEN,
+                table_id=REPAIR_FOLLOWUP_TABLE_ID,
+                meta_by_name=followup_meta_by_name,
+                work_type=WORK_TYPE_REPAIR,
+                notice_type=NOTICE_TYPE_REPAIR,
+            )
+            summary_by_id = {
+                str(record.get("record_id") or "").strip(): record
+                for record in summaries
+                if str(record.get("record_id") or "").strip()
+            }
+            summary_by_order: dict[str, list[dict[str, Any]]] = {}
+            summary_by_name: dict[str, list[dict[str, Any]]] = {}
+            for summary in summaries:
+                display = summary.get("display_fields") or {}
+                raw = summary.get("raw_fields") or {}
+                order_key = self._repair_followup_match_key(
+                    display.get("维修单号") or raw.get("维修单号")
+                )
+                name_key = self._repair_followup_match_key(
+                    display.get("维修名称") or raw.get("维修名称")
+                )
+                if order_key:
+                    summary_by_order.setdefault(order_key, []).append(summary)
+                if name_key:
+                    summary_by_name.setdefault(name_key, []).append(summary)
+
+            updated = 0
+            unchanged = 0
+            unresolved = 0
+            failed = 0
+            warnings: list[str] = []
+            linked_by_summary: dict[str, list[str]] = {}
+            for followup in followups:
+                record_id = str(followup.get("record_id") or "").strip()
+                display = followup.get("display_fields") or {}
+                raw = followup.get("raw_fields") or {}
+                parent_ids = self._repair_followup_parent_ids(followup)
+                summary: dict[str, Any] | None = None
+                if len(parent_ids) == 1:
+                    summary = summary_by_id.get(parent_ids[0])
+                if summary is None:
+                    order_key = self._repair_followup_match_key(
+                        display.get("维修单号") or raw.get("维修单号")
+                    )
+                    candidates = summary_by_order.get(order_key, []) if order_key else []
+                    if len(candidates) != 1:
+                        name_key = self._repair_followup_match_key(
+                            display.get("维修名称") or raw.get("维修名称")
+                        )
+                        candidates = summary_by_name.get(name_key, []) if name_key else []
+                    if len(candidates) == 1:
+                        summary = candidates[0]
+                if summary is None:
+                    unresolved += 1
+                    continue
+                summary_id = str(summary.get("record_id") or "").strip()
+                if not summary_id or not record_id:
+                    unresolved += 1
+                    continue
+                parent_was_persisted = (
+                    len(parent_ids) == 1 and parent_ids[0] == summary_id
+                )
+                try:
+                    prepared, record_warnings = self._prepare_repair_followup_fields(
+                        summary_record_id=summary_id,
+                        fields={},
+                        cmdb_record_ids=self._repair_management_record_ids(
+                            raw.get(REPAIR_FOLLOWUP_CMDB_FIELD_NAME)
+                        ),
+                        summary_record=summary,
+                        existing_record=followup,
+                        meta_by_name=followup_meta_by_name,
+                    )
+                    _metas, followup_meta_by_name = (
+                        self._ensure_repair_followup_select_options(
+                            prepared,
+                            followup_meta_by_name,
+                        )
+                    )
+                    patch_fields: dict[str, Any] = {}
+                    for field_name, value in prepared.items():
+                        meta = followup_meta_by_name.get(field_name)
+                        current_value = (
+                            raw.get(field_name)
+                            if meta is not None
+                            and int(meta.field_type or 0) in {2, 3, 4, 5, 11, 15, 17, 18, 21}
+                            else display.get(field_name)
+                        )
+                        if self._repair_followup_comparable_value(
+                            meta,
+                            current_value,
+                        ) != self._repair_followup_comparable_value(meta, value):
+                            patch_fields[field_name] = value
+                    if patch_fields:
+                        self._patch_record_fields(
+                            app_token=REPAIR_SOURCE_APP_TOKEN,
+                            table_id=REPAIR_FOLLOWUP_TABLE_ID,
+                            record_id=record_id,
+                            fields=patch_fields,
+                        )
+                        updated += 1
+                    else:
+                        unchanged += 1
+                    linked_by_summary.setdefault(summary_id, []).append(record_id)
+                    warnings.extend(record_warnings)
+                except Exception as exc:
+                    failed += 1
+                    if parent_was_persisted:
+                        linked_by_summary.setdefault(summary_id, []).append(record_id)
+                    warnings.append(f"{record_id}: {exc}")
+
+            backlink_updates = 0
+            backlink_meta = summary_meta_by_name.get("维修跟进记录")
+            if backlink_meta is not None and int(backlink_meta.field_type or 0) == 1:
+                for summary_id, record_ids in linked_by_summary.items():
+                    normalized_ids = list(dict.fromkeys(record_ids))
+                    summary = summary_by_id[summary_id]
+                    current_ids = self._repair_management_record_ids(
+                        (summary.get("raw_fields") or {}).get("维修跟进记录")
+                        or (summary.get("display_fields") or {}).get("维修跟进记录")
+                    )
+                    if current_ids == normalized_ids:
+                        continue
+                    try:
+                        self._patch_record_fields(
+                            app_token=REPAIR_SOURCE_APP_TOKEN,
+                            table_id=REPAIR_MANAGEMENT_TABLE_ID,
+                            record_id=summary_id,
+                            fields={
+                                "维修跟进记录": (
+                                    ",".join(normalized_ids)
+                                    if normalized_ids
+                                    else None
+                                )
+                            },
+                        )
+                        backlink_updates += 1
+                    except Exception as exc:
+                        failed += 1
+                        warnings.append(f"{summary_id}回写维修跟进记录失败: {exc}")
+
+            result = {
+                "status": "partial" if failed else "complete",
+                "summary_count": len(summaries),
+                "followup_count": len(followups),
+                "updated": updated,
+                "unchanged": unchanged,
+                "unresolved": unresolved,
+                "failed": failed,
+                "backlink_updates": backlink_updates,
+                "warnings": list(dict.fromkeys(warnings))[-50:],
+                "finished_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "finished_ts": time.time(),
+            }
+            self._state_store.put_backend_runtime(
+                REPAIR_FOLLOWUP_BACKFILL_RUNTIME_KEY,
+                result,
+            )
+            return result
+
+    @classmethod
     def _coerce_repair_management_fields(
         cls,
         fields: dict[str, Any],
         meta_by_name: dict[str, FieldMeta],
+        *,
+        custom_single_select_fields: set[str] | None = None,
+        custom_multi_select_fields: set[str] | None = None,
     ) -> tuple[dict[str, Any], list[str]]:
         result: dict[str, Any] = {}
         warnings: list[str] = []
+        custom_single_select_fields = custom_single_select_fields or set()
+        custom_multi_select_fields = (
+            REPAIR_MANAGEMENT_CUSTOM_MULTI_SELECT_FIELDS
+            if custom_multi_select_fields is None
+            else custom_multi_select_fields
+        )
         for name, value in fields.items():
             meta = meta_by_name.get(str(name or "").strip())
             if meta is None:
@@ -2661,18 +4265,29 @@ class MaintenancePortalService:
                     warnings.append(f"{meta.field_name}不是有效数字")
                 continue
             if field_type == 4 or "multiselect" in ui_type:
-                values = value if isinstance(value, list) else re.split(r"[,，、;；]+", str(value))
+                values = cls._repair_management_select_items(value)
                 normalized: list[str] = []
                 invalid: list[str] = []
                 for item in values:
                     option_name = cls._repair_management_option_name(meta, item)
+                    option_name = cls._repair_management_canonical_select_text(
+                        meta.field_name,
+                        option_name,
+                    )
                     if option_name:
                         if option_name not in normalized:
                             normalized.append(option_name)
                         continue
-                    text = cls._repair_management_plain_text(item)
+                    text = cls._repair_management_canonical_select_text(
+                        meta.field_name,
+                        cls._repair_management_plain_text(item),
+                    )
                     if text:
-                        invalid.append(text)
+                        if meta.field_name in custom_multi_select_fields:
+                            if text not in normalized:
+                                normalized.append(text)
+                        else:
+                            invalid.append(text)
                 if normalized:
                     result[meta.field_name] = normalized
                 if invalid and meta.option_names:
@@ -2682,11 +4297,17 @@ class MaintenancePortalService:
                 continue
             if field_type == 3 or "singleselect" in ui_type:
                 option_name = cls._repair_management_option_name(meta, value)
+                option_name = cls._repair_management_canonical_select_text(
+                    meta.field_name,
+                    option_name,
+                )
                 if option_name:
                     result[meta.field_name] = option_name
                 else:
                     text = cls._repair_management_plain_text(value)
-                    if text:
+                    if text and meta.field_name in custom_single_select_fields:
+                        result[meta.field_name] = text
+                    elif text:
                         warnings.append(
                             f"{meta.field_name}的值“{text}”不在当前单选选项中，已跳过"
                         )
@@ -2710,7 +4331,7 @@ class MaintenancePortalService:
                 continue
             if field_type in {18, 21} or "link" in ui_type:
                 values = value if isinstance(value, list) else cls._repair_management_record_ids(value)
-                if values:
+                if values or isinstance(value, list):
                     result[meta.field_name] = values
                 continue
             if isinstance(value, (dict, list)):
@@ -2767,6 +4388,40 @@ class MaintenancePortalService:
         if not overwrite and result.get(field_name) not in (None, "", []):
             return
         result[field_name] = value
+
+    @classmethod
+    def _apply_repair_management_form_derivatives(
+        cls,
+        fields: dict[str, Any],
+        meta_by_name: dict[str, FieldMeta],
+    ) -> dict[str, Any]:
+        derived = dict(fields)
+        specialty = cls._repair_management_plain_text(derived.get("所属专业"))
+        if specialty and "专业（推送消息用）" in meta_by_name:
+            derived["专业（推送消息用）"] = specialty
+
+        building = cls._repair_management_plain_text(
+            derived.get("所属数据中心/楼栋-使用")
+        )
+        if building:
+            if "区域" in meta_by_name:
+                derived.setdefault("区域", "华东一")
+            if "数据中心" in meta_by_name:
+                derived.setdefault("数据中心", "南通")
+            legacy_name = "所属数据中心/楼栋（关联CMDB唯一ID关联,DE不选）"
+            legacy_meta = meta_by_name.get(legacy_name)
+            building_codes = cls._repair_building_codes_from_value(building)
+            if legacy_meta is not None and len(building_codes) == 1:
+                canonical_building = cls._repair_management_building_label(
+                    building_codes
+                )
+                option_name = cls._repair_management_option_name(
+                    legacy_meta,
+                    canonical_building,
+                )
+                if option_name:
+                    derived[legacy_name] = option_name
+        return derived
 
     @classmethod
     def _repair_management_building_label(cls, codes: list[str]) -> str:
@@ -3277,12 +4932,15 @@ class MaintenancePortalService:
                 )
 
             text_mappings = (
-                ("设备名称", "设备名称-1"),
-                ("设备编号", "设备编号-1"),
-                ("设备品牌", "设备品牌 -1"),
-                ("设备型号", "设备型号 -1"),
-                ("供应商名称", "供应商名称 -1"),
-                ("供应商维修人员", "供应商维修人员-1"),
+                ("设备名称", REPAIR_FOLLOWUP_DEVICE_NAME_FIELD_NAME),
+                ("设备编号", REPAIR_FOLLOWUP_DEVICE_NUMBER_FIELD_NAME),
+                ("设备品牌", REPAIR_FOLLOWUP_BRAND_FIELD_NAME),
+                ("设备型号", REPAIR_FOLLOWUP_MODEL_FIELD_NAME),
+                ("供应商名称", REPAIR_FOLLOWUP_SUPPLIER_FIELD_NAME),
+                (
+                    "供应商维修人员",
+                    REPAIR_FOLLOWUP_SUPPLIER_PERSON_FIELD_NAME,
+                ),
                 ("设备容量KW/AH", "设备容量KW/AH"),
                 ("跟进项", "跟进项（如有）"),
                 ("后续整改措施", "后续整改措施（如有）"),
@@ -3309,7 +4967,7 @@ class MaintenancePortalService:
             )
 
             for target_name, source_name in (
-                ("维修方", "维修方 -1"),
+                ("维修方", REPAIR_FOLLOWUP_REPAIR_PARTY_FIELD_NAME),
                 ("是否质保期内", "是否质保期内"),
             ):
                 values = list(
@@ -3808,6 +5466,10 @@ class MaintenancePortalService:
         merged = self._apply_repair_management_repair_links(
             merged, meta_by_name, source_repair_ids
         )
+        merged = self._apply_repair_management_form_derivatives(
+            merged,
+            meta_by_name,
+        )
         prepared, write_warnings = self._coerce_repair_management_fields(merged, meta_by_name)
         if not prepared:
             raise PortalError("没有可写入的维修汇总字段。")
@@ -3843,6 +5505,7 @@ class MaintenancePortalService:
         *,
         source_event_id: str = "",
         source_repair_ids: list[str] | tuple[str, ...] | None = None,
+        replace_source_relations: bool = False,
         source_month: str | None = None,
         scope: str = "ALL",
     ) -> dict[str, Any]:
@@ -3859,11 +5522,11 @@ class MaintenancePortalService:
         existing_raw = existing.get("raw_fields") if isinstance((existing or {}).get("raw_fields"), dict) else {}
         summary_id = str(record_id or "").strip()
         effective_event_id = str(source_event_id or "").strip()
-        if not effective_event_id:
+        if not replace_source_relations and not effective_event_id:
             existing_event_ids = self._repair_management_record_ids(existing_raw.get("关联事件单"))
             effective_event_id = existing_event_ids[0] if existing_event_ids else ""
         effective_repair_ids = list(source_repair_ids or [])
-        if not effective_repair_ids:
+        if not replace_source_relations and not effective_repair_ids:
             effective_repair_ids = self._repair_management_record_ids(
                 existing_raw.get("设备检修关联")
             )[:1]
@@ -3907,9 +5570,48 @@ class MaintenancePortalService:
         merged = self._apply_repair_management_repair_links(
             merged, meta_by_name, effective_repair_ids
         )
+        merged = self._apply_repair_management_form_derivatives(
+            merged,
+            meta_by_name,
+        )
+        if replace_source_relations and not effective_event_id:
+            field_name = REPAIR_MANAGEMENT_EVENT_LINK_FIELD_NAMES[0]
+            meta = meta_by_name.get(field_name)
+            if meta is not None:
+                merged[field_name] = (
+                    []
+                    if int(meta.field_type or 0) in {18, 21}
+                    or "link" in str(meta.ui_type or "").lower()
+                    else None
+                )
+        if replace_source_relations and not effective_repair_ids:
+            field_name = REPAIR_MANAGEMENT_REPAIR_LINK_FIELD_NAMES[0]
+            meta = meta_by_name.get(field_name)
+            if meta is not None:
+                merged[field_name] = (
+                    []
+                    if int(meta.field_type or 0) in {18, 21}
+                    or "link" in str(meta.ui_type or "").lower()
+                    else None
+                )
         prepared, write_warnings = self._coerce_repair_management_fields(merged, meta_by_name)
         if not prepared:
             raise PortalError("没有可写入的维修汇总字段。")
+        effective_fields = {
+            **(
+                existing.get("display_fields")
+                if isinstance(existing.get("display_fields"), dict)
+                else {}
+            ),
+            **existing_raw,
+            **prepared,
+        }
+        missing = self._missing_repair_management_required_fields(
+            effective_fields,
+            meta_by_name,
+        )
+        if missing:
+            raise PortalError("请先填写检修单必填字段：" + "、".join(missing) + "。")
         if not self._repair_management_fields_in_scope(prepared, scope):
             raise PortalError("当前账号无权把检修记录改到该楼栋。")
         self._patch_record_fields(
@@ -9286,6 +10988,16 @@ class MaintenancePortalService:
             else:
                 converted.append(record)
         return converted
+
+    def _maintenance_record_is_converted_to_change(
+        self, record: dict[str, Any]
+    ) -> bool:
+        converted = self._apply_work_type_overrides([record])
+        return bool(
+            converted
+            and self._record_work_type(converted[0]) == WORK_TYPE_CHANGE
+            and self._record_source_work_type(converted[0]) == WORK_TYPE_MAINTENANCE
+        )
 
     def _change_title(self, record: dict[str, Any]) -> str:
         fields = record.get("display_fields") or {}
@@ -18964,6 +20676,25 @@ class MaintenancePortalService:
             or ""
         ).strip()
         source_record_id = str(request_payload.get("source_record_id") or "").strip()
+        source_identity_record_id = source_record_id or (record_id if action == "start" else "")
+        if (
+            not manual
+            and source_work_type == WORK_TYPE_CHANGE
+            and source_identity_record_id
+        ):
+            try:
+                maintenance_source = self._find_record_by_id(
+                    source_identity_record_id, WORK_TYPE_MAINTENANCE
+                )
+            except PortalError:
+                maintenance_source = None
+            if (
+                maintenance_source is not None
+                and self._maintenance_record_is_converted_to_change(
+                    maintenance_source
+                )
+            ):
+                source_work_type = WORK_TYPE_MAINTENANCE
         target_record_id = ""
         fields: dict[str, Any] = {}
         paired_maintenance_original_title = str(
@@ -19004,9 +20735,24 @@ class MaintenancePortalService:
                 fields = record.get("display_fields") or {}
                 source_progress = self._maintenance_status_value(record)
                 if not self._maintenance_status_is_startable(record):
-                    raise PortalError(
-                        f"该维保源记录当前状态不是{DEFAULT_MAINTENANCE_STATUS}: {source_progress or '-'}"
+                    existing_target_record_id = (
+                        self._target_record_id_from_identity_map(
+                            work_type=WORK_TYPE_CHANGE,
+                            source_record_id=source_record_id,
+                        )
+                        or self._target_record_id_from_work_status(
+                            work_type=WORK_TYPE_CHANGE,
+                            source_record_id=source_record_id,
+                        )
                     )
+                    if existing_target_record_id:
+                        raise PortalError(
+                            "该维保转变更已创建目标记录，请从“已开始未结束”发送更新。"
+                        )
+                    if "进行中" not in source_progress:
+                        raise PortalError(
+                            f"该维保源记录当前状态不能发起变更通告: {source_progress or '-'}"
+                        )
                 title = (
                     str(request_payload.get("title") or "").strip()
                     or self._maintenance_title(record)

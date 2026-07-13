@@ -14,6 +14,8 @@ import time
 import uuid
 from pathlib import Path
 
+from fastapi.responses import RedirectResponse
+
 BIN_DIR = Path(__file__).resolve().parents[1]
 if str(BIN_DIR) not in sys.path:
     sys.path.insert(0, str(BIN_DIR))
@@ -443,6 +445,8 @@ class _SmokePortalService:
                     "维修名称": "A楼测试检修管理记录",
                     "所属数据中心/楼栋-使用": "南通A楼",
                     "所属专业": "弱电",
+                    "关联事件单": "A楼测试事件转检修",
+                    "设备检修关联": "A楼测试设备检修",
                 },
                 "raw_fields": {
                     "维修名称": "A楼测试检修管理记录",
@@ -458,6 +462,18 @@ class _SmokePortalService:
         ]
         if str(scope or "").strip().upper() not in {"", "ALL", "A"}:
             records = []
+        query_text = str(query or "").strip().lower()
+        if query_text:
+            records = [
+                record
+                for record in records
+                if query_text
+                in json.dumps(record, ensure_ascii=False, default=str).lower()
+            ]
+        page_records = records[
+            max(0, int(offset or 0)) :
+            max(0, int(offset or 0)) + max(1, min(int(limit or 200), 500))
+        ]
         return {
             "app_token": "AnEBwJlvGiJfDdkOB32cUPuknzg",
             "table_id": "tblcws1gwaFQnU6H",
@@ -472,9 +488,9 @@ class _SmokePortalService:
                 {"field_name": "维修跟进记录", "editable": False, "auto_filled": True, "ui_type": "text"},
                 {"field_name": "创建日期", "editable": False, "ui_type": "datetime"},
             ],
-            "records": records[max(0, int(offset or 0)) : max(0, int(offset or 0)) + max(1, min(int(limit or 200), 500))],
+            "records": page_records,
             "total": len(records),
-            "returned": len(records[max(0, int(offset or 0)) : max(0, int(offset or 0)) + max(1, min(int(limit or 200), 500))]),
+            "returned": len(page_records),
         }
 
     def create_repair_management_record(
@@ -488,6 +504,40 @@ class _SmokePortalService:
     ) -> dict:
         return {"record_id": "repair-mgmt-created-001", "fields": dict(fields or {}), "field_count": len(fields or {})}
 
+    def repair_management_notice_prefill(
+        self,
+        record_id: str,
+        *,
+        scope: str = "ALL",
+    ) -> dict:
+        return {
+            "repair_management_record_id": record_id,
+            "source_record_id": record_id,
+            "target_record_id": "rec-smoke-repair-a-001",
+            "action": "update",
+            "draft": {
+                "work_type": "repair",
+                "notice_type": "设备检修",
+                "title": "A楼测试检修管理记录",
+                "location": "A楼弱电间",
+                "level": "低",
+                "specialty": "弱电",
+                "start_time": "2026-06-25 18:00",
+                "end_time": "2026-06-25 10:00",
+                "repair_device": "A-219-CRAH-01",
+                "repair_fault": "测试告警",
+                "fault_type": "设备故障",
+                "repair_mode": "自维",
+                "impact": "不影响业务",
+                "discovery": "BMS",
+                "symptom": "通讯中断",
+                "reason": "测试原因",
+                "solution": "测试方案",
+                "spare_parts": "无",
+                "progress": "处理中",
+            },
+        }
+
     def update_repair_management_record(
         self,
         record_id: str,
@@ -495,6 +545,7 @@ class _SmokePortalService:
         *,
         source_event_id: str = "",
         source_repair_ids=None,
+        replace_source_relations: bool = False,
         source_month: str = "",
         scope: str = "ALL",
     ) -> dict:
@@ -594,11 +645,19 @@ class _SmokePortalService:
                     "unique_id": "ZH-A-219-01",
                     "category": "精密空调",
                     "building": "A楼",
-                    "location": "A-219",
-                }
+                    "location": "A楼A-219空调间靠近北侧配电柜的精密空调设备区域",
+                },
+                {
+                    "record_id": "rec-smoke-cmdb-a-002",
+                    "title": "A-220-CRAH-02",
+                    "unique_id": "ZH-A-220-02",
+                    "category": "精密空调",
+                    "building": "A楼",
+                    "location": "A楼A-220空调间靠近南侧配电柜的精密空调设备区域",
+                },
             ],
-            "total": 1,
-            "returned": 1,
+            "total": 2,
+            "returned": 2,
         }
 
     def get_repair_followup_records(
@@ -613,10 +672,14 @@ class _SmokePortalService:
         return {
             "summary_record_id": summary_record_id,
             "fields": [
-                {"field_name": "设备名称-1", "field_type": 3, "ui_type": "SingleSelect", "options": ["精密空调"], "editable": True},
-                {"field_name": "设备编号-1", "field_type": 1, "ui_type": "Text", "options": [], "editable": True},
+                {"field_name": "设备名称", "field_type": 3, "ui_type": "SingleSelect", "options": ["精密空调"], "editable": True},
+                {"field_name": "设备编号", "field_type": 1, "ui_type": "Text", "options": [], "editable": True},
+                {"field_name": "设备品牌", "field_type": 3, "ui_type": "SingleSelect", "options": ["双登", "康明斯", "圣阳"], "editable": True},
+                {"field_name": "设备型号", "field_type": 3, "ui_type": "SingleSelect", "options": ["GFMHR-1250W", "C2500 D5A", "SP12-100", "SP12-200"], "editable": True},
+                {"field_name": "随工人员（我方维修人员）", "field_type": 11, "ui_type": "User", "options": [], "editable": True},
                 {"field_name": "维修进展描述", "field_type": 1, "ui_type": "Text", "options": [], "editable": True},
                 {"field_name": "维修进度", "field_type": 2, "ui_type": "Progress", "options": [], "editable": True},
+                {"field_name": "超链接", "field_type": 15, "ui_type": "Url", "options": [], "editable": True},
             ],
             "records": [
                 {
@@ -624,18 +687,60 @@ class _SmokePortalService:
                     "title": "A楼测试维修跟进记录",
                     "created_time": "2026-06-25 10:10",
                     "progress": "0.5",
-                    "cmdb_record_id": "rec-smoke-cmdb-a-001",
+                    "cmdb_record_ids": ["rec-smoke-cmdb-a-001"],
                     "display_fields": {
-                        "设备名称-1": "精密空调",
-                        "设备编号-1": "A-219-CRAH-01",
+                        "设备名称": "精密空调",
+                        "设备编号": "A-219-CRAH-01",
+                        "设备品牌": "双登",
+                        "设备型号": "GFMHR-1250W",
+                        "随工人员（我方维修人员）": "张宇航",
                         "维修进展描述": "处理中",
                         "维修进度": "0.5",
+                        "超链接": "https://example.invalid/followup",
                     },
-                    "raw_fields": {},
+                    "raw_fields": {
+                        "随工人员（我方维修人员）": [
+                            {"id": "ou-smoke-zhang", "name": "张宇航"}
+                        ]
+                    },
                 }
             ],
             "total": 1,
             "returned": 1,
+            "brand_model_options": {
+                "双登": ["GFMHR-1250W"],
+                "康明斯": ["C2500 D5A"],
+                "圣阳": ["SP12-100", "SP12-200"],
+            },
+        }
+
+    def list_repair_followup_people(
+        self,
+        *,
+        scope: str = "ALL",
+        query: str = "",
+        limit: int = 80,
+        refresh: bool = False,
+    ) -> dict:
+        people = [
+            {
+                "person_record_id": "rec-smoke-person-zhang",
+                "user_id": "ou-smoke-zhang",
+                "name": "张宇航",
+                "employee_no": "10001",
+                "building": "A楼",
+                "position": "运维值班员",
+                "selectable": True,
+            }
+        ]
+        query_text = str(query or "").strip()
+        if query_text:
+            people = [item for item in people if query_text in item["name"]]
+        return {
+            "scope": scope,
+            "people": people[:limit],
+            "total": len(people),
+            "returned": min(len(people), limit),
         }
 
     def create_repair_followup_record(
@@ -643,7 +748,7 @@ class _SmokePortalService:
         *,
         summary_record_id: str,
         fields: dict,
-        cmdb_record_id: str = "",
+        cmdb_record_ids: list[str] | None = None,
         scope: str = "ALL",
     ) -> dict:
         return {"record_id": "rec-smoke-followup-created", "warnings": []}
@@ -654,7 +759,7 @@ class _SmokePortalService:
         *,
         summary_record_id: str,
         fields: dict,
-        cmdb_record_id: str = "",
+        cmdb_record_ids: list[str] | None = None,
         scope: str = "ALL",
     ) -> dict:
         return {"record_id": record_id, "warnings": []}
@@ -978,27 +1083,133 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await waitForTextOrDump(page, 'A楼测试检修管理记录', 'repair-management-entry');
           await page.locator('.record-row').filter({{ hasText: 'A楼测试检修管理记录' }}).click();
           await page.getByRole('button', {{ name: '更改来源', exact: true }}).click();
-          await page.locator('.source-relation-item').filter({{ hasText: '关联事件单' }}).getByRole('button').click();
+          const sourceRelationPanel = page.locator('.source-relation-panel');
+          await sourceRelationPanel.getByText('A楼测试事件转检修', {{ exact: true }}).waitFor({{ state: 'visible' }});
+          await sourceRelationPanel.getByText('A楼测试设备检修', {{ exact: true }}).waitFor({{ state: 'visible' }});
+          await page.locator('.source-relation-item').filter({{ hasText: '关联事件单' }}).getByRole('button', {{ name: '重新选择', exact: true }}).click();
           const eventPicker = page.getByRole('dialog', {{ name: '选择关联事件单' }});
           await eventPicker.locator('tbody tr').filter({{ hasText: 'A楼测试事件转检修' }}).click();
           await eventPicker.getByRole('button', {{ name: '确认', exact: true }}).click();
-          await page.locator('.source-relation-item').filter({{ hasText: '设备检修关联' }}).getByRole('button').click();
+          await page.locator('.source-relation-item').filter({{ hasText: '设备检修关联' }}).getByRole('button', {{ name: '重新选择', exact: true }}).click();
           const repairPicker = page.getByRole('dialog', {{ name: '选择设备检修通告' }});
           await repairPicker.getByText('A楼测试设备检修', {{ exact: true }}).waitFor({{ state: 'visible' }});
           await repairPicker.getByRole('button', {{ name: '确认', exact: true }}).click();
           await waitForTextOrDump(page, 'A楼测试设备检修', 'repair-management-autofill');
+          const projectColumnCount = await page.locator('.project-field-grid').first().evaluate((node) => (
+            getComputedStyle(node).gridTemplateColumns.split(' ').filter(Boolean).length
+          ));
+          if (projectColumnCount !== 4) {{
+            throw new Error(`repair project form should use four desktop columns, got ${{projectColumnCount}}`);
+          }}
           await page.getByRole('button', {{ name: '跟进记录', exact: true }}).click();
           await waitForTextOrDump(page, 'A楼测试维修跟进记录', 'repair-management-autofill');
           const followupPanel = page.locator('.followup-panel');
-          await followupPanel.getByRole('button', {{ name: '新增跟进', exact: true }}).click();
-          await followupPanel.locator('label').filter({{ hasText: '维修进展描述' }}).locator('textarea').fill('烟测新增跟进');
-          await followupPanel.getByRole('button', {{ name: '保存跟进', exact: true }}).click();
-          await followupPanel.getByText('维修跟进已创建。', {{ exact: true }}).waitFor({{ state: 'visible' }});
-          await followupPanel.getByRole('button', {{ name: /A楼测试维修跟进记录/ }}).click();
-          await followupPanel.locator('label').filter({{ hasText: '维修进度' }}).locator('input').fill('0.6');
-          await followupPanel.getByRole('button', {{ name: '保存修改', exact: true }}).click();
-          await followupPanel.getByText('维修跟进已更新。', {{ exact: true }}).waitFor({{ state: 'visible' }});
+          if (await followupPanel.getByRole('button', {{ name: '新增跟进记录', exact: true }}).count() !== 1) {{
+            throw new Error('followup create action should have exactly one entry');
+          }}
+          if (await followupPanel.getByText('超链接', {{ exact: true }}).count()) {{
+            throw new Error('followup hyperlink field must stay hidden');
+          }}
+          await followupPanel.getByRole('button', {{ name: '新增跟进记录', exact: true }}).click();
+          const followupColumnCount = await followupPanel.locator('.followup-field-grid').first().evaluate((node) => (
+            getComputedStyle(node).gridTemplateColumns.split(' ').filter(Boolean).length
+          ));
+          if (followupColumnCount !== 4) {{
+            throw new Error(`repair followup form should use four desktop columns, got ${{followupColumnCount}}`);
+          }}
+          const tallestCompactField = await followupPanel.locator('.repair-field-control.compact').evaluateAll((nodes) => (
+            Math.max(0, ...nodes.map((node) => node.getBoundingClientRect().height))
+          ));
+          if (tallestCompactField > 60) {{
+            throw new Error(`compact followup field is too tall: ${{Math.round(tallestCompactField)}}px`);
+          }}
+          await followupPanel.getByRole('button', {{ name: '选择设备', exact: true }}).click();
+          const cmdbDialog = page.getByRole('dialog', {{ name: '选择 CMDB 设备', exact: true }});
+          await cmdbDialog.waitFor({{ state: 'visible' }});
+          await cmdbDialog.getByText('A-219-CRAH-01', {{ exact: true }}).waitFor({{ state: 'visible' }});
+          const cmdbCheckboxes = cmdbDialog.locator('tbody input[type="checkbox"]');
+          const cmdbCheckboxCount = await cmdbCheckboxes.count();
+          if (cmdbCheckboxCount !== 2) {{
+            throw new Error(`CMDB picker must expose every candidate as a multi-select checkbox, got ${{cmdbCheckboxCount}}`);
+          }}
+          const locationWhiteSpace = await cmdbDialog.locator('td.wrap-column span').first().evaluate(
+            (node) => getComputedStyle(node).whiteSpace,
+          );
+          if (locationWhiteSpace !== 'normal') {{
+            throw new Error(`CMDB location column must wrap instead of truncate, got ${{locationWhiteSpace}}`);
+          }}
+          await cmdbCheckboxes.nth(0).click();
+          await cmdbCheckboxes.nth(1).click();
+          await cmdbDialog.getByRole('button', {{ name: '确认', exact: true }}).click();
+          const selectedCmdbText = String(await followupPanel.locator('.cmdb-line').textContent() || '');
+          if (!selectedCmdbText.includes('A-219-CRAH-01') || !selectedCmdbText.includes('A-220-CRAH-02')) {{
+            throw new Error(`CMDB multi-selection summary is incomplete: ${{selectedCmdbText}}`);
+          }}
+          const followupBrand = followupPanel.getByRole('combobox', {{ name: '设备品牌', exact: true }});
+          const followupModel = followupPanel.getByRole('combobox', {{ name: '设备型号', exact: true }});
+          await followupBrand.click();
+          await page.getByRole('option', {{ name: '圣阳', exact: true }}).click();
+          await followupModel.click();
+          await page.getByRole('option', {{ name: 'SP12-100', exact: true }}).waitFor({{ state: 'visible' }});
+          await page.getByRole('option', {{ name: 'SP12-200', exact: true }}).waitFor({{ state: 'visible' }});
+          if (await page.getByRole('option', {{ name: 'C2500 D5A', exact: true }}).count()) {{
+            throw new Error('followup model options were not filtered by selected brand');
+          }}
+          await page.getByRole('option', {{ name: 'SP12-100', exact: true }}).click();
+          await followupBrand.click();
+          await page.getByRole('option', {{ name: '康明斯', exact: true }}).click();
+          if (await followupModel.inputValue() !== '') {{
+            throw new Error('changing followup brand did not clear the stale model');
+          }}
+          await followupModel.click();
+          await page.getByRole('option', {{ name: 'C2500 D5A', exact: true }}).click();
+          await followupModel.fill('现场手填新型号');
+          if (await followupModel.inputValue() !== '现场手填新型号') {{
+            throw new Error('followup model combobox did not retain a custom model');
+          }}
+          const followupDescription = followupPanel.locator('[data-field-name="维修进展描述"] textarea');
+          await followupDescription.fill('烟测新增跟进');
+          const unsavedNotice = page.locator('.page-unsaved-notice');
+          await unsavedNotice.waitFor({{ state: 'visible' }});
+          if (!String(await unsavedNotice.textContent() || '').includes('未保存修改')) {{
+            throw new Error('page-level unsaved notice is missing its status text');
+          }}
+          const repairProjectSearch = page.getByRole('searchbox', {{ name: '搜索维修项目', exact: true }});
+          await repairProjectSearch.fill('不存在的维修项目');
+          await page.getByText('暂无维修项目', {{ exact: true }}).waitFor({{ state: 'visible' }});
+          if (await followupDescription.inputValue() !== '烟测新增跟进') {{
+            throw new Error('repair project search discarded unsaved followup draft');
+          }}
+          await repairProjectSearch.fill('');
+          await page.locator('.record-row').filter({{ hasText: 'A楼测试检修管理记录' }}).waitFor({{ state: 'visible' }});
+          if (await followupPanel.getByRole('button', {{ name: '新增跟进记录', exact: true }}).count() !== 1) {{
+            throw new Error('followup create mode must show one submit action');
+          }}
+          await followupPanel.getByRole('button', {{ name: '新增跟进记录', exact: true }}).click();
+          await followupPanel.getByText('维修跟进记录已新增。', {{ exact: true }}).waitFor({{ state: 'visible' }});
+          await followupPanel.getByRole('button', {{ name: '选择跟进记录', exact: true }}).click();
+          const followupOptions = followupPanel.locator('.followup-selector-list [role="option"]');
+          await followupOptions.first().waitFor({{ state: 'visible' }});
+          await followupOptions.last().click();
+          const progressInput = followupPanel.locator('[data-field-name="维修进度"] [data-progress-number]');
+          await progressInput.fill('60');
+          await followupPanel.getByRole('button', {{ name: '更新跟进记录', exact: true }}).click();
+          await followupPanel.getByText('维修跟进记录已更新。', {{ exact: true }}).waitFor({{ state: 'visible' }});
           await assertLayout(page, 'repair-management-entry');
+          await page.getByRole('button', {{ name: '项目信息' }}).click();
+          await page.getByRole('button', {{ name: '检修通告', exact: true }}).click();
+          await page.getByText('放弃未保存修改？', {{ exact: true }}).waitFor({{ state: 'visible' }});
+          await page.getByRole('button', {{ name: '放弃并继续', exact: true }}).click();
+          await waitForTextOrDump(page, '维修单生成检修通告', 'repair-notice-prefill');
+          if (!page.url().includes('repair_management_record_id=repair-mgmt-a-001')) {{
+            throw new Error(`repair management prefill id missing: ${{page.url()}}`);
+          }}
+          const repairSourceId = await page.locator('input[name="source_record_id"]').getAttribute('value');
+          const repairTargetId = await page.locator('input[name="target_record_id"]').getAttribute('value');
+          const repairTitleValue = await page.locator('input[name="title"]').getAttribute('value');
+          if (repairSourceId !== 'repair-mgmt-a-001') throw new Error(`repair source id mismatch: ${{repairSourceId}}`);
+          if (repairTargetId !== 'rec-smoke-repair-a-001') throw new Error(`repair target id mismatch: ${{repairTargetId}}`);
+          if (repairTitleValue !== 'A楼测试检修管理记录') throw new Error(`repair title prefill mismatch: ${{repairTitleValue}}`);
           await page.goto(cfg.url, {{
             waitUntil: 'domcontentloaded',
             timeout: 20000,
@@ -1517,6 +1728,24 @@ def run_smoke(*, port: int = 18976, keep_server_seconds: float = 0.0) -> dict:
 
         controller = FastAPIPortalController(host="127.0.0.1", port=port)
         app = controller._build_app()
+
+        @app.middleware("http")
+        async def _frontend_smoke_login(request, call_next):
+            if request.url.path != "/__frontend_smoke_login":
+                return await call_next(request)
+            response = RedirectResponse(
+                url="/repair-management?scope=A",
+                status_code=302,
+            )
+            response.set_cookie(
+                AUTH_COOKIE_NAME,
+                session_id,
+                httponly=True,
+                samesite="lax",
+                path="/",
+            )
+            return response
+
         bound_port = find_available_port("127.0.0.1", int(port or 18976))
         config = uvicorn.Config(
             app,
@@ -1574,12 +1803,12 @@ def run_smoke(*, port: int = 18976, keep_server_seconds: float = 0.0) -> dict:
                 env=env,
                 timeout=60,
             )
-        if keep_server_seconds > 0:
-            time.sleep(float(keep_server_seconds))
         if completed.returncode != 0:
             raise RuntimeError(
                 (completed.stderr or completed.stdout or "Playwright smoke failed").strip()
             )
+        if keep_server_seconds > 0:
+            time.sleep(float(keep_server_seconds))
         output = (completed.stdout or "").strip().splitlines()[-1]
         data = json.loads(output)
         data["url"] = url

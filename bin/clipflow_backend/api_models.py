@@ -62,6 +62,7 @@ class RepairManagementRecordRequest(APIModel):
     scope: str = "ALL"
     source_event_id: str = ""
     source_repair_ids: list[str] = Field(default_factory=list, max_length=1)
+    replace_source_relations: bool = False
     source_month: str = ""
     fields: dict[str, Any] = Field(default_factory=dict)
 
@@ -82,7 +83,7 @@ class RepairManagementPrefillRequest(APIModel):
 class RepairFollowupRecordRequest(APIModel):
     scope: str = "ALL"
     summary_record_id: str
-    cmdb_record_id: str = ""
+    cmdb_record_ids: list[str] = Field(default_factory=list)
     fields: dict[str, Any] = Field(default_factory=dict)
 
 

@@ -56,7 +56,8 @@
                   v-for="column in columns"
                   :key="column.key"
                   scope="col"
-                  :style="column.width ? { minWidth: column.width } : undefined"
+                  :class="{ 'wrap-column': column.wrap }"
+                  :style="column.width ? { width: column.width, minWidth: column.width } : undefined"
                 >
                   {{ column.label }}
                 </th>
@@ -93,6 +94,7 @@
                 <td
                   v-for="column in columns"
                   :key="column.key"
+                  :class="{ 'wrap-column': column.wrap }"
                   :title="cellText(record, column.key)"
                 >
                   <span>{{ cellText(record, column.key) || "-" }}</span>
@@ -129,12 +131,14 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { repairFieldValueToText } from "../repairManagementUtils";
 import type { LooseDict } from "../types";
 
 type RecordPickerColumn = {
   key: string;
   label: string;
   width?: string;
+  wrap?: boolean;
 };
 
 const props = withDefaults(defineProps<{
@@ -181,17 +185,7 @@ function recordId(record: LooseDict): string {
 }
 
 function cellText(record: LooseDict, key: string): string {
-  const value = record[key];
-  if (value === null || value === undefined) return "";
-  if (Array.isArray(value)) return value.map((item) => String(item || "")).filter(Boolean).join("、");
-  if (typeof value === "object") {
-    try {
-      return JSON.stringify(value);
-    } catch {
-      return String(value);
-    }
-  }
-  return String(value).trim();
+  return repairFieldValueToText(record[key]).trim();
 }
 
 function isSelected(record: LooseDict): boolean {
@@ -479,6 +473,20 @@ onBeforeUnmount(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.record-picker-table td.wrap-column {
+  height: auto;
+  min-height: 42px;
+  vertical-align: top;
+}
+
+.record-picker-table td.wrap-column span {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
 }
 
 .select-column {

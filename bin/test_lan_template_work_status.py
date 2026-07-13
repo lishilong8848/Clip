@@ -32,6 +32,10 @@ from lan_bitable_template_portal.portal_service import REPAIR_SOURCE_TABLE_ID  #
 from lan_bitable_template_portal.portal_service import REPAIR_MANAGEMENT_TABLE_ID  # noqa: E402
 from lan_bitable_template_portal.portal_service import REPAIR_MANAGEMENT_REPAIR_TABLE_ID  # noqa: E402
 from lan_bitable_template_portal.portal_service import REPAIR_FOLLOWUP_TABLE_ID  # noqa: E402
+from lan_bitable_template_portal.portal_service import REPAIR_EQUIPMENT_CATALOG_TABLE_ID  # noqa: E402
+from lan_bitable_template_portal.portal_service import REPAIR_FOLLOWUP_CATALOG_MAX_RECORDS  # noqa: E402
+from lan_bitable_template_portal.portal_service import REPAIR_FOLLOWUP_CATALOG_RUNTIME_KEY  # noqa: E402
+from lan_bitable_template_portal.portal_service import REPAIR_FOLLOWUP_BACKFILL_RUNTIME_KEY  # noqa: E402
 from lan_bitable_template_portal.portal_service import REPAIR_CMDB_TABLE_ID  # noqa: E402
 from lan_bitable_template_portal.portal_service import REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME  # noqa: E402
 from lan_bitable_template_portal.portal_service import WORK_TYPE_CHANGE  # noqa: E402
@@ -2186,9 +2190,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         old_locks = PortalRuntime.local_upload_locks
         old_created_targets = PortalRuntime.local_upload_created_targets
         with tempfile.TemporaryDirectory() as tmp:
-            PortalRuntime.state_store = LanPortalStateStore(
-                Path(tmp) / "lan_portal_state.sqlite3"
-            )
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            PortalRuntime.state_store = store
             PortalRuntime.local_upload_locks = {}
             PortalRuntime.local_upload_created_targets = {}
             try:
@@ -2204,6 +2207,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     first = PortalRuntime.execute_local_notice_upload(request_payload)
                     second = PortalRuntime.execute_local_notice_upload(request_payload)
             finally:
+                store.shutdown_write_worker(timeout=2.0)
                 PortalRuntime.state_store = old_store
                 PortalRuntime.local_upload_locks = old_locks
                 PortalRuntime.local_upload_created_targets = old_created_targets
@@ -2359,6 +2363,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     end_payload["screenshot_upload_id"] = end_screenshot["upload_id"]
                     ended = PortalRuntime.execute_local_notice_upload(end_payload)
             finally:
+                store.shutdown_write_worker(timeout=2.0)
                 PortalRuntime.state_store = old_store
                 PortalRuntime.local_upload_locks = old_locks
                 PortalRuntime.local_upload_created_targets = old_created_targets
@@ -7936,6 +7941,108 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             )
             self.assertEqual(paired["recipients"], [])
 
+    def test_prepare_change_action_recovers_converted_source_type_and_allows_first_start(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            current_month = MaintenancePortalService._current_month_label()
+            service._records = [
+                _build_record(
+                    "m-convert-running",
+                    "A楼",
+                    "冷却塔清洗",
+                    current_month,
+                    status="进行中",
+                    maintenance_cycle="每月",
+                )
+            ]
+            service._change_records = []
+            service._repair_records = []
+            service._zhihang_change_records = []
+            service._maintenance_loaded_once = True
+            service._change_loaded_once = True
+            service._repair_loaded_once = True
+            service._zhihang_change_loaded_once = True
+            service.set_notice_work_type_override(
+                record_id="m-convert-running",
+                source_work_type=WORK_TYPE_MAINTENANCE,
+                target_work_type=WORK_TYPE_CHANGE,
+                scope="A",
+                updated_by="tester",
+            )
+
+            prepared = service.prepare_change_action(
+                {
+                    "action": "start",
+                    "scope": "A",
+                    "work_type": WORK_TYPE_CHANGE,
+                    "record_id": "m-convert-running",
+                    "source_record_id": "m-convert-running",
+                    "start_time": "2026-06-12T09:30",
+                    "end_time": "2026-06-12T18:30",
+                    "location": "A楼楼顶",
+                    "content": "工程师进行冷却塔清洗",
+                    "reason": "按计划维护",
+                    "impact": "对IT设备无影响",
+                    "progress": "准备工作已完成",
+                },
+                job_id="job-converted-running",
+            )
+
+            self.assertEqual(prepared["source_work_type"], WORK_TYPE_MAINTENANCE)
+            self.assertEqual(prepared["source_record_id"], "m-convert-running")
+            self.assertEqual(prepared["source_progress"], "进行中")
+            self.assertEqual(prepared["notice_type"], "变更通告")
+
+            service._state_store.upsert_notice_identity(
+                {
+                    "work_type": WORK_TYPE_CHANGE,
+                    "notice_type": "变更通告",
+                    "source_record_id": "m-convert-running",
+                    "target_record_id": "rec-existing-change",
+                },
+                origin="test",
+            )
+            with self.assertRaisesRegex(PortalError, "已创建目标记录"):
+                service.prepare_change_action(
+                    {
+                        "action": "start",
+                        "scope": "A",
+                        "work_type": WORK_TYPE_CHANGE,
+                        "record_id": "m-convert-running",
+                        "source_record_id": "m-convert-running",
+                        "start_time": "2026-06-12T09:30",
+                        "end_time": "2026-06-12T18:30",
+                        "location": "A楼楼顶",
+                        "content": "工程师进行冷却塔清洗",
+                        "reason": "按计划维护",
+                        "impact": "对IT设备无影响",
+                        "progress": "准备工作已完成",
+                    },
+                    job_id="job-converted-running-duplicate",
+                )
+
+    def test_workbench_lite_contains_auth_heartbeat(self):
+        from lan_bitable_template_portal.workbench_lite import render_workbench_lite
+
+        html = render_workbench_lite(
+            payload={
+                "records": [],
+                "ongoing": [],
+                "daily_summary": {"stats": {}},
+                "record_type_counts": {},
+                "ongoing_type_counts": {},
+            },
+            session={"user": {"name": "测试"}},
+            scope="E",
+            work_type="maintenance",
+            scope_options=[{"value": "E", "label": "E楼"}],
+        )
+
+        self.assertIn("function checkLiteAuthStatus()", html)
+        self.assertIn("/api/auth/status?next=", html)
+        self.assertIn("window.addEventListener('focus', checkLiteAuthStatus)", html)
+        self.assertIn("document.addEventListener('visibilitychange'", html)
+
     def test_converted_maintenance_change_allows_empty_maintenance_cycle_for_pair_upload(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
@@ -9515,6 +9622,370 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(len(metas), 1)
         self.assertEqual(metas[0].field_name, "进展")
         self.assertEqual(metas[0].options_map["opt1"], "进行中")
+
+    def test_formatted_number_fields_remain_editable(self):
+        service = _TestMaintenancePortalService()
+        metas = service._parse_field_metas(
+            [
+                {
+                    "field_id": "fld-progress",
+                    "field_name": "维修进度",
+                    "ui_type": "Number",
+                    "type": 2,
+                    "property": {"formatter": "0%"},
+                },
+                {
+                    "field_id": "fld-cost",
+                    "field_name": "故障维修总费用",
+                    "ui_type": "Number",
+                    "type": 2,
+                    "property": {"formatter": "0.00"},
+                },
+                {
+                    "field_id": "fld-formula",
+                    "field_name": "公式结果",
+                    "ui_type": "Formula",
+                    "type": 20,
+                    "property": {
+                        "formula_expression": "1 + 1",
+                        "formatter": "0",
+                    },
+                },
+                {
+                    "field_id": "fld-lookup",
+                    "field_name": "查找结果",
+                    "ui_type": "Lookup",
+                    "type": 19,
+                    "property": {},
+                },
+            ]
+        )
+        by_name = {meta.field_name: meta for meta in metas}
+        self.assertFalse(by_name["维修进度"].has_formula)
+        self.assertFalse(service._field_meta_is_readonly(by_name["维修进度"]))
+        self.assertFalse(service._field_meta_is_readonly(by_name["故障维修总费用"]))
+        self.assertTrue(service._field_meta_is_readonly(by_name["公式结果"]))
+        self.assertTrue(service._field_meta_is_readonly(by_name["查找结果"]))
+
+    def test_repair_management_form_only_exposes_manual_fields(self):
+        service = _TestMaintenancePortalService()
+
+        def meta(name, field_type=1, ui_type="Text"):
+            return FieldMeta(
+                f"fld_{name}",
+                name,
+                ui_type,
+                field_type,
+                False,
+                {},
+                [],
+                False,
+            )
+
+        manual_names = {
+            "维修名称",
+            "故障发生时间",
+            "故障维修原因",
+            "故障发生现象描述",
+            "所属专业",
+            "所属数据中心/楼栋-使用",
+        }
+        derived_names = {
+            "区域",
+            "数据中心",
+            "专业（推送消息用）",
+            "事件描述",
+            "检修通告名称",
+            "当前维修进度",
+        }
+        payloads = {
+            name: service._repair_management_field_payload(meta(name))
+            for name in manual_names | derived_names
+        }
+        self.assertEqual(
+            {name for name, payload in payloads.items() if payload["editable"]},
+            manual_names,
+        )
+        self.assertTrue(all(payloads[name]["auto_filled"] for name in derived_names))
+
+    def test_repair_followup_form_exposes_complete_business_fields_only(self):
+        service = _TestMaintenancePortalService()
+        expected = {
+            "设备名称",
+            "设备编号",
+            "设备品牌",
+            "设备型号",
+            "维修方",
+            "供应商名称",
+            "供应商维修人员",
+            "设备生产日期",
+            "设备使用年限",
+            "设备容量KW/AH",
+            "是否质保期内",
+            "随工人员（我方维修人员）",
+            "更换备件名称",
+            "更换备件数量",
+            "维修进展描述",
+            "维修进度",
+            "故障维修总费用",
+            "跟进项（如有）",
+            "后续整改措施（如有）",
+        }
+        hidden = {
+            "是否本维修单第一次提交跟进记录",
+            "费用举证（如：发票/支付记录）",
+            "超链接",
+            "维修汇总记录ID",
+            "CMDB设备唯一ID",
+        }
+        payloads = {}
+        for name in expected | hidden:
+            field_type, ui_type = (2, "Number") if name in {
+                "设备使用年限",
+                "更换备件数量",
+                "维修进度",
+                "故障维修总费用",
+            } else (1, "Text")
+            meta = FieldMeta(
+                f"fld_{name}",
+                name,
+                ui_type,
+                field_type,
+                False,
+                {},
+                [],
+                False,
+            )
+            payloads[name] = service._repair_followup_field_payload(meta)
+        self.assertEqual(
+            {name for name, payload in payloads.items() if payload["editable"]},
+            expected,
+        )
+
+    def test_repair_followup_duplicate_field_migration_is_idempotent(self):
+        service = _TestMaintenancePortalService()
+
+        def raw_field(field_id, name, field_type, options=()):
+            return {
+                "field_id": field_id,
+                "field_name": name,
+                "type": field_type,
+                "ui_type": "SingleSelect" if field_type == 3 else "Text",
+                "property": {
+                    "options": [
+                        {"id": option_id, "name": option_name, "color": index}
+                        for index, (option_id, option_name) in enumerate(options)
+                    ]
+                }
+                if field_type == 3
+                else {},
+            }
+
+        raw_fields = [
+            raw_field("old_name", "设备名称-1", 3, [("opt_name", "铅酸阀控蓄电池")]),
+            raw_field("new_name", "设备名称", 1),
+            raw_field("old_no", "设备编号-1", 1),
+            raw_field("new_no", "设备编号", 1),
+            raw_field("old_brand", "设备品牌 -1", 3, [("opt_brand", "双登")]),
+            raw_field("new_brand", "设备品牌", 1),
+            raw_field("old_model", "设备型号 -1", 3, [("opt_model", "GFMHR-1250W")]),
+            raw_field("new_model", "设备型号", 1),
+            raw_field("old_party", "维修方 -1", 3, [("opt_party", "我方")]),
+            raw_field("new_party", "维修方", 3, [("opt_bad", "opt_party")]),
+            raw_field("old_supplier", "供应商名称 -1", 1),
+            raw_field("new_supplier", "供应商名称", 1),
+            raw_field("old_person", "供应商维修人员-1", 1),
+            raw_field("new_person", "供应商维修人员", 1),
+            raw_field("warranty", "是否质保期内", 3, [("opt_yes", "是"), ("opt_no", "否")]),
+        ]
+        records = [
+            {
+                "record_id": "rec_followup",
+                "display_fields": {
+                    "设备名称-1": "铅酸阀控蓄电池",
+                    "设备名称": "opt_name",
+                    "设备编号-1": "A-446-BAT-01",
+                    "设备编号": "A-446-BAT-01",
+                    "设备品牌 -1": "双登",
+                    "设备品牌": "opt_brand",
+                    "设备型号 -1": "GFMHR-1250W",
+                    "设备型号": "opt_model",
+                    "维修方 -1": "我方",
+                    "维修方": "opt_party",
+                    "供应商名称 -1": "测试供应商",
+                    "供应商维修人员-1": "测试工程师",
+                    "是否质保期内": "是",
+                },
+                "raw_fields": {},
+            }
+        ]
+        runtime = {}
+
+        class RuntimeStore:
+            @staticmethod
+            def get_backend_runtime(key):
+                return runtime.get(key)
+
+            @staticmethod
+            def put_backend_runtime(key, value):
+                runtime[key] = dict(value)
+
+        service._state_store = RuntimeStore()  # type: ignore[assignment]
+
+        def load_fields(**_kwargs):
+            metas = service._parse_field_metas(raw_fields)
+            return metas, {meta.field_name: meta for meta in metas}
+
+        service._load_table_fields = load_fields  # type: ignore[method-assign]
+        service._request_json = (  # type: ignore[method-assign]
+            lambda path, **_kwargs: {
+                "data": {"items": raw_fields if path == "fields" else []}
+            }
+        )
+        service._load_table_records = (  # type: ignore[method-assign]
+            lambda **_kwargs: records
+        )
+
+        def patch_record_fields(**kwargs):
+            record = records[0]
+            record["display_fields"].update(kwargs["fields"])
+            record["raw_fields"].update(kwargs["fields"])
+            return {}
+
+        def update_field(raw, *, field_type, options=None):
+            raw["type"] = field_type
+            raw["ui_type"] = "SingleSelect" if field_type == 3 else "Text"
+            if field_type == 3:
+                raw["property"] = {
+                    "options": [
+                        {
+                            **option,
+                            "id": option.get("id") or f"generated_{index}",
+                        }
+                        for index, option in enumerate(options or [])
+                    ]
+                }
+
+        failed_delete_once = {"设备名称-1": False}
+
+        def delete_field(raw):
+            if (
+                raw["field_name"] == "设备名称-1"
+                and not failed_delete_once["设备名称-1"]
+            ):
+                failed_delete_once["设备名称-1"] = True
+                raise PortalError("mock transient delete failure")
+            raw_fields.remove(raw)
+            name = raw["field_name"]
+            records[0]["display_fields"].pop(name, None)
+            records[0]["raw_fields"].pop(name, None)
+
+        service._patch_record_fields = patch_record_fields  # type: ignore[method-assign]
+        service._update_repair_followup_field_definition = update_field  # type: ignore[method-assign]
+        service._delete_repair_followup_field_definition = delete_field  # type: ignore[method-assign]
+
+        result = service.migrate_repair_followup_duplicate_fields()
+        second = service.migrate_repair_followup_duplicate_fields()
+
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(second["status"], "complete")
+        remaining_names = {field["field_name"] for field in raw_fields}
+        self.assertFalse(any(name.endswith("-1") for name in remaining_names))
+        self.assertNotIn("设备品牌 -1", remaining_names)
+        self.assertEqual(records[0]["display_fields"]["设备名称"], "铅酸阀控蓄电池")
+        self.assertEqual(records[0]["display_fields"]["设备品牌"], "双登")
+        self.assertEqual(records[0]["display_fields"]["设备型号"], "GFMHR-1250W")
+        self.assertEqual(records[0]["display_fields"]["维修方"], "我方")
+        self.assertEqual(records[0]["display_fields"]["是否质保期内"], "是")
+
+    def test_repair_followup_people_searches_by_name_and_hides_open_id(self):
+        service = _TestMaintenancePortalService()
+        service._load_signature_people = (  # type: ignore[method-assign]
+            lambda force=False: [
+                {
+                    "record_id": "rec_zhang",
+                    "name": "张宇航",
+                    "open_id": "ou_zhang",
+                    "employee_no": "10001",
+                    "building": "A楼",
+                    "position": "运维值班员",
+                },
+                {
+                    "record_id": "rec_li",
+                    "name": "李世龙",
+                    "open_id": "ou_li",
+                    "employee_no": "10002",
+                    "building": "A楼",
+                    "position": "运维值班长",
+                },
+            ]
+        )
+
+        payload = service.list_repair_followup_people(
+            scope="A",
+            query="张宇",
+            limit=20,
+        )
+
+        self.assertEqual(payload["total"], 1)
+        self.assertEqual(payload["people"][0]["name"], "张宇航")
+        self.assertEqual(payload["people"][0]["user_id"], "ou_zhang")
+        self.assertNotIn("open_id", payload["people"][0])
+
+    def test_repair_followup_coerces_selected_people_to_user_field(self):
+        meta = FieldMeta(
+            "fld_workers",
+            "随工人员（我方维修人员）",
+            "User",
+            11,
+            False,
+            {},
+            [],
+            False,
+        )
+
+        prepared, warnings = MaintenancePortalService._coerce_repair_management_fields(
+            {"随工人员（我方维修人员）": [{"id": "ou_zhang", "name": "张宇航"}]},
+            {meta.field_name: meta},
+        )
+
+        self.assertEqual(prepared[meta.field_name], [{"id": "ou_zhang"}])
+        self.assertEqual(warnings, [])
+
+    def test_repair_management_form_derives_hidden_routing_fields(self):
+        service = _TestMaintenancePortalService()
+        legacy_building = FieldMeta(
+            "fld_legacy_building",
+            "所属数据中心/楼栋（关联CMDB唯一ID关联,DE不选）",
+            "SingleSelect",
+            3,
+            False,
+            {},
+            ["南通A楼", "南通E楼"],
+            False,
+        )
+        metas = {
+            legacy_building.field_name: legacy_building,
+            "专业（推送消息用）": FieldMeta(
+                "fld_push_specialty", "专业（推送消息用）", "Text", 1, False, {}, [], False
+            ),
+            "区域": FieldMeta("fld_region", "区域", "Text", 1, False, {}, [], False),
+            "数据中心": FieldMeta("fld_dc", "数据中心", "Text", 1, False, {}, [], False),
+        }
+        derived = service._apply_repair_management_form_derivatives(
+            {
+                "所属专业": "电气",
+                "所属数据中心/楼栋-使用": "A楼",
+            },
+            metas,
+        )
+        self.assertEqual(derived["专业（推送消息用）"], "电气")
+        self.assertEqual(derived["区域"], "华东一")
+        self.assertEqual(derived["数据中心"], "南通")
+        self.assertEqual(
+            derived["所属数据中心/楼栋（关联CMDB唯一ID关联,DE不选）"],
+            "南通A楼",
+        )
 
     def test_maintenance_cycle_written_to_target_fields(self):
         handler = MaintenanceNoticeHandler("维保通告")
@@ -12469,6 +12940,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 ],
             )
         )
+        service._load_repair_followup_brand_model_catalog = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: {}
+        )
 
         payload = service.get_repair_followup_records(
             summary_record_id="rec_summary",
@@ -12487,7 +12961,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
     def test_repair_management_coerce_skips_invalid_select_values(self):
         single = FieldMeta(
             "fld_device",
-            "设备名称-1",
+            "设备名称",
             "SingleSelect",
             3,
             False,
@@ -12508,21 +12982,21 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
         prepared, warnings = MaintenancePortalService._coerce_repair_management_fields(
             {
-                "设备名称-1": "精密空调",
+                "设备名称": "精密空调",
                 "所属专业": ["opt_electric", "不存在专业"],
             },
             {single.field_name: single, multi.field_name: multi},
         )
 
-        self.assertNotIn("设备名称-1", prepared)
+        self.assertNotIn("设备名称", prepared)
         self.assertEqual(prepared["所属专业"], ["电气"])
-        self.assertTrue(any("设备名称-1" in warning for warning in warnings))
+        self.assertTrue(any("设备名称" in warning for warning in warnings))
         self.assertTrue(any("不存在专业" in warning for warning in warnings))
 
     def test_repair_management_coerce_accepts_select_option_id_and_case(self):
         meta = FieldMeta(
             "fld_device",
-            "设备名称-1",
+            "设备名称",
             "SingleSelect",
             3,
             False,
@@ -12532,18 +13006,79 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         )
 
         by_id, id_warnings = MaintenancePortalService._coerce_repair_management_fields(
-            {"设备名称-1": "opt_water"},
+            {"设备名称": "opt_water"},
             {meta.field_name: meta},
         )
         by_name, name_warnings = MaintenancePortalService._coerce_repair_management_fields(
-            {"设备名称-1": "水冷型精密空调"},
+            {"设备名称": "水冷型精密空调"},
             {meta.field_name: meta},
         )
 
-        self.assertEqual(by_id["设备名称-1"], "水冷型精密空调")
-        self.assertEqual(by_name["设备名称-1"], "水冷型精密空调")
+        self.assertEqual(by_id["设备名称"], "水冷型精密空调")
+        self.assertEqual(by_name["设备名称"], "水冷型精密空调")
         self.assertEqual(id_warnings, [])
         self.assertEqual(name_warnings, [])
+
+    def test_repair_management_coerce_normalizes_python_list_multiselect(self):
+        source = FieldMeta(
+            "fld_source",
+            "对应来源",
+            "MultiSelect",
+            4,
+            False,
+            {"opt_bms": "BMS系统"},
+            ["方舟系统", "BMS系统"],
+            False,
+        )
+
+        prepared, warnings = MaintenancePortalService._coerce_repair_management_fields(
+            {"对应来源": "['BMS系统']"},
+            {source.field_name: source},
+        )
+
+        self.assertEqual(prepared["对应来源"], ["BMS系统"])
+        self.assertEqual(warnings, [])
+
+    def test_repair_management_coerce_accepts_new_source_and_normalizes_alias(self):
+        source = FieldMeta(
+            "fld_source",
+            "对应来源",
+            "MultiSelect",
+            4,
+            False,
+            {"opt_bms": "BMS系统"},
+            ["BMS系统", "方舟系统", "['巡检发现']"],
+            False,
+        )
+
+        prepared, warnings = MaintenancePortalService._coerce_repair_management_fields(
+            {"对应来源": ["巡检发现", "BMS"]},
+            {source.field_name: source},
+        )
+
+        self.assertEqual(prepared["对应来源"], ["巡检发现", "BMS系统"])
+        self.assertEqual(warnings, [])
+
+    def test_repair_management_coerce_allows_custom_followup_model(self):
+        model = FieldMeta(
+            "fld_model",
+            "设备型号",
+            "SingleSelect",
+            3,
+            False,
+            {"opt_known": "已登记型号"},
+            ["已登记型号"],
+            False,
+        )
+
+        prepared, warnings = MaintenancePortalService._coerce_repair_management_fields(
+            {"设备型号": "现场手填新型号"},
+            {model.field_name: model},
+            custom_single_select_fields={"设备型号"},
+        )
+
+        self.assertEqual(prepared["设备型号"], "现场手填新型号")
+        self.assertEqual(warnings, [])
 
     def test_repair_management_notice_prefill_maps_current_project_fields(self):
         service = _TestMaintenancePortalService()
@@ -12626,6 +13161,112 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(captured["record_id"], "rec_repair_1")
         self.assertEqual(captured["fields"], {"维修名称": "新检修"})
         self.assertEqual(result["field_count"], 1)
+
+    def test_repair_management_update_cannot_clear_required_field(self):
+        service = _TestMaintenancePortalService()
+        title = FieldMeta("fld_title", "维修名称", "Text", 1, True, {}, [], False)
+        specialty = FieldMeta(
+            "fld_specialty",
+            "所属专业",
+            "SingleSelect",
+            3,
+            False,
+            {},
+            ["电气", "暖通"],
+            False,
+        )
+        service._load_table_fields = (  # type: ignore[method-assign]
+            lambda **_kwargs: (
+                [title, specialty],
+                {title.field_name: title, specialty.field_name: specialty},
+            )
+        )
+        service._ensure_repair_management_record_in_scope = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: {
+                "record_id": "rec_repair_1",
+                "display_fields": {
+                    "维修名称": "A楼测试检修",
+                    "所属专业": "电气",
+                },
+                "raw_fields": {},
+            }
+        )
+        service._load_repair_followups_for_summary = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: ([], {}, [])
+        )
+        service._patch_record_fields = (  # type: ignore[method-assign]
+            lambda **_kwargs: self.fail("required-field validation must run before patch")
+        )
+
+        with self.assertRaisesRegex(PortalError, "所属专业"):
+            service.update_repair_management_record(
+                "rec_repair_1",
+                {"所属专业": ""},
+                scope="A",
+            )
+
+    def test_repair_management_update_can_explicitly_clear_source_relations(self):
+        service = _TestMaintenancePortalService()
+        metas = [
+            FieldMeta("fld_title", "维修名称", "Text", 1, True, {}, [], False),
+            FieldMeta("fld_fault_time", "故障发生时间", "Text", 1, False, {}, [], False),
+            FieldMeta("fld_reason", "故障维修原因", "Text", 1, False, {}, [], False),
+            FieldMeta("fld_specialty", "所属专业", "Text", 1, False, {}, [], False),
+            FieldMeta(
+                "fld_building",
+                "所属数据中心/楼栋-使用",
+                "Text",
+                1,
+                False,
+                {},
+                [],
+                False,
+            ),
+            FieldMeta("fld_event", "关联事件单", "DuplexLink", 21, False, {}, [], False),
+            FieldMeta("fld_repair", "设备检修关联", "DuplexLink", 21, False, {}, [], False),
+        ]
+        meta_by_name = {meta.field_name: meta for meta in metas}
+        service._load_table_fields = (  # type: ignore[method-assign]
+            lambda **_kwargs: (metas, meta_by_name)
+        )
+        service._ensure_repair_management_record_in_scope = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: {
+                "record_id": "rec_repair_1",
+                "display_fields": {
+                    "维修名称": "A楼测试检修",
+                    "故障发生时间": "2026-07-01 10:00",
+                    "故障维修原因": "测试原因",
+                    "所属专业": "电气",
+                    "所属数据中心/楼栋-使用": "南通A楼",
+                },
+                "raw_fields": {
+                    "关联事件单": ["rec_event_1"],
+                    "设备检修关联": ["rec_notice_1"],
+                },
+            }
+        )
+        service._load_repair_followups_for_summary = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: ([], {}, [])
+        )
+        service._repair_management_fields_in_scope = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: True
+        )
+        captured = {}
+        service._patch_record_fields = (  # type: ignore[method-assign]
+            lambda **kwargs: captured.update(kwargs)
+        )
+
+        service.update_repair_management_record(
+            "rec_repair_1",
+            {"维修名称": "A楼测试检修"},
+            source_event_id="",
+            source_repair_ids=[],
+            replace_source_relations=True,
+            scope="A",
+        )
+
+        self.assertEqual(captured["fields"]["关联事件单"], [])
+        self.assertEqual(captured["fields"]["设备检修关联"], [])
 
     def test_repair_management_update_rejects_cross_scope_record(self):
         service = _TestMaintenancePortalService()
@@ -13062,17 +13703,17 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "创建时间": "2026-06-25 12:35",
                 "维修进度": "1",
                 "维修进展描述": "已更换压力传感器并恢复",
-                "设备名称-1": "E-217-CRAC-02",
-                "设备编号-1": "CRAC-02",
-                "设备品牌 -1": "测试品牌",
-                "设备型号 -1": "TEST-02",
+                "设备名称": "E-217-CRAC-02",
+                "设备编号": "CRAC-02",
+                "设备品牌": "测试品牌",
+                "设备型号": "TEST-02",
                 "设备生产日期": "2020-06-25 00:00",
                 "设备使用年限": "6",
                 "设备容量KW/AH": "120KW",
                 "是否质保期内": "否",
-                "维修方 -1": "供应商",
-                "供应商名称 -1": "测试供应商",
-                "供应商维修人员-1": "供应商工程师",
+                "维修方": "供应商",
+                "供应商名称": "测试供应商",
+                "供应商维修人员": "供应商工程师",
                 "更换备件名称": "压力传感器",
                 "更换备件数量": "1",
                 "故障维修总费用": "350",
@@ -13318,14 +13959,17 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         )
 
         fields = captured["fields"]
-        self.assertNotIn("维修跟进记录", fields)
+        self.assertEqual(
+            fields["维修跟进记录"],
+            "rec_followup_new,rec_followup_done",
+        )
         self.assertEqual(fields["当前维修进度"], 0.5)
         self.assertEqual(fields["维修进展描述"], "处理中")
         self.assertEqual(fields["更换备件名称"], "完成备件")
         self.assertEqual(fields["更换备件数量"], 2)
         self.assertEqual(fields["故障维修总费用（跟进完成的维修项）"], 100)
 
-    def test_repair_followup_create_prefills_summary_and_cmdb_fields(self):
+    def test_repair_followup_create_prefills_summary_and_multiple_cmdb_fields(self):
         service = _TestMaintenancePortalService()
         metas = [
             FieldMeta(
@@ -13339,10 +13983,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 False,
             ),
             FieldMeta("fld_cmdb", "CMDB设备唯一ID", "DuplexLink", 21, False, {}, [], False),
-            FieldMeta("fld_name", "设备名称-1", "Text", 1, False, {}, [], False),
-            FieldMeta("fld_no", "设备编号-1", "Text", 1, False, {}, [], False),
-            FieldMeta("fld_brand", "设备品牌 -1", "Text", 1, False, {}, [], False),
-            FieldMeta("fld_supplier", "供应商名称 -1", "Text", 1, False, {}, [], False),
+            FieldMeta("fld_name", "设备名称", "Text", 1, False, {}, [], False),
+            FieldMeta("fld_no", "设备编号", "Text", 1, False, {}, [], False),
+            FieldMeta("fld_brand", "设备品牌", "Text", 1, False, {}, [], False),
+            FieldMeta("fld_supplier", "供应商名称", "Text", 1, False, {}, [], False),
         ]
         meta_by_name = {item.field_name: item for item in metas}
         summary = {
@@ -13354,38 +13998,566 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             },
             "raw_fields": {},
         }
-        cmdb = {
-            "record_id": "rec_cmdb",
-            "display_fields": {
-                "分类名称": "精密空调",
-                "设备名称": "A-219-CRAH-01",
+        cmdb_records = [
+            {
+                "record_id": "rec_cmdb_1",
+                "display_fields": {
+                    "分类名称": "精密空调",
+                    "设备名称": "A-219-CRAH-01",
+                },
+                "raw_fields": {},
             },
-            "raw_fields": {},
-        }
+            {
+                "record_id": "rec_cmdb_2",
+                "display_fields": {
+                    "分类名称": "精密空调",
+                    "设备名称": "A-220-CRAH-02",
+                },
+                "raw_fields": {},
+            },
+        ]
         service._ensure_repair_followup_parent_id_field = (  # type: ignore[method-assign]
             lambda: (metas, meta_by_name)
         )
         service._load_repair_management_cmdb_records = (  # type: ignore[method-assign]
-            lambda: ([], {}, [cmdb])
+            lambda: ([], {}, cmdb_records)
         )
         service._load_table_records_by_ids = (  # type: ignore[method-assign]
-            lambda **_kwargs: [cmdb]
+            lambda **kwargs: [
+                record
+                for record_id in kwargs.get("record_ids") or []
+                for record in cmdb_records
+                if record["record_id"] == record_id
+            ]
         )
 
         prepared, warnings = service._prepare_repair_followup_fields(
             summary_record_id="rec_summary",
-            fields={"设备品牌 -1": "用户品牌"},
-            cmdb_record_id="rec_cmdb",
+            fields={"设备品牌": "用户品牌"},
+            cmdb_record_ids=["rec_cmdb_1", "rec_cmdb_2"],
             summary_record=summary,
         )
 
         self.assertEqual(warnings, [])
         self.assertEqual(prepared[REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME], "rec_summary")
-        self.assertEqual(prepared["CMDB设备唯一ID"], ["rec_cmdb"])
-        self.assertEqual(prepared["设备名称-1"], "精密空调")
-        self.assertEqual(prepared["设备编号-1"], "A-219-CRAH-01")
-        self.assertEqual(prepared["设备品牌 -1"], "用户品牌")
-        self.assertEqual(prepared["供应商名称 -1"], "汇总供应商")
+        self.assertEqual(
+            prepared["CMDB设备唯一ID"],
+            ["rec_cmdb_1", "rec_cmdb_2"],
+        )
+        self.assertEqual(prepared["设备名称"], "精密空调")
+        self.assertEqual(prepared["设备编号"], "A-219-CRAH-01、A-220-CRAH-02")
+        self.assertEqual(prepared["设备品牌"], "用户品牌")
+        self.assertEqual(prepared["供应商名称"], "汇总供应商")
+
+    def test_repair_followup_uses_canonical_fields_and_builds_brief(self):
+        service = _TestMaintenancePortalService()
+        metas = [
+            FieldMeta("fld_parent", REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME, "Text", 1, False, {}, [], False),
+            FieldMeta("fld_brief", "维修简述", "Text", 1, True, {}, [], False),
+            FieldMeta("fld_name", "维修名称", "Text", 1, False, {}, [], False),
+            FieldMeta("fld_start", "维修开始时间", "DateTime", 5, False, {}, [], False),
+            FieldMeta("fld_worker", "随工人员（我方维修人员）", "User", 11, False, {}, [], False),
+            FieldMeta("fld_device", "设备编号", "Text", 1, False, {}, [], False),
+            FieldMeta("fld_brand", "设备品牌", "Text", 1, False, {}, [], False),
+            FieldMeta("fld_vendor", "供应商名称", "Text", 1, False, {}, [], False),
+        ]
+        meta_by_name = {item.field_name: item for item in metas}
+        start_ms = int(dt.datetime(2026, 7, 12, 10, 30).timestamp() * 1000)
+        summary = {
+            "display_fields": {
+                "维修名称": "A楼蓄电池维修",
+                "设备编号": "A-245-HVDC-01",
+                "设备品牌": "双登",
+                "供应商名称": "测试供应商",
+                "维修开始时间": "2026-07-12 10:30",
+                "随工人员（或我方维修人员）": "张三",
+            },
+            "raw_fields": {
+                "维修开始时间": start_ms,
+                "随工人员（或我方维修人员）": [{"id": "ou_worker", "name": "张三"}],
+            },
+        }
+
+        prepared, warnings = service._prepare_repair_followup_fields(
+            summary_record_id="rec_summary",
+            fields={"设备品牌": "南都"},
+            summary_record=summary,
+            meta_by_name=meta_by_name,
+        )
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(prepared["维修简述"], "2026/07/12 - 张三")
+        self.assertEqual(prepared["设备编号"], "A-245-HVDC-01")
+        self.assertEqual(prepared["设备品牌"], "南都")
+        self.assertEqual(prepared["供应商名称"], "测试供应商")
+
+    def test_repair_followup_backfill_links_unique_summary_and_writes_backlink(self):
+        service = _TestMaintenancePortalService()
+        summary_metas = [
+            FieldMeta("fld_summary_name", "维修名称", "Text", 1, True, {}, [], False),
+            FieldMeta("fld_summary_no", "维修单号", "Text", 1, False, {}, [], False),
+            FieldMeta("fld_summary_links", "维修跟进记录", "Text", 1, False, {}, [], False),
+        ]
+        followup_metas = [
+            FieldMeta("fld_parent", REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME, "Text", 1, False, {}, [], False),
+            FieldMeta("fld_follow_name", "维修名称", "Text", 1, False, {}, [], False),
+            FieldMeta("fld_follow_no", "维修单号", "Text", 1, False, {}, [], False),
+            FieldMeta("fld_follow_brief", "维修简述", "Text", 1, True, {}, [], False),
+        ]
+        summary_meta_by_name = {item.field_name: item for item in summary_metas}
+        followup_meta_by_name = {item.field_name: item for item in followup_metas}
+        summaries = [
+            {
+                "record_id": "rec_summary",
+                "display_fields": {"维修名称": "A楼测试维修", "维修单号": "WX-001"},
+                "raw_fields": {"维修名称": "A楼测试维修", "维修单号": "WX-001"},
+            }
+        ]
+        followups = [
+            {
+                "record_id": "rec_followup",
+                "display_fields": {"维修名称": "A楼测试维修", "维修单号": "WX-001"},
+                "raw_fields": {},
+            }
+        ]
+        patches = []
+        persisted = []
+        service._state_store.get_backend_runtime = lambda _key: None  # type: ignore[method-assign]
+        service._state_store.put_backend_runtime = (  # type: ignore[method-assign]
+            lambda key, payload: persisted.append((key, payload))
+        )
+        service._load_table_fields = (  # type: ignore[method-assign]
+            lambda **kwargs: (
+                (summary_metas, summary_meta_by_name)
+                if kwargs.get("table_id") == REPAIR_MANAGEMENT_TABLE_ID
+                else (followup_metas, followup_meta_by_name)
+            )
+        )
+        service._ensure_repair_followup_parent_id_field = (  # type: ignore[method-assign]
+            lambda: (followup_metas, followup_meta_by_name)
+        )
+        service._load_table_records = (  # type: ignore[method-assign]
+            lambda **kwargs: summaries
+            if kwargs.get("table_id") == REPAIR_MANAGEMENT_TABLE_ID
+            else followups
+        )
+        service._ensure_repair_followup_select_options = (  # type: ignore[method-assign]
+            lambda _fields, meta_by_name: (list(meta_by_name.values()), meta_by_name)
+        )
+        service._patch_record_fields = (  # type: ignore[method-assign]
+            lambda **kwargs: patches.append(kwargs) or {"code": 0}
+        )
+
+        result = service.backfill_repair_followup_records(force=True)
+
+        followup_patch = next(
+            item for item in patches if item["table_id"] == REPAIR_FOLLOWUP_TABLE_ID
+        )
+        summary_patch = next(
+            item for item in patches if item["table_id"] == REPAIR_MANAGEMENT_TABLE_ID
+        )
+        self.assertEqual(
+            followup_patch["fields"][REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME],
+            "rec_summary",
+        )
+        self.assertEqual(summary_patch["fields"]["维修跟进记录"], "rec_followup")
+        self.assertEqual(result["updated"], 1)
+        self.assertEqual(result["backlink_updates"], 1)
+        self.assertEqual(persisted[0][0], REPAIR_FOLLOWUP_BACKFILL_RUNTIME_KEY)
+
+    def test_repair_followup_select_options_are_added_before_record_write(self):
+        service = _TestMaintenancePortalService()
+        initial = FieldMeta(
+            "fld_specialty",
+            "所属专业",
+            "SingleSelect",
+            3,
+            False,
+            {"opt_electric": "电气"},
+            ["电气"],
+            False,
+        )
+        refreshed = FieldMeta(
+            "fld_specialty",
+            "所属专业",
+            "SingleSelect",
+            3,
+            False,
+            {"opt_electric": "电气", "opt_hvac": "暖通"},
+            ["电气", "暖通"],
+            False,
+        )
+        field_updates = []
+        service._request_json = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: {
+                "data": {
+                    "items": [
+                        {
+                            "field_id": "fld_specialty",
+                            "field_name": "所属专业",
+                            "type": 3,
+                            "ui_type": "SingleSelect",
+                            "property": {
+                                "options": [
+                                    {"id": "opt_electric", "name": "电气", "color": 0}
+                                ]
+                            },
+                        }
+                    ]
+                }
+            }
+        )
+        service._request_payload = (  # type: ignore[method-assign]
+            lambda *args, **kwargs: field_updates.append((args, kwargs)) or {"code": 0}
+        )
+        service._load_table_fields = (  # type: ignore[method-assign]
+            lambda **_kwargs: ([refreshed], {"所属专业": refreshed})
+        )
+
+        _metas, meta_by_name = service._ensure_repair_followup_select_options(
+            {"所属专业": "暖通"},
+            {"所属专业": initial},
+        )
+
+        options = field_updates[0][1]["json_payload"]["property"]["options"]
+        self.assertEqual([item["name"] for item in options], ["电气", "暖通"])
+        self.assertEqual(meta_by_name["所属专业"].option_names, ["电气", "暖通"])
+
+    def test_repair_followup_legacy_option_ids_use_business_labels(self):
+        self.assertEqual(
+            MaintenancePortalService._repair_management_canonical_select_text(
+                "所属专业",
+                "optAssNaw3",
+            ),
+            "电气",
+        )
+        self.assertEqual(
+            MaintenancePortalService._repair_management_canonical_select_text(
+                "维修来源",
+                "optt3FGRvz",
+            ),
+            "BMS系统",
+        )
+        self.assertEqual(
+            MaintenancePortalService._repair_management_canonical_select_text(
+                "维修方",
+                "optt2azmKP",
+            ),
+            "我方",
+        )
+
+    def test_repair_followup_multiple_cmdb_categories_require_manual_device_name(self):
+        service = _TestMaintenancePortalService()
+        metas = [
+            FieldMeta(
+                "fld_parent",
+                REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME,
+                "Text",
+                1,
+                False,
+                {},
+                [],
+                False,
+            ),
+            FieldMeta("fld_cmdb", "CMDB设备唯一ID", "DuplexLink", 21, False, {}, [], False),
+            FieldMeta("fld_name", "设备名称", "Text", 1, False, {}, [], False),
+            FieldMeta("fld_no", "设备编号", "Text", 1, False, {}, [], False),
+        ]
+        meta_by_name = {item.field_name: item for item in metas}
+        cmdb_records = [
+            {
+                "record_id": "rec_cmdb_1",
+                "display_fields": {"分类名称": "精密空调", "设备名称": "A-219-CRAH-01"},
+                "raw_fields": {},
+            },
+            {
+                "record_id": "rec_cmdb_2",
+                "display_fields": {"分类名称": "蓄电池", "设备名称": "A-220-BAT-01"},
+                "raw_fields": {},
+            },
+        ]
+        service._ensure_repair_followup_parent_id_field = (  # type: ignore[method-assign]
+            lambda: (metas, meta_by_name)
+        )
+        service._load_repair_management_cmdb_records = (  # type: ignore[method-assign]
+            lambda: ([], {}, cmdb_records)
+        )
+        service._load_table_records_by_ids = (  # type: ignore[method-assign]
+            lambda **_kwargs: cmdb_records
+        )
+
+        prepared, warnings = service._prepare_repair_followup_fields(
+            summary_record_id="rec_summary",
+            fields={},
+            cmdb_record_ids=["rec_cmdb_1", "rec_cmdb_2"],
+            summary_record={"display_fields": {}, "raw_fields": {}},
+        )
+
+        self.assertEqual(prepared["CMDB设备唯一ID"], ["rec_cmdb_1", "rec_cmdb_2"])
+        self.assertNotIn("设备名称", prepared)
+        self.assertEqual(prepared["设备编号"], "A-219-CRAH-01、A-220-BAT-01")
+        self.assertIn("所选 CMDB 设备属于不同分类，请手动确认设备名称。", warnings)
+
+    def test_repair_followup_uses_parent_id_and_copies_writable_summary_snapshot(self):
+        metas = [
+            FieldMeta(
+                "fld_parent",
+                REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME,
+                "Text",
+                1,
+                False,
+                {},
+                [],
+                False,
+            ),
+            FieldMeta("fld_title", "维修简述", "Text", 1, True, {}, [], False),
+            FieldMeta("fld_name", "维修名称", "Text", 1, False, {}, [], False),
+            FieldMeta("fld_start", "维修开始时间", "DateTime", 5, False, {}, [], False),
+            FieldMeta("fld_end", "结束时间", "DateTime", 5, False, {}, [], False),
+            FieldMeta(
+                "fld_source",
+                "维修来源",
+                "MultiSelect",
+                4,
+                False,
+                {"opt_bms": "BMS系统"},
+                ["BMS系统"],
+                False,
+            ),
+            FieldMeta(
+                "fld_device",
+                "设备名称",
+                "SingleSelect",
+                3,
+                False,
+                {},
+                ["E-217-HVDC-202"],
+                False,
+            ),
+            FieldMeta("fld_old", "维修汇总表", "DuplexLink", 21, False, {}, [], False),
+        ]
+        meta_by_name = {item.field_name: item for item in metas}
+        summary = {
+            "display_fields": {
+                "维修名称": "E楼蓄电池维修",
+                "对应来源": "BMS系统",
+                "设备名称": "E-217-HVDC-202",
+                "维修开始时间": "2026-07-11 10:00",
+                "维修结束时间": "2026-07-11 12:00",
+            },
+            "raw_fields": {
+                "对应来源": "['BMS系统']",
+                "维修开始时间": 1783735200000,
+                "维修结束时间": 1783742400000,
+            },
+        }
+
+        prepared, warnings = _TestMaintenancePortalService()._prepare_repair_followup_fields(
+            summary_record_id="rec_summary",
+            fields={},
+            summary_record=summary,
+            meta_by_name=meta_by_name,
+        )
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(prepared[REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME], "rec_summary")
+        self.assertEqual(prepared["维修简述"], "E楼蓄电池维修")
+        self.assertEqual(prepared["维修名称"], "E楼蓄电池维修")
+        self.assertEqual(prepared["维修开始时间"], 1783735200000)
+        self.assertEqual(prepared["结束时间"], 1783742400000)
+        self.assertEqual(prepared["维修来源"], ["BMS系统"])
+        self.assertEqual(prepared["设备名称"], "E-217-HVDC-202")
+        self.assertNotIn("维修汇总表", prepared)
+
+    def test_repair_followup_brand_model_options_are_scoped_by_brand(self):
+        brand = FieldMeta(
+            "fld_brand",
+            "设备品牌",
+            "SingleSelect",
+            3,
+            False,
+            {"opt_a": "品牌A", "opt_b": "品牌B"},
+            ["品牌A", "品牌B"],
+            False,
+        )
+        model = FieldMeta(
+            "fld_model",
+            "设备型号",
+            "SingleSelect",
+            3,
+            False,
+            {"opt_a1": "A-100", "opt_a2": "A-200", "opt_b1": "B-100"},
+            ["A-100", "A-200", "B-100"],
+            False,
+        )
+        records = [
+            {"display_fields": {"设备品牌": "品牌A", "设备型号": "A-200"}},
+            {"display_fields": {"设备品牌": "品牌B", "设备型号": "B-100"}},
+            {"display_fields": {"设备品牌": "品牌A", "设备型号": "不存在型号"}},
+        ]
+        summary = {"display_fields": {"设备品牌": "品牌A", "设备型号": "A-100"}}
+
+        result = MaintenancePortalService._repair_followup_brand_model_options(
+            records=records,
+            summary_record=summary,
+            meta_by_name={brand.field_name: brand, model.field_name: model},
+        )
+
+        self.assertEqual(result["品牌A"], ["A-100", "A-200"])
+        self.assertEqual(result["品牌B"], ["B-100"])
+
+    def test_repair_followup_brand_model_catalog_reads_all_records_once(self):
+        service = _TestMaintenancePortalService()
+        catalog_brand = FieldMeta(
+            "fld_catalog_brand",
+            "设备品牌",
+            "SingleSelect",
+            3,
+            False,
+            {},
+            ["圣阳", "双登", "南都"],
+            False,
+        )
+        catalog_model = FieldMeta(
+            "fld_catalog_model",
+            "设备型号",
+            "SingleSelect",
+            3,
+            False,
+            {},
+            ["SP12-100", "SP12-200", "GFMHR-1250W", "6-GFM-150HR"],
+            False,
+        )
+        calls = []
+        persisted = []
+
+        def fake_search(**kwargs):
+            calls.append(kwargs)
+            return [
+                {"display_fields": {"设备品牌": "圣阳", "设备型号": "SP12-100"}},
+                {"display_fields": {"设备品牌": "双登", "设备型号": "GFMHR-1250W"}},
+                {"display_fields": {"设备品牌": "圣阳", "设备型号": "SP12-200"}},
+                {"display_fields": {"设备品牌": "南都", "设备型号": "6-GFM-150HR"}},
+            ]
+
+        service._load_table_fields = (  # type: ignore[method-assign]
+            lambda **_kwargs: (
+                [catalog_brand, catalog_model],
+                {
+                    catalog_brand.field_name: catalog_brand,
+                    catalog_model.field_name: catalog_model,
+                },
+            )
+        )
+        service._search_table_records = fake_search  # type: ignore[method-assign]
+        service._state_store.get_backend_runtime = (  # type: ignore[method-assign]
+            lambda _key: None
+        )
+        service._state_store.put_backend_runtime = (  # type: ignore[method-assign]
+            lambda key, payload: persisted.append((key, payload))
+        )
+
+        first = service._load_repair_followup_brand_model_catalog({})
+        second = service._load_repair_followup_brand_model_catalog({})
+
+        self.assertEqual(first["圣阳"], ["SP12-100", "SP12-200"])
+        self.assertEqual(first["南都"], ["6-GFM-150HR"])
+        self.assertEqual(second, first)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["table_id"], REPAIR_EQUIPMENT_CATALOG_TABLE_ID)
+        self.assertEqual(calls[0]["limit"], REPAIR_FOLLOWUP_CATALOG_MAX_RECORDS)
+        self.assertEqual(persisted[0][0], REPAIR_FOLLOWUP_CATALOG_RUNTIME_KEY)
+        self.assertEqual(persisted[0][1]["record_count"], 4)
+
+    def test_repair_followup_brand_model_catalog_uses_fresh_sqlite_snapshot(self):
+        service = _TestMaintenancePortalService()
+        service._state_store.get_backend_runtime = (  # type: ignore[method-assign]
+            lambda key: {
+                "refreshed_at": time.time(),
+                "mapping": {"南都": ["6-GFM-150HR", "GFM-360E"]},
+            }
+            if key == REPAIR_FOLLOWUP_CATALOG_RUNTIME_KEY
+            else None
+        )
+        service._load_table_fields = (  # type: ignore[method-assign]
+            lambda **_kwargs: self.fail("fresh local snapshot must avoid remote fields read")
+        )
+        service._search_table_records = (  # type: ignore[method-assign]
+            lambda **_kwargs: self.fail("fresh local snapshot must avoid remote records read")
+        )
+
+        result = service._load_repair_followup_brand_model_catalog({})
+
+        self.assertEqual(result["南都"], ["6-GFM-150HR", "GFM-360E"])
+
+    def test_repair_followup_create_recovers_single_select_conversion_failure(self):
+        service = _TestMaintenancePortalService()
+        parent = FieldMeta(
+            "fld_parent",
+            REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME,
+            "Text",
+            1,
+            False,
+            {},
+            [],
+            False,
+        )
+        brand = FieldMeta(
+            "fld_brand",
+            "设备品牌",
+            "SingleSelect",
+            3,
+            False,
+            {},
+            ["品牌A"],
+            False,
+        )
+        model = FieldMeta(
+            "fld_model",
+            "设备型号",
+            "SingleSelect",
+            3,
+            False,
+            {},
+            ["A-100"],
+            False,
+        )
+        create_calls = []
+        patch_calls = []
+
+        def fake_create_record_fields(**kwargs):
+            create_calls.append(dict(kwargs["fields"]))
+            if len(create_calls) == 1:
+                raise PortalError("飞书记录创建失败: code=1254062, msg=SingleSelectFieldConvFail")
+            return {"data": {"record": {"record_id": "rec_followup_created"}}}
+
+        def fake_patch_record_fields(**kwargs):
+            patch_calls.append(dict(kwargs["fields"]))
+            if "设备型号" in kwargs["fields"]:
+                raise PortalError("飞书记录更新失败: code=1254062, msg=SingleSelectFieldConvFail")
+            return {}
+
+        service._create_record_fields = fake_create_record_fields  # type: ignore[method-assign]
+        service._patch_record_fields = fake_patch_record_fields  # type: ignore[method-assign]
+        service._delete_record_fields = (  # type: ignore[method-assign]
+            lambda **_kwargs: self.fail("recoverable select failure must not delete the base record")
+        )
+
+        payload, effective, warnings = service._create_repair_followup_fields(
+            {
+                REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: "rec_summary",
+                "设备品牌": "品牌A",
+                "设备型号": "A-100",
+            },
+            {parent.field_name: parent, brand.field_name: brand, model.field_name: model},
+        )
+
+        self.assertEqual(service._created_record_id(payload), "rec_followup_created")
+        self.assertEqual(create_calls[1], {REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: "rec_summary"})
+        self.assertEqual(patch_calls, [{"设备品牌": "品牌A"}, {"设备型号": "A-100"}])
+        self.assertEqual(effective["设备品牌"], "品牌A")
+        self.assertNotIn("设备型号", effective)
+        self.assertTrue(any("设备型号" in warning for warning in warnings))
 
     def test_repair_management_update_clears_stale_auto_end_time(self):
         service = _TestMaintenancePortalService()
@@ -13452,7 +14624,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
     def test_repair_management_create_filters_system_readonly_field_names(self):
         service = _TestMaintenancePortalService()
-        editable = FieldMeta("fld_building", "所属数据中心/楼栋（关联CMDB唯一ID关联,DE不选）", "SingleSelect", 1, False, {}, [], False)
+        editable = FieldMeta("fld_building", "所属数据中心/楼栋-使用", "Text", 1, False, {}, [], False)
         stage = FieldMeta("fld_stage", "流程", "Stage", 1, False, {}, [], False)
         created_at = FieldMeta("fld_created_at", "创建日期", "DateTime", 5, False, {}, [], False)
         formula_named = FieldMeta("fld_formula_named", "公式", "Text", 1, False, {}, [], False)
@@ -13475,14 +14647,14 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
         result = service.create_repair_management_record(
             {
-                "所属数据中心/楼栋（关联CMDB唯一ID关联,DE不选）": "E楼",
+                "所属数据中心/楼栋-使用": "E楼",
                 "流程": "待处理",
                 "创建日期": "2026-06-25",
                 "公式": "不可写",
             }
         )
 
-        self.assertEqual(captured["fields"], {"所属数据中心/楼栋（关联CMDB唯一ID关联,DE不选）": "E楼"})
+        self.assertEqual(captured["fields"], {"所属数据中心/楼栋-使用": "E楼"})
         self.assertEqual(result["field_count"], 1)
 
     def test_repair_management_delete_uses_repair_source_table(self):

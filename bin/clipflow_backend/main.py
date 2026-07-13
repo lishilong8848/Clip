@@ -2809,6 +2809,33 @@ class FastAPIPortalController:
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
 
+        @app.get("/api/repair-management/people")
+        async def repair_management_people(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_scope_or_error(
+                    session, request.query_params.get("scope") or "ALL"
+                )
+                try:
+                    limit = int(request.query_params.get("limit") or 80)
+                except ValueError:
+                    limit = 80
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.list_repair_followup_people,
+                    scope=scope,
+                    query=str(request.query_params.get("q") or ""),
+                    limit=limit,
+                    refresh=str(
+                        request.query_params.get("refresh") or ""
+                    ).lower()
+                    in {"1", "true", "yes"},
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
         @app.get("/api/repair-management/followups")
         async def repair_management_followups(request: Request):
             session = self._current_session(request)
@@ -2856,7 +2883,7 @@ class FastAPIPortalController:
                     PortalRuntime.service.create_repair_followup_record,
                     summary_record_id=str(payload.get("summary_record_id") or ""),
                     fields=payload.get("fields") or {},
-                    cmdb_record_id=str(payload.get("cmdb_record_id") or ""),
+                    cmdb_record_ids=payload.get("cmdb_record_ids") or [],
                     scope=scope,
                 )
                 return self._json_ok(request, session, data)
@@ -2880,7 +2907,7 @@ class FastAPIPortalController:
                     record_id,
                     summary_record_id=str(payload.get("summary_record_id") or ""),
                     fields=payload.get("fields") or {},
-                    cmdb_record_id=str(payload.get("cmdb_record_id") or ""),
+                    cmdb_record_ids=payload.get("cmdb_record_ids") or [],
                     scope=scope,
                 )
                 return self._json_ok(request, session, data)
@@ -2998,6 +3025,9 @@ class FastAPIPortalController:
                     payload.get("fields") if isinstance(payload.get("fields"), dict) else {},
                     source_event_id=str(payload.get("source_event_id") or ""),
                     source_repair_ids=payload.get("source_repair_ids") or [],
+                    replace_source_relations=bool(
+                        payload.get("replace_source_relations")
+                    ),
                     source_month=str(payload.get("source_month") or ""),
                     scope=str(payload.get("scope") or "ALL"),
                 )

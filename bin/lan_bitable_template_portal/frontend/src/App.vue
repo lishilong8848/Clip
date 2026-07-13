@@ -137,7 +137,7 @@ const ScopeHome = asyncPage(() => import("./components/ScopeHome.vue"));
 type Dict = LooseDict;
 
 const brandLogoSrc = "/assets/vnet-logo.png";
-const authKeepaliveMs = 30 * 60 * 1000;
+const authKeepaliveMs = 60 * 1000;
 const authKeepaliveRetryMs = 3 * 60 * 1000;
 const manualRefreshCooldownMs = 30 * 1000;
 const requestableScopes: ScopeOption[] = [
@@ -185,6 +185,7 @@ const auth = reactive({
 });
 
 let authKeepaliveTimer: number | null = null;
+let authKeepaliveInFlight = false;
 let authRedirectInProgress = false;
 let appDisposed = false;
 const refreshCooldownTimers = new Map<string, number>();
@@ -303,13 +304,33 @@ function scheduleAuthKeepalive(delayMs = authKeepaliveMs): void {
   if (appDisposed || !auth.loggedIn) return;
   authKeepaliveTimer = window.setTimeout(async () => {
     authKeepaliveTimer = null;
-    if (appDisposed || !auth.loggedIn) return;
+    if (appDisposed || !auth.loggedIn || authKeepaliveInFlight) return;
+    authKeepaliveInFlight = true;
     try {
       await loadAuthStatus({ silent: true });
     } catch {
       if (!appDisposed && auth.loggedIn) scheduleAuthKeepalive(authKeepaliveRetryMs);
+    } finally {
+      authKeepaliveInFlight = false;
     }
   }, delayMs);
+}
+
+function checkAuthAfterPageReturn(): void {
+  if (appDisposed || !auth.loggedIn || document.hidden || authKeepaliveInFlight) return;
+  clearAuthKeepalive();
+  authKeepaliveInFlight = true;
+  void loadAuthStatus({ silent: true })
+    .catch(() => {
+      if (!appDisposed && auth.loggedIn) scheduleAuthKeepalive(authKeepaliveRetryMs);
+    })
+    .finally(() => {
+      authKeepaliveInFlight = false;
+    });
+}
+
+function handleAuthVisibilityChange(): void {
+  if (!document.hidden) checkAuthAfterPageReturn();
 }
 
 function markAuthExpired(message = "登录已过期，请重新扫码登录。"): void {
@@ -534,6 +555,8 @@ onMounted(async () => {
   appDisposed = false;
   window.addEventListener(AUTH_EXPIRED_EVENT, handleGlobalAuthExpired);
   window.addEventListener("popstate", updateLocationRefs);
+  window.addEventListener("focus", checkAuthAfterPageReturn);
+  document.addEventListener("visibilitychange", handleAuthVisibilityChange);
   if (isSignaturePage.value) {
     authChecking.value = false;
     syncText.value = "";
@@ -558,6 +581,8 @@ onBeforeUnmount(() => {
   appDisposed = true;
   window.removeEventListener(AUTH_EXPIRED_EVENT, handleGlobalAuthExpired);
   window.removeEventListener("popstate", updateLocationRefs);
+  window.removeEventListener("focus", checkAuthAfterPageReturn);
+  document.removeEventListener("visibilitychange", handleAuthVisibilityChange);
   clearAuthKeepalive();
   for (const timer of refreshCooldownTimers.values()) window.clearTimeout(timer);
   refreshCooldownTimers.clear();

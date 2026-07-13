@@ -654,6 +654,12 @@ def _record_extra_chips(record: dict[str, Any], work_type: str, *, ongoing: bool
 
 
 def _action_for_record(record: dict[str, Any]) -> str:
+    if (
+        _item_work_type(record) == "change"
+        and str(record.get("source_work_type") or record.get("converted_from_work_type") or "").strip()
+        == "maintenance"
+    ):
+        return "start"
     progress = _record_progress(record)
     return "start" if "未开始" in progress or not progress else "update"
 
@@ -2338,6 +2344,53 @@ def render_workbench_lite(
       redirectLiteAuthRequired();
       return true;
     }}
+    const liteAuthHeartbeatMs = 60 * 1000;
+    let liteAuthHeartbeatTimer = null;
+    let liteAuthHeartbeatInFlight = false;
+    let liteAuthRedirecting = false;
+    function redirectLiteAuthRequiredOnce() {{
+      if (liteAuthRedirecting) return;
+      liteAuthRedirecting = true;
+      redirectLiteAuthRequired();
+    }}
+    function scheduleLiteAuthHeartbeat(delayMs = liteAuthHeartbeatMs) {{
+      if (liteAuthHeartbeatTimer !== null) window.clearTimeout(liteAuthHeartbeatTimer);
+      liteAuthHeartbeatTimer = window.setTimeout(() => {{
+        liteAuthHeartbeatTimer = null;
+        checkLiteAuthStatus();
+      }}, delayMs);
+    }}
+    async function checkLiteAuthStatus() {{
+      if (liteAuthHeartbeatInFlight || liteAuthRedirecting) return;
+      liteAuthHeartbeatInFlight = true;
+      try {{
+        const next = location.pathname + location.search + location.hash;
+        const response = await fetch('/api/auth/status?next=' + encodeURIComponent(next || '/'), {{
+          credentials: 'same-origin',
+          cache: 'no-store',
+        }});
+        const payload = await response.json().catch(() => ({{}}));
+        if (isLiteAuthRequired(response, payload)) {{
+          redirectLiteAuthRequiredOnce();
+          return;
+        }}
+        const status = payload && typeof payload.data === 'object' ? payload.data : payload;
+        if (response.ok && status && status.logged_in === false) {{
+          redirectLiteAuthRequiredOnce();
+          return;
+        }}
+      }} catch {{
+        // 网络短暂中断不等于登录过期，保留当前页面并在下一轮重试。
+      }} finally {{
+        liteAuthHeartbeatInFlight = false;
+        if (!liteAuthRedirecting) scheduleLiteAuthHeartbeat();
+      }}
+    }}
+    document.addEventListener('visibilitychange', () => {{
+      if (!document.hidden) checkLiteAuthStatus();
+    }});
+    window.addEventListener('focus', checkLiteAuthStatus);
+    scheduleLiteAuthHeartbeat();
     function setLiteFormDirty(enabled) {{
       liteFormDirty = Boolean(enabled);
       document.body.classList.toggle('has-dirty-lite-form', liteFormDirty);

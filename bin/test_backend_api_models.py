@@ -80,6 +80,7 @@ class _FakeRepairEventRouteService:
         *,
         source_event_id: str = "",
         source_repair_ids: list[str] | None = None,
+        replace_source_relations: bool = False,
         source_month: str = "",
         scope: str = "ALL",
     ) -> dict:
@@ -91,6 +92,7 @@ class _FakeRepairEventRouteService:
                 dict(fields or {}),
                 source_event_id,
                 tuple(source_repair_ids or []),
+                replace_source_relations,
                 source_month,
             )
         )
@@ -162,6 +164,20 @@ class _FakeRepairEventRouteService:
         self.calls.append(("cmdb_candidates", scope, query, limit))
         return {"records": [{"record_id": "rec-cmdb"}], "total": 1}
 
+    def list_repair_followup_people(
+        self,
+        *,
+        scope: str = "ALL",
+        query: str = "",
+        limit: int = 80,
+        refresh: bool = False,
+    ) -> dict:
+        self.calls.append(("followup_people", scope, query, limit, refresh))
+        return {
+            "people": [{"user_id": "ou-zhang", "name": "张宇航"}],
+            "total": 1,
+        }
+
     def get_repair_followup_records(
         self,
         *,
@@ -179,11 +195,17 @@ class _FakeRepairEventRouteService:
         *,
         summary_record_id: str,
         fields: dict,
-        cmdb_record_id: str = "",
+        cmdb_record_ids: list[str] | None = None,
         scope: str = "ALL",
     ) -> dict:
         self.calls.append(
-            ("create_followup", scope, summary_record_id, cmdb_record_id, dict(fields or {}))
+            (
+                "create_followup",
+                scope,
+                summary_record_id,
+                tuple(cmdb_record_ids or []),
+                dict(fields or {}),
+            )
         )
         return {"record_id": "rec-followup-new"}
 
@@ -193,7 +215,7 @@ class _FakeRepairEventRouteService:
         *,
         summary_record_id: str,
         fields: dict,
-        cmdb_record_id: str = "",
+        cmdb_record_ids: list[str] | None = None,
         scope: str = "ALL",
     ) -> dict:
         self.calls.append(
@@ -202,7 +224,7 @@ class _FakeRepairEventRouteService:
                 scope,
                 record_id,
                 summary_record_id,
-                cmdb_record_id,
+                tuple(cmdb_record_ids or []),
                 dict(fields or {}),
             )
         )
@@ -290,6 +312,7 @@ class BackendApiModelTests(unittest.TestCase):
                         "scope": "E",
                         "source_event_id": "rec-event",
                         "source_repair_ids": ["rec-repair"],
+                        "replace_source_relations": True,
                         "source_month": "2026-06",
                         "fields": {"专业": "电气"},
                     },
@@ -314,6 +337,10 @@ class BackendApiModelTests(unittest.TestCase):
                     "/api/repair-management/cmdb-candidates?scope=E&q=CRAH&limit=8",
                     headers=headers,
                 )
+                followup_people = client.get(
+                    "/api/repair-management/people?scope=E&q=张宇&limit=7",
+                    headers=headers,
+                )
                 followups = client.get(
                     "/api/repair-management/followups?scope=E&summary_record_id=rec-summary&q=进展&limit=9",
                     headers=headers,
@@ -324,7 +351,7 @@ class BackendApiModelTests(unittest.TestCase):
                     json={
                         "scope": "E",
                         "summary_record_id": "rec-summary",
-                        "cmdb_record_id": "rec-cmdb",
+                        "cmdb_record_ids": ["rec-cmdb-1", "rec-cmdb-2"],
                         "fields": {"维修进展描述": "处理中"},
                     },
                 )
@@ -334,7 +361,7 @@ class BackendApiModelTests(unittest.TestCase):
                     json={
                         "scope": "E",
                         "summary_record_id": "rec-summary",
-                        "cmdb_record_id": "rec-cmdb",
+                        "cmdb_record_ids": ["rec-cmdb-1", "rec-cmdb-2"],
                         "fields": {"维修进度": 1},
                     },
                 )
@@ -369,6 +396,7 @@ class BackendApiModelTests(unittest.TestCase):
                 repair_prefill,
                 repair_candidates,
                 cmdb_candidates,
+                followup_people,
                 followups,
                 followup_created,
                 followup_updated,
@@ -397,6 +425,7 @@ class BackendApiModelTests(unittest.TestCase):
                         {"专业": "电气"},
                         "rec-event",
                         ("rec-repair",),
+                        True,
                         "2026-06",
                     ),
                     ("delete_repair", "E", "rec-1"),
@@ -404,12 +433,13 @@ class BackendApiModelTests(unittest.TestCase):
                     ("repair_prefill", "E", "rec-event", "2026-06"),
                     ("repair_candidates", "E", "rec-event", "2026-06", "压缩机", 6),
                     ("cmdb_candidates", "E", "CRAH", 8),
+                    ("followup_people", "E", "张宇", 7, False),
                     ("list_followups", "E", "rec-summary", "进展", 9),
                     (
                         "create_followup",
                         "E",
                         "rec-summary",
-                        "rec-cmdb",
+                        ("rec-cmdb-1", "rec-cmdb-2"),
                         {"维修进展描述": "处理中"},
                     ),
                     (
@@ -417,7 +447,7 @@ class BackendApiModelTests(unittest.TestCase):
                         "E",
                         "rec-followup",
                         "rec-summary",
-                        "rec-cmdb",
+                        ("rec-cmdb-1", "rec-cmdb-2"),
                         {"维修进度": 1},
                     ),
                     ("delete_followup", "E", "rec-followup", "rec-summary"),

@@ -1,24 +1,27 @@
 <template>
   <section class="repair-management-page">
-    <div class="page-back-row">
-      <VnetBackButton @click="requestBack" />
-    </div>
-
     <div class="repair-hero">
-      <div>
+      <div class="repair-hero-title">
+        <VnetBackButton @click="requestBack" />
         <h2>维修项目与跟进</h2>
       </div>
       <div class="hero-actions">
         <button type="button" class="btn secondary" :disabled="loading" @click="loadRecords(true)">
-          {{ loading ? "读取中" : "刷新" }}
+          <RefreshCw :size="16" :class="{ spinning: loading }" aria-hidden="true" />
+          <span>{{ loading ? "读取中" : "刷新" }}</span>
         </button>
         <button type="button" class="btn primary" @click="requestStartCreate">
-          清空表单
+          <FilePlus2 :size="16" aria-hidden="true" />
+          <span>清空表单</span>
         </button>
       </div>
     </div>
 
     <MessageBanner v-if="messageText" :tone="messageTone" :text="messageText" />
+    <div v-if="hasAnyUnsavedChanges" class="page-unsaved-notice" role="status" aria-live="polite">
+      <AlertCircle :size="16" aria-hidden="true" />
+      <span>{{ unsavedNoticeText }}</span>
+    </div>
 
     <div class="repair-layout">
       <aside class="record-panel">
@@ -45,7 +48,14 @@
             :aria-current="selectedRecord?.record_id === record.record_id ? 'true' : undefined"
             @click="requestSelectRecord(record)"
           >
-            <span class="record-title">{{ record.title || "未命名维修项目" }}</span>
+            <span class="record-title-line">
+              <span class="record-title">{{ record.title || "未命名维修项目" }}</span>
+              <CheckCircle2
+                v-if="selectedRecord?.record_id === record.record_id"
+                :size="16"
+                aria-hidden="true"
+              />
+            </span>
             <span class="record-meta">
               <b>{{ recordBuildingLabel(record) }}</b>
               <b>{{ recordSpecialtyLabel(record) }}</b>
@@ -88,6 +98,7 @@
             <header class="source-relation-head">
               <h3>来源关系</h3>
               <div class="source-head-actions">
+                <span v-if="prefillLoading" class="source-loading">填入中</span>
                 <button type="button" class="btn quiet compact" @click="sourceExpanded = !sourceExpanded">
                   {{ sourceExpanded ? "收起" : "更改来源" }}
                 </button>
@@ -97,16 +108,26 @@
               <div class="source-relation-item">
                 <span class="relation-order">1</span>
                 <div><b>关联事件单</b><small>{{ selectedEventSummary }}</small></div>
-                <button type="button" class="btn secondary" @click="openSourcePicker('event')">
-                  {{ sourceEventId ? "重新选择" : "选择事件" }}
-                </button>
+                <div class="relation-actions">
+                  <button type="button" class="btn secondary" :disabled="prefillLoading" @click="openSourcePicker('event')">
+                    {{ sourceEventId ? "重新选择" : "选择事件" }}
+                  </button>
+                  <button v-if="sourceEventId" type="button" class="btn quiet" :disabled="prefillLoading" @click="clearEventSelection">
+                    清除
+                  </button>
+                </div>
               </div>
               <div class="source-relation-item">
                 <span class="relation-order">2</span>
                 <div><b>设备检修关联</b><small>{{ selectedRepairSummary }}</small></div>
-                <button type="button" class="btn secondary" @click="openSourcePicker('repair')">
-                  {{ selectedRepairIds.length ? "重新选择" : "选择检修通告" }}
-                </button>
+                <div class="relation-actions">
+                  <button type="button" class="btn secondary" :disabled="prefillLoading" @click="openSourcePicker('repair')">
+                    {{ selectedRepairIds.length ? "重新选择" : "选择检修通告" }}
+                  </button>
+                  <button v-if="selectedRepairIds.length" type="button" class="btn quiet" :disabled="prefillLoading" @click="clearRepairSelection">
+                    清除
+                  </button>
+                </div>
               </div>
             </div>
             <div v-else class="source-summary-row">
@@ -119,81 +140,39 @@
           <header class="editor-head">
             <div>
               <h3>{{ editingRecordId ? selectedRecordTitle : "填写维修项目" }}</h3>
-              <p v-if="eventTitle">来自事件：{{ eventTitle }}</p>
-            </div>
-            <div class="editor-actions">
-              <button v-if="editingRecordId" type="button" class="btn secondary" @click="requestOpenRepairNoticeWorkbench">
-                检修通告
-              </button>
-              <button type="button" class="btn quiet" :disabled="saving" @click="requestResetDraft">重置</button>
-              <button v-if="editingRecordId" type="button" class="btn danger" :disabled="saving" @click="requestDeleteRecord">
-                删除
-              </button>
-              <button type="button" class="btn primary" :disabled="saving || !canSaveRecord" @click="saveRecord">
-                {{ saving ? "保存中" : editingRecordId ? "保存修改" : "保存维修单" }}
-              </button>
+              <p v-if="sourceEventId && eventTitle">来自事件：{{ eventTitle }}</p>
             </div>
           </header>
 
-          <div v-if="missingRequiredEditableFields.length" class="form-warning">
+          <div v-if="validationAttempted && missingRequiredEditableFields.length" class="form-warning">
             还缺 {{ missingRequiredEditableFields.length }} 项：{{ missingRequiredEditableFields.join("、") }}
           </div>
 
           <div v-if="!fields.length && loading" class="empty-state">正在读取字段...</div>
           <div v-else-if="!editableFields.length" class="empty-state">暂无可填写字段</div>
-          <div v-else class="field-grid">
-            <label
-              v-for="field in editableFields"
-              :key="field.field_name"
-              class="field-card"
-              :class="{ required: isRequiredField(field.field_name) && !editingRecordId }"
-            >
-              <span><b>{{ field.field_name }}</b><small v-if="fieldBadge(field)">{{ fieldBadge(field) }}</small></span>
-              <select
-                v-if="field.options?.length"
-                v-model="fieldDraft[field.field_name]"
-                :required="!editingRecordId && isRequiredField(field.field_name)"
-                @change="markFieldDirty(field.field_name)"
-              >
-                <option value="">请选择{{ field.field_name }}</option>
-                <option
-                  v-if="fieldDraft[field.field_name] && !field.options.includes(fieldDraft[field.field_name])"
-                  :value="fieldDraft[field.field_name]"
-                >{{ fieldDraft[field.field_name] }}</option>
-                <option v-for="option in field.options" :key="option" :value="option">{{ option }}</option>
-              </select>
-              <input
-                v-else-if="isDateField(field)"
-                v-model="fieldDraft[field.field_name]"
-                type="datetime-local"
-                :required="!editingRecordId && isRequiredField(field.field_name)"
-                @input="markFieldDirty(field.field_name)"
-              />
-              <input
-                v-else-if="isNumberField(field)"
-                v-model="fieldDraft[field.field_name]"
-                type="number"
-                step="any"
-                :required="!editingRecordId && isRequiredField(field.field_name)"
-                @input="markFieldDirty(field.field_name)"
-              />
-              <textarea
-                v-else-if="usesTextarea(field.field_name)"
-                v-model="fieldDraft[field.field_name]"
-                placeholder="填写字段内容"
-                :required="!editingRecordId && isRequiredField(field.field_name)"
-                rows="2"
-                @input="markFieldDirty(field.field_name)"
-              />
-              <input
-                v-else
-                v-model="fieldDraft[field.field_name]"
-                type="text"
-                placeholder="填写字段内容"
-                :required="!editingRecordId && isRequiredField(field.field_name)"
-                @input="markFieldDirty(field.field_name)"
-              />
-            </label>
+          <div v-else class="project-form-sections">
+            <section v-for="group in projectFieldGroups" :key="group.key" class="project-field-section">
+              <header>
+                <h4>{{ group.label }}</h4>
+                <span>{{ group.fields.length }} 项</span>
+              </header>
+              <div class="project-field-grid">
+                <RepairFieldControl
+                  v-for="field in group.fields"
+                  :key="field.field_name"
+                  :field="field"
+                  :input-id="fieldInputId(field)"
+                  :label="projectFieldLabel(field.field_name)"
+                  :model-value="fieldDraft[field.field_name]"
+                  :required="isRequiredField(field.field_name)"
+                  :error="fieldValidationError(field.field_name)"
+                  :wide="usesTextarea(field.field_name)"
+                  compact
+                  @update:model-value="fieldDraft[field.field_name] = $event"
+                  @edited="markFieldDirty(field.field_name)"
+                />
+              </div>
+            </section>
           </div>
           <details v-if="readonlyPreviewFields.length" class="readonly-summary" :open="!editingRecordId">
             <summary>自动填写字段（{{ visibleReadonlyFields.length }} 项）</summary>
@@ -204,6 +183,48 @@
               </div>
             </div>
           </details>
+
+          <footer class="editor-action-bar">
+            <div class="save-state" :class="projectSaveStateTone">
+              <component :is="projectSaveStateIcon" :size="17" aria-hidden="true" />
+              <span>{{ projectSaveStateText }}</span>
+            </div>
+            <div class="editor-action-buttons">
+              <button
+                v-if="editingRecordId"
+                type="button"
+                class="btn secondary"
+                @click="requestOpenRepairNoticeWorkbench"
+              >
+                <Wrench :size="16" aria-hidden="true" />
+                <span>检修通告</span>
+              </button>
+              <button type="button" class="btn quiet" :disabled="saving" @click="requestResetDraft">
+                <RotateCcw :size="16" aria-hidden="true" />
+                <span>重置</span>
+              </button>
+              <button
+                v-if="editingRecordId"
+                type="button"
+                class="btn danger"
+                :disabled="saving"
+                @click="requestDeleteRecord"
+              >
+                <Trash2 :size="16" aria-hidden="true" />
+                <span>删除</span>
+              </button>
+              <button
+                type="button"
+                class="btn primary"
+                :disabled="saving || !canSaveRecord"
+                :title="saveDisabledReason"
+                @click="saveRecord"
+              >
+                <Save :size="16" aria-hidden="true" />
+                <span>{{ saving ? "保存中" : editingRecordId ? "保存修改" : "保存维修单" }}</span>
+              </button>
+            </div>
+          </footer>
         </div>
 
         <RepairFollowupPanel
@@ -264,7 +285,18 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import {
+  AlertCircle,
+  CheckCircle2,
+  FilePlus2,
+  LoaderCircle,
+  RefreshCw,
+  RotateCcw,
+  Save,
+  Trash2,
+  Wrench,
+} from "lucide-vue-next";
 import { requestJson } from "../api/client";
 import { navigate, navigateHard } from "../navigation";
 import {
@@ -273,6 +305,7 @@ import {
   parseRepairDraftValue as parseDraftValue,
   repairDraftInputValue,
   repairEventRecordId as eventRecordId,
+  repairFieldPreservesRawValue,
   repairFieldUsesTextarea,
   repairFieldValueToText as fieldValueToText,
   repairRecordBuildingLabel as recordBuildingLabel,
@@ -283,6 +316,7 @@ import {
 import type { LooseDict, ScopeOption } from "../types";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import MessageBanner from "./MessageBanner.vue";
+import RepairFieldControl from "./RepairFieldControl.vue";
 import RepairFollowupPanel from "./RepairFollowupPanel.vue";
 import RecordPickerDialog from "./RecordPickerDialog.vue";
 import VnetBackButton from "./VnetBackButton.vue";
@@ -291,8 +325,32 @@ type PickerColumn = { key: string; label: string; width?: string };
 type SourcePicker = "" | "event" | "repair";
 type WorkspaceTab = "project" | "followups";
 type ConfirmTone = "warning" | "danger" | "primary";
+type ProjectFieldGroupKey = "basic" | "fault" | "execution" | "other";
 
 const RECORD_PAGE_SIZE = 30;
+
+const PROJECT_FIELD_GROUPS: Array<{ key: ProjectFieldGroupKey; label: string }> = [
+  { key: "basic", label: "基础信息" },
+  { key: "fault", label: "故障与设备" },
+  { key: "execution", label: "维修执行" },
+  { key: "other", label: "其他信息" },
+];
+const BASIC_FIELD_NAMES = new Set([
+  "维修名称",
+  "故障发生时间",
+  "所属专业",
+  "专业",
+  "专业（推送消息用）",
+  "楼栋",
+  "所属数据中心/楼栋-使用",
+  "所属数据中心/楼栋（关联CMDB唯一ID关联,DE不选）",
+]);
+const PROJECT_FIELD_LABELS: Record<string, string> = {
+  "故障维修原因": "故障原因",
+  "故障发生现象描述": "故障现象",
+  "所属专业": "专业",
+  "所属数据中心/楼栋-使用": "楼栋",
+};
 
 const ASSOCIATION_FIELD_NAMES = new Set(["关联事件单", "设备检修关联", "维修跟进记录"]);
 const eventPickerColumns: PickerColumn[] = [
@@ -340,6 +398,7 @@ const repairCandidateLoading = ref(false);
 const repairSearchText = ref("");
 const repairCandidates = ref<LooseDict[]>([]);
 const selectedRepairIds = ref<string[]>([]);
+const selectedRepairRecords = ref<LooseDict[]>([]);
 const repairRecommendedIds = ref<string[]>([]);
 const activePicker = ref<SourcePicker>("");
 const prefillLoading = ref(false);
@@ -350,6 +409,7 @@ const activeWorkspaceTab = ref<WorkspaceTab>("project");
 const sourceExpanded = ref(true);
 const hasUnsavedChanges = ref(false);
 const followupHasUnsavedChanges = ref(false);
+const validationAttempted = ref(false);
 const creatingNewProject = ref(false);
 const recordPage = ref(1);
 const confirmDialog = reactive({
@@ -363,6 +423,10 @@ const confirmDialog = reactive({
 });
 let pendingConfirmAction: null | (() => void | Promise<void>) = null;
 let searchTimer: ReturnType<typeof setTimeout> | undefined;
+let recordsRequestVersion = 0;
+let eventRequestVersion = 0;
+let repairRequestVersion = 0;
+let prefillRequestVersion = 0;
 
 const routeParams = new URLSearchParams(window.location.search);
 const routeEventTitle = String(routeParams.get("event_title") || "").trim();
@@ -375,8 +439,20 @@ const readonlyFields = computed(() => sortedFields(fields.value.filter((field) =
 const visibleReadonlyFields = computed(() => readonlyFields.value.filter(
   (field) => !ASSOCIATION_FIELD_NAMES.has(String(field.field_name || "")),
 ));
-const readonlyPreviewFields = computed(() => {
-  return visibleReadonlyFields.value;
+const readonlyPreviewFields = computed(() => visibleReadonlyFields.value.filter(
+  (field) => Boolean(displayReadonlyValue(field.field_name)),
+));
+const projectFieldGroups = computed(() => {
+  const grouped = new Map<ProjectFieldGroupKey, LooseDict[]>(
+    PROJECT_FIELD_GROUPS.map((group) => [group.key, []]),
+  );
+  for (const field of editableFields.value) {
+    grouped.get(projectFieldGroup(field.field_name))?.push(field);
+  }
+  return PROJECT_FIELD_GROUPS.map((group) => ({
+    ...group,
+    fields: grouped.get(group.key) || [],
+  })).filter((group) => group.fields.length);
 });
 const hasSelectedSources = computed(() => Boolean(
   sourceEventId.value || selectedRepairIds.value.length,
@@ -390,7 +466,7 @@ const selectedEventSummary = computed(() => {
 });
 const selectedRepairSummary = computed(() => selectedSourceSummary(
   selectedRepairIds.value,
-  repairCandidates.value,
+  [...selectedRepairRecords.value, ...repairCandidates.value],
   "title",
 ));
 
@@ -401,7 +477,6 @@ const hasWritableDraft = computed(() => {
   });
 });
 const missingRequiredEditableFields = computed(() => {
-  if (editingRecordId.value) return [];
   const editableNames = new Set(editableFields.value.map((field) => String(field.field_name || "")));
   const missing: string[] = [];
   for (const group of REPAIR_REQUIRED_FIELD_GROUPS) {
@@ -414,40 +489,138 @@ const missingRequiredEditableFields = computed(() => {
   return missing;
 });
 const canSaveRecord = computed(() => {
-  if (saving.value || !hasWritableDraft.value) return false;
-  return missingRequiredEditableFields.value.length === 0;
+  return !saving.value && !prefillLoading.value && hasWritableDraft.value;
+});
+const hasAnyUnsavedChanges = computed(() => (
+  hasUnsavedChanges.value || followupHasUnsavedChanges.value
+));
+const unsavedNoticeText = computed(() => {
+  if (hasUnsavedChanges.value && followupHasUnsavedChanges.value) {
+    return "项目信息和跟进记录有未保存修改";
+  }
+  return followupHasUnsavedChanges.value
+    ? "跟进记录有未保存修改"
+    : "项目信息有未保存修改";
+});
+const projectSaveStateText = computed(() => {
+  if (saving.value) return "保存中";
+  if (missingRequiredEditableFields.value.length) return `缺 ${missingRequiredEditableFields.value.length} 项`;
+  if (hasUnsavedChanges.value) return "有未保存修改";
+  return editingRecordId.value ? "已保存" : "等待填写";
+});
+const projectSaveStateTone = computed(() => {
+  if (saving.value) return "saving";
+  if (missingRequiredEditableFields.value.length) return "warning";
+  if (hasUnsavedChanges.value) return "dirty";
+  return "saved";
+});
+const projectSaveStateIcon = computed(() => {
+  if (saving.value) return LoaderCircle;
+  if (missingRequiredEditableFields.value.length || hasUnsavedChanges.value) return AlertCircle;
+  return CheckCircle2;
+});
+const saveDisabledReason = computed(() => {
+  if (saving.value) return "正在保存";
+  if (prefillLoading.value) return "关联字段正在填入";
+  if (!hasWritableDraft.value) return "请先填写维修项目";
+  if (missingRequiredEditableFields.value.length) {
+    return `请先填写：${missingRequiredEditableFields.value.join("、")}`;
+  }
+  return "保存维修项目";
 });
 
 const selectedRecordTitle = computed(() => selectedRecord.value?.title || "未命名维修项目");
 const recordPageCount = computed(() => Math.max(1, Math.ceil(total.value / RECORD_PAGE_SIZE)));
 
-function fieldBadge(field: LooseDict): string {
-  const fieldName = String(field.field_name || "");
-  return !editingRecordId.value && isRequiredField(fieldName) ? "必填" : "";
-}
-
-function isDateField(field: LooseDict): boolean {
-  return String(field.ui_type || "").toLowerCase().includes("datetime");
-}
-
-function isNumberField(field: LooseDict): boolean {
-  return String(field.ui_type || "").toLowerCase() === "number";
-}
-
 function usesTextarea(fieldName: unknown): boolean {
   return repairFieldUsesTextarea(fieldName);
+}
+
+function projectFieldGroup(fieldName: unknown): ProjectFieldGroupKey {
+  const name = String(fieldName || "").trim();
+  if (BASIC_FIELD_NAMES.has(name)) return "basic";
+  if (/(故障|设备|位置|地点|机房|CMDB|唯一\s*id|编号|品牌|型号|容量|生产日期|使用年限)/i.test(name)) {
+    return "fault";
+  }
+  if (/(维修方|维修人员|供应商|方案|措施|备件|费用|质保|开始时间|结束时间|维修进度|跟进|附件|推送群组|负责人|审批人)/.test(name)) {
+    return "execution";
+  }
+  return "other";
+}
+
+function fieldInputId(field: LooseDict): string {
+  return `repair-project-field-${encodeURIComponent(String(field.field_name || "field"))}`;
+}
+
+function projectFieldLabel(fieldName: unknown): string {
+  const name = String(fieldName || "").trim();
+  return PROJECT_FIELD_LABELS[name] || name;
+}
+
+function fieldValidationError(fieldName: unknown): string {
+  const name = String(fieldName || "").trim();
+  if (!validationAttempted.value || !missingRequiredEditableFields.value.includes(name)) return "";
+  return `请填写${name}`;
+}
+
+async function focusFirstMissingField(): Promise<void> {
+  const firstName = missingRequiredEditableFields.value[0];
+  if (!firstName) return;
+  const field = editableFields.value.find((item) => String(item.field_name || "") === firstName);
+  if (!field) return;
+  await nextTick();
+  const control = document.getElementById(fieldInputId(field));
+  control?.closest(".repair-field-control")?.scrollIntoView({ behavior: "smooth", block: "center" });
+  window.setTimeout(() => control?.focus(), 180);
 }
 
 function selectedSourceSummary(ids: string[], candidates: LooseDict[], preferredKey: string): string {
   if (!ids.length) return "未选择";
   const idSet = new Set(ids);
-  const labels = candidates
-    .filter((item) => idSet.has(String(item.record_id || "")))
-    .map((item) => String(item[preferredKey] || item.title || "").trim())
-    .filter(Boolean);
+  const seenIds = new Set<string>();
+  const labels: string[] = [];
+  for (const item of candidates) {
+    const recordId = String(item.record_id || "").trim();
+    if (!idSet.has(recordId) || seenIds.has(recordId)) continue;
+    seenIds.add(recordId);
+    const label = String(item[preferredKey] || item.title || "").trim();
+    if (label) labels.push(label);
+  }
   if (!labels.length) return "已关联";
   const preview = labels.slice(0, 2).join("；");
   return labels.length > 2 ? `${preview} 等 ${labels.length} 条` : preview;
+}
+
+function relationDisplayText(value: unknown): string {
+  if (typeof value === "string" || typeof value === "number") return String(value).trim();
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => relationDisplayText(item))
+      .filter(Boolean)
+      .join("；");
+  }
+  if (!value || typeof value !== "object") return "";
+  const item = value as LooseDict;
+  for (const key of ["text", "name", "title", "value"]) {
+    const label = relationDisplayText(item[key]);
+    if (label) return label;
+  }
+  return "";
+}
+
+function seedSelectedSourceLabels(displayFields: LooseDict): void {
+  const eventLabel = relationDisplayText(displayFields["关联事件单"]);
+  if (sourceEventId.value && eventLabel) {
+    selectedEvent.value = { record_id: sourceEventId.value, title: eventLabel };
+    eventTitle.value = eventLabel;
+  }
+  const repairLabel = relationDisplayText(displayFields["设备检修关联"]);
+  if (selectedRepairIds.value.length && repairLabel) {
+    selectedRepairRecords.value = [{
+      record_id: selectedRepairIds.value[0],
+      title: repairLabel,
+    }];
+  }
 }
 
 function markFieldDirty(fieldName: unknown): void {
@@ -553,15 +726,10 @@ function requestResetDraft(): void {
   );
 }
 
-function handleBeforeUnload(event: BeforeUnloadEvent): void {
-  if (!hasUnsavedChanges.value && !followupHasUnsavedChanges.value) return;
-  event.preventDefault();
-  event.returnValue = "";
-}
-
 function resetDraft(): void {
   dirtyFieldNames.clear();
   hasUnsavedChanges.value = false;
+  validationAttempted.value = false;
   if (editingRecordId.value && selectedRecord.value) {
     const savedDisplayFields = selectedRecord.value.display_fields || {};
     eventTitle.value = String(savedDisplayFields["事件描述"] || savedDisplayFields["故障维修原因"] || "");
@@ -572,6 +740,8 @@ function resetDraft(): void {
     selectedEvent.value = sourceEventId.value
       ? { record_id: sourceEventId.value, title: eventTitle.value }
       : null;
+    selectedRepairRecords.value = [];
+    seedSelectedSourceLabels(savedDisplayFields);
   }
   for (const key of Object.keys(fieldDraft)) delete fieldDraft[key];
   for (const key of Object.keys(prefillPreview)) delete prefillPreview[key];
@@ -579,8 +749,12 @@ function resetDraft(): void {
   const displayFields = selectedRecord.value?.display_fields || {};
   for (const field of editableFields.value) {
     const name = String(field.field_name || "");
-    const rawValue = Object.prototype.hasOwnProperty.call(rawFields, name) ? rawFields[name] : displayFields[name];
-    fieldDraft[name] = repairDraftInputValue(field, rawValue);
+    const fieldType = Number(field.field_type || 0);
+    const prefersRaw = [2, 5, 15].includes(fieldType);
+    const value = prefersRaw && Object.prototype.hasOwnProperty.call(rawFields, name)
+      ? rawFields[name]
+      : Object.prototype.hasOwnProperty.call(displayFields, name) ? displayFields[name] : rawFields[name];
+    fieldDraft[name] = repairDraftInputValue(field, value);
   }
   if (!editingRecordId.value && eventTitle.value) prefillEventTitle();
 }
@@ -618,6 +792,7 @@ function prefillEventTitle(): void {
 }
 
 async function loadEventCandidates(): Promise<void> {
+  const requestVersion = ++eventRequestVersion;
   eventLoading.value = true;
   try {
     const params = new URLSearchParams({
@@ -627,14 +802,23 @@ async function loadEventCandidates(): Promise<void> {
       limit: "120",
     });
     const payload = await requestJson(`/api/repair-management/event-candidates?${params.toString()}`);
+    if (requestVersion !== eventRequestVersion) return;
     eventCandidates.value = Array.isArray(payload.records) ? payload.records : [];
+    const selected = eventCandidates.value.find(
+      (item) => eventRecordId(item) === sourceEventId.value,
+    );
+    if (selected) {
+      selectedEvent.value = selected;
+      eventTitle.value = String(selected.title || selected.alarm_desc || eventTitle.value || "");
+    }
     if (!eventCandidates.value.length) {
       showMessage("当前条件下没有可选择的事件。", "warning");
     }
   } catch (error: unknown) {
+    if (requestVersion !== eventRequestVersion) return;
     showMessage(error instanceof Error ? error.message : "事件候选读取失败。", "failed");
   } finally {
-    eventLoading.value = false;
+    if (requestVersion === eventRequestVersion) eventLoading.value = false;
   }
 }
 
@@ -666,10 +850,10 @@ async function confirmEventSelection(recordIds: string[], quiet = false): Promis
   selectedEvent.value = event;
   eventTitle.value = String(event.title || eventTitle.value || "");
   activePicker.value = "";
-  dirtyFieldNames.clear();
   prefillWarnings.value = [];
   if (changed) {
     selectedRepairIds.value = [];
+    selectedRepairRecords.value = [];
     repairRecommendedIds.value = [];
   }
   await applyCombinedPrefill(true);
@@ -679,6 +863,7 @@ async function confirmEventSelection(recordIds: string[], quiet = false): Promis
 }
 
 async function loadRepairCandidates(): Promise<void> {
+  const requestVersion = ++repairRequestVersion;
   repairCandidateLoading.value = true;
   try {
     const params = new URLSearchParams({
@@ -689,19 +874,59 @@ async function loadRepairCandidates(): Promise<void> {
       limit: "80",
     });
     const payload = await requestJson(`/api/repair-management/repair-candidates?${params.toString()}`);
+    if (requestVersion !== repairRequestVersion) return;
     repairCandidates.value = Array.isArray(payload.records) ? payload.records : [];
+    const selectedIdSet = new Set(selectedRepairIds.value);
+    const matchedSelected = repairCandidates.value.filter(
+      (item) => selectedIdSet.has(String(item.record_id || "").trim()),
+    );
+    if (matchedSelected.length) selectedRepairRecords.value = matchedSelected;
     repairRecommendedIds.value = Array.isArray(payload.auto_selected_ids)
       ? payload.auto_selected_ids.map((item: unknown) => String(item || "").trim()).filter(Boolean).slice(0, 1)
       : [];
   } catch (error: unknown) {
+    if (requestVersion !== repairRequestVersion) return;
     showMessage(error instanceof Error ? error.message : "设备检修候选读取失败。", "failed");
   } finally {
-    repairCandidateLoading.value = false;
+    if (requestVersion === repairRequestVersion) repairCandidateLoading.value = false;
   }
+}
+
+async function refreshPrefillAfterSourceChange(): Promise<void> {
+  if (hasSelectedSources.value) {
+    await applyCombinedPrefill(true);
+  } else {
+    prefillRequestVersion += 1;
+    prefillLoading.value = false;
+    replacePrefillFields({}, true);
+    prefillWarnings.value = [];
+  }
+  hasUnsavedChanges.value = true;
+}
+
+async function clearEventSelection(): Promise<void> {
+  sourceEventId.value = "";
+  selectedEvent.value = null;
+  eventTitle.value = "";
+  repairRecommendedIds.value = [];
+  await refreshPrefillAfterSourceChange();
+  showMessage("事件关联已清除。", "success");
+}
+
+async function clearRepairSelection(): Promise<void> {
+  selectedRepairIds.value = [];
+  selectedRepairRecords.value = [];
+  repairRecommendedIds.value = [];
+  await refreshPrefillAfterSourceChange();
+  showMessage("检修通告关联已清除。", "success");
 }
 
 async function confirmRepairSelection(recordIds: string[]): Promise<void> {
   selectedRepairIds.value = recordIds.map((item) => String(item || "").trim()).filter(Boolean).slice(0, 1);
+  const selectedIdSet = new Set(selectedRepairIds.value);
+  selectedRepairRecords.value = repairCandidates.value.filter(
+    (item) => selectedIdSet.has(String(item.record_id || "").trim()),
+  );
   repairRecommendedIds.value = [];
   activePicker.value = "";
   await applyCombinedPrefill(true);
@@ -719,6 +944,7 @@ async function handleFollowupChanged(): Promise<void> {
 
 async function applyCombinedPrefill(quiet = false): Promise<void> {
   if (!hasSelectedSources.value) return;
+  const requestVersion = ++prefillRequestVersion;
   prefillLoading.value = true;
   try {
     const payload = await requestJson("/api/repair-management/prefill", {
@@ -730,6 +956,7 @@ async function applyCombinedPrefill(quiet = false): Promise<void> {
         source_month: currentMonthKey(),
       }),
     });
+    if (requestVersion !== prefillRequestVersion) return;
     if (payload.event && typeof payload.event === "object") {
       const event = payload.event as LooseDict;
       selectedEvent.value = event;
@@ -748,9 +975,10 @@ async function applyCombinedPrefill(quiet = false): Promise<void> {
       showMessage("已按所选关联记录重新填入。", "success");
     }
   } catch (error: unknown) {
+    if (requestVersion !== prefillRequestVersion) return;
     showMessage(error instanceof Error ? error.message : "自动填入失败。", "failed");
   } finally {
-    prefillLoading.value = false;
+    if (requestVersion === prefillRequestVersion) prefillLoading.value = false;
   }
 }
 
@@ -763,15 +991,21 @@ function selectRecordNow(record: LooseDict): void {
   selectedRepairIds.value = Array.isArray(record.source_repair_ids)
     ? record.source_repair_ids.map((item: unknown) => String(item || "").trim()).filter(Boolean).slice(0, 1)
     : [];
+  selectedRepairRecords.value = [];
   repairRecommendedIds.value = [];
   const displayFields = record.display_fields || {};
   eventTitle.value = String(displayFields["事件描述"] || displayFields["故障维修原因"] || "");
+  const matchedEvent = eventCandidates.value.find(
+    (item) => eventRecordId(item) === sourceEventId.value,
+  );
   selectedEvent.value = sourceEventId.value
-    ? { record_id: sourceEventId.value, title: eventTitle.value }
+    ? matchedEvent || { record_id: sourceEventId.value, title: eventTitle.value }
     : null;
+  seedSelectedSourceLabels(displayFields);
   resetDraft();
   sourceExpanded.value = false;
   activeWorkspaceTab.value = "project";
+  if (selectedRepairIds.value.length) void loadRepairCandidates();
 }
 
 function requestSelectRecord(record: LooseDict): void {
@@ -788,6 +1022,7 @@ function startCreateNow(): void {
   eventTitle.value = "";
   selectedEvent.value = null;
   selectedRepairIds.value = [];
+  selectedRepairRecords.value = [];
   repairRecommendedIds.value = [];
   repairCandidates.value = [];
   prefillWarnings.value = [];
@@ -820,6 +1055,7 @@ function changeRecordPage(delta: number): void {
     eventTitle.value = "";
     selectedEvent.value = null;
     selectedRepairIds.value = [];
+    selectedRepairRecords.value = [];
     repairRecommendedIds.value = [];
     resetDraft();
     void loadRecords(false);
@@ -827,9 +1063,11 @@ function changeRecordPage(delta: number): void {
 }
 
 async function loadRecords(announce = false): Promise<void> {
+  const requestVersion = ++recordsRequestVersion;
   loading.value = true;
   try {
     const payload = await requestJson(`/api/repair-management/records?${scopedQuery()}`);
+    if (requestVersion !== recordsRequestVersion) return;
     fields.value = Array.isArray(payload.fields) ? payload.fields : [];
     records.value = Array.isArray(payload.records) ? payload.records : [];
     total.value = Number(payload.total || records.value.length || 0);
@@ -844,7 +1082,11 @@ async function loadRecords(announce = false): Promise<void> {
       const current = records.value.find((item) => String(item.record_id || "") === editingRecordId.value);
       if (current) {
         selectedRecord.value = current;
-      } else if (!hasUnsavedChanges.value && records.value.length) {
+      } else if (
+        !hasUnsavedChanges.value
+        && !followupHasUnsavedChanges.value
+        && records.value.length
+      ) {
         selectRecordNow(records.value[0]);
       }
     } else if (!creatingNewProject.value && records.value.length) {
@@ -860,26 +1102,43 @@ async function loadRecords(announce = false): Promise<void> {
       showMessage(records.value.length ? "维修项目已刷新。" : "当前筛选下没有维修项目。", records.value.length ? "success" : "warning");
     }
   } catch (error: unknown) {
+    if (requestVersion !== recordsRequestVersion) return;
     showMessage(error instanceof Error ? error.message : "维修项目读取失败。", "failed");
   } finally {
-    loading.value = false;
+    if (requestVersion === recordsRequestVersion) loading.value = false;
   }
 }
 
 function writablePayload(): Record<string, unknown> {
   const result: Record<string, unknown> = {};
+  const rawFields = selectedRecord.value?.raw_fields || {};
   for (const field of editableFields.value) {
     const name = String(field.field_name || "");
     const value = String(fieldDraft[name] ?? "");
     if (value.trim() === "" && !editingRecordId.value) continue;
-    result[name] = parseDraftValue(value);
+    if (
+      editingRecordId.value
+      && !dirtyFieldNames.has(name)
+      && repairFieldPreservesRawValue(field)
+      && Object.prototype.hasOwnProperty.call(rawFields, name)
+    ) {
+      result[name] = rawFields[name];
+      continue;
+    }
+    result[name] = parseDraftValue(value, field);
   }
   return result;
 }
 
 async function saveRecord(): Promise<void> {
+  validationAttempted.value = true;
+  if (prefillLoading.value) {
+    showMessage("关联字段正在填入，请稍后保存。", "warning");
+    return;
+  }
   if (missingRequiredEditableFields.value.length) {
     showMessage(`请先填写：${missingRequiredEditableFields.value.join("、")}。`, "warning");
+    await focusFirstMissingField();
     return;
   }
   saving.value = true;
@@ -888,6 +1147,7 @@ async function saveRecord(): Promise<void> {
       scope: props.scope || "ALL",
       source_event_id: sourceEventId.value,
       source_repair_ids: selectedRepairIds.value,
+      replace_source_relations: true,
       source_month: currentMonthKey(),
       fields: writablePayload(),
     });
@@ -915,6 +1175,7 @@ async function saveRecord(): Promise<void> {
     }
     dirtyFieldNames.clear();
     hasUnsavedChanges.value = false;
+    validationAttempted.value = false;
     sourceExpanded.value = false;
     recordPage.value = 1;
     await loadRecords(false);
@@ -961,6 +1222,7 @@ async function deleteRecordNow(): Promise<void> {
     eventTitle.value = "";
     selectedEvent.value = null;
     selectedRepairIds.value = [];
+    selectedRepairRecords.value = [];
     repairRecommendedIds.value = [];
     resetDraft();
     activeWorkspaceTab.value = "project";
@@ -1010,6 +1272,7 @@ watch(
     selectedEvent.value = null;
     repairCandidates.value = [];
     selectedRepairIds.value = [];
+    selectedRepairRecords.value = [];
     repairRecommendedIds.value = [];
     activePicker.value = "";
     prefillWarnings.value = [];
@@ -1033,14 +1296,12 @@ onMounted(() => {
     sourceEventId.value = routeEventId;
     eventTitle.value = routeEventTitle;
   }
-  window.addEventListener("beforeunload", handleBeforeUnload);
   void loadRecords(false);
   void loadEventCandidates();
 });
 
 onBeforeUnmount(() => {
   if (searchTimer) clearTimeout(searchTimer);
-  window.removeEventListener("beforeunload", handleBeforeUnload);
 });
 </script>
 
@@ -1048,26 +1309,50 @@ onBeforeUnmount(() => {
 .repair-management-page {
   width: min(1720px, 100%);
   margin: 0 auto;
-  padding: 18px 32px 40px;
+  padding: 16px 28px 32px;
   display: grid;
-  gap: 14px;
+  gap: 12px;
+  color: #142b49;
 }
 
-.page-back-row {
+.page-unsaved-notice {
+  min-height: 38px;
   display: flex;
   align-items: center;
-  justify-content: flex-start;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid #f2c78f;
+  border-radius: 10px;
+  background: #fff8ed;
+  color: #96500f;
+  font-size: 13px;
+  font-weight: 700;
 }
 
-.page-back-btn {
+.page-unsaved-notice svg {
+  flex: 0 0 auto;
+}
+
+.repair-hero-title {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.repair-hero-title h2 {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.repair-hero-title :deep(.vnet-back-button) {
   min-height: 36px;
-  padding: 0 13px;
-  border-radius: 999px;
-}
-
-.page-back-btn span {
-  font-size: 19px;
-  line-height: 1;
+  flex: 0 0 auto;
+  border-radius: 9px;
+  padding-inline: 11px;
+  box-shadow: none;
 }
 
 .repair-hero,
@@ -1078,9 +1363,9 @@ onBeforeUnmount(() => {
 .record-panel,
 .editor-panel {
   border: 1px solid #d8e5f7;
-  border-radius: 20px;
-  background: rgba(255, 255, 255, 0.96);
-  box-shadow: 0 22px 58px rgba(20, 75, 150, 0.12);
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 10px 26px rgba(20, 75, 150, 0.08);
 }
 
 .source-relation-panel {
@@ -1148,6 +1433,19 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
+.source-relation-item > .relation-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.source-loading {
+  color: #176de0;
+  font-size: 12px;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
 .relation-order {
   width: 26px;
   height: 26px;
@@ -1165,24 +1463,21 @@ onBeforeUnmount(() => {
   justify-content: space-between;
   gap: 16px;
   align-items: center;
-  padding: 14px 18px;
-  background:
-    linear-gradient(135deg, rgba(255, 255, 255, 0.98), rgba(244, 249, 255, 0.96)),
-    radial-gradient(circle at 92% 18%, rgba(42, 119, 255, 0.12), transparent 30%);
+  padding: 12px 16px;
+  background: #fff;
 }
 
 .repair-hero h2,
 .editor-head h3 {
   margin: 0;
   color: #071a39;
-  font-size: 24px;
-  font-weight: 950;
+  font-size: 20px;
+  font-weight: 750;
 }
 
 .repair-hero p,
 .editor-head p,
 .record-panel small,
-.field-card small,
 .empty-state {
   color: #62758f;
 }
@@ -1212,7 +1507,6 @@ onBeforeUnmount(() => {
 }
 
 .hero-actions,
-.editor-actions,
 .record-actions {
   display: flex;
   gap: 10px;
@@ -1589,14 +1883,14 @@ onBeforeUnmount(() => {
 
 .repair-layout {
   display: grid;
-  grid-template-columns: minmax(320px, 0.34fr) minmax(0, 1fr);
-  gap: 16px;
+  grid-template-columns: 280px minmax(0, 1fr);
+  gap: 12px;
 }
 
 .record-panel,
 .editor-panel {
   min-width: 0;
-  padding: 16px;
+  padding: 14px;
 }
 
 .record-panel {
@@ -1613,7 +1907,7 @@ onBeforeUnmount(() => {
   min-height: 220px;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 2px 4px 4px 0;
+  padding: 2px 3px 4px 0;
 }
 
 .record-search {
@@ -1677,6 +1971,7 @@ onBeforeUnmount(() => {
 
 .editor-panel {
   align-self: start;
+  overflow: visible;
 }
 
 .workspace-tabs-row {
@@ -1814,44 +2109,27 @@ onBeforeUnmount(() => {
 
 .panel-head strong {
   color: #071a39;
-  font-size: 18px;
-  font-weight: 950;
+  font-size: 16px;
+  font-weight: 750;
 }
 
-input,
-select,
-textarea {
+.record-search input {
   width: 100%;
-  border: 1px solid #d8e5f7;
-  border-radius: 12px;
+  min-height: 36px;
+  border: 1px solid #cbd8e8;
+  border-radius: 8px;
   background: #fff;
   color: #10203b;
   font: inherit;
-  font-weight: 780;
-  padding: 9px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 7px 10px;
 }
 
-input:focus,
-select:focus,
-textarea:focus {
-  outline: 3px solid rgba(30, 99, 255, 0.16);
+.record-search input:focus {
+  outline: 0;
   border-color: #1e63ff;
-}
-
-select {
-  min-height: 40px;
-  appearance: none;
-  background-image: linear-gradient(45deg, transparent 50%, #1d5edb 50%), linear-gradient(135deg, #1d5edb 50%, transparent 50%);
-  background-position: calc(100% - 18px) 17px, calc(100% - 12px) 17px;
-  background-size: 6px 6px, 6px 6px;
-  background-repeat: no-repeat;
-  padding-right: 34px;
-}
-
-textarea {
-  min-height: 42px;
-  resize: vertical;
-  line-height: 1.45;
+  box-shadow: 0 0 0 3px rgba(30, 99, 255, 0.14);
 }
 
 .record-actions {
@@ -1861,14 +2139,14 @@ textarea {
 
 .record-row {
   width: 100%;
-  margin-top: 8px;
-  padding: 12px;
+  margin-top: 6px;
+  padding: 9px 10px;
   display: grid;
-  gap: 8px;
+  gap: 6px;
   text-align: left;
   border: 1px solid #e0e9f7;
-  border-radius: 14px;
-  background: #f8fbff;
+  border-radius: 9px;
+  background: #fbfdff;
   cursor: pointer;
   transition: border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
 }
@@ -1881,13 +2159,31 @@ textarea {
 .record-row.active {
   border-color: #1e63ff;
   background: #eff6ff;
-  box-shadow: 0 0 0 3px rgba(30, 99, 255, 0.12);
+  box-shadow: inset 3px 0 0 #1e63ff;
+}
+
+.record-title-line {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.record-title-line svg {
+  flex: 0 0 auto;
+  color: #1662d4;
 }
 
 .record-title {
+  min-width: 0;
+  overflow: hidden;
   color: #071a39;
-  font-weight: 950;
+  font-size: 13px;
+  font-weight: 700;
   line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .record-meta {
@@ -1898,13 +2194,13 @@ textarea {
 
 .record-meta b {
   max-width: 100%;
-  min-height: 24px;
-  padding: 3px 8px;
+  min-height: 21px;
+  padding: 2px 7px;
   border-radius: 999px;
   background: #edf5ff;
   color: #315273;
-  font-size: 12px;
-  font-weight: 850;
+  font-size: 11px;
+  font-weight: 650;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1913,9 +2209,22 @@ textarea {
 .editor-head {
   display: flex;
   justify-content: space-between;
-  align-items: flex-start;
-  gap: 14px;
-  margin-bottom: 14px;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 2px;
+}
+
+.editor-head > div {
+  min-width: 0;
+}
+
+.editor-head p {
+  margin: 4px 0 0;
+  overflow: hidden;
+  color: #60758f;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .form-warning {
@@ -1972,56 +2281,61 @@ textarea {
   justify-content: flex-end;
 }
 
-.field-grid {
+.project-form-sections {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.project-field-section {
+  display: grid;
+  gap: 5px;
+  padding: 0 0 7px;
+  border-bottom: 1px solid #e4ecf6;
+}
+
+.project-field-section:last-child {
+  border-bottom: 0;
+}
+
+.project-field-section > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: 12px;
 }
 
-.field-card {
-  min-width: 0;
+.project-field-section h4 {
+  margin: 0;
+  color: #17314f;
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.project-field-section > header span {
+  color: #7a8da5;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.project-field-grid {
   display: grid;
-  gap: 8px;
-  padding: 11px;
-  border: 1px solid #e1ebf8;
-  border-radius: 14px;
-  background: #fbfdff;
-}
-
-.field-card.required {
-  border-color: #bfdbfe;
-  background: #f8fbff;
-}
-
-.field-card > span {
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.field-card b {
-  color: #0f2142;
-  font-weight: 950;
-}
-
-.field-card output {
-  min-height: 32px;
-  white-space: pre-wrap;
-  color: #4d627e;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 7px 10px;
 }
 
 .readonly-summary {
-  margin-top: 14px;
+  margin-top: 2px;
   border: 1px solid #e4ecf8;
-  border-radius: 14px;
+  border-radius: 10px;
   background: #f7fbff;
-  padding: 10px 12px;
+  padding: 8px 10px;
 }
 
 .readonly-summary summary {
   cursor: pointer;
   color: #315273;
-  font-weight: 850;
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .readonly-hint {
@@ -2043,8 +2357,8 @@ textarea {
 
 .readonly-line {
   min-width: 0;
-  padding: 8px 10px;
-  border-radius: 12px;
+  padding: 7px 9px;
+  border-radius: 8px;
   background: #ffffff;
   border: 1px solid #edf3fb;
   display: grid;
@@ -2060,7 +2374,7 @@ textarea {
 
 .readonly-line b {
   color: #425a78;
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .readonly-line span {
@@ -2068,25 +2382,85 @@ textarea {
   font-size: 12px;
 }
 
+.editor-action-bar {
+  position: sticky;
+  z-index: 20;
+  bottom: 8px;
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: 4px;
+  border: 1px solid #d5e2f2;
+  border-radius: 10px;
+  padding: 5px 8px 5px 10px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 10px 26px rgba(21, 67, 128, 0.13);
+  backdrop-filter: blur(10px);
+}
+
+.project-workspace {
+  scroll-padding-bottom: 84px;
+}
+
+.project-field-section:last-child,
+.readonly-summary {
+  scroll-margin-bottom: 84px;
+}
+
+.save-state,
+.editor-action-buttons,
 .btn {
-  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+}
+
+.save-state {
+  min-width: 0;
+  gap: 7px;
+  color: #536b87;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.save-state.saving { color: #155ec2; }
+.save-state.warning,
+.save-state.dirty { color: #a65314; }
+.save-state.saved { color: #16805f; }
+
+.save-state.saving svg {
+  animation: repair-spin 900ms linear infinite;
+}
+
+.editor-action-buttons {
+  flex: 0 0 auto;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.btn {
+  min-height: 36px;
+  justify-content: center;
+  gap: 6px;
   border: 1px solid #d8e5f7;
-  border-radius: 12px;
-  padding: 0 15px;
+  border-radius: 8px;
+  padding: 0 12px;
   font: inherit;
-  font-weight: 950;
+  font-size: 13px;
+  font-weight: 700;
   cursor: pointer;
-  transition: transform 160ms ease, border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
+  transition: border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
 }
 
 .btn:hover:not(:disabled) {
-  transform: translateY(-1px);
-  box-shadow: 0 10px 20px rgba(20, 75, 150, 0.12);
+  border-color: #9bb9e2;
+  box-shadow: 0 5px 14px rgba(20, 75, 150, 0.1);
 }
 
 .btn.primary {
   border-color: #1e63ff;
-  background: linear-gradient(135deg, #2a77ff, #0050d9);
+  background: #1464e7;
   color: #fff;
 }
 
@@ -2112,6 +2486,14 @@ textarea {
   opacity: 0.62;
 }
 
+.spinning {
+  animation: repair-spin 900ms linear infinite;
+}
+
+@keyframes repair-spin {
+  to { transform: rotate(360deg); }
+}
+
 .empty-state {
   padding: 18px;
   border: 1px dashed #d8e5f7;
@@ -2120,9 +2502,24 @@ textarea {
   font-weight: 850;
 }
 
-@media (max-width: 1180px) {
+@media (max-width: 1279px) and (min-width: 1024px) {
+  .repair-layout {
+    grid-template-columns: 240px minmax(0, 1fr);
+  }
+
+  .project-field-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-height: 900px) {
+  .editor-action-bar {
+    position: static;
+  }
+}
+
+@media (max-width: 1023px) {
   .repair-layout,
-  .field-grid,
   .source-relation-grid,
   .event-candidates {
     grid-template-columns: 1fr;
@@ -2174,6 +2571,34 @@ textarea {
 
   .repair-workflow > i {
     display: none;
+  }
+
+  .project-field-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .repair-management-page {
+    padding-inline: 14px;
+  }
+
+  .repair-hero,
+  .editor-head,
+  .editor-action-bar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .project-field-grid,
+  .readonly-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .editor-action-buttons {
+    width: 100%;
+    flex-wrap: wrap;
+    justify-content: flex-start;
   }
 }
 
