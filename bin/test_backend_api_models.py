@@ -44,18 +44,54 @@ class _FakeRepairEventRouteService:
         query: str = "",
         limit: int = 200,
         offset: int = 0,
+        focus_record_id: str = "",
     ) -> dict:
-        self.calls.append(("list_repair", scope, query, limit))
+        self.calls.append(("list_repair", scope, query, limit, focus_record_id))
         return {
             "records": [],
             "fields": [{"field_name": "维修名称", "readonly": False}],
             "total": 0,
         }
 
+    def get_repair_management_status(
+        self,
+        *,
+        scope: str = "ALL",
+        query: str = "",
+        state: str = "all",
+        period: str = "all",
+        limit: int = 100,
+        offset: int = 0,
+        force_refresh: bool = False,
+    ) -> dict:
+        self.calls.append(
+            (
+                "repair_status",
+                scope,
+                query,
+                state,
+                period,
+                limit,
+                offset,
+                force_refresh,
+            )
+        )
+        return {
+            "records": [],
+            "total": 0,
+            "stats": {
+                "total": 0,
+                "without_followup": 0,
+                "in_progress": 0,
+                "average_progress": 0,
+            },
+        }
+
     def create_repair_management_record(
         self,
         fields: dict,
         *,
+        operation_id: str = "",
         source_event_id: str = "",
         source_repair_ids: list[str] | None = None,
         source_month: str = "",
@@ -196,6 +232,7 @@ class _FakeRepairEventRouteService:
         summary_record_id: str,
         fields: dict,
         cmdb_record_ids: list[str] | None = None,
+        operation_id: str = "",
         scope: str = "ALL",
     ) -> dict:
         self.calls.append(
@@ -291,7 +328,11 @@ class BackendApiModelTests(unittest.TestCase):
                     headers=headers,
                 )
                 listed = client.get(
-                    "/api/repair-management/records?scope=E&q=冷站&limit=3",
+                    "/api/repair-management/records?scope=E&q=冷站&limit=3&focus_record_id=rec-focus",
+                    headers=headers,
+                )
+                repair_status = client.get(
+                    "/api/repair-management/status?scope=E&q=冷站&state=in_progress&limit=12&offset=3&refresh=1",
                     headers=headers,
                 )
                 created = client.post(
@@ -389,6 +430,7 @@ class BackendApiModelTests(unittest.TestCase):
             self.assertEqual(denied.status_code, 403)
             for response in [
                 listed,
+                repair_status,
                 created,
                 updated,
                 deleted,
@@ -409,7 +451,17 @@ class BackendApiModelTests(unittest.TestCase):
             self.assertEqual(
                 service.calls,
                 [
-                    ("list_repair", "E", "冷站", 3),
+                    ("list_repair", "E", "冷站", 3, "rec-focus"),
+                    (
+                        "repair_status",
+                        "E",
+                        "冷站",
+                        "in_progress",
+                        "all",
+                        12,
+                        3,
+                        True,
+                    ),
                     (
                         "create_repair",
                         "E",

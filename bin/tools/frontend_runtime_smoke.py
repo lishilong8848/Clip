@@ -434,6 +434,7 @@ class _SmokePortalService:
         query: str = "",
         limit: int = 200,
         offset: int = 0,
+        focus_record_id: str = "",
     ) -> dict:
         records = [
             {
@@ -458,6 +459,27 @@ class _SmokePortalService:
                 "building_codes": ["A"],
                 "source_event_id": "rec-smoke-event-a-001",
                 "source_repair_ids": ["rec-smoke-repair-a-001"],
+            },
+            {
+                "record_id": "repair-mgmt-a-002",
+                "title": "A楼第二测试检修管理记录",
+                "created_time": "2026-06-01 09:30:00",
+                "last_modified_time": "2026-06-01 10:30:00",
+                "display_fields": {
+                    "维修名称": "A楼第二测试检修管理记录",
+                    "所属数据中心/楼栋-使用": "南通A楼",
+                    "所属专业": "电气",
+                    "关联事件单": "",
+                    "设备检修关联": "",
+                },
+                "raw_fields": {
+                    "维修名称": "A楼第二测试检修管理记录",
+                    "所属数据中心/楼栋-使用": "南通A楼",
+                    "所属专业": "电气",
+                },
+                "building_codes": ["A"],
+                "source_event_id": "",
+                "source_repair_ids": [],
             }
         ]
         if str(scope or "").strip().upper() not in {"", "ALL", "A"}:
@@ -493,10 +515,116 @@ class _SmokePortalService:
             "returned": len(page_records),
         }
 
+    def get_repair_management_record(
+        self,
+        record_id: str,
+        *,
+        scope: str = "ALL",
+    ) -> dict:
+        payload = self.get_repair_management_records(
+            scope=scope,
+            limit=500,
+            offset=0,
+        )
+        record = next(
+            (
+                item
+                for item in payload.get("records", [])
+                if str(item.get("record_id") or "") == str(record_id or "")
+            ),
+            None,
+        )
+        if record is None:
+            raise RuntimeError("维修项目记录不存在")
+        return {
+            "record": record,
+            "fields": payload.get("fields", []),
+            "schema_warnings": [],
+        }
+
+    def get_repair_management_status(
+        self,
+        *,
+        scope: str = "ALL",
+        query: str = "",
+        state: str = "all",
+        period: str = "all",
+        limit: int = 100,
+        offset: int = 0,
+        force_refresh: bool = False,
+    ) -> dict:
+        all_records = [
+            {
+                "record_id": "repair-mgmt-a-001",
+                "title": "A楼测试事件告警描述",
+                "repair_title": "A楼测试检修管理记录",
+                "building": "A楼",
+                "specialty": "弱电",
+                "state": "in_progress",
+                "status_label": "维修进行中",
+                "followup_count": 1,
+                "completed_followup_count": 0,
+                "progress_percent": 50,
+                "event_sent_time": "2026-06-01 09:50",
+                "latest_followup_time": "2026-06-01 10:00",
+                "latest_followup": "测试维修进展",
+            },
+            {
+                "record_id": "repair-mgmt-a-002",
+                "title": "A楼今日完成事件告警描述",
+                "repair_title": "A楼今日完成检修记录",
+                "building": "A楼",
+                "specialty": "电气",
+                "state": "completed",
+                "status_label": "历史已完成",
+                "followup_count": 1,
+                "completed_followup_count": 1,
+                "progress_percent": 100,
+                "event_sent_time": "2026-06-01 10:50",
+                "latest_followup_time": "2026-06-01 11:00",
+                "latest_followup": "维修完成",
+            },
+        ]
+        if str(scope or "").strip().upper() not in {"", "ALL", "A"}:
+            all_records = []
+        active_records = [item for item in all_records if item.get("state") != "completed"]
+        completed_records = [item for item in all_records if item.get("state") == "completed"]
+        if state == "completed":
+            records = list(completed_records)
+        elif state in {"without_followup", "in_progress"}:
+            records = [item for item in active_records if item.get("state") == state]
+        else:
+            records = list(active_records)
+        return {
+            "scope": scope,
+            "state": state,
+            "period": period,
+            "records": records,
+            "total": len(records),
+            "returned": len(records),
+            "offset": offset,
+            "has_more": False,
+            "stats": {
+                "total": len(active_records),
+                "without_followup": sum(
+                    1 for item in active_records if item.get("state") == "without_followup"
+                ),
+                "in_progress": sum(
+                    1 for item in active_records if item.get("state") == "in_progress"
+                ),
+                "completed_total": len(completed_records),
+                "completed_month": len(completed_records),
+                "completed_week": len(completed_records),
+                "completed_today": len(completed_records),
+                "average_progress": 50 if active_records else 0,
+            },
+        }
+
     def create_repair_management_record(
         self,
         fields: dict,
         *,
+        operation_id: str = "",
         source_event_id: str = "",
         source_repair_ids=None,
         source_month: str = "",
@@ -669,6 +797,19 @@ class _SmokePortalService:
         limit: int = 100,
         offset: int = 0,
     ) -> dict:
+        is_second_project = summary_record_id == "repair-mgmt-a-002"
+        if is_second_project:
+            time.sleep(0.35)
+        followup_record_id = (
+            "rec-smoke-followup-a-002"
+            if is_second_project
+            else "rec-smoke-followup-a-001"
+        )
+        followup_title = (
+            "A楼第二项目跟进记录"
+            if is_second_project
+            else "A楼测试维修跟进记录"
+        )
         return {
             "summary_record_id": summary_record_id,
             "fields": [
@@ -683,8 +824,8 @@ class _SmokePortalService:
             ],
             "records": [
                 {
-                    "record_id": "rec-smoke-followup-a-001",
-                    "title": "A楼测试维修跟进记录",
+                    "record_id": followup_record_id,
+                    "title": followup_title,
                     "created_time": "2026-06-25 10:10",
                     "progress": "0.5",
                     "cmdb_record_ids": ["rec-smoke-cmdb-a-001"],
@@ -749,6 +890,7 @@ class _SmokePortalService:
         summary_record_id: str,
         fields: dict,
         cmdb_record_ids: list[str] | None = None,
+        operation_id: str = "",
         scope: str = "ALL",
     ) -> dict:
         return {"record_id": "rec-smoke-followup-created", "warnings": []}
@@ -923,6 +1065,11 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             if (issues.length) throw new Error(`VNET skin issues at ${{stage}}: ${{issues.join('; ')}}`);
           }}
           async function assertHeaderSubtitle(targetPage, expected, stage) {{
+            await targetPage.waitForFunction(
+              expectedText => Boolean(document.querySelector('.brand')?.innerText.includes(expectedText)),
+              expected,
+              {{ timeout: 10000 }},
+            );
             const headerText = await targetPage.locator('.brand').innerText({{ timeout: 10000 }});
             if (!headerText.includes(expected)) {{
               throw new Error(`header subtitle mismatch at ${{stage}}: expected "${{expected}}", got "${{headerText}}"`);
@@ -1031,6 +1178,24 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             path: '/',
           }}]);
           const page = await context.newPage();
+          let repairRecordRequestCount = 0;
+          let repairStatusRequestCount = 0;
+          let repairEventCandidateRequestCount = 0;
+          let repairNoticeCandidateRequestCount = 0;
+          page.on('request', request => {{
+            if (request.url().includes('/api/repair-management/records?')) {{
+              repairRecordRequestCount += 1;
+            }}
+            if (request.url().includes('/api/repair-management/status?')) {{
+              repairStatusRequestCount += 1;
+            }}
+            if (request.url().includes('/api/repair-management/event-candidates?')) {{
+              repairEventCandidateRequestCount += 1;
+            }}
+            if (request.url().includes('/api/repair-management/repair-candidates?')) {{
+              repairNoticeCandidateRequestCount += 1;
+            }}
+          }});
           attachDiagnostics(page, 'auth');
           const response = await page.goto(cfg.url, {{
             waitUntil: 'domcontentloaded',
@@ -1081,16 +1246,71 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await repairScopeCard.getByRole('button', {{ name: '进入检修单管理' }}).click();
           await waitForTextOrDump(page, '维修项目与跟进', 'repair-management-entry');
           await waitForTextOrDump(page, 'A楼测试检修管理记录', 'repair-management-entry');
+          if (repairEventCandidateRequestCount !== 0 || repairNoticeCandidateRequestCount !== 0) {{
+            throw new Error(
+              `repair source candidates were eagerly loaded: event=${{repairEventCandidateRequestCount}}, repair=${{repairNoticeCandidateRequestCount}}`,
+            );
+          }}
+          await page.getByRole('button', {{ name: '检修状态', exact: true }}).click();
+          await waitForTextOrDump(page, '当前状态项目', 'repair-status-entry');
+          await waitForTextOrDump(page, 'A楼测试事件告警描述', 'repair-status-entry');
+          await page.getByText('2026-06-01 09:50', {{ exact: true }}).first().waitFor({{ state: 'visible' }});
+          await page.getByRole('button', {{ name: /^历史已完成/ }}).click();
+          const completedStatusDialog = page.getByRole('dialog', {{ name: '历史已完成' }});
+          await completedStatusDialog.getByText('A楼今日完成事件告警描述', {{ exact: true }}).waitFor({{ state: 'visible' }});
+          await completedStatusDialog.getByRole('button', {{ name: /^全部完成/ }}).waitFor({{ state: 'visible' }});
+          await completedStatusDialog.getByRole('button', {{ name: /^本月完成/ }}).click();
+          await completedStatusDialog.getByRole('button', {{ name: '关闭状态列表' }}).click();
+          await page.getByRole('button', {{ name: /^当前状态项目/ }}).click();
+          const activeStatusDialog = page.getByRole('dialog', {{ name: '当前状态项目' }});
+          await activeStatusDialog.getByText('A楼测试事件告警描述', {{ exact: true }}).waitFor({{ state: 'visible' }});
+          const repairRequestsBeforeOpen = repairRecordRequestCount;
+          await activeStatusDialog.locator('.status-dialog-row').filter({{ hasText: 'A楼测试事件告警描述' }}).getByRole('button', {{ name: '跟进检修管理' }}).click();
+          await waitForTextOrDump(page, 'A楼测试检修管理记录', 'repair-management-return');
+          await page.waitForTimeout(250);
+          if (repairRecordRequestCount !== repairRequestsBeforeOpen) {{
+            throw new Error(`cached repair management page reloaded: ${{repairRequestsBeforeOpen}} -> ${{repairRecordRequestCount}}`);
+          }}
+          const statusRequestsBeforeReturn = repairStatusRequestCount;
+          await page.getByRole('button', {{ name: '检修状态', exact: true }}).click();
+          await waitForTextOrDump(page, '当前状态项目', 'repair-status-cached-return');
+          await page.waitForTimeout(250);
+          if (repairStatusRequestCount !== statusRequestsBeforeReturn) {{
+            throw new Error(`cached repair status page reloaded: ${{statusRequestsBeforeReturn}} -> ${{repairStatusRequestCount}}`);
+          }}
+          await page.locator('.status-row').filter({{ hasText: 'A楼测试事件告警描述' }}).getByRole('button', {{ name: '跟进检修管理' }}).click();
+          await waitForTextOrDump(page, 'A楼测试检修管理记录', 'repair-management-second-return');
           await page.locator('.record-row').filter({{ hasText: 'A楼测试检修管理记录' }}).click();
-          await page.getByRole('button', {{ name: '更改来源', exact: true }}).click();
+          await page.getByRole('button', {{ name: '跟进记录', exact: true }}).click();
+          const crossProjectFollowupPanel = page.locator('.followup-panel');
+          await crossProjectFollowupPanel.locator('.followup-editor-head strong').filter({{ hasText: 'A楼测试维修跟进记录' }}).waitFor({{ state: 'visible' }});
+          await page.locator('.record-row').filter({{ hasText: 'A楼第二测试检修管理记录' }}).click();
+          await page.getByRole('button', {{ name: '跟进记录', exact: true }}).click();
+          await crossProjectFollowupPanel.getByText('正在读取当前维修项目的跟进记录...', {{ exact: true }}).waitFor({{ state: 'visible' }});
+          if (await crossProjectFollowupPanel.getByText('A楼测试维修跟进记录', {{ exact: true }}).count()) {{
+            throw new Error('previous project followup leaked into the newly selected repair project');
+          }}
+          await crossProjectFollowupPanel.locator('.followup-editor-head strong').filter({{ hasText: 'A楼第二项目跟进记录' }}).waitFor({{ state: 'visible' }});
+          await page.locator('.record-row').filter({{ hasText: 'A楼测试检修管理记录' }}).click();
+          await page.getByRole('button', {{ name: '维修单信息', exact: true }}).click();
+          await page.getByRole('button', {{ name: '更改事件检修关联', exact: true }}).click();
           const sourceRelationPanel = page.locator('.source-relation-panel');
           await sourceRelationPanel.getByText('A楼测试事件转检修', {{ exact: true }}).waitFor({{ state: 'visible' }});
           await sourceRelationPanel.getByText('A楼测试设备检修', {{ exact: true }}).waitFor({{ state: 'visible' }});
           await page.locator('.source-relation-item').filter({{ hasText: '关联事件单' }}).getByRole('button', {{ name: '重新选择', exact: true }}).click();
+          if (repairEventCandidateRequestCount !== 1) {{
+            throw new Error(`event candidates should load on demand once, got ${{repairEventCandidateRequestCount}}`);
+          }}
           const eventPicker = page.getByRole('dialog', {{ name: '选择关联事件单' }});
           await eventPicker.locator('tbody tr').filter({{ hasText: 'A楼测试事件转检修' }}).click();
           await eventPicker.getByRole('button', {{ name: '确认', exact: true }}).click();
+          if (repairNoticeCandidateRequestCount !== 0) {{
+            throw new Error(`repair candidates loaded before opening their picker: ${{repairNoticeCandidateRequestCount}}`);
+          }}
           await page.locator('.source-relation-item').filter({{ hasText: '设备检修关联' }}).getByRole('button', {{ name: '重新选择', exact: true }}).click();
+          if (repairNoticeCandidateRequestCount !== 1) {{
+            throw new Error(`repair candidates should load on demand once, got ${{repairNoticeCandidateRequestCount}}`);
+          }}
           const repairPicker = page.getByRole('dialog', {{ name: '选择设备检修通告' }});
           await repairPicker.getByText('A楼测试设备检修', {{ exact: true }}).waitFor({{ state: 'visible' }});
           await repairPicker.getByRole('button', {{ name: '确认', exact: true }}).click();
@@ -1104,13 +1324,13 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await page.getByRole('button', {{ name: '跟进记录', exact: true }}).click();
           await waitForTextOrDump(page, 'A楼测试维修跟进记录', 'repair-management-autofill');
           const followupPanel = page.locator('.followup-panel');
-          if (await followupPanel.getByRole('button', {{ name: '新增跟进记录', exact: true }}).count() !== 1) {{
+          if (await followupPanel.getByRole('button', {{ name: '新建跟进', exact: true }}).count() !== 1) {{
             throw new Error('followup create action should have exactly one entry');
           }}
           if (await followupPanel.getByText('超链接', {{ exact: true }}).count()) {{
             throw new Error('followup hyperlink field must stay hidden');
           }}
-          await followupPanel.getByRole('button', {{ name: '新增跟进记录', exact: true }}).click();
+          await followupPanel.getByRole('button', {{ name: '新建跟进', exact: true }}).click();
           const followupColumnCount = await followupPanel.locator('.followup-field-grid').first().evaluate((node) => (
             getComputedStyle(node).gridTemplateColumns.split(' ').filter(Boolean).length
           ));
@@ -1176,16 +1396,16 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           }}
           const repairProjectSearch = page.getByRole('searchbox', {{ name: '搜索维修项目', exact: true }});
           await repairProjectSearch.fill('不存在的维修项目');
-          await page.getByText('暂无维修项目', {{ exact: true }}).waitFor({{ state: 'visible' }});
+          await page.getByText('没有匹配的维修项目', {{ exact: true }}).waitFor({{ state: 'visible' }});
           if (await followupDescription.inputValue() !== '烟测新增跟进') {{
             throw new Error('repair project search discarded unsaved followup draft');
           }}
           await repairProjectSearch.fill('');
           await page.locator('.record-row').filter({{ hasText: 'A楼测试检修管理记录' }}).waitFor({{ state: 'visible' }});
-          if (await followupPanel.getByRole('button', {{ name: '新增跟进记录', exact: true }}).count() !== 1) {{
+          if (await followupPanel.getByRole('button', {{ name: '保存新跟进', exact: true }}).count() !== 1) {{
             throw new Error('followup create mode must show one submit action');
           }}
-          await followupPanel.getByRole('button', {{ name: '新增跟进记录', exact: true }}).click();
+          await followupPanel.getByRole('button', {{ name: '保存新跟进', exact: true }}).click();
           await followupPanel.getByText('维修跟进记录已新增。', {{ exact: true }}).waitFor({{ state: 'visible' }});
           await followupPanel.getByRole('button', {{ name: '选择跟进记录', exact: true }}).click();
           const followupOptions = followupPanel.locator('.followup-selector-list [role="option"]');
@@ -1193,10 +1413,10 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await followupOptions.last().click();
           const progressInput = followupPanel.locator('[data-field-name="维修进度"] [data-progress-number]');
           await progressInput.fill('60');
-          await followupPanel.getByRole('button', {{ name: '更新跟进记录', exact: true }}).click();
+          await followupPanel.getByRole('button', {{ name: '保存跟进修改', exact: true }}).click();
           await followupPanel.getByText('维修跟进记录已更新。', {{ exact: true }}).waitFor({{ state: 'visible' }});
           await assertLayout(page, 'repair-management-entry');
-          await page.getByRole('button', {{ name: '项目信息' }}).click();
+          await page.getByRole('button', {{ name: '维修单信息' }}).click();
           await page.getByRole('button', {{ name: '检修通告', exact: true }}).click();
           await page.getByText('放弃未保存修改？', {{ exact: true }}).waitFor({{ state: 'visible' }});
           await page.getByRole('button', {{ name: '放弃并继续', exact: true }}).click();

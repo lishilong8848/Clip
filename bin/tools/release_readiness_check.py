@@ -647,10 +647,11 @@ def check_frontend_vnet_skin() -> tuple[bool, list[str]]:
         ".source-link-field",
         "source-link-title",
         "target-link-panel",
-        "detail-status-board",
     ):
         if marker not in lite_text:
             errors.append(f"workbench_lite.py 轻量工作台缺少蓝白/关联交互样式: {marker}")
+    if "detail-status-board" in lite_text:
+        errors.append("workbench_lite.py 仍显示已要求移除的通告状态摘要")
 
     history_text = files["HistoryMemoryPage.vue"]
     for marker in (

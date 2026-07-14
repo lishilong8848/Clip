@@ -43,6 +43,36 @@ function buildHeaders(options: RequestInit): Headers {
   return headers;
 }
 
+function requestSignalWithTimeout(
+  externalSignal: AbortSignal | null | undefined,
+  timeoutMs: number,
+): {
+  signal: AbortSignal;
+  timedOut: () => boolean;
+  cleanup: () => void;
+} {
+  const controller = new AbortController();
+  let timeoutTriggered = false;
+  const abortFromExternal = () => controller.abort();
+  if (externalSignal?.aborted) {
+    abortFromExternal();
+  } else {
+    externalSignal?.addEventListener("abort", abortFromExternal, { once: true });
+  }
+  const timer = window.setTimeout(() => {
+    timeoutTriggered = true;
+    controller.abort();
+  }, Math.max(1000, timeoutMs));
+  return {
+    signal: controller.signal,
+    timedOut: () => timeoutTriggered,
+    cleanup: () => {
+      window.clearTimeout(timer);
+      externalSignal?.removeEventListener("abort", abortFromExternal);
+    },
+  };
+}
+
 function currentLoginUrl(): string {
   if (typeof window === "undefined") return "/api/auth/login";
   const next = `${window.location.pathname}${window.location.search}`;
@@ -80,20 +110,24 @@ export async function requestJson(
   hooks: ApiClientHooks = {},
 ): Promise<Dict> {
   let response: Response;
+  const requestSignal = requestSignalWithTimeout(options.signal, 45_000);
   try {
     response = await fetch(path, {
       ...options,
       credentials: options.credentials || "same-origin",
       headers: buildHeaders(options),
+      signal: requestSignal.signal,
     });
     hooks.onOnline?.();
   } catch (error: unknown) {
     if (error instanceof Error && error.name === "AbortError") {
-      throw new ApiError("请求超时，请稍后重试。");
+      throw new ApiError(requestSignal.timedOut() ? "请求超时，请稍后重试。" : "请求已取消。");
     }
     const message = error instanceof Error && error.message ? error.message : "服务连接中断";
     hooks.onOffline?.("服务连接中断，已保留当前页面数据。", error);
     throw new ApiError(message, { offline: true });
+  } finally {
+    requestSignal.cleanup();
   }
 
   const payload = await response.json().catch(() => ({} as Dict));
@@ -133,6 +167,7 @@ export async function requestBinaryJson(
   hooks: ApiClientHooks = {},
 ): Promise<Dict> {
   let response: Response;
+  const requestSignal = requestSignalWithTimeout(options.signal, 120_000);
   try {
     response = await fetch(path, {
       ...options,
@@ -140,15 +175,18 @@ export async function requestBinaryJson(
       credentials: options.credentials || "same-origin",
       headers: options.headers,
       body,
+      signal: requestSignal.signal,
     });
     hooks.onOnline?.();
   } catch (error: unknown) {
     if (error instanceof Error && error.name === "AbortError") {
-      throw new ApiError("请求超时，请稍后重试。");
+      throw new ApiError(requestSignal.timedOut() ? "请求超时，请稍后重试。" : "请求已取消。");
     }
     const message = error instanceof Error && error.message ? error.message : "服务连接中断";
     hooks.onOffline?.("服务连接中断，已保留当前页面数据。", error);
     throw new ApiError(message, { offline: true });
+  } finally {
+    requestSignal.cleanup();
   }
 
   const payload = await response.json().catch(() => ({} as Dict));

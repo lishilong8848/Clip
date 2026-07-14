@@ -1015,6 +1015,7 @@ def _form_fields(work_type: str, draft: dict[str, str]) -> str:
 def _record_rows(
     records: list[dict[str, Any]],
     *,
+    ongoing_items: list[dict[str, Any]] | None,
     scope: str,
     work_type: str,
     search: str,
@@ -1027,8 +1028,10 @@ def _record_rows(
         return "<div class=\"empty\">没有待发起事项</div>"
     rows: list[str] = []
     for record in sorted(records, key=_record_sort_key):
+        linked_ongoing = _linked_ongoing_for_source(record, ongoing_items)
+        row_source = linked_ongoing or record
         record_id = str(record.get("record_id") or record.get("source_record_id") or "")
-        row_work_type = _item_work_type(record)
+        row_work_type = _item_work_type(row_source)
         url = _query_url(
             "/workbench-lite",
             scope=scope,
@@ -1040,14 +1043,20 @@ def _record_rows(
             ongoing_page=ongoing_page,
         )
         active = " active" if record_id == selected_id else ""
-        title = _record_title(record)
-        progress = _record_progress(record)
-        draft = _draft_from_record(record, work_type=row_work_type)
+        title = _record_title(row_source)
+        progress = _record_progress(row_source)
+        draft = _draft_from_record(row_source, work_type=row_work_type)
         source_record_id = _source_id(record)
-        action = _action_for_record(record)
+        action = "update" if linked_ongoing else _action_for_record(record)
         disabled_reason = _record_disabled_reason(progress)
-        site_photo_count = _site_photo_count(record)
-        mop_status = _mop_status_text(record, row_work_type)
+        site_photo_count = _site_photo_count(row_source)
+        mop_status = _mop_status_text(row_source, row_work_type)
+        linked_active_item_id = str((linked_ongoing or {}).get("active_item_id") or "")
+        linked_target_record_id = str(
+            (linked_ongoing or {}).get("target_record_id")
+            or (linked_ongoing or {}).get("record_id")
+            or ""
+        )
         disabled_class = " is-disabled" if disabled_reason else ""
         aria_disabled = "true" if disabled_reason else "false"
         rows.append(
@@ -1058,6 +1067,9 @@ def _record_rows(
         f" data-work-type=\"{_e(row_work_type)}\""
         f" data-record-id=\"{_e(record_id)}\""
         f" data-source-record-id=\"{_e(source_record_id)}\""
+        f" data-linked-ongoing=\"{'1' if linked_ongoing else '0'}\""
+        f" data-active-item-id=\"{_e(linked_active_item_id)}\""
+        f" data-target-record-id=\"{_e(linked_target_record_id)}\""
         f" data-site-photo-count=\"{_e(site_photo_count)}\""
         f" data-mop-status=\"{_e(mop_status)}\""
         f" data-action=\"{_e(action)}\""
@@ -1065,7 +1077,7 @@ def _record_rows(
             f" data-title=\"{_e(title)}\""
         f" data-draft=\"{_e(_safe_draft_json_attr(draft))}\">"
             f"<span class=\"row-main\"><strong>{_e(title)}</strong>{_progress_badge(progress)}</span>"
-            f"{_row_meta(_record_building(record), _record_specialty(record), progress=progress, extra_chips=_record_extra_chips(record, row_work_type))}"
+            f"{_row_meta(_record_building(row_source), _record_specialty(row_source), progress=progress, extra_chips=_record_extra_chips(row_source, row_work_type, ongoing=bool(linked_ongoing)))}"
             "</a>"
         )
     return "\n".join(rows)
@@ -1202,6 +1214,59 @@ def _selected_ongoing(items: list[dict[str, Any]], active_item_id: str) -> dict[
     return None
 
 
+def _linked_ongoing_for_source(
+    record: dict[str, Any] | None,
+    ongoing_items: list[dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(record, dict):
+        return None
+    source_record_id = _source_id(record)
+    work_type = _item_work_type(record)
+    if not source_record_id:
+        return None
+
+    embedded = record.get("linked_ongoing")
+    if isinstance(embedded, dict):
+        candidates = [embedded]
+    else:
+        candidates = [
+            item
+            for item in ongoing_items or []
+            if isinstance(item, dict)
+            and _item_work_type(item) == work_type
+            and _explicit_source_id(item) == source_record_id
+        ]
+    if len(candidates) != 1:
+        return None
+
+    candidate = candidates[0]
+    if _item_work_type(candidate) != work_type:
+        return None
+    candidate_source_id = _explicit_source_id(candidate) or source_record_id
+    if candidate_source_id != source_record_id:
+        return None
+    active_item_id = str(candidate.get("active_item_id") or "").strip()
+    target_record_id = str(candidate.get("target_record_id") or "").strip()
+    candidate_record_id = str(candidate.get("record_id") or "").strip()
+    if not target_record_id and candidate_record_id != source_record_id:
+        target_record_id = candidate_record_id
+    if not (active_item_id or target_record_id):
+        return None
+
+    linked = dict(record)
+    linked.update(candidate)
+    linked["work_type"] = work_type
+    linked["source_record_id"] = source_record_id
+    if active_item_id:
+        linked["active_item_id"] = active_item_id
+    if target_record_id:
+        linked["target_record_id"] = target_record_id
+        linked["record_id"] = target_record_id
+    linked["source_progress"] = str(candidate.get("status") or "进行中").strip()
+    linked["source_status"] = linked["source_progress"]
+    return linked
+
+
 def _source_link_options(
     records: list[dict[str, Any]],
     ongoing_items: list[dict[str, Any]],
@@ -1293,58 +1358,6 @@ def _target_link_panel(work_type: str, target_record_id: str) -> str:
           <button class="btn ghost" id="lite-target-search" type="button">{_e('更换' if linked else '查找')}</button>
         </section>
     """
-
-
-def _detail_status_item(label: str, value: str, tone: str = "") -> str:
-    tone_class = f" {tone}" if tone else ""
-    return (
-        f"<article class=\"detail-status-item{tone_class}\">"
-        f"<span>{_e(label)}</span>"
-        f"<strong>{_e(value)}</strong>"
-        "</article>"
-    )
-
-
-def _detail_status_board(
-    *,
-    work_type: str,
-    detail_mode: str,
-    source_record_id: str,
-    target_record_id: str,
-    site_photo_count: int,
-    mop_status: str,
-) -> str:
-    work = _work_type(work_type)
-    source_text = "已关联" if source_record_id else ("纯手填" if detail_mode in {"manual", "ongoing"} else "待选择")
-    source_tone = "ok" if source_record_id else ("ready" if detail_mode in {"manual", "ongoing"} else "warn")
-    if target_record_id:
-        target_text, target_tone = "已绑定", "ok"
-    elif detail_mode == "ongoing":
-        target_text, target_tone = "需绑定", "blocked"
-    else:
-        target_text, target_tone = "发送创建", "ready"
-    if work in SITE_PHOTO_REQUIRED_WORK_TYPES:
-        if site_photo_count > 0:
-            site_text, site_tone = f"{site_photo_count}张", "ok"
-        else:
-            site_text, site_tone = "待补", "warn"
-    else:
-        site_text, site_tone = "无需", "muted"
-    if work == "maintenance":
-        mop_text = mop_status or "MOP未绑定"
-        mop_tone = "ok" if ("已上传" in mop_text or "已确认" in mop_text) else ("warn" if "未" in mop_text else "ready")
-    else:
-        mop_text, mop_tone = "不要求", "muted"
-    qt_text = "已同步" if detail_mode == "ongoing" else "发送后同步"
-    return (
-        "<section class=\"detail-status-board\" aria-label=\"当前通告办理状态\">"
-        + _detail_status_item("源表", source_text, source_tone)
-        + _detail_status_item("目标", target_text, target_tone)
-        + _detail_status_item("现场", site_text, site_tone)
-        + _detail_status_item("MOP", mop_text, mop_tone)
-        + _detail_status_item("Qt", qt_text, "ready")
-        + "</section>"
-    )
 
 
 def _mop_next_action_panel(
@@ -1522,14 +1535,6 @@ def _detail_form(
         if mode_note
         else "<small class=\"detail-mode-note\" hidden></small>"
     )
-    status_board = _detail_status_board(
-        work_type=work,
-        detail_mode=detail_mode,
-        source_record_id=source_record_id,
-        target_record_id=target_record_id,
-        site_photo_count=site_photo_count,
-        mop_status=mop_status,
-    )
     mop_action_panel = _mop_next_action_panel(
         scope=scope,
         work_type=work,
@@ -1619,7 +1624,6 @@ def _detail_form(
           <strong>{_e(title)}</strong>
           {mode_note_html}
         </header>
-        {status_board}
         {mop_action_panel}
         {source_link_html}
         {_target_link_panel(work, target_record_id)}
@@ -1766,6 +1770,8 @@ def render_workbench_lite(
     )
     selected_ongoing = _selected_ongoing(ongoing, active_item_id)
     selected_record = None if selected_ongoing or manual or parsed_draft else _selected_source(records, record_id)
+    if selected_record and not selected_ongoing:
+        selected_ongoing = _linked_ongoing_for_source(selected_record, ongoing)
     selected_record_id = str((selected_record or {}).get("record_id") or "")
     detail_source = selected_ongoing or selected_record or {}
     detail_work = _item_work_type(detail_source) if detail_source else (work_filter or "maintenance")
@@ -2008,19 +2014,6 @@ def render_workbench_lite(
     .detail-head strong {{ min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:14px; line-height:1.22; }}
     .detail-head em {{ color:#64748b; font-style:normal; }}
     .detail-mode-note {{ width:max-content; max-width:100%; border-radius:999px; padding:3px 7px; color:#0a57d8; background:#fff; box-shadow:inset 0 0 0 1px rgba(31,99,255,.12); font-size:10px; font-weight:900; line-height:1.25; }}
-    .detail-status-board {{ display:flex; flex-wrap:wrap; gap:4px; align-items:center; margin-bottom:4px; }}
-    .detail-status-item {{ min-width:0; max-width:100%; display:inline-flex; align-items:center; gap:4px; border:1px solid #d8e5f7; border-radius:999px; padding:3px 6px; background:linear-gradient(180deg,#fff,#f8fbff); box-shadow:0 4px 10px rgba(15,73,153,.035); }}
-    .detail-status-item span {{ display:block; margin:0; color:#64748b; font-size:10px; font-weight:950; line-height:1.1; white-space:nowrap; }}
-    .detail-status-item strong {{ display:block; min-width:0; max-width:108px; color:#0c244d; font-size:10px; line-height:1.18; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
-    .detail-status-item.ok {{ border-color:#b7efd1; background:linear-gradient(180deg,#fff,#ecfff5); }}
-    .detail-status-item.ok strong {{ color:#087443; }}
-    .detail-status-item.ready {{ border-color:#b9d7ff; background:linear-gradient(180deg,#fff,#eef6ff); }}
-    .detail-status-item.ready strong {{ color:#0a57d8; }}
-    .detail-status-item.warn {{ border-color:#ffd899; background:linear-gradient(180deg,#fff,#fff8eb); }}
-    .detail-status-item.warn strong {{ color:#8a4b00; }}
-    .detail-status-item.blocked {{ border-color:#ffc7bf; background:linear-gradient(180deg,#fff,#fff1f0); }}
-    .detail-status-item.blocked strong {{ color:#b42318; }}
-    .detail-status-item.muted {{ background:#f7f9fc; }}
     .detail-form {{ display:grid; gap:6px; }}
     .site-photo-panel {{ border:1px solid #cfe0f5; border-radius:16px; padding:10px; background:linear-gradient(135deg,#f8fbff,#eef6ff); display:grid; gap:9px; }}
     .site-photo-head {{ display:flex; justify-content:space-between; gap:10px; align-items:flex-start; }}
@@ -2139,9 +2132,7 @@ def render_workbench_lite(
       .manual-menu,.refresh-menu {{ left:0; right:auto; max-width:calc(100vw - 32px); }}
       .form-grid {{ grid-template-columns:1fr; }}
       .site-photo-upload {{ grid-template-columns:1fr; }}
-      .detail-status-board {{ gap:4px; }}
       .detail-head {{ grid-template-columns:1fr; }}
-      .detail-status-item strong {{ max-width:96px; }}
       label:has(textarea), label:nth-last-child(1) {{ grid-column:auto; }}
       .form-actions {{ flex-wrap:wrap; }}
       .form-actions .btn {{ flex:1 1 140px; }}
@@ -2210,7 +2201,7 @@ def render_workbench_lite(
         </div>
         <section class="inbox-section pending-inbox-panel">
           <h3><span>待发起事项</span><b>{_e(current_pending_count)}</b></h3>
-          <div class="list">{_record_rows(visible_records, scope=scope, work_type=view_work, search=search, specialty=specialty, selected_id=selected_record_id, pending_page=pending_page_num, ongoing_page=ongoing_page_num)}</div>
+          <div class="list">{_record_rows(visible_records, ongoing_items=ongoing, scope=scope, work_type=view_work, search=search, specialty=specialty, selected_id=selected_record_id, pending_page=pending_page_num, ongoing_page=ongoing_page_num)}</div>
           {pending_pager}
         </section>
         <section class="inbox-section ongoing-inbox-panel" data-ongoing-panel>
@@ -3424,29 +3415,35 @@ def render_workbench_lite(
       const workType = link.getAttribute('data-work-type') || '';
       if (workType && form.dataset.workType && workType !== form.dataset.workType) return false;
       const draft = draftFromRow(link);
-      const action = link.getAttribute('data-action') || 'start';
+      const linkedOngoing = link.getAttribute('data-linked-ongoing') === '1';
+      const action = linkedOngoing ? 'update' : (link.getAttribute('data-action') || 'start');
       const title = link.getAttribute('data-title') || draft.title || '选择左侧事项';
       form.dataset.action = action;
-      form.dataset.detailMode = 'source';
+      form.dataset.detailMode = linkedOngoing ? 'ongoing' : 'source';
       form.dataset.targetEnded = '';
       setFormValue(form, 'manual', '');
       setFormValue(form, 'manual_id', '');
-      setFormValue(form, 'record_id', link.getAttribute('data-record-id') || '');
-      setFormValue(form, 'source_record_id', link.getAttribute('data-source-record-id') || link.getAttribute('data-record-id') || '');
-      setSourceLinkDisplay(form, link.getAttribute('data-source-record-id') || link.getAttribute('data-record-id') || '', '已关联');
-      setFormValue(form, 'target_record_id', '');
-      setFormValue(form, 'active_item_id', '');
-      setFormValue(form, 'site_photo_count', link.getAttribute('data-site-photo-count') || '0');
-      setFormValue(form, 'mop_status', link.getAttribute('data-mop-status') || '');
       for (const [key, value] of Object.entries(draft)) {{
         setFormValue(form, key, value);
       }}
+      const sourceRecordId = link.getAttribute('data-source-record-id') || link.getAttribute('data-record-id') || '';
+      const targetRecordId = linkedOngoing ? (link.getAttribute('data-target-record-id') || '') : '';
+      setFormValue(form, 'record_id', targetRecordId || sourceRecordId);
+      setFormValue(form, 'source_record_id', sourceRecordId);
+      setSourceLinkDisplay(form, sourceRecordId, '已关联');
+      setFormValue(form, 'target_record_id', targetRecordId);
+      setFormValue(form, 'active_item_id', linkedOngoing ? (link.getAttribute('data-active-item-id') || '') : '');
+      setFormValue(form, 'site_photo_count', link.getAttribute('data-site-photo-count') || '0');
+      setFormValue(form, 'mop_status', link.getAttribute('data-mop-status') || '');
       form.querySelector('.detail-head strong')?.replaceChildren(document.createTextNode(title));
       setDetailModeNote('');
       resetSitePhotoState(form, Number(link.getAttribute('data-site-photo-count') || 0));
-      setSubmitButtons(form, action);
+      if (linkedOngoing) setOngoingSubmitButtons(form);
+      else setSubmitButtons(form, action);
       updateNoticePreview(form);
-      setLiteStatus('已选择待发起事项，可继续编辑后发送');
+      setLiteStatus(linkedOngoing
+        ? '该事项已在进行中，可发送更新、结束或删除'
+        : '已选择待发起事项，可继续编辑后发送');
       return true;
     }}
     function applyOngoingRowToDetail(link) {{
@@ -4174,6 +4171,28 @@ def render_workbench_lite(
         list.replaceChildren(empty);
       }}
     }}
+    function promoteSubmittedStartToOngoing(draft) {{
+      if (!draft || draft.action !== 'start') return;
+      const form = document.getElementById('lite-notice-form');
+      if (!form) return;
+      const currentSourceId = String(previewValue(form, 'source_record_id') || '').trim();
+      const draftSourceId = String(draft.source_record_id || '').trim();
+      if (currentSourceId && draftSourceId && currentSourceId !== draftSourceId) return;
+      const targetRecordId = String(draft.target_record_id || draft.record_id || '').trim();
+      if (isMissingTargetRecordId(targetRecordId)) return;
+      form.dataset.action = 'update';
+      form.dataset.detailMode = 'ongoing';
+      form.dataset.targetEnded = '';
+      setFormValue(form, 'record_id', targetRecordId);
+      setFormValue(form, 'target_record_id', targetRecordId);
+      setFormValue(form, 'active_item_id', draft.active_item_id || targetRecordId);
+      if (draftSourceId) {{
+        setFormValue(form, 'source_record_id', draftSourceId);
+        setSourceLinkDisplay(form, draftSourceId, '已关联');
+      }}
+      setOngoingSubmitButtons(form);
+      setLiteFormDirty(false);
+    }}
     function applyJobPatch(jobPatch, payload, ok, message) {{
       const patch = jobPatch && typeof jobPatch === 'object' ? jobPatch : null;
       if (!patch || patch.kind !== 'notice_action_result') {{
@@ -4238,7 +4257,10 @@ def render_workbench_lite(
       setSafeDraftAttr(row, Object.assign({{}}, draftFromRow(row), draft));
       const meta = row.querySelector('.row-meta');
       if (meta) setMetaChip(meta, String(message || patch.message || '已完成').slice(0, 36), 'success');
-      if (draft.action === 'start') removeSourceRowForDraft(draft);
+      if (draft.action === 'start') {{
+        promoteSubmittedStartToOngoing(draft);
+        removeSourceRowForDraft(draft);
+      }}
     }}
     function sleep(ms) {{
       return new Promise(resolve => setTimeout(resolve, ms));

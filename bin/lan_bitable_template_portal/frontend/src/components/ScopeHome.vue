@@ -161,9 +161,13 @@
             <button type="button"
               v-else
               class="primary"
+              :disabled="Boolean(openingWorkbenchKey)"
+              :aria-busy="isOpeningWorkbench(scope.value) ? 'true' : 'false'"
+              @pointerenter="prefetchNoticeWorkbench(scope.value)"
+              @focus="prefetchNoticeWorkbench(scope.value)"
               @click="enterNoticeWorkbench(scope.value)"
             >
-              {{ activeConfig.actionLabel }}
+              {{ isOpeningWorkbench(scope.value) ? "正在进入" : activeConfig.actionLabel }}
             </button>
           </div>
           <span class="scope-building-art" aria-hidden="true"></span>
@@ -208,6 +212,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   enter: [scope: string, workType?: string];
+  prefetch: [scope: string, workType?: string];
   event: [scope: string];
   engineer: [scope: string];
   "repair-management": [scope: string];
@@ -215,6 +220,7 @@ const emit = defineEmits<{
 }>();
 
 const activeMode = ref<EntryKey>("");
+const openingWorkbenchKey = ref("");
 
 const enabledModuleCount = computed(() => moduleCards.filter((item) => !item.disabled).length);
 const activeConfig = computed(() => entryConfigs[activeMode.value || "tools"]);
@@ -423,7 +429,30 @@ function returnFromFeature(): void {
 
 function enterNoticeWorkbench(scope: string): void {
   const workType = activeConfig.value.workType || "maintenance";
+  const key = workbenchEntryKey(scope, workType);
+  if (openingWorkbenchKey.value) return;
+  openingWorkbenchKey.value = key;
+  emit("prefetch", scope, workType);
   emit("enter", scope, workType);
+  window.setTimeout(() => {
+    if (openingWorkbenchKey.value === key) openingWorkbenchKey.value = "";
+  }, 15000);
+}
+
+function prefetchNoticeWorkbench(scope: string): void {
+  if (openingWorkbenchKey.value) return;
+  emit("prefetch", scope, activeConfig.value.workType || "maintenance");
+}
+
+function workbenchEntryKey(scope: string, workType: string): string {
+  return `${normalizeScopeValue(scope)}:${workType || "maintenance"}`;
+}
+
+function isOpeningWorkbench(scope: string): boolean {
+  return openingWorkbenchKey.value === workbenchEntryKey(
+    scope,
+    activeConfig.value.workType || "maintenance",
+  );
 }
 
 function defaultEventScope(): string {

@@ -59,6 +59,7 @@ class NoticeWorkTypeOverrideRequest(APIModel):
 
 
 class RepairManagementRecordRequest(APIModel):
+    operation_id: str = Field(default="", max_length=128)
     scope: str = "ALL"
     source_event_id: str = ""
     source_repair_ids: list[str] = Field(default_factory=list, max_length=1)
@@ -81,6 +82,7 @@ class RepairManagementPrefillRequest(APIModel):
 
 
 class RepairFollowupRecordRequest(APIModel):
+    operation_id: str = Field(default="", max_length=128)
     scope: str = "ALL"
     summary_record_id: str
     cmdb_record_ids: list[str] = Field(default_factory=list)

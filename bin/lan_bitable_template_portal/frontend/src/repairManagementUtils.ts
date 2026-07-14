@@ -1,5 +1,12 @@
 import type { LooseDict, ScopeOption } from "./types";
 
+export function createRepairOperationId(prefix: string): string {
+  const normalizedPrefix = String(prefix || "repair").replace(/[^a-z0-9_-]/gi, "").slice(0, 24) || "repair";
+  const cryptoApi = typeof globalThis !== "undefined" ? globalThis.crypto : undefined;
+  if (cryptoApi?.randomUUID) return `${normalizedPrefix}-${cryptoApi.randomUUID()}`;
+  return `${normalizedPrefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 14)}`;
+}
+
 export const REPAIR_REQUIRED_FIELD_GROUPS = [
   ["维修名称"],
   ["故障发生时间"],

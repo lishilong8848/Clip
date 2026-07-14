@@ -10,6 +10,9 @@
     </header>
 
     <div v-if="!summaryRecordId" class="followup-empty">未选择维修项目</div>
+    <div v-else-if="loading && !fields.length" class="followup-empty" aria-live="polite">
+      正在读取当前维修项目的跟进记录...
+    </div>
     <div v-else class="followup-workspace">
       <div ref="selectorRoot" class="followup-selector">
         <div class="followup-selector-bar">
@@ -48,7 +51,7 @@
               @click="requestStartCreate"
             >
               <Plus :size="16" aria-hidden="true" />
-              <span>新增跟进记录</span>
+              <span>新建跟进</span>
             </button>
           </div>
         </div>
@@ -89,7 +92,7 @@
 
       <main class="followup-editor">
         <div class="followup-editor-head">
-          <strong>{{ editingRecordId ? selectedRecord?.title || "编辑跟进" : "新增跟进记录" }}</strong>
+          <strong>{{ editingRecordId ? selectedRecord?.title || "编辑跟进" : "填写新跟进" }}</strong>
         </div>
 
         <div class="cmdb-line">
@@ -126,7 +129,7 @@
                   :percentage="isProgressField(field)"
                   :select-options="selectOptionsForField(field)"
                   :allow-custom-select="isModelField(field)"
-                  :disabled="isModelField(field) && !selectedBrand"
+                  :disabled="isFollowupFieldDisabled(field)"
                   :placeholder="fieldPlaceholder(field)"
                   :number-min="isProgressField(field) ? 0 : undefined"
                   :number-max="isProgressField(field) ? 1 : undefined"
@@ -226,6 +229,7 @@ import {
 } from "lucide-vue-next";
 import { requestJson } from "../api/client";
 import {
+  createRepairOperationId,
   parseRepairDraftValue,
   repairDraftInputValue,
   repairFieldPreservesRawValue,
@@ -264,6 +268,8 @@ const DEVICE_NAME_FIELD_NAME = "设备名称";
 const DEVICE_NUMBER_FIELD_NAME = "设备编号";
 const BRAND_FIELD_NAME = "设备品牌";
 const MODEL_FIELD_NAME = "设备型号";
+const REPAIR_PARTY_FIELD_NAME = "维修方";
+const SUPPLIER_FIELD_NAMES = new Set(["供应商名称", "供应商维修人员"]);
 const WORKER_FIELD_NAME = "随工人员（我方维修人员）";
 const fieldLabels: Record<string, string> = {
   "跟进项（如有）": "跟进项",
@@ -318,6 +324,7 @@ const total = ref(0);
 const page = ref(1);
 const deleteDialogOpen = ref(false);
 const creatingNewFollowup = ref(false);
+const createOperationId = ref("");
 const followupDirty = ref(false);
 const discardDialogOpen = ref(false);
 const selectorOpen = ref(false);
@@ -328,6 +335,7 @@ let pendingDiscardAction: null | (() => void) = null;
 let recordsRequestVersion = 0;
 let cmdbRequestVersion = 0;
 let queryTimer: ReturnType<typeof setTimeout> | undefined;
+let recordsAbortController: AbortController | null = null;
 
 const editableFields = computed(() => fields.value.filter((field) => (
   field.editable
@@ -360,6 +368,9 @@ const selectedCmdbLabel = computed(() => {
 });
 const pageCount = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)));
 const selectedBrand = computed(() => String(draft[BRAND_FIELD_NAME] || "").trim());
+const isInternalRepairParty = computed(() => (
+  String(draft[REPAIR_PARTY_FIELD_NAME] || "").trim() === "我方"
+));
 const selectedModelOptions = computed(() => {
   if (!selectedBrand.value) return [];
   const values = brandModelOptions.value[selectedBrand.value];
@@ -372,7 +383,7 @@ const hasDraftContent = computed(() => Boolean(
 ));
 const primaryActionLabel = computed(() => {
   if (saving.value) return "保存中";
-  return editingRecordId.value ? "更新跟进记录" : "新增跟进记录";
+  return editingRecordId.value ? "保存跟进修改" : "保存新跟进";
 });
 const primaryActionDisabled = computed(() => {
   if (saving.value || !props.summaryRecordId) return true;
@@ -388,7 +399,7 @@ const primaryActionDisabledReason = computed(() => {
   return "请至少填写一项跟进内容";
 });
 const currentFollowupTitle = computed(() => {
-  if (creatingNewFollowup.value) return "新增跟进记录";
+  if (creatingNewFollowup.value) return "填写新跟进";
   return String(selectedRecord.value?.title || (total.value ? "选择跟进记录" : "暂无跟进记录"));
 });
 const currentFollowupMeta = computed(() => {
@@ -431,6 +442,15 @@ function isWorkerField(field: LooseDict): boolean {
   return String(field.field_name || "") === WORKER_FIELD_NAME;
 }
 
+function isSupplierField(field: LooseDict): boolean {
+  return SUPPLIER_FIELD_NAMES.has(String(field.field_name || ""));
+}
+
+function isFollowupFieldDisabled(field: LooseDict): boolean {
+  if (isModelField(field) && !selectedBrand.value) return true;
+  return isSupplierField(field) && isInternalRepairParty.value;
+}
+
 function normalizeWorkerPeople(value: unknown): LooseDict[] {
   let source: unknown[] = [];
   if (Array.isArray(value)) {
@@ -462,6 +482,9 @@ function selectOptionsForField(field: LooseDict): string[] | null {
 }
 
 function fieldPlaceholder(field: LooseDict): string {
+  if (isSupplierField(field) && isInternalRepairParty.value) {
+    return "维修方为我方，无需填写";
+  }
   if (!isModelField(field)) return "";
   if (!selectedBrand.value) return "请先选择设备品牌";
   return "选择或输入设备型号";
@@ -517,6 +540,12 @@ function updateFollowupField(field: LooseDict, value: string): void {
       draft[MODEL_FIELD_NAME] = "";
     }
   }
+  if (fieldName === REPAIR_PARTY_FIELD_NAME && String(value || "").trim() === "我方") {
+    for (const supplierFieldName of SUPPLIER_FIELD_NAMES) {
+      draft[supplierFieldName] = "";
+      dirtyFieldNames.add(supplierFieldName);
+    }
+  }
   markDirty();
 }
 
@@ -543,6 +572,7 @@ function resolveDiscardConfirmation(confirmed: boolean): void {
 }
 
 function startCreate(): void {
+  createOperationId.value = "";
   selectorOpen.value = false;
   creatingNewFollowup.value = true;
   editingRecordId.value = "";
@@ -558,6 +588,7 @@ function requestStartCreate(): void {
 }
 
 function selectRecord(record: LooseDict): void {
+  createOperationId.value = "";
   creatingNewFollowup.value = false;
   editingRecordId.value = String(record.record_id || "");
   selectedRecord.value = record;
@@ -582,6 +613,11 @@ function selectRecord(record: LooseDict): void {
       : Object.prototype.hasOwnProperty.call(display, name) ? display[name] : raw[name];
     draft[name] = repairDraftInputValue(field, value);
   }
+  if (String(draft[REPAIR_PARTY_FIELD_NAME] || "").trim() === "我方") {
+    for (const supplierFieldName of SUPPLIER_FIELD_NAMES) {
+      draft[supplierFieldName] = "";
+    }
+  }
   setDirty(false);
 }
 
@@ -597,11 +633,30 @@ function requestSelectRecord(record: LooseDict): void {
 }
 
 function resetForParent(): void {
+  recordsRequestVersion += 1;
+  cmdbRequestVersion += 1;
+  recordsAbortController?.abort();
+  recordsAbortController = null;
+  if (queryTimer) {
+    clearTimeout(queryTimer);
+    queryTimer = undefined;
+  }
+  loading.value = false;
+  cmdbLoading.value = false;
+  records.value = [];
+  fields.value = [];
+  brandModelOptions.value = {};
+  total.value = 0;
   selectorOpen.value = false;
+  cmdbPickerOpen.value = false;
+  deleteDialogOpen.value = false;
+  discardDialogOpen.value = false;
+  pendingDiscardAction = null;
   creatingNewFollowup.value = false;
   editingRecordId.value = "";
   selectedRecord.value = null;
   cmdbRecordIds.value = [];
+  message.value = "";
   clearDraft();
   setDirty(false);
 }
@@ -636,19 +691,27 @@ async function loadRecords(announce = false): Promise<void> {
   }
   const requestVersion = ++recordsRequestVersion;
   const summaryRecordId = props.summaryRecordId;
+  const scope = props.scope || "ALL";
+  recordsAbortController?.abort();
+  const abortController = new AbortController();
+  recordsAbortController = abortController;
   loading.value = true;
   try {
     const params = new URLSearchParams({
-      scope: props.scope || "ALL",
-      summary_record_id: props.summaryRecordId,
+      scope,
+      summary_record_id: summaryRecordId,
       q: followupQuery.value,
       limit: String(PAGE_SIZE),
       offset: String((page.value - 1) * PAGE_SIZE),
     });
-    const payload = await requestJson(`/api/repair-management/followups?${params.toString()}`);
+    const payload = await requestJson(
+      `/api/repair-management/followups?${params.toString()}`,
+      { signal: abortController.signal },
+    );
     if (
       requestVersion !== recordsRequestVersion
       || summaryRecordId !== props.summaryRecordId
+      || scope !== (props.scope || "ALL")
     ) return;
     records.value = Array.isArray(payload.records) ? payload.records : [];
     fields.value = Array.isArray(payload.fields) ? payload.fields : [];
@@ -679,9 +742,14 @@ async function loadRecords(announce = false): Promise<void> {
     }
     if (announce) showMessage(records.value.length ? "跟进记录已刷新。" : "暂无跟进记录。", records.value.length ? "success" : "warning");
   } catch (error: unknown) {
-    if (requestVersion !== recordsRequestVersion) return;
+    if (
+      requestVersion !== recordsRequestVersion
+      || summaryRecordId !== props.summaryRecordId
+      || scope !== (props.scope || "ALL")
+    ) return;
     showMessage(error instanceof Error ? error.message : "维修跟进读取失败。", "failed");
   } finally {
+    if (recordsAbortController === abortController) recordsAbortController = null;
     if (requestVersion === recordsRequestVersion) loading.value = false;
   }
 }
@@ -735,7 +803,11 @@ async function saveRecord(): Promise<void> {
   }
   saving.value = true;
   try {
+    if (!editingRecordId.value && !createOperationId.value) {
+      createOperationId.value = createRepairOperationId("repair-followup");
+    }
     const body = JSON.stringify({
+      operation_id: editingRecordId.value ? "" : createOperationId.value,
       scope: props.scope || "ALL",
       summary_record_id: props.summaryRecordId,
       cmdb_record_ids: cmdbRecordIds.value,
@@ -749,6 +821,7 @@ async function saveRecord(): Promise<void> {
         })
       : await requestJson("/api/repair-management/followups", { method: "POST", body });
     editingRecordId.value = String(payload.record_id || editingRecordId.value || "");
+    if (!wasEditing) createOperationId.value = "";
     setDirty(false);
     if (!wasEditing) page.value = 1;
     const warnings = Array.isArray(payload.warnings)
@@ -881,7 +954,7 @@ watch(
     resetForParent();
     void loadRecords(false);
   },
-  { immediate: true },
+  { immediate: true, flush: "sync" },
 );
 
 watch(followupQuery, () => {
@@ -897,6 +970,10 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  recordsRequestVersion += 1;
+  cmdbRequestVersion += 1;
+  recordsAbortController?.abort();
+  recordsAbortController = null;
   if (queryTimer) clearTimeout(queryTimer);
   document.removeEventListener("pointerdown", handleDocumentPointerDown, true);
 });

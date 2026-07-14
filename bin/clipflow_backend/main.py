@@ -509,27 +509,47 @@ class FastAPIPortalController:
                 }
                 ongoing = self._get_ongoing(scope)
                 self._reconcile_orphan_started_items(scope, ongoing)
-                payload = await asyncio.to_thread(
-                    PortalRuntime.service.query_records,
-                    scope=scope,
-                    specialty=specialty,
-                    search=search,
-                    ongoing_items=ongoing,
-                    work_type=work_type,
-                    sections=("records", "ongoing", "stats", "zhihang"),
-                    records_page=pending_page,
-                    records_page_size=PENDING_PAGE_SIZE,
-                    ongoing_page=ongoing_page,
-                    ongoing_page_size=ONGOING_PAGE_SIZE,
+                sections = ("records", "ongoing", "stats", "zhihang")
+                open_id = str((session.get("user") or {}).get("open_id") or "")
+                payload_task = asyncio.to_thread(
+                    self._cached_service_payload,
+                    (
+                        "workbench",
+                        open_id,
+                        scope,
+                        "",
+                        specialty,
+                        search,
+                        work_type,
+                        sections,
+                        pending_page,
+                        str(PENDING_PAGE_SIZE),
+                        ongoing_page,
+                        str(ONGOING_PAGE_SIZE),
+                        PortalRuntime._ongoing_items_marker(ongoing),
+                    ),
+                    lambda: PortalRuntime.service.query_records(
+                        scope=scope,
+                        specialty=specialty,
+                        search=search,
+                        ongoing_items=ongoing,
+                        work_type=work_type,
+                        sections=sections,
+                        records_page=pending_page,
+                        records_page_size=PENDING_PAGE_SIZE,
+                        ongoing_page=ongoing_page,
+                        ongoing_page_size=ONGOING_PAGE_SIZE,
+                    ),
                 )
-                scope_options = PortalRuntime.auth_manager.filter_scope_options(
-                    SCOPE_OPTIONS,
-                    session,
-                )
-                notice_undos = await asyncio.to_thread(
+                undo_task = asyncio.to_thread(
                     PortalRuntime.service.list_available_notice_undos,
                     scope=scope,
                     since_seconds=3 * 24 * 60 * 60,
+                )
+                payload, notice_undos = await asyncio.gather(payload_task, undo_task)
+                scope_options = PortalRuntime.auth_manager.filter_scope_options(
+                    SCOPE_OPTIONS,
+                    session,
                 )
                 html_body = render_workbench_lite(
                     payload=payload if isinstance(payload, dict) else {},
@@ -637,6 +657,11 @@ class FastAPIPortalController:
         @app.get("/repair-management")
         @app.get("/repair-management/")
         async def repair_management_page(request: Request):
+            return self._static_file_response(request, portal_index_file(), html=True)
+
+        @app.get("/repair-status")
+        @app.get("/repair-status/")
+        async def repair_status_page(request: Request):
             return self._static_file_response(request, portal_index_file(), html=True)
 
         @app.get("/signature")
@@ -1554,6 +1579,12 @@ class FastAPIPortalController:
                     for item in raw_sections.split(",")
                     if item.strip()
                 )
+                prefetch_only = str(request.query_params.get("prefetch") or "").strip().lower() in {
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                }
                 open_id = str((session.get("user") or {}).get("open_id") or "")
                 payload_key = "records" if request.url.path == "/api/records" else "workbench"
                 if payload_key == "records":
@@ -1590,6 +1621,8 @@ class FastAPIPortalController:
                         ongoing_page_size=ongoing_page_size,
                     ),
                 )
+                if payload_key == "workbench" and prefetch_only:
+                    return self._json_ok(request, session, {"prefetched": True})
                 if (
                     payload_key == "workbench"
                     and work_type in NOTICE_TYPE_BY_WORK_TYPE
@@ -2884,6 +2917,7 @@ class FastAPIPortalController:
                     summary_record_id=str(payload.get("summary_record_id") or ""),
                     fields=payload.get("fields") or {},
                     cmdb_record_ids=payload.get("cmdb_record_ids") or [],
+                    operation_id=str(payload.get("operation_id") or ""),
                     scope=scope,
                 )
                 return self._json_ok(request, session, data)
@@ -2958,6 +2992,40 @@ class FastAPIPortalController:
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
 
+        @app.get("/api/repair-management/status")
+        async def repair_management_status(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_scope_or_error(
+                    session, request.query_params.get("scope") or "ALL"
+                )
+                try:
+                    limit = int(request.query_params.get("limit") or 100)
+                except ValueError:
+                    limit = 100
+                try:
+                    offset = int(request.query_params.get("offset") or 0)
+                except ValueError:
+                    offset = 0
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.get_repair_management_status,
+                    scope=scope,
+                    query=str(request.query_params.get("q") or ""),
+                    state=str(request.query_params.get("state") or "all"),
+                    period=str(request.query_params.get("period") or "all"),
+                    limit=limit,
+                    offset=offset,
+                    force_refresh=str(
+                        request.query_params.get("refresh") or ""
+                    ).lower()
+                    in {"1", "true", "yes"},
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
         @app.get("/api/repair-management/records")
         async def repair_management_records(request: Request):
             session = self._current_session(request)
@@ -2982,10 +3050,31 @@ class FastAPIPortalController:
                     query=query,
                     limit=limit,
                     offset=offset,
+                    focus_record_id=str(
+                        request.query_params.get("focus_record_id") or ""
+                    ),
                 )
                 return self._json_ok(request, session, data)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)
+
+        @app.get("/api/repair-management/records/{record_id}")
+        async def repair_management_record_detail(record_id: str, request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_scope_or_error(
+                    session, request.query_params.get("scope") or "ALL"
+                )
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.get_repair_management_record,
+                    record_id,
+                    scope=scope,
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=404)
 
         @app.post("/api/repair-management/records")
         async def repair_management_record_create(request: Request):
@@ -3000,6 +3089,7 @@ class FastAPIPortalController:
                 data = await asyncio.to_thread(
                     PortalRuntime.service.create_repair_management_record,
                     payload.get("fields") if isinstance(payload.get("fields"), dict) else {},
+                    operation_id=str(payload.get("operation_id") or ""),
                     source_event_id=str(payload.get("source_event_id") or ""),
                     source_repair_ids=payload.get("source_repair_ids") or [],
                     source_month=str(payload.get("source_month") or ""),

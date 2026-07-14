@@ -6,13 +6,17 @@
         <h2>维修项目与跟进</h2>
       </div>
       <div class="hero-actions">
+        <button type="button" class="btn secondary" @click="openRepairStatus">
+          <Activity :size="16" aria-hidden="true" />
+          <span>检修状态</span>
+        </button>
         <button type="button" class="btn secondary" :disabled="loading" @click="loadRecords(true)">
           <RefreshCw :size="16" :class="{ spinning: loading }" aria-hidden="true" />
-          <span>{{ loading ? "读取中" : "刷新" }}</span>
+          <span>{{ loading && !records.length ? "读取中" : "刷新" }}</span>
         </button>
         <button type="button" class="btn primary" @click="requestStartCreate">
           <FilePlus2 :size="16" aria-hidden="true" />
-          <span>清空表单</span>
+          <span>新建维修单</span>
         </button>
       </div>
     </div>
@@ -28,7 +32,7 @@
         <div class="panel-head">
           <div>
             <strong>维修项目列表</strong>
-            <span>{{ total }} 条</span>
+            <span aria-live="polite">{{ loading && records.length ? "更新中" : `${total} 条` }}</span>
           </div>
           <div class="record-search">
             <input v-model.trim="searchText" type="search" placeholder="搜索维修项目" />
@@ -36,8 +40,8 @@
           </div>
         </div>
         <div class="record-list" :aria-busy="loading">
-          <div v-if="loading" class="empty-state">正在读取维修项目...</div>
-          <div v-else-if="!records.length" class="empty-state">暂无维修项目</div>
+          <div v-if="loading && !records.length" class="empty-state">正在读取维修项目...</div>
+          <div v-else-if="!records.length" class="empty-state">{{ recordEmptyText }}</div>
           <button
             v-for="record in records"
             v-else
@@ -57,6 +61,7 @@
               />
             </span>
             <span class="record-meta">
+              <b v-if="record.workflow" class="workflow">{{ record.workflow }}</b>
               <b>{{ recordBuildingLabel(record) }}</b>
               <b>{{ recordSpecialtyLabel(record) }}</b>
               <b>{{ recordTimeLabel(record) }}</b>
@@ -78,7 +83,7 @@
               :class="{ active: activeWorkspaceTab === 'project' }"
               @click="activeWorkspaceTab = 'project'"
             >
-              项目信息
+              维修单信息
               <span v-if="hasUnsavedChanges" class="unsaved-dot">未保存</span>
             </button>
             <button
@@ -100,7 +105,7 @@
               <div class="source-head-actions">
                 <span v-if="prefillLoading" class="source-loading">填入中</span>
                 <button type="button" class="btn quiet compact" @click="sourceExpanded = !sourceExpanded">
-                  {{ sourceExpanded ? "收起" : "更改来源" }}
+                  {{ sourceExpanded ? "收起" : "更改事件检修关联" }}
                 </button>
               </div>
             </header>
@@ -131,16 +136,26 @@
               </div>
             </div>
             <div v-else class="source-summary-row">
-              <span><b>事件</b>{{ selectedEventSummary }}</span>
-              <span><b>检修</b>{{ selectedRepairSummary }}</span>
+              <span><b>关联事件</b>{{ selectedEventSummary }}</span>
+              <span><b>关联检修通告</b>{{ selectedRepairSummary }}</span>
             </div>
             <div v-if="prefillWarnings.length" class="prefill-warning">{{ prefillWarnings.join("；") }}</div>
           </section>
 
           <header class="editor-head">
             <div>
-              <h3>{{ editingRecordId ? selectedRecordTitle : "填写维修项目" }}</h3>
-              <p v-if="sourceEventId && eventTitle">来自事件：{{ eventTitle }}</p>
+              <button
+                v-if="editingRecordId"
+                type="button"
+                class="editor-title-button"
+                title="查看并编辑完整维修单"
+                @click="detailDialogOpen = true"
+              >
+                <span>{{ selectedRecordTitle }}</span>
+                <PencilLine :size="15" aria-hidden="true" />
+              </button>
+              <h3 v-else>填写维修项目</h3>
+              <p v-if="sourceEventId && eventTitle">关联事件：{{ eventTitle }}</p>
             </div>
           </header>
 
@@ -152,7 +167,7 @@
           <div v-else-if="!editableFields.length" class="empty-state">暂无可填写字段</div>
           <div v-else class="project-form-sections">
             <section v-for="group in projectFieldGroups" :key="group.key" class="project-field-section">
-              <header>
+              <header v-if="group.label">
                 <h4>{{ group.label }}</h4>
                 <span>{{ group.fields.length }} 项</span>
               </header>
@@ -174,15 +189,6 @@
               </div>
             </section>
           </div>
-          <details v-if="readonlyPreviewFields.length" class="readonly-summary" :open="!editingRecordId">
-            <summary>自动填写字段（{{ visibleReadonlyFields.length }} 项）</summary>
-            <div class="readonly-grid">
-              <div v-for="field in readonlyPreviewFields" :key="field.field_name" class="readonly-line">
-                <b>{{ field.field_name }}</b>
-                <span>{{ displayReadonlyValue(field.field_name) || "未填写" }}</span>
-              </div>
-            </div>
-          </details>
 
           <footer class="editor-action-bar">
             <div class="save-state" :class="projectSaveStateTone">
@@ -229,6 +235,7 @@
 
         <RepairFollowupPanel
           v-if="editingRecordId"
+          :key="`${scope}:${editingRecordId}`"
           v-show="activeWorkspaceTab === 'followups'"
           embedded
           :scope="scope"
@@ -281,33 +288,106 @@
       @close="activePicker = ''"
       @confirm="confirmRepairSelection"
     />
+
+    <Teleport to="body">
+      <div
+        v-if="detailDialogOpen"
+        class="repair-detail-overlay"
+        role="presentation"
+        @click.self="detailDialogOpen = false"
+        @keydown.esc="detailDialogOpen = false"
+      >
+        <section
+          class="repair-detail-dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="repair-detail-title"
+        >
+          <header class="repair-detail-head">
+            <div>
+              <span>维修单</span>
+              <h3 id="repair-detail-title">{{ selectedRecordTitle }}</h3>
+            </div>
+            <button type="button" aria-label="关闭维修单详情" @click="detailDialogOpen = false">
+              <X :size="19" aria-hidden="true" />
+            </button>
+          </header>
+          <div class="repair-detail-body">
+            <section v-if="editableFields.length" class="repair-detail-section">
+              <h4>可编辑内容</h4>
+              <div class="repair-detail-field-grid">
+                <RepairFieldControl
+                  v-for="field in editableFields"
+                  :key="`detail-${field.field_name}`"
+                  :field="field"
+                  :input-id="detailFieldInputId(field)"
+                  :label="projectFieldLabel(field.field_name)"
+                  :model-value="fieldDraft[field.field_name]"
+                  :required="isRequiredField(field.field_name)"
+                  :error="fieldValidationError(field.field_name)"
+                  :wide="usesTextarea(field.field_name)"
+                  compact
+                  @update:model-value="fieldDraft[field.field_name] = $event"
+                  @edited="markFieldDirty(field.field_name)"
+                />
+              </div>
+            </section>
+            <section v-if="readonlyPreviewFields.length" class="repair-detail-section">
+              <h4>系统内容</h4>
+              <div class="repair-detail-readonly-grid">
+                <div v-for="field in readonlyPreviewFields" :key="`readonly-${field.field_name}`">
+                  <b>{{ field.field_name }}</b>
+                  <span>{{ displayReadonlyValue(field.field_name) || "未填写" }}</span>
+                </div>
+              </div>
+            </section>
+          </div>
+          <footer class="repair-detail-footer">
+            <button type="button" class="btn quiet" @click="detailDialogOpen = false">关闭</button>
+            <button
+              type="button"
+              class="btn primary"
+              :disabled="saving || !canSaveRecord"
+              :title="saveDisabledReason"
+              @click="saveRecord"
+            >
+              <Save :size="16" aria-hidden="true" />
+              <span>{{ saving ? "保存中" : "保存修改" }}</span>
+            </button>
+          </footer>
+        </section>
+      </div>
+    </Teleport>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import {
+  Activity,
   AlertCircle,
   CheckCircle2,
   FilePlus2,
   LoaderCircle,
+  PencilLine,
   RefreshCw,
   RotateCcw,
   Save,
   Trash2,
   Wrench,
+  X,
 } from "lucide-vue-next";
 import { requestJson } from "../api/client";
 import { navigate, navigateHard } from "../navigation";
+import { invalidateRepairStatus } from "../repairStatusState";
 import {
   REPAIR_REQUIRED_FIELD_GROUPS,
+  createRepairOperationId,
   isRequiredRepairField as isRequiredField,
   parseRepairDraftValue as parseDraftValue,
   repairDraftInputValue,
   repairEventRecordId as eventRecordId,
-  repairFieldPreservesRawValue,
   repairFieldUsesTextarea,
-  repairFieldValueToText as fieldValueToText,
   repairRecordBuildingLabel as recordBuildingLabel,
   repairRecordSpecialtyLabel as recordSpecialtyLabel,
   repairRecordTimeLabel as recordTimeLabel,
@@ -325,13 +405,13 @@ type PickerColumn = { key: string; label: string; width?: string };
 type SourcePicker = "" | "event" | "repair";
 type WorkspaceTab = "project" | "followups";
 type ConfirmTone = "warning" | "danger" | "primary";
-type ProjectFieldGroupKey = "basic" | "fault" | "execution" | "other";
+type ProjectFieldGroupKey = "basic" | "execution" | "other";
+type PrefillSelection = { eventRecordId: string; repairRecordIds: string[] };
 
 const RECORD_PAGE_SIZE = 30;
 
 const PROJECT_FIELD_GROUPS: Array<{ key: ProjectFieldGroupKey; label: string }> = [
-  { key: "basic", label: "基础信息" },
-  { key: "fault", label: "故障与设备" },
+  { key: "basic", label: "" },
   { key: "execution", label: "维修执行" },
   { key: "other", label: "其他信息" },
 ];
@@ -376,6 +456,7 @@ const repairPickerColumns: PickerColumn[] = [
 const props = defineProps<{
   scope: string;
   scopeOptions: ScopeOption[];
+  focusRecordId?: string;
 }>();
 
 const loading = ref(false);
@@ -411,6 +492,8 @@ const hasUnsavedChanges = ref(false);
 const followupHasUnsavedChanges = ref(false);
 const validationAttempted = ref(false);
 const creatingNewProject = ref(false);
+const detailDialogOpen = ref(false);
+const createOperationId = ref("");
 const recordPage = ref(1);
 const confirmDialog = reactive({
   open: false,
@@ -423,14 +506,23 @@ const confirmDialog = reactive({
 });
 let pendingConfirmAction: null | (() => void | Promise<void>) = null;
 let searchTimer: ReturnType<typeof setTimeout> | undefined;
+let skipNextSearchReload = false;
 let recordsRequestVersion = 0;
 let eventRequestVersion = 0;
 let repairRequestVersion = 0;
 let prefillRequestVersion = 0;
+let recordDetailRequestVersion = 0;
+let activationCount = 0;
+let recordsAbortController: AbortController | null = null;
+let eventAbortController: AbortController | null = null;
+let repairAbortController: AbortController | null = null;
+let prefillAbortController: AbortController | null = null;
+let recordDetailAbortController: AbortController | null = null;
 
 const routeParams = new URLSearchParams(window.location.search);
 const routeEventTitle = String(routeParams.get("event_title") || "").trim();
 const routeEventId = String(routeParams.get("from_event_record_id") || "").trim();
+const appliedFocusRecordId = ref("");
 const eventTitle = ref(routeEventTitle);
 const sourceEventId = ref(routeEventId);
 
@@ -489,18 +581,21 @@ const missingRequiredEditableFields = computed(() => {
   return missing;
 });
 const canSaveRecord = computed(() => {
-  return !saving.value && !prefillLoading.value && hasWritableDraft.value;
+  return !saving.value
+    && !prefillLoading.value
+    && hasWritableDraft.value
+    && (!editingRecordId.value || hasUnsavedChanges.value);
 });
 const hasAnyUnsavedChanges = computed(() => (
   hasUnsavedChanges.value || followupHasUnsavedChanges.value
 ));
 const unsavedNoticeText = computed(() => {
   if (hasUnsavedChanges.value && followupHasUnsavedChanges.value) {
-    return "项目信息和跟进记录有未保存修改";
+    return "维修单信息和跟进记录有未保存修改";
   }
   return followupHasUnsavedChanges.value
     ? "跟进记录有未保存修改"
-    : "项目信息有未保存修改";
+    : "维修单信息有未保存修改";
 });
 const projectSaveStateText = computed(() => {
   if (saving.value) return "保存中";
@@ -523,6 +618,7 @@ const saveDisabledReason = computed(() => {
   if (saving.value) return "正在保存";
   if (prefillLoading.value) return "关联字段正在填入";
   if (!hasWritableDraft.value) return "请先填写维修项目";
+  if (editingRecordId.value && !hasUnsavedChanges.value) return "没有需要保存的修改";
   if (missingRequiredEditableFields.value.length) {
     return `请先填写：${missingRequiredEditableFields.value.join("、")}`;
   }
@@ -531,6 +627,9 @@ const saveDisabledReason = computed(() => {
 
 const selectedRecordTitle = computed(() => selectedRecord.value?.title || "未命名维修项目");
 const recordPageCount = computed(() => Math.max(1, Math.ceil(total.value / RECORD_PAGE_SIZE)));
+const recordEmptyText = computed(() => (
+  searchText.value ? "没有匹配的维修项目" : "暂无进行中的维修项目"
+));
 
 function usesTextarea(fieldName: unknown): boolean {
   return repairFieldUsesTextarea(fieldName);
@@ -540,7 +639,7 @@ function projectFieldGroup(fieldName: unknown): ProjectFieldGroupKey {
   const name = String(fieldName || "").trim();
   if (BASIC_FIELD_NAMES.has(name)) return "basic";
   if (/(故障|设备|位置|地点|机房|CMDB|唯一\s*id|编号|品牌|型号|容量|生产日期|使用年限)/i.test(name)) {
-    return "fault";
+    return "basic";
   }
   if (/(维修方|维修人员|供应商|方案|措施|备件|费用|质保|开始时间|结束时间|维修进度|跟进|附件|推送群组|负责人|审批人)/.test(name)) {
     return "execution";
@@ -550,6 +649,10 @@ function projectFieldGroup(fieldName: unknown): ProjectFieldGroupKey {
 
 function fieldInputId(field: LooseDict): string {
   return `repair-project-field-${encodeURIComponent(String(field.field_name || "field"))}`;
+}
+
+function detailFieldInputId(field: LooseDict): string {
+  return `repair-detail-field-${encodeURIComponent(String(field.field_name || "field"))}`;
 }
 
 function projectFieldLabel(fieldName: unknown): string {
@@ -608,13 +711,32 @@ function relationDisplayText(value: unknown): string {
   return "";
 }
 
+function businessRelationLabel(value: unknown): string {
+  const label = relationDisplayText(value);
+  if (!label) return "";
+  return /(?:^|[^a-z0-9])(?:rec|localid)[a-z0-9_-]+(?:$|[^a-z0-9])/i.test(label)
+    ? ""
+    : label;
+}
+
 function seedSelectedSourceLabels(displayFields: LooseDict): void {
-  const eventLabel = relationDisplayText(displayFields["关联事件单"]);
+  const eventLabel = relationDisplayText(
+    displayFields["事件描述"]
+    || displayFields["故障发生现象描述"]
+    || displayFields["故障维修原因"],
+  ) || businessRelationLabel(
+    displayFields["关联事件单"],
+  );
   if (sourceEventId.value && eventLabel) {
     selectedEvent.value = { record_id: sourceEventId.value, title: eventLabel };
     eventTitle.value = eventLabel;
   }
-  const repairLabel = relationDisplayText(displayFields["设备检修关联"]);
+  const repairLabel = relationDisplayText(
+    displayFields["检修通告名称"]
+    || displayFields["维修设备"],
+  ) || businessRelationLabel(
+    displayFields["设备检修关联"],
+  );
   if (selectedRepairIds.value.length && repairLabel) {
     selectedRepairRecords.value = [{
       record_id: selectedRepairIds.value[0],
@@ -631,12 +753,17 @@ function markFieldDirty(fieldName: unknown): void {
 }
 
 function scopedQuery(): string {
-  return new URLSearchParams({
+  const params = new URLSearchParams({
     scope: props.scope || "ALL",
     q: searchText.value,
     limit: String(RECORD_PAGE_SIZE),
     offset: String((recordPage.value - 1) * RECORD_PAGE_SIZE),
-  }).toString();
+  });
+  const focusRecordId = String(props.focusRecordId || "").trim();
+  if (focusRecordId && appliedFocusRecordId.value !== focusRecordId) {
+    params.set("focus_record_id", focusRecordId);
+  }
+  return params.toString();
 }
 
 function currentMonthKey(): string {
@@ -702,6 +829,14 @@ function requestBack(): void {
   });
 }
 
+function openRepairStatus(): void {
+  runWithUnsavedGuard(() => {
+    const url = new URL("/repair-status", window.location.origin);
+    url.searchParams.set("scope", props.scope || "ALL");
+    navigate(url);
+  });
+}
+
 function requestOpenRepairNoticeWorkbench(): void {
   runWithUnsavedGuard(() => {
     dirtyFieldNames.clear();
@@ -732,7 +867,13 @@ function resetDraft(): void {
   validationAttempted.value = false;
   if (editingRecordId.value && selectedRecord.value) {
     const savedDisplayFields = selectedRecord.value.display_fields || {};
-    eventTitle.value = String(savedDisplayFields["事件描述"] || savedDisplayFields["故障维修原因"] || "");
+    eventTitle.value = String(
+      savedDisplayFields["事件描述"]
+      || savedDisplayFields["故障发生现象描述"]
+      || savedDisplayFields["故障维修原因"]
+      || businessRelationLabel(savedDisplayFields["关联事件单"])
+      || "",
+    );
     sourceEventId.value = String(selectedRecord.value.source_event_id || "").trim();
     selectedRepairIds.value = Array.isArray(selectedRecord.value.source_repair_ids)
       ? selectedRecord.value.source_repair_ids.map((item: unknown) => String(item || "").trim()).filter(Boolean).slice(0, 1)
@@ -793,6 +934,9 @@ function prefillEventTitle(): void {
 
 async function loadEventCandidates(): Promise<void> {
   const requestVersion = ++eventRequestVersion;
+  eventAbortController?.abort();
+  const abortController = new AbortController();
+  eventAbortController = abortController;
   eventLoading.value = true;
   try {
     const params = new URLSearchParams({
@@ -801,7 +945,10 @@ async function loadEventCandidates(): Promise<void> {
       q: eventSearchText.value,
       limit: "120",
     });
-    const payload = await requestJson(`/api/repair-management/event-candidates?${params.toString()}`);
+    const payload = await requestJson(
+      `/api/repair-management/event-candidates?${params.toString()}`,
+      { signal: abortController.signal },
+    );
     if (requestVersion !== eventRequestVersion) return;
     eventCandidates.value = Array.isArray(payload.records) ? payload.records : [];
     const selected = eventCandidates.value.find(
@@ -815,9 +962,11 @@ async function loadEventCandidates(): Promise<void> {
       showMessage("当前条件下没有可选择的事件。", "warning");
     }
   } catch (error: unknown) {
+    if (abortController.signal.aborted) return;
     if (requestVersion !== eventRequestVersion) return;
     showMessage(error instanceof Error ? error.message : "事件候选读取失败。", "failed");
   } finally {
+    if (eventAbortController === abortController) eventAbortController = null;
     if (requestVersion === eventRequestVersion) eventLoading.value = false;
   }
 }
@@ -846,24 +995,30 @@ async function confirmEventSelection(recordIds: string[], quiet = false): Promis
     record_id: recordId,
     title: eventTitle.value,
   };
+  const nextRepairIds = changed ? [] : selectedRepairIds.value.slice(0, 1);
+  const applied = await applyCombinedPrefill(true, {
+    eventRecordId: recordId,
+    repairRecordIds: nextRepairIds,
+  });
+  if (!applied) return;
   sourceEventId.value = recordId;
   selectedEvent.value = event;
   eventTitle.value = String(event.title || eventTitle.value || "");
   activePicker.value = "";
-  prefillWarnings.value = [];
   if (changed) {
-    selectedRepairIds.value = [];
+    selectedRepairIds.value = nextRepairIds;
     selectedRepairRecords.value = [];
     repairRecommendedIds.value = [];
   }
-  await applyCombinedPrefill(true);
   hasUnsavedChanges.value = true;
-  await loadRepairCandidates();
-  if (!quiet) showMessage("事件已关联，可继续选择检修通告。", "success");
+  if (!quiet) showMessage("事件已关联。", "success");
 }
 
 async function loadRepairCandidates(): Promise<void> {
   const requestVersion = ++repairRequestVersion;
+  repairAbortController?.abort();
+  const abortController = new AbortController();
+  repairAbortController = abortController;
   repairCandidateLoading.value = true;
   try {
     const params = new URLSearchParams({
@@ -873,7 +1028,10 @@ async function loadRepairCandidates(): Promise<void> {
       q: repairSearchText.value,
       limit: "80",
     });
-    const payload = await requestJson(`/api/repair-management/repair-candidates?${params.toString()}`);
+    const payload = await requestJson(
+      `/api/repair-management/repair-candidates?${params.toString()}`,
+      { signal: abortController.signal },
+    );
     if (requestVersion !== repairRequestVersion) return;
     repairCandidates.value = Array.isArray(payload.records) ? payload.records : [];
     const selectedIdSet = new Set(selectedRepairIds.value);
@@ -885,84 +1043,142 @@ async function loadRepairCandidates(): Promise<void> {
       ? payload.auto_selected_ids.map((item: unknown) => String(item || "").trim()).filter(Boolean).slice(0, 1)
       : [];
   } catch (error: unknown) {
+    if (abortController.signal.aborted) return;
     if (requestVersion !== repairRequestVersion) return;
     showMessage(error instanceof Error ? error.message : "设备检修候选读取失败。", "failed");
   } finally {
+    if (repairAbortController === abortController) repairAbortController = null;
     if (requestVersion === repairRequestVersion) repairCandidateLoading.value = false;
   }
 }
 
-async function refreshPrefillAfterSourceChange(): Promise<void> {
-  if (hasSelectedSources.value) {
-    await applyCombinedPrefill(true);
+async function clearEventSelection(): Promise<void> {
+  const nextRepairIds = selectedRepairIds.value.slice(0, 1);
+  if (nextRepairIds.length) {
+    const applied = await applyCombinedPrefill(true, {
+      eventRecordId: "",
+      repairRecordIds: nextRepairIds,
+    });
+    if (!applied) return;
   } else {
     prefillRequestVersion += 1;
-    prefillLoading.value = false;
     replacePrefillFields({}, true);
     prefillWarnings.value = [];
   }
-  hasUnsavedChanges.value = true;
-}
-
-async function clearEventSelection(): Promise<void> {
   sourceEventId.value = "";
   selectedEvent.value = null;
   eventTitle.value = "";
   repairRecommendedIds.value = [];
-  await refreshPrefillAfterSourceChange();
+  hasUnsavedChanges.value = true;
   showMessage("事件关联已清除。", "success");
 }
 
 async function clearRepairSelection(): Promise<void> {
+  if (sourceEventId.value) {
+    const applied = await applyCombinedPrefill(true, {
+      eventRecordId: sourceEventId.value,
+      repairRecordIds: [],
+    });
+    if (!applied) return;
+  } else {
+    prefillRequestVersion += 1;
+    replacePrefillFields({}, true);
+    prefillWarnings.value = [];
+  }
   selectedRepairIds.value = [];
   selectedRepairRecords.value = [];
   repairRecommendedIds.value = [];
-  await refreshPrefillAfterSourceChange();
+  hasUnsavedChanges.value = true;
   showMessage("检修通告关联已清除。", "success");
 }
 
 async function confirmRepairSelection(recordIds: string[]): Promise<void> {
-  selectedRepairIds.value = recordIds.map((item) => String(item || "").trim()).filter(Boolean).slice(0, 1);
-  const selectedIdSet = new Set(selectedRepairIds.value);
+  const nextRepairIds = recordIds.map((item) => String(item || "").trim()).filter(Boolean).slice(0, 1);
+  const applied = await applyCombinedPrefill(true, {
+    eventRecordId: sourceEventId.value,
+    repairRecordIds: nextRepairIds,
+  });
+  if (!applied) return;
+  selectedRepairIds.value = nextRepairIds;
+  const selectedIdSet = new Set(nextRepairIds);
   selectedRepairRecords.value = repairCandidates.value.filter(
     (item) => selectedIdSet.has(String(item.record_id || "").trim()),
   );
   repairRecommendedIds.value = [];
   activePicker.value = "";
-  await applyCombinedPrefill(true);
   hasUnsavedChanges.value = true;
   showMessage(`已关联 ${selectedRepairIds.value.length} 条设备检修通告。`, "success");
 }
 
 async function handleFollowupChanged(): Promise<void> {
-  await loadRecords(false);
-  const current = records.value.find(
-    (item) => String(item.record_id || "") === editingRecordId.value,
-  );
-  if (current) selectedRecord.value = current;
+  invalidateRepairStatus();
+  const recordId = editingRecordId.value;
+  if (!recordId) return;
+  const requestVersion = ++recordDetailRequestVersion;
+  recordDetailAbortController?.abort();
+  const abortController = new AbortController();
+  recordDetailAbortController = abortController;
+  try {
+    const params = new URLSearchParams({ scope: props.scope || "ALL" });
+    const payload = await requestJson(
+      `/api/repair-management/records/${encodeURIComponent(recordId)}?${params.toString()}`,
+      { signal: abortController.signal },
+    );
+    if (requestVersion !== recordDetailRequestVersion) return;
+    if (recordId !== editingRecordId.value) return;
+    const current = payload.record && typeof payload.record === "object"
+      ? payload.record as LooseDict
+      : null;
+    if (!current) return;
+    const index = records.value.findIndex(
+      (item) => String(item.record_id || "") === recordId,
+    );
+    if (index >= 0) {
+      const nextRecords = records.value.slice();
+      nextRecords[index] = current;
+      records.value = nextRecords;
+    }
+    selectedRecord.value = current;
+    if (!hasUnsavedChanges.value) resetDraft();
+  } catch (error: unknown) {
+    if (abortController.signal.aborted) return;
+    if (requestVersion !== recordDetailRequestVersion) return;
+    showMessage(
+      `跟进记录已保存，维修项目信息稍后刷新：${error instanceof Error ? error.message : "读取失败"}`,
+      "warning",
+    );
+  } finally {
+    if (recordDetailAbortController === abortController) recordDetailAbortController = null;
+  }
 }
 
-async function applyCombinedPrefill(quiet = false): Promise<void> {
-  if (!hasSelectedSources.value) return;
+async function applyCombinedPrefill(
+  quiet = false,
+  selection?: PrefillSelection,
+): Promise<boolean> {
+  const eventRecordId = String(selection?.eventRecordId ?? sourceEventId.value).trim();
+  const repairRecordIds = (selection?.repairRecordIds ?? selectedRepairIds.value)
+    .map((item) => String(item || "").trim())
+    .filter(Boolean)
+    .slice(0, 1);
+  if (!eventRecordId && !repairRecordIds.length) return true;
   const requestVersion = ++prefillRequestVersion;
+  prefillAbortController?.abort();
+  const abortController = new AbortController();
+  prefillAbortController = abortController;
   prefillLoading.value = true;
   try {
     const payload = await requestJson("/api/repair-management/prefill", {
       method: "POST",
       body: JSON.stringify({
         scope: props.scope || "ALL",
-        source_event_id: sourceEventId.value,
-        source_repair_ids: selectedRepairIds.value,
+        source_event_id: eventRecordId,
+        source_repair_ids: repairRecordIds,
         source_month: currentMonthKey(),
       }),
+      signal: abortController.signal,
     });
-    if (requestVersion !== prefillRequestVersion) return;
-    if (payload.event && typeof payload.event === "object") {
-      const event = payload.event as LooseDict;
-      selectedEvent.value = event;
-      sourceEventId.value = eventRecordId(event) || sourceEventId.value;
-      eventTitle.value = String(event.title || event.alarm_desc || eventTitle.value || "");
-    }
+    if (requestVersion !== prefillRequestVersion) return false;
     replacePrefillFields(
       payload.fields && typeof payload.fields === "object" ? payload.fields : {},
       true,
@@ -974,15 +1190,24 @@ async function applyCombinedPrefill(quiet = false): Promise<void> {
       hasUnsavedChanges.value = true;
       showMessage("已按所选关联记录重新填入。", "success");
     }
+    return true;
   } catch (error: unknown) {
-    if (requestVersion !== prefillRequestVersion) return;
+    if (abortController.signal.aborted) return false;
+    if (requestVersion !== prefillRequestVersion) return false;
     showMessage(error instanceof Error ? error.message : "自动填入失败。", "failed");
+    return false;
   } finally {
+    if (prefillAbortController === abortController) prefillAbortController = null;
     if (requestVersion === prefillRequestVersion) prefillLoading.value = false;
   }
 }
 
 function selectRecordNow(record: LooseDict): void {
+  recordDetailRequestVersion += 1;
+  recordDetailAbortController?.abort();
+  recordDetailAbortController = null;
+  detailDialogOpen.value = false;
+  createOperationId.value = "";
   followupHasUnsavedChanges.value = false;
   creatingNewProject.value = false;
   selectedRecord.value = record;
@@ -994,7 +1219,13 @@ function selectRecordNow(record: LooseDict): void {
   selectedRepairRecords.value = [];
   repairRecommendedIds.value = [];
   const displayFields = record.display_fields || {};
-  eventTitle.value = String(displayFields["事件描述"] || displayFields["故障维修原因"] || "");
+  eventTitle.value = String(
+    displayFields["事件描述"]
+    || displayFields["故障发生现象描述"]
+    || displayFields["故障维修原因"]
+    || businessRelationLabel(displayFields["关联事件单"])
+    || "",
+  );
   const matchedEvent = eventCandidates.value.find(
     (item) => eventRecordId(item) === sourceEventId.value,
   );
@@ -1005,7 +1236,6 @@ function selectRecordNow(record: LooseDict): void {
   resetDraft();
   sourceExpanded.value = false;
   activeWorkspaceTab.value = "project";
-  if (selectedRepairIds.value.length) void loadRepairCandidates();
 }
 
 function requestSelectRecord(record: LooseDict): void {
@@ -1014,6 +1244,11 @@ function requestSelectRecord(record: LooseDict): void {
 }
 
 function startCreateNow(): void {
+  recordDetailRequestVersion += 1;
+  recordDetailAbortController?.abort();
+  recordDetailAbortController = null;
+  detailDialogOpen.value = false;
+  createOperationId.value = "";
   followupHasUnsavedChanges.value = false;
   creatingNewProject.value = true;
   selectedRecord.value = null;
@@ -1037,6 +1272,8 @@ function requestStartCreate(): void {
 }
 
 function clearSearch(): void {
+  if (searchTimer) clearTimeout(searchTimer);
+  skipNextSearchReload = true;
   searchText.value = "";
   recordPage.value = 1;
   void loadRecords(false);
@@ -1064,13 +1301,30 @@ function changeRecordPage(delta: number): void {
 
 async function loadRecords(announce = false): Promise<void> {
   const requestVersion = ++recordsRequestVersion;
+  recordsAbortController?.abort();
+  const abortController = new AbortController();
+  recordsAbortController = abortController;
   loading.value = true;
   try {
-    const payload = await requestJson(`/api/repair-management/records?${scopedQuery()}`);
+    const payload = await requestJson(
+      `/api/repair-management/records?${scopedQuery()}`,
+      { signal: abortController.signal },
+    );
     if (requestVersion !== recordsRequestVersion) return;
     fields.value = Array.isArray(payload.fields) ? payload.fields : [];
     records.value = Array.isArray(payload.records) ? payload.records : [];
     total.value = Number(payload.total || records.value.length || 0);
+    const focusRecordId = String(props.focusRecordId || "").trim();
+    if (focusRecordId && appliedFocusRecordId.value !== focusRecordId) {
+      const focused = records.value.find(
+        (item) => String(item.record_id || "").trim() === focusRecordId,
+      );
+      appliedFocusRecordId.value = focusRecordId;
+      if (focused) {
+        recordPage.value = Math.floor(Number(payload.offset || 0) / RECORD_PAGE_SIZE) + 1;
+        selectRecordNow(focused);
+      }
+    }
     const maxPage = Math.max(1, Math.ceil(total.value / RECORD_PAGE_SIZE));
     if (recordPage.value > maxPage) {
       recordPage.value = maxPage;
@@ -1098,33 +1352,31 @@ async function loadRecords(announce = false): Promise<void> {
       routeEventPrefillApplied.value = true;
       await applyEventPrefill(sourceEventId.value, true);
     }
-    if (announce) {
+    const schemaWarnings = Array.isArray(payload.schema_warnings)
+      ? payload.schema_warnings.map((item: unknown) => String(item || "").trim()).filter(Boolean)
+      : [];
+    if (schemaWarnings.length) {
+      showMessage(schemaWarnings.join("；"), "warning");
+    } else if (announce) {
       showMessage(records.value.length ? "维修项目已刷新。" : "当前筛选下没有维修项目。", records.value.length ? "success" : "warning");
     }
   } catch (error: unknown) {
+    if (abortController.signal.aborted) return;
     if (requestVersion !== recordsRequestVersion) return;
     showMessage(error instanceof Error ? error.message : "维修项目读取失败。", "failed");
   } finally {
+    if (recordsAbortController === abortController) recordsAbortController = null;
     if (requestVersion === recordsRequestVersion) loading.value = false;
   }
 }
 
 function writablePayload(): Record<string, unknown> {
   const result: Record<string, unknown> = {};
-  const rawFields = selectedRecord.value?.raw_fields || {};
   for (const field of editableFields.value) {
     const name = String(field.field_name || "");
+    if (editingRecordId.value && !dirtyFieldNames.has(name)) continue;
     const value = String(fieldDraft[name] ?? "");
     if (value.trim() === "" && !editingRecordId.value) continue;
-    if (
-      editingRecordId.value
-      && !dirtyFieldNames.has(name)
-      && repairFieldPreservesRawValue(field)
-      && Object.prototype.hasOwnProperty.call(rawFields, name)
-    ) {
-      result[name] = rawFields[name];
-      continue;
-    }
     result[name] = parseDraftValue(value, field);
   }
   return result;
@@ -1143,7 +1395,11 @@ async function saveRecord(): Promise<void> {
   }
   saving.value = true;
   try {
+    if (!editingRecordId.value && !createOperationId.value) {
+      createOperationId.value = createRepairOperationId("repair-project");
+    }
     const body = JSON.stringify({
+      operation_id: editingRecordId.value ? "" : createOperationId.value,
       scope: props.scope || "ALL",
       source_event_id: sourceEventId.value,
       source_repair_ids: selectedRepairIds.value,
@@ -1167,6 +1423,7 @@ async function saveRecord(): Promise<void> {
         body,
       });
       editingRecordId.value = String(created.record_id || "");
+      createOperationId.value = "";
       const warnings = Array.isArray(created.warnings) ? created.warnings.filter(Boolean) : [];
       showMessage(
         warnings.length ? `维修项目已创建；${warnings.join("；")}` : "维修项目已创建。",
@@ -1176,9 +1433,11 @@ async function saveRecord(): Promise<void> {
     dirtyFieldNames.clear();
     hasUnsavedChanges.value = false;
     validationAttempted.value = false;
+    detailDialogOpen.value = false;
     sourceExpanded.value = false;
     recordPage.value = 1;
     await loadRecords(false);
+    invalidateRepairStatus();
     const current = records.value.find((item) => String(item.record_id || "") === editingRecordId.value);
     if (current) {
       selectedRecord.value = current;
@@ -1228,6 +1487,7 @@ async function deleteRecordNow(): Promise<void> {
     activeWorkspaceTab.value = "project";
     sourceExpanded.value = true;
     showMessage("维修项目已删除。");
+    invalidateRepairStatus();
     await loadRecords(false);
   } catch (error: unknown) {
     showMessage(error instanceof Error ? error.message : "删除失败。", "failed");
@@ -1237,9 +1497,21 @@ async function deleteRecordNow(): Promise<void> {
 }
 
 function displayReadonlyValue(fieldName: string): string {
+  const field = fields.value.find((item) => String(item.field_name || "") === fieldName) || {};
+  const formatValue = (value: unknown): string => {
+    const uiType = String(field.ui_type || "").toLowerCase();
+    if (uiType === "progress" || fieldName === "当前维修进度") {
+      const raw = String(value ?? "").trim().replace("％", "%");
+      const parsed = Number.parseFloat(raw.replace("%", ""));
+      if (Number.isFinite(parsed)) {
+        const percent = raw.includes("%") || Math.abs(parsed) > 1 ? parsed : parsed * 100;
+        return `${Math.max(0, Math.min(100, Math.round(percent)))}%`;
+      }
+    }
+    return repairDraftInputValue(field, value).replace("T", " ");
+  };
   if (Object.prototype.hasOwnProperty.call(prefillPreview, fieldName)) {
-    const field = fields.value.find((item) => String(item.field_name || "") === fieldName) || {};
-    return repairDraftInputValue(field, prefillPreview[fieldName]).replace("T", " ");
+    return formatValue(prefillPreview[fieldName]);
   }
   if (!editingRecordId.value) {
     if (fieldName === "维修名称" && eventTitle.value) {
@@ -1250,7 +1522,7 @@ function displayReadonlyValue(fieldName: string): string {
     }
   }
   const displayFields = selectedRecord.value?.display_fields || {};
-  return fieldValueToText(displayFields[fieldName]);
+  return formatValue(displayFields[fieldName]);
 }
 
 function openRepairNoticeWorkbench(): void {
@@ -1277,12 +1549,51 @@ watch(
     activePicker.value = "";
     prefillWarnings.value = [];
     routeEventPrefillApplied.value = false;
+    appliedFocusRecordId.value = "";
     void loadRecords(false);
-    void loadEventCandidates();
   },
 );
 
+watch(
+  () => String(props.focusRecordId || "").trim(),
+  (focusRecordId) => {
+    if (!focusRecordId || appliedFocusRecordId.value === focusRecordId) return;
+    const focused = records.value.find(
+      (item) => String(item.record_id || "").trim() === focusRecordId,
+    );
+    if (focused) {
+      appliedFocusRecordId.value = focusRecordId;
+      runWithUnsavedGuard(() => selectRecordNow(focused));
+      return;
+    }
+    if (!loading.value) void loadRecords(false);
+  },
+);
+
+onActivated(() => {
+  activationCount += 1;
+  if (activationCount === 1) return;
+  const focusRecordId = String(props.focusRecordId || "").trim();
+  if (!focusRecordId) return;
+  const focused = records.value.find(
+    (item) => String(item.record_id || "").trim() === focusRecordId,
+  );
+  if (focused) {
+    appliedFocusRecordId.value = focusRecordId;
+    if (editingRecordId.value !== focusRecordId) {
+      runWithUnsavedGuard(() => selectRecordNow(focused));
+    }
+    return;
+  }
+  appliedFocusRecordId.value = "";
+  if (!loading.value) void loadRecords(false);
+});
+
 watch(searchText, () => {
+  if (skipNextSearchReload) {
+    skipNextSearchReload = false;
+    return;
+  }
   if (searchTimer) clearTimeout(searchTimer);
   searchTimer = setTimeout(() => {
     recordPage.value = 1;
@@ -1297,11 +1608,15 @@ onMounted(() => {
     eventTitle.value = routeEventTitle;
   }
   void loadRecords(false);
-  void loadEventCandidates();
 });
 
 onBeforeUnmount(() => {
   if (searchTimer) clearTimeout(searchTimer);
+  recordsAbortController?.abort();
+  eventAbortController?.abort();
+  repairAbortController?.abort();
+  prefillAbortController?.abort();
+  recordDetailAbortController?.abort();
 });
 </script>
 
@@ -2214,6 +2529,12 @@ onBeforeUnmount(() => {
   margin-bottom: 2px;
 }
 
+.record-meta b.workflow {
+  border: 1px solid #c8e7df;
+  background: #edf9f5;
+  color: #08745f;
+}
+
 .editor-head > div {
   min-width: 0;
 }
@@ -2225,6 +2546,41 @@ onBeforeUnmount(() => {
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.editor-title-button {
+  min-width: 0;
+  max-width: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 0;
+  border-radius: 7px;
+  padding: 2px 4px;
+  background: transparent;
+  color: #10294a;
+  font: inherit;
+  font-size: 17px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.editor-title-button span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.editor-title-button svg {
+  flex: 0 0 auto;
+  color: #1e63ff;
+}
+
+.editor-title-button:hover,
+.editor-title-button:focus-visible {
+  outline: 0;
+  background: #edf5ff;
+  box-shadow: 0 0 0 3px rgba(30, 99, 255, 0.12);
 }
 
 .form-warning {
@@ -2502,6 +2858,138 @@ onBeforeUnmount(() => {
   font-weight: 850;
 }
 
+.repair-detail-overlay {
+  position: fixed;
+  z-index: 120;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(8, 25, 52, 0.48);
+}
+
+.repair-detail-dialog {
+  width: min(1180px, 96vw);
+  max-height: min(880px, 92vh);
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  border: 1px solid #cbdcf1;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 24px 64px rgba(8, 37, 82, 0.24);
+}
+
+.repair-detail-head,
+.repair-detail-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 13px 16px;
+}
+
+.repair-detail-head {
+  border-bottom: 1px solid #dce7f4;
+}
+
+.repair-detail-head > div {
+  min-width: 0;
+}
+
+.repair-detail-head span {
+  color: #54708f;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.repair-detail-head h3 {
+  overflow: hidden;
+  margin: 2px 0 0;
+  color: #10294a;
+  font-size: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.repair-detail-head > button {
+  width: 36px;
+  height: 36px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border: 1px solid #d4e1f1;
+  border-radius: 9px;
+  background: #f8fbff;
+  color: #486683;
+  cursor: pointer;
+}
+
+.repair-detail-head > button:hover,
+.repair-detail-head > button:focus-visible {
+  border-color: #1e63ff;
+  outline: 0;
+  color: #155bc6;
+  box-shadow: 0 0 0 3px rgba(30, 99, 255, 0.12);
+}
+
+.repair-detail-body {
+  overflow: auto;
+  padding: 14px 16px 18px;
+}
+
+.repair-detail-section + .repair-detail-section {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid #e1eaf5;
+}
+
+.repair-detail-section h4 {
+  margin: 0 0 9px;
+  color: #17314f;
+  font-size: 13px;
+}
+
+.repair-detail-field-grid,
+.repair-detail-readonly-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px 10px;
+}
+
+.repair-detail-readonly-grid > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+  border: 1px solid #e4edf7;
+  border-radius: 8px;
+  padding: 7px 9px;
+  background: #f8fbff;
+}
+
+.repair-detail-readonly-grid b,
+.repair-detail-readonly-grid span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.repair-detail-readonly-grid b {
+  color: #405d7c;
+  font-size: 11px;
+}
+
+.repair-detail-readonly-grid span {
+  color: #6b8098;
+  font-size: 12px;
+}
+
+.repair-detail-footer {
+  justify-content: flex-end;
+  border-top: 1px solid #dce7f4;
+  background: #fbfdff;
+}
+
 @media (max-width: 1279px) and (min-width: 1024px) {
   .repair-layout {
     grid-template-columns: 240px minmax(0, 1fr);
@@ -2576,6 +3064,11 @@ onBeforeUnmount(() => {
   .project-field-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .repair-detail-field-grid,
+  .repair-detail-readonly-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 760px) {
@@ -2591,8 +3084,19 @@ onBeforeUnmount(() => {
   }
 
   .project-field-grid,
-  .readonly-grid {
+  .readonly-grid,
+  .repair-detail-field-grid,
+  .repair-detail-readonly-grid {
     grid-template-columns: 1fr;
+  }
+
+  .repair-detail-overlay {
+    padding: 8px;
+  }
+
+  .repair-detail-dialog {
+    width: 100%;
+    max-height: 96vh;
   }
 
   .editor-action-buttons {

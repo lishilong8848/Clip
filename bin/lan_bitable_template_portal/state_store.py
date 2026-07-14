@@ -55,7 +55,7 @@ class LanPortalStateStore:
     are migration inputs only and are never deleted or overwritten here.
     """
 
-    SCHEMA_VERSION = 23
+    SCHEMA_VERSION = 24
     SOURCE_SCOPE_TABLES = {
         "110": "source_records_110",
         "A": "source_records_a",
@@ -104,6 +104,7 @@ class LanPortalStateStore:
         "mop_signature_usage_confirmations",
         "signature_crypto_migrations",
         "event_notice_operation_locks",
+        "repair_management_operations",
         "schema_migrations",
     ]
     REQUIRED_INDEXES = [
@@ -136,6 +137,8 @@ class LanPortalStateStore:
         "idx_signature_crypto_migrations_status",
         "idx_signature_crypto_migrations_updated",
         "idx_event_notice_operation_locks_expiry",
+        "idx_repair_management_operations_status",
+        "idx_repair_management_operations_record",
     ]
 
     def __init__(self, db_path: str | Path | None = None):
@@ -899,6 +902,35 @@ class LanPortalStateStore:
             """
             CREATE INDEX IF NOT EXISTS idx_runtime_task_queue_status
             ON runtime_task_queue(queue_name, status, available_at, updated_at)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS repair_management_operations (
+                operation_id TEXT PRIMARY KEY,
+                operation_type TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                status TEXT NOT NULL,
+                payload_hash TEXT NOT NULL DEFAULT '',
+                record_id TEXT NOT NULL DEFAULT '',
+                summary_record_id TEXT NOT NULL DEFAULT '',
+                result_json TEXT NOT NULL DEFAULT '{}',
+                last_error TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_repair_management_operations_status
+            ON repair_management_operations(status, updated_at)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_repair_management_operations_record
+            ON repair_management_operations(operation_type, summary_record_id, record_id)
             """
         )
         conn.execute(
@@ -7487,6 +7519,211 @@ class LanPortalStateStore:
             "removed_failed": removed_failed,
             "removed_total": removed_done + removed_failed,
         }
+
+    @classmethod
+    def _repair_management_operation_payload(
+        cls,
+        row: sqlite3.Row | None,
+        *,
+        created: bool = False,
+    ) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        result = cls._loads(str(row["result_json"] or ""), {})
+        return {
+            "operation_id": str(row["operation_id"] or ""),
+            "operation_type": str(row["operation_type"] or ""),
+            "scope": str(row["scope"] or ""),
+            "status": str(row["status"] or ""),
+            "payload_hash": str(row["payload_hash"] or ""),
+            "record_id": str(row["record_id"] or ""),
+            "summary_record_id": str(row["summary_record_id"] or ""),
+            "result": result if isinstance(result, dict) else {},
+            "last_error": str(row["last_error"] or ""),
+            "created_at": float(row["created_at"] or 0),
+            "updated_at": float(row["updated_at"] or 0),
+            "created": bool(created),
+        }
+
+    def begin_repair_management_operation(
+        self,
+        operation_id: str,
+        *,
+        operation_type: str,
+        scope: str,
+        payload_hash: str,
+        summary_record_id: str = "",
+    ) -> dict[str, Any]:
+        operation_id = self._text(operation_id)
+        operation_type = self._text(operation_type)
+        if not operation_id or not operation_type:
+            raise ValueError("operation_id and operation_type are required")
+        normalized_scope = self._text(scope) or "ALL"
+        normalized_payload_hash = self._text(payload_hash)
+        normalized_summary_id = self._text(summary_record_id)
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    "SELECT * FROM repair_management_operations WHERE operation_id = ?",
+                    (operation_id,),
+                ).fetchone()
+                if row is None:
+                    conn.execute(
+                        """
+                        INSERT INTO repair_management_operations(
+                            operation_id, operation_type, scope, status,
+                            payload_hash, record_id, summary_record_id,
+                            result_json, last_error, created_at, updated_at
+                        ) VALUES (?, ?, ?, 'started', ?, '', ?, '{}', '', ?, ?)
+                        """,
+                        (
+                            operation_id,
+                            operation_type,
+                            normalized_scope,
+                            normalized_payload_hash,
+                            normalized_summary_id,
+                            now,
+                            now,
+                        ),
+                    )
+                    row = conn.execute(
+                        "SELECT * FROM repair_management_operations WHERE operation_id = ?",
+                        (operation_id,),
+                    ).fetchone()
+                    conn.commit()
+                    payload = self._repair_management_operation_payload(row, created=True)
+                    return payload or {}
+                payload = self._repair_management_operation_payload(row, created=False) or {}
+                if payload.get("operation_type") != operation_type:
+                    conn.rollback()
+                    raise ValueError("operation_id already belongs to another operation")
+                stored_payload_hash = self._text(payload.get("payload_hash"))
+                if (
+                    normalized_payload_hash
+                    and stored_payload_hash
+                    and normalized_payload_hash != stored_payload_hash
+                ):
+                    can_restart_failed_operation = (
+                        payload.get("status") == "failed"
+                        and not self._text(payload.get("record_id"))
+                    )
+                    if not can_restart_failed_operation:
+                        conn.rollback()
+                        raise ValueError(
+                            "operation_id payload does not match the original request"
+                        )
+                    conn.execute(
+                        """
+                        UPDATE repair_management_operations
+                        SET scope = ?, status = 'started', payload_hash = ?,
+                            summary_record_id = ?, result_json = '{}',
+                            last_error = '', updated_at = ?
+                        WHERE operation_id = ?
+                        """,
+                        (
+                            normalized_scope,
+                            normalized_payload_hash,
+                            normalized_summary_id,
+                            now,
+                            operation_id,
+                        ),
+                    )
+                    row = conn.execute(
+                        "SELECT * FROM repair_management_operations WHERE operation_id = ?",
+                        (operation_id,),
+                    ).fetchone()
+                    conn.commit()
+                    restarted = self._repair_management_operation_payload(
+                        row,
+                        created=True,
+                    )
+                    return restarted or {}
+                conn.commit()
+                return payload
+
+    def get_repair_management_operation(
+        self,
+        operation_id: str,
+    ) -> dict[str, Any] | None:
+        operation_id = self._text(operation_id)
+        if not operation_id or not self.db_path.exists():
+            return None
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    "SELECT * FROM repair_management_operations WHERE operation_id = ?",
+                    (operation_id,),
+                ).fetchone()
+        return self._repair_management_operation_payload(row, created=False)
+
+    def update_repair_management_operation(
+        self,
+        operation_id: str,
+        *,
+        status: str,
+        record_id: str | None = None,
+        summary_record_id: str | None = None,
+        result: dict[str, Any] | None = None,
+        error: str | None = None,
+    ) -> bool:
+        operation_id = self._text(operation_id)
+        status = self._text(status)
+        if not operation_id or not status:
+            return False
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    "SELECT record_id, summary_record_id, result_json, last_error "
+                    "FROM repair_management_operations WHERE operation_id = ?",
+                    (operation_id,),
+                ).fetchone()
+                if row is None:
+                    return False
+                next_record_id = (
+                    self._text(record_id)
+                    if record_id is not None
+                    else str(row["record_id"] or "")
+                )
+                next_summary_id = (
+                    self._text(summary_record_id)
+                    if summary_record_id is not None
+                    else str(row["summary_record_id"] or "")
+                )
+                next_result = (
+                    self._json(dict(result or {}))
+                    if result is not None
+                    else str(row["result_json"] or "{}")
+                )
+                next_error = (
+                    self._text(error)
+                    if error is not None
+                    else str(row["last_error"] or "")
+                )
+                cursor = conn.execute(
+                    """
+                    UPDATE repair_management_operations
+                    SET status = ?, record_id = ?, summary_record_id = ?,
+                        result_json = ?, last_error = ?, updated_at = ?
+                    WHERE operation_id = ?
+                    """,
+                    (
+                        status,
+                        next_record_id,
+                        next_summary_id,
+                        next_result,
+                        next_error,
+                        now,
+                        operation_id,
+                    ),
+                )
+                conn.commit()
+                return bool(cursor.rowcount)
 
     def upsert_runtime_queue_item(
         self,

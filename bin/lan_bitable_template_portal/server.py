@@ -908,7 +908,7 @@ class PortalRuntime:
             else:
                 owner = False
         if not owner:
-            inflight.wait(timeout=5)
+            inflight.wait(timeout=30)
             with PortalRuntime.payload_cache_lock:
                 cached = PortalRuntime.payload_cache.get(key)
                 if cached and cached[0] > time.monotonic():
@@ -954,11 +954,12 @@ class PortalRuntime:
                         event.set()
             return payload
         with PortalRuntime.payload_cache_lock:
+            completed_at = time.monotonic()
             PortalRuntime.payload_cache[key] = (
-                now + float(PortalRuntime.payload_cache_ttl_s),
+                completed_at + float(PortalRuntime.payload_cache_ttl_s),
                 copy.deepcopy(payload),
             )
-            PortalRuntime._prune_payload_cache_locked(now)
+            PortalRuntime._prune_payload_cache_locked(completed_at)
             if owner:
                 event = PortalRuntime.payload_cache_inflight.pop(key, None)
                 PortalRuntime.payload_cache_inflight_started.pop(key, None)

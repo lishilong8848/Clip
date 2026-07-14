@@ -28,6 +28,13 @@
       :page-status-text="pageStatusText"
     />
 
+    <div v-if="workbenchOpening" class="workbench-opening-mask" role="status" aria-live="polite">
+      <div class="workbench-opening-card">
+        <span class="spinner" aria-hidden="true"></span>
+        <strong>{{ workbenchOpeningText }}</strong>
+      </div>
+    </div>
+
     <AdminTools
       :open="showAdminTools"
       :scope-options="requestableScopes"
@@ -55,11 +62,12 @@
       :scope-options="visibleScopeOptions"
     />
 
-    <RepairManagementPage
-      v-else-if="isRepairManagementPage"
-      :scope="currentScope"
-      :scope-options="visibleScopeOptions"
-    />
+    <KeepAlive v-else-if="isRepairModulePage" :max="2">
+      <component
+        :is="repairModuleComponent"
+        v-bind="repairModuleProps"
+      />
+    </KeepAlive>
 
     <AuthPanels
       v-else-if="showPermissionRequestPanel || authChecking || !auth.loggedIn || (auth.loggedIn && !auth.scopeOptions.length)"
@@ -97,6 +105,7 @@
       :handover-links="handoverLinks"
       :can-request-more-scopes="additionalRequestableScopes.length > 0"
       @enter="enterScope"
+      @prefetch="prefetchWorkbench"
       @event="enterEventManagement"
       @engineer="enterEngineerMop"
       @repair-management="enterRepairManagement"
@@ -131,6 +140,7 @@ const EngineerMopPage = asyncPage(() => import("./components/EngineerMopPage.vue
 const EventManagementPage = asyncPage(() => import("./components/EventManagementPage.vue"));
 const HistoryMemoryPage = asyncPage(() => import("./components/HistoryMemoryPage.vue"));
 const RepairManagementPage = asyncPage(() => import("./components/RepairManagementPage.vue"));
+const RepairStatusPage = asyncPage(() => import("./components/RepairStatusPage.vue"));
 const SignaturePage = asyncPage(() => import("./components/SignaturePage.vue"));
 const ScopeHome = asyncPage(() => import("./components/ScopeHome.vue"));
 
@@ -161,6 +171,8 @@ const showPermissionRequestPanel = ref(false);
 const refreshMenuOpen = ref(false);
 const eventRefreshing = ref(false);
 const eventRefreshNonce = ref(0);
+const workbenchOpening = ref(false);
+const workbenchOpeningText = ref("正在进入维护管理");
 const syncText = ref("准备中");
 const scopeOverview = ref<Record<string, Dict>>({});
 const handoverLinks = ref<Record<string, string>>({});
@@ -187,17 +199,33 @@ const auth = reactive({
 let authKeepaliveTimer: number | null = null;
 let authKeepaliveInFlight = false;
 let authRedirectInProgress = false;
+const workbenchPrefetchInFlight = new Map<string, Promise<void>>();
+const workbenchPrefetchReadyUntil = new Map<string, number>();
 let appDisposed = false;
 const refreshCooldownTimers = new Map<string, number>();
 
 const isHistoryMemoryPage = computed(() => routePath.value === "/admin/history-memory");
 const isEngineerMopPage = computed(() => routePath.value === "/engineer/mop");
 const isRepairManagementPage = computed(() => routePath.value === "/repair-management");
+const isRepairStatusPage = computed(() => routePath.value === "/repair-status");
+const isRepairModulePage = computed(() => isRepairManagementPage.value || isRepairStatusPage.value);
+const repairModuleComponent = computed(() => (
+  isRepairStatusPage.value ? RepairStatusPage : RepairManagementPage
+));
 const isSignaturePage = computed(() => routePath.value === "/signature");
 const isEventPage = computed(() => routeParams.value.get("mode") === "events");
 const signatureLinkMode = computed(() => isSignaturePage.value && Boolean(routeParams.value.get("record_id") || routeParams.value.get("temporary_id")));
 const isAdmin = computed(() => String(auth.user?.role || "").toLowerCase() === "admin");
 const visibleScopeOptions = computed(() => auth.scopeOptions.length ? auth.scopeOptions : requestableScopes);
+const repairModuleProps = computed(() => (
+  isRepairStatusPage.value
+    ? { scope: currentScope.value }
+    : {
+        scope: currentScope.value,
+        scopeOptions: visibleScopeOptions.value,
+        focusRecordId: String(routeParams.value.get("record_id") || "").trim(),
+      }
+));
 const normalizedVisibleScopeOptions = computed<ScopeOption[]>(() => visibleScopeOptions.value.map((item) => ({
   ...item,
   value: normalizeScopeValue(item.value),
@@ -227,6 +255,7 @@ const headerSubtitle = computed(() => {
   if (isHistoryMemoryPage.value) return "管理工具 · 历史通告记忆导入";
   if (isEngineerMopPage.value) return `${scopeLabel(currentScope.value)} · 工程师 MOP 填写`;
   if (isRepairManagementPage.value) return `${scopeLabel(currentScope.value)} · 检修管理`;
+  if (isRepairStatusPage.value) return `${scopeLabel(currentScope.value)} · 检修状态`;
   if (isSignaturePage.value) return "线上签名 · 手机手写保存";
   if (isEventPage.value) return `${scopeLabel(currentScope.value)} · 事件管理`;
   if (authChecking.value) return "功能选择 · 正在检查登录";
@@ -447,10 +476,60 @@ function updateLocationRefs(): void {
   currentScope.value = normalizeScopeValue(routeParams.value.get("scope") || currentScope.value || "");
 }
 
-function enterScope(scope: string, workType = "maintenance"): void {
+function prefetchWorkbench(scope: string, workType = "maintenance"): Promise<void> {
+  const normalizedScope = normalizeScopeValue(scope);
+  const normalizedWorkType = workType || "maintenance";
+  const key = `${normalizedScope}:${normalizedWorkType}`;
+  if ((workbenchPrefetchReadyUntil.get(key) || 0) > Date.now()) {
+    return Promise.resolve();
+  }
+  const current = workbenchPrefetchInFlight.get(key);
+  if (current) return current;
+
+  const url = new URL("/api/workbench", window.location.origin);
+  url.searchParams.set("scope", normalizedScope);
+  url.searchParams.set("work_type", normalizedWorkType);
+  url.searchParams.set("sections", "records,ongoing,stats,zhihang");
+  url.searchParams.set("records_page", "1");
+  url.searchParams.set("records_page_size", "24");
+  url.searchParams.set("ongoing_page", "1");
+  url.searchParams.set("ongoing_page_size", "18");
+  url.searchParams.set("prefetch", "1");
+
+  const task = requestJson(`${url.pathname}${url.search}`)
+    .then(() => {
+      workbenchPrefetchReadyUntil.set(key, Date.now() + 4000);
+    })
+    .catch(() => undefined)
+    .finally(() => {
+      workbenchPrefetchInFlight.delete(key);
+    });
+  workbenchPrefetchInFlight.set(key, task);
+  return task;
+}
+
+async function enterScope(scope: string, workType = "maintenance"): Promise<void> {
+  if (workbenchOpening.value) return;
+  const normalizedScope = normalizeScopeValue(scope);
+  const normalizedWorkType = workType || "maintenance";
   const url = new URL("/workbench-lite", window.location.origin);
-  url.searchParams.set("scope", normalizeScopeValue(scope));
-  url.searchParams.set("work_type", workType || "maintenance");
+  url.searchParams.set("scope", normalizedScope);
+  url.searchParams.set("work_type", normalizedWorkType);
+  const labelMap: Record<string, string> = {
+    maintenance: "维护管理",
+    change: "变更管理",
+    repair: "检修通告管理",
+    power: "上/下电通告",
+    polling: "轮巡管理",
+    adjust: "调整管理",
+  };
+  workbenchOpeningText.value = `正在进入${labelMap[normalizedWorkType] || "通告管理"}`;
+  workbenchOpening.value = true;
+  await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+  await Promise.race([
+    prefetchWorkbench(normalizedScope, normalizedWorkType),
+    new Promise<void>((resolve) => window.setTimeout(resolve, 12000)),
+  ]);
   navigateHard(url);
 }
 
@@ -638,6 +717,32 @@ p {
   border-top-color: #2563eb;
   border-radius: 50%;
   animation: spin 0.9s linear infinite;
+}
+
+.workbench-opening-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 5000;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(238, 243, 248, 0.88);
+  backdrop-filter: blur(4px);
+}
+
+.workbench-opening-card {
+  min-width: 220px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 18px 22px;
+  border: 1px solid #cbdcf4;
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow: 0 16px 44px rgba(15, 73, 153, 0.16);
+  color: #0c3f93;
+  font-size: 15px;
 }
 
 @keyframes spin {

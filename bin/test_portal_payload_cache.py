@@ -1,6 +1,7 @@
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 BIN_DIR = Path(__file__).resolve().parent
 if str(BIN_DIR) not in sys.path:
@@ -67,6 +68,37 @@ class PortalPayloadCacheTests(unittest.TestCase):
         )
 
         self.assertEqual(second["rows"][0]["title"], "原始")
+
+    def test_slow_builder_cache_ttl_starts_after_builder_finishes(self):
+        adapter = _CacheAdapter()
+        calls: list[str] = []
+        clock = [100.0]
+
+        def monotonic() -> float:
+            return clock[0]
+
+        def slow_builder() -> dict:
+            calls.append("first")
+            clock[0] += float(PortalRuntime.payload_cache_ttl_s) + 1.0
+            return {"rows": [{"title": "慢查询结果"}]}
+
+        with mock.patch(
+            "lan_bitable_template_portal.server.time.monotonic",
+            side_effect=monotonic,
+        ):
+            first = PortalRuntime._cached_service_payload(
+                adapter,
+                ("workbench", "ou_user_1", "A", "", "", ()),
+                slow_builder,
+            )
+            second = PortalRuntime._cached_service_payload(
+                adapter,
+                ("workbench", "ou_user_1", "A", "", "", ()),
+                lambda: calls.append("second") or {"rows": []},
+            )
+
+        self.assertEqual(first, second)
+        self.assertEqual(calls, ["first"])
 
 
 if __name__ == "__main__":
