@@ -85,7 +85,7 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
 
         self.assertEqual(result, "")
 
-    def test_command_expansion_rejects_source_record_as_update_target(self) -> None:
+    def test_command_expansion_keeps_source_for_later_target_resolution(self) -> None:
         payload = {
             "command_format": "notice_command",
             "action": "update",
@@ -100,12 +100,197 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
             },
         }
 
-        with self.assertRaises(PortalError):
-            self.service.expand_workbench_action_command(
-                payload,
-                scope="C",
-                ongoing_items=[],
-            )
+        result = self.service.expand_workbench_action_command(
+            payload,
+            scope="C",
+            ongoing_items=[],
+        )
+
+        self.assertEqual(result.get("source_record_id"), "recSource123")
+        self.assertFalse(result.get("target_record_id"))
+
+    def test_command_expansion_recovers_cross_day_target_from_identity_map(self) -> None:
+        class IdentityStore:
+            @staticmethod
+            def resolve_notice_identity(**_kwargs):
+                return {
+                    "work_type": "maintenance",
+                    "notice_type": "维保通告",
+                    "active_item_id": "active-maintenance-1",
+                    "source_record_id": "recSource123",
+                    "target_record_id": "recTarget456",
+                    "building_codes": ["C"],
+                    "payload": {
+                        "title": "昨天已更新的维保通告",
+                        "building": "C楼",
+                        "maintenance_cycle": "每月",
+                    },
+                }
+
+        self.service._state_store = IdentityStore()
+        payload = {
+            "command_format": "notice_command",
+            "action": "update",
+            "scope": "C",
+            "work_type": "maintenance",
+            "source_record_id": "recSource123",
+            "record_id": "recSource123",
+            "patch": {
+                "title": "今天再次更新的维保通告",
+                "source_record_id": "recSource123",
+                "record_id": "recSource123",
+                "progress": "今天继续更新",
+            },
+        }
+
+        result = self.service.expand_workbench_action_command(
+            payload,
+            scope="C",
+            ongoing_items=[],
+        )
+
+        self.assertEqual(result.get("target_record_id"), "recTarget456")
+        self.assertEqual(result.get("record_id"), "recTarget456")
+        self.assertEqual(result.get("active_item_id"), "active-maintenance-1")
+        self.assertEqual(result.get("title"), "今天再次更新的维保通告")
+        self.assertEqual(result.get("maintenance_cycle"), "每月")
+
+    def test_command_expansion_recovers_cross_day_target_from_work_status(self) -> None:
+        class EmptyIdentityStore:
+            @staticmethod
+            def resolve_notice_identity(**_kwargs):
+                return None
+
+        self.service._state_store = EmptyIdentityStore()
+        self.service._summary_lock = threading.RLock()
+        self.service._load_work_status_items_locked = lambda _scope: [
+            {
+                "work_type": "maintenance",
+                "source_record_id": "recSource123",
+                "target_record_id": "recTarget456",
+                "status": "进行中",
+            }
+        ]
+
+        result = self.service.expand_workbench_action_command(
+            {
+                "command_format": "notice_command",
+                "action": "update",
+                "scope": "C",
+                "work_type": "maintenance",
+                "source_record_id": "recSource123",
+                "patch": {
+                    "title": "跨天维保更新",
+                    "source_record_id": "recSource123",
+                    "progress": "今天继续更新",
+                },
+            },
+            scope="C",
+            ongoing_items=[],
+        )
+
+        self.assertEqual(result.get("target_record_id"), "recTarget456")
+        self.assertEqual(result.get("record_id"), "recTarget456")
+
+    def test_command_expansion_unwraps_sqlite_qt_active_row(self) -> None:
+        self.service._is_ongoing_hidden = lambda _item: False
+        result = self.service.expand_workbench_action_command(
+            {
+                "command_format": "notice_command",
+                "action": "update",
+                "scope": "C",
+                "work_type": "maintenance",
+                "active_item_id": "active-maintenance-1",
+                "patch": {"progress": "继续更新"},
+            },
+            scope="C",
+            ongoing_items=[
+                {
+                    "active_item_id": "active-maintenance-1",
+                    "record_id": "recTarget456",
+                    "notice_type": "维保通告",
+                    "payload": {
+                        "work_type": "maintenance",
+                        "source_record_id": "recSource123",
+                        "building": "C楼",
+                        "building_codes": ["C"],
+                        "title": "跨天维保更新",
+                    },
+                }
+            ],
+        )
+
+        self.assertEqual(result.get("target_record_id"), "recTarget456")
+        self.assertEqual(result.get("record_id"), "recTarget456")
+        self.assertEqual(result.get("source_record_id"), "recSource123")
+
+    def test_all_notice_types_recover_cross_day_update_and_end_target(self) -> None:
+        notice_types = {
+            "maintenance": "维保通告",
+            "change": "变更通告",
+            "repair": "设备检修",
+            "power": "上电通告",
+            "polling": "设备轮巡",
+            "adjust": "设备调整",
+        }
+
+        class IdentityStore:
+            @staticmethod
+            def resolve_notice_identity(**kwargs):
+                work_type = str(kwargs.get("work_type") or "")
+                return {
+                    "work_type": work_type,
+                    "notice_type": notice_types[work_type],
+                    "active_item_id": f"active-{work_type}",
+                    "source_record_id": (
+                        f"source-{work_type}"
+                        if work_type in {"maintenance", "change", "repair"}
+                        else ""
+                    ),
+                    "target_record_id": f"target-{work_type}",
+                    "building_codes": ["C"],
+                    "status": "进行中",
+                    "payload": {
+                        "title": f"跨天{notice_types[work_type]}",
+                        "building": "C楼",
+                        "updated_at": "2026-07-14 18:00",
+                    },
+                }
+
+        self.service._state_store = IdentityStore()
+        for work_type, notice_type in notice_types.items():
+            for action in ("update", "end"):
+                with self.subTest(work_type=work_type, action=action):
+                    source_record_id = (
+                        f"source-{work_type}"
+                        if work_type in {"maintenance", "change", "repair"}
+                        else ""
+                    )
+                    result = self.service.expand_workbench_action_command(
+                        {
+                            "command_format": "notice_command",
+                            "action": action,
+                            "scope": "C",
+                            "work_type": work_type,
+                            "notice_type": notice_type,
+                            "active_item_id": f"active-{work_type}",
+                            "source_record_id": source_record_id,
+                            "patch": {
+                                "title": f"今天继续{notice_type}",
+                                "progress": "今天继续处理",
+                                "manual": work_type in {"power", "polling", "adjust"},
+                            },
+                        },
+                        scope="C",
+                        ongoing_items=[],
+                    )
+
+                    self.assertEqual(
+                        result.get("target_record_id"), f"target-{work_type}"
+                    )
+                    self.assertEqual(result.get("record_id"), f"target-{work_type}")
+                    self.assertEqual(result.get("active_item_id"), f"active-{work_type}")
+                    self.assertEqual(result.get("title"), f"今天继续{notice_type}")
 
     def test_command_expansion_preserves_explicit_target_record(self) -> None:
         payload = {
@@ -237,6 +422,7 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
                     "title": title,
                     "building": "E楼",
                     "building_codes": ["E"],
+                    "updated_at": "2026-07-14 18:00",
                     "record_id": f"rec-{expected_work_type}",
                     "target_record_id": f"rec-{expected_work_type}",
                     "active_item_id": f"active-{expected_work_type}",

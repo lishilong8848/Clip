@@ -65,7 +65,74 @@ class StateStoreMigrationTests(unittest.TestCase):
             self.assertTrue(report["schema"]["ok"], report)
             self.assertTrue(report["database"]["exists"], report)
             self.assertIn("source_snapshot", report)
+            self.assertIn("repair_snapshot", report)
             self.assertIn("write_worker", report)
+
+    def test_repair_snapshot_replace_and_incremental_updates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            store.replace_repair_snapshot(
+                "repair_projects",
+                records=[
+                    {
+                        "record_id": "rec_project_1",
+                        "title": "测试维修项目",
+                        "scope_codes": ["A"],
+                        "payload": {
+                            "record_id": "rec_project_1",
+                            "display_fields": {"维修名称": "测试维修项目"},
+                        },
+                    }
+                ],
+                fields=[{"field_name": "维修名称"}],
+            )
+            snapshot = store.get_repair_snapshot("repair_projects")
+            self.assertTrue(snapshot["exists"], snapshot)
+            self.assertEqual(snapshot["record_count"], 1)
+            self.assertEqual(snapshot["records"][0]["record_id"], "rec_project_1")
+
+            store.upsert_repair_snapshot_record(
+                "repair_projects",
+                "rec_project_2",
+                {"record_id": "rec_project_2", "display_fields": {}},
+            )
+            self.assertEqual(
+                store.get_repair_snapshot("repair_projects")["record_count"],
+                2,
+            )
+            self.assertTrue(
+                store.delete_repair_snapshot_record(
+                    "repair_projects", "rec_project_1"
+                )
+            )
+            self.assertEqual(store.repair_snapshot_stats()["record_count"], 1)
+
+    def test_repair_snapshot_failure_preserves_last_good_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            store.replace_repair_snapshot(
+                "repair_followups",
+                records=[
+                    {
+                        "record_id": "rec_followup_1",
+                        "parent_record_id": "rec_project_1",
+                        "payload": {"record_id": "rec_followup_1"},
+                    }
+                ],
+            )
+            store.mark_repair_snapshot_failed(
+                "repair_followups", "Data not ready"
+            )
+            snapshot = store.get_repair_snapshot(
+                "repair_followups",
+                parent_record_id="rec_project_1",
+            )
+            self.assertEqual(snapshot["status"], "failed")
+            self.assertEqual(snapshot["error"], "Data not ready")
+            self.assertEqual(
+                [item["record_id"] for item in snapshot["records"]],
+                ["rec_followup_1"],
+            )
 
 
 if __name__ == "__main__":

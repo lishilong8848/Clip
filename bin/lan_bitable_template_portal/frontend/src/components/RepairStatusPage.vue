@@ -17,19 +17,19 @@
     <MessageBanner v-if="message" :tone="messageTone" :text="message" />
 
     <div class="status-summary" aria-label="检修状态统计">
-      <button type="button" :class="{ active: dialogOpen && dialogState === 'all' }" @click="openStatusDialog('all')">
+      <button type="button" :class="{ active: activeState === 'all' }" @click="setStatusFilter('all')">
         <span class="summary-icon blue"><ClipboardList :size="19" aria-hidden="true" /></span>
         <span><small>当前状态项目</small><strong>{{ stats.total }}</strong></span>
       </button>
-      <button type="button" :class="{ active: dialogOpen && dialogState === 'without_followup' }" @click="openStatusDialog('without_followup')">
+      <button type="button" :class="{ active: activeState === 'without_followup' }" @click="setStatusFilter('without_followup')">
         <span class="summary-icon amber"><CircleAlert :size="19" aria-hidden="true" /></span>
         <span><small>待首次跟进</small><strong>{{ stats.without_followup }}</strong></span>
       </button>
-      <button type="button" :class="{ active: dialogOpen && dialogState === 'in_progress' }" @click="openStatusDialog('in_progress')">
+      <button type="button" :class="{ active: activeState === 'in_progress' }" @click="setStatusFilter('in_progress')">
         <span class="summary-icon teal"><Activity :size="19" aria-hidden="true" /></span>
         <span><small>维修进行中</small><strong>{{ stats.in_progress }}</strong></span>
       </button>
-      <button type="button" :class="{ active: dialogOpen && dialogState === 'completed' }" @click="openStatusDialog('completed')">
+      <button type="button" :class="{ active: activeState === 'completed' }" @click="setStatusFilter('completed')">
         <span class="summary-icon green"><CircleCheckBig :size="19" aria-hidden="true" /></span>
         <span><small>历史已完成</small><strong>{{ stats.completed_total }}</strong></span>
       </button>
@@ -37,6 +37,21 @@
 
     <section class="status-workspace">
       <header class="status-toolbar">
+        <strong class="status-view-title">{{ statusViewTitle }}</strong>
+        <div v-if="activeState === 'completed'" class="history-period-tabs" aria-label="完成时间范围">
+          <button type="button" :class="{ active: activePeriod === 'all' }" @click="setHistoryPeriod('all')">
+            全部 <b>{{ stats.completed_total }}</b>
+          </button>
+          <button type="button" :class="{ active: activePeriod === 'month' }" @click="setHistoryPeriod('month')">
+            本月 <b>{{ stats.completed_month }}</b>
+          </button>
+          <button type="button" :class="{ active: activePeriod === 'week' }" @click="setHistoryPeriod('week')">
+            本周 <b>{{ stats.completed_week }}</b>
+          </button>
+          <button type="button" :class="{ active: activePeriod === 'today' }" @click="setHistoryPeriod('today')">
+            今天 <b>{{ stats.completed_today }}</b>
+          </button>
+        </div>
         <label class="status-search">
           <Search :size="16" aria-hidden="true" />
           <input v-model.trim="searchText" type="search" placeholder="搜索维修名称、专业、位置或进展" />
@@ -57,7 +72,7 @@
           <span>操作</span>
         </div>
         <div v-if="loading && !records.length" class="empty-state">正在读取检修状态...</div>
-        <div v-else-if="!records.length" class="empty-state">当前没有待处理检修项目</div>
+        <div v-else-if="!records.length" class="empty-state">{{ statusEmptyText }}</div>
         <article v-for="record in records" v-else :key="record.record_id" class="status-row">
           <div class="project-cell">
             <strong :title="String(record.title || '')">{{ record.title || "未命名维修项目" }}</strong>
@@ -103,88 +118,6 @@
         <button type="button" :disabled="loading || page >= pageCount" @click="changePage(1)">下一页</button>
       </nav>
     </section>
-
-    <Teleport to="body">
-      <div
-        v-if="dialogOpen"
-        class="status-dialog-overlay"
-        @click.self="closeStatusDialog"
-        @keydown.esc="closeStatusDialog"
-      >
-        <section
-          class="status-dialog"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="status-dialog-title"
-        >
-          <header class="status-dialog-head">
-            <div>
-              <span>{{ scopeLabel }}</span>
-              <h3 id="status-dialog-title">{{ dialogTitle }}</h3>
-            </div>
-            <button type="button" aria-label="关闭状态列表" @click="closeStatusDialog">
-              <X :size="19" aria-hidden="true" />
-            </button>
-          </header>
-
-          <div class="status-dialog-tools">
-            <div v-if="dialogState === 'completed'" class="history-period-tabs" aria-label="完成时间范围">
-              <button type="button" :class="{ active: dialogPeriod === 'all' }" @click="setDialogPeriod('all')">
-                全部完成 <b>{{ stats.completed_total }}</b>
-              </button>
-              <button type="button" :class="{ active: dialogPeriod === 'month' }" @click="setDialogPeriod('month')">
-                本月完成 <b>{{ stats.completed_month }}</b>
-              </button>
-              <button type="button" :class="{ active: dialogPeriod === 'week' }" @click="setDialogPeriod('week')">
-                本周完成 <b>{{ stats.completed_week }}</b>
-              </button>
-              <button type="button" :class="{ active: dialogPeriod === 'today' }" @click="setDialogPeriod('today')">
-                今天完成 <b>{{ stats.completed_today }}</b>
-              </button>
-            </div>
-            <label class="status-search dialog-search">
-              <Search :size="16" aria-hidden="true" />
-              <input v-model.trim="dialogSearchText" type="search" placeholder="搜索告警描述、专业或进展" />
-              <button v-if="dialogSearchText" type="button" aria-label="清空弹窗搜索" @click="dialogSearchText = ''">
-                <X :size="15" aria-hidden="true" />
-              </button>
-            </label>
-            <span class="result-count">{{ dialogTotal }} 项</span>
-          </div>
-
-          <div class="status-dialog-body" :aria-busy="dialogLoading">
-            <div v-if="dialogLoading && !dialogRecords.length" class="empty-state">正在读取...</div>
-            <div v-else-if="dialogError" class="dialog-error">{{ dialogError }}</div>
-            <div v-else-if="!dialogRecords.length" class="empty-state">当前条件下没有记录</div>
-            <article v-for="record in dialogRecords" v-else :key="record.record_id" class="status-dialog-row">
-              <div class="project-cell">
-                <strong :title="String(record.title || '')">{{ record.title || "未命名维修项目" }}</strong>
-                <span>
-                  <b v-if="record.specialty">{{ record.specialty }}</b>
-                  <i v-if="record.event_sent_time">{{ formatTime(record.event_sent_time) }}</i>
-                  <i v-if="record.repair_title && record.repair_title !== record.title">{{ record.repair_title }}</i>
-                </span>
-              </div>
-              <span class="state-pill" :class="record.state">{{ record.status_label }}</span>
-              <div class="dialog-progress">
-                <strong>{{ record.progress_percent }}%</strong>
-                <span>{{ record.latest_followup || (record.followup_count ? "已跟进" : "尚未跟进") }}</span>
-              </div>
-              <button type="button" class="dialog-open-button" @click="openRecord(record)">
-                跟进检修管理
-                <ArrowRight :size="15" aria-hidden="true" />
-              </button>
-            </article>
-          </div>
-
-          <footer class="status-dialog-footer">
-            <button type="button" :disabled="dialogLoading || dialogPage <= 1" @click="changeDialogPage(-1)">上一页</button>
-            <span>{{ dialogPage }} / {{ dialogPageCount }}</span>
-            <button type="button" :disabled="dialogLoading || dialogPage >= dialogPageCount" @click="changeDialogPage(1)">下一页</button>
-          </footer>
-        </section>
-      </div>
-    </Teleport>
   </section>
 </template>
 
@@ -233,34 +166,27 @@ const stats = ref({
   completed_today: 0,
   average_progress: 0,
 });
-const dialogOpen = ref(false);
-const dialogState = ref<StatusFilter>("all");
-const dialogPeriod = ref<HistoryPeriod>("all");
-const dialogRecords = ref<LooseDict[]>([]);
-const dialogTotal = ref(0);
-const dialogPage = ref(1);
-const dialogLoading = ref(false);
-const dialogSearchText = ref("");
-const dialogError = ref("");
+const activeState = ref<StatusFilter>("all");
+const activePeriod = ref<HistoryPeriod>("all");
 let searchTimer: ReturnType<typeof setTimeout> | undefined;
-let dialogSearchTimer: ReturnType<typeof setTimeout> | undefined;
-let skipNextDialogSearchReload = false;
 let requestVersion = 0;
-let dialogRequestVersion = 0;
 let statusStale = false;
 let statusAbortController: AbortController | null = null;
-let dialogAbortController: AbortController | null = null;
 const responseCache = new Map<string, { payload: LooseDict; cachedAt: number }>();
-const dialogResponseCache = new Map<string, { payload: LooseDict; cachedAt: number }>();
 
 const pageCount = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)));
-const dialogPageCount = computed(() => Math.max(1, Math.ceil(dialogTotal.value / PAGE_SIZE)));
-const dialogTitle = computed(() => ({
+const statusViewTitle = computed(() => ({
   all: "当前状态项目",
   without_followup: "待首次跟进",
   in_progress: "维修进行中",
   completed: "历史已完成",
-}[dialogState.value]));
+}[activeState.value]));
+const statusEmptyText = computed(() => ({
+  all: "当前没有待处理检修项目",
+  without_followup: "当前没有待首次跟进的项目",
+  in_progress: "当前没有维修进行中的项目",
+  completed: "当前时间范围内没有已完成项目",
+}[activeState.value]));
 const scopeLabel = computed(() => {
   const scope = String(props.scope || "ALL").toUpperCase();
   if (scope === "110") return "110站";
@@ -287,39 +213,26 @@ function openRecord(record: LooseDict): void {
   const url = new URL("/repair-management", window.location.origin);
   url.searchParams.set("scope", props.scope || "ALL");
   url.searchParams.set("record_id", recordId);
-  dialogOpen.value = false;
   navigate(url);
 }
 
-function openStatusDialog(state: StatusFilter): void {
-  if (dialogSearchTimer) clearTimeout(dialogSearchTimer);
-  dialogState.value = state;
-  dialogPeriod.value = "all";
-  dialogPage.value = 1;
-  if (dialogSearchText.value) {
-    skipNextDialogSearchReload = true;
-    dialogSearchText.value = "";
-  }
-  dialogRecords.value = [];
-  dialogError.value = "";
-  dialogOpen.value = true;
-  void loadDialogStatus(false);
+function setStatusFilter(state: StatusFilter): void {
+  if (activeState.value === state) return;
+  activeState.value = state;
+  activePeriod.value = "all";
+  page.value = 1;
+  records.value = [];
+  total.value = 0;
+  void loadStatus(false);
 }
 
-function closeStatusDialog(): void {
-  dialogOpen.value = false;
-  dialogRequestVersion += 1;
-  if (dialogSearchTimer) clearTimeout(dialogSearchTimer);
-  dialogAbortController?.abort();
-  dialogAbortController = null;
-  dialogLoading.value = false;
-}
-
-function setDialogPeriod(period: HistoryPeriod): void {
-  if (dialogPeriod.value === period) return;
-  dialogPeriod.value = period;
-  dialogPage.value = 1;
-  void loadDialogStatus(false);
+function setHistoryPeriod(period: HistoryPeriod): void {
+  if (activePeriod.value === period) return;
+  activePeriod.value = period;
+  page.value = 1;
+  records.value = [];
+  total.value = 0;
+  void loadStatus(false);
 }
 
 function changePage(delta: number): void {
@@ -329,30 +242,16 @@ function changePage(delta: number): void {
   void loadStatus(false);
 }
 
-function changeDialogPage(delta: number): void {
-  const nextPage = Math.min(
-    dialogPageCount.value,
-    Math.max(1, dialogPage.value + delta),
-  );
-  if (nextPage === dialogPage.value) return;
-  dialogPage.value = nextPage;
-  void loadDialogStatus(false);
-}
-
 async function refreshStatus(): Promise<void> {
   await loadStatus(true);
-  if (dialogOpen.value) {
-    dialogResponseCache.clear();
-    await loadDialogStatus(false);
-  }
 }
 
 async function loadStatus(forceRefresh = false): Promise<void> {
   const params = new URLSearchParams({
     scope: props.scope || "ALL",
     q: searchText.value,
-    state: "all",
-    period: "all",
+    state: activeState.value,
+    period: activeState.value === "completed" ? activePeriod.value : "all",
     limit: String(PAGE_SIZE),
     offset: String((page.value - 1) * PAGE_SIZE),
   });
@@ -413,67 +312,6 @@ async function loadStatus(forceRefresh = false): Promise<void> {
   }
 }
 
-async function loadDialogStatus(forceRefresh = false): Promise<void> {
-  if (!dialogOpen.value) return;
-  const params = new URLSearchParams({
-    scope: props.scope || "ALL",
-    q: dialogSearchText.value,
-    state: dialogState.value,
-    period: dialogState.value === "completed" ? dialogPeriod.value : "all",
-    limit: String(PAGE_SIZE),
-    offset: String((dialogPage.value - 1) * PAGE_SIZE),
-  });
-  const cacheKey = params.toString();
-  if (!forceRefresh && !statusStale) {
-    const cached = dialogResponseCache.get(cacheKey);
-    if (cached && Date.now() - cached.cachedAt <= STATUS_CACHE_TTL_MS) {
-      dialogRequestVersion += 1;
-      dialogAbortController?.abort();
-      dialogAbortController = null;
-      dialogLoading.value = false;
-      dialogError.value = "";
-      applyDialogPayload(cached.payload);
-      return;
-    }
-  }
-  const version = ++dialogRequestVersion;
-  dialogAbortController?.abort();
-  const abortController = new AbortController();
-  dialogAbortController = abortController;
-  dialogLoading.value = true;
-  dialogError.value = "";
-  try {
-    if (forceRefresh) params.set("refresh", "1");
-    const payload = await requestJson(
-      `/api/repair-management/status?${params.toString()}`,
-      { signal: abortController.signal },
-    );
-    if (version !== dialogRequestVersion || !dialogOpen.value) return;
-    dialogResponseCache.set(cacheKey, { payload, cachedAt: Date.now() });
-    applyDialogPayload(payload);
-    const warnings = Array.isArray(payload.warnings)
-      ? payload.warnings.map((item: unknown) => String(item || "").trim()).filter(Boolean)
-      : [];
-    if (warnings.length) {
-      message.value = warnings.join("；");
-      messageTone.value = "warning";
-    }
-    const maxPage = Math.max(1, Math.ceil(dialogTotal.value / PAGE_SIZE));
-    if (dialogPage.value > maxPage) {
-      dialogPage.value = maxPage;
-      dialogLoading.value = false;
-      await loadDialogStatus(forceRefresh);
-    }
-  } catch (error: unknown) {
-    if (abortController.signal.aborted) return;
-    if (version !== dialogRequestVersion) return;
-    dialogError.value = error instanceof Error ? error.message : "状态列表读取失败。";
-  } finally {
-    if (dialogAbortController === abortController) dialogAbortController = null;
-    if (version === dialogRequestVersion) dialogLoading.value = false;
-  }
-}
-
 function applyStatusPayload(payload: LooseDict): void {
   records.value = Array.isArray(payload.records) ? payload.records : [];
   total.value = Number(payload.total || records.value.length || 0);
@@ -492,15 +330,9 @@ function applyStatusPayload(payload: LooseDict): void {
   };
 }
 
-function applyDialogPayload(payload: LooseDict): void {
-  dialogRecords.value = Array.isArray(payload.records) ? payload.records : [];
-  dialogTotal.value = Number(payload.total || dialogRecords.value.length || 0);
-}
-
 function markStatusStale(): void {
   statusStale = true;
   responseCache.clear();
-  dialogResponseCache.clear();
 }
 
 watch(searchText, () => {
@@ -511,23 +343,11 @@ watch(searchText, () => {
   }, 280);
 });
 
-watch(dialogSearchText, () => {
-  if (skipNextDialogSearchReload) {
-    skipNextDialogSearchReload = false;
-    return;
-  }
-  if (dialogSearchTimer) clearTimeout(dialogSearchTimer);
-  dialogSearchTimer = setTimeout(() => {
-    if (!dialogOpen.value) return;
-    dialogPage.value = 1;
-    void loadDialogStatus(false);
-  }, 280);
-});
-
 watch(
   () => props.scope,
   () => {
-    closeStatusDialog();
+    activeState.value = "all";
+    activePeriod.value = "all";
     page.value = 1;
     void loadStatus(false);
   },
@@ -545,9 +365,7 @@ onActivated(() => {
 
 onBeforeUnmount(() => {
   if (searchTimer) clearTimeout(searchTimer);
-  if (dialogSearchTimer) clearTimeout(dialogSearchTimer);
   statusAbortController?.abort();
-  dialogAbortController?.abort();
   window.removeEventListener(REPAIR_STATUS_INVALIDATED_EVENT, markStatusStale);
 });
 </script>
@@ -738,9 +556,16 @@ onBeforeUnmount(() => {
   min-height: 62px;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 12px;
   padding: 12px 14px;
   border-bottom: 1px solid #e2eaf4;
+}
+
+.status-view-title {
+  flex: 0 0 auto;
+  color: #17314f;
+  font-size: 14px;
 }
 
 .status-search {
@@ -975,84 +800,6 @@ onBeforeUnmount(() => {
   to { transform: rotate(360deg); }
 }
 
-.status-dialog-overlay {
-  position: fixed;
-  z-index: 120;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  padding: 24px;
-  background: rgba(8, 25, 52, 0.48);
-}
-
-.status-dialog {
-  width: min(1120px, 96vw);
-  max-height: min(820px, 92vh);
-  overflow: hidden;
-  display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
-  border: 1px solid #cadbf0;
-  border-radius: 12px;
-  background: #fff;
-  box-shadow: 0 24px 64px rgba(8, 37, 82, 0.24);
-}
-
-.status-dialog-head,
-.status-dialog-tools,
-.status-dialog-footer {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 12px 15px;
-}
-
-.status-dialog-head {
-  justify-content: space-between;
-  border-bottom: 1px solid #dce7f4;
-}
-
-.status-dialog-head > div {
-  min-width: 0;
-}
-
-.status-dialog-head span {
-  color: #607995;
-  font-size: 11px;
-  font-weight: 700;
-}
-
-.status-dialog-head h3 {
-  margin: 2px 0 0;
-  color: #10294a;
-  font-size: 18px;
-}
-
-.status-dialog-head > button {
-  width: 36px;
-  height: 36px;
-  flex: 0 0 auto;
-  display: grid;
-  place-items: center;
-  border: 1px solid #d4e1f1;
-  border-radius: 9px;
-  background: #f8fbff;
-  color: #486683;
-  cursor: pointer;
-}
-
-.status-dialog-head > button:hover,
-.status-dialog-head > button:focus-visible {
-  border-color: #1e63ff;
-  outline: 0;
-  color: #155bc6;
-  box-shadow: 0 0 0 3px rgba(30, 99, 255, 0.12);
-}
-
-.status-dialog-tools {
-  border-bottom: 1px solid #e2eaf4;
-  background: #fbfdff;
-}
-
 .history-period-tabs {
   flex: 0 0 auto;
   display: inline-flex;
@@ -1093,107 +840,6 @@ onBeforeUnmount(() => {
   font-size: 11px;
 }
 
-.dialog-search {
-  max-width: none;
-}
-
-.status-dialog-body {
-  min-height: 220px;
-  overflow: auto;
-  padding: 0 14px;
-}
-
-.status-dialog-row {
-  min-width: 0;
-  min-height: 72px;
-  display: grid;
-  grid-template-columns: minmax(300px, 1.7fr) 118px minmax(150px, 0.8fr) 150px;
-  align-items: center;
-  gap: 12px;
-  border-bottom: 1px solid #e7eef6;
-  padding: 9px 0;
-}
-
-.status-dialog-row:last-child {
-  border-bottom: 0;
-}
-
-.dialog-progress {
-  min-width: 0;
-  display: grid;
-  gap: 4px;
-}
-
-.dialog-progress strong {
-  color: #214969;
-  font-size: 13px;
-}
-
-.dialog-progress span {
-  overflow: hidden;
-  color: #71849a;
-  font-size: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.dialog-open-button,
-.status-dialog-footer button {
-  min-height: 36px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  border: 1px solid #cbd9eb;
-  border-radius: 9px;
-  padding: 0 12px;
-  background: #fff;
-  color: #24527e;
-  font: inherit;
-  font-size: 12px;
-  font-weight: 750;
-  cursor: pointer;
-}
-
-.dialog-open-button {
-  border-color: #1e63ff;
-  background: #1e63ff;
-  color: #fff;
-}
-
-.dialog-open-button:hover,
-.dialog-open-button:focus-visible,
-.status-dialog-footer button:hover:not(:disabled),
-.status-dialog-footer button:focus-visible {
-  outline: 0;
-  box-shadow: 0 0 0 3px rgba(30, 99, 255, 0.13);
-}
-
-.status-dialog-footer {
-  justify-content: center;
-  border-top: 1px solid #dce7f4;
-  background: #fbfdff;
-}
-
-.status-dialog-footer span {
-  color: #637a94;
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.status-dialog-footer button:disabled {
-  cursor: not-allowed;
-  opacity: 0.5;
-}
-
-.dialog-error {
-  min-height: 160px;
-  display: grid;
-  place-items: center;
-  color: #b42318;
-  font-size: 13px;
-}
-
 @media (max-width: 1180px) {
   .status-table-head {
     display: none;
@@ -1208,13 +854,6 @@ onBeforeUnmount(() => {
     display: none;
   }
 
-  .status-dialog-row {
-    grid-template-columns: minmax(260px, 1fr) 112px 150px;
-  }
-
-  .status-dialog-row .dialog-progress {
-    display: none;
-  }
 }
 
 @media (max-width: 760px) {
@@ -1222,14 +861,9 @@ onBeforeUnmount(() => {
   .status-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .status-row { grid-template-columns: 1fr auto; }
   .status-row > div:not(.project-cell):not(.action-cell) { display: none; }
-  .status-dialog-overlay { padding: 8px; }
-  .status-dialog { width: 100%; max-height: 96vh; }
-  .status-dialog-tools { align-items: stretch; flex-direction: column; }
   .history-period-tabs { width: 100%; }
   .history-period-tabs button { flex: 1; }
-  .status-dialog-row { grid-template-columns: 1fr auto; }
-  .status-dialog-row .state-pill { display: none; }
-  .dialog-open-button { min-width: 44px; padding-inline: 10px; font-size: 0; }
+  .status-search { max-width: none; flex-basis: 100%; }
 }
 
 @media (prefers-reduced-motion: reduce) {

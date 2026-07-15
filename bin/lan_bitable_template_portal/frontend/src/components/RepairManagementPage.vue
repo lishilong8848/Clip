@@ -53,7 +53,9 @@
             @click="requestSelectRecord(record)"
           >
             <span class="record-title-line">
-              <span class="record-title">{{ record.title || "未命名维修项目" }}</span>
+              <span class="record-title" :title="record.title || '未命名维修项目'">
+                {{ record.title || "未命名维修项目" }}
+              </span>
               <CheckCircle2
                 v-if="selectedRecord?.record_id === record.record_id"
                 :size="16"
@@ -64,7 +66,10 @@
               <b v-if="record.workflow" class="workflow">{{ record.workflow }}</b>
               <b>{{ recordBuildingLabel(record) }}</b>
               <b>{{ recordSpecialtyLabel(record) }}</b>
-              <b>{{ recordTimeLabel(record) }}</b>
+            </span>
+            <span class="record-time" :title="recordTimeLabel(record)">
+              <Clock3 :size="13" aria-hidden="true" />
+              <span>{{ recordTimeLabel(record) }}</span>
             </span>
           </button>
         </div>
@@ -148,11 +153,11 @@
                 v-if="editingRecordId"
                 type="button"
                 class="editor-title-button"
-                title="查看并编辑完整维修单"
+                title="查看完整维修单"
                 @click="detailDialogOpen = true"
               >
                 <span>{{ selectedRecordTitle }}</span>
-                <PencilLine :size="15" aria-hidden="true" />
+                <Eye :size="15" aria-hidden="true" />
               </button>
               <h3 v-else>填写维修项目</h3>
               <p v-if="sourceEventId && eventTitle">关联事件：{{ eventTitle }}</p>
@@ -305,7 +310,7 @@
         >
           <header class="repair-detail-head">
             <div>
-              <span>维修单</span>
+              <span>维修单详情</span>
               <h3 id="repair-detail-title">{{ selectedRecordTitle }}</h3>
             </div>
             <button type="button" aria-label="关闭维修单详情" @click="detailDialogOpen = false">
@@ -313,47 +318,26 @@
             </button>
           </header>
           <div class="repair-detail-body">
-            <section v-if="editableFields.length" class="repair-detail-section">
-              <h4>可编辑内容</h4>
-              <div class="repair-detail-field-grid">
-                <RepairFieldControl
-                  v-for="field in editableFields"
-                  :key="`detail-${field.field_name}`"
-                  :field="field"
-                  :input-id="detailFieldInputId(field)"
-                  :label="projectFieldLabel(field.field_name)"
-                  :model-value="fieldDraft[field.field_name]"
-                  :required="isRequiredField(field.field_name)"
-                  :error="fieldValidationError(field.field_name)"
-                  :wide="usesTextarea(field.field_name)"
-                  compact
-                  @update:model-value="fieldDraft[field.field_name] = $event"
-                  @edited="markFieldDirty(field.field_name)"
-                />
-              </div>
-            </section>
-            <section v-if="readonlyPreviewFields.length" class="repair-detail-section">
-              <h4>系统内容</h4>
+            <div v-if="hasSelectedSources" class="repair-detail-context">
+              <span><b>关联事件</b>{{ selectedEventSummary }}</span>
+              <span><b>关联检修通告</b>{{ selectedRepairSummary }}</span>
+            </div>
+            <section v-if="detailPreviewFields.length" class="repair-detail-section">
               <div class="repair-detail-readonly-grid">
-                <div v-for="field in readonlyPreviewFields" :key="`readonly-${field.field_name}`">
-                  <b>{{ field.field_name }}</b>
-                  <span>{{ displayReadonlyValue(field.field_name) || "未填写" }}</span>
+                <div
+                  v-for="field in detailPreviewFields"
+                  :key="`detail-${field.field_name}`"
+                  :class="{ wide: field.wide }"
+                >
+                  <b>{{ field.label }}</b>
+                  <span :title="field.value">{{ field.value }}</span>
                 </div>
               </div>
             </section>
+            <div v-else class="empty-state">暂无可展示内容</div>
           </div>
           <footer class="repair-detail-footer">
             <button type="button" class="btn quiet" @click="detailDialogOpen = false">关闭</button>
-            <button
-              type="button"
-              class="btn primary"
-              :disabled="saving || !canSaveRecord"
-              :title="saveDisabledReason"
-              @click="saveRecord"
-            >
-              <Save :size="16" aria-hidden="true" />
-              <span>{{ saving ? "保存中" : "保存修改" }}</span>
-            </button>
           </footer>
         </section>
       </div>
@@ -367,9 +351,10 @@ import {
   Activity,
   AlertCircle,
   CheckCircle2,
+  Clock3,
+  Eye,
   FilePlus2,
   LoaderCircle,
-  PencilLine,
   RefreshCw,
   RotateCcw,
   Save,
@@ -409,6 +394,12 @@ type ProjectFieldGroupKey = "basic" | "execution" | "other";
 type PrefillSelection = { eventRecordId: string; repairRecordIds: string[] };
 
 const RECORD_PAGE_SIZE = 30;
+const RECORD_RESPONSE_CACHE_TTL_MS = 15_000;
+const recordResponseCache = new Map<string, { expiresAt: number; payload: LooseDict }>();
+
+function clearRecordResponseCache(): void {
+  recordResponseCache.clear();
+}
 
 const PROJECT_FIELD_GROUPS: Array<{ key: ProjectFieldGroupKey; label: string }> = [
   { key: "basic", label: "" },
@@ -534,6 +525,26 @@ const visibleReadonlyFields = computed(() => readonlyFields.value.filter(
 const readonlyPreviewFields = computed(() => visibleReadonlyFields.value.filter(
   (field) => Boolean(displayReadonlyValue(field.field_name)),
 ));
+const detailPreviewFields = computed(() => [
+  ...editableFields.value.map((field) => {
+    const fieldName = String(field.field_name || "").trim();
+    return {
+      field_name: fieldName,
+      label: projectFieldLabel(fieldName),
+      value: String(fieldDraft[fieldName] ?? "").trim().replace("T", " "),
+      wide: usesTextarea(fieldName),
+    };
+  }),
+  ...readonlyPreviewFields.value.map((field) => {
+    const fieldName = String(field.field_name || "").trim();
+    return {
+      field_name: fieldName,
+      label: projectFieldLabel(fieldName),
+      value: displayReadonlyValue(fieldName),
+      wide: usesTextarea(fieldName),
+    };
+  }),
+].filter((field) => field.field_name && field.value));
 const projectFieldGroups = computed(() => {
   const grouped = new Map<ProjectFieldGroupKey, LooseDict[]>(
     PROJECT_FIELD_GROUPS.map((group) => [group.key, []]),
@@ -649,10 +660,6 @@ function projectFieldGroup(fieldName: unknown): ProjectFieldGroupKey {
 
 function fieldInputId(field: LooseDict): string {
   return `repair-project-field-${encodeURIComponent(String(field.field_name || "field"))}`;
-}
-
-function detailFieldInputId(field: LooseDict): string {
-  return `repair-detail-field-${encodeURIComponent(String(field.field_name || "field"))}`;
 }
 
 function projectFieldLabel(fieldName: unknown): string {
@@ -1112,6 +1119,7 @@ async function confirmRepairSelection(recordIds: string[]): Promise<void> {
 
 async function handleFollowupChanged(): Promise<void> {
   invalidateRepairStatus();
+  clearRecordResponseCache();
   const recordId = editingRecordId.value;
   if (!recordId) return;
   const requestVersion = ++recordDetailRequestVersion;
@@ -1306,10 +1314,24 @@ async function loadRecords(announce = false): Promise<void> {
   recordsAbortController = abortController;
   loading.value = true;
   try {
-    const payload = await requestJson(
-      `/api/repair-management/records?${scopedQuery()}`,
-      { signal: abortController.signal },
-    );
+    const query = new URLSearchParams(scopedQuery());
+    if (announce) query.set("refresh", "1");
+    const requestUrl = `/api/repair-management/records?${query.toString()}`;
+    const cacheKey = requestUrl.replace(/([?&])refresh=1(?:&|$)/, "$1").replace(/[?&]$/, "");
+    const cached = recordResponseCache.get(cacheKey);
+    let payload: LooseDict;
+    if (!announce && cached && cached.expiresAt > Date.now()) {
+      payload = cached.payload;
+    } else {
+      payload = await requestJson(requestUrl, { signal: abortController.signal });
+      recordResponseCache.set(cacheKey, {
+        expiresAt: Date.now() + RECORD_RESPONSE_CACHE_TTL_MS,
+        payload,
+      });
+      if (recordResponseCache.size > 24) {
+        recordResponseCache.delete(recordResponseCache.keys().next().value || "");
+      }
+    }
     if (requestVersion !== recordsRequestVersion) return;
     fields.value = Array.isArray(payload.fields) ? payload.fields : [];
     records.value = Array.isArray(payload.records) ? payload.records : [];
@@ -1436,6 +1458,7 @@ async function saveRecord(): Promise<void> {
     detailDialogOpen.value = false;
     sourceExpanded.value = false;
     recordPage.value = 1;
+    clearRecordResponseCache();
     await loadRecords(false);
     invalidateRepairStatus();
     const current = records.value.find((item) => String(item.record_id || "") === editingRecordId.value);
@@ -1488,6 +1511,7 @@ async function deleteRecordNow(): Promise<void> {
     sourceExpanded.value = true;
     showMessage("维修项目已删除。");
     invalidateRepairStatus();
+    clearRecordResponseCache();
     await loadRecords(false);
   } catch (error: unknown) {
     showMessage(error instanceof Error ? error.message : "删除失败。", "failed");
@@ -2198,7 +2222,8 @@ onBeforeUnmount(() => {
 
 .repair-layout {
   display: grid;
-  grid-template-columns: 280px minmax(0, 1fr);
+  grid-template-columns: minmax(300px, 320px) minmax(0, 1fr);
+  align-items: stretch;
   gap: 12px;
 }
 
@@ -2209,10 +2234,10 @@ onBeforeUnmount(() => {
 }
 
 .record-panel {
-  align-self: start;
-  position: sticky;
-  top: 14px;
-  max-height: calc(100vh - 28px);
+  align-self: stretch;
+  position: relative;
+  min-height: 0;
+  height: 100%;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
   overflow: hidden;
@@ -2285,7 +2310,7 @@ onBeforeUnmount(() => {
 }
 
 .editor-panel {
-  align-self: start;
+  align-self: stretch;
   overflow: visible;
 }
 
@@ -2455,9 +2480,11 @@ onBeforeUnmount(() => {
 .record-row {
   width: 100%;
   margin-top: 6px;
-  padding: 9px 10px;
+  min-height: 104px;
+  padding: 10px 11px;
   display: grid;
-  gap: 6px;
+  align-content: start;
+  gap: 7px;
   text-align: left;
   border: 1px solid #e0e9f7;
   border-radius: 9px;
@@ -2480,7 +2507,7 @@ onBeforeUnmount(() => {
 .record-title-line {
   min-width: 0;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 8px;
 }
@@ -2492,13 +2519,13 @@ onBeforeUnmount(() => {
 
 .record-title {
   min-width: 0;
-  overflow: hidden;
+  display: block;
   color: #071a39;
   font-size: 13px;
-  font-weight: 700;
-  line-height: 1.35;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-weight: 750;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .record-meta {
@@ -2533,6 +2560,28 @@ onBeforeUnmount(() => {
   border: 1px solid #c8e7df;
   background: #edf9f5;
   color: #08745f;
+}
+
+.record-time {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: #6a7f99;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.record-time svg {
+  flex: 0 0 auto;
+  color: #7e94ad;
+}
+
+.record-time span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .editor-head > div {
@@ -2862,20 +2911,19 @@ onBeforeUnmount(() => {
   position: fixed;
   z-index: 120;
   inset: 0;
-  display: grid;
-  place-items: center;
-  padding: 24px;
+  display: flex;
+  justify-content: flex-end;
   background: rgba(8, 25, 52, 0.48);
 }
 
 .repair-detail-dialog {
-  width: min(1180px, 96vw);
-  max-height: min(880px, 92vh);
+  width: min(680px, 96vw);
+  height: 100%;
   overflow: hidden;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
-  border: 1px solid #cbdcf1;
-  border-radius: 12px;
+  border-left: 1px solid #cbdcf1;
+  border-radius: 12px 0 0 12px;
   background: #fff;
   box-shadow: 0 24px 64px rgba(8, 37, 82, 0.24);
 }
@@ -2938,6 +2986,30 @@ onBeforeUnmount(() => {
   padding: 14px 16px 18px;
 }
 
+.repair-detail-context {
+  display: grid;
+  gap: 7px;
+  margin-bottom: 12px;
+  border: 1px solid #d9e6f5;
+  border-radius: 9px;
+  padding: 9px 10px;
+  background: #f7faff;
+}
+
+.repair-detail-context span {
+  min-width: 0;
+  overflow: hidden;
+  color: #5f7690;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.repair-detail-context b {
+  margin-right: 8px;
+  color: #214a73;
+}
+
 .repair-detail-section + .repair-detail-section {
   margin-top: 16px;
   padding-top: 14px;
@@ -2950,10 +3022,9 @@ onBeforeUnmount(() => {
   font-size: 13px;
 }
 
-.repair-detail-field-grid,
 .repair-detail-readonly-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px 10px;
 }
 
@@ -2967,11 +3038,14 @@ onBeforeUnmount(() => {
   background: #f8fbff;
 }
 
+.repair-detail-readonly-grid > div.wide {
+  grid-column: 1 / -1;
+}
+
 .repair-detail-readonly-grid b,
 .repair-detail-readonly-grid span {
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .repair-detail-readonly-grid b {
@@ -2982,6 +3056,9 @@ onBeforeUnmount(() => {
 .repair-detail-readonly-grid span {
   color: #6b8098;
   font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .repair-detail-footer {
@@ -2992,7 +3069,7 @@ onBeforeUnmount(() => {
 
 @media (max-width: 1279px) and (min-width: 1024px) {
   .repair-layout {
-    grid-template-columns: 240px minmax(0, 1fr);
+    grid-template-columns: 280px minmax(0, 1fr);
   }
 
   .project-field-grid {
@@ -3024,6 +3101,7 @@ onBeforeUnmount(() => {
 
   .record-panel {
     position: static;
+    height: auto;
     max-height: none;
   }
 
@@ -3065,7 +3143,6 @@ onBeforeUnmount(() => {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .repair-detail-field-grid,
   .repair-detail-readonly-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -3085,18 +3162,17 @@ onBeforeUnmount(() => {
 
   .project-field-grid,
   .readonly-grid,
-  .repair-detail-field-grid,
-  .repair-detail-readonly-grid {
+    .repair-detail-readonly-grid {
     grid-template-columns: 1fr;
   }
 
   .repair-detail-overlay {
-    padding: 8px;
+    align-items: stretch;
   }
 
   .repair-detail-dialog {
     width: 100%;
-    max-height: 96vh;
+    border-radius: 0;
   }
 
   .editor-action-buttons {

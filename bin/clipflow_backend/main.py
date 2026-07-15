@@ -801,6 +801,7 @@ class FastAPIPortalController:
             sqlite_stats: dict = {}
             source_snapshot_stats: dict = {}
             event_snapshot_stats: dict = {}
+            repair_snapshot_stats: dict = {}
             source_type_stats: dict = {}
             schema_status: dict = {}
             runtime_health: dict = {}
@@ -813,6 +814,8 @@ class FastAPIPortalController:
                 source_snapshot_stats = PortalRuntime.state_store.source_snapshot_stats()
             with suppress(Exception):
                 event_snapshot_stats = PortalRuntime.state_store.event_month_snapshot_stats()
+            with suppress(Exception):
+                repair_snapshot_stats = PortalRuntime.state_store.repair_snapshot_stats()
             with suppress(Exception):
                 source_type_stats = PortalRuntime.state_store.source_snapshot_work_type_stats()
             with suppress(Exception):
@@ -925,6 +928,7 @@ class FastAPIPortalController:
                     "runtime_health": runtime_health if isinstance(runtime_health, dict) else {},
                     "source_snapshot": source_snapshot_stats if isinstance(source_snapshot_stats, dict) else {},
                     "event_snapshot": event_snapshot_stats if isinstance(event_snapshot_stats, dict) else {},
+                    "repair_snapshot": repair_snapshot_stats if isinstance(repair_snapshot_stats, dict) else {},
                     "source_type_summary": source_type_stats if isinstance(source_type_stats, dict) else {},
                     "upload_attachments": upload_attachment_stats if isinstance(upload_attachment_stats, dict) else {},
                     "signature_crypto": signature_crypto_stats if isinstance(signature_crypto_stats, dict) else {},
@@ -964,6 +968,7 @@ class FastAPIPortalController:
                     "schema": PortalRuntime.state_store.schema_health(),
                     "source_snapshot": PortalRuntime.state_store.source_snapshot_stats(),
                     "event_snapshot": PortalRuntime.state_store.event_month_snapshot_stats(),
+                    "repair_snapshot": PortalRuntime.state_store.repair_snapshot_stats(),
                     "qt_active_items": PortalRuntime.state_store.qt_active_items_stats(),
                     "time": time.time(),
                 },
@@ -2895,6 +2900,10 @@ class FastAPIPortalController:
                     query=str(request.query_params.get("q") or ""),
                     limit=limit,
                     offset=offset,
+                    force_refresh=str(
+                        request.query_params.get("refresh") or ""
+                    ).lower()
+                    in {"1", "true", "yes"},
                 )
                 return self._json_ok(request, session, data)
             except Exception as exc:
@@ -3053,6 +3062,10 @@ class FastAPIPortalController:
                     focus_record_id=str(
                         request.query_params.get("focus_record_id") or ""
                     ),
+                    force_refresh=str(
+                        request.query_params.get("refresh") or ""
+                    ).lower()
+                    in {"1", "true", "yes"},
                 )
                 return self._json_ok(request, session, data)
             except Exception as exc:
@@ -3071,6 +3084,10 @@ class FastAPIPortalController:
                     PortalRuntime.service.get_repair_management_record,
                     record_id,
                     scope=scope,
+                    force_refresh=str(
+                        request.query_params.get("refresh") or ""
+                    ).lower()
+                    in {"1", "true", "yes"},
                 )
                 return self._json_ok(request, session, data)
             except Exception as exc:
@@ -4876,9 +4893,14 @@ class FastAPIPortalController:
         PortalRuntime.service = MaintenancePortalService(
             app_token=self.app_token,
             table_id=self.table_id,
+            enable_repair_snapshots=True,
         )
         try:
             PortalRuntime.service.ensure_snapshot_loaded()
+        except Exception:
+            pass
+        try:
+            PortalRuntime.service.start_repair_snapshot_warmup_async()
         except Exception:
             pass
         try:

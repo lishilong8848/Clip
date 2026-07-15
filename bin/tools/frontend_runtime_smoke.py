@@ -435,6 +435,7 @@ class _SmokePortalService:
         limit: int = 200,
         offset: int = 0,
         focus_record_id: str = "",
+        force_refresh: bool = False,
     ) -> dict:
         records = [
             {
@@ -520,6 +521,7 @@ class _SmokePortalService:
         record_id: str,
         *,
         scope: str = "ALL",
+        force_refresh: bool = False,
     ) -> dict:
         payload = self.get_repair_management_records(
             scope=scope,
@@ -796,6 +798,7 @@ class _SmokePortalService:
         query: str = "",
         limit: int = 100,
         offset: int = 0,
+        force_refresh: bool = False,
     ) -> dict:
         is_second_project = summary_record_id == "repair-mgmt-a-002"
         if is_second_project:
@@ -1256,16 +1259,14 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await waitForTextOrDump(page, 'A楼测试事件告警描述', 'repair-status-entry');
           await page.getByText('2026-06-01 09:50', {{ exact: true }}).first().waitFor({{ state: 'visible' }});
           await page.getByRole('button', {{ name: /^历史已完成/ }}).click();
-          const completedStatusDialog = page.getByRole('dialog', {{ name: '历史已完成' }});
-          await completedStatusDialog.getByText('A楼今日完成事件告警描述', {{ exact: true }}).waitFor({{ state: 'visible' }});
-          await completedStatusDialog.getByRole('button', {{ name: /^全部完成/ }}).waitFor({{ state: 'visible' }});
-          await completedStatusDialog.getByRole('button', {{ name: /^本月完成/ }}).click();
-          await completedStatusDialog.getByRole('button', {{ name: '关闭状态列表' }}).click();
+          await page.locator('.status-workspace').getByText('A楼今日完成事件告警描述', {{ exact: true }}).waitFor({{ state: 'visible' }});
+          await page.locator('.history-period-tabs').getByRole('button', {{ name: /^全部/ }}).waitFor({{ state: 'visible' }});
+          await page.locator('.history-period-tabs').getByRole('button', {{ name: /^本月/ }}).click();
+          await page.locator('.status-workspace').getByText('A楼今日完成事件告警描述', {{ exact: true }}).waitFor({{ state: 'visible' }});
           await page.getByRole('button', {{ name: /^当前状态项目/ }}).click();
-          const activeStatusDialog = page.getByRole('dialog', {{ name: '当前状态项目' }});
-          await activeStatusDialog.getByText('A楼测试事件告警描述', {{ exact: true }}).waitFor({{ state: 'visible' }});
+          await page.locator('.status-workspace').getByText('A楼测试事件告警描述', {{ exact: true }}).waitFor({{ state: 'visible' }});
           const repairRequestsBeforeOpen = repairRecordRequestCount;
-          await activeStatusDialog.locator('.status-dialog-row').filter({{ hasText: 'A楼测试事件告警描述' }}).getByRole('button', {{ name: '跟进检修管理' }}).click();
+          await page.locator('.status-row').filter({{ hasText: 'A楼测试事件告警描述' }}).getByRole('button', {{ name: '跟进检修管理' }}).click();
           await waitForTextOrDump(page, 'A楼测试检修管理记录', 'repair-management-return');
           await page.waitForTimeout(250);
           if (repairRecordRequestCount !== repairRequestsBeforeOpen) {{
@@ -1407,8 +1408,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           }}
           await followupPanel.getByRole('button', {{ name: '保存新跟进', exact: true }}).click();
           await followupPanel.getByText('维修跟进记录已新增。', {{ exact: true }}).waitFor({{ state: 'visible' }});
-          await followupPanel.getByRole('button', {{ name: '选择跟进记录', exact: true }}).click();
-          const followupOptions = followupPanel.locator('.followup-selector-list [role="option"]');
+          const followupOptions = followupPanel.locator('.followup-timeline-list [role="option"]');
           await followupOptions.first().waitFor({{ state: 'visible' }});
           await followupOptions.last().click();
           const progressInput = followupPanel.locator('[data-field-name="维修进度"] [data-progress-number]');

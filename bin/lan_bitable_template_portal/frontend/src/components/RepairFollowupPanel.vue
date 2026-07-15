@@ -14,81 +14,65 @@
       正在读取当前维修项目的跟进记录...
     </div>
     <div v-else class="followup-workspace">
-      <div ref="selectorRoot" class="followup-selector">
-        <div class="followup-selector-bar">
-          <button
-            type="button"
-            class="followup-selector-trigger"
-            :class="{ active: selectorOpen }"
-            aria-label="选择跟进记录"
-            aria-haspopup="listbox"
-            :aria-expanded="selectorOpen"
-            @click="selectorOpen = !selectorOpen"
-            @keydown.esc.stop="selectorOpen = false"
-          >
-            <span>
-              <small>跟进记录</small>
-              <strong>{{ currentFollowupTitle }}</strong>
-            </span>
-            <span class="followup-selector-meta">{{ currentFollowupMeta }}</span>
-            <ChevronDown :size="17" aria-hidden="true" />
-          </button>
-          <div class="followup-selector-actions">
-            <button
-              type="button"
-              class="followup-button quiet icon-button"
-              :disabled="loading"
-              title="刷新跟进记录"
-              aria-label="刷新跟进记录"
-              @click="requestRefresh"
-            >
-              <RefreshCw :size="16" :class="{ spinning: loading }" aria-hidden="true" />
-            </button>
-            <button
-              v-if="!creatingNewFollowup && !followupDirty"
-              type="button"
-              class="followup-button primary"
-              @click="requestStartCreate"
-            >
-              <Plus :size="16" aria-hidden="true" />
-              <span>新建跟进</span>
-            </button>
-          </div>
-        </div>
-
-        <div v-if="selectorOpen" class="followup-selector-popover" @keydown.esc.stop="selectorOpen = false">
-          <label class="followup-selector-search">
+      <aside class="followup-timeline" aria-label="跟进记录时间线">
+        <header class="followup-timeline-head">
+          <strong>跟进记录</strong>
+          <span>{{ total }} 条</span>
+        </header>
+        <div class="followup-timeline-tools">
+          <label class="followup-timeline-search">
             <Search :size="15" aria-hidden="true" />
             <input v-model.trim="followupQuery" type="search" placeholder="搜索跟进内容" />
           </label>
-          <div class="followup-selector-list" role="listbox" aria-label="选择跟进记录">
-            <div v-if="loading && !records.length" class="followup-empty">正在读取...</div>
-            <div v-else-if="!records.length" class="followup-empty">暂无匹配的跟进记录</div>
-            <button
-              v-for="record in records"
-              v-else
-              :key="record.record_id"
-              type="button"
-              role="option"
-              :aria-selected="editingRecordId === record.record_id"
-              :class="{ active: editingRecordId === record.record_id }"
-              @click="requestSelectRecord(record)"
-            >
-              <span>
-                <strong>{{ record.title || "未命名跟进记录" }}</strong>
-                <small>{{ record.created_time || "时间未填" }}</small>
-              </span>
-              <b>{{ progressLabel(record.progress) }}</b>
-              <Check v-if="editingRecordId === record.record_id" :size="16" aria-hidden="true" />
-            </button>
-          </div>
-          <nav v-if="pageCount > 1" class="followup-pager" aria-label="跟进记录分页">
-            <button type="button" :disabled="loading || page <= 1" @click="requestChangePage(-1)">上一页</button>
-            <span>{{ page }} / {{ pageCount }}</span>
-            <button type="button" :disabled="loading || page >= pageCount" @click="requestChangePage(1)">下一页</button>
-          </nav>
+          <button
+            type="button"
+            class="followup-button quiet icon-button"
+            :disabled="loading"
+            title="刷新跟进记录"
+            aria-label="刷新跟进记录"
+            @click="requestRefresh"
+          >
+            <RefreshCw :size="16" :class="{ spinning: loading }" aria-hidden="true" />
+          </button>
+          <button
+            v-if="!creatingNewFollowup && !followupDirty"
+            type="button"
+            class="followup-button primary timeline-create-button"
+            @click="requestStartCreate"
+          >
+            <Plus :size="16" aria-hidden="true" />
+            <span>新建跟进</span>
+          </button>
         </div>
-      </div>
+        <div class="followup-timeline-list" role="listbox" aria-label="选择跟进记录">
+          <div v-if="loading && !records.length" class="followup-empty">正在读取...</div>
+          <div v-else-if="!records.length" class="followup-empty">暂无匹配的跟进记录</div>
+          <button
+            v-for="record in records"
+            v-else
+            :key="record.record_id"
+            type="button"
+            role="option"
+            :aria-selected="editingRecordId === record.record_id"
+            :class="{ active: editingRecordId === record.record_id }"
+            @click="requestSelectRecord(record)"
+          >
+            <span class="timeline-marker">
+              <Check v-if="editingRecordId === record.record_id" :size="13" aria-hidden="true" />
+            </span>
+            <span class="timeline-copy">
+              <strong>{{ record.title || "未命名跟进记录" }}</strong>
+              <small>{{ record.created_time || "时间未填" }}</small>
+            </span>
+            <b>{{ progressLabel(record.progress) }}</b>
+          </button>
+        </div>
+        <nav v-if="pageCount > 1" class="followup-pager" aria-label="跟进记录分页">
+          <button type="button" :disabled="loading || page <= 1" @click="requestChangePage(-1)">上一页</button>
+          <span>{{ page }} / {{ pageCount }}</span>
+          <button type="button" :disabled="loading || page >= pageCount" @click="requestChangePage(1)">下一页</button>
+        </nav>
+      </aside>
 
       <main class="followup-editor">
         <div class="followup-editor-head">
@@ -214,12 +198,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, onBeforeUnmount, reactive, ref, watch } from "vue";
 import {
   AlertCircle,
   Check,
   CheckCircle2,
-  ChevronDown,
   LoaderCircle,
   Plus,
   RefreshCw,
@@ -327,10 +310,23 @@ const creatingNewFollowup = ref(false);
 const createOperationId = ref("");
 const followupDirty = ref(false);
 const discardDialogOpen = ref(false);
-const selectorOpen = ref(false);
 const followupQuery = ref("");
-const selectorRoot = ref<HTMLElement | null>(null);
 const PAGE_SIZE = 20;
+const FOLLOWUP_RESPONSE_CACHE_TTL_MS = 15_000;
+const followupResponseCache = new Map<string, { expiresAt: number; payload: LooseDict }>();
+
+function clearFollowupResponseCache(summaryRecordId = ""): void {
+  const normalizedId = String(summaryRecordId || "").trim();
+  if (!normalizedId) {
+    followupResponseCache.clear();
+    return;
+  }
+  for (const key of followupResponseCache.keys()) {
+    if (key.includes(`summary_record_id=${encodeURIComponent(normalizedId)}`)) {
+      followupResponseCache.delete(key);
+    }
+  }
+}
 let pendingDiscardAction: null | (() => void) = null;
 let recordsRequestVersion = 0;
 let cmdbRequestVersion = 0;
@@ -397,15 +393,6 @@ const primaryActionDisabledReason = computed(() => {
   if (!props.summaryRecordId) return "请先选择维修项目";
   if (!primaryActionDisabled.value) return primaryActionLabel.value;
   return "请至少填写一项跟进内容";
-});
-const currentFollowupTitle = computed(() => {
-  if (creatingNewFollowup.value) return "填写新跟进";
-  return String(selectedRecord.value?.title || (total.value ? "选择跟进记录" : "暂无跟进记录"));
-});
-const currentFollowupMeta = computed(() => {
-  if (creatingNewFollowup.value) return "未保存";
-  if (!editingRecordId.value) return `${total.value} 条`;
-  return `${progressLabel(selectedRecord.value?.progress)} · ${selectedRecord.value?.created_time || "时间未填"}`;
 });
 const followupSaveStateText = computed(() => {
   if (saving.value) return "保存中";
@@ -573,7 +560,6 @@ function resolveDiscardConfirmation(confirmed: boolean): void {
 
 function startCreate(): void {
   createOperationId.value = "";
-  selectorOpen.value = false;
   creatingNewFollowup.value = true;
   editingRecordId.value = "";
   selectedRecord.value = null;
@@ -622,13 +608,9 @@ function selectRecord(record: LooseDict): void {
 }
 
 function requestSelectRecord(record: LooseDict): void {
-  if (String(record.record_id || "") === editingRecordId.value) {
-    selectorOpen.value = false;
-    return;
-  }
+  if (String(record.record_id || "") === editingRecordId.value) return;
   runWithDirtyGuard(() => {
     selectRecord(record);
-    selectorOpen.value = false;
   });
 }
 
@@ -647,7 +629,6 @@ function resetForParent(): void {
   fields.value = [];
   brandModelOptions.value = {};
   total.value = 0;
-  selectorOpen.value = false;
   cmdbPickerOpen.value = false;
   deleteDialogOpen.value = false;
   discardDialogOpen.value = false;
@@ -704,10 +685,23 @@ async function loadRecords(announce = false): Promise<void> {
       limit: String(PAGE_SIZE),
       offset: String((page.value - 1) * PAGE_SIZE),
     });
-    const payload = await requestJson(
-      `/api/repair-management/followups?${params.toString()}`,
-      { signal: abortController.signal },
-    );
+    if (announce) params.set("refresh", "1");
+    const requestUrl = `/api/repair-management/followups?${params.toString()}`;
+    const cacheKey = requestUrl.replace(/([?&])refresh=1(?:&|$)/, "$1").replace(/[?&]$/, "");
+    const cached = followupResponseCache.get(cacheKey);
+    let payload: LooseDict;
+    if (!announce && cached && cached.expiresAt > Date.now()) {
+      payload = cached.payload;
+    } else {
+      payload = await requestJson(requestUrl, { signal: abortController.signal });
+      followupResponseCache.set(cacheKey, {
+        expiresAt: Date.now() + FOLLOWUP_RESPONSE_CACHE_TTL_MS,
+        payload,
+      });
+      if (followupResponseCache.size > 36) {
+        followupResponseCache.delete(followupResponseCache.keys().next().value || "");
+      }
+    }
     if (
       requestVersion !== recordsRequestVersion
       || summaryRecordId !== props.summaryRecordId
@@ -832,6 +826,7 @@ async function saveRecord(): Promise<void> {
       warnings.length ? `${successText}${warnings.join("；")}` : successText,
       warnings.length ? "warning" : "success",
     );
+    clearFollowupResponseCache(props.summaryRecordId);
     await loadRecords(false);
     emit("changed");
   } catch (error: unknown) {
@@ -864,6 +859,7 @@ async function deleteRecordNow(): Promise<void> {
       { method: "DELETE" },
     );
     resetForParent();
+    clearFollowupResponseCache(props.summaryRecordId);
     await loadRecords(false);
     emit("changed");
     showMessage("维修跟进已删除。", "success");
@@ -939,13 +935,6 @@ function confirmCmdb(recordIds: string[]): void {
   markDirty();
 }
 
-function handleDocumentPointerDown(event: PointerEvent): void {
-  if (!selectorOpen.value) return;
-  const target = event.target as Node | null;
-  if (target && selectorRoot.value?.contains(target)) return;
-  selectorOpen.value = false;
-}
-
 watch(
   () => [props.summaryRecordId, props.scope] as const,
   () => {
@@ -965,17 +954,12 @@ watch(followupQuery, () => {
   }, 300);
 });
 
-onMounted(() => {
-  document.addEventListener("pointerdown", handleDocumentPointerDown, true);
-});
-
 onBeforeUnmount(() => {
   recordsRequestVersion += 1;
   cmdbRequestVersion += 1;
   recordsAbortController?.abort();
   recordsAbortController = null;
   if (queryTimer) clearTimeout(queryTimer);
-  document.removeEventListener("pointerdown", handleDocumentPointerDown, true);
 });
 </script>
 
@@ -1224,197 +1208,174 @@ onBeforeUnmount(() => {
 .followup-workspace {
   min-width: 0;
   display: grid;
+  grid-template-columns: 250px minmax(0, 1fr);
   align-content: start;
-  gap: 8px;
+  gap: 12px;
   padding-top: 7px;
   border-top: 1px solid #e1eaf5;
 }
 
-.followup-selector {
-  position: relative;
-  z-index: 25;
-}
-
-.followup-selector-bar {
-  display: flex;
-  align-items: stretch;
-  gap: 8px;
-}
-
-.followup-selector-trigger {
+.followup-timeline {
   min-width: 0;
-  min-height: 40px;
-  flex: 1;
+  max-height: min(620px, calc(100vh - 250px));
+  position: sticky;
+  top: 12px;
+  align-self: start;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto 18px;
-  align-items: center;
-  gap: 10px;
-  border: 1px solid #ccd9e9;
-  border-radius: 9px;
-  padding: 4px 9px;
-  background: #fbfdff;
-  color: #17314f;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  transition: border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
-}
-
-.followup-selector-trigger:hover,
-.followup-selector-trigger.active,
-.followup-selector-trigger:focus-visible {
-  border-color: #1e63ff;
-  outline: 0;
-  background: #f5f9ff;
-  box-shadow: 0 0 0 3px rgba(30, 99, 255, 0.12);
-}
-
-.followup-selector-trigger > span:first-child {
-  min-width: 0;
-  display: grid;
-  gap: 2px;
-}
-
-.followup-selector-trigger small {
-  color: #71839a;
-  font-size: 10px;
-  font-weight: 650;
-}
-
-.followup-selector-trigger strong {
+  grid-template-rows: auto auto minmax(140px, 1fr) auto;
   overflow: hidden;
-  font-size: 13px;
-  font-weight: 700;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.followup-selector-meta {
-  color: #5e7692;
-  font-size: 11px;
-  font-weight: 650;
-  white-space: nowrap;
-}
-
-.followup-selector-trigger > svg {
-  color: #456d99;
-  transition: transform 160ms ease;
-}
-
-.followup-selector-trigger.active > svg {
-  transform: rotate(180deg);
-}
-
-.followup-selector-actions {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: stretch;
-  gap: 7px;
-}
-
-.followup-selector-popover {
-  position: absolute;
-  z-index: 30;
-  top: calc(100% + 7px);
-  right: 0;
-  left: 0;
-  overflow: hidden;
-  border: 1px solid #cbd9eb;
+  border: 1px solid #d7e3f2;
   border-radius: 10px;
-  background: #fff;
-  box-shadow: 0 18px 44px rgba(18, 58, 110, 0.2);
+  background: #f8fbff;
 }
 
-.followup-selector-search {
+.followup-timeline-head {
   min-height: 40px;
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-bottom: 1px solid #e0e9f4;
+  padding: 0 10px;
+  background: #fff;
+}
+
+.followup-timeline-head strong {
+  color: #17314f;
+  font-size: 13px;
+}
+
+.followup-timeline-head span {
+  color: #68809a;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.followup-timeline-tools {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 36px;
   gap: 7px;
-  margin: 8px;
-  border: 1px solid #d3dfed;
-  border-radius: 8px;
-  padding: 0 9px;
-  color: #57708f;
+  border-bottom: 1px solid #e3ebf5;
+  padding: 8px;
 }
 
-.followup-selector-search:focus-within {
-  border-color: #1e63ff;
-  box-shadow: 0 0 0 3px rgba(30, 99, 255, 0.12);
-}
-
-.followup-selector-search input {
+.followup-timeline-search {
   min-width: 0;
-  flex: 1;
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid #d1deed;
+  border-radius: 8px;
+  padding: 0 8px;
+  background: #fff;
+  color: #5e7692;
+}
+
+.followup-timeline-search:focus-within {
+  border-color: #1e63ff;
+  box-shadow: 0 0 0 3px rgba(30, 99, 255, 0.1);
+}
+
+.followup-timeline-search input {
+  min-width: 0;
+  width: 100%;
   border: 0;
   outline: 0;
   background: transparent;
   color: #17314f;
   font: inherit;
-  font-size: 13px;
+  font-size: 12px;
 }
 
-.followup-selector-list {
-  max-height: 280px;
+.followup-timeline-tools .icon-button {
+  width: 36px;
+  min-height: 36px;
+}
+
+.timeline-create-button {
+  grid-column: 1 / -1;
+  width: 100%;
+}
+
+.followup-timeline-list {
+  min-height: 140px;
   overflow-y: auto;
   overscroll-behavior: contain;
   display: grid;
+  align-content: start;
   gap: 4px;
-  padding: 0 7px 7px;
+  padding: 7px;
 }
 
-.followup-selector-list > button {
+.followup-timeline-list > button {
   width: 100%;
-  min-height: 46px;
+  min-height: 52px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto 18px;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 9px;
+  gap: 8px;
   border: 1px solid transparent;
   border-radius: 8px;
-  padding: 6px 9px;
-  background: #fbfdff;
+  padding: 6px 8px;
+  background: #fff;
   color: #17314f;
   font: inherit;
   text-align: left;
   cursor: pointer;
 }
 
-.followup-selector-list > button:hover,
-.followup-selector-list > button.active {
+.followup-timeline-list > button:hover,
+.followup-timeline-list > button.active,
+.followup-timeline-list > button:focus-visible {
   border-color: #b7cdf0;
+  outline: 0;
   background: #edf4ff;
 }
 
-.followup-selector-list > button > span {
+.timeline-marker {
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border: 2px solid #b8c9db;
+  border-radius: 50%;
+  background: #fff;
+  color: #fff;
+}
+
+.followup-timeline-list > button.active .timeline-marker {
+  border-color: #1464e7;
+  background: #1464e7;
+}
+
+.timeline-copy {
   min-width: 0;
   display: grid;
   gap: 3px;
 }
 
-.followup-selector-list strong,
-.followup-selector-list small {
+.timeline-copy strong,
+.timeline-copy small {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.followup-selector-list strong {
+.timeline-copy strong {
   font-size: 13px;
   font-weight: 700;
 }
 
-.followup-selector-list small {
+.timeline-copy small {
   color: #70839a;
   font-size: 11px;
 }
 
-.followup-selector-list b {
+.followup-timeline-list > button > b {
   color: #1658b5;
   font-size: 11px;
-}
-
-.followup-selector-list svg {
-  color: #1464e7;
+  white-space: nowrap;
 }
 
 .followup-pager {
@@ -1552,27 +1513,47 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 1279px) and (min-width: 1024px) {
+  .followup-workspace {
+    grid-template-columns: 220px minmax(0, 1fr);
+  }
+
   .followup-field-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 
 @media (max-width: 1023px) and (min-width: 761px) {
+  .followup-workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .followup-timeline {
+    position: static;
+    max-height: 300px;
+  }
+
   .followup-field-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
 @media (max-width: 760px) {
-  .followup-selector-bar,
   .followup-action-bar {
     align-items: stretch;
     flex-direction: column;
   }
 
-  .followup-selector-actions,
   .followup-action-bar > div:last-child {
     justify-content: flex-start;
+  }
+
+  .followup-workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .followup-timeline {
+    position: static;
+    max-height: 300px;
   }
 
   .followup-field-grid {

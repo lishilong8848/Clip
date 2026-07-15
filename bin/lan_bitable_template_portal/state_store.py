@@ -55,7 +55,7 @@ class LanPortalStateStore:
     are migration inputs only and are never deleted or overwritten here.
     """
 
-    SCHEMA_VERSION = 24
+    SCHEMA_VERSION = 25
     SOURCE_SCOPE_TABLES = {
         "110": "source_records_110",
         "A": "source_records_a",
@@ -105,6 +105,8 @@ class LanPortalStateStore:
         "signature_crypto_migrations",
         "event_notice_operation_locks",
         "repair_management_operations",
+        "repair_snapshot_sources",
+        "repair_snapshot_records",
         "schema_migrations",
     ]
     REQUIRED_INDEXES = [
@@ -139,6 +141,9 @@ class LanPortalStateStore:
         "idx_event_notice_operation_locks_expiry",
         "idx_repair_management_operations_status",
         "idx_repair_management_operations_record",
+        "idx_repair_snapshot_records_source_sort",
+        "idx_repair_snapshot_records_parent_sort",
+        "idx_repair_snapshot_records_status_sort",
     ]
 
     def __init__(self, db_path: str | Path | None = None):
@@ -931,6 +936,60 @@ class LanPortalStateStore:
             """
             CREATE INDEX IF NOT EXISTS idx_repair_management_operations_record
             ON repair_management_operations(operation_type, summary_record_id, record_id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS repair_snapshot_sources (
+                source_key TEXT PRIMARY KEY,
+                app_token TEXT NOT NULL DEFAULT '',
+                table_id TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'empty',
+                record_count INTEGER NOT NULL DEFAULT 0,
+                fields_json TEXT NOT NULL DEFAULT '[]',
+                meta_json TEXT NOT NULL DEFAULT '{}',
+                error TEXT NOT NULL DEFAULT '',
+                refreshed_at REAL NOT NULL DEFAULT 0,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS repair_snapshot_records (
+                source_key TEXT NOT NULL,
+                record_id TEXT NOT NULL,
+                parent_record_id TEXT NOT NULL DEFAULT '',
+                scope_codes_json TEXT NOT NULL DEFAULT '[]',
+                title TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT '',
+                search_text TEXT NOT NULL DEFAULT '',
+                sort_time REAL NOT NULL DEFAULT 0,
+                payload_json TEXT NOT NULL,
+                source_updated_at REAL NOT NULL DEFAULT 0,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY(source_key, record_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_repair_snapshot_records_source_sort
+            ON repair_snapshot_records(source_key, sort_time DESC, record_id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_repair_snapshot_records_parent_sort
+            ON repair_snapshot_records(source_key, parent_record_id, sort_time DESC, record_id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_repair_snapshot_records_status_sort
+            ON repair_snapshot_records(source_key, status, sort_time DESC, record_id)
             """
         )
         conn.execute(
@@ -3167,6 +3226,373 @@ class LanPortalStateStore:
             "active": row_payload(active),
             "last_failed": row_payload(failed),
             "manifest_count": int(total["c"] or 0) if total else 0,
+        }
+
+    @staticmethod
+    def _normalize_repair_snapshot_source_key(source_key: str) -> str:
+        normalized = str(source_key or "").strip().lower()
+        if not normalized or not re.fullmatch(r"[a-z0-9_.:-]{1,80}", normalized):
+            raise ValueError("invalid repair snapshot source key")
+        return normalized
+
+    def replace_repair_snapshot(
+        self,
+        source_key: str,
+        *,
+        records: list[dict[str, Any]],
+        app_token: str = "",
+        table_id: str = "",
+        fields: list[dict[str, Any]] | None = None,
+        meta: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        source_key = self._normalize_repair_snapshot_source_key(source_key)
+        now = time.time()
+        normalized_records_by_id: dict[str, dict[str, Any]] = {}
+        for item in records or []:
+            if not isinstance(item, dict):
+                continue
+            payload = item.get("payload")
+            if not isinstance(payload, dict):
+                payload = dict(item)
+            record_id = self._text(
+                item.get("record_id")
+                or payload.get("record_id")
+                or payload.get("source_record_id")
+            )
+            if not record_id:
+                continue
+            scope_codes = item.get("scope_codes")
+            if not isinstance(scope_codes, list):
+                scope_codes = []
+            normalized_records_by_id[record_id] = {
+                "record_id": record_id,
+                "parent_record_id": self._text(item.get("parent_record_id")),
+                "scope_codes": [
+                    self._text(value)
+                    for value in scope_codes
+                    if self._text(value)
+                ],
+                "title": self._text(item.get("title")),
+                "status": self._text(item.get("status")),
+                "search_text": self._text(item.get("search_text")),
+                "sort_time": float(item.get("sort_time") or 0),
+                "source_updated_at": float(item.get("source_updated_at") or 0),
+                "payload": payload,
+            }
+        normalized_records = list(normalized_records_by_id.values())
+        fields_payload = [
+            dict(item) for item in (fields or []) if isinstance(item, dict)
+        ]
+        meta_payload = dict(meta or {})
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute(
+                    "DELETE FROM repair_snapshot_records WHERE source_key=?",
+                    (source_key,),
+                )
+                for item in normalized_records:
+                    conn.execute(
+                        """
+                        INSERT INTO repair_snapshot_records(
+                            source_key, record_id, parent_record_id,
+                            scope_codes_json, title, status, search_text,
+                            sort_time, payload_json, source_updated_at,
+                            created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            source_key,
+                            item["record_id"],
+                            item["parent_record_id"],
+                            self._json(item["scope_codes"]),
+                            item["title"],
+                            item["status"],
+                            item["search_text"],
+                            item["sort_time"],
+                            self._json(item["payload"]),
+                            item["source_updated_at"],
+                            now,
+                            now,
+                        ),
+                    )
+                conn.execute(
+                    """
+                    INSERT INTO repair_snapshot_sources(
+                        source_key, app_token, table_id, status, record_count,
+                        fields_json, meta_json, error, refreshed_at,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, 'active', ?, ?, ?, '', ?, ?, ?)
+                    ON CONFLICT(source_key) DO UPDATE SET
+                        app_token=excluded.app_token,
+                        table_id=excluded.table_id,
+                        status='active',
+                        record_count=excluded.record_count,
+                        fields_json=excluded.fields_json,
+                        meta_json=excluded.meta_json,
+                        error='',
+                        refreshed_at=excluded.refreshed_at,
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        source_key,
+                        self._text(app_token),
+                        self._text(table_id),
+                        len(normalized_records),
+                        self._json(fields_payload),
+                        self._json(meta_payload),
+                        now,
+                        now,
+                        now,
+                    ),
+                )
+                conn.commit()
+        return {
+            "source_key": source_key,
+            "status": "active",
+            "record_count": len(normalized_records),
+            "refreshed_at": now,
+        }
+
+    def mark_repair_snapshot_failed(self, source_key: str, error: str) -> None:
+        source_key = self._normalize_repair_snapshot_source_key(source_key)
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute(
+                    """
+                    INSERT INTO repair_snapshot_sources(
+                        source_key, status, error, created_at, updated_at
+                    ) VALUES (?, 'failed', ?, ?, ?)
+                    ON CONFLICT(source_key) DO UPDATE SET
+                        status='failed', error=excluded.error,
+                        updated_at=excluded.updated_at
+                    """,
+                    (source_key, self._text(error), now, now),
+                )
+                conn.commit()
+
+    def get_repair_snapshot(
+        self,
+        source_key: str,
+        *,
+        parent_record_id: str = "",
+        record_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> dict[str, Any]:
+        source_key = self._normalize_repair_snapshot_source_key(source_key)
+        if not self.db_path.exists():
+            return {
+                "exists": False,
+                "source_key": source_key,
+                "records": [],
+                "fields": [],
+                "meta": {},
+                "refreshed_at": 0.0,
+                "status": "empty",
+                "error": "",
+            }
+        clauses = ["source_key=?"]
+        params: list[Any] = [source_key]
+        normalized_parent = self._text(parent_record_id)
+        if normalized_parent:
+            clauses.append("parent_record_id=?")
+            params.append(normalized_parent)
+        normalized_ids = list(
+            dict.fromkeys(
+                self._text(value)
+                for value in (record_ids or [])
+                if self._text(value)
+            )
+        )
+        if normalized_ids:
+            clauses.append(f"record_id IN ({','.join('?' for _ in normalized_ids)})")
+            params.extend(normalized_ids)
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                source_row = conn.execute(
+                    "SELECT * FROM repair_snapshot_sources WHERE source_key=?",
+                    (source_key,),
+                ).fetchone()
+                record_rows = conn.execute(
+                    f"""
+                    SELECT payload_json FROM repair_snapshot_records
+                    WHERE {' AND '.join(clauses)}
+                    ORDER BY sort_time DESC, record_id ASC
+                    """,
+                    tuple(params),
+                ).fetchall()
+        records: list[dict[str, Any]] = []
+        for row in record_rows:
+            payload = self._loads(str(row["payload_json"] or ""), {})
+            if isinstance(payload, dict):
+                records.append(payload)
+        if not source_row:
+            return {
+                "exists": False,
+                "source_key": source_key,
+                "records": records,
+                "fields": [],
+                "meta": {},
+                "refreshed_at": 0.0,
+                "status": "partial" if records else "empty",
+                "error": "",
+            }
+        fields = self._loads(str(source_row["fields_json"] or ""), [])
+        meta = self._loads(str(source_row["meta_json"] or ""), {})
+        return {
+            "exists": bool(records) or str(source_row["status"] or "") == "active",
+            "source_key": source_key,
+            "app_token": str(source_row["app_token"] or ""),
+            "table_id": str(source_row["table_id"] or ""),
+            "status": str(source_row["status"] or "empty"),
+            "record_count": int(source_row["record_count"] or 0),
+            "records": records,
+            "fields": fields if isinstance(fields, list) else [],
+            "meta": meta if isinstance(meta, dict) else {},
+            "error": str(source_row["error"] or ""),
+            "refreshed_at": float(source_row["refreshed_at"] or 0),
+            "updated_at": float(source_row["updated_at"] or 0),
+        }
+
+    def upsert_repair_snapshot_record(
+        self,
+        source_key: str,
+        record_id: str,
+        payload: dict[str, Any],
+        *,
+        parent_record_id: str = "",
+        scope_codes: list[str] | None = None,
+        title: str = "",
+        status: str = "",
+        search_text: str = "",
+        sort_time: float = 0,
+        source_updated_at: float = 0,
+    ) -> None:
+        source_key = self._normalize_repair_snapshot_source_key(source_key)
+        record_id = self._text(record_id)
+        if not record_id or not isinstance(payload, dict):
+            return
+        now = time.time()
+        normalized_scopes = [
+            self._text(value) for value in (scope_codes or []) if self._text(value)
+        ]
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute(
+                    """
+                    INSERT INTO repair_snapshot_records(
+                        source_key, record_id, parent_record_id,
+                        scope_codes_json, title, status, search_text,
+                        sort_time, payload_json, source_updated_at,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(source_key, record_id) DO UPDATE SET
+                        parent_record_id=excluded.parent_record_id,
+                        scope_codes_json=excluded.scope_codes_json,
+                        title=excluded.title,
+                        status=excluded.status,
+                        search_text=excluded.search_text,
+                        sort_time=excluded.sort_time,
+                        payload_json=excluded.payload_json,
+                        source_updated_at=excluded.source_updated_at,
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        source_key,
+                        record_id,
+                        self._text(parent_record_id),
+                        self._json(normalized_scopes),
+                        self._text(title),
+                        self._text(status),
+                        self._text(search_text),
+                        float(sort_time or 0),
+                        self._json(payload),
+                        float(source_updated_at or 0),
+                        now,
+                        now,
+                    ),
+                )
+                count_row = conn.execute(
+                    "SELECT count(*) AS c FROM repair_snapshot_records WHERE source_key=?",
+                    (source_key,),
+                ).fetchone()
+                count = int(count_row["c"] or 0) if count_row else 0
+                conn.execute(
+                    """
+                    INSERT INTO repair_snapshot_sources(
+                        source_key, status, record_count, created_at, updated_at
+                    ) VALUES (?, 'partial', ?, ?, ?)
+                    ON CONFLICT(source_key) DO UPDATE SET
+                        record_count=excluded.record_count,
+                        updated_at=excluded.updated_at
+                    """,
+                    (source_key, count, now, now),
+                )
+                conn.commit()
+
+    def delete_repair_snapshot_record(self, source_key: str, record_id: str) -> bool:
+        source_key = self._normalize_repair_snapshot_source_key(source_key)
+        record_id = self._text(record_id)
+        if not record_id:
+            return False
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                cursor = conn.execute(
+                    "DELETE FROM repair_snapshot_records WHERE source_key=? AND record_id=?",
+                    (source_key, record_id),
+                )
+                count_row = conn.execute(
+                    "SELECT count(*) AS c FROM repair_snapshot_records WHERE source_key=?",
+                    (source_key,),
+                ).fetchone()
+                count = int(count_row["c"] or 0) if count_row else 0
+                conn.execute(
+                    """
+                    UPDATE repair_snapshot_sources
+                    SET record_count=?, updated_at=? WHERE source_key=?
+                    """,
+                    (count, now, source_key),
+                )
+                conn.commit()
+                return int(cursor.rowcount or 0) > 0
+
+    def repair_snapshot_stats(self) -> dict[str, Any]:
+        if not self.db_path.exists():
+            return {"source_count": 0, "record_count": 0, "sources": []}
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                rows = conn.execute(
+                    """
+                    SELECT source_key, status, record_count, error,
+                           refreshed_at, updated_at
+                    FROM repair_snapshot_sources
+                    ORDER BY source_key
+                    """
+                ).fetchall()
+        sources = [
+            {
+                "source_key": str(row["source_key"] or ""),
+                "status": str(row["status"] or ""),
+                "record_count": int(row["record_count"] or 0),
+                "error": str(row["error"] or ""),
+                "refreshed_at": float(row["refreshed_at"] or 0),
+                "updated_at": float(row["updated_at"] or 0),
+            }
+            for row in rows
+        ]
+        return {
+            "source_count": len(sources),
+            "record_count": sum(item["record_count"] for item in sources),
+            "sources": sources,
         }
 
     def active_source_snapshot_meta(self) -> dict[str, Any]:
@@ -7202,6 +7628,7 @@ class LanPortalStateStore:
         schema = self.schema_health()
         database = self.get_database_stats()
         source_snapshot = self.source_snapshot_stats()
+        repair_snapshot = self.repair_snapshot_stats()
         write_worker = self.get_write_worker_stats()
         ok = bool(schema.get("ok")) and bool(database.get("exists"))
         return {
@@ -7209,6 +7636,7 @@ class LanPortalStateStore:
             "schema": schema,
             "database": database,
             "source_snapshot": source_snapshot,
+            "repair_snapshot": repair_snapshot,
             "write_worker": write_worker,
             "checked_at": time.time(),
         }

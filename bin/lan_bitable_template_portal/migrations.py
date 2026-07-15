@@ -31,6 +31,7 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
     (22, "engineer_mop_local_files"),
     (23, "signature_crypto_migrations"),
     (24, "repair_management_operations"),
+    (25, "repair_data_snapshots"),
 )
 
 

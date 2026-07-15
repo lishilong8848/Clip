@@ -120,7 +120,7 @@ class PortalRuntime:
     and Qt bridge while the service layer is being split further.
     """
 
-    service = MaintenancePortalService()
+    service = MaintenancePortalService(enable_repair_snapshots=True)
     auth_manager = PortalAuthManager()
     state_store = LanPortalStateStore()
     notice_callback = None
