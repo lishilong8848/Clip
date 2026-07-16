@@ -1,4 +1,4 @@
-import{j as r}from"./index-BOstUB5H.js";/**
+import{j as o}from"./index-CEY-zp4l.js";/**
  * @license lucide-vue-next v0.468.0 - ISC
  *
  * This source code is licensed under the ISC license.
@@ -13,12 +13,12 @@ import{j as r}from"./index-BOstUB5H.js";/**
  *
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
- */const k=({size:e,strokeWidth:a=2,absoluteStrokeWidth:o,color:i,iconNode:n,name:l,class:u,...h},{slots:s})=>r("svg",{...c,width:e||c.width,height:e||c.height,stroke:i||c.stroke,"stroke-width":o?Number(a)*24/Number(e):a,class:["lucide",`lucide-${y(l??"icon")}`],...h},[...n.map(d=>r(...d)),...s.default?[s.default()]:[]]);/**
+ */const k=({size:e,strokeWidth:a=2,absoluteStrokeWidth:r,color:i,iconNode:h,name:n,class:u,...d},{slots:s})=>o("svg",{...c,width:e||c.width,height:e||c.height,stroke:i||c.stroke,"stroke-width":r?Number(a)*24/Number(e):a,class:["lucide",`lucide-${y(n??"icon")}`],...d},[...h.map(l=>o(...l)),...s.default?[s.default()]:[]]);/**
  * @license lucide-vue-next v0.468.0 - ISC
  *
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
- */const t=(e,a)=>(o,{slots:i})=>r(k,{...o,iconNode:a,name:e},i);/**
+ */const t=(e,a)=>(r,{slots:i})=>o(k,{...r,iconNode:a,name:e},i);/**
  * @license lucide-vue-next v0.468.0 - ISC
  *
  * This source code is licensed under the ISC license.
@@ -33,14 +33,19 @@ import{j as r}from"./index-BOstUB5H.js";/**
  *
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
+ */const x=t("ClipboardListIcon",[["rect",{width:"8",height:"4",x:"8",y:"2",rx:"1",ry:"1",key:"tgr4d6"}],["path",{d:"M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2",key:"116196"}],["path",{d:"M12 11h4",key:"1jrz19"}],["path",{d:"M12 16h4",key:"n85exb"}],["path",{d:"M8 11h.01",key:"1dfujw"}],["path",{d:"M8 16h.01",key:"18s6g9"}]]);/**
+ * @license lucide-vue-next v0.468.0 - ISC
+ *
+ * This source code is licensed under the ISC license.
+ * See the LICENSE file in the root directory of this source tree.
  */const A=t("RefreshCwIcon",[["path",{d:"M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8",key:"v9h5vc"}],["path",{d:"M21 3v5h-5",key:"1q7to0"}],["path",{d:"M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16",key:"3uifl3"}],["path",{d:"M8 16H3v5",key:"1cv678"}]]);/**
  * @license lucide-vue-next v0.468.0 - ISC
  *
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
- */const m=t("SearchIcon",[["circle",{cx:"11",cy:"11",r:"8",key:"4ej97u"}],["path",{d:"m21 21-4.3-4.3",key:"1qie3q"}]]);/**
+ */const b=t("SearchIcon",[["circle",{cx:"11",cy:"11",r:"8",key:"4ej97u"}],["path",{d:"m21 21-4.3-4.3",key:"1qie3q"}]]);/**
  * @license lucide-vue-next v0.468.0 - ISC
  *
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
- */const I=t("XIcon",[["path",{d:"M18 6 6 18",key:"1bl5f8"}],["path",{d:"m6 6 12 12",key:"d8bk6v"}]]),p="clipflow:repair-status-invalidated";function x(){window.dispatchEvent(new Event(p))}export{v as A,f as C,p as R,m as S,I as X,A as a,t as c,x as i};
+ */const g=t("XIcon",[["path",{d:"M18 6 6 18",key:"1bl5f8"}],["path",{d:"m6 6 12 12",key:"d8bk6v"}]]),p="clipflow:repair-status-invalidated";function I(){window.dispatchEvent(new Event(p))}export{v as A,f as C,p as R,b as S,g as X,x as a,A as b,t as c,I as i};

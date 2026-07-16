@@ -62,7 +62,7 @@
             </span>
             <span class="timeline-copy">
               <strong>{{ record.title || "未命名跟进记录" }}</strong>
-              <small>{{ record.created_time || "时间未填" }}</small>
+              <small>{{ repairDisplayTime(record.created_time) || "时间未填" }}</small>
             </span>
             <b>{{ progressLabel(record.progress) }}</b>
           </button>
@@ -186,6 +186,7 @@
       :columns="cmdbColumns"
       :selected-ids="cmdbRecordIds"
       :multiple="true"
+      :allow-empty="true"
       :loading="cmdbLoading"
       :query="cmdbQuery"
       search-placeholder="搜索设备名称、唯一ID、分类或位置"
@@ -215,7 +216,7 @@ import {
   createRepairOperationId,
   parseRepairDraftValue,
   repairDraftInputValue,
-  repairFieldPreservesRawValue,
+  repairDisplayTime,
   repairFieldUsesTextarea,
 } from "../repairManagementUtils";
 import type { LooseDict } from "../types";
@@ -237,6 +238,7 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   changed: [];
   "dirty-changed": [value: boolean];
+  "count-changed": [value: number];
 }>();
 
 const cmdbColumns = [
@@ -308,6 +310,7 @@ const page = ref(1);
 const deleteDialogOpen = ref(false);
 const creatingNewFollowup = ref(false);
 const createOperationId = ref("");
+const followupFocusRecordId = ref("");
 const followupDirty = ref(false);
 const discardDialogOpen = ref(false);
 const followupQuery = ref("");
@@ -332,6 +335,7 @@ let recordsRequestVersion = 0;
 let cmdbRequestVersion = 0;
 let queryTimer: ReturnType<typeof setTimeout> | undefined;
 let recordsAbortController: AbortController | null = null;
+let cmdbAbortController: AbortController | null = null;
 
 const editableFields = computed(() => fields.value.filter((field) => (
   field.editable
@@ -383,6 +387,7 @@ const primaryActionLabel = computed(() => {
 });
 const primaryActionDisabled = computed(() => {
   if (saving.value || !props.summaryRecordId) return true;
+  if (editingRecordId.value) return !followupDirty.value;
   return !hasDraftContent.value;
 });
 const showPrimaryAction = computed(() => Boolean(
@@ -391,6 +396,7 @@ const showPrimaryAction = computed(() => Boolean(
 const primaryActionDisabledReason = computed(() => {
   if (saving.value) return "正在保存";
   if (!props.summaryRecordId) return "请先选择维修项目";
+  if (editingRecordId.value && !followupDirty.value) return "没有需要保存的修改";
   if (!primaryActionDisabled.value) return primaryActionLabel.value;
   return "请至少填写一项跟进内容";
 });
@@ -520,11 +526,19 @@ function updateFollowupField(field: LooseDict, value: string): void {
   const fieldName = String(field.field_name || "");
   draft[fieldName] = value;
   dirtyFieldNames.add(fieldName);
+  if (
+    fieldName === DEVICE_NAME_FIELD_NAME
+    && !String(draft[DEVICE_NUMBER_FIELD_NAME] || "").trim()
+  ) {
+    draft[DEVICE_NUMBER_FIELD_NAME] = String(value || "").trim();
+    dirtyFieldNames.add(DEVICE_NUMBER_FIELD_NAME);
+  }
   if (fieldName === BRAND_FIELD_NAME) {
     const allowedModels = brandModelOptions.value[value] || [];
     const currentModel = String(draft[MODEL_FIELD_NAME] || "").trim();
     if (currentModel && !allowedModels.includes(currentModel)) {
       draft[MODEL_FIELD_NAME] = "";
+      dirtyFieldNames.add(MODEL_FIELD_NAME);
     }
   }
   if (fieldName === REPAIR_PARTY_FIELD_NAME && String(value || "").trim() === "我方") {
@@ -560,6 +574,7 @@ function resolveDiscardConfirmation(confirmed: boolean): void {
 
 function startCreate(): void {
   createOperationId.value = "";
+  followupFocusRecordId.value = "";
   creatingNewFollowup.value = true;
   editingRecordId.value = "";
   selectedRecord.value = null;
@@ -575,6 +590,7 @@ function requestStartCreate(): void {
 
 function selectRecord(record: LooseDict): void {
   createOperationId.value = "";
+  followupFocusRecordId.value = "";
   creatingNewFollowup.value = false;
   editingRecordId.value = String(record.record_id || "");
   selectedRecord.value = record;
@@ -619,6 +635,8 @@ function resetForParent(): void {
   cmdbRequestVersion += 1;
   recordsAbortController?.abort();
   recordsAbortController = null;
+  cmdbAbortController?.abort();
+  cmdbAbortController = null;
   if (queryTimer) {
     clearTimeout(queryTimer);
     queryTimer = undefined;
@@ -635,6 +653,7 @@ function resetForParent(): void {
   pendingDiscardAction = null;
   creatingNewFollowup.value = false;
   editingRecordId.value = "";
+  followupFocusRecordId.value = "";
   selectedRecord.value = null;
   cmdbRecordIds.value = [];
   message.value = "";
@@ -668,6 +687,7 @@ async function loadRecords(announce = false): Promise<void> {
     records.value = [];
     fields.value = [];
     total.value = 0;
+    emit("count-changed", 0);
     return;
   }
   const requestVersion = ++recordsRequestVersion;
@@ -685,6 +705,9 @@ async function loadRecords(announce = false): Promise<void> {
       limit: String(PAGE_SIZE),
       offset: String((page.value - 1) * PAGE_SIZE),
     });
+    if (followupFocusRecordId.value) {
+      params.set("focus_record_id", followupFocusRecordId.value);
+    }
     if (announce) params.set("refresh", "1");
     const requestUrl = `/api/repair-management/followups?${params.toString()}`;
     const cacheKey = requestUrl.replace(/([?&])refresh=1(?:&|$)/, "$1").replace(/[?&]$/, "");
@@ -713,6 +736,10 @@ async function loadRecords(announce = false): Promise<void> {
       ? payload.brand_model_options as Record<string, string[]>
       : {};
     total.value = Number(payload.total || records.value.length || 0);
+    emit("count-changed", total.value);
+    if (followupFocusRecordId.value) {
+      page.value = Math.floor(Number(payload.offset || 0) / PAGE_SIZE) + 1;
+    }
     const maxPage = Math.max(1, Math.ceil(total.value / PAGE_SIZE));
     if (page.value > maxPage) {
       page.value = maxPage;
@@ -722,7 +749,11 @@ async function loadRecords(announce = false): Promise<void> {
     }
     if (editingRecordId.value) {
       const current = records.value.find((item) => String(item.record_id || "") === editingRecordId.value);
-      if (current && !followupDirty.value) selectRecord(current);
+      if (current && !followupDirty.value) {
+        selectRecord(current);
+      } else if (followupFocusRecordId.value) {
+        followupFocusRecordId.value = "";
+      }
     } else if (!creatingNewFollowup.value && records.value.length) {
       selectRecord(records.value[0]);
     } else if (!records.value.length) {
@@ -750,19 +781,11 @@ async function loadRecords(announce = false): Promise<void> {
 
 function buildFields(): LooseDict {
   const payload: LooseDict = {};
-  const raw = selectedRecord.value?.raw_fields && typeof selectedRecord.value.raw_fields === "object"
-    ? selectedRecord.value.raw_fields
-    : {};
   for (const field of editableFields.value) {
     const name = String(field.field_name || "");
+    if (editingRecordId.value && !dirtyFieldNames.has(name)) continue;
     if (name === WORKER_FIELD_NAME) {
-      if (
-        editingRecordId.value
-        && !dirtyFieldNames.has(name)
-        && Object.prototype.hasOwnProperty.call(raw, name)
-      ) {
-        payload[name] = raw[name];
-      } else if (workerPeople.value.length || editingRecordId.value) {
+      if (workerPeople.value.length || editingRecordId.value) {
         payload[name] = workerPeople.value.map((person) => ({
           id: String(person.user_id || person.id || person.open_id || "").trim(),
         })).filter((person) => person.id);
@@ -771,15 +794,6 @@ function buildFields(): LooseDict {
     }
     const value = String(draft[name] ?? "");
     if (!value.trim() && !editingRecordId.value) continue;
-    if (
-      editingRecordId.value
-      && !dirtyFieldNames.has(name)
-      && repairFieldPreservesRawValue(field)
-      && Object.prototype.hasOwnProperty.call(raw, name)
-    ) {
-      payload[name] = raw[name];
-      continue;
-    }
     payload[name] = parseRepairDraftValue(value, field);
   }
   return payload;
@@ -790,8 +804,13 @@ function handlePrimaryAction(): void {
 }
 
 async function saveRecord(): Promise<void> {
-  if (!props.summaryRecordId) return;
-  if (!hasDraftContent.value) {
+  if (saving.value || !props.summaryRecordId) return;
+  const wasEditing = Boolean(editingRecordId.value);
+  if (wasEditing && !followupDirty.value) {
+    showMessage("当前跟进没有需要保存的修改。", "warning");
+    return;
+  }
+  if (!wasEditing && !hasDraftContent.value) {
     showMessage("请至少填写一项跟进内容。", "warning");
     return;
   }
@@ -807,7 +826,6 @@ async function saveRecord(): Promise<void> {
       cmdb_record_ids: cmdbRecordIds.value,
       fields: buildFields(),
     });
-    const wasEditing = Boolean(editingRecordId.value);
     const payload = wasEditing
       ? await requestJson(`/api/repair-management/followups/${encodeURIComponent(editingRecordId.value)}`, {
           method: "PUT",
@@ -815,7 +833,10 @@ async function saveRecord(): Promise<void> {
         })
       : await requestJson("/api/repair-management/followups", { method: "POST", body });
     editingRecordId.value = String(payload.record_id || editingRecordId.value || "");
-    if (!wasEditing) createOperationId.value = "";
+    if (!wasEditing) {
+      createOperationId.value = "";
+      followupFocusRecordId.value = editingRecordId.value;
+    }
     setDirty(false);
     if (!wasEditing) page.value = 1;
     const warnings = Array.isArray(payload.warnings)
@@ -837,7 +858,7 @@ async function saveRecord(): Promise<void> {
 }
 
 function requestDeleteRecord(): void {
-  if (!editingRecordId.value || !props.summaryRecordId) return;
+  if (saving.value || !editingRecordId.value || !props.summaryRecordId) return;
   deleteDialogOpen.value = true;
 }
 
@@ -847,7 +868,7 @@ async function resolveDeleteConfirmation(confirmed: boolean): Promise<void> {
 }
 
 async function deleteRecordNow(): Promise<void> {
-  if (!editingRecordId.value || !props.summaryRecordId) return;
+  if (saving.value || !editingRecordId.value || !props.summaryRecordId) return;
   saving.value = true;
   try {
     const params = new URLSearchParams({
@@ -872,6 +893,9 @@ async function deleteRecordNow(): Promise<void> {
 
 async function loadCmdbCandidates(): Promise<void> {
   const requestVersion = ++cmdbRequestVersion;
+  cmdbAbortController?.abort();
+  const abortController = new AbortController();
+  cmdbAbortController = abortController;
   cmdbLoading.value = true;
   try {
     const params = new URLSearchParams({
@@ -879,13 +903,18 @@ async function loadCmdbCandidates(): Promise<void> {
       q: cmdbQuery.value,
       limit: "200",
     });
-    const payload = await requestJson(`/api/repair-management/cmdb-candidates?${params.toString()}`);
+    const payload = await requestJson(
+      `/api/repair-management/cmdb-candidates?${params.toString()}`,
+      { signal: abortController.signal },
+    );
     if (requestVersion !== cmdbRequestVersion) return;
     cmdbCandidates.value = Array.isArray(payload.records) ? payload.records : [];
   } catch (error: unknown) {
+    if (abortController.signal.aborted) return;
     if (requestVersion !== cmdbRequestVersion) return;
     showMessage(error instanceof Error ? error.message : "CMDB 设备读取失败。", "failed");
   } finally {
+    if (cmdbAbortController === abortController) cmdbAbortController = null;
     if (requestVersion === cmdbRequestVersion) cmdbLoading.value = false;
   }
 }
@@ -917,6 +946,7 @@ function confirmCmdb(recordIds: string[]): void {
     const options = Array.isArray(deviceNameField?.options) ? deviceNameField.options : [];
     if (!options.length || options.includes(category)) {
       draft[DEVICE_NAME_FIELD_NAME] = category;
+      dirtyFieldNames.add(DEVICE_NAME_FIELD_NAME);
     } else {
       showMessage(`设备分类“${category}”不是跟进表可选项，请手动选择设备名称。`, "warning");
     }
@@ -925,6 +955,7 @@ function confirmCmdb(recordIds: string[]): void {
   }
   if (!String(draft[DEVICE_NUMBER_FIELD_NAME] || "").trim() && deviceNames.length) {
     draft[DEVICE_NUMBER_FIELD_NAME] = deviceNames.join("、");
+    dirtyFieldNames.add(DEVICE_NUMBER_FIELD_NAME);
   }
   if (!selectedRecords.length && cmdbRecordIds.value.length) {
     showMessage(
@@ -959,6 +990,8 @@ onBeforeUnmount(() => {
   cmdbRequestVersion += 1;
   recordsAbortController?.abort();
   recordsAbortController = null;
+  cmdbAbortController?.abort();
+  cmdbAbortController = null;
   if (queryTimer) clearTimeout(queryTimer);
 });
 </script>

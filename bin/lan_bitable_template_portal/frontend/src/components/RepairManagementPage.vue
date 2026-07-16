@@ -21,8 +21,8 @@
       </div>
     </div>
 
-    <MessageBanner v-if="messageText" :tone="messageTone" :text="messageText" />
-    <div v-if="hasAnyUnsavedChanges" class="page-unsaved-notice" role="status" aria-live="polite">
+    <MessageBanner v-if="messageText && !projectDrawerOpen" :tone="messageTone" :text="messageText" />
+    <div v-if="hasAnyUnsavedChanges && !projectDrawerOpen" class="page-unsaved-notice" role="status" aria-live="polite">
       <AlertCircle :size="16" aria-hidden="true" />
       <span>{{ unsavedNoticeText }}</span>
     </div>
@@ -39,39 +39,62 @@
             <button v-if="searchText" type="button" class="search-clear" @click="clearSearch">清空</button>
           </div>
         </div>
+        <div v-if="records.length" class="record-table-head" aria-hidden="true">
+          <span>维修项目</span>
+          <span>状态</span>
+          <span>跟进记录</span>
+          <span>当前进度</span>
+          <span>最近更新</span>
+          <span></span>
+        </div>
         <div class="record-list" :aria-busy="loading">
           <div v-if="loading && !records.length" class="empty-state">正在读取维修项目...</div>
           <div v-else-if="!records.length" class="empty-state">{{ recordEmptyText }}</div>
-          <button
+          <article
             v-for="record in records"
             v-else
             :key="record.record_id"
-            type="button"
             class="record-row"
             :class="{ active: selectedRecord?.record_id === record.record_id }"
-            :aria-current="selectedRecord?.record_id === record.record_id ? 'true' : undefined"
-            @click="requestSelectRecord(record)"
+            role="button"
+            tabindex="0"
+            :aria-label="`打开维修项目：${record.title || '未命名维修项目'}`"
+            @click="requestSelectRecord(record, 'project')"
+            @keydown.enter.prevent="requestSelectRecord(record, 'project')"
+            @keydown.space.prevent="requestSelectRecord(record, 'project')"
           >
-            <span class="record-title-line">
+            <span class="record-project-cell">
               <span class="record-title" :title="record.title || '未命名维修项目'">
                 {{ record.title || "未命名维修项目" }}
               </span>
-              <CheckCircle2
-                v-if="selectedRecord?.record_id === record.record_id"
-                :size="16"
-                aria-hidden="true"
-              />
+              <span class="record-meta">
+                <b>{{ recordBuildingLabel(record) }}</b>
+                <b>{{ recordSpecialtyLabel(record) }}</b>
+              </span>
             </span>
-            <span class="record-meta">
-              <b v-if="record.workflow" class="workflow">{{ record.workflow }}</b>
-              <b>{{ recordBuildingLabel(record) }}</b>
-              <b>{{ recordSpecialtyLabel(record) }}</b>
+            <span class="record-status-cell">
+              <b class="workflow">{{ record.workflow || "待跟进" }}</b>
             </span>
-            <span class="record-time" :title="recordTimeLabel(record)">
+            <button
+              type="button"
+              class="record-followup-button"
+              :aria-label="`查看 ${record.followup_count || 0} 条跟进记录`"
+              @click.stop="requestSelectRecord(record, 'followups')"
+            >
+              <ClipboardList :size="15" aria-hidden="true" />
+              <b>{{ Number(record.followup_count || 0) }}</b>
+              <span>条</span>
+            </button>
+            <span class="record-progress-cell">
+              <span><b>{{ recordProgressPercent(record) }}%</b></span>
+              <i aria-hidden="true"><b :style="{ width: `${recordProgressPercent(record)}%` }"></b></i>
+            </span>
+            <span class="record-time" :title="recordLatestTimeLabel(record)">
               <Clock3 :size="13" aria-hidden="true" />
-              <span>{{ recordTimeLabel(record) }}</span>
+              <span>{{ recordLatestTimeLabel(record) }}</span>
             </span>
-          </button>
+            <ChevronRight :size="18" class="record-open-icon" aria-hidden="true" />
+          </article>
         </div>
         <nav v-if="recordPageCount > 1" class="pager" aria-label="维修项目分页">
           <button type="button" :disabled="loading || recordPage <= 1" @click="changeRecordPage(-1)">上一页</button>
@@ -79,14 +102,76 @@
           <button type="button" :disabled="loading || recordPage >= recordPageCount" @click="changeRecordPage(1)">下一页</button>
         </nav>
       </aside>
+    </div>
 
-      <main class="editor-panel">
+    <Teleport to="body">
+      <div
+        v-if="projectDrawerOpen"
+        class="repair-project-overlay"
+        role="presentation"
+        @click.self="requestCloseProjectDrawer"
+      >
+        <section
+          ref="projectDrawerRef"
+          class="repair-project-drawer"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="repair-project-drawer-title"
+          tabindex="-1"
+          @keydown="handleProjectDrawerKeydown"
+        >
+          <header class="project-drawer-head">
+            <div class="project-drawer-title">
+              <span>{{ activeWorkspaceTab === "followups" ? "跟进记录" : editingRecordId ? "维修单信息" : "新建维修单" }}</span>
+              <h3 id="repair-project-drawer-title">
+                {{ editingRecordId ? selectedRecordTitle : "填写维修项目" }}
+              </h3>
+            </div>
+            <div class="project-drawer-head-actions">
+              <button
+                v-if="editingRecordId"
+                type="button"
+                class="drawer-followup-summary"
+                :class="{ active: activeWorkspaceTab === 'followups' }"
+                @click="openWorkspaceTab('followups')"
+              >
+                <ClipboardList :size="17" aria-hidden="true" />
+                <span>跟进记录</span>
+                <b>{{ selectedFollowupCount }}</b>
+              </button>
+              <button
+                type="button"
+                class="project-drawer-close"
+                aria-label="关闭维修项目"
+                @click="requestCloseProjectDrawer"
+              >
+                <X :size="20" aria-hidden="true" />
+              </button>
+            </div>
+          </header>
+
+          <div v-if="editingRecordId" class="project-drawer-summary">
+            <span><small>状态</small><b>{{ selectedRecord?.workflow || "待跟进" }}</b></span>
+            <span><small>楼栋</small><b>{{ recordBuildingLabel(selectedRecord || {}) }}</b></span>
+            <span><small>专业</small><b>{{ recordSpecialtyLabel(selectedRecord || {}) }}</b></span>
+            <span><small>当前进度</small><b>{{ recordProgressPercent(selectedRecord || {}) }}%</b></span>
+            <span><small>跟进记录</small><b>{{ selectedFollowupCount }} 条</b></span>
+          </div>
+
+          <div class="project-drawer-body">
+            <MessageBanner v-if="messageText" :tone="messageTone" :text="messageText" />
+            <div v-if="hasAnyUnsavedChanges" class="page-unsaved-notice" role="status" aria-live="polite">
+              <AlertCircle :size="16" aria-hidden="true" />
+              <span>{{ unsavedNoticeText }}</span>
+            </div>
+
+            <main class="editor-panel">
         <header class="workspace-tabs-row">
           <nav class="workspace-tabs" aria-label="维修项目工作区">
             <button
               type="button"
               :class="{ active: activeWorkspaceTab === 'project' }"
-              @click="activeWorkspaceTab = 'project'"
+              @click="openWorkspaceTab('project')"
             >
               维修单信息
               <span v-if="hasUnsavedChanges" class="unsaved-dot">未保存</span>
@@ -95,9 +180,9 @@
               type="button"
               :class="{ active: activeWorkspaceTab === 'followups' }"
               :disabled="!editingRecordId"
-              @click="activeWorkspaceTab = 'followups'"
+              @click="openWorkspaceTab('followups')"
             >
-              跟进记录
+              跟进记录 {{ selectedFollowupCount }}
               <span v-if="followupHasUnsavedChanges" class="unsaved-dot">未保存</span>
             </button>
           </nav>
@@ -129,7 +214,10 @@
               </div>
               <div class="source-relation-item">
                 <span class="relation-order">2</span>
-                <div><b>设备检修关联</b><small>{{ selectedRepairSummary }}</small></div>
+                <div>
+                  <b>设备检修关联（可选）</b>
+                  <small>{{ selectedRepairIds.length ? selectedRepairSummary : "未关联 · 手动填写" }}</small>
+                </div>
                 <div class="relation-actions">
                   <button type="button" class="btn secondary" :disabled="prefillLoading" @click="openSourcePicker('repair')">
                     {{ selectedRepairIds.length ? "重新选择" : "选择检修通告" }}
@@ -147,22 +235,7 @@
             <div v-if="prefillWarnings.length" class="prefill-warning">{{ prefillWarnings.join("；") }}</div>
           </section>
 
-          <header class="editor-head">
-            <div>
-              <button
-                v-if="editingRecordId"
-                type="button"
-                class="editor-title-button"
-                title="查看完整维修单"
-                @click="detailDialogOpen = true"
-              >
-                <span>{{ selectedRecordTitle }}</span>
-                <Eye :size="15" aria-hidden="true" />
-              </button>
-              <h3 v-else>填写维修项目</h3>
-              <p v-if="sourceEventId && eventTitle">关联事件：{{ eventTitle }}</p>
-            </div>
-          </header>
+          <p v-if="sourceEventId && eventTitle" class="linked-event-line">关联事件：{{ eventTitle }}</p>
 
           <div v-if="validationAttempted && missingRequiredEditableFields.length" class="form-warning">
             还缺 {{ missingRequiredEditableFields.length }} 项：{{ missingRequiredEditableFields.join("、") }}
@@ -177,20 +250,30 @@
                 <span>{{ group.fields.length }} 项</span>
               </header>
               <div class="project-field-grid">
-                <RepairFieldControl
-                  v-for="field in group.fields"
-                  :key="field.field_name"
-                  :field="field"
-                  :input-id="fieldInputId(field)"
-                  :label="projectFieldLabel(field.field_name)"
-                  :model-value="fieldDraft[field.field_name]"
-                  :required="isRequiredField(field.field_name)"
-                  :error="fieldValidationError(field.field_name)"
-                  :wide="usesTextarea(field.field_name)"
-                  compact
-                  @update:model-value="fieldDraft[field.field_name] = $event"
-                  @edited="markFieldDirty(field.field_name)"
-                />
+                <template v-for="field in group.fields" :key="field.field_name">
+                  <RepairPeoplePicker
+                    v-if="isProjectWorkerField(field)"
+                    :scope="scope"
+                    :input-id="fieldInputId(field)"
+                    :label="projectFieldLabel(field.field_name)"
+                    :model-value="projectWorkerPeople"
+                    @update:model-value="updateProjectWorkerPeople"
+                    @edited="markFieldDirty(field.field_name)"
+                  />
+                  <RepairFieldControl
+                    v-else
+                    :field="field"
+                    :input-id="fieldInputId(field)"
+                    :label="projectFieldLabel(field.field_name)"
+                    :model-value="fieldDraft[field.field_name]"
+                    :required="isRequiredField(field.field_name)"
+                    :error="fieldValidationError(field.field_name)"
+                    :wide="usesTextarea(field.field_name)"
+                    compact
+                    @update:model-value="fieldDraft[field.field_name] = $event"
+                    @edited="markFieldDirty(field.field_name)"
+                  />
+                </template>
               </div>
             </section>
           </div>
@@ -239,7 +322,7 @@
         </div>
 
         <RepairFollowupPanel
-          v-if="editingRecordId"
+          v-if="editingRecordId && followupPanelMounted"
           :key="`${scope}:${editingRecordId}`"
           v-show="activeWorkspaceTab === 'followups'"
           embedded
@@ -248,9 +331,13 @@
           :summary-title="selectedRecordTitle"
           @changed="handleFollowupChanged"
           @dirty-changed="followupHasUnsavedChanges = $event"
+          @count-changed="updateSelectedFollowupCount"
         />
-      </main>
-    </div>
+            </main>
+          </div>
+        </section>
+      </div>
+    </Teleport>
 
     <ConfirmDialog
       :open="confirmDialog.open"
@@ -294,65 +381,18 @@
       @confirm="confirmRepairSelection"
     />
 
-    <Teleport to="body">
-      <div
-        v-if="detailDialogOpen"
-        class="repair-detail-overlay"
-        role="presentation"
-        @click.self="detailDialogOpen = false"
-        @keydown.esc="detailDialogOpen = false"
-      >
-        <section
-          class="repair-detail-dialog"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="repair-detail-title"
-        >
-          <header class="repair-detail-head">
-            <div>
-              <span>维修单详情</span>
-              <h3 id="repair-detail-title">{{ selectedRecordTitle }}</h3>
-            </div>
-            <button type="button" aria-label="关闭维修单详情" @click="detailDialogOpen = false">
-              <X :size="19" aria-hidden="true" />
-            </button>
-          </header>
-          <div class="repair-detail-body">
-            <div v-if="hasSelectedSources" class="repair-detail-context">
-              <span><b>关联事件</b>{{ selectedEventSummary }}</span>
-              <span><b>关联检修通告</b>{{ selectedRepairSummary }}</span>
-            </div>
-            <section v-if="detailPreviewFields.length" class="repair-detail-section">
-              <div class="repair-detail-readonly-grid">
-                <div
-                  v-for="field in detailPreviewFields"
-                  :key="`detail-${field.field_name}`"
-                  :class="{ wide: field.wide }"
-                >
-                  <b>{{ field.label }}</b>
-                  <span :title="field.value">{{ field.value }}</span>
-                </div>
-              </div>
-            </section>
-            <div v-else class="empty-state">暂无可展示内容</div>
-          </div>
-          <footer class="repair-detail-footer">
-            <button type="button" class="btn quiet" @click="detailDialogOpen = false">关闭</button>
-          </footer>
-        </section>
-      </div>
-    </Teleport>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from "vue";
 import {
   Activity,
   AlertCircle,
   CheckCircle2,
+  ChevronRight,
   Clock3,
-  Eye,
+  ClipboardList,
   FilePlus2,
   LoaderCircle,
   RefreshCw,
@@ -373,6 +413,7 @@ import {
   repairDraftInputValue,
   repairEventRecordId as eventRecordId,
   repairFieldUsesTextarea,
+  repairDisplayTime,
   repairRecordBuildingLabel as recordBuildingLabel,
   repairRecordSpecialtyLabel as recordSpecialtyLabel,
   repairRecordTimeLabel as recordTimeLabel,
@@ -383,6 +424,7 @@ import ConfirmDialog from "./ConfirmDialog.vue";
 import MessageBanner from "./MessageBanner.vue";
 import RepairFieldControl from "./RepairFieldControl.vue";
 import RepairFollowupPanel from "./RepairFollowupPanel.vue";
+import RepairPeoplePicker from "./RepairPeoplePicker.vue";
 import RecordPickerDialog from "./RecordPickerDialog.vue";
 import VnetBackButton from "./VnetBackButton.vue";
 
@@ -395,10 +437,24 @@ type PrefillSelection = { eventRecordId: string; repairRecordIds: string[] };
 
 const RECORD_PAGE_SIZE = 30;
 const RECORD_RESPONSE_CACHE_TTL_MS = 15_000;
+const REPAIR_SPECIALTY_OPTIONS = ["电气", "暖通", "消防", "弱电"];
+const PROJECT_WORKER_FIELD_NAME = "随工人员（或我方维修人员）";
 const recordResponseCache = new Map<string, { expiresAt: number; payload: LooseDict }>();
 
 function clearRecordResponseCache(): void {
   recordResponseCache.clear();
+}
+
+function withStandardRepairOptions(field: LooseDict): LooseDict {
+  const fieldName = String(field.field_name || "");
+  if (!new Set(["所属专业", "专业（推送消息用）"]).has(fieldName)) return field;
+  return {
+    ...field,
+    options: Array.from(new Set([
+      ...(Array.isArray(field.options) ? field.options.map((item: unknown) => String(item || "").trim()) : []),
+      ...REPAIR_SPECIALTY_OPTIONS,
+    ].filter(Boolean))),
+  };
 }
 
 const PROJECT_FIELD_GROUPS: Array<{ key: ProjectFieldGroupKey; label: string }> = [
@@ -423,7 +479,6 @@ const PROJECT_FIELD_LABELS: Record<string, string> = {
   "所属数据中心/楼栋-使用": "楼栋",
 };
 
-const ASSOCIATION_FIELD_NAMES = new Set(["关联事件单", "设备检修关联", "维修跟进记录"]);
 const eventPickerColumns: PickerColumn[] = [
   { key: "title", label: "事件标题", width: "360px" },
   { key: "building", label: "楼栋", width: "100px" },
@@ -461,6 +516,7 @@ const total = ref(0);
 const selectedRecord = ref<LooseDict | null>(null);
 const editingRecordId = ref("");
 const fieldDraft = reactive<Record<string, string>>({});
+const projectWorkerPeople = ref<LooseDict[]>([]);
 const eventLoading = ref(false);
 const eventSearchText = ref("");
 const eventCandidates = ref<LooseDict[]>([]);
@@ -483,8 +539,11 @@ const hasUnsavedChanges = ref(false);
 const followupHasUnsavedChanges = ref(false);
 const validationAttempted = ref(false);
 const creatingNewProject = ref(false);
-const detailDialogOpen = ref(false);
+const projectDrawerOpen = ref(false);
+const followupPanelMounted = ref(false);
+const projectDrawerRef = ref<HTMLElement | null>(null);
 const createOperationId = ref("");
+const pendingRecordFocusId = ref("");
 const recordPage = ref(1);
 const confirmDialog = reactive({
   open: false,
@@ -509,6 +568,8 @@ let eventAbortController: AbortController | null = null;
 let repairAbortController: AbortController | null = null;
 let prefillAbortController: AbortController | null = null;
 let recordDetailAbortController: AbortController | null = null;
+let bodyOverflowBeforeDrawer = "";
+let projectDrawerReturnFocus: HTMLElement | null = null;
 
 const routeParams = new URLSearchParams(window.location.search);
 const routeEventTitle = String(routeParams.get("event_title") || "").trim();
@@ -517,34 +578,7 @@ const appliedFocusRecordId = ref("");
 const eventTitle = ref(routeEventTitle);
 const sourceEventId = ref(routeEventId);
 
-const editableFields = computed(() => sortedFields(fields.value.filter((field) => field.editable)));
-const readonlyFields = computed(() => sortedFields(fields.value.filter((field) => !field.editable)));
-const visibleReadonlyFields = computed(() => readonlyFields.value.filter(
-  (field) => !ASSOCIATION_FIELD_NAMES.has(String(field.field_name || "")),
-));
-const readonlyPreviewFields = computed(() => visibleReadonlyFields.value.filter(
-  (field) => Boolean(displayReadonlyValue(field.field_name)),
-));
-const detailPreviewFields = computed(() => [
-  ...editableFields.value.map((field) => {
-    const fieldName = String(field.field_name || "").trim();
-    return {
-      field_name: fieldName,
-      label: projectFieldLabel(fieldName),
-      value: String(fieldDraft[fieldName] ?? "").trim().replace("T", " "),
-      wide: usesTextarea(fieldName),
-    };
-  }),
-  ...readonlyPreviewFields.value.map((field) => {
-    const fieldName = String(field.field_name || "").trim();
-    return {
-      field_name: fieldName,
-      label: projectFieldLabel(fieldName),
-      value: displayReadonlyValue(fieldName),
-      wide: usesTextarea(fieldName),
-    };
-  }),
-].filter((field) => field.field_name && field.value));
+const editableFields = computed(() => sortedFields(fields.value.filter(projectFieldIsEditable)));
 const projectFieldGroups = computed(() => {
   const grouped = new Map<ProjectFieldGroupKey, LooseDict[]>(
     PROJECT_FIELD_GROUPS.map((group) => [group.key, []]),
@@ -557,9 +591,6 @@ const projectFieldGroups = computed(() => {
     fields: grouped.get(group.key) || [],
   })).filter((group) => group.fields.length);
 });
-const hasSelectedSources = computed(() => Boolean(
-  sourceEventId.value || selectedRepairIds.value.length,
-));
 const repairPickerSelectedIds = computed(() => (
   selectedRepairIds.value.length ? selectedRepairIds.value.slice(0, 1) : repairRecommendedIds.value.slice(0, 1)
 ));
@@ -575,7 +606,8 @@ const selectedRepairSummary = computed(() => selectedSourceSummary(
 
 const hasWritableDraft = computed(() => {
   return fields.value.some((field) => {
-    if (!field.editable) return false;
+    if (!projectFieldIsEditable(field)) return false;
+    if (isProjectWorkerField(field)) return projectWorkerPeople.value.length > 0;
     return String(fieldDraft[field.field_name] ?? "").trim() !== "";
   });
 });
@@ -637,6 +669,10 @@ const saveDisabledReason = computed(() => {
 });
 
 const selectedRecordTitle = computed(() => selectedRecord.value?.title || "未命名维修项目");
+const selectedFollowupCount = computed(() => Math.max(
+  0,
+  Number(selectedRecord.value?.followup_count || 0),
+));
 const recordPageCount = computed(() => Math.max(1, Math.ceil(total.value / RECORD_PAGE_SIZE)));
 const recordEmptyText = computed(() => (
   searchText.value ? "没有匹配的维修项目" : "暂无进行中的维修项目"
@@ -644,6 +680,92 @@ const recordEmptyText = computed(() => (
 
 function usesTextarea(fieldName: unknown): boolean {
   return repairFieldUsesTextarea(fieldName);
+}
+
+function recordProgressPercent(record: LooseDict): number {
+  const parsed = Number(record.progress_percent || 0);
+  if (!Number.isFinite(parsed)) return 0;
+  return Math.max(0, Math.min(100, Math.round(parsed)));
+}
+
+function recordLatestTimeLabel(record: LooseDict): string {
+  return repairDisplayTime(
+    record.latest_followup_time
+    || record.last_modified_time
+    || recordTimeLabel(record)
+  ) || "时间未填";
+}
+
+function updateSelectedFollowupCount(value: number): void {
+  const recordId = editingRecordId.value;
+  if (!recordId) return;
+  const followupCount = Math.max(0, Number(value || 0));
+  if (selectedRecord.value && String(selectedRecord.value.record_id || "") === recordId) {
+    selectedRecord.value = { ...selectedRecord.value, followup_count: followupCount };
+  }
+  records.value = records.value.map((record) => (
+    String(record.record_id || "") === recordId
+      ? { ...record, followup_count: followupCount }
+      : record
+  ));
+}
+
+function projectFieldIsEditable(field: LooseDict | null | undefined): boolean {
+  if (!field) return false;
+  return Boolean(
+    field.editable
+    || (!selectedRepairIds.value.length && field.editable_without_repair_link),
+  );
+}
+
+function isProjectWorkerField(field: LooseDict | null | undefined): boolean {
+  if (!field) return false;
+  return String(field.field_name || "").trim() === PROJECT_WORKER_FIELD_NAME;
+}
+
+function projectPeopleFromValue(value: unknown): LooseDict[] {
+  let source: unknown = value;
+  if (typeof source === "string") {
+    const text = source.trim();
+    if (!text) return [];
+    if (text.startsWith("[") || text.startsWith("{")) {
+      try {
+        source = JSON.parse(text);
+      } catch {
+        return [];
+      }
+    } else {
+      return [];
+    }
+  }
+  if (source && typeof source === "object" && !Array.isArray(source)) {
+    const record = source as LooseDict;
+    source = Array.isArray(record.users) ? record.users : [record];
+  }
+  if (!Array.isArray(source)) return [];
+  const seen = new Set<string>();
+  const people: LooseDict[] = [];
+  for (const item of source) {
+    if (!item || typeof item !== "object") continue;
+    const person = item as LooseDict;
+    const userId = String(
+      person.user_id || person.id || person.open_id || "",
+    ).trim();
+    if (!userId || seen.has(userId)) continue;
+    seen.add(userId);
+    people.push({
+      user_id: userId,
+      name: String(person.name || person.text || "已选人员").trim() || "已选人员",
+      employee_no: String(person.employee_no || "").trim(),
+      building: String(person.building || "").trim(),
+      position: String(person.position || "").trim(),
+    });
+  }
+  return people;
+}
+
+function updateProjectWorkerPeople(value: LooseDict[]): void {
+  projectWorkerPeople.value = Array.isArray(value) ? value.slice() : [];
 }
 
 function projectFieldGroup(fieldName: unknown): ProjectFieldGroupKey {
@@ -766,8 +888,10 @@ function scopedQuery(): string {
     limit: String(RECORD_PAGE_SIZE),
     offset: String((recordPage.value - 1) * RECORD_PAGE_SIZE),
   });
-  const focusRecordId = String(props.focusRecordId || "").trim();
-  if (focusRecordId && appliedFocusRecordId.value !== focusRecordId) {
+  const routeFocusRecordId = String(props.focusRecordId || "").trim();
+  const focusRecordId = pendingRecordFocusId.value
+    || (appliedFocusRecordId.value !== routeFocusRecordId ? routeFocusRecordId : "");
+  if (focusRecordId) {
     params.set("focus_record_id", focusRecordId);
   }
   return params.toString();
@@ -827,6 +951,57 @@ function runWithUnsavedGuard(action: () => void | Promise<void>): void {
   );
 }
 
+function focusProjectDrawer(): void {
+  void nextTick(() => projectDrawerRef.value?.focus());
+}
+
+function handleProjectDrawerKeydown(event: KeyboardEvent): void {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    requestCloseProjectDrawer();
+    return;
+  }
+  if (event.key !== "Tab" || !projectDrawerRef.value) return;
+  const focusable = Array.from(projectDrawerRef.value.querySelectorAll<HTMLElement>(
+    'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex="-1"])',
+  )).filter((element) => element.offsetParent !== null);
+  if (!focusable.length) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+function openWorkspaceTab(tab: WorkspaceTab): void {
+  if (tab === "followups") {
+    if (!editingRecordId.value) return;
+    followupPanelMounted.value = true;
+  }
+  activeWorkspaceTab.value = tab;
+}
+
+function closeProjectDrawerNow(): void {
+  if (hasUnsavedChanges.value) resetDraft();
+  projectDrawerOpen.value = false;
+  followupPanelMounted.value = false;
+  followupHasUnsavedChanges.value = false;
+  activeWorkspaceTab.value = "project";
+  const returnFocus = projectDrawerReturnFocus;
+  projectDrawerReturnFocus = null;
+  void nextTick(() => {
+    if (returnFocus?.isConnected) returnFocus.focus();
+  });
+}
+
+function requestCloseProjectDrawer(): void {
+  runWithUnsavedGuard(closeProjectDrawerNow);
+}
+
 function requestBack(): void {
   runWithUnsavedGuard(() => {
     dirtyFieldNames.clear();
@@ -845,12 +1020,24 @@ function openRepairStatus(): void {
 }
 
 function requestOpenRepairNoticeWorkbench(): void {
-  runWithUnsavedGuard(() => {
-    dirtyFieldNames.clear();
-    hasUnsavedChanges.value = false;
-    followupHasUnsavedChanges.value = false;
-    openRepairNoticeWorkbench();
-  });
+  if (hasUnsavedChanges.value) {
+    openConfirmation(
+      {
+        title: "保存后填写检修通告？",
+        message: "当前维修单有未保存修改，保存后会用最新字段填入检修通告。",
+        confirmLabel: "保存并继续",
+      },
+      async () => {
+        if (await saveRecord()) openRepairNoticeWorkbench();
+      },
+    );
+    return;
+  }
+  if (followupHasUnsavedChanges.value) {
+    showMessage("请先保存当前跟进记录。", "warning");
+    return;
+  }
+  openRepairNoticeWorkbench();
 }
 
 function requestResetDraft(): void {
@@ -893,6 +1080,7 @@ function resetDraft(): void {
   }
   for (const key of Object.keys(fieldDraft)) delete fieldDraft[key];
   for (const key of Object.keys(prefillPreview)) delete prefillPreview[key];
+  projectWorkerPeople.value = [];
   const rawFields = selectedRecord.value?.raw_fields || {};
   const displayFields = selectedRecord.value?.display_fields || {};
   for (const field of editableFields.value) {
@@ -902,9 +1090,40 @@ function resetDraft(): void {
     const value = prefersRaw && Object.prototype.hasOwnProperty.call(rawFields, name)
       ? rawFields[name]
       : Object.prototype.hasOwnProperty.call(displayFields, name) ? displayFields[name] : rawFields[name];
+    if (isProjectWorkerField(field)) {
+      projectWorkerPeople.value = projectPeopleFromValue(
+        Object.prototype.hasOwnProperty.call(rawFields, name) ? rawFields[name] : value,
+      );
+      continue;
+    }
     fieldDraft[name] = repairDraftInputValue(field, value);
   }
   if (!editingRecordId.value && eventTitle.value) prefillEventTitle();
+}
+
+function hydrateUnlinkedRepairDraftFields(): void {
+  const rawFields = selectedRecord.value?.raw_fields || {};
+  const displayFields = selectedRecord.value?.display_fields || {};
+  for (const field of editableFields.value) {
+    const name = String(field.field_name || "");
+    if (!name || Object.prototype.hasOwnProperty.call(fieldDraft, name)) continue;
+    const previewValue = prefillPreview[name];
+    const fieldType = Number(field.field_type || 0);
+    const prefersRaw = [2, 5, 15].includes(fieldType);
+    const savedValue = prefersRaw && Object.prototype.hasOwnProperty.call(rawFields, name)
+      ? rawFields[name]
+      : Object.prototype.hasOwnProperty.call(displayFields, name) ? displayFields[name] : rawFields[name];
+    if (isProjectWorkerField(field)) {
+      projectWorkerPeople.value = projectPeopleFromValue(
+        Object.prototype.hasOwnProperty.call(prefillPreview, name) ? previewValue : savedValue,
+      );
+      continue;
+    }
+    fieldDraft[name] = repairDraftInputValue(
+      field,
+      Object.prototype.hasOwnProperty.call(prefillPreview, name) ? previewValue : savedValue,
+    );
+  }
 }
 
 function applyPrefillFields(fieldsPayload: LooseDict, preserveDirty = true): void {
@@ -912,7 +1131,15 @@ function applyPrefillFields(fieldsPayload: LooseDict, preserveDirty = true): voi
   for (const [name, value] of Object.entries(fieldsPayload)) {
     prefillPreview[name] = value;
     const field = fields.value.find((item) => String(item.field_name || "") === name);
-    if (!field?.editable || (preserveDirty && dirtyFieldNames.has(name))) continue;
+    if (
+      !field
+      || !projectFieldIsEditable(field)
+      || (preserveDirty && dirtyFieldNames.has(name))
+    ) continue;
+    if (isProjectWorkerField(field)) {
+      projectWorkerPeople.value = projectPeopleFromValue(value);
+      continue;
+    }
     fieldDraft[name] = repairDraftInputValue(field, value);
   }
 }
@@ -921,8 +1148,9 @@ function replacePrefillFields(fieldsPayload: LooseDict, preserveDirty = true): v
   const previousNames = Object.keys(prefillPreview);
   for (const name of previousNames) {
     const field = fields.value.find((item) => String(item.field_name || "") === name);
-    if (field?.editable && (!preserveDirty || !dirtyFieldNames.has(name))) {
-      fieldDraft[name] = "";
+    if (projectFieldIsEditable(field) && (!preserveDirty || !dirtyFieldNames.has(name))) {
+      if (isProjectWorkerField(field)) projectWorkerPeople.value = [];
+      else fieldDraft[name] = "";
     }
     delete prefillPreview[name];
   }
@@ -932,7 +1160,7 @@ function replacePrefillFields(fieldsPayload: LooseDict, preserveDirty = true): v
 function prefillEventTitle(): void {
   const titleField = fields.value.find((field) => {
     const name = String(field.field_name || "");
-    return field.editable && name === "维修名称";
+    return projectFieldIsEditable(field) && name === "维修名称";
   });
   if (titleField && !String(fieldDraft[titleField.field_name] || "").trim()) {
     fieldDraft[titleField.field_name] = eventTitle.value;
@@ -1049,6 +1277,13 @@ async function loadRepairCandidates(): Promise<void> {
     repairRecommendedIds.value = Array.isArray(payload.auto_selected_ids)
       ? payload.auto_selected_ids.map((item: unknown) => String(item || "").trim()).filter(Boolean).slice(0, 1)
       : [];
+    const warnings = Array.isArray(payload.warnings)
+      ? payload.warnings.map((item: unknown) => String(item || "").trim()).filter(Boolean)
+      : [];
+    if (warnings.length) {
+      prefillWarnings.value = Array.from(new Set([...prefillWarnings.value, ...warnings]));
+      showMessage(warnings.join("；"), "warning");
+    }
   } catch (error: unknown) {
     if (abortController.signal.aborted) return;
     if (requestVersion !== repairRequestVersion) return;
@@ -1095,6 +1330,8 @@ async function clearRepairSelection(): Promise<void> {
   selectedRepairIds.value = [];
   selectedRepairRecords.value = [];
   repairRecommendedIds.value = [];
+  projectWorkerPeople.value = [];
+  hydrateUnlinkedRepairDraftFields();
   hasUnsavedChanges.value = true;
   showMessage("检修通告关联已清除。", "success");
 }
@@ -1122,6 +1359,7 @@ async function handleFollowupChanged(): Promise<void> {
   clearRecordResponseCache();
   const recordId = editingRecordId.value;
   if (!recordId) return;
+  const authoritativeFollowupCount = selectedFollowupCount.value;
   const requestVersion = ++recordDetailRequestVersion;
   recordDetailAbortController?.abort();
   const abortController = new AbortController();
@@ -1135,7 +1373,10 @@ async function handleFollowupChanged(): Promise<void> {
     if (requestVersion !== recordDetailRequestVersion) return;
     if (recordId !== editingRecordId.value) return;
     const current = payload.record && typeof payload.record === "object"
-      ? payload.record as LooseDict
+      ? {
+          ...payload.record as LooseDict,
+          followup_count: authoritativeFollowupCount,
+        }
       : null;
     if (!current) return;
     const index = records.value.findIndex(
@@ -1187,10 +1428,12 @@ async function applyCombinedPrefill(
       signal: abortController.signal,
     });
     if (requestVersion !== prefillRequestVersion) return false;
-    replacePrefillFields(
-      payload.fields && typeof payload.fields === "object" ? payload.fields : {},
-      true,
-    );
+    const nextFields = payload.fields && typeof payload.fields === "object"
+      ? payload.fields as LooseDict
+      : {};
+    if (!payload.event_context_missing || repairRecordIds.length) {
+      replacePrefillFields(nextFields, true);
+    }
     prefillWarnings.value = Array.isArray(payload.warnings)
       ? payload.warnings.map((item: unknown) => String(item || "")).filter(Boolean)
       : [];
@@ -1210,12 +1453,14 @@ async function applyCombinedPrefill(
   }
 }
 
-function selectRecordNow(record: LooseDict): void {
+function selectRecordNow(record: LooseDict, initialTab: WorkspaceTab = "project"): void {
   recordDetailRequestVersion += 1;
   recordDetailAbortController?.abort();
   recordDetailAbortController = null;
-  detailDialogOpen.value = false;
+  messageText.value = "";
+  prefillWarnings.value = [];
   createOperationId.value = "";
+  pendingRecordFocusId.value = "";
   followupHasUnsavedChanges.value = false;
   creatingNewProject.value = false;
   selectedRecord.value = record;
@@ -1243,20 +1488,29 @@ function selectRecordNow(record: LooseDict): void {
   seedSelectedSourceLabels(displayFields);
   resetDraft();
   sourceExpanded.value = false;
-  activeWorkspaceTab.value = "project";
+  followupPanelMounted.value = initialTab === "followups";
+  activeWorkspaceTab.value = initialTab;
+  projectDrawerOpen.value = true;
+  focusProjectDrawer();
 }
 
-function requestSelectRecord(record: LooseDict): void {
-  if (String(record.record_id || "") === editingRecordId.value) return;
-  runWithUnsavedGuard(() => selectRecordNow(record));
+function requestSelectRecord(record: LooseDict, initialTab: WorkspaceTab = "project"): void {
+  if (String(record.record_id || "") === editingRecordId.value) {
+    projectDrawerOpen.value = true;
+    openWorkspaceTab(initialTab);
+    focusProjectDrawer();
+    return;
+  }
+  runWithUnsavedGuard(() => selectRecordNow(record, initialTab));
 }
 
 function startCreateNow(): void {
   recordDetailRequestVersion += 1;
   recordDetailAbortController?.abort();
   recordDetailAbortController = null;
-  detailDialogOpen.value = false;
+  messageText.value = "";
   createOperationId.value = "";
+  pendingRecordFocusId.value = "";
   followupHasUnsavedChanges.value = false;
   creatingNewProject.value = true;
   selectedRecord.value = null;
@@ -1272,6 +1526,9 @@ function startCreateNow(): void {
   resetDraft();
   sourceExpanded.value = true;
   activeWorkspaceTab.value = "project";
+  followupPanelMounted.value = false;
+  projectDrawerOpen.value = true;
+  focusProjectDrawer();
   showMessage("请填写维修项目。", "warning");
 }
 
@@ -1291,6 +1548,8 @@ function changeRecordPage(delta: number): void {
   const nextPage = Math.min(recordPageCount.value, Math.max(1, recordPage.value + delta));
   if (nextPage === recordPage.value) return;
   runWithUnsavedGuard(() => {
+    projectDrawerOpen.value = false;
+    followupPanelMounted.value = false;
     recordPage.value = nextPage;
     followupHasUnsavedChanges.value = false;
     creatingNewProject.value = false;
@@ -1333,18 +1592,32 @@ async function loadRecords(announce = false): Promise<void> {
       }
     }
     if (requestVersion !== recordsRequestVersion) return;
-    fields.value = Array.isArray(payload.fields) ? payload.fields : [];
+    fields.value = Array.isArray(payload.fields)
+      ? payload.fields.map((field: LooseDict) => withStandardRepairOptions(field))
+      : [];
     records.value = Array.isArray(payload.records) ? payload.records : [];
     total.value = Number(payload.total || records.value.length || 0);
-    const focusRecordId = String(props.focusRecordId || "").trim();
-    if (focusRecordId && appliedFocusRecordId.value !== focusRecordId) {
+    const routeFocusRecordId = String(props.focusRecordId || "").trim();
+    const pendingFocusRecordId = pendingRecordFocusId.value;
+    const focusRecordId = pendingFocusRecordId
+      || (appliedFocusRecordId.value !== routeFocusRecordId ? routeFocusRecordId : "");
+    if (focusRecordId) {
       const focused = records.value.find(
         (item) => String(item.record_id || "").trim() === focusRecordId,
       );
-      appliedFocusRecordId.value = focusRecordId;
       if (focused) {
         recordPage.value = Math.floor(Number(payload.offset || 0) / RECORD_PAGE_SIZE) + 1;
-        selectRecordNow(focused);
+        if (pendingFocusRecordId) {
+          selectedRecord.value = focused;
+          pendingRecordFocusId.value = "";
+        } else {
+          appliedFocusRecordId.value = focusRecordId;
+          selectRecordNow(focused);
+        }
+      } else if (pendingFocusRecordId) {
+        pendingRecordFocusId.value = "";
+      } else {
+        appliedFocusRecordId.value = focusRecordId;
       }
     }
     const maxPage = Math.max(1, Math.ceil(total.value / RECORD_PAGE_SIZE));
@@ -1358,15 +1631,7 @@ async function loadRecords(announce = false): Promise<void> {
       const current = records.value.find((item) => String(item.record_id || "") === editingRecordId.value);
       if (current) {
         selectedRecord.value = current;
-      } else if (
-        !hasUnsavedChanges.value
-        && !followupHasUnsavedChanges.value
-        && records.value.length
-      ) {
-        selectRecordNow(records.value[0]);
       }
-    } else if (!creatingNewProject.value && records.value.length) {
-      selectRecordNow(records.value[0]);
     } else if (!selectedRecord.value) {
       resetDraft();
     }
@@ -1397,6 +1662,18 @@ function writablePayload(): Record<string, unknown> {
   for (const field of editableFields.value) {
     const name = String(field.field_name || "");
     if (editingRecordId.value && !dirtyFieldNames.has(name)) continue;
+    if (isProjectWorkerField(field)) {
+      if (projectWorkerPeople.value.length || editingRecordId.value) {
+        result[name] = projectWorkerPeople.value
+          .map((person) => ({
+            id: String(
+              person.user_id || person.id || person.open_id || "",
+            ).trim(),
+          }))
+          .filter((person) => person.id);
+      }
+      continue;
+    }
     const value = String(fieldDraft[name] ?? "");
     if (value.trim() === "" && !editingRecordId.value) continue;
     result[name] = parseDraftValue(value, field);
@@ -1404,16 +1681,17 @@ function writablePayload(): Record<string, unknown> {
   return result;
 }
 
-async function saveRecord(): Promise<void> {
+async function saveRecord(): Promise<boolean> {
+  if (saving.value) return false;
   validationAttempted.value = true;
   if (prefillLoading.value) {
     showMessage("关联字段正在填入，请稍后保存。", "warning");
-    return;
+    return false;
   }
   if (missingRequiredEditableFields.value.length) {
     showMessage(`请先填写：${missingRequiredEditableFields.value.join("、")}。`, "warning");
     await focusFirstMissingField();
-    return;
+    return false;
   }
   saving.value = true;
   try {
@@ -1445,6 +1723,8 @@ async function saveRecord(): Promise<void> {
         body,
       });
       editingRecordId.value = String(created.record_id || "");
+      pendingRecordFocusId.value = editingRecordId.value;
+      creatingNewProject.value = false;
       createOperationId.value = "";
       const warnings = Array.isArray(created.warnings) ? created.warnings.filter(Boolean) : [];
       showMessage(
@@ -1455,7 +1735,6 @@ async function saveRecord(): Promise<void> {
     dirtyFieldNames.clear();
     hasUnsavedChanges.value = false;
     validationAttempted.value = false;
-    detailDialogOpen.value = false;
     sourceExpanded.value = false;
     recordPage.value = 1;
     clearRecordResponseCache();
@@ -1466,8 +1745,10 @@ async function saveRecord(): Promise<void> {
       selectedRecord.value = current;
       resetDraft();
     }
+    return true;
   } catch (error: unknown) {
     showMessage(error instanceof Error ? error.message : "保存失败。", "failed");
+    return false;
   } finally {
     saving.value = false;
   }
@@ -1480,8 +1761,10 @@ function requestDeleteRecord(): void {
       tone: "danger",
       kicker: "删除维修项目",
       title: `删除“${selectedRecordTitle.value}”？`,
-      message: "删除后无法恢复；如果该项目已有跟进记录，后端会阻止删除。",
-      details: ["只删除当前维修项目，不会误删其他记录。"],
+      message: "删除后无法恢复；该项目下的全部跟进记录也会一并删除。",
+      details: [
+        `将删除当前维修项目及其 ${selectedFollowupCount.value} 条跟进记录，不影响其他维修项目。`,
+      ],
       confirmLabel: "确认删除",
     },
     deleteRecordNow,
@@ -1489,15 +1772,17 @@ function requestDeleteRecord(): void {
 }
 
 async function deleteRecordNow(): Promise<void> {
-  if (!editingRecordId.value) return;
+  if (saving.value || !editingRecordId.value) return;
   saving.value = true;
   try {
     const params = new URLSearchParams({ scope: props.scope || "ALL" });
-    await requestJson(`/api/repair-management/records/${encodeURIComponent(editingRecordId.value)}?${params.toString()}`, {
+    const result = await requestJson(`/api/repair-management/records/${encodeURIComponent(editingRecordId.value)}?${params.toString()}`, {
       method: "DELETE",
     });
     selectedRecord.value = null;
     editingRecordId.value = "";
+    projectDrawerOpen.value = false;
+    followupPanelMounted.value = false;
     followupHasUnsavedChanges.value = false;
     creatingNewProject.value = false;
     sourceEventId.value = "";
@@ -1506,10 +1791,16 @@ async function deleteRecordNow(): Promise<void> {
     selectedRepairIds.value = [];
     selectedRepairRecords.value = [];
     repairRecommendedIds.value = [];
+    pendingRecordFocusId.value = "";
     resetDraft();
     activeWorkspaceTab.value = "project";
     sourceExpanded.value = true;
-    showMessage("维修项目已删除。");
+    const deletedFollowupCount = Math.max(0, Number(result.deleted_followup_count || 0));
+    showMessage(
+      deletedFollowupCount
+        ? `维修项目及 ${deletedFollowupCount} 条跟进记录已删除。`
+        : "维修项目已删除。",
+    );
     invalidateRepairStatus();
     clearRecordResponseCache();
     await loadRecords(false);
@@ -1518,35 +1809,6 @@ async function deleteRecordNow(): Promise<void> {
   } finally {
     saving.value = false;
   }
-}
-
-function displayReadonlyValue(fieldName: string): string {
-  const field = fields.value.find((item) => String(item.field_name || "") === fieldName) || {};
-  const formatValue = (value: unknown): string => {
-    const uiType = String(field.ui_type || "").toLowerCase();
-    if (uiType === "progress" || fieldName === "当前维修进度") {
-      const raw = String(value ?? "").trim().replace("％", "%");
-      const parsed = Number.parseFloat(raw.replace("%", ""));
-      if (Number.isFinite(parsed)) {
-        const percent = raw.includes("%") || Math.abs(parsed) > 1 ? parsed : parsed * 100;
-        return `${Math.max(0, Math.min(100, Math.round(percent)))}%`;
-      }
-    }
-    return repairDraftInputValue(field, value).replace("T", " ");
-  };
-  if (Object.prototype.hasOwnProperty.call(prefillPreview, fieldName)) {
-    return formatValue(prefillPreview[fieldName]);
-  }
-  if (!editingRecordId.value) {
-    if (fieldName === "维修名称" && eventTitle.value) {
-      return eventTitle.value;
-    }
-    if (fieldName === "关联事件单" && sourceEventId.value) {
-      return sourceEventId.value;
-    }
-  }
-  const displayFields = selectedRecord.value?.display_fields || {};
-  return formatValue(displayFields[fieldName]);
 }
 
 function openRepairNoticeWorkbench(): void {
@@ -1562,7 +1824,12 @@ function openRepairNoticeWorkbench(): void {
 watch(
   () => props.scope,
   () => {
+    projectDrawerOpen.value = false;
+    followupPanelMounted.value = false;
     recordPage.value = 1;
+    selectedRecord.value = null;
+    editingRecordId.value = "";
+    creatingNewProject.value = false;
     followupHasUnsavedChanges.value = false;
     eventCandidates.value = [];
     selectedEvent.value = null;
@@ -1570,6 +1837,7 @@ watch(
     selectedRepairIds.value = [];
     selectedRepairRecords.value = [];
     repairRecommendedIds.value = [];
+    pendingRecordFocusId.value = "";
     activePicker.value = "";
     prefillWarnings.value = [];
     routeEventPrefillApplied.value = false;
@@ -1577,6 +1845,19 @@ watch(
     void loadRecords(false);
   },
 );
+
+watch(projectDrawerOpen, (open) => {
+  if (open) {
+    projectDrawerReturnFocus = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    bodyOverflowBeforeDrawer = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    focusProjectDrawer();
+    return;
+  }
+  document.body.style.overflow = bodyOverflowBeforeDrawer;
+});
 
 watch(
   () => String(props.focusRecordId || "").trim(),
@@ -1606,11 +1887,22 @@ onActivated(() => {
     appliedFocusRecordId.value = focusRecordId;
     if (editingRecordId.value !== focusRecordId) {
       runWithUnsavedGuard(() => selectRecordNow(focused));
+    } else {
+      projectDrawerOpen.value = true;
+      focusProjectDrawer();
     }
     return;
   }
   appliedFocusRecordId.value = "";
   if (!loading.value) void loadRecords(false);
+});
+
+onDeactivated(() => {
+  projectDrawerOpen.value = false;
+  followupPanelMounted.value = false;
+  activeWorkspaceTab.value = "project";
+  projectDrawerReturnFocus = null;
+  document.body.style.overflow = bodyOverflowBeforeDrawer;
 });
 
 watch(searchText, () => {
@@ -1635,6 +1927,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  document.body.style.overflow = bodyOverflowBeforeDrawer;
   if (searchTimer) clearTimeout(searchTimer);
   recordsAbortController?.abort();
   eventAbortController?.abort();
@@ -2222,7 +2515,7 @@ onBeforeUnmount(() => {
 
 .repair-layout {
   display: grid;
-  grid-template-columns: minmax(300px, 320px) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   align-items: stretch;
   gap: 12px;
 }
@@ -2237,7 +2530,7 @@ onBeforeUnmount(() => {
   align-self: stretch;
   position: relative;
   min-height: 0;
-  height: 100%;
+  height: auto;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
   overflow: hidden;
@@ -2245,9 +2538,30 @@ onBeforeUnmount(() => {
 
 .record-list {
   min-height: 220px;
+  max-height: calc(100vh - 300px);
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 2px 3px 4px 0;
+  display: grid;
+  gap: 6px;
+  padding: 6px 4px 6px 0;
+}
+
+.record-table-head,
+.record-row {
+  display: grid;
+  grid-template-columns: minmax(320px, 1fr) 118px 108px 150px 170px 24px;
+  align-items: center;
+  gap: 12px;
+}
+
+.record-table-head {
+  min-height: 34px;
+  margin-top: 10px;
+  padding: 0 12px;
+  border-bottom: 1px solid #dfe8f4;
+  color: #71859d;
+  font-size: 11px;
+  font-weight: 700;
 }
 
 .record-search {
@@ -2479,23 +2793,23 @@ onBeforeUnmount(() => {
 
 .record-row {
   width: 100%;
-  margin-top: 6px;
-  min-height: 104px;
-  padding: 10px 11px;
-  display: grid;
-  align-content: start;
-  gap: 7px;
+  min-height: 72px;
+  padding: 9px 12px;
   text-align: left;
   border: 1px solid #e0e9f7;
   border-radius: 9px;
   background: #fbfdff;
   cursor: pointer;
-  transition: border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
+  transition: border-color 160ms ease, box-shadow 160ms ease, background 160ms ease, transform 160ms ease;
 }
 
-.record-row:hover {
+.record-row:hover,
+.record-row:focus-visible {
+  outline: 0;
   border-color: #97b8ff;
   background: #f2f7ff;
+  box-shadow: 0 7px 18px rgba(30, 99, 255, 0.09);
+  transform: translateY(-1px);
 }
 
 .record-row.active {
@@ -2504,17 +2818,10 @@ onBeforeUnmount(() => {
   box-shadow: inset 3px 0 0 #1e63ff;
 }
 
-.record-title-line {
+.record-project-cell {
   min-width: 0;
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.record-title-line svg {
-  flex: 0 0 auto;
-  color: #1662d4;
+  display: grid;
+  gap: 6px;
 }
 
 .record-title {
@@ -2530,7 +2837,7 @@ onBeforeUnmount(() => {
 
 .record-meta {
   display: flex;
-  gap: 6px;
+  gap: 5px;
   flex-wrap: wrap;
 }
 
@@ -2556,10 +2863,93 @@ onBeforeUnmount(() => {
   margin-bottom: 2px;
 }
 
-.record-meta b.workflow {
+.record-status-cell {
+  min-width: 0;
+}
+
+.record-status-cell .workflow {
+  max-width: 100%;
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
   border: 1px solid #c8e7df;
+  border-radius: 999px;
+  padding: 2px 8px;
   background: #edf9f5;
   color: #08745f;
+  font-size: 11px;
+  font-weight: 750;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.record-followup-button {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border: 1px solid #cfe0f5;
+  border-radius: 8px;
+  padding: 0 9px;
+  background: #f3f8ff;
+  color: #175fbf;
+  font: inherit;
+  cursor: pointer;
+}
+
+.record-followup-button:hover,
+.record-followup-button:focus-visible {
+  outline: 0;
+  border-color: #1e63ff;
+  background: #e9f2ff;
+  box-shadow: 0 0 0 3px rgba(30, 99, 255, 0.12);
+}
+
+.record-followup-button b {
+  font-size: 14px;
+}
+
+.record-followup-button span {
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.record-progress-cell {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.record-progress-cell > span {
+  color: #315273;
+  font-size: 12px;
+}
+
+.record-progress-cell > i {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e4edf7;
+}
+
+.record-progress-cell > i > b {
+  height: 100%;
+  display: block;
+  border-radius: inherit;
+  background: #16a085;
+}
+
+.record-open-icon {
+  color: #8ba0b9;
+  transition: color 160ms ease, transform 160ms ease;
+}
+
+.record-row:hover .record-open-icon,
+.record-row.active .record-open-icon {
+  color: #1e63ff;
+  transform: translateX(2px);
 }
 
 .record-time {
@@ -2595,41 +2985,6 @@ onBeforeUnmount(() => {
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.editor-title-button {
-  min-width: 0;
-  max-width: 100%;
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  border: 0;
-  border-radius: 7px;
-  padding: 2px 4px;
-  background: transparent;
-  color: #10294a;
-  font: inherit;
-  font-size: 17px;
-  font-weight: 800;
-  cursor: pointer;
-}
-
-.editor-title-button span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.editor-title-button svg {
-  flex: 0 0 auto;
-  color: #1e63ff;
-}
-
-.editor-title-button:hover,
-.editor-title-button:focus-visible {
-  outline: 0;
-  background: #edf5ff;
-  box-shadow: 0 0 0 3px rgba(30, 99, 255, 0.12);
 }
 
 .form-warning {
@@ -2907,60 +3262,106 @@ onBeforeUnmount(() => {
   font-weight: 850;
 }
 
-.repair-detail-overlay {
+.repair-project-overlay {
   position: fixed;
-  z-index: 120;
+  z-index: 180;
   inset: 0;
   display: flex;
   justify-content: flex-end;
-  background: rgba(8, 25, 52, 0.48);
+  background: rgba(8, 25, 52, 0.5);
+  backdrop-filter: blur(3px);
 }
 
-.repair-detail-dialog {
-  width: min(680px, 96vw);
+.repair-project-drawer {
+  width: min(1180px, calc(100vw - 72px));
   height: 100%;
   overflow: hidden;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr);
   border-left: 1px solid #cbdcf1;
-  border-radius: 12px 0 0 12px;
+  border-radius: 16px 0 0 16px;
   background: #fff;
-  box-shadow: 0 24px 64px rgba(8, 37, 82, 0.24);
+  box-shadow: -18px 0 56px rgba(8, 37, 82, 0.22);
 }
 
-.repair-detail-head,
-.repair-detail-footer {
+.repair-project-drawer:focus {
+  outline: 0;
+}
+
+.project-drawer-head {
+  min-height: 72px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 14px;
-  padding: 13px 16px;
-}
-
-.repair-detail-head {
+  padding: 12px 18px;
   border-bottom: 1px solid #dce7f4;
+  background: #fff;
 }
 
-.repair-detail-head > div {
+.project-drawer-title {
   min-width: 0;
 }
 
-.repair-detail-head span {
+.project-drawer-title > span {
   color: #54708f;
   font-size: 11px;
   font-weight: 700;
 }
 
-.repair-detail-head h3 {
+.project-drawer-title h3 {
   overflow: hidden;
   margin: 2px 0 0;
   color: #10294a;
-  font-size: 18px;
+  font-size: 19px;
+  font-weight: 800;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.repair-detail-head > button {
+.project-drawer-head-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.drawer-followup-summary {
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid #cfe0f4;
+  border-radius: 9px;
+  padding: 0 11px;
+  background: #f5f9ff;
+  color: #1d5dab;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.drawer-followup-summary b {
+  min-width: 24px;
+  min-height: 22px;
+  display: grid;
+  place-items: center;
+  border-radius: 7px;
+  background: #dceaff;
+  color: #0d58c9;
+}
+
+.drawer-followup-summary:hover,
+.drawer-followup-summary:focus-visible,
+.drawer-followup-summary.active {
+  outline: 0;
+  border-color: #1e63ff;
+  background: #eaf3ff;
+  box-shadow: 0 0 0 3px rgba(30, 99, 255, 0.11);
+}
+
+.project-drawer-close {
   width: 36px;
   height: 36px;
   flex: 0 0 auto;
@@ -2973,103 +3374,100 @@ onBeforeUnmount(() => {
   cursor: pointer;
 }
 
-.repair-detail-head > button:hover,
-.repair-detail-head > button:focus-visible {
+.project-drawer-close:hover,
+.project-drawer-close:focus-visible {
   border-color: #1e63ff;
   outline: 0;
   color: #155bc6;
   box-shadow: 0 0 0 3px rgba(30, 99, 255, 0.12);
 }
 
-.repair-detail-body {
-  overflow: auto;
-  padding: 14px 16px 18px;
-}
-
-.repair-detail-context {
+.project-drawer-summary {
+  min-height: 62px;
   display: grid;
-  gap: 7px;
-  margin-bottom: 12px;
-  border: 1px solid #d9e6f5;
-  border-radius: 9px;
-  padding: 9px 10px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  border-bottom: 1px solid #dce7f4;
   background: #f7faff;
 }
 
-.repair-detail-context span {
+.project-drawer-summary > span {
   min-width: 0;
+  display: grid;
+  align-content: center;
+  gap: 3px;
+  padding: 9px 15px;
+  border-right: 1px solid #e1eaf5;
+}
+
+.project-drawer-summary > span:last-child {
+  border-right: 0;
+}
+
+.project-drawer-summary small,
+.project-drawer-summary b {
   overflow: hidden;
-  color: #5f7690;
-  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.repair-detail-context b {
-  margin-right: 8px;
-  color: #214a73;
-}
-
-.repair-detail-section + .repair-detail-section {
-  margin-top: 16px;
-  padding-top: 14px;
-  border-top: 1px solid #e1eaf5;
-}
-
-.repair-detail-section h4 {
-  margin: 0 0 9px;
-  color: #17314f;
-  font-size: 13px;
-}
-
-.repair-detail-readonly-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px 10px;
-}
-
-.repair-detail-readonly-grid > div {
-  min-width: 0;
-  display: grid;
-  gap: 3px;
-  border: 1px solid #e4edf7;
-  border-radius: 8px;
-  padding: 7px 9px;
-  background: #f8fbff;
-}
-
-.repair-detail-readonly-grid > div.wide {
-  grid-column: 1 / -1;
-}
-
-.repair-detail-readonly-grid b,
-.repair-detail-readonly-grid span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.repair-detail-readonly-grid b {
-  color: #405d7c;
+.project-drawer-summary small {
+  color: #6e8299;
   font-size: 11px;
+  font-weight: 650;
 }
 
-.repair-detail-readonly-grid span {
-  color: #6b8098;
+.project-drawer-summary b {
+  color: #163657;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.project-drawer-body {
+  overflow: auto;
+  overscroll-behavior: contain;
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  padding: 12px 16px 18px;
+}
+
+.repair-project-drawer .editor-panel {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.repair-project-drawer .workspace-tabs-row {
+  position: sticky;
+  z-index: 18;
+  top: -12px;
+  margin: -2px 0 10px;
+  padding-top: 2px;
+  background: #fff;
+}
+
+.linked-event-line {
+  min-width: 0;
+  overflow: hidden;
+  margin: 0;
+  border: 1px solid #dce8f6;
+  border-radius: 8px;
+  padding: 7px 10px;
+  background: #f7fbff;
+  color: #526b88;
   font-size: 12px;
-  line-height: 1.55;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-.repair-detail-footer {
-  justify-content: flex-end;
-  border-top: 1px solid #dce7f4;
-  background: #fbfdff;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 @media (max-width: 1279px) and (min-width: 1024px) {
-  .repair-layout {
-    grid-template-columns: 280px minmax(0, 1fr);
+  .record-table-head,
+  .record-row {
+    grid-template-columns: minmax(260px, 1fr) 108px 100px 130px 145px 22px;
   }
 
   .project-field-grid {
@@ -3109,6 +3507,24 @@ onBeforeUnmount(() => {
     max-height: 420px;
   }
 
+  .record-table-head,
+  .record-row {
+    grid-template-columns: minmax(240px, 1fr) 104px 92px 125px 22px;
+  }
+
+  .record-table-head > span:nth-child(5),
+  .record-row > .record-time {
+    display: none;
+  }
+
+  .repair-project-drawer {
+    width: min(1000px, calc(100vw - 28px));
+  }
+
+  .project-drawer-summary {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
   .source-summary-row {
     grid-template-columns: 1fr;
   }
@@ -3143,9 +3559,6 @@ onBeforeUnmount(() => {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .repair-detail-readonly-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
 }
 
 @media (max-width: 760px) {
@@ -3161,18 +3574,43 @@ onBeforeUnmount(() => {
   }
 
   .project-field-grid,
-  .readonly-grid,
-    .repair-detail-readonly-grid {
+  .readonly-grid {
     grid-template-columns: 1fr;
   }
 
-  .repair-detail-overlay {
+  .repair-project-overlay {
     align-items: stretch;
   }
 
-  .repair-detail-dialog {
+  .repair-project-drawer {
     width: 100%;
     border-radius: 0;
+  }
+
+  .project-drawer-head {
+    align-items: flex-start;
+  }
+
+  .drawer-followup-summary span {
+    display: none;
+  }
+
+  .project-drawer-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .record-table-head {
+    display: none;
+  }
+
+  .record-row {
+    grid-template-columns: minmax(0, 1fr) auto 22px;
+    gap: 8px;
+  }
+
+  .record-status-cell,
+  .record-progress-cell {
+    display: none;
   }
 
   .editor-action-buttons {

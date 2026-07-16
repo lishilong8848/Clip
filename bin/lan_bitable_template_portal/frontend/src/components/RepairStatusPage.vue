@@ -62,7 +62,15 @@
         <span class="result-count">{{ total }} 项</span>
       </header>
 
-      <div class="status-table-wrap" :aria-busy="loading">
+      <div
+        class="status-table-wrap"
+        :class="{ refreshing: loading && records.length }"
+        :aria-busy="loading"
+      >
+        <div v-if="loading && records.length" class="status-loading-overlay" role="status">
+          <RefreshCw :size="15" class="spinning" aria-hidden="true" />
+          <span>更新中</span>
+        </div>
         <div class="status-table-head" aria-hidden="true">
           <span>维修项目</span>
           <span>状态</span>
@@ -221,8 +229,6 @@ function setStatusFilter(state: StatusFilter): void {
   activeState.value = state;
   activePeriod.value = "all";
   page.value = 1;
-  records.value = [];
-  total.value = 0;
   void loadStatus(false);
 }
 
@@ -230,8 +236,6 @@ function setHistoryPeriod(period: HistoryPeriod): void {
   if (activePeriod.value === period) return;
   activePeriod.value = period;
   page.value = 1;
-  records.value = [];
-  total.value = 0;
   void loadStatus(false);
 }
 
@@ -349,6 +353,18 @@ watch(
     activeState.value = "all";
     activePeriod.value = "all";
     page.value = 1;
+    records.value = [];
+    total.value = 0;
+    stats.value = {
+      total: 0,
+      without_followup: 0,
+      in_progress: 0,
+      completed_total: 0,
+      completed_month: 0,
+      completed_week: 0,
+      completed_today: 0,
+      average_progress: 0,
+    };
     void loadStatus(false);
   },
   { immediate: true },
@@ -550,6 +566,34 @@ onBeforeUnmount(() => {
 .status-workspace {
   overflow: hidden;
   border-radius: 12px;
+}
+
+.status-table-wrap {
+  position: relative;
+}
+
+.status-table-wrap.refreshing .status-row {
+  pointer-events: none;
+  opacity: 0.48;
+}
+
+.status-loading-overlay {
+  position: absolute;
+  z-index: 5;
+  top: 12px;
+  right: 14px;
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid #bad3f5;
+  border-radius: 9px;
+  padding: 0 10px;
+  background: rgba(247, 251, 255, 0.96);
+  color: #1458aa;
+  box-shadow: 0 8px 20px rgba(31, 87, 158, 0.12);
+  font-size: 12px;
+  font-weight: 750;
 }
 
 .status-toolbar {

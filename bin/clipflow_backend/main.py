@@ -6,6 +6,7 @@ import asyncio
 import datetime as dt
 import hashlib
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -2900,6 +2901,9 @@ class FastAPIPortalController:
                     query=str(request.query_params.get("q") or ""),
                     limit=limit,
                     offset=offset,
+                    focus_record_id=str(
+                        request.query_params.get("focus_record_id") or ""
+                    ),
                     force_refresh=str(
                         request.query_params.get("refresh") or ""
                     ).lower()
@@ -2925,7 +2929,7 @@ class FastAPIPortalController:
                     PortalRuntime.service.create_repair_followup_record,
                     summary_record_id=str(payload.get("summary_record_id") or ""),
                     fields=payload.get("fields") or {},
-                    cmdb_record_ids=payload.get("cmdb_record_ids") or [],
+                    cmdb_record_ids=payload.get("cmdb_record_ids"),
                     operation_id=str(payload.get("operation_id") or ""),
                     scope=scope,
                 )
@@ -2950,7 +2954,7 @@ class FastAPIPortalController:
                     record_id,
                     summary_record_id=str(payload.get("summary_record_id") or ""),
                     fields=payload.get("fields") or {},
-                    cmdb_record_ids=payload.get("cmdb_record_ids") or [],
+                    cmdb_record_ids=payload.get("cmdb_record_ids"),
                     scope=scope,
                 )
                 return self._json_ok(request, session, data)
@@ -4942,6 +4946,9 @@ class FastAPIPortalController:
         with PortalRuntime.message_queue_lock:
             PortalRuntime.message_worker_stop = False
             PortalRuntime.message_queue_event.clear()
+        with PortalRuntime.event_repair_queue_lock:
+            PortalRuntime.event_repair_worker_stop = False
+            PortalRuntime.event_repair_queue_event.clear()
 
     @staticmethod
     def _qt_bridge_callback_ready(callback_key: str) -> bool:
@@ -5943,6 +5950,11 @@ class FastAPIPortalController:
     @staticmethod
     def _portal_error_response(exc: Exception, *, default_status: int) -> JSONResponse:
         status = default_status if isinstance(exc, PortalError) else 500
+        if not isinstance(exc, PortalError):
+            logging.getLogger(__name__).exception(
+                "Portal API unexpected failure: %s",
+                exc,
+            )
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=status)
 
     @staticmethod
@@ -7743,6 +7755,7 @@ class FastAPIPortalController:
         PortalRuntime.ensure_action_worker()
         PortalRuntime.ensure_upload_wait_worker()
         PortalRuntime.ensure_source_refresh_worker()
+        PortalRuntime.ensure_event_repair_worker()
         for job_id in PortalRuntime.service.recoverable_action_job_ids():
             PortalRuntime.enqueue_initial_message_or_upload_job(job_id)
 
@@ -7781,6 +7794,10 @@ class FastAPIPortalController:
         self._stop_scheduler()
         try:
             PortalRuntime.stop_source_refresh_worker()
+        except Exception:
+            pass
+        try:
+            PortalRuntime.stop_event_repair_worker()
         except Exception:
             pass
         server = self._server

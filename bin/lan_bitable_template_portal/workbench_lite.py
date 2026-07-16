@@ -2015,6 +2015,7 @@ def render_workbench_lite(
     .detail-head em {{ color:#64748b; font-style:normal; }}
     .detail-mode-note {{ width:max-content; max-width:100%; border-radius:999px; padding:3px 7px; color:#0a57d8; background:#fff; box-shadow:inset 0 0 0 1px rgba(31,99,255,.12); font-size:10px; font-weight:900; line-height:1.25; }}
     .detail-form {{ display:grid; gap:6px; }}
+    .current-notice-empty {{ min-height:180px; }}
     .site-photo-panel {{ border:1px solid #cfe0f5; border-radius:16px; padding:10px; background:linear-gradient(135deg,#f8fbff,#eef6ff); display:grid; gap:9px; }}
     .site-photo-head {{ display:flex; justify-content:space-between; gap:10px; align-items:flex-start; }}
     .site-photo-head strong {{ display:block; color:#0c244d; font-size:14px; line-height:1.25; }}
@@ -3982,6 +3983,42 @@ def render_workbench_lite(
         draft.operation_id,
       ].map(value => String(value || '').trim()).filter(Boolean);
     }}
+    function currentNoticeMatchesDraft(form, draft) {{
+      if (!form || !draft) return false;
+      const draftIds = new Set(rowIdentityCandidates(draft));
+      if (!draftIds.size) return false;
+      const formIds = [
+        'active_item_id',
+        'target_record_id',
+        'record_id',
+        'source_record_id',
+        'manual_id',
+      ].map(name => String(previewValue(form, name) || '').trim()).filter(Boolean);
+      return formIds.some(value => draftIds.has(value));
+    }}
+    function clearCompletedCurrentNotice(draft) {{
+      const form = document.getElementById('lite-notice-form');
+      if (!currentNoticeMatchesDraft(form, draft)) return false;
+      setLiteFormDirty(false);
+      liteSitePhotos = [];
+      liteSitePhotoSignature = '';
+      document.querySelectorAll('.notice-row.active,.ongoing-row.active').forEach(row => {{
+        row.classList.remove('active');
+        row.setAttribute('aria-current', 'false');
+      }});
+      const empty = document.createElement('div');
+      empty.id = 'lite-current-notice-empty';
+      empty.className = 'current-notice-empty';
+      empty.setAttribute('aria-label', '当前通告已结束');
+      form.replaceWith(empty);
+      const url = new URL(location.href);
+      for (const key of ['active_item_id', 'record_id', 'manual', 'repair_management_record_id']) {{
+        url.searchParams.delete(key);
+      }}
+      history.replaceState({{ lite: true }}, '', url.pathname + url.search + url.hash);
+      closeEndCheck();
+      return true;
+    }}
     function findOngoingRowByDraft(draft) {{
       const candidates = rowIdentityCandidates(draft);
       if (!candidates.length) return null;
@@ -4139,19 +4176,12 @@ def render_workbench_lite(
       draft.target_record_id = payload?.target_record_id || draft.target_record_id || '';
       draft.record_id = payload?.record_id || draft.record_id || '';
       const row = findOngoingRowByDraft(draft);
-      if (!row) return;
       if (ok && draft.action === 'end') {{
-        const list = row.parentElement;
-        row.remove();
-        adjustOngoingCount(-1);
-        if (list && !list.querySelector('.ongoing-row')) {{
-          const empty = document.createElement('div');
-          empty.className = 'empty';
-          empty.textContent = '当前没有进行中通告';
-          list.replaceChildren(empty);
-        }}
+        removeOngoingRow(row);
+        clearCompletedCurrentNotice(draft);
         return;
       }}
+      if (!row) return;
       row.classList.remove('optimistic');
       row.classList.toggle('failed', !ok);
       const status = row.querySelector('.row-status');
@@ -4211,6 +4241,7 @@ def render_workbench_lite(
       draft.record_id = patch.record_id || draft.target_record_id || payload?.record_id || draft.record_id || '';
       if (ok && draft.action === 'end') {{
         removeOngoingRow(findOngoingRowByDraft(draft));
+        clearCompletedCurrentNotice(draft);
         return;
       }}
       let row = findOngoingRowByDraft(draft);

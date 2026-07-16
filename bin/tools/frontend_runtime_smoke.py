@@ -34,6 +34,7 @@ class _SmokePortalService:
 
     def __init__(self) -> None:
         self._jobs: dict[str, dict] = {}
+        self._created_repair_followups: dict[str, list[dict]] = {}
 
     def _normalize_scope(self, scope: str) -> str:
         text = str(scope or "").strip().upper()
@@ -483,6 +484,12 @@ class _SmokePortalService:
                 "source_repair_ids": [],
             }
         ]
+        for record in records:
+            record_id = str(record.get("record_id") or "")
+            created_followups = self._created_repair_followups.get(record_id, [])
+            record["followup_count"] = 1 + len(created_followups)
+            record["progress_percent"] = 50
+            record["latest_followup_time"] = "2026-06-01 10:10:00"
         if str(scope or "").strip().upper() not in {"", "ALL", "A"}:
             records = []
         query_text = str(query or "").strip().lower()
@@ -499,7 +506,7 @@ class _SmokePortalService:
         ]
         return {
             "app_token": "AnEBwJlvGiJfDdkOB32cUPuknzg",
-            "table_id": "tblcws1gwaFQnU6H",
+            "table_id": "tblschT48zXwigUG",
             "fields": [
                 {"field_name": "维修名称", "editable": True, "is_primary": True, "ui_type": "text"},
                 {"field_name": "故障发生时间", "editable": True, "ui_type": "datetime"},
@@ -798,6 +805,7 @@ class _SmokePortalService:
         query: str = "",
         limit: int = 100,
         offset: int = 0,
+        focus_record_id: str = "",
         force_refresh: bool = False,
     ) -> dict:
         is_second_project = summary_record_id == "repair-mgmt-a-002"
@@ -813,6 +821,54 @@ class _SmokePortalService:
             if is_second_project
             else "A楼测试维修跟进记录"
         )
+        records = [
+            {
+                "record_id": followup_record_id,
+                "title": followup_title,
+                "created_time": "2026-06-25 10:10",
+                "progress": "0.5",
+                "cmdb_record_ids": ["rec-smoke-cmdb-a-001"],
+                "display_fields": {
+                    "设备名称": "精密空调",
+                    "设备编号": "A-219-CRAH-01",
+                    "设备品牌": "双登",
+                    "设备型号": "GFMHR-1250W",
+                    "随工人员（我方维修人员）": "张宇航",
+                    "维修进展描述": "处理中",
+                    "维修进度": "0.5",
+                    "超链接": "https://example.invalid/followup",
+                },
+                "raw_fields": {
+                    "随工人员（我方维修人员）": [
+                        {"id": "ou-smoke-zhang", "name": "张宇航"}
+                    ]
+                },
+            },
+            *self._created_repair_followups.get(summary_record_id, []),
+        ]
+        query_text = str(query or "").strip().lower()
+        if query_text:
+            records = [
+                item
+                for item in records
+                if query_text in str(item.get("title") or "").lower()
+                or query_text in str(item.get("display_fields") or "").lower()
+            ]
+        total = len(records)
+        page_limit = max(1, limit)
+        page_offset = max(0, offset)
+        if focus_record_id:
+            focus_index = next(
+                (
+                    index
+                    for index, item in enumerate(records)
+                    if str(item.get("record_id") or "") == focus_record_id
+                ),
+                -1,
+            )
+            if focus_index >= 0:
+                page_offset = (focus_index // page_limit) * page_limit
+        paged_records = records[page_offset : page_offset + page_limit]
         return {
             "summary_record_id": summary_record_id,
             "fields": [
@@ -825,32 +881,11 @@ class _SmokePortalService:
                 {"field_name": "维修进度", "field_type": 2, "ui_type": "Progress", "options": [], "editable": True},
                 {"field_name": "超链接", "field_type": 15, "ui_type": "Url", "options": [], "editable": True},
             ],
-            "records": [
-                {
-                    "record_id": followup_record_id,
-                    "title": followup_title,
-                    "created_time": "2026-06-25 10:10",
-                    "progress": "0.5",
-                    "cmdb_record_ids": ["rec-smoke-cmdb-a-001"],
-                    "display_fields": {
-                        "设备名称": "精密空调",
-                        "设备编号": "A-219-CRAH-01",
-                        "设备品牌": "双登",
-                        "设备型号": "GFMHR-1250W",
-                        "随工人员（我方维修人员）": "张宇航",
-                        "维修进展描述": "处理中",
-                        "维修进度": "0.5",
-                        "超链接": "https://example.invalid/followup",
-                    },
-                    "raw_fields": {
-                        "随工人员（我方维修人员）": [
-                            {"id": "ou-smoke-zhang", "name": "张宇航"}
-                        ]
-                    },
-                }
-            ],
-            "total": 1,
-            "returned": 1,
+            "records": paged_records,
+            "total": total,
+            "returned": len(paged_records),
+            "offset": page_offset,
+            "has_more": page_offset + len(paged_records) < total,
             "brand_model_options": {
                 "双登": ["GFMHR-1250W"],
                 "康明斯": ["C2500 D5A"],
@@ -896,7 +931,21 @@ class _SmokePortalService:
         operation_id: str = "",
         scope: str = "ALL",
     ) -> dict:
-        return {"record_id": "rec-smoke-followup-created", "warnings": []}
+        created_records = self._created_repair_followups.setdefault(summary_record_id, [])
+        record_id = f"rec-smoke-followup-created-{len(created_records) + 1}"
+        display_fields = dict(fields or {})
+        created_records.append(
+            {
+                "record_id": record_id,
+                "title": str(display_fields.get("维修进展描述") or "新增维修跟进记录"),
+                "created_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "progress": str(display_fields.get("维修进度") or "0"),
+                "cmdb_record_ids": list(cmdb_record_ids or []),
+                "display_fields": display_fields,
+                "raw_fields": {},
+            }
+        )
+        return {"record_id": record_id, "warnings": []}
 
     def update_repair_followup_record(
         self,
@@ -907,6 +956,18 @@ class _SmokePortalService:
         cmdb_record_ids: list[str] | None = None,
         scope: str = "ALL",
     ) -> dict:
+        for item in self._created_repair_followups.get(summary_record_id, []):
+            if str(item.get("record_id") or "") != record_id:
+                continue
+            item["display_fields"] = {
+                **dict(item.get("display_fields") or {}),
+                **dict(fields or {}),
+            }
+            if "维修进度" in (fields or {}):
+                item["progress"] = str((fields or {}).get("维修进度") or "0")
+            if cmdb_record_ids is not None:
+                item["cmdb_record_ids"] = list(cmdb_record_ids)
+            break
         return {"record_id": record_id, "warnings": []}
 
     def delete_repair_followup_record(
@@ -916,6 +977,10 @@ class _SmokePortalService:
         summary_record_id: str,
         scope: str = "ALL",
     ) -> dict:
+        records = self._created_repair_followups.get(summary_record_id, [])
+        self._created_repair_followups[summary_record_id] = [
+            item for item in records if str(item.get("record_id") or "") != record_id
+        ]
         return {"record_id": record_id, "deleted": True, "warnings": []}
 
     def repair_management_combined_prefill(
@@ -1272,6 +1337,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           if (repairRecordRequestCount !== repairRequestsBeforeOpen) {{
             throw new Error(`cached repair management page reloaded: ${{repairRequestsBeforeOpen}} -> ${{repairRecordRequestCount}}`);
           }}
+          await page.getByRole('button', {{ name: '关闭维修项目', exact: true }}).click();
           const statusRequestsBeforeReturn = repairStatusRequestCount;
           await page.getByRole('button', {{ name: '检修状态', exact: true }}).click();
           await waitForTextOrDump(page, '当前状态项目', 'repair-status-cached-return');
@@ -1281,17 +1347,18 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           }}
           await page.locator('.status-row').filter({{ hasText: 'A楼测试事件告警描述' }}).getByRole('button', {{ name: '跟进检修管理' }}).click();
           await waitForTextOrDump(page, 'A楼测试检修管理记录', 'repair-management-second-return');
-          await page.locator('.record-row').filter({{ hasText: 'A楼测试检修管理记录' }}).click();
-          await page.getByRole('button', {{ name: '跟进记录', exact: true }}).click();
+          await page.getByRole('button', {{ name: /^跟进记录/ }}).first().click();
           const crossProjectFollowupPanel = page.locator('.followup-panel');
           await crossProjectFollowupPanel.locator('.followup-editor-head strong').filter({{ hasText: 'A楼测试维修跟进记录' }}).waitFor({{ state: 'visible' }});
+          await page.getByRole('button', {{ name: '关闭维修项目', exact: true }}).click();
           await page.locator('.record-row').filter({{ hasText: 'A楼第二测试检修管理记录' }}).click();
-          await page.getByRole('button', {{ name: '跟进记录', exact: true }}).click();
+          await page.getByRole('button', {{ name: /^跟进记录/ }}).first().click();
           await crossProjectFollowupPanel.getByText('正在读取当前维修项目的跟进记录...', {{ exact: true }}).waitFor({{ state: 'visible' }});
           if (await crossProjectFollowupPanel.getByText('A楼测试维修跟进记录', {{ exact: true }}).count()) {{
             throw new Error('previous project followup leaked into the newly selected repair project');
           }}
           await crossProjectFollowupPanel.locator('.followup-editor-head strong').filter({{ hasText: 'A楼第二项目跟进记录' }}).waitFor({{ state: 'visible' }});
+          await page.getByRole('button', {{ name: '关闭维修项目', exact: true }}).click();
           await page.locator('.record-row').filter({{ hasText: 'A楼测试检修管理记录' }}).click();
           await page.getByRole('button', {{ name: '维修单信息', exact: true }}).click();
           await page.getByRole('button', {{ name: '更改事件检修关联', exact: true }}).click();
@@ -1322,7 +1389,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           if (projectColumnCount !== 4) {{
             throw new Error(`repair project form should use four desktop columns, got ${{projectColumnCount}}`);
           }}
-          await page.getByRole('button', {{ name: '跟进记录', exact: true }}).click();
+          await page.getByRole('button', {{ name: /^跟进记录/ }}).first().click();
           await waitForTextOrDump(page, 'A楼测试维修跟进记录', 'repair-management-autofill');
           const followupPanel = page.locator('.followup-panel');
           if (await followupPanel.getByRole('button', {{ name: '新建跟进', exact: true }}).count() !== 1) {{
@@ -1366,6 +1433,15 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           if (!selectedCmdbText.includes('A-219-CRAH-01') || !selectedCmdbText.includes('A-220-CRAH-02')) {{
             throw new Error(`CMDB multi-selection summary is incomplete: ${{selectedCmdbText}}`);
           }}
+          await followupPanel.getByRole('button', {{ name: '重新选择', exact: true }}).click();
+          const clearCmdbDialog = page.getByRole('dialog', {{ name: '选择 CMDB 设备', exact: true }});
+          await clearCmdbDialog.locator('tbody tr').filter({{ hasText: 'A-219-CRAH-01' }}).click();
+          await clearCmdbDialog.locator('tbody tr').filter({{ hasText: 'A-220-CRAH-02' }}).click();
+          await clearCmdbDialog.getByRole('button', {{ name: '清空关联', exact: true }}).click();
+          const clearedCmdbText = String(await followupPanel.locator('.cmdb-line').textContent() || '');
+          if (!clearedCmdbText.includes('未选择')) {{
+            throw new Error(`CMDB relation was not cleared: ${{clearedCmdbText}}`);
+          }}
           const followupBrand = followupPanel.getByRole('combobox', {{ name: '设备品牌', exact: true }});
           const followupModel = followupPanel.getByRole('combobox', {{ name: '设备型号', exact: true }});
           await followupBrand.click();
@@ -1395,19 +1471,18 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           if (!String(await unsavedNotice.textContent() || '').includes('未保存修改')) {{
             throw new Error('page-level unsaved notice is missing its status text');
           }}
-          const repairProjectSearch = page.getByRole('searchbox', {{ name: '搜索维修项目', exact: true }});
-          await repairProjectSearch.fill('不存在的维修项目');
-          await page.getByText('没有匹配的维修项目', {{ exact: true }}).waitFor({{ state: 'visible' }});
+          await page.getByRole('button', {{ name: '关闭维修项目', exact: true }}).click();
+          await page.getByText('放弃未保存修改？', {{ exact: true }}).waitFor({{ state: 'visible' }});
+          await page.getByRole('button', {{ name: '取消', exact: true }}).click();
           if (await followupDescription.inputValue() !== '烟测新增跟进') {{
-            throw new Error('repair project search discarded unsaved followup draft');
+            throw new Error('cancelling repair drawer close discarded unsaved followup draft');
           }}
-          await repairProjectSearch.fill('');
-          await page.locator('.record-row').filter({{ hasText: 'A楼测试检修管理记录' }}).waitFor({{ state: 'visible' }});
           if (await followupPanel.getByRole('button', {{ name: '保存新跟进', exact: true }}).count() !== 1) {{
             throw new Error('followup create mode must show one submit action');
           }}
           await followupPanel.getByRole('button', {{ name: '保存新跟进', exact: true }}).click();
           await followupPanel.getByText('维修跟进记录已新增。', {{ exact: true }}).waitFor({{ state: 'visible' }});
+          await page.getByRole('button', {{ name: /^跟进记录 2$/ }}).first().waitFor({{ state: 'visible' }});
           const followupOptions = followupPanel.locator('.followup-timeline-list [role="option"]');
           await followupOptions.first().waitFor({{ state: 'visible' }});
           await followupOptions.last().click();
@@ -1417,9 +1492,10 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await followupPanel.getByText('维修跟进记录已更新。', {{ exact: true }}).waitFor({{ state: 'visible' }});
           await assertLayout(page, 'repair-management-entry');
           await page.getByRole('button', {{ name: '维修单信息' }}).click();
+          await page.locator('[data-field-name="故障发生时间"] input[type="datetime-local"]').fill('2026-06-01T09:00');
           await page.getByRole('button', {{ name: '检修通告', exact: true }}).click();
-          await page.getByText('放弃未保存修改？', {{ exact: true }}).waitFor({{ state: 'visible' }});
-          await page.getByRole('button', {{ name: '放弃并继续', exact: true }}).click();
+          await page.getByText('保存后填写检修通告？', {{ exact: true }}).waitFor({{ state: 'visible' }});
+          await page.getByRole('button', {{ name: '保存并继续', exact: true }}).click();
           await waitForTextOrDump(page, '维修单生成检修通告', 'repair-notice-prefill');
           if (!page.url().includes('repair_management_record_id=repair-mgmt-a-001')) {{
             throw new Error(`repair management prefill id missing: ${{page.url()}}`);

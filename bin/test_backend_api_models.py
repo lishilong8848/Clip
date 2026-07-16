@@ -45,6 +45,7 @@ class _FakeRepairEventRouteService:
         limit: int = 200,
         offset: int = 0,
         focus_record_id: str = "",
+        force_refresh: bool = False,
     ) -> dict:
         self.calls.append(("list_repair", scope, query, limit, focus_record_id))
         return {
@@ -222,6 +223,8 @@ class _FakeRepairEventRouteService:
         query: str = "",
         limit: int = 100,
         offset: int = 0,
+        focus_record_id: str = "",
+        force_refresh: bool = False,
     ) -> dict:
         self.calls.append(("list_followups", scope, summary_record_id, query, limit))
         return {"records": [{"record_id": "rec-followup"}], "fields": [], "total": 1}

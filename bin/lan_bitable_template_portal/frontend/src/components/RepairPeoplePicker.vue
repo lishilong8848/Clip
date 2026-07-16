@@ -93,6 +93,9 @@ const errorText = ref("");
 const results = shallowRef<LooseDict[]>([]);
 let queryTimer: ReturnType<typeof setTimeout> | undefined;
 let requestVersion = 0;
+let peopleAbortController: AbortController | null = null;
+const peopleCache = new Map<string, { expiresAt: number; people: LooseDict[] }>();
+const PEOPLE_CACHE_TTL_MS = 45_000;
 
 const selectedPeople = computed(() => props.modelValue);
 
@@ -152,22 +155,48 @@ function removePerson(person: LooseDict): void {
 
 async function loadPeople(): Promise<void> {
   const currentVersion = ++requestVersion;
+  const scope = props.scope || "ALL";
+  const normalizedQuery = query.value.trim();
+  const cacheKey = `${scope}\n${normalizedQuery.toLowerCase()}`;
+  peopleAbortController?.abort();
+  peopleAbortController = null;
+  const cached = peopleCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    results.value = cached.people;
+    errorText.value = "";
+    loading.value = false;
+    return;
+  }
+  const abortController = new AbortController();
+  peopleAbortController = abortController;
   loading.value = true;
   errorText.value = "";
   try {
     const params = new URLSearchParams({
-      scope: props.scope || "ALL",
-      q: query.value,
+      scope,
+      q: normalizedQuery,
       limit: "80",
     });
-    const payload = await requestJson(`/api/repair-management/people?${params.toString()}`);
+    const payload = await requestJson(
+      `/api/repair-management/people?${params.toString()}`,
+      { signal: abortController.signal },
+    );
     if (currentVersion !== requestVersion) return;
     results.value = Array.isArray(payload.people) ? payload.people : [];
+    peopleCache.set(cacheKey, {
+      expiresAt: Date.now() + PEOPLE_CACHE_TTL_MS,
+      people: results.value,
+    });
+    if (peopleCache.size > 24) {
+      peopleCache.delete(peopleCache.keys().next().value || "");
+    }
   } catch (error: unknown) {
+    if (abortController.signal.aborted) return;
     if (currentVersion !== requestVersion) return;
     results.value = [];
     errorText.value = error instanceof Error ? error.message : "人员搜索失败";
   } finally {
+    if (peopleAbortController === abortController) peopleAbortController = null;
     if (currentVersion === requestVersion) loading.value = false;
   }
 }
@@ -192,6 +221,9 @@ watch(query, () => {
 });
 
 watch(() => props.scope, () => {
+  peopleAbortController?.abort();
+  peopleAbortController = null;
+  requestVersion += 1;
   results.value = [];
   if (open.value) void loadPeople();
 });
@@ -200,6 +232,8 @@ onMounted(() => document.addEventListener("pointerdown", handleDocumentPointerDo
 onBeforeUnmount(() => {
   document.removeEventListener("pointerdown", handleDocumentPointerDown);
   if (queryTimer) clearTimeout(queryTimer);
+  peopleAbortController?.abort();
+  peopleAbortController = null;
 });
 </script>
 

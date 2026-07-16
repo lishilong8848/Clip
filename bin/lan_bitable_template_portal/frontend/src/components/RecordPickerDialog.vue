@@ -117,10 +117,10 @@
             <button
               type="button"
               class="picker-confirm"
-              :disabled="!draftSelection.length"
+              :disabled="!allowEmpty && !draftSelection.length"
               @click="emit('confirm', draftSelection.slice())"
             >
-              确认
+              {{ allowEmpty && !draftSelection.length ? "清空关联" : "确认" }}
             </button>
           </div>
         </footer>
@@ -149,6 +149,7 @@ const props = withDefaults(defineProps<{
   columns: RecordPickerColumn[];
   selectedIds?: string[];
   multiple?: boolean;
+  allowEmpty?: boolean;
   loading?: boolean;
   query?: string;
   searchPlaceholder?: string;
@@ -156,6 +157,7 @@ const props = withDefaults(defineProps<{
   kicker: "多维记录选择",
   selectedIds: () => [],
   multiple: true,
+  allowEmpty: false,
   loading: false,
   query: "",
   searchPlaceholder: "输入关键词搜索",
@@ -174,6 +176,7 @@ const dialogRef = ref<HTMLElement | null>(null);
 const searchInput = ref<HTMLInputElement | null>(null);
 let previousBodyOverflow = "";
 let searchTimer: ReturnType<typeof setTimeout> | undefined;
+let returnFocusElement: HTMLElement | null = null;
 
 const queryModel = computed({
   get: () => props.query,
@@ -246,6 +249,9 @@ watch(
   () => props.open,
   (open) => {
     if (open) {
+      returnFocusElement = document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
       previousBodyOverflow = document.body.style.overflow;
       document.body.style.overflow = "hidden";
       window.addEventListener("keydown", handleKeydown);
@@ -253,6 +259,11 @@ watch(
     } else {
       document.body.style.overflow = previousBodyOverflow;
       window.removeEventListener("keydown", handleKeydown);
+      const returnFocus = returnFocusElement;
+      returnFocusElement = null;
+      void nextTick(() => {
+        if (returnFocus?.isConnected) returnFocus.focus();
+      });
     }
   },
   { immediate: true },
@@ -271,6 +282,7 @@ watch(
 
 onBeforeUnmount(() => {
   if (searchTimer) clearTimeout(searchTimer);
+  returnFocusElement = null;
   document.body.style.overflow = previousBodyOverflow;
   window.removeEventListener("keydown", handleKeydown);
 });

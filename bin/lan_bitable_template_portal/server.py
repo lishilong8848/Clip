@@ -168,6 +168,14 @@ class PortalRuntime:
     source_refresh_inflight = False
     source_refresh_last_result: dict = {}
     source_refresh_last_finished = 0.0
+    event_repair_queue_lock = threading.RLock()
+    event_repair_queue_event = threading.Event()
+    event_repair_worker_thread: threading.Thread | None = None
+    event_repair_worker_stop = False
+    event_repair_queue_channel = "event_repair_project"
+    # Event closure is authoritative. Repair-project creation is a separate,
+    # best-effort action and must not keep retrying after it fails.
+    event_repair_max_attempts = 1
     repair_refresh_lock = threading.RLock()
     repair_refresh_inflight = False
     repair_refresh_event = threading.Event()
@@ -3094,6 +3102,155 @@ class PortalRuntime:
             next_wait = max(60.0, float(ttl or SOURCE_CACHE_TTL_SECONDS))
 
     @classmethod
+    def ensure_event_repair_worker(cls) -> None:
+        with cls.event_repair_queue_lock:
+            worker = cls.event_repair_worker_thread
+            if worker and worker.is_alive():
+                return
+            cls.event_repair_worker_stop = False
+            cls.event_repair_queue_event.clear()
+            cls.event_repair_worker_thread = threading.Thread(
+                target=cls._event_repair_worker_loop,
+                name="LANEventRepairProjectQueue",
+                daemon=True,
+            )
+            cls.event_repair_worker_thread.start()
+
+    @classmethod
+    def stop_event_repair_worker(cls) -> None:
+        with cls.event_repair_queue_lock:
+            cls.event_repair_worker_stop = True
+            cls.event_repair_queue_event.set()
+            worker = cls.event_repair_worker_thread
+        if worker and worker.is_alive():
+            try:
+                worker.join(timeout=2)
+            except Exception:
+                pass
+        with cls.event_repair_queue_lock:
+            cls.event_repair_worker_thread = None
+
+    @classmethod
+    def enqueue_event_repair_project(
+        cls,
+        *,
+        event_record_id: str,
+        notice_data: dict[str, Any],
+        remote_fields: dict[str, Any],
+        scope: str,
+        source_month: str,
+    ) -> int:
+        event_record_id = str(event_record_id or "").strip()
+        if not event_record_id or is_local_record_id(event_record_id):
+            raise PortalError("事件结束缺少有效的目标记录 ID，无法排队创建维修单。")
+        event_id = cls.state_store.enqueue_outbox_event(
+            cls.event_repair_queue_channel,
+            {
+                "event_record_id": event_record_id,
+                "notice_data": dict(notice_data or {}),
+                "remote_fields": dict(remote_fields or {}),
+                "scope": str(scope or "ALL").strip() or "ALL",
+                "source_month": str(source_month or "").strip(),
+            },
+        )
+        if event_id <= 0:
+            raise PortalError("转检修任务未写入本地队列。")
+        cls.ensure_event_repair_worker()
+        cls.event_repair_queue_event.set()
+        return event_id
+
+    @classmethod
+    def _process_event_repair_queue_once(cls) -> dict[str, Any]:
+        tasks = cls.state_store.lease_outbox_events(
+            cls.event_repair_queue_channel,
+            limit=1,
+            lease_seconds=5 * 60,
+        )
+        if not tasks:
+            return {"processed": False, "status": "idle"}
+        task = tasks[0]
+        event_id = int(task.get("id") or 0)
+        payload = task.get("payload") if isinstance(task.get("payload"), dict) else {}
+        event_record_id = str(payload.get("event_record_id") or "").strip()
+        try:
+            result = cls.service.ensure_repair_management_record_for_event_notice(
+                event_record_id=event_record_id,
+                notice_data=(
+                    payload.get("notice_data")
+                    if isinstance(payload.get("notice_data"), dict)
+                    else {}
+                ),
+                remote_fields=(
+                    payload.get("remote_fields")
+                    if isinstance(payload.get("remote_fields"), dict)
+                    else {}
+                ),
+                scope=str(payload.get("scope") or "ALL"),
+                source_month=str(payload.get("source_month") or ""),
+            )
+            repair_record_id = str(result.get("record_id") or "").strip()
+            if not repair_record_id:
+                raise PortalError("维修单创建未返回记录 ID。")
+            cls.state_store.mark_outbox_event(event_id, "done")
+            cls.state_store.append_event_async(
+                "event_repair_project_result",
+                {
+                    "event_id": event_id,
+                    "event_record_id": event_record_id,
+                    "repair_record_id": repair_record_id,
+                    "created": bool(result.get("created")),
+                    "status": "success",
+                },
+            )
+            return {
+                "processed": True,
+                "status": "success",
+                "event_id": event_id,
+                "event_record_id": event_record_id,
+                "repair_record_id": repair_record_id,
+            }
+        except Exception as exc:
+            marked = cls.state_store.mark_outbox_event(
+                event_id,
+                "pending",
+                error=str(exc),
+                max_attempts=cls.event_repair_max_attempts,
+            ) or {}
+            status = str(marked.get("status") or "failed")
+            cls.state_store.append_event_async(
+                "event_repair_project_result",
+                {
+                    "event_id": event_id,
+                    "event_record_id": event_record_id,
+                    "status": status,
+                    "error": str(exc),
+                },
+            )
+            log_warning(
+                "事件已正常结束，但转检修维修单创建失败: "
+                f"event_record_id={event_record_id}, status={status}, error={exc}"
+            )
+            return {
+                "processed": True,
+                "status": status,
+                "event_id": event_id,
+                "event_record_id": event_record_id,
+                "error": str(exc),
+            }
+
+    @classmethod
+    def _event_repair_worker_loop(cls) -> None:
+        while True:
+            cls.event_repair_queue_event.wait(timeout=1.0)
+            cls.event_repair_queue_event.clear()
+            with cls.event_repair_queue_lock:
+                if cls.event_repair_worker_stop:
+                    return
+            result = cls._process_event_repair_queue_once()
+            if result.get("processed") and result.get("status") != "pending":
+                cls.event_repair_queue_event.set()
+
+    @classmethod
     def ensure_message_workers(cls) -> None:
         with cls.message_queue_lock:
             cls.message_worker_threads = [
@@ -5804,6 +5961,7 @@ class PortalRuntime:
         existing_tokens: list[str] = []
         existing_extra_tokens: list[str] = []
         existing_response_time = ""
+        remote_fields_for_action: dict[str, Any] = {}
         checkpoint_id = ""
         query_record_id = str(target_record_id or record_id or "").strip()
         has_remote_record_for_update = bool(
@@ -5831,6 +5989,7 @@ class PortalRuntime:
             else:
                 query_result = prequery_result
             fields = query_result.get("fields", {}) if isinstance(query_result, dict) else {}
+            remote_fields_for_action = dict(fields) if isinstance(fields, dict) else {}
             if action_type in {"update", "end"}:
                 checkpoint_id = cls._create_backend_undo_checkpoint(
                     "end" if action_type == "end" else "update",
@@ -5927,6 +6086,64 @@ class PortalRuntime:
                 "failed",
                 error=str(result or "多维更新失败。"),
             )
+        repair_project_queue_id = 0
+        repair_project_queued = False
+        repair_project_warning = ""
+        if success and action_type == "end" and notice_type == "事件通告":
+            if "transfer_to_overhaul" in data:
+                transfer_requested = MaintenancePortalService._truthy_flag(
+                    data.get("transfer_to_overhaul")
+                )
+            else:
+                transfer_requested = MaintenancePortalService._truthy_flag(
+                    remote_fields_for_action.get(
+                        EVENT_NOTICE_FIELDS["transfer_to_overhaul"]
+                    )
+                )
+            if transfer_requested:
+                scope_value: Any = data.get("scope")
+                if not str(scope_value or "").strip():
+                    building_values = (
+                        data.get("building_codes")
+                        or data.get("buildings")
+                        or data.get("building")
+                        or "ALL"
+                    )
+                    if isinstance(building_values, (list, tuple)):
+                        scope_value = next(
+                            (
+                                str(item or "").strip()
+                                for item in building_values
+                                if str(item or "").strip()
+                            ),
+                            "ALL",
+                        )
+                    else:
+                        scope_value = building_values
+                time_text = str(
+                    data.get("time_str")
+                    or data.get("occurrence_date")
+                    or ""
+                ).strip()
+                month_match = re.search(r"(\d{4})[-/年](\d{1,2})", time_text)
+                source_month = (
+                    f"{int(month_match.group(1)):04d}-{int(month_match.group(2)):02d}"
+                    if month_match
+                    else time.strftime("%Y-%m")
+                )
+                try:
+                    repair_project_queue_id = cls.enqueue_event_repair_project(
+                        event_record_id=target_record_id,
+                        notice_data=data,
+                        remote_fields=remote_fields_for_action,
+                        scope=str(scope_value or "ALL"),
+                        source_month=source_month,
+                    )
+                    repair_project_queued = repair_project_queue_id > 0
+                except Exception as exc:
+                    repair_project_warning = (
+                        f"事件已正常结束，但转检修任务创建失败：{exc}"
+                    )
         if success and action_type == "end":
             cls._enqueue_active_delete_for_ended_notice(
                 data,
@@ -5954,20 +6171,49 @@ class PortalRuntime:
             if success
             else {}
         )
+        result_message = str(result or "")
+        if repair_project_queued:
+            result_message = "；".join(
+                item
+                for item in (result_message, "转检修维修单已进入后台创建。")
+                if item
+            )
+        if repair_project_warning:
+            result_message = "；".join(
+                item for item in (result_message, repair_project_warning) if item
+            )
+            robot_result["message_warning"] = "；".join(
+                item
+                for item in (
+                    str(robot_result.get("message_warning") or "").strip(),
+                    repair_project_warning,
+                )
+                if item
+            )
         cls._record_event_notice_operation_result(
             data,
             action_type=action_type,
             success=bool(success),
             record_id=target_record_id if success else "",
-            message=str(result or ""),
+            message=result_message,
             robot_result=robot_result,
         )
         return {
             "ok": bool(success),
             "name": action_name,
-            "message": str(result or ""),
+            "message": result_message,
             "record_id": target_record_id or record_id,
             "real_record_id": target_record_id if success else "",
+            "repair_project_created": False,
+            "repair_project_record_id": "",
+            "repair_project_queued": repair_project_queued,
+            "repair_project_queue_id": repair_project_queue_id,
+            "repair_project_status": (
+                "queued"
+                if repair_project_queued
+                else "failed" if repair_project_warning else "not_requested"
+            ),
+            "repair_project_warning": repair_project_warning,
             **robot_result,
         }
 
@@ -6647,6 +6893,7 @@ class PortalServerController:
         PortalRuntime.stop_message_workers()
         PortalRuntime.stop_action_worker()
         PortalRuntime.stop_upload_wait_worker()
+        PortalRuntime.stop_event_repair_worker()
         if self.start_source_refresh_worker:
             PortalRuntime.stop_source_refresh_worker()
         PortalRuntime.notice_callback = None

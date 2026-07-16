@@ -85,7 +85,7 @@ class RepairFollowupRecordRequest(APIModel):
     operation_id: str = Field(default="", max_length=128)
     scope: str = "ALL"
     summary_record_id: str
-    cmdb_record_ids: list[str] = Field(default_factory=list)
+    cmdb_record_ids: list[str] | None = None
     fields: dict[str, Any] = Field(default_factory=dict)
 
 

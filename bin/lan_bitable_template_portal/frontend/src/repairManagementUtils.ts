@@ -199,8 +199,30 @@ export function repairRecordSpecialtyLabel(record: LooseDict): string {
   return String(fields["专业"] || fields["所属专业"] || fields["专业（推送消息用）"] || "专业未填").trim();
 }
 
+export function repairDisplayTime(value: unknown): string {
+  if (value === null || value === undefined || value === "") return "";
+  const raw = String(value).trim();
+  if (!raw) return "";
+  const numeric = Number(raw);
+  if (Number.isFinite(numeric) && /^\d+(?:\.\d+)?$/.test(raw)) {
+    const timestamp = numeric > 10_000_000_000
+      ? numeric
+      : numeric > 1_000_000_000
+        ? numeric * 1000
+        : Number.NaN;
+    if (Number.isFinite(timestamp)) {
+      const date = new Date(timestamp);
+      if (!Number.isNaN(date.getTime())) {
+        const pad = (item: number) => String(item).padStart(2, "0");
+        return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+      }
+    }
+  }
+  return raw.replace("T", " ");
+}
+
 export function repairRecordTimeLabel(record: LooseDict): string {
   const fields = record.display_fields || {};
   const time = fields["故障发生时间"] || fields["维修开始时间"] || fields["维修结束时间"] || record.last_modified_time;
-  return String(time || "时间未填").trim();
+  return repairDisplayTime(time) || "时间未填";
 }
