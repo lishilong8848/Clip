@@ -3,7 +3,7 @@
     <label class="repair-people-label" :for="inputId">{{ label }}</label>
 
     <div v-if="selectedPeople.length" class="repair-people-selected">
-      <span v-for="person in selectedPeople" :key="personKey(person)" class="repair-person-chip">
+      <span v-for="person in visibleSelectedPeople" :key="personKey(person)" class="repair-person-chip">
         <UserRound :size="14" aria-hidden="true" />
         <b>{{ personName(person) }}</b>
         <button
@@ -15,6 +15,15 @@
           <X :size="13" aria-hidden="true" />
         </button>
       </span>
+      <button
+        v-if="selectedPeople.length > SELECTED_COLLAPSE_LIMIT"
+        type="button"
+        class="repair-selected-toggle"
+        :aria-expanded="selectedExpanded"
+        @click="selectedExpanded = !selectedExpanded"
+      >
+        {{ selectedExpanded ? "收起" : `查看全部 ${selectedPeople.length} 人` }}
+      </button>
     </div>
 
     <div class="repair-people-search" :class="{ active: open }">
@@ -28,8 +37,9 @@
         :disabled="disabled"
         aria-haspopup="listbox"
         :aria-expanded="open"
+        :aria-activedescendant="activeResultId"
         @focus="openPicker"
-        @keydown.esc.stop="open = false"
+        @keydown="handleSearchKeydown"
       />
       <LoaderCircle v-if="loading" :size="16" class="spinning" aria-hidden="true" />
     </div>
@@ -40,13 +50,15 @@
       <div v-else-if="!results.length" class="repair-people-state">未找到人员</div>
       <div v-else class="repair-people-results" role="listbox" aria-label="随工人员搜索结果">
         <button
-          v-for="person in results"
+          v-for="(person, index) in results"
           :key="resultKey(person)"
+          :id="resultId(index)"
           type="button"
           role="option"
           :aria-selected="isSelected(person)"
           :disabled="!person.selectable"
-          :class="{ selected: isSelected(person) }"
+          :class="{ selected: isSelected(person), active: activeResultIndex === index }"
+          @mouseenter="activeResultIndex = index"
           @click="togglePerson(person)"
         >
           <span class="repair-person-avatar">{{ personName(person).slice(0, 1) }}</span>
@@ -57,13 +69,25 @@
           <Check v-if="isSelected(person)" :size="16" aria-hidden="true" />
           <small v-else-if="!person.selectable" class="repair-person-unavailable">资料不完整</small>
         </button>
+        <button
+          v-if="peopleHaveMore"
+          type="button"
+          class="repair-people-load-more"
+          :disabled="loading"
+          @click.stop="loadPeople(false)"
+        >
+          {{ loading ? "加载中" : "加载更多人员" }}
+        </button>
+        <small v-if="peopleResultNote" class="repair-people-result-note">
+          {{ peopleResultNote }}
+        </small>
       </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import { Check, LoaderCircle, Search, UserRound, X } from "lucide-vue-next";
 import { requestJson } from "../api/client";
 import type { LooseDict } from "../types";
@@ -88,16 +112,37 @@ const emit = defineEmits<{
 const rootRef = ref<HTMLElement | null>(null);
 const query = ref("");
 const open = ref(false);
+const selectedExpanded = ref(false);
+const activeResultIndex = ref(-1);
 const loading = ref(false);
 const errorText = ref("");
 const results = shallowRef<LooseDict[]>([]);
 let queryTimer: ReturnType<typeof setTimeout> | undefined;
 let requestVersion = 0;
 let peopleAbortController: AbortController | null = null;
-const peopleCache = new Map<string, { expiresAt: number; people: LooseDict[] }>();
+const peopleCache = new Map<string, {
+  expiresAt: number;
+  people: LooseDict[];
+  hasMore: boolean;
+  resultNote: string;
+}>();
 const PEOPLE_CACHE_TTL_MS = 45_000;
+const PEOPLE_BATCH_SIZE = 80;
+const PEOPLE_MAX_LIMIT = 640;
+const SELECTED_COLLAPSE_LIMIT = 3;
+const peopleLimit = ref(PEOPLE_BATCH_SIZE);
+const peopleHaveMore = ref(false);
+const peopleResultNote = ref("");
 
 const selectedPeople = computed(() => props.modelValue);
+const visibleSelectedPeople = computed(() => (
+  selectedExpanded.value
+    ? selectedPeople.value
+    : selectedPeople.value.slice(0, SELECTED_COLLAPSE_LIMIT)
+));
+const activeResultId = computed(() => (
+  open.value && activeResultIndex.value >= 0 ? resultId(activeResultIndex.value) : undefined
+));
 
 function personKey(person: LooseDict): string {
   return String(person.user_id || person.id || person.open_id || person.person_record_id || "").trim();
@@ -105,6 +150,10 @@ function personKey(person: LooseDict): string {
 
 function resultKey(person: LooseDict): string {
   return personKey(person) || `${String(person.name || "")}-${String(person.employee_no || "")}`;
+}
+
+function resultId(index: number): string {
+  return `${props.inputId}-person-${index}`;
 }
 
 function personName(person: LooseDict): string {
@@ -148,21 +197,79 @@ function togglePerson(person: LooseDict): void {
   publish([...props.modelValue, normalizedPerson(person)]);
 }
 
+function moveActiveResult(direction: 1 | -1): void {
+  if (!results.value.length) return;
+  let index = activeResultIndex.value;
+  for (let attempts = 0; attempts < results.value.length; attempts += 1) {
+    index = (index + direction + results.value.length) % results.value.length;
+    if (results.value[index]?.selectable) {
+      activeResultIndex.value = index;
+      void nextTick(() => {
+        document.getElementById(resultId(index))?.scrollIntoView({ block: "nearest" });
+      });
+      return;
+    }
+  }
+}
+
+function handleSearchKeydown(event: KeyboardEvent): void {
+  if (event.key === "Escape") {
+    event.stopPropagation();
+    open.value = false;
+    return;
+  }
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    if (!open.value) openPicker();
+    moveActiveResult(event.key === "ArrowDown" ? 1 : -1);
+    return;
+  }
+  if (event.key === "Enter" && open.value && activeResultIndex.value >= 0) {
+    const person = results.value[activeResultIndex.value];
+    if (person?.selectable) {
+      event.preventDefault();
+      togglePerson(person);
+    }
+  }
+}
+
 function removePerson(person: LooseDict): void {
   const key = personKey(person);
   publish(props.modelValue.filter((item) => personKey(item) !== key));
 }
 
-async function loadPeople(): Promise<void> {
+function candidateHasMore(payload: LooseDict, recordCount: number, requestedLimit: number): boolean {
+  const totalCount = Number(payload.total ?? payload.total_count);
+  if (Number.isFinite(totalCount) && totalCount > recordCount) return true;
+  return payload.has_more === true
+    || payload.truncated === true
+    || recordCount >= requestedLimit;
+}
+
+async function loadPeople(resetLimit = true): Promise<void> {
+  const previousCount = results.value.length;
+  if (resetLimit) {
+    peopleLimit.value = PEOPLE_BATCH_SIZE;
+    peopleResultNote.value = "";
+  } else if (peopleLimit.value < PEOPLE_MAX_LIMIT) {
+    peopleLimit.value = Math.min(PEOPLE_MAX_LIMIT, peopleLimit.value + PEOPLE_BATCH_SIZE);
+  } else {
+    peopleHaveMore.value = false;
+    return;
+  }
+  const requestedLimit = peopleLimit.value;
   const currentVersion = ++requestVersion;
   const scope = props.scope || "ALL";
   const normalizedQuery = query.value.trim();
-  const cacheKey = `${scope}\n${normalizedQuery.toLowerCase()}`;
+  const cacheKey = `${scope}\n${normalizedQuery.toLowerCase()}\n${requestedLimit}`;
   peopleAbortController?.abort();
   peopleAbortController = null;
   const cached = peopleCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) {
     results.value = cached.people;
+    peopleHaveMore.value = cached.hasMore;
+    peopleResultNote.value = cached.resultNote;
+    activeResultIndex.value = results.value.findIndex((person) => Boolean(person.selectable));
     errorText.value = "";
     loading.value = false;
     return;
@@ -175,7 +282,7 @@ async function loadPeople(): Promise<void> {
     const params = new URLSearchParams({
       scope,
       q: normalizedQuery,
-      limit: "80",
+      limit: String(requestedLimit),
     });
     const payload = await requestJson(
       `/api/repair-management/people?${params.toString()}`,
@@ -183,9 +290,24 @@ async function loadPeople(): Promise<void> {
     );
     if (currentVersion !== requestVersion) return;
     results.value = Array.isArray(payload.people) ? payload.people : [];
+    const loadedMore = results.value.length > previousCount;
+    const moreAvailable = candidateHasMore(
+      payload,
+      results.value.length,
+      requestedLimit,
+    );
+    const reachedVisibleLimit = moreAvailable
+      && (requestedLimit >= PEOPLE_MAX_LIMIT || (!resetLimit && !loadedMore));
+    peopleHaveMore.value = moreAvailable && !reachedVisibleLimit;
+    peopleResultNote.value = reachedVisibleLimit
+      ? "人员较多，请输入更精确的姓名。"
+      : "";
+    activeResultIndex.value = results.value.findIndex((person) => Boolean(person.selectable));
     peopleCache.set(cacheKey, {
       expiresAt: Date.now() + PEOPLE_CACHE_TTL_MS,
       people: results.value,
+      hasMore: peopleHaveMore.value,
+      resultNote: peopleResultNote.value,
     });
     if (peopleCache.size > 24) {
       peopleCache.delete(peopleCache.keys().next().value || "");
@@ -194,6 +316,7 @@ async function loadPeople(): Promise<void> {
     if (abortController.signal.aborted) return;
     if (currentVersion !== requestVersion) return;
     results.value = [];
+    activeResultIndex.value = -1;
     errorText.value = error instanceof Error ? error.message : "人员搜索失败";
   } finally {
     if (peopleAbortController === abortController) peopleAbortController = null;
@@ -204,7 +327,8 @@ async function loadPeople(): Promise<void> {
 function openPicker(): void {
   if (props.disabled) return;
   open.value = true;
-  void loadPeople();
+  activeResultIndex.value = results.value.findIndex((person) => Boolean(person.selectable));
+  void loadPeople(true);
 }
 
 function handleDocumentPointerDown(event: PointerEvent): void {
@@ -217,7 +341,7 @@ function handleDocumentPointerDown(event: PointerEvent): void {
 watch(query, () => {
   if (!open.value) return;
   if (queryTimer) clearTimeout(queryTimer);
-  queryTimer = setTimeout(() => void loadPeople(), 250);
+  queryTimer = setTimeout(() => void loadPeople(true), 250);
 });
 
 watch(() => props.scope, () => {
@@ -225,8 +349,16 @@ watch(() => props.scope, () => {
   peopleAbortController = null;
   requestVersion += 1;
   results.value = [];
-  if (open.value) void loadPeople();
+  activeResultIndex.value = -1;
+  if (open.value) void loadPeople(true);
 });
+
+watch(
+  () => props.modelValue.length,
+  (count) => {
+    if (count <= SELECTED_COLLAPSE_LIMIT) selectedExpanded.value = false;
+  },
+);
 
 onMounted(() => document.addEventListener("pointerdown", handleDocumentPointerDown));
 onBeforeUnmount(() => {
@@ -256,7 +388,29 @@ onBeforeUnmount(() => {
 .repair-people-selected {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 5px;
+}
+
+.repair-selected-toggle {
+  min-height: 28px;
+  border: 1px solid #c9d9ec;
+  border-radius: 8px;
+  padding: 0 9px;
+  background: #f7faff;
+  color: #285b91;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.repair-selected-toggle:hover,
+.repair-selected-toggle:focus-visible {
+  border-color: #3483e8;
+  outline: 0;
+  background: #edf5ff;
+  box-shadow: 0 0 0 3px rgba(52, 131, 232, 0.1);
 }
 
 .repair-person-chip {
@@ -358,9 +512,35 @@ onBeforeUnmount(() => {
 }
 
 .repair-people-results > button:hover,
+.repair-people-results > button.active,
 .repair-people-results > button.selected { background: #edf5ff; }
+.repair-people-results > button.active { outline: 2px solid rgba(52, 131, 232, 0.35); }
 .repair-people-results > button.selected { color: #0f63ca; }
 .repair-people-results > button:disabled { cursor: not-allowed; opacity: 0.55; }
+
+.repair-people-results > button.repair-people-load-more {
+  min-height: 34px;
+  display: flex;
+  justify-content: center;
+  border: 1px solid #c4d6ed;
+  background: #f5f9ff;
+  color: #245b96;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.repair-people-results > button.repair-people-load-more:hover:not(:disabled) {
+  border-color: #6ba2e9;
+  background: #eaf3ff;
+}
+
+.repair-people-result-note {
+  display: block;
+  padding: 8px 10px;
+  color: #8a5a16;
+  font-size: 11px;
+  text-align: center;
+}
 
 .repair-person-avatar {
   width: 32px;

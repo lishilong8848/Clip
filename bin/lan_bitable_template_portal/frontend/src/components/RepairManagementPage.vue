@@ -41,7 +41,7 @@
         </div>
         <div v-if="records.length" class="record-table-head" aria-hidden="true">
           <span>维修项目</span>
-          <span>状态</span>
+          <span>流程状态</span>
           <span>跟进记录</span>
           <span>当前进度</span>
           <span>最近更新</span>
@@ -73,7 +73,7 @@
               </span>
             </span>
             <span class="record-status-cell">
-              <b class="workflow">{{ record.workflow || "待跟进" }}</b>
+              <b class="workflow">{{ record.workflow || "流程未填写" }}</b>
             </span>
             <button
               type="button"
@@ -151,7 +151,7 @@
           </header>
 
           <div v-if="editingRecordId" class="project-drawer-summary">
-            <span><small>状态</small><b>{{ selectedRecord?.workflow || "待跟进" }}</b></span>
+            <span><small>流程状态</small><b>{{ selectedRecord?.workflow || "流程未填写" }}</b></span>
             <span><small>楼栋</small><b>{{ recordBuildingLabel(selectedRecord || {}) }}</b></span>
             <span><small>专业</small><b>{{ recordSpecialtyLabel(selectedRecord || {}) }}</b></span>
             <span><small>当前进度</small><b>{{ recordProgressPercent(selectedRecord || {}) }}%</b></span>
@@ -212,14 +212,32 @@
                   </button>
                 </div>
               </div>
-              <div class="source-relation-item">
+              <div
+                class="source-relation-item"
+                :class="{ disabled: !sourceEventId }"
+                :aria-disabled="!sourceEventId"
+              >
                 <span class="relation-order">2</span>
                 <div>
                   <b>设备检修关联（可选）</b>
-                  <small>{{ selectedRepairIds.length ? selectedRepairSummary : "未关联 · 手动填写" }}</small>
+                  <small>
+                    {{
+                      !sourceEventId
+                        ? "请先选择关联事件单"
+                        : selectedRepairIds.length
+                          ? selectedRepairSummary
+                          : "未关联 · 手动填写"
+                    }}
+                  </small>
                 </div>
                 <div class="relation-actions">
-                  <button type="button" class="btn secondary" :disabled="prefillLoading" @click="openSourcePicker('repair')">
+                  <button
+                    type="button"
+                    class="btn secondary"
+                    :disabled="prefillLoading || !sourceEventId"
+                    :title="!sourceEventId ? '请先选择关联事件单' : ''"
+                    @click="openSourcePicker('repair')"
+                  >
                     {{ selectedRepairIds.length ? "重新选择" : "选择检修通告" }}
                   </button>
                   <button v-if="selectedRepairIds.length" type="button" class="btn quiet" :disabled="prefillLoading" @click="clearRepairSelection">
@@ -268,6 +286,7 @@
                     :model-value="fieldDraft[field.field_name]"
                     :required="isRequiredField(field.field_name)"
                     :error="fieldValidationError(field.field_name)"
+                    :disabled="projectFieldIsSourceControlled(field)"
                     :wide="usesTextarea(field.field_name)"
                     compact
                     @update:model-value="fieldDraft[field.field_name] = $event"
@@ -323,7 +342,6 @@
 
         <RepairFollowupPanel
           v-if="editingRecordId && followupPanelMounted"
-          :key="`${scope}:${editingRecordId}`"
           v-show="activeWorkspaceTab === 'followups'"
           embedded
           :scope="scope"
@@ -355,13 +373,16 @@
       title="选择关联事件单"
       :records="eventCandidates"
       :columns="eventPickerColumns"
-      :selected-ids="sourceEventId ? [sourceEventId] : []"
+      :selected-ids="eventPickerSelectedIds"
       :multiple="false"
       :loading="eventLoading"
+      :has-more="eventCandidatesHaveMore"
+      :result-note="eventCandidateNote"
       :query="eventSearchText"
       search-placeholder="搜索事件标题、楼栋、专业、来源"
       @update:query="eventSearchText = $event"
-      @search="loadEventCandidates"
+      @search="loadEventCandidates(true)"
+      @load-more="loadEventCandidates(false)"
       @close="activePicker = ''"
       @confirm="confirmEventSelection"
     />
@@ -373,10 +394,13 @@
       :selected-ids="repairPickerSelectedIds"
       :multiple="false"
       :loading="repairCandidateLoading"
+      :has-more="repairCandidatesHaveMore"
+      :result-note="repairCandidateNote"
       :query="repairSearchText"
       search-placeholder="搜索检修标题、设备、故障、位置"
       @update:query="repairSearchText = $event"
-      @search="loadRepairCandidates"
+      @search="loadRepairCandidates(true)"
+      @load-more="loadRepairCandidates(false)"
       @close="activePicker = ''"
       @confirm="confirmRepairSelection"
     />
@@ -428,7 +452,7 @@ import RepairPeoplePicker from "./RepairPeoplePicker.vue";
 import RecordPickerDialog from "./RecordPickerDialog.vue";
 import VnetBackButton from "./VnetBackButton.vue";
 
-type PickerColumn = { key: string; label: string; width?: string };
+type PickerColumn = { key: string; label: string; width?: string; wrap?: boolean };
 type SourcePicker = "" | "event" | "repair";
 type WorkspaceTab = "project" | "followups";
 type ConfirmTone = "warning" | "danger" | "primary";
@@ -478,6 +502,20 @@ const PROJECT_FIELD_LABELS: Record<string, string> = {
   "所属专业": "专业",
   "所属数据中心/楼栋-使用": "楼栋",
 };
+const EVENT_SOURCE_CONTROLLED_FIELD_NAMES = new Set([
+  "对应来源",
+  "故障维修原因",
+  "所属数据中心/楼栋-使用",
+]);
+const REPAIR_SOURCE_CONTROLLED_FIELD_NAMES = new Set([
+  "所属数据中心/楼栋-使用",
+  "维修开始时间",
+  "维修结束时间（2026）",
+]);
+const EVENT_CANDIDATE_BATCH_SIZE = 120;
+const EVENT_CANDIDATE_MAX_LIMIT = 960;
+const REPAIR_CANDIDATE_BATCH_SIZE = 80;
+const REPAIR_CANDIDATE_MAX_LIMIT = 800;
 
 const eventPickerColumns: PickerColumn[] = [
   { key: "title", label: "事件标题", width: "360px" },
@@ -486,6 +524,7 @@ const eventPickerColumns: PickerColumn[] = [
   { key: "level", label: "等级", width: "90px" },
   { key: "source", label: "来源", width: "120px" },
   { key: "status", label: "状态", width: "120px" },
+  { key: "selection_status", label: "关联状态", width: "210px", wrap: true },
   { key: "occurrence_time", label: "事件发生时间", width: "170px" },
 ];
 const repairPickerColumns: PickerColumn[] = [
@@ -520,11 +559,17 @@ const projectWorkerPeople = ref<LooseDict[]>([]);
 const eventLoading = ref(false);
 const eventSearchText = ref("");
 const eventCandidates = ref<LooseDict[]>([]);
+const eventCandidateLimit = ref(EVENT_CANDIDATE_BATCH_SIZE);
+const eventCandidatesHaveMore = ref(false);
+const eventCandidateNote = ref("");
 const selectedEvent = ref<LooseDict | null>(null);
 const routeEventPrefillApplied = ref(false);
 const repairCandidateLoading = ref(false);
 const repairSearchText = ref("");
 const repairCandidates = ref<LooseDict[]>([]);
+const repairCandidateLimit = ref(REPAIR_CANDIDATE_BATCH_SIZE);
+const repairCandidatesHaveMore = ref(false);
+const repairCandidateNote = ref("");
 const selectedRepairIds = ref<string[]>([]);
 const selectedRepairRecords = ref<LooseDict[]>([]);
 const repairRecommendedIds = ref<string[]>([]);
@@ -593,6 +638,9 @@ const projectFieldGroups = computed(() => {
 });
 const repairPickerSelectedIds = computed(() => (
   selectedRepairIds.value.length ? selectedRepairIds.value.slice(0, 1) : repairRecommendedIds.value.slice(0, 1)
+));
+const eventPickerSelectedIds = computed(() => (
+  sourceEventId.value ? [sourceEventId.value] : []
 ));
 const selectedEventSummary = computed(() => {
   if (!sourceEventId.value) return "未选择";
@@ -716,6 +764,16 @@ function projectFieldIsEditable(field: LooseDict | null | undefined): boolean {
     field.editable
     || (!selectedRepairIds.value.length && field.editable_without_repair_link),
   );
+}
+
+function projectFieldIsSourceControlled(field: LooseDict | null | undefined): boolean {
+  const fieldName = String(field?.field_name || "").trim();
+  if (!fieldName) return false;
+  if (sourceEventId.value && EVENT_SOURCE_CONTROLLED_FIELD_NAMES.has(fieldName)) {
+    return true;
+  }
+  return selectedRepairIds.value.length > 0
+    && REPAIR_SOURCE_CONTROLLED_FIELD_NAMES.has(fieldName);
 }
 
 function isProjectWorkerField(field: LooseDict | null | undefined): boolean {
@@ -900,6 +958,18 @@ function scopedQuery(): string {
 function currentMonthKey(): string {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function candidateHasMore(
+  payload: LooseDict,
+  recordCount: number,
+  requestedLimit: number,
+): boolean {
+  const totalCount = Number(payload.total ?? payload.total_count);
+  if (Number.isFinite(totalCount) && totalCount > recordCount) return true;
+  return payload.has_more === true
+    || payload.truncated === true
+    || recordCount >= requestedLimit;
 }
 
 function showMessage(text: string, tone: "success" | "warning" | "failed" = "success"): void {
@@ -1126,7 +1196,11 @@ function hydrateUnlinkedRepairDraftFields(): void {
   }
 }
 
-function applyPrefillFields(fieldsPayload: LooseDict, preserveDirty = true): void {
+function applyPrefillFields(
+  fieldsPayload: LooseDict,
+  preserveDirty = true,
+  forcedNames?: ReadonlySet<string>,
+): void {
   if (!fieldsPayload || typeof fieldsPayload !== "object") return;
   for (const [name, value] of Object.entries(fieldsPayload)) {
     prefillPreview[name] = value;
@@ -1134,7 +1208,7 @@ function applyPrefillFields(fieldsPayload: LooseDict, preserveDirty = true): voi
     if (
       !field
       || !projectFieldIsEditable(field)
-      || (preserveDirty && dirtyFieldNames.has(name))
+      || (preserveDirty && dirtyFieldNames.has(name) && !forcedNames?.has(name))
     ) continue;
     if (isProjectWorkerField(field)) {
       projectWorkerPeople.value = projectPeopleFromValue(value);
@@ -1144,17 +1218,28 @@ function applyPrefillFields(fieldsPayload: LooseDict, preserveDirty = true): voi
   }
 }
 
-function replacePrefillFields(fieldsPayload: LooseDict, preserveDirty = true): void {
+function replacePrefillFields(
+  fieldsPayload: LooseDict,
+  preserveDirty = true,
+  forcedNames?: ReadonlySet<string>,
+): void {
   const previousNames = Object.keys(prefillPreview);
   for (const name of previousNames) {
     const field = fields.value.find((item) => String(item.field_name || "") === name);
-    if (projectFieldIsEditable(field) && (!preserveDirty || !dirtyFieldNames.has(name))) {
+    if (
+      projectFieldIsEditable(field)
+      && (
+        !preserveDirty
+        || !dirtyFieldNames.has(name)
+        || forcedNames?.has(name)
+      )
+    ) {
       if (isProjectWorkerField(field)) projectWorkerPeople.value = [];
       else fieldDraft[name] = "";
     }
     delete prefillPreview[name];
   }
-  applyPrefillFields(fieldsPayload, preserveDirty);
+  applyPrefillFields(fieldsPayload, preserveDirty, forcedNames);
 }
 
 function prefillEventTitle(): void {
@@ -1167,7 +1252,21 @@ function prefillEventTitle(): void {
   }
 }
 
-async function loadEventCandidates(): Promise<void> {
+async function loadEventCandidates(resetLimit = true): Promise<void> {
+  const previousCount = eventCandidates.value.length;
+  if (resetLimit) {
+    eventCandidateLimit.value = EVENT_CANDIDATE_BATCH_SIZE;
+    eventCandidateNote.value = "";
+  } else if (eventCandidateLimit.value < EVENT_CANDIDATE_MAX_LIMIT) {
+    eventCandidateLimit.value = Math.min(
+      EVENT_CANDIDATE_MAX_LIMIT,
+      eventCandidateLimit.value + EVENT_CANDIDATE_BATCH_SIZE,
+    );
+  } else {
+    eventCandidatesHaveMore.value = false;
+    return;
+  }
+  const requestedLimit = eventCandidateLimit.value;
   const requestVersion = ++eventRequestVersion;
   eventAbortController?.abort();
   const abortController = new AbortController();
@@ -1178,7 +1277,7 @@ async function loadEventCandidates(): Promise<void> {
       scope: props.scope || "ALL",
       month: currentMonthKey(),
       q: eventSearchText.value,
-      limit: "120",
+      limit: String(requestedLimit),
     });
     const payload = await requestJson(
       `/api/repair-management/event-candidates?${params.toString()}`,
@@ -1186,6 +1285,18 @@ async function loadEventCandidates(): Promise<void> {
     );
     if (requestVersion !== eventRequestVersion) return;
     eventCandidates.value = Array.isArray(payload.records) ? payload.records : [];
+    const loadedMore = eventCandidates.value.length > previousCount;
+    const moreAvailable = candidateHasMore(
+      payload,
+      eventCandidates.value.length,
+      requestedLimit,
+    );
+    const reachedVisibleLimit = moreAvailable
+      && (requestedLimit >= EVENT_CANDIDATE_MAX_LIMIT || (!resetLimit && !loadedMore));
+    eventCandidatesHaveMore.value = moreAvailable && !reachedVisibleLimit;
+    eventCandidateNote.value = reachedVisibleLimit
+      ? "候选较多，当前已到显示上限，请输入关键词缩小范围。"
+      : "";
     const selected = eventCandidates.value.find(
       (item) => eventRecordId(item) === sourceEventId.value,
     );
@@ -1217,6 +1328,10 @@ async function applyEventPrefill(recordId: string, quiet = false): Promise<void>
 }
 
 async function openSourcePicker(picker: Exclude<SourcePicker, "">): Promise<void> {
+  if (picker === "repair" && !sourceEventId.value) {
+    showMessage("请先选择关联事件单，再选择设备检修关联。", "warning");
+    return;
+  }
   activePicker.value = picker;
   if (picker === "event") await loadEventCandidates();
   if (picker === "repair") await loadRepairCandidates();
@@ -1249,7 +1364,21 @@ async function confirmEventSelection(recordIds: string[], quiet = false): Promis
   if (!quiet) showMessage("事件已关联。", "success");
 }
 
-async function loadRepairCandidates(): Promise<void> {
+async function loadRepairCandidates(resetLimit = true): Promise<void> {
+  const previousCount = repairCandidates.value.length;
+  if (resetLimit) {
+    repairCandidateLimit.value = REPAIR_CANDIDATE_BATCH_SIZE;
+    repairCandidateNote.value = "";
+  } else if (repairCandidateLimit.value < REPAIR_CANDIDATE_MAX_LIMIT) {
+    repairCandidateLimit.value = Math.min(
+      REPAIR_CANDIDATE_MAX_LIMIT,
+      repairCandidateLimit.value + REPAIR_CANDIDATE_BATCH_SIZE,
+    );
+  } else {
+    repairCandidatesHaveMore.value = false;
+    return;
+  }
+  const requestedLimit = repairCandidateLimit.value;
   const requestVersion = ++repairRequestVersion;
   repairAbortController?.abort();
   const abortController = new AbortController();
@@ -1261,7 +1390,7 @@ async function loadRepairCandidates(): Promise<void> {
       month: currentMonthKey(),
       event_record_id: sourceEventId.value,
       q: repairSearchText.value,
-      limit: "80",
+      limit: String(requestedLimit),
     });
     const payload = await requestJson(
       `/api/repair-management/repair-candidates?${params.toString()}`,
@@ -1269,6 +1398,18 @@ async function loadRepairCandidates(): Promise<void> {
     );
     if (requestVersion !== repairRequestVersion) return;
     repairCandidates.value = Array.isArray(payload.records) ? payload.records : [];
+    const loadedMore = repairCandidates.value.length > previousCount;
+    const moreAvailable = candidateHasMore(
+      payload,
+      repairCandidates.value.length,
+      requestedLimit,
+    );
+    const reachedVisibleLimit = moreAvailable
+      && (requestedLimit >= REPAIR_CANDIDATE_MAX_LIMIT || (!resetLimit && !loadedMore));
+    repairCandidatesHaveMore.value = moreAvailable && !reachedVisibleLimit;
+    repairCandidateNote.value = reachedVisibleLimit
+      ? "候选较多，当前已到显示上限，请输入关键词缩小范围。"
+      : "";
     const selectedIdSet = new Set(selectedRepairIds.value);
     const matchedSelected = repairCandidates.value.filter(
       (item) => selectedIdSet.has(String(item.record_id || "").trim()),
@@ -1295,24 +1436,25 @@ async function loadRepairCandidates(): Promise<void> {
 }
 
 async function clearEventSelection(): Promise<void> {
-  const nextRepairIds = selectedRepairIds.value.slice(0, 1);
-  if (nextRepairIds.length) {
-    const applied = await applyCombinedPrefill(true, {
-      eventRecordId: "",
-      repairRecordIds: nextRepairIds,
-    });
-    if (!applied) return;
-  } else {
-    prefillRequestVersion += 1;
-    replacePrefillFields({}, true);
-    prefillWarnings.value = [];
-  }
+  const hadRepairSelection = selectedRepairIds.value.length > 0;
+  prefillRequestVersion += 1;
+  prefillAbortController?.abort();
+  prefillAbortController = null;
+  prefillLoading.value = false;
+  replacePrefillFields({}, true);
+  prefillWarnings.value = [];
   sourceEventId.value = "";
   selectedEvent.value = null;
   eventTitle.value = "";
+  selectedRepairIds.value = [];
+  selectedRepairRecords.value = [];
   repairRecommendedIds.value = [];
+  projectWorkerPeople.value = [];
   hasUnsavedChanges.value = true;
-  showMessage("事件关联已清除。", "success");
+  showMessage(
+    hadRepairSelection ? "事件及检修通告关联已清除。" : "事件关联已清除。",
+    "success",
+  );
 }
 
 async function clearRepairSelection(): Promise<void> {
@@ -1337,6 +1479,11 @@ async function clearRepairSelection(): Promise<void> {
 }
 
 async function confirmRepairSelection(recordIds: string[]): Promise<void> {
+  if (!sourceEventId.value) {
+    activePicker.value = "";
+    showMessage("请先选择关联事件单，再选择设备检修关联。", "warning");
+    return;
+  }
   const nextRepairIds = recordIds.map((item) => String(item || "").trim()).filter(Boolean).slice(0, 1);
   const applied = await applyCombinedPrefill(true, {
     eventRecordId: sourceEventId.value,
@@ -1432,7 +1579,19 @@ async function applyCombinedPrefill(
       ? payload.fields as LooseDict
       : {};
     if (!payload.event_context_missing || repairRecordIds.length) {
-      replacePrefillFields(nextFields, true);
+      const sourceControlledNames = new Set<string>();
+      if (eventRecordId) {
+        EVENT_SOURCE_CONTROLLED_FIELD_NAMES.forEach((name) => {
+          sourceControlledNames.add(name);
+        });
+      }
+      if (repairRecordIds.length) {
+        REPAIR_SOURCE_CONTROLLED_FIELD_NAMES.forEach((name) => {
+          sourceControlledNames.add(name);
+        });
+      }
+      sourceControlledNames.forEach((name) => dirtyFieldNames.delete(name));
+      replacePrefillFields(nextFields, true, sourceControlledNames);
     }
     prefillWarnings.value = Array.isArray(payload.warnings)
       ? payload.warnings.map((item: unknown) => String(item || "")).filter(Boolean)
@@ -2039,6 +2198,15 @@ onBeforeUnmount(() => {
 
 .source-relation-item:last-child {
   border-right: 0;
+}
+
+.source-relation-item.disabled {
+  background: #f3f6fa;
+}
+
+.source-relation-item.disabled > div,
+.source-relation-item.disabled > .relation-order {
+  opacity: 0.62;
 }
 
 .source-relation-item > div {

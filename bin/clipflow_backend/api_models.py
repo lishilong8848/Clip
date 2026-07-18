@@ -34,6 +34,8 @@ class WorkbenchActionRequest(APIModel):
     active_item_id: str = ""
     manual_id: str = ""
     manual_key: str = ""
+    manual_binding_choice: str = ""
+    manual_binding_required: bool = False
     operation_id: str = ""
 
 

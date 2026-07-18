@@ -400,7 +400,13 @@ def _record_specialty(record: dict[str, Any]) -> str:
 
 
 def _record_progress(record: dict[str, Any]) -> str:
+    work_summary = (
+        record.get("work_summary")
+        if isinstance(record.get("work_summary"), dict)
+        else {}
+    )
     return _first(
+        work_summary.get("status"),
         record.get("source_progress"),
         record.get("source_status"),
         record.get("status"),
@@ -452,6 +458,8 @@ def _record_disabled_reason(progress: Any) -> str:
     text = str(progress or "").strip()
     if "未结束" not in text and any(flag in text for flag in ("已结束", "正常结束", "延期结束", "结束", "闭环", "已完成")):
         return "该事项已结束，只保留查看状态，不可再次发起。"
+    if "进行中" in text or "未结束" in text:
+        return "该事项已在“已开始未结束”中，请从右侧进行中列表处理。"
     return ""
 
 
@@ -675,6 +683,19 @@ def _query_url(path: str, **params: Any) -> str:
 
 def _manual_url(scope: str, work_type: str) -> str:
     return _query_url("/workbench-lite", scope=scope, work_type=work_type, manual="1")
+
+
+def _undo_created_time(value: Any) -> str:
+    try:
+        timestamp = float(value or 0)
+    except (TypeError, ValueError):
+        return ""
+    if timestamp <= 0:
+        return ""
+    try:
+        return dt.datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M")
+    except (OverflowError, OSError, ValueError):
+        return ""
 
 
 def _datetime_local(value: Any) -> str:
@@ -1286,7 +1307,7 @@ def _source_link_options(
         if not source_id or source_id in used_source_ids:
             continue
         progress = _record_progress(record)
-        if not any(flag in progress for flag in ("未开始", "延期未开始", "进行中")):
+        if _record_disabled_reason(progress) or "未开始" not in progress:
             continue
         options.append(
             {
@@ -1298,6 +1319,24 @@ def _source_link_options(
             }
         )
     return options
+
+
+def _manual_source_binding_panel() -> str:
+    return """
+        <section class="manual-source-binding" data-manual-source-binding>
+          <input type="hidden" name="manual_binding_required" value="1">
+          <input type="hidden" name="manual_binding_choice" value="">
+          <input type="hidden" name="source_record_id" value="">
+          <div class="manual-source-binding-head">
+            <strong>待发起事项关系</strong>
+            <span id="lite-manual-binding-status">请选择绑定方式</span>
+          </div>
+          <div class="manual-source-binding-actions">
+            <button class="btn ghost" type="button" data-manual-binding-mode="bind">绑定待发起事项</button>
+            <button class="btn ghost" type="button" data-manual-binding-mode="unbound">不绑定</button>
+          </div>
+        </section>
+    """
 
 
 def _source_link_select(
@@ -1502,10 +1541,17 @@ def _detail_form(
     active_item_id = str(source.get("active_item_id") or "") if ongoing_item else ""
     site_photo_count = _site_photo_count(source)
     mop_status = _mop_status_text(source, work)
-    source_link_html = _source_link_select(
-        ongoing_item=ongoing_item,
-        current_source_id=source_record_id,
-        options=source_link_options or [],
+    require_manual_binding = bool(
+        effective_manual and not parsed_draft and not prefill_draft
+    )
+    source_link_html = (
+        _manual_source_binding_panel()
+        if require_manual_binding
+        else _source_link_select(
+            ongoing_item=ongoing_item,
+            current_source_id=source_record_id,
+            options=source_link_options or [],
+        )
     )
     hidden_source_input = "" if source_link_html else f'<input type="hidden" name="source_record_id" value="{_e(source_record_id)}">'
     title = (
@@ -1807,7 +1853,10 @@ def render_workbench_lite(
     source_loaded_at = str(payload.get("last_loaded_at") or "").strip()
     source_loaded_text = source_loaded_at or "暂无成功同步时间"
     undo_html = "".join(
-        f"<button class=\"undo-row\" type=\"button\" data-undo-id=\"{_e(item.get('undo_id'))}\">"
+        f"<button class=\"undo-row\" type=\"button\" data-undo-id=\"{_e(item.get('undo_id'))}\""
+        f" data-undo-title=\"{_e(item.get('title') or item.get('undo_label') or '可回退通告')}\""
+        f" data-undo-action=\"{_e(item.get('undo_label') or item.get('undo_action_type') or '回退')}\""
+        f" data-undo-time=\"{_e(_undo_created_time(item.get('undo_created_at')))}\">"
         f"<strong>{_e(item.get('title') or item.get('undo_label') or '可回退通告')}</strong>"
         f"<span>{_e(item.get('undo_label') or item.get('undo_action_type') or '回退')}</span>"
         "</button>"
@@ -2055,6 +2104,14 @@ def render_workbench_lite(
     .source-link-title {{ color:#0c244d; font-size:11px; font-weight:950; line-height:1.2; }}
     .source-link-field select {{ flex:1 1 220px; min-width:160px; min-height:28px; border-radius:999px; padding:3px 9px; font-size:12px; }}
     .source-link-field.readonly {{ padding-right:9px; }}
+    .manual-source-binding {{ display:grid; gap:8px; border:1px solid #bfdbfe; border-radius:14px; padding:9px 10px; background:linear-gradient(135deg,#f8fbff,#eef6ff); }}
+    .manual-source-binding-head {{ display:flex; align-items:center; justify-content:space-between; gap:10px; }}
+    .manual-source-binding-head strong {{ color:#0c244d; font-size:12px; }}
+    .manual-source-binding-head span {{ color:#b15d00; font-size:11px; font-weight:900; }}
+    .manual-source-binding-head span.ready {{ color:#087443; }}
+    .manual-source-binding-actions {{ display:flex; flex-wrap:wrap; gap:7px; }}
+    .manual-source-binding-actions .btn {{ min-height:30px; padding:5px 10px; border-radius:999px; }}
+    .manual-source-binding-actions .btn.active {{ color:#fff; border-color:#1f63ff; background:#1f63ff; box-shadow:0 8px 18px rgba(31,99,255,.18); }}
     .mop-action-panel {{ display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:6px; width:max-content; max-width:100%; margin:0 0 5px; border:1px solid #bfdbfe; border-radius:999px; padding:4px 6px 4px 9px; background:linear-gradient(135deg,#f5fbff,#ffffff); }}
     .mop-action-panel.warn {{ border-color:#fbd38d; background:linear-gradient(135deg,#fff8ed,#ffffff); }}
     .mop-action-panel.ok {{ border-color:#bbf7d0; background:linear-gradient(135deg,#f0fdf4,#ffffff); }}
@@ -2110,6 +2167,11 @@ def render_workbench_lite(
     .target-candidate-row span {{ color:#64748b; font-size:12px; line-height:1.45; }}
     .target-candidate-row small {{ width:max-content; max-width:100%; border-radius:999px; padding:3px 8px; color:#0a57d8; background:#eaf3ff; font-size:11px; font-weight:900; }}
     .target-candidate-empty {{ border:1px dashed #cbdaf0; border-radius:16px; padding:18px; color:#64748b; text-align:center; background:#f8fbff; }}
+    .manual-source-tools {{ display:flex; gap:8px; padding:12px 20px 0; }}
+    .manual-source-tools input {{ flex:1 1 auto; min-width:0; }}
+    .undo-confirm-copy {{ display:grid; gap:8px; padding:16px 18px; }}
+    .undo-confirm-copy strong {{ color:#0c244d; font-size:15px; line-height:1.45; overflow-wrap:anywhere; }}
+    .undo-confirm-copy span {{ color:#64748b; font-size:12px; line-height:1.5; }}
     body.has-dirty-lite-form .job-status {{ color:#b15d00; }}
     .empty {{ border:1px dashed #cbdaf0; border-radius:16px; padding:18px; color:#64748b; text-align:center; background:#f8fbff; }}
     @keyframes liteSpin {{ to {{ transform:rotate(360deg); }} }}
@@ -2251,6 +2313,38 @@ def render_workbench_lite(
       <footer class="end-check-actions">
         <button class="btn ghost" type="button" id="lite-target-candidates-cancel">取消</button>
         <button class="btn primary" type="button" id="lite-target-candidates-confirm" disabled>确认绑定</button>
+      </footer>
+    </section>
+  </div>
+  <div class="end-check-backdrop" id="lite-manual-source-candidates" hidden>
+    <section class="end-check-dialog target-candidate-dialog" role="dialog" aria-modal="true" aria-labelledby="lite-manual-source-title">
+      <header class="end-check-head">
+        <span>待发起事项关系</span>
+        <strong id="lite-manual-source-title">选择要绑定的待发起事项</strong>
+      </header>
+      <div class="manual-source-tools">
+        <input id="lite-manual-source-search" type="search" placeholder="搜索名称、楼栋或专业" autocomplete="off">
+      </div>
+      <div class="target-candidate-list" id="lite-manual-source-list"></div>
+      <footer class="end-check-actions">
+        <button class="btn ghost" type="button" id="lite-manual-source-cancel">取消</button>
+        <button class="btn primary" type="button" id="lite-manual-source-confirm" disabled>确认绑定</button>
+      </footer>
+    </section>
+  </div>
+  <div class="end-check-backdrop" id="lite-undo-confirm" hidden>
+    <section class="end-check-dialog" role="dialog" aria-modal="true" aria-labelledby="lite-undo-confirm-title">
+      <header class="end-check-head">
+        <span>回退确认</span>
+        <strong id="lite-undo-confirm-title">确认回退这条通告</strong>
+      </header>
+      <div class="undo-confirm-copy">
+        <strong id="lite-undo-confirm-name"></strong>
+        <span id="lite-undo-confirm-meta"></span>
+      </div>
+      <footer class="end-check-actions">
+        <button class="btn ghost" type="button" id="lite-undo-confirm-cancel">取消</button>
+        <button class="btn danger" type="button" id="lite-undo-confirm-apply">确认回退</button>
       </footer>
     </section>
   </div>
@@ -2625,6 +2719,7 @@ def render_workbench_lite(
     }}
     const commandPatchKeys = new Set([
       'manual', 'manual_id', 'scope', 'action', 'work_type', 'notice_type', 'operation_id',
+      'manual_binding_choice', 'manual_binding_required',
       'active_item_id', 'source_record_id', 'target_record_id', 'record_id',
       'source_work_type', 'converted_from_work_type', 'converted_to_work_type', 'sync_maintenance_target',
       'paired_maintenance_target_record_id', 'paired_maintenance_original_title',
@@ -3073,6 +3168,14 @@ def render_workbench_lite(
         .filter(([name]) => !previewValue(form, name))
         .map(([, label]) => label);
     }}
+    function manualBindingIssue(form) {{
+      if (!form || previewValue(form, 'manual') !== '1' || previewValue(form, 'manual_binding_required') !== '1') return '';
+      const choice = previewValue(form, 'manual_binding_choice');
+      if (!choice) return '请选择绑定待发起事项或不绑定';
+      if (choice === 'bind' && !previewValue(form, 'source_record_id')) return '请选择要绑定的待发起事项';
+      if (!['bind', 'unbound'].includes(choice)) return '待发起事项绑定方式无效';
+      return '';
+    }}
     function parseLiteDateTime(value) {{
       const raw = String(value || '').trim();
       if (!raw) return null;
@@ -3149,6 +3252,12 @@ def render_workbench_lite(
       const workType = targetForm.querySelector('[name="work_type"]')?.value || targetForm.dataset.workType || 'maintenance';
       const sitePhotoCount = Number(previewValue(targetForm, 'site_photo_count') || 0);
       const buttons = targetForm.querySelectorAll('button[name="submit_action"]');
+      const bindingIssue = manualBindingIssue(targetForm);
+      if (bindingIssue) {{
+        buttons.forEach(button => button.disabled = true);
+        setActionReason(bindingIssue, 'blocked');
+        return;
+      }}
       const missing = missingRequiredFields(targetForm);
       if (missing.length) {{
         buttons.forEach(button => button.disabled = true);
@@ -3184,6 +3293,192 @@ def render_workbench_lite(
       if (modal) modal.hidden = true;
       liteTargetCandidates = [];
       liteSelectedTargetIndex = -1;
+    }}
+    let liteManualSourceCandidates = [];
+    let liteSelectedManualSourceIndex = -1;
+    let liteManualSourceSearchTimer = 0;
+    function manualSourceModal() {{
+      return document.getElementById('lite-manual-source-candidates');
+    }}
+    function closeManualSourceCandidates() {{
+      const modal = manualSourceModal();
+      if (modal) modal.hidden = true;
+      liteManualSourceCandidates = [];
+      liteSelectedManualSourceIndex = -1;
+    }}
+    function setManualBindingChoice(form, choice, candidate) {{
+      if (!form) return;
+      const normalized = ['bind', 'unbound'].includes(choice) ? choice : '';
+      setFormValue(form, 'manual_binding_choice', normalized);
+      const sourceId = normalized === 'bind' ? String(candidate?.source_record_id || '').trim() : '';
+      setFormValue(form, 'source_record_id', sourceId);
+      setFormValue(form, 'record_id', sourceId);
+      const panel = form.querySelector('[data-manual-source-binding]');
+      panel?.querySelectorAll('[data-manual-binding-mode]').forEach(button => {{
+        button.classList.toggle('active', button.getAttribute('data-manual-binding-mode') === normalized);
+      }});
+      const status = document.getElementById('lite-manual-binding-status');
+      if (status) {{
+        status.textContent = normalized === 'bind'
+          ? (candidate?.title || '已绑定待发起事项')
+          : (normalized === 'unbound' ? '不绑定待发起事项' : '请选择绑定方式');
+        status.classList.toggle('ready', Boolean(normalized));
+      }}
+      setLiteFormDirty(true);
+      updateNoticePreview(form);
+    }}
+    function renderManualSourceCandidates(items) {{
+      const list = document.getElementById('lite-manual-source-list');
+      const confirmButton = document.getElementById('lite-manual-source-confirm');
+      if (!list || !confirmButton) return;
+      liteManualSourceCandidates = Array.isArray(items) ? items : [];
+      liteSelectedManualSourceIndex = -1;
+      confirmButton.disabled = true;
+      if (!liteManualSourceCandidates.length) {{
+        const empty = document.createElement('div');
+        empty.className = 'target-candidate-empty';
+        empty.textContent = '没有可绑定的待发起事项。进行中和已结束事项不会出现在这里。';
+        list.replaceChildren(empty);
+        return;
+      }}
+      const rows = liteManualSourceCandidates.map((candidate, index) => {{
+        const row = document.createElement('button');
+        row.className = 'target-candidate-row';
+        row.type = 'button';
+        row.setAttribute('data-manual-source-index', String(index));
+        const title = document.createElement('strong');
+        title.textContent = candidate.title || '未命名待发起事项';
+        const meta = document.createElement('span');
+        meta.textContent = [
+          candidate.progress || '未开始',
+          candidate.building || '',
+          candidate.specialty || '',
+        ].filter(Boolean).join(' · ');
+        row.append(title, meta);
+        return row;
+      }});
+      list.replaceChildren(...rows);
+    }}
+    async function loadManualSourceCandidates(search) {{
+      const form = document.getElementById('lite-notice-form');
+      const list = document.getElementById('lite-manual-source-list');
+      if (!form || !list) return;
+      const loading = document.createElement('div');
+      loading.className = 'target-candidate-empty';
+      loading.textContent = '正在读取待发起事项...';
+      list.replaceChildren(loading);
+      const url = new URL('/api/workbench/source-options', location.origin);
+      url.searchParams.set('scope', previewValue(form, 'scope') || getCurrentScope());
+      url.searchParams.set('work_type', previewValue(form, 'work_type') || form.dataset.workType || 'maintenance');
+      if (String(search || '').trim()) url.searchParams.set('q', String(search || '').trim());
+      const response = await fetch(url.pathname + url.search, {{ credentials: 'same-origin', cache: 'no-store' }});
+      const data = await response.json().catch(() => ({{}}));
+      if (handleLiteAuthRequired(response, data)) return;
+      if (!response.ok || data.ok === false) throw new Error(data.error || '读取待发起事项失败');
+      renderManualSourceCandidates((data.data && data.data.items) || data.items || []);
+    }}
+    async function openManualSourceCandidates() {{
+      const modal = manualSourceModal();
+      const search = document.getElementById('lite-manual-source-search');
+      if (!modal) return;
+      modal.hidden = false;
+      if (search) search.value = '';
+      try {{
+        await loadManualSourceCandidates('');
+        search?.focus();
+      }} catch (error) {{
+        closeManualSourceCandidates();
+        showLiteError(error && error.message ? error.message : '读取待发起事项失败');
+      }}
+    }}
+    function selectManualSourceCandidate(index) {{
+      liteSelectedManualSourceIndex = Number.isInteger(index) ? index : -1;
+      document.querySelectorAll('[data-manual-source-index]').forEach(row => {{
+        row.classList.toggle('active', Number(row.getAttribute('data-manual-source-index')) === liteSelectedManualSourceIndex);
+      }});
+      const confirmButton = document.getElementById('lite-manual-source-confirm');
+      if (confirmButton) confirmButton.disabled = liteSelectedManualSourceIndex < 0;
+    }}
+    function confirmManualSourceCandidate() {{
+      const candidate = liteManualSourceCandidates[liteSelectedManualSourceIndex];
+      const form = document.getElementById('lite-notice-form');
+      if (!candidate || !form) return;
+      setManualBindingChoice(form, 'bind', candidate);
+      closeManualSourceCandidates();
+      setLiteStatus('已绑定待发起事项');
+    }}
+    let pendingUndoButton = null;
+    function closeUndoConfirm() {{
+      const modal = document.getElementById('lite-undo-confirm');
+      if (modal) modal.hidden = true;
+      pendingUndoButton = null;
+    }}
+    function openUndoConfirm(button) {{
+      const modal = document.getElementById('lite-undo-confirm');
+      if (!modal || !button) return;
+      pendingUndoButton = button;
+      const title = button.getAttribute('data-undo-title') || '可回退通告';
+      const action = button.getAttribute('data-undo-action') || '回退上一步';
+      const createdAt = button.getAttribute('data-undo-time') || '';
+      const nameNode = document.getElementById('lite-undo-confirm-name');
+      const metaNode = document.getElementById('lite-undo-confirm-meta');
+      if (nameNode) nameNode.textContent = title;
+      if (metaNode) metaNode.textContent = [action, createdAt ? '操作时间 ' + createdAt : ''].filter(Boolean).join(' · ');
+      modal.hidden = false;
+      document.getElementById('lite-undo-confirm-apply')?.focus();
+    }}
+    async function pollUndoJob(jobId) {{
+      const startedAt = Date.now();
+      let delay = 320;
+      while (Date.now() - startedAt < 90000) {{
+        await sleep(delay);
+        const response = await fetch(`/api/jobs/${{encodeURIComponent(jobId)}}`, {{
+          credentials: 'same-origin',
+          cache: 'no-store',
+        }});
+        const data = await response.json().catch(() => ({{}}));
+        if (handleLiteAuthRequired(response, data)) return false;
+        if (!response.ok || data.ok === false) throw new Error(data.error || '读取回退状态失败');
+        const job = data.data || {{}};
+        const phase = String(job.phase || '');
+        if (phase === 'success') return true;
+        if (phase === 'failed') throw new Error(job.error || job.upload_message || '回退失败');
+        setLiteStatus('回退中：' + jobPhaseText(phase));
+        delay = Math.min(1200, Math.round(delay * 1.35));
+      }}
+      throw new Error('回退仍在处理中，请稍后刷新本页');
+    }}
+    async function applyPendingUndo() {{
+      const undoButton = pendingUndoButton;
+      const undoId = undoButton?.getAttribute('data-undo-id') || '';
+      if (!undoButton || !undoId) return;
+      const applyButton = document.getElementById('lite-undo-confirm-apply');
+      setButtonBusy(applyButton, true);
+      undoButton.disabled = true;
+      clearLiteHtmlCache();
+      try {{
+        const response = await fetch('/api/notice-undo/' + encodeURIComponent(undoId) + '/apply', {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          credentials: 'same-origin',
+          body: JSON.stringify({{ scope: getCurrentScope() }}),
+        }});
+        const data = await response.json().catch(() => ({{}}));
+        if (handleLiteAuthRequired(response, data)) return;
+        if (!response.ok || data.ok === false) throw new Error(data.error || '回退失败');
+        const jobId = (data.data && data.data.job_id) || data.job_id || '';
+        closeUndoConfirm();
+        setLiteStatus('回退已受理，正在恢复通告...');
+        await pollUndoJob(jobId);
+        clearLiteHtmlCache();
+        await refreshCurrentLite('回退成功，正在更新列表...', ['.status', '.summary', '.workspace']);
+        setLiteStatus('回退成功，通告已恢复');
+      }} catch (error) {{
+        showLiteError(error && error.message ? error.message : '回退失败');
+        undoButton.disabled = false;
+      }} finally {{
+        setButtonBusy(applyButton, false);
+      }}
     }}
     function targetCandidateRecordId(candidate) {{
       return String(candidate?.target_record_id || candidate?.record_id || '').trim();
@@ -3642,6 +3937,48 @@ def render_workbench_lite(
         resolveDiscardConfirm(true);
         return;
       }}
+      const manualBindingButton = target.closest('[data-manual-binding-mode]');
+      if (manualBindingButton) {{
+        event.preventDefault();
+        const form = manualBindingButton.closest('#lite-notice-form') || document.getElementById('lite-notice-form');
+        const mode = manualBindingButton.getAttribute('data-manual-binding-mode') || '';
+        if (mode === 'bind') await openManualSourceCandidates();
+        else if (mode === 'unbound') {{
+          setManualBindingChoice(form, 'unbound', null);
+          setLiteStatus('已选择不绑定待发起事项');
+        }}
+        return;
+      }}
+      const manualSourceRow = target.closest('[data-manual-source-index]');
+      if (manualSourceRow) {{
+        event.preventDefault();
+        selectManualSourceCandidate(Number(manualSourceRow.getAttribute('data-manual-source-index')));
+        return;
+      }}
+      const manualSourceCancel = target.closest('#lite-manual-source-cancel');
+      if (manualSourceCancel) {{
+        event.preventDefault();
+        closeManualSourceCandidates();
+        return;
+      }}
+      const manualSourceConfirm = target.closest('#lite-manual-source-confirm');
+      if (manualSourceConfirm) {{
+        event.preventDefault();
+        confirmManualSourceCandidate();
+        return;
+      }}
+      const undoCancel = target.closest('#lite-undo-confirm-cancel');
+      if (undoCancel) {{
+        event.preventDefault();
+        closeUndoConfirm();
+        return;
+      }}
+      const undoApply = target.closest('#lite-undo-confirm-apply');
+      if (undoApply) {{
+        event.preventDefault();
+        await applyPendingUndo();
+        return;
+      }}
       const manualOpen = target.closest('#manual-open');
       if (manualOpen) {{
         event.preventDefault();
@@ -3758,24 +4095,8 @@ def render_workbench_lite(
       }}
       const undoButton = target.closest('.undo-row[data-undo-id]');
       if (undoButton) {{
-        const undoId = undoButton.getAttribute('data-undo-id');
-        if (!undoId) return;
-        undoButton.disabled = true;
-        clearLiteHtmlCache();
-        try {{
-          const response = await fetch('/api/notice-undo/' + encodeURIComponent(undoId) + '/apply', {{
-            method: 'POST',
-            headers: {{ 'Content-Type': 'application/json' }},
-            body: JSON.stringify({{ scope: getCurrentScope() }}),
-          }});
-          const data = await response.json().catch(() => ({{}}));
-          if (handleLiteAuthRequired(response, data)) return;
-          if (!response.ok || data.ok === false) throw new Error(data.error || '回退失败');
-          await refreshCurrentLite('回退已受理，正在更新页面...');
-        }} catch (error) {{
-          showLiteError(error && error.message ? error.message : '回退失败');
-          undoButton.disabled = false;
-        }}
+        event.preventDefault();
+        openUndoConfirm(undoButton);
         return;
       }}
       const ongoingDeleteButton = target.closest('button[data-ongoing-delete-mode]');
@@ -3909,6 +4230,8 @@ def render_workbench_lite(
         closePickers();
         closeEndCheck();
         closeTargetCandidates();
+        closeManualSourceCandidates();
+        closeUndoConfirm();
       }}
     }});
     window.addEventListener('popstate', () => {{
@@ -3941,7 +4264,7 @@ def render_workbench_lite(
         ? (sourceRecordId || patch.manual_id || rawRecordId || patch.active_item_id || '')
         : (targetRecordId || patch.active_item_id || rawRecordId || '');
       patch.action = action;
-      patch.manual = patch.manual === '1';
+      patch.manual = ['1', 'true', 'yes', 'on'].includes(String(patch.manual || '').trim().toLowerCase());
       patch.actual_action_time = actualActionTime || patch.actual_action_time || '';
       patch.response_time = patch.actual_action_time || patch.response_time || '';
       patch.source_record_id = sourceRecordId;
@@ -4308,6 +4631,9 @@ def render_workbench_lite(
         qt_queued: '等待展示',
         upload_waiting: '等待上传多维',
         uploading: '正在上传多维',
+        undo_queued: '回退已排队',
+        undoing_remote: '正在恢复多维记录',
+        undoing_local: '正在恢复本地状态',
         success: '发送成功',
         failed: '发送失败'
       }};
@@ -4409,6 +4735,13 @@ def render_workbench_lite(
         return;
       }}
       delete form.dataset.endCheckApproved;
+      const bindingIssue = manualBindingIssue(form);
+      if (bindingIssue) {{
+        showLiteError(bindingIssue);
+        setLiteStatus('提交失败：' + bindingIssue);
+        updateActionAvailability(form);
+        return;
+      }}
       const missing = missingRequiredFields(form);
       if (missing.length) {{
         const message = '缺少' + missing.join('、') + '，暂不能发送';
@@ -4456,6 +4789,15 @@ def render_workbench_lite(
       }}
     }});
     document.addEventListener('input', (event) => {{
+      if (event.target && event.target.id === 'lite-manual-source-search') {{
+        window.clearTimeout(liteManualSourceSearchTimer);
+        liteManualSourceSearchTimer = window.setTimeout(() => {{
+          loadManualSourceCandidates(event.target.value).catch(error => {{
+            showLiteError(error && error.message ? error.message : '搜索待发起事项失败');
+          }});
+        }}, 260);
+        return;
+      }}
       if (event.target && event.target.closest('#lite-notice-form')) {{
         if (event.target.name === 'actual_action_time') {{
           event.target.dataset.autoActualTime = event.target.value ? '0' : '1';

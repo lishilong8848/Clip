@@ -9,6 +9,8 @@
       </div>
     </header>
 
+    <MessageBanner v-if="message" :tone="messageTone" :text="message" />
+
     <div v-if="!summaryRecordId" class="followup-empty">未选择维修项目</div>
     <div v-else-if="loading && !fields.length" class="followup-empty" aria-live="polite">
       正在读取当前维修项目的跟进记录...
@@ -34,27 +36,21 @@
           >
             <RefreshCw :size="16" :class="{ spinning: loading }" aria-hidden="true" />
           </button>
-          <button
-            v-if="!creatingNewFollowup && !followupDirty"
-            type="button"
-            class="followup-button primary timeline-create-button"
-            @click="requestStartCreate"
-          >
-            <Plus :size="16" aria-hidden="true" />
-            <span>新建跟进</span>
-          </button>
         </div>
         <div class="followup-timeline-list" role="listbox" aria-label="选择跟进记录">
-          <div v-if="loading && !records.length" class="followup-empty">正在读取...</div>
-          <div v-else-if="!records.length" class="followup-empty">暂无匹配的跟进记录</div>
+          <div v-if="loading && !timelineRecords.length" class="followup-empty">正在读取...</div>
+          <div v-else-if="!timelineRecords.length" class="followup-empty">暂无匹配的跟进记录</div>
           <button
-            v-for="record in records"
+            v-for="record in timelineRecords"
             v-else
             :key="record.record_id"
             type="button"
             role="option"
             :aria-selected="editingRecordId === record.record_id"
-            :class="{ active: editingRecordId === record.record_id }"
+            :class="{
+              active: editingRecordId === record.record_id,
+              'outside-filter': isOutsideFilterRecord(record),
+            }"
             @click="requestSelectRecord(record)"
           >
             <span class="timeline-marker">
@@ -62,7 +58,10 @@
             </span>
             <span class="timeline-copy">
               <strong>{{ record.title || "未命名跟进记录" }}</strong>
-              <small>{{ repairDisplayTime(record.created_time) || "时间未填" }}</small>
+              <small v-if="isOutsideFilterRecord(record)" class="timeline-filter-note">
+                当前编辑 · 筛选外
+              </small>
+              <small v-else>{{ repairDisplayTime(record.created_time) || "时间未填" }}</small>
             </span>
             <b>{{ progressLabel(record.progress) }}</b>
           </button>
@@ -143,22 +142,20 @@
               <span>删除</span>
             </button>
             <button
-              v-if="showPrimaryAction"
               type="button"
               class="followup-button primary"
               :disabled="primaryActionDisabled"
               :title="primaryActionDisabledReason"
               @click="handlePrimaryAction"
             >
-              <Save :size="16" aria-hidden="true" />
+              <Plus v-if="primaryActionMode === 'create'" :size="16" aria-hidden="true" />
+              <Save v-else :size="16" aria-hidden="true" />
               <span>{{ primaryActionLabel }}</span>
             </button>
           </div>
         </footer>
       </main>
     </div>
-
-    <MessageBanner v-if="message" :tone="messageTone" :text="message" />
 
     <ConfirmDialog
       :open="deleteDialogOpen"
@@ -188,10 +185,13 @@
       :multiple="true"
       :allow-empty="true"
       :loading="cmdbLoading"
+      :has-more="cmdbCandidatesHaveMore"
+      :result-note="cmdbCandidateNote"
       :query="cmdbQuery"
       search-placeholder="搜索设备名称、唯一ID、分类或位置"
       @update:query="cmdbQuery = $event"
-      @search="loadCmdbCandidates"
+      @search="loadCmdbCandidates(true)"
+      @load-more="loadCmdbCandidates(false)"
       @close="cmdbPickerOpen = false"
       @confirm="confirmCmdb"
     />
@@ -219,6 +219,11 @@ import {
   repairDisplayTime,
   repairFieldUsesTextarea,
 } from "../repairManagementUtils";
+import {
+  clearRepairFollowupCache,
+  getRepairFollowupCache,
+  setRepairFollowupCache,
+} from "../repairFollowupCache";
 import type { LooseDict } from "../types";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import MessageBanner from "./MessageBanner.vue";
@@ -287,6 +292,8 @@ const groupFields: Array<{ key: string; label: string; fields: string[] }> = [
 const visibleFollowupFieldNames = new Set(
   groupFields.flatMap((group) => group.fields),
 );
+const CMDB_CANDIDATE_BATCH_SIZE = 200;
+const CMDB_CANDIDATE_MAX_LIMIT = 1_000;
 
 const loading = ref(false);
 const saving = ref(false);
@@ -302,6 +309,9 @@ const cmdbPickerOpen = ref(false);
 const cmdbLoading = ref(false);
 const cmdbQuery = ref("");
 const cmdbCandidates = ref<LooseDict[]>([]);
+const cmdbCandidateLimit = ref(CMDB_CANDIDATE_BATCH_SIZE);
+const cmdbCandidatesHaveMore = ref(false);
+const cmdbCandidateNote = ref("");
 const cmdbRecordIds = ref<string[]>([]);
 const workerPeople = ref<LooseDict[]>([]);
 const brandModelOptions = ref<Record<string, string[]>>({});
@@ -315,25 +325,11 @@ const followupDirty = ref(false);
 const discardDialogOpen = ref(false);
 const followupQuery = ref("");
 const PAGE_SIZE = 20;
-const FOLLOWUP_RESPONSE_CACHE_TTL_MS = 15_000;
-const followupResponseCache = new Map<string, { expiresAt: number; payload: LooseDict }>();
-
-function clearFollowupResponseCache(summaryRecordId = ""): void {
-  const normalizedId = String(summaryRecordId || "").trim();
-  if (!normalizedId) {
-    followupResponseCache.clear();
-    return;
-  }
-  for (const key of followupResponseCache.keys()) {
-    if (key.includes(`summary_record_id=${encodeURIComponent(normalizedId)}`)) {
-      followupResponseCache.delete(key);
-    }
-  }
-}
 let pendingDiscardAction: null | (() => void) = null;
 let recordsRequestVersion = 0;
 let cmdbRequestVersion = 0;
 let queryTimer: ReturnType<typeof setTimeout> | undefined;
+let skipNextQueryReload = false;
 let recordsAbortController: AbortController | null = null;
 let cmdbAbortController: AbortController | null = null;
 
@@ -367,6 +363,15 @@ const selectedCmdbLabel = computed(() => {
   return summary ? `${summary}${ids.length > 2 ? ` 等 ${ids.length} 台` : ""}` : `已选择 ${ids.length} 台设备`;
 });
 const pageCount = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)));
+const editingRecordOutsideResults = computed(() => Boolean(
+  editingRecordId.value
+  && selectedRecord.value
+  && !records.value.some((item) => String(item.record_id || "") === editingRecordId.value),
+));
+const timelineRecords = computed(() => {
+  if (!editingRecordOutsideResults.value || !selectedRecord.value) return records.value;
+  return [selectedRecord.value, ...records.value];
+});
 const selectedBrand = computed(() => String(draft[BRAND_FIELD_NAME] || "").trim());
 const isInternalRepairParty = computed(() => (
   String(draft[REPAIR_PARTY_FIELD_NAME] || "").trim() === "我方"
@@ -381,22 +386,24 @@ const hasDraftContent = computed(() => Boolean(
   || workerPeople.value.length
   || editableFields.value.some((field) => String(draft[String(field.field_name || "")] || "").trim()),
 ));
+const primaryActionMode = computed<"create" | "save">(() => (
+  editingRecordId.value && !followupDirty.value ? "create" : "save"
+));
 const primaryActionLabel = computed(() => {
   if (saving.value) return "保存中";
-  return editingRecordId.value ? "保存跟进修改" : "保存新跟进";
+  if (primaryActionMode.value === "create") return "新增跟进记录";
+  return editingRecordId.value ? "更新跟进记录" : "新增跟进记录";
 });
 const primaryActionDisabled = computed(() => {
   if (saving.value || !props.summaryRecordId) return true;
+  if (primaryActionMode.value === "create") return false;
   if (editingRecordId.value) return !followupDirty.value;
   return !hasDraftContent.value;
 });
-const showPrimaryAction = computed(() => Boolean(
-  saving.value || creatingNewFollowup.value || followupDirty.value,
-));
 const primaryActionDisabledReason = computed(() => {
   if (saving.value) return "正在保存";
   if (!props.summaryRecordId) return "请先选择维修项目";
-  if (editingRecordId.value && !followupDirty.value) return "没有需要保存的修改";
+  if (primaryActionMode.value === "create") return "新增一条跟进记录";
   if (!primaryActionDisabled.value) return primaryActionLabel.value;
   return "请至少填写一项跟进内容";
 });
@@ -420,6 +427,23 @@ const followupSaveStateIcon = computed(() => {
 function showMessage(text: string, tone: "success" | "warning" | "failed" = "success"): void {
   message.value = text;
   messageTone.value = tone;
+}
+
+function isOutsideFilterRecord(record: LooseDict): boolean {
+  return editingRecordOutsideResults.value
+    && String(record.record_id || "") === editingRecordId.value;
+}
+
+function candidateHasMore(
+  payload: LooseDict,
+  recordCount: number,
+  requestedLimit: number,
+): boolean {
+  const totalCount = Number(payload.total ?? payload.total_count);
+  if (Number.isFinite(totalCount) && totalCount > recordCount) return true;
+  return payload.has_more === true
+    || payload.truncated === true
+    || recordCount >= requestedLimit;
 }
 
 function isProgressField(field: LooseDict): boolean {
@@ -711,19 +735,13 @@ async function loadRecords(announce = false): Promise<void> {
     if (announce) params.set("refresh", "1");
     const requestUrl = `/api/repair-management/followups?${params.toString()}`;
     const cacheKey = requestUrl.replace(/([?&])refresh=1(?:&|$)/, "$1").replace(/[?&]$/, "");
-    const cached = followupResponseCache.get(cacheKey);
+    const cached = getRepairFollowupCache(cacheKey);
     let payload: LooseDict;
-    if (!announce && cached && cached.expiresAt > Date.now()) {
-      payload = cached.payload;
+    if (!announce && cached) {
+      payload = cached;
     } else {
       payload = await requestJson(requestUrl, { signal: abortController.signal });
-      followupResponseCache.set(cacheKey, {
-        expiresAt: Date.now() + FOLLOWUP_RESPONSE_CACHE_TTL_MS,
-        payload,
-      });
-      if (followupResponseCache.size > 36) {
-        followupResponseCache.delete(followupResponseCache.keys().next().value || "");
-      }
+      setRepairFollowupCache(cacheKey, payload);
     }
     if (
       requestVersion !== recordsRequestVersion
@@ -751,8 +769,12 @@ async function loadRecords(announce = false): Promise<void> {
       const current = records.value.find((item) => String(item.record_id || "") === editingRecordId.value);
       if (current && !followupDirty.value) {
         selectRecord(current);
-      } else if (followupFocusRecordId.value) {
-        followupFocusRecordId.value = "";
+      } else if (!current) {
+        if (followupFocusRecordId.value) followupFocusRecordId.value = "";
+        if (!followupDirty.value) {
+          if (records.value.length) selectRecord(records.value[0]);
+          else startCreate();
+        }
       }
     } else if (!creatingNewFollowup.value && records.value.length) {
       selectRecord(records.value[0]);
@@ -800,6 +822,10 @@ function buildFields(): LooseDict {
 }
 
 function handlePrimaryAction(): void {
+  if (primaryActionMode.value === "create") {
+    requestStartCreate();
+    return;
+  }
   void saveRecord();
 }
 
@@ -847,7 +873,7 @@ async function saveRecord(): Promise<void> {
       warnings.length ? `${successText}${warnings.join("；")}` : successText,
       warnings.length ? "warning" : "success",
     );
-    clearFollowupResponseCache(props.summaryRecordId);
+    clearRepairFollowupCache(props.summaryRecordId);
     await loadRecords(false);
     emit("changed");
   } catch (error: unknown) {
@@ -880,7 +906,7 @@ async function deleteRecordNow(): Promise<void> {
       { method: "DELETE" },
     );
     resetForParent();
-    clearFollowupResponseCache(props.summaryRecordId);
+    clearRepairFollowupCache(props.summaryRecordId);
     await loadRecords(false);
     emit("changed");
     showMessage("维修跟进已删除。", "success");
@@ -891,7 +917,21 @@ async function deleteRecordNow(): Promise<void> {
   }
 }
 
-async function loadCmdbCandidates(): Promise<void> {
+async function loadCmdbCandidates(resetLimit = true): Promise<void> {
+  const previousCount = cmdbCandidates.value.length;
+  if (resetLimit) {
+    cmdbCandidateLimit.value = CMDB_CANDIDATE_BATCH_SIZE;
+    cmdbCandidateNote.value = "";
+  } else if (cmdbCandidateLimit.value < CMDB_CANDIDATE_MAX_LIMIT) {
+    cmdbCandidateLimit.value = Math.min(
+      CMDB_CANDIDATE_MAX_LIMIT,
+      cmdbCandidateLimit.value + CMDB_CANDIDATE_BATCH_SIZE,
+    );
+  } else {
+    cmdbCandidatesHaveMore.value = false;
+    return;
+  }
+  const requestedLimit = cmdbCandidateLimit.value;
   const requestVersion = ++cmdbRequestVersion;
   cmdbAbortController?.abort();
   const abortController = new AbortController();
@@ -901,7 +941,7 @@ async function loadCmdbCandidates(): Promise<void> {
     const params = new URLSearchParams({
       scope: props.scope || "ALL",
       q: cmdbQuery.value,
-      limit: "200",
+      limit: String(requestedLimit),
     });
     const payload = await requestJson(
       `/api/repair-management/cmdb-candidates?${params.toString()}`,
@@ -909,6 +949,18 @@ async function loadCmdbCandidates(): Promise<void> {
     );
     if (requestVersion !== cmdbRequestVersion) return;
     cmdbCandidates.value = Array.isArray(payload.records) ? payload.records : [];
+    const loadedMore = cmdbCandidates.value.length > previousCount;
+    const moreAvailable = candidateHasMore(
+      payload,
+      cmdbCandidates.value.length,
+      requestedLimit,
+    );
+    const reachedVisibleLimit = moreAvailable
+      && (requestedLimit >= CMDB_CANDIDATE_MAX_LIMIT || (!resetLimit && !loadedMore));
+    cmdbCandidatesHaveMore.value = moreAvailable && !reachedVisibleLimit;
+    cmdbCandidateNote.value = reachedVisibleLimit
+      ? "候选较多，当前已到显示上限，请输入关键词缩小范围。"
+      : "";
   } catch (error: unknown) {
     if (abortController.signal.aborted) return;
     if (requestVersion !== cmdbRequestVersion) return;
@@ -921,7 +973,7 @@ async function loadCmdbCandidates(): Promise<void> {
 
 async function openCmdbPicker(): Promise<void> {
   cmdbPickerOpen.value = true;
-  await loadCmdbCandidates();
+  await loadCmdbCandidates(true);
 }
 
 function confirmCmdb(recordIds: string[]): void {
@@ -969,8 +1021,15 @@ function confirmCmdb(recordIds: string[]): void {
 watch(
   () => [props.summaryRecordId, props.scope] as const,
   () => {
+    if (queryTimer) {
+      clearTimeout(queryTimer);
+      queryTimer = undefined;
+    }
     page.value = 1;
-    followupQuery.value = "";
+    if (followupQuery.value) {
+      skipNextQueryReload = true;
+      followupQuery.value = "";
+    }
     resetForParent();
     void loadRecords(false);
   },
@@ -978,12 +1037,16 @@ watch(
 );
 
 watch(followupQuery, () => {
+  if (skipNextQueryReload) {
+    skipNextQueryReload = false;
+    return;
+  }
   if (queryTimer) clearTimeout(queryTimer);
   queryTimer = setTimeout(() => {
     page.value = 1;
     void loadRecords(false);
   }, 300);
-});
+}, { flush: "sync" });
 
 onBeforeUnmount(() => {
   recordsRequestVersion += 1;
@@ -1241,7 +1304,7 @@ onBeforeUnmount(() => {
 .followup-workspace {
   min-width: 0;
   display: grid;
-  grid-template-columns: 250px minmax(0, 1fr);
+  grid-template-columns: 300px minmax(0, 1fr);
   align-content: start;
   gap: 12px;
   padding-top: 7px;
@@ -1326,11 +1389,6 @@ onBeforeUnmount(() => {
   min-height: 36px;
 }
 
-.timeline-create-button {
-  grid-column: 1 / -1;
-  width: 100%;
-}
-
 .followup-timeline-list {
   min-height: 140px;
   overflow-y: auto;
@@ -1366,6 +1424,11 @@ onBeforeUnmount(() => {
   background: #edf4ff;
 }
 
+.followup-timeline-list > button.outside-filter {
+  border-color: #efc47d;
+  background: #fff8eb;
+}
+
 .timeline-marker {
   width: 20px;
   height: 20px;
@@ -1392,17 +1455,26 @@ onBeforeUnmount(() => {
 .timeline-copy small {
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .timeline-copy strong {
+  display: -webkit-box;
   font-size: 13px;
   font-weight: 700;
+  line-height: 1.35;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .timeline-copy small {
+  white-space: nowrap;
   color: #70839a;
   font-size: 11px;
+}
+
+.timeline-copy .timeline-filter-note {
+  color: #a05d14;
+  font-weight: 700;
 }
 
 .followup-timeline-list > button > b {
@@ -1547,7 +1619,7 @@ onBeforeUnmount(() => {
 
 @media (max-width: 1279px) and (min-width: 1024px) {
   .followup-workspace {
-    grid-template-columns: 220px minmax(0, 1fr);
+    grid-template-columns: 260px minmax(0, 1fr);
   }
 
   .followup-field-grid {

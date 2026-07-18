@@ -3435,6 +3435,31 @@ class FastAPIPortalController:
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)
 
+        @app.get("/api/workbench/source-options")
+        async def workbench_source_options(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_scope_or_error(
+                    session, request.query_params.get("scope") or "ALL"
+                )
+                work_type = str(
+                    request.query_params.get("work_type") or "maintenance"
+                ).strip()
+                search = str(request.query_params.get("q") or "").strip()
+                items = await asyncio.to_thread(
+                    PortalRuntime.service.list_bindable_source_items,
+                    scope=scope,
+                    work_type=work_type,
+                    search=search,
+                    ongoing_items=self._get_ongoing(scope),
+                    limit=200,
+                )
+                return self._json_ok(request, session, {"items": items})
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
         @app.post("/api/notice-attachments")
         async def notice_attachments(request: Request):
             session = self._current_session(request)
@@ -7400,6 +7425,8 @@ class FastAPIPortalController:
                 job_id=job_id,
                 requested_by=requested_by,
             )
+            PortalRuntime.clear_payload_cache()
+            self._clear_read_cache()
             PortalRuntime.service.mark_job(
                 job_id,
                 phase="success",
@@ -7408,8 +7435,6 @@ class FastAPIPortalController:
                 error="",
                 error_retryable=False,
             )
-            PortalRuntime.clear_payload_cache()
-            self._clear_read_cache()
         except Exception as exc:
             if undo_id:
                 PortalRuntime.state_store.mark_notice_undo_action(

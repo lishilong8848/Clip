@@ -25,13 +25,13 @@
             title="关闭"
             @click="emit('close')"
           >
-            ×
+            <X :size="18" aria-hidden="true" />
           </button>
         </header>
 
-        <form class="record-picker-toolbar" @submit.prevent="emit('search')">
+        <form class="record-picker-toolbar" @submit.prevent="runSearchNow">
           <label>
-            <span class="search-icon" aria-hidden="true"></span>
+            <Search :size="16" class="search-icon" aria-hidden="true" />
             <input
               ref="searchInput"
               v-model.trim="queryModel"
@@ -40,8 +40,14 @@
               autofocus
             />
           </label>
-          <button type="submit" class="picker-search" :disabled="loading">
-            {{ loading ? "读取中" : "搜索" }}
+          <button
+            type="submit"
+            class="picker-search icon-only"
+            :disabled="loading"
+            :aria-label="loading ? '正在刷新记录' : '刷新记录'"
+            :title="loading ? '读取中' : '刷新记录'"
+          >
+            <RefreshCw :size="17" :class="{ spinning: loading }" aria-hidden="true" />
           </button>
         </form>
 
@@ -71,12 +77,13 @@
                 <td :colspan="columns.length + 1" class="picker-empty">没有找到可选择的记录</td>
               </tr>
               <tr
-                v-for="record in records"
+                v-for="record in pagedRecords"
                 v-else
                 :key="recordId(record)"
-                :class="{ selected: isSelected(record) }"
+                :class="{ selected: isSelected(record), unavailable: !recordSelectable(record) }"
                 :aria-selected="isSelected(record)"
-                tabindex="0"
+                :aria-disabled="!recordSelectable(record)"
+                :tabindex="recordSelectable(record) ? 0 : -1"
                 @click="toggle(record)"
                 @dblclick="confirmSingle(record)"
                 @keydown.enter.prevent="toggle(record)"
@@ -87,6 +94,7 @@
                     :type="multiple ? 'checkbox' : 'radio'"
                     :name="multiple ? undefined : titleId"
                     :checked="isSelected(record)"
+                    :disabled="!recordSelectable(record)"
                     :aria-label="`选择${cellText(record, columns[0]?.key || 'title')}`"
                     @click.stop="toggle(record)"
                   />
@@ -111,7 +119,24 @@
         </div>
 
         <footer class="record-picker-footer">
-          <span>已选：<b>{{ draftSelection.length }}</b> 条记录</span>
+          <div class="picker-result-summary">
+            <span>已选：<b>{{ draftSelection.length }}</b> 条记录</span>
+            <small v-if="resultNote">{{ resultNote }}</small>
+            <button
+              v-if="hasMore"
+              type="button"
+              class="picker-load-more"
+              :disabled="loading"
+              @click="emit('load-more')"
+            >
+              {{ loading ? "加载中" : "加载更多" }}
+            </button>
+          </div>
+          <nav v-if="pageCount > 1" class="picker-pager" aria-label="候选记录分页">
+            <button type="button" :disabled="page <= 1" @click="page -= 1">上一页</button>
+            <span>{{ page }} / {{ pageCount }}</span>
+            <button type="button" :disabled="page >= pageCount" @click="page += 1">下一页</button>
+          </nav>
           <div>
             <button type="button" class="picker-cancel" @click="emit('close')">取消</button>
             <button
@@ -131,6 +156,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { RefreshCw, Search, X } from "lucide-vue-next";
 import { repairFieldValueToText } from "../repairManagementUtils";
 import type { LooseDict } from "../types";
 
@@ -151,6 +177,8 @@ const props = withDefaults(defineProps<{
   multiple?: boolean;
   allowEmpty?: boolean;
   loading?: boolean;
+  hasMore?: boolean;
+  resultNote?: string;
   query?: string;
   searchPlaceholder?: string;
 }>(), {
@@ -159,6 +187,8 @@ const props = withDefaults(defineProps<{
   multiple: true,
   allowEmpty: false,
   loading: false,
+  hasMore: false,
+  resultNote: "",
   query: "",
   searchPlaceholder: "输入关键词搜索",
 });
@@ -167,20 +197,32 @@ const emit = defineEmits<{
   close: [];
   confirm: [recordIds: string[]];
   search: [];
+  "load-more": [];
   "update:query": [value: string];
 }>();
 
 const titleId = `record-picker-${Math.random().toString(36).slice(2, 9)}`;
 const draftSelection = ref<string[]>([]);
+const page = ref(1);
 const dialogRef = ref<HTMLElement | null>(null);
 const searchInput = ref<HTMLInputElement | null>(null);
 let previousBodyOverflow = "";
 let searchTimer: ReturnType<typeof setTimeout> | undefined;
 let returnFocusElement: HTMLElement | null = null;
+const PAGE_SIZE = 30;
 
 const queryModel = computed({
   get: () => props.query,
   set: (value: string) => emit("update:query", value),
+});
+const pageCount = computed(() => Math.max(1, Math.ceil(props.records.length / PAGE_SIZE)));
+const selectedIdsKey = computed(() => props.selectedIds
+  .map((item) => String(item || "").trim())
+  .filter(Boolean)
+  .join("\u001f"));
+const pagedRecords = computed(() => {
+  const start = (page.value - 1) * PAGE_SIZE;
+  return props.records.slice(start, start + PAGE_SIZE);
 });
 
 function recordId(record: LooseDict): string {
@@ -195,7 +237,12 @@ function isSelected(record: LooseDict): boolean {
   return draftSelection.value.includes(recordId(record));
 }
 
+function recordSelectable(record: LooseDict): boolean {
+  return record.selectable !== false;
+}
+
 function toggle(record: LooseDict): void {
+  if (!recordSelectable(record)) return;
   const id = recordId(record);
   if (!id) return;
   if (!props.multiple) {
@@ -208,9 +255,16 @@ function toggle(record: LooseDict): void {
 }
 
 function confirmSingle(record: LooseDict): void {
-  if (props.multiple) return;
+  if (props.multiple || !recordSelectable(record)) return;
   const id = recordId(record);
   if (id) emit("confirm", [id]);
+}
+
+function runSearchNow(): void {
+  if (searchTimer) clearTimeout(searchTimer);
+  searchTimer = undefined;
+  page.value = 1;
+  emit("search");
 }
 
 function handleKeydown(event: KeyboardEvent): void {
@@ -235,20 +289,21 @@ function handleKeydown(event: KeyboardEvent): void {
   }
 }
 
-watch(
-  () => [props.open, props.selectedIds] as const,
-  ([open]) => {
-    if (!open) return;
-    const selected = props.selectedIds.map((item) => String(item || "").trim()).filter(Boolean);
-    draftSelection.value = props.multiple ? selected : selected.slice(0, 1);
-  },
-  { immediate: true, deep: true },
-);
+function syncSelectionFromProps(): void {
+  const selected = props.selectedIds.map((item) => String(item || "").trim()).filter(Boolean);
+  draftSelection.value = props.multiple ? selected : selected.slice(0, 1);
+}
+
+watch(selectedIdsKey, () => {
+  if (props.open) syncSelectionFromProps();
+});
 
 watch(
   () => props.open,
   (open) => {
     if (open) {
+      syncSelectionFromProps();
+      page.value = 1;
       returnFocusElement = document.activeElement instanceof HTMLElement
         ? document.activeElement
         : null;
@@ -273,10 +328,18 @@ watch(
   () => props.query,
   () => {
     if (!props.open) return;
+    page.value = 1;
     if (searchTimer) clearTimeout(searchTimer);
     searchTimer = setTimeout(() => {
       if (props.open) emit("search");
     }, 300);
+  },
+);
+
+watch(
+  () => props.records.length,
+  () => {
+    page.value = Math.min(page.value, pageCount.value);
   },
 );
 
@@ -383,26 +446,13 @@ onBeforeUnmount(() => {
   position: absolute;
   left: 14px;
   top: 50%;
-  width: 13px;
-  height: 13px;
   transform: translateY(-55%);
-  border: 2px solid #748aa3;
-  border-radius: 50%;
-}
-
-.search-icon::after {
-  content: "";
-  position: absolute;
-  right: -5px;
-  bottom: -3px;
-  width: 6px;
-  height: 2px;
-  transform: rotate(45deg);
-  border-radius: 2px;
-  background: #748aa3;
+  color: #748aa3;
+  pointer-events: none;
 }
 
 .picker-search,
+.picker-load-more,
 .picker-confirm,
 .picker-cancel {
   min-height: 38px;
@@ -412,11 +462,28 @@ onBeforeUnmount(() => {
   cursor: pointer;
 }
 
+.picker-search.icon-only {
+  width: 38px;
+  flex: 0 0 38px;
+  padding: 0;
+}
+
 .picker-search,
 .picker-confirm {
   border: 1px solid #1265dc;
   background: #1265dc;
   color: #fff;
+}
+
+.picker-load-more {
+  border: 1px solid #b9cce4;
+  background: #f5f9ff;
+  color: #245b96;
+}
+
+.picker-load-more:hover:not(:disabled) {
+  border-color: #6ba2e9;
+  background: #eaf3ff;
 }
 
 .picker-cancel {
@@ -426,9 +493,25 @@ onBeforeUnmount(() => {
 }
 
 .picker-search:disabled,
+.picker-load-more:disabled,
 .picker-confirm:disabled {
   opacity: 0.48;
   cursor: not-allowed;
+}
+
+.picker-result-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.picker-result-summary small {
+  max-width: 360px;
+  overflow: hidden;
+  color: #8a5a16;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .record-picker-table-wrap {
@@ -478,6 +561,20 @@ onBeforeUnmount(() => {
 .record-picker-table tbody tr.selected {
   background: #e9f3ff;
   box-shadow: inset 3px 0 0 #176de0;
+}
+
+.record-picker-table tbody tr.unavailable {
+  background: #f6f8fb;
+  color: #738398;
+  cursor: not-allowed;
+}
+
+.record-picker-table tbody tr.unavailable:hover {
+  background: #f6f8fb;
+}
+
+.record-picker-table tbody tr.unavailable td {
+  opacity: 0.78;
 }
 
 .record-picker-table td span {
@@ -549,6 +646,46 @@ onBeforeUnmount(() => {
   gap: 10px;
 }
 
+.picker-pager {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.picker-pager button {
+  min-height: 32px;
+  border: 1px solid #d4deeb;
+  border-radius: 8px;
+  padding: 0 10px;
+  background: #f7faff;
+  color: #24527e;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.picker-pager button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.picker-pager span {
+  color: #627690;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.spinning {
+  animation: record-picker-spin 0.9s linear infinite;
+}
+
+@keyframes record-picker-spin {
+  to { transform: rotate(360deg); }
+}
+
 .sr-only {
   position: absolute;
   width: 1px;
@@ -571,6 +708,21 @@ onBeforeUnmount(() => {
     height: 100vh;
     border: 0;
     border-radius: 0;
+  }
+
+  .record-picker-footer {
+    flex-wrap: wrap;
+  }
+
+  .picker-pager {
+    order: 3;
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinning {
+    animation: none;
   }
 }
 </style>

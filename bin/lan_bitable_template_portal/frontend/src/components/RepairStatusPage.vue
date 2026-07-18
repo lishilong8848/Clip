@@ -73,7 +73,7 @@
         </div>
         <div class="status-table-head" aria-hidden="true">
           <span>维修项目</span>
-          <span>状态</span>
+          <span>维修进展</span>
           <span>跟进记录</span>
           <span>当前进度</span>
           <span>最近跟进</span>

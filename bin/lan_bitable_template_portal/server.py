@@ -3884,7 +3884,9 @@ class PortalRuntime:
             existing_response_time=existing_response_time or None,
             transfer_to_overhaul=prepared.get("transfer_to_overhaul"),
             recover=bool(prepared.get("recover_selected", False)),
-            robot_group_choice="auto",
+            robot_group_choice=(
+                str(prepared.get("robot_group_choice") or "auto").strip() or "auto"
+            ),
             maintenance_cycle=str(prepared.get("maintenance_cycle") or "").strip() or None,
         )
 
@@ -5367,6 +5369,26 @@ class PortalRuntime:
         prepared["paired_upload_status"] = "success" if success else "failed"
         if success:
             prepared["paired_upload_warning"] = ""
+            if record_id and isinstance(paired, dict):
+                try:
+                    cls.state_store.upsert_notice_identity(
+                        {
+                            **paired,
+                            "work_type": "maintenance",
+                            "notice_type": "维保通告",
+                            "target_record_id": record_id,
+                            "record_id": record_id,
+                            "status": (
+                                "已结束"
+                                if str(paired.get("action") or "").strip().lower()
+                                == "end"
+                                else "进行中"
+                            ),
+                        },
+                        origin="paired_maintenance_upload",
+                    )
+                except Exception as exc:
+                    log_warning(f"配套维保目标 ID 写入身份表失败: {exc}")
         else:
             prepared["paired_upload_warning"] = str(message or "维保多维同步失败。")
         return prepared

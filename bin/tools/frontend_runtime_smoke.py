@@ -1392,13 +1392,13 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await page.getByRole('button', {{ name: /^跟进记录/ }}).first().click();
           await waitForTextOrDump(page, 'A楼测试维修跟进记录', 'repair-management-autofill');
           const followupPanel = page.locator('.followup-panel');
-          if (await followupPanel.getByRole('button', {{ name: '新建跟进', exact: true }}).count() !== 1) {{
+          if (await followupPanel.getByRole('button', {{ name: '新增跟进记录', exact: true }}).count() !== 1) {{
             throw new Error('followup create action should have exactly one entry');
           }}
           if (await followupPanel.getByText('超链接', {{ exact: true }}).count()) {{
             throw new Error('followup hyperlink field must stay hidden');
           }}
-          await followupPanel.getByRole('button', {{ name: '新建跟进', exact: true }}).click();
+          await followupPanel.getByRole('button', {{ name: '新增跟进记录', exact: true }}).click();
           const followupColumnCount = await followupPanel.locator('.followup-field-grid').first().evaluate((node) => (
             getComputedStyle(node).gridTemplateColumns.split(' ').filter(Boolean).length
           ));
@@ -1477,10 +1477,10 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           if (await followupDescription.inputValue() !== '烟测新增跟进') {{
             throw new Error('cancelling repair drawer close discarded unsaved followup draft');
           }}
-          if (await followupPanel.getByRole('button', {{ name: '保存新跟进', exact: true }}).count() !== 1) {{
+          if (await followupPanel.getByRole('button', {{ name: '新增跟进记录', exact: true }}).count() !== 1) {{
             throw new Error('followup create mode must show one submit action');
           }}
-          await followupPanel.getByRole('button', {{ name: '保存新跟进', exact: true }}).click();
+          await followupPanel.getByRole('button', {{ name: '新增跟进记录', exact: true }}).click();
           await followupPanel.getByText('维修跟进记录已新增。', {{ exact: true }}).waitFor({{ state: 'visible' }});
           await page.getByRole('button', {{ name: /^跟进记录 2$/ }}).first().waitFor({{ state: 'visible' }});
           const followupOptions = followupPanel.locator('.followup-timeline-list [role="option"]');
@@ -1488,7 +1488,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await followupOptions.last().click();
           const progressInput = followupPanel.locator('[data-field-name="维修进度"] [data-progress-number]');
           await progressInput.fill('60');
-          await followupPanel.getByRole('button', {{ name: '保存跟进修改', exact: true }}).click();
+          await followupPanel.getByRole('button', {{ name: '更新跟进记录', exact: true }}).click();
           await followupPanel.getByText('维修跟进记录已更新。', {{ exact: true }}).waitFor({{ state: 'visible' }});
           await assertLayout(page, 'repair-management-entry');
           await page.getByRole('button', {{ name: '维修单信息' }}).click();
