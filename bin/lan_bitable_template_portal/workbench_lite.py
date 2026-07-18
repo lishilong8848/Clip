@@ -1211,14 +1211,19 @@ def _attention_rows(
     return "\n".join(rows) or "<div class=\"empty compact\">当前没有需要处理的问题</div>"
 
 
-def _selected_source(records: list[dict[str, Any]], record_id: str) -> dict[str, Any] | None:
+def _selected_source(
+    records: list[dict[str, Any]],
+    record_id: str,
+    *,
+    fallback_to_first: bool = True,
+) -> dict[str, Any] | None:
     if not records:
         return None
     if record_id:
         for record in records:
             if str(record.get("record_id") or record.get("source_record_id") or "") == record_id:
                 return record
-    return records[0]
+    return records[0] if fallback_to_first else None
 
 
 def _selected_ongoing(items: list[dict[str, Any]], active_item_id: str) -> dict[str, Any] | None:
@@ -1786,12 +1791,22 @@ def render_workbench_lite(
         )
         current_ongoing_count = len(filtered_ongoing)
         ongoing_page_size = ONGOING_PAGE_SIZE
+    effective_record_id = str(prefill_source_record_id or record_id or "").strip()
+    detail_requested = bool(
+        effective_record_id
+        or active_item_id
+        or manual
+        or parsed_draft
+        or prefill_draft
+        or prefill_source_record_id
+        or prefill_context_id
+    )
     pager_base = {
         "scope": scope,
         "work_type": view_work,
         "search": search,
         "specialty": specialty,
-        "record_id": record_id,
+        "record_id": effective_record_id,
         "active_item_id": active_item_id,
         "manual": "1" if manual else "",
         "repair_management_record_id": prefill_context_id,
@@ -1815,10 +1830,22 @@ def render_workbench_lite(
         base_params={**pager_base, "pending_page": pending_page_num},
     )
     selected_ongoing = _selected_ongoing(ongoing, active_item_id)
-    selected_record = None if selected_ongoing or manual or parsed_draft else _selected_source(records, record_id)
+    selected_record = (
+        None
+        if selected_ongoing or manual or parsed_draft
+        else _selected_source(
+            records,
+            effective_record_id,
+            fallback_to_first=not bool(prefill_source_record_id or prefill_draft),
+        )
+    )
     if selected_record and not selected_ongoing:
         selected_ongoing = _linked_ongoing_for_source(selected_record, ongoing)
-    selected_record_id = str((selected_record or {}).get("record_id") or "")
+    selected_record_id = (
+        str((selected_record or {}).get("record_id") or "")
+        if detail_requested
+        else ""
+    )
     detail_source = selected_ongoing or selected_record or {}
     detail_work = _item_work_type(detail_source) if detail_source else (work_filter or "maintenance")
     if parsed_draft:
@@ -1834,6 +1861,13 @@ def render_workbench_lite(
     elif manual and work_filter:
         detail_work = work_filter
     source_options = _source_link_options(records, ongoing, work_type=detail_work)
+    detail_drawer_open = detail_requested
+    drawer_title = str(
+        (parsed_draft or {}).get("title")
+        or (prefill_draft or {}).get("title")
+        or (_record_title(detail_source) if detail_source else "")
+        or f"{WORK_TYPE_LABELS.get(detail_work, '通告')}通告"
+    ).strip()
     user = session.get("user") if isinstance(session.get("user"), dict) else {}
     is_admin_session = bool(session.get("is_admin")) or str(session.get("role") or "").strip().lower() == "admin"
     scope_options = scope_options or []
@@ -1972,14 +2006,14 @@ def render_workbench_lite(
     .undo-row strong {{ display:block; color:#0c244d; }}
     .undo-row span {{ color:#0a57d8; font-weight:900; font-size:12px; }}
     .empty.compact {{ padding:10px; }}
-    .workspace {{ display:grid; grid-template-columns:minmax(300px,360px) minmax(0,1fr); gap:12px; margin-top:10px; align-items:start; }}
+    .workspace {{ display:grid; grid-template-columns:minmax(0,1fr); gap:12px; margin-top:10px; align-items:start; }}
     .workspace.is-switching {{ position:relative; min-height:420px; }}
     .workspace.is-switching > * {{ opacity:0; pointer-events:none; }}
     .workspace.is-switching::before {{ content:""; position:absolute; inset:0; z-index:3; border:1px solid #d8e5f7; border-radius:20px; background:linear-gradient(135deg,rgba(255,255,255,.96),rgba(238,246,255,.94)); box-shadow:0 14px 32px rgba(15,73,153,.08); }}
     .workspace.is-switching::after {{ content:attr(data-loading-text); position:absolute; left:50%; top:50%; z-index:4; transform:translate(-50%,-50%); min-width:180px; min-height:42px; border-radius:999px; padding:11px 22px; display:flex; align-items:center; justify-content:center; color:#0a57d8; background:#fff; border:1px solid #cfe0ff; box-shadow:0 12px 28px rgba(31,99,255,.14); font-size:14px; font-weight:950; }}
-    .task-inbox {{ position:sticky; top:12px; display:grid; gap:10px; max-height:calc(100vh - 24px); overflow:auto; align-self:start; }}
+    .task-inbox {{ position:relative; display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; overflow:visible; align-self:start; }}
     .task-inbox.panel {{ padding:10px; }}
-    .inbox-head {{ display:grid; gap:8px; }}
+    .inbox-head {{ grid-column:1 / -1; display:grid; grid-template-columns:minmax(0,1fr) minmax(240px,360px); gap:12px; align-items:center; }}
     .inbox-title {{ margin:0; display:flex; align-items:center; justify-content:space-between; gap:10px; font-size:16px; }}
     .inbox-summary {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:7px; }}
     .inbox-summary span {{ min-width:0; display:flex; align-items:center; justify-content:space-between; gap:6px; border:1px solid #dce8f8; border-radius:13px; padding:7px 9px; color:#53677f; background:#f8fbff; font-size:11px; font-weight:950; }}
@@ -1987,8 +2021,23 @@ def render_workbench_lite(
     .inbox-section {{ border:1px solid #d8e5f7; border-radius:16px; padding:8px; background:linear-gradient(180deg,#fff,#f8fbff); box-shadow:0 6px 16px rgba(15,73,153,.04); }}
     .inbox-section h3 {{ margin:0 0 8px; display:flex; align-items:center; justify-content:space-between; gap:10px; color:#0c244d; font-size:14px; line-height:1.2; }}
     .inbox-section h3 b {{ min-width:28px; height:22px; border-radius:999px; display:inline-flex; align-items:center; justify-content:center; color:#0a57d8; background:#eaf3ff; font-size:12px; font-weight:950; }}
-    .inbox-section .list {{ max-height:30vh; }}
+    .inbox-section .list {{ max-height:54vh; }}
     .inbox-section.ongoing-inbox-panel h3 b {{ color:#087443; background:#e8fff3; }}
+    body.notice-drawer-open {{ overflow:hidden; }}
+    .notice-detail-overlay {{ position:fixed; z-index:180; inset:0; display:none; justify-content:flex-end; background:rgba(8,25,52,.5); backdrop-filter:blur(3px); }}
+    .notice-detail-overlay.open {{ display:flex; }}
+    .panel.notice-detail-drawer {{ width:min(1180px,calc(100vw - 72px)); height:100%; min-width:0; overflow:hidden; display:grid; grid-template-rows:auto minmax(0,1fr); border-radius:16px 0 0 16px; border-right:0; padding:0; background:#fff; box-shadow:-18px 0 56px rgba(8,37,82,.22); isolation:isolate; }}
+    .panel.notice-detail-drawer::before {{ display:none; }}
+    .notice-detail-drawer.loading::after {{ top:82px; right:22px; }}
+    .notice-drawer-head {{ position:relative; z-index:2; min-height:72px; display:flex; align-items:center; justify-content:space-between; gap:16px; padding:12px 18px; border-bottom:1px solid #d8e5f7; background:linear-gradient(135deg,#f8fbff,#eef6ff); }}
+    .notice-drawer-title {{ min-width:0; display:grid; gap:3px; }}
+    .notice-drawer-title span {{ width:max-content; border-radius:999px; padding:4px 9px; color:#0a57d8; background:#eaf3ff; font-size:11px; font-weight:950; }}
+    .notice-drawer-title h2 {{ min-width:0; margin:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#0c244d; font-size:18px; line-height:1.25; }}
+    .notice-drawer-close {{ flex:0 0 auto; width:38px; height:38px; display:grid; place-items:center; border:1px solid #cfe0f5; border-radius:13px; color:#0a57d8; background:#fff; cursor:pointer; font-size:25px; line-height:1; box-shadow:0 8px 18px rgba(15,73,153,.08); }}
+    .notice-drawer-close:hover {{ border-color:#1f63ff; background:#eef6ff; }}
+    .notice-drawer-close:focus-visible {{ outline:3px solid rgba(31,99,255,.22); outline-offset:2px; }}
+    .notice-drawer-body {{ position:relative; z-index:1; min-height:0; overflow:auto; display:flex; flex-direction:column; align-items:stretch; gap:9px; padding:12px 16px 20px; }}
+    .notice-drawer-body > .paste-drawer,.notice-drawer-body > .detail-form {{ flex:0 0 auto; }}
     .detail-panel {{ min-width:0; }}
     .panel {{ position:relative; border:1px solid #d8e5f7; border-radius:18px; padding:10px; background:rgba(255,255,255,.95); box-shadow:0 10px 24px rgba(15,73,153,.08); }}
     .panel::before {{ content:""; position:absolute; left:14px; right:14px; top:0; height:3px; border-radius:0 0 999px 999px; background:linear-gradient(90deg,#1f63ff,#00aeda); opacity:.72; }}
@@ -2083,10 +2132,11 @@ def render_workbench_lite(
     .site-photo-remove {{ border:0; border-radius:999px; width:18px; height:18px; display:grid; place-items:center; color:#64748b; background:#eef2f7; cursor:pointer; font-size:12px; line-height:1; }}
     .site-photo-remove:hover {{ color:#b42318; background:#fff1f0; }}
     .site-photo-panel.uploading .site-photo-drop {{ pointer-events:none; opacity:.68; }}
-    .paste-drawer {{ border:1px solid #cfe0f5; border-radius:18px; background:linear-gradient(135deg,#f8fbff,#eef6ff); overflow:hidden; }}
-    .paste-drawer summary {{ min-height:38px; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:8px 11px; cursor:pointer; color:#0a57d8; font-size:13px; font-weight:900; }}
-    .paste-drawer summary::after {{ content:"展开"; border-radius:999px; padding:4px 9px; color:#0a57d8; background:#fff; font-size:12px; box-shadow:inset 0 0 0 1px rgba(31,99,255,.14); }}
-    .paste-drawer[open] summary::after {{ content:"收起"; }}
+    .paste-drawer {{ position:relative; z-index:1; border:1px solid #cfe0f5; border-radius:18px; background:linear-gradient(135deg,#f8fbff,#eef6ff); overflow:hidden; }}
+    .paste-drawer-toggle {{ width:100%; min-height:38px; display:flex; align-items:center; justify-content:space-between; gap:12px; border:0; padding:8px 11px; cursor:pointer; color:#0a57d8; background:transparent; font:900 13px/1.4 "Microsoft YaHei",Arial,sans-serif; text-align:left; }}
+    .paste-drawer-toggle::after {{ content:"展开"; flex:0 0 auto; border-radius:999px; padding:4px 9px; color:#0a57d8; background:#fff; font-size:12px; box-shadow:inset 0 0 0 1px rgba(31,99,255,.14); }}
+    .paste-drawer.open .paste-drawer-toggle::after {{ content:"收起"; }}
+    .paste-drawer-content[hidden] {{ display:none; }}
     .paste-drawer form {{ display:grid; gap:10px; padding:0 13px 13px; }}
     .paste-drawer textarea {{ min-height:96px; resize:vertical; }}
     .form-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }}
@@ -2143,7 +2193,7 @@ def render_workbench_lite(
     .action-reason.ready {{ color:#087443; background:#e8fff3; }}
     .action-reason.blocked {{ color:#b42318; background:#fff1f0; }}
     .form-actions .btn.primary,.form-actions .btn.danger,.form-actions .btn.danger-ghost {{ min-width:104px; box-shadow:0 12px 24px rgba(21,99,255,.14); }}
-    .end-check-backdrop {{ position:fixed; inset:0; z-index:60; display:grid; place-items:center; padding:24px; background:rgba(8,32,74,.36); backdrop-filter:blur(8px); }}
+    .end-check-backdrop {{ position:fixed; inset:0; z-index:240; display:grid; place-items:center; padding:24px; background:rgba(8,32,74,.36); backdrop-filter:blur(8px); }}
     .end-check-backdrop[hidden] {{ display:none; }}
     .end-check-dialog {{ width:min(560px,100%); border:1px solid #d8e5f7; border-radius:24px; background:#fff; box-shadow:0 28px 70px rgba(8,32,74,.24); overflow:hidden; }}
     .end-check-head {{ padding:15px 18px; background:linear-gradient(135deg,#f8fbff,#eef6ff); border-bottom:1px solid #e5edf8; }}
@@ -2176,7 +2226,7 @@ def render_workbench_lite(
     .empty {{ border:1px dashed #cbdaf0; border-radius:16px; padding:18px; color:#64748b; text-align:center; background:#f8fbff; }}
     @keyframes liteSpin {{ to {{ transform:rotate(360deg); }} }}
     @media (prefers-reduced-motion: reduce) {{ *, *::before, *::after {{ transition:none !important; animation:none !important; scroll-behavior:auto !important; }} }}
-    @media (max-width: 1180px) {{ .workspace,.summary,.lite-tools,.workbench-guide {{ grid-template-columns:1fr; }} .task-inbox {{ position:relative; top:auto; max-height:none; overflow:visible; }} .inbox-section .list {{ max-height:42vh; }} .toolbar {{ flex-wrap:wrap; }} }}
+    @media (max-width: 1180px) {{ .workspace,.summary,.lite-tools,.workbench-guide {{ grid-template-columns:1fr; }} .task-inbox {{ position:relative; top:auto; max-height:none; grid-template-columns:1fr; overflow:visible; }} .inbox-head {{ grid-column:auto; grid-template-columns:1fr; }} .inbox-section .list {{ max-height:42vh; }} .toolbar {{ flex-wrap:wrap; }} .notice-detail-drawer {{ width:min(1000px,calc(100vw - 28px)); }} }}
     @media (max-width: 900px) {{
       .topbar {{ min-height:auto; padding:18px 20px; flex-direction:column; align-items:stretch; gap:16px; }}
       .brand {{ gap:14px; align-items:flex-start; }}
@@ -2199,6 +2249,10 @@ def render_workbench_lite(
       label:has(textarea), label:nth-last-child(1) {{ grid-column:auto; }}
       .form-actions {{ flex-wrap:wrap; }}
       .form-actions .btn {{ flex:1 1 140px; }}
+      .notice-detail-drawer {{ width:100%; border-radius:0; }}
+      .notice-drawer-head {{ min-height:64px; padding:10px 14px; }}
+      .notice-drawer-title h2 {{ font-size:16px; }}
+      .notice-drawer-body {{ padding:10px 12px 18px; }}
     }}
   </style>
 </head>
@@ -2275,19 +2329,31 @@ def render_workbench_lite(
         <details class="rail-fold attention"{' open' if attention_count else ''}><summary>待处理问题 <b class="panel-count">{_e(attention_count)}</b></summary><section class="rail-panel attention"><h2>待处理问题</h2><div class="attention-list">{attention_html}</div></section></details>
         <details class="rail-fold undo"><summary>近三天可回退 <b class="panel-count">{_e(undo_count)}</b></summary><section class="rail-panel undo"><h2>近三天可回退</h2><div class="undo-panel-list">{undo_html}</div></section></details>
       </aside>
-      <section class="panel detail-panel" id="detail-panel">
-        <h2>当前通告</h2>
-        <details class="paste-drawer"{' open' if parsed_draft else ''}>
-          <summary>解析粘贴通告</summary>
-          <form method="post" action="/workbench-lite/parse">
-            <input type="hidden" name="scope" value="{_e(scope)}">
-            <input type="hidden" name="work_type" value="{_e(view_work)}">
-            <textarea name="paste_text" placeholder="粘贴完整通告文本">{_e(paste_text)}</textarea>
-            <button class="btn primary" type="submit">解析到当前通告</button>
-          </form>
-        </details>
-        {_detail_form(record=selected_record, ongoing_item=selected_ongoing, scope=scope, work_type=detail_work, manual=manual or bool(parsed_draft), parsed_draft=parsed_draft, parsed_action=parsed_action, source_link_options=source_options, is_admin=is_admin_session, prefill_draft=prefill_draft, prefill_source_record_id=prefill_source_record_id, prefill_target_record_id=prefill_target_record_id, prefill_action=prefill_action, prefill_context_id=prefill_context_id)}
-      </section>
+      <div class="notice-detail-overlay{' open' if detail_drawer_open else ''}" id="lite-notice-detail-overlay" data-open-on-load="{'1' if detail_drawer_open else '0'}" aria-hidden="{'false' if detail_drawer_open else 'true'}">
+        <section class="panel detail-panel notice-detail-drawer" id="detail-panel" role="dialog" aria-modal="true" aria-labelledby="lite-notice-drawer-title" tabindex="-1">
+          <header class="notice-drawer-head">
+            <div class="notice-drawer-title">
+              <span>当前通告</span>
+              <h2 id="lite-notice-drawer-title">{_e(drawer_title)}</h2>
+            </div>
+            <button class="notice-drawer-close" id="lite-notice-drawer-close" type="button" aria-label="关闭当前通告">×</button>
+          </header>
+          <div class="notice-drawer-body">
+            <section class="paste-drawer{' open' if parsed_draft else ''}">
+              <button class="paste-drawer-toggle" id="lite-paste-toggle" type="button" aria-expanded="{'true' if parsed_draft else 'false'}" aria-controls="lite-paste-content">解析粘贴通告</button>
+              <div class="paste-drawer-content" id="lite-paste-content"{'' if parsed_draft else ' hidden'}>
+                <form method="post" action="/workbench-lite/parse">
+                  <input type="hidden" name="scope" value="{_e(scope)}">
+                  <input type="hidden" name="work_type" value="{_e(view_work)}">
+                  <textarea name="paste_text" placeholder="粘贴完整通告文本">{_e(paste_text)}</textarea>
+                  <button class="btn primary" type="submit">解析到当前通告</button>
+                </form>
+              </div>
+            </section>
+            {_detail_form(record=selected_record, ongoing_item=selected_ongoing, scope=scope, work_type=detail_work, manual=manual or bool(parsed_draft), parsed_draft=parsed_draft, parsed_action=parsed_action, source_link_options=source_options, is_admin=is_admin_session, prefill_draft=prefill_draft, prefill_source_record_id=prefill_source_record_id, prefill_target_record_id=prefill_target_record_id, prefill_action=prefill_action, prefill_context_id=prefill_context_id)}
+          </div>
+        </section>
+      </div>
     </section>
   </main>
   <div class="end-check-backdrop" id="lite-end-check" hidden>
@@ -2483,27 +2549,111 @@ def render_workbench_lite(
       if (liteFormDirty) setLiteStatus('有未发送修改');
     }}
     let pendingDiscardResolver = null;
+    let pendingDiscardPromise = null;
+    let discardReturnFocus = null;
     function confirmDiscardLiteChanges() {{
       if (!liteFormDirty) return Promise.resolve(true);
+      if (pendingDiscardPromise) return pendingDiscardPromise;
       const modal = document.getElementById('lite-discard-confirm');
       const confirmButton = document.getElementById('lite-discard-confirm-button');
       if (!modal || !confirmButton) return Promise.resolve(false);
+      discardReturnFocus = document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
       modal.hidden = false;
       confirmButton.focus();
-      return new Promise(resolve => {{
+      pendingDiscardPromise = new Promise(resolve => {{
         pendingDiscardResolver = resolve;
       }});
+      return pendingDiscardPromise;
     }}
     function resolveDiscardConfirm(approved) {{
       const modal = document.getElementById('lite-discard-confirm');
       if (modal) modal.hidden = true;
       const resolver = pendingDiscardResolver;
+      const returnFocus = discardReturnFocus;
       pendingDiscardResolver = null;
+      pendingDiscardPromise = null;
+      discardReturnFocus = null;
       if (resolver) resolver(Boolean(approved));
+      if (!approved && returnFocus?.isConnected) {{
+        requestAnimationFrame(() => returnFocus.focus());
+      }}
     }}
     function setPanelLoading(enabled) {{
       const panel = document.getElementById('detail-panel');
       if (panel) panel.classList.toggle('loading', Boolean(enabled));
+    }}
+    function noticeDrawerOverlay() {{
+      return document.getElementById('lite-notice-detail-overlay');
+    }}
+    let lastNoticeDrawerTrigger = null;
+    function updateNoticeDrawerTitle(title) {{
+      const heading = document.getElementById('lite-notice-drawer-title');
+      if (heading && String(title || '').trim()) heading.textContent = String(title).trim();
+    }}
+    function syncNoticeDrawerState() {{
+      const overlay = noticeDrawerOverlay();
+      if (!overlay) {{
+        document.body.classList.remove('notice-drawer-open');
+        return;
+      }}
+      const shouldOpen = overlay.dataset.openOnLoad === '1' || overlay.classList.contains('open');
+      overlay.classList.toggle('open', shouldOpen);
+      overlay.setAttribute('aria-hidden', shouldOpen ? 'false' : 'true');
+      document.body.classList.toggle('notice-drawer-open', shouldOpen);
+    }}
+    function openNoticeDrawer(title, trigger) {{
+      const overlay = noticeDrawerOverlay();
+      if (!overlay) return;
+      const wasOpen = overlay.classList.contains('open');
+      if (trigger instanceof HTMLElement) lastNoticeDrawerTrigger = trigger;
+      overlay.dataset.openOnLoad = '1';
+      delete overlay.dataset.detailNeedsReload;
+      overlay.classList.add('open');
+      overlay.setAttribute('aria-hidden', 'false');
+      document.body.classList.add('notice-drawer-open');
+      updateNoticeDrawerTitle(title);
+      if (!wasOpen) {{
+        requestAnimationFrame(() => {{
+          const body = overlay.querySelector('.notice-drawer-body');
+          if (body) body.scrollTop = 0;
+          document.getElementById('lite-notice-drawer-close')?.focus();
+        }});
+      }}
+    }}
+    function closeNoticeDrawer({{ resetUrl = true }} = {{}}) {{
+      const overlay = noticeDrawerOverlay();
+      if (!overlay) return;
+      overlay.dataset.openOnLoad = '0';
+      overlay.classList.remove('open');
+      overlay.setAttribute('aria-hidden', 'true');
+      document.body.classList.remove('notice-drawer-open');
+      document.querySelectorAll('.notice-row.active,.ongoing-row.active').forEach(row => {{
+        row.classList.remove('active');
+        row.setAttribute('aria-current', 'false');
+      }});
+      if (!resetUrl) return;
+      const url = new URL(location.href);
+      for (const key of ['active_item_id', 'record_id', 'manual', 'repair_management_record_id']) {{
+        url.searchParams.delete(key);
+      }}
+      history.replaceState({{ lite: true }}, '', url.pathname + url.search + url.hash);
+      const returnFocus = lastNoticeDrawerTrigger;
+      lastNoticeDrawerTrigger = null;
+      if (returnFocus?.isConnected) {{
+        requestAnimationFrame(() => returnFocus.focus());
+      }}
+    }}
+    async function requestCloseNoticeDrawer() {{
+      const overlay = noticeDrawerOverlay();
+      if (!overlay || !overlay.classList.contains('open')) return true;
+      const hadUnsavedChanges = liteFormDirty;
+      if (!(await confirmDiscardLiteChanges())) return false;
+      if (hadUnsavedChanges) overlay.dataset.detailNeedsReload = '1';
+      setLiteFormDirty(false);
+      closeNoticeDrawer();
+      return true;
     }}
     function setWorkspaceSwitching(enabled, label) {{
       const workspace = document.querySelector('.workspace');
@@ -3630,6 +3780,7 @@ def render_workbench_lite(
       resetSitePhotoState(form);
       resetActualActionTime(form);
       updateNoticePreview(form);
+      syncNoticeDrawerState();
     }}
     function setSubmitButtons(form, action) {{
       const actions = form.querySelector('.form-actions');
@@ -3740,6 +3891,7 @@ def render_workbench_lite(
       setLiteStatus(linkedOngoing
         ? '该事项已在进行中，可发送更新、结束或删除'
         : '已选择待发起事项，可继续编辑后发送');
+      openNoticeDrawer(title, link);
       return true;
     }}
     function applyOngoingRowToDetail(link) {{
@@ -3777,6 +3929,7 @@ def render_workbench_lite(
       setOngoingSubmitButtons(form);
       updateNoticePreview(form);
       setLiteStatus('已选择进行中通告，可发送更新或结束');
+      openNoticeDrawer(title, link);
       return true;
     }}
     async function navigateLite(url, options = {{}}) {{
@@ -3876,6 +4029,29 @@ def render_workbench_lite(
     document.addEventListener('click', async (event) => {{
       const target = event.target instanceof Element ? event.target : null;
       if (!target) return;
+      const noticeDrawerClose = target.closest('#lite-notice-drawer-close');
+      if (noticeDrawerClose) {{
+        event.preventDefault();
+        await requestCloseNoticeDrawer();
+        return;
+      }}
+      const noticeDrawerBackdrop = target.closest('#lite-notice-detail-overlay');
+      if (noticeDrawerBackdrop && target === noticeDrawerBackdrop) {{
+        event.preventDefault();
+        await requestCloseNoticeDrawer();
+        return;
+      }}
+      const pasteDrawerToggle = target.closest('#lite-paste-toggle');
+      if (pasteDrawerToggle) {{
+        event.preventDefault();
+        const pasteDrawer = pasteDrawerToggle.closest('.paste-drawer');
+        const content = document.getElementById('lite-paste-content');
+        const shouldOpen = !pasteDrawer?.classList.contains('open');
+        pasteDrawer?.classList.toggle('open', shouldOpen);
+        pasteDrawerToggle.setAttribute('aria-expanded', shouldOpen ? 'true' : 'false');
+        if (content) content.hidden = !shouldOpen;
+        return;
+      }}
       const convertButton = target.closest('button[data-convert-to-change]');
       if (convertButton) {{
         event.preventDefault();
@@ -4018,8 +4194,9 @@ def render_workbench_lite(
             node.setAttribute('aria-current', node === navLink ? 'page' : 'false');
           }});
         }}
-        const appliedLocally = isRow && navLink.matches('.notice-row') && applySourceRowToDetail(navLink);
-        const appliedOngoingLocally = isRow && navLink.matches('.ongoing-row') && applyOngoingRowToDetail(navLink);
+        const detailNeedsReload = noticeDrawerOverlay()?.dataset.detailNeedsReload === '1';
+        const appliedLocally = !detailNeedsReload && isRow && navLink.matches('.notice-row') && applySourceRowToDetail(navLink);
+        const appliedOngoingLocally = !detailNeedsReload && isRow && navLink.matches('.ongoing-row') && applyOngoingRowToDetail(navLink);
         if (appliedLocally || appliedOngoingLocally) {{
           const selectingOngoing = navLink.matches('.ongoing-row');
           document.querySelectorAll('.notice-row').forEach(node => {{
@@ -4051,6 +4228,7 @@ def render_workbench_lite(
               node.setAttribute('aria-current', node === navLink ? 'true' : 'false');
             }});
             navLink.classList.remove('is-loading');
+            openNoticeDrawer(navLink.getAttribute('data-title') || '', navLink);
           }}
         }}
         catch (error) {{
@@ -4227,11 +4405,13 @@ def render_workbench_lite(
     }});
     document.addEventListener('keydown', (event) => {{
       if (event.key === 'Escape') {{
+        const hadOpenDialog = Array.from(document.querySelectorAll('.end-check-backdrop')).some(node => !node.hidden);
         closePickers();
         closeEndCheck();
         closeTargetCandidates();
         closeManualSourceCandidates();
         closeUndoConfirm();
+        if (!hadOpenDialog) requestCloseNoticeDrawer().catch(() => null);
       }}
     }});
     window.addEventListener('popstate', () => {{
@@ -4340,6 +4520,7 @@ def render_workbench_lite(
       }}
       history.replaceState({{ lite: true }}, '', url.pathname + url.search + url.hash);
       closeEndCheck();
+      closeNoticeDrawer({{ resetUrl: false }});
       return true;
     }}
     function findOngoingRowByDraft(draft) {{

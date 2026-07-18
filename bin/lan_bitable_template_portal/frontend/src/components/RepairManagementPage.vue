@@ -1976,6 +1976,7 @@ function openRepairNoticeWorkbench(): void {
   url.searchParams.set("work_type", "repair");
   if (editingRecordId.value) {
     url.searchParams.set("repair_management_record_id", editingRecordId.value);
+    url.searchParams.set("record_id", editingRecordId.value);
   }
   navigateHard(url);
 }

@@ -4250,6 +4250,44 @@ class LanPortalStateStore:
             tasks.append(payload)
         return tasks
 
+    def expedite_pending_repair_link_tasks(self, *, now: float | None = None) -> int:
+        now = time.time() if now is None else float(now)
+        if not self.db_path.exists():
+            return 0
+        updated = 0
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                rows = conn.execute(
+                    """
+                    SELECT task_key, payload_json
+                    FROM repair_link_tasks
+                    WHERE status = 'pending' AND due_at > ?
+                    """,
+                    (now,),
+                ).fetchall()
+                for row in rows:
+                    payload = self._loads(str(row["payload_json"] or ""), {})
+                    payload = payload if isinstance(payload, dict) else {}
+                    payload["due_at"] = now
+                    payload["updated_at"] = now
+                    conn.execute(
+                        """
+                        UPDATE repair_link_tasks
+                        SET due_at = ?, payload_json = ?, updated_at = ?
+                        WHERE task_key = ?
+                        """,
+                        (
+                            now,
+                            self._json(payload),
+                            now,
+                            str(row["task_key"] or ""),
+                        ),
+                    )
+                    updated += 1
+                conn.commit()
+        return updated
+
     def claim_due_repair_link_tasks(
         self,
         *,

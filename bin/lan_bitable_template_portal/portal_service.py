@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import io
 import json
+import logging
 import math
 import os
 import re
@@ -509,7 +510,6 @@ REPAIR_FOLLOWUP_SUMMARY_COPY_MAPPINGS: tuple[tuple[str, tuple[str, ...]], ...] =
     ),
 )
 REPAIR_LINK_FIELD_NAME = "设备检修关联"
-REPAIR_LINK_DELAY_SECONDS = 70 * 60
 REPAIR_LINK_RETRY_SECONDS = 10 * 60
 REPAIR_LINK_RETRY_SLOW_SECONDS = 20 * 60
 REPAIR_LINK_FAST_RETRY_ATTEMPTS = 6
@@ -988,6 +988,7 @@ class MaintenancePortalService:
         self._repair_management_status_cache_lock = threading.RLock()
         self._repair_management_status_load_lock = threading.Lock()
         self._repair_management_status_cache: dict[str, Any] | None = None
+        self._repair_management_missing_event_ids: dict[str, float] = {}
         self._repair_snapshots_enabled = bool(enable_repair_snapshots)
         self._repair_snapshot_locks_guard = threading.RLock()
         self._repair_snapshot_locks: dict[str, threading.Lock] = {}
@@ -1000,6 +1001,9 @@ class MaintenancePortalService:
         self._repair_followup_backfill_lock = threading.RLock()
         self._repair_followup_catalog_cache_lock = threading.RLock()
         self._repair_followup_catalog_cache: dict[str, Any] | None = None
+        self._repair_link_task_worker_lock = threading.RLock()
+        self._repair_link_task_worker_running = False
+        self._repair_link_task_worker_pending = False
         self._maintenance_loaded_once = False
         self._change_loaded_once = False
         self._zhihang_change_loaded_once = False
@@ -1606,6 +1610,28 @@ class MaintenancePortalService:
         if not isinstance(fields, dict) or not fields:
             raise PortalError("更新多维记录字段不能为空。")
         fields = self._repair_physical_record_fields(table_id, fields)
+        return self._patch_record_fields_exact(
+            app_token=app_token,
+            table_id=table_id,
+            record_id=record_id,
+            fields=fields,
+        )
+
+    def _patch_record_fields_exact(
+        self,
+        *,
+        app_token: str,
+        table_id: str,
+        record_id: str,
+        fields: dict[str, Any],
+    ) -> dict[str, Any]:
+        app_token = str(app_token or "").strip()
+        table_id = str(table_id or "").strip()
+        record_id = str(record_id or "").strip()
+        if not app_token or not table_id or not record_id:
+            raise PortalError("更新多维记录缺少 app_token/table_id/record_id。")
+        if not isinstance(fields, dict) or not fields:
+            raise PortalError("更新多维记录字段不能为空。")
         url = (
             f"https://open.feishu.cn/open-apis/bitable/v1/apps/"
             f"{app_token}/tables/{table_id}/records/{record_id}"
@@ -6717,16 +6743,125 @@ class MaintenancePortalService:
                 fields, "维修进展描述", "当前维修进度", "完成情况", "进度"
             ),
         }
+        source_record = dict(record)
+        source_record["work_type"] = WORK_TYPE_REPAIR
+        source_record["notice_type"] = NOTICE_TYPE_REPAIR
+        source_record.setdefault("source_app_token", REPAIR_SOURCE_APP_TOKEN)
+        source_record.setdefault("source_table_id", REPAIR_MANAGEMENT_TABLE_ID)
         return {
             "repair_management_record_id": str(record_id or "").strip(),
             "source_record_id": str(record_id or "").strip(),
             "target_record_id": target_record_id,
             "action": "update" if target_record_id else "start",
+            "source_record": self._serialize_record(source_record),
             "draft": {
                 key: str(value or "").strip()
                 for key, value in draft.items()
                 if str(value or "").strip()
             },
+        }
+
+    def sync_repair_management_notice_action(
+        self,
+        prepared: dict[str, Any],
+        *,
+        action: str,
+        target_record_id: str,
+    ) -> dict[str, Any]:
+        action = str(action or "").strip().lower()
+        if action not in {"start", "update", "end"}:
+            return {"synced": False, "skipped": True, "warnings": []}
+        if str((prepared or {}).get("work_type") or "").strip() != WORK_TYPE_REPAIR:
+            return {"synced": False, "skipped": True, "warnings": []}
+
+        source_record_id = canonical_source_record_id(prepared)
+        target_record_id = str(target_record_id or "").strip()
+        source_table_id = str(
+            (prepared or {}).get("source_table_id") or REPAIR_SOURCE_TABLE_ID
+        ).strip()
+        if (
+            not source_record_id.startswith("rec")
+            or not target_record_id.startswith("rec")
+            or source_table_id != REPAIR_MANAGEMENT_TABLE_ID
+        ):
+            return {"synced": False, "skipped": True, "warnings": []}
+
+        scope = str((prepared or {}).get("scope") or "ALL").strip() or "ALL"
+        existing = self._ensure_repair_management_record_in_scope(
+            source_record_id,
+            scope,
+        )
+        _metas, meta_by_name, _records = (
+            self._load_repair_management_project_records()
+        )
+        raw_fields = (
+            existing.get("raw_fields")
+            if isinstance(existing.get("raw_fields"), dict)
+            else {}
+        )
+        display_fields = (
+            existing.get("display_fields")
+            if isinstance(existing.get("display_fields"), dict)
+            else {}
+        )
+
+        desired: dict[str, Any] = {
+            "设备检修关联": target_record_id,
+        }
+        title = str((prepared or {}).get("title") or "").strip()
+        if title:
+            desired["检修通告名称"] = title
+
+        action_time = self._action_response_time(prepared)
+        existing_start = (
+            raw_fields.get("维修开始时间")
+            if raw_fields.get("维修开始时间") not in (None, "", [], {})
+            else display_fields.get("维修开始时间")
+        )
+        existing_end = (
+            raw_fields.get("维修结束时间（2026）")
+            if raw_fields.get("维修结束时间（2026）") not in (None, "", [], {})
+            else display_fields.get("维修结束时间（2026）")
+        )
+        if action == "start" and self._repair_management_datetime_ms(existing_start) is None:
+            desired["维修开始时间"] = action_time
+        if action == "end" and self._repair_management_datetime_ms(existing_end) is None:
+            desired["维修结束时间（2026）"] = action_time
+
+        coerced, warnings = self._coerce_repair_management_fields(
+            desired,
+            meta_by_name,
+            excluded_field_names=REPAIR_MANAGEMENT_RETIRED_FIELD_NAMES,
+        )
+        missing_fields = [
+            field_name for field_name in desired if field_name not in coerced
+        ]
+        if missing_fields:
+            warnings.append(
+                f"维修项目表缺少可写字段：{'、'.join(missing_fields)}"
+            )
+        if not coerced:
+            raise PortalError("维修项目没有可同步的检修通告字段。")
+
+        self._patch_record_fields(
+            app_token=REPAIR_SOURCE_APP_TOKEN,
+            table_id=REPAIR_MANAGEMENT_TABLE_ID,
+            record_id=source_record_id,
+            fields=coerced,
+        )
+        self._upsert_repair_snapshot_fields(
+            source_key=REPAIR_SNAPSHOT_SOURCE_PROJECTS,
+            record_id=source_record_id,
+            fields=coerced,
+        )
+        self._invalidate_repair_management_status_cache()
+        return {
+            "synced": True,
+            "skipped": False,
+            "source_record_id": source_record_id,
+            "target_record_id": target_record_id,
+            "fields": coerced,
+            "warnings": list(dict.fromkeys(warnings)),
         }
 
     @classmethod
@@ -6818,6 +6953,7 @@ class MaintenancePortalService:
         }
         if not requested_ids:
             return []
+        warnings: list[str] = []
         try:
             _metas, meta_by_name, event_records = (
                 self._load_repair_management_event_records(
@@ -6829,27 +6965,70 @@ class MaintenancePortalService:
                 for item in event_records
                 if str(item.get("record_id") or "").strip() in requested_ids
             }
+            known_missing_ids: set[str] = set()
             missing_ids = sorted(requested_ids - set(event_by_id))
             if missing_ids:
+                now = time.monotonic()
+                missing_ttl_seconds = 600.0
+                with self._repair_management_status_cache_lock:
+                    self._repair_management_missing_event_ids = {
+                        record_id: failed_at
+                        for record_id, failed_at in self._repair_management_missing_event_ids.items()
+                        if now - failed_at <= missing_ttl_seconds
+                    }
+                    if force_refresh:
+                        for record_id in missing_ids:
+                            self._repair_management_missing_event_ids.pop(record_id, None)
+                    known_missing_ids = set(
+                        self._repair_management_missing_event_ids
+                    )
                 app_token, table_id, _source_key = self._event_source_config()
-                direct_records = self._load_table_records_by_ids(
-                    app_token=app_token,
-                    table_id=table_id,
-                    meta_by_name=meta_by_name,
-                    work_type=WORK_TYPE_EVENT,
-                    notice_type=NOTICE_TYPE_EVENT,
-                    record_ids=missing_ids,
-                )
-                for item in direct_records:
-                    record_id = str(item.get("record_id") or "").strip()
-                    if record_id:
-                        event_by_id[record_id] = item
+                for record_id in missing_ids:
+                    if record_id in known_missing_ids:
+                        continue
+                    try:
+                        direct_records = self._load_table_records_by_ids(
+                            app_token=app_token,
+                            table_id=table_id,
+                            meta_by_name=meta_by_name,
+                            work_type=WORK_TYPE_EVENT,
+                            notice_type=NOTICE_TYPE_EVENT,
+                            record_ids=[record_id],
+                        )
+                    except Exception as exc:
+                        if self._repair_management_record_not_found_error(exc):
+                            with self._repair_management_status_cache_lock:
+                                self._repair_management_missing_event_ids[
+                                    record_id
+                                ] = time.monotonic()
+                            known_missing_ids.add(record_id)
+                            continue
+                        warnings.append(
+                            "部分关联事件暂未更新，当前显示维修单中已保存的信息。"
+                        )
+                        continue
+                    for direct_record in direct_records:
+                        direct_record_id = str(
+                            direct_record.get("record_id") or ""
+                        ).strip()
+                        if not direct_record_id:
+                            continue
+                        event_by_id[direct_record_id] = direct_record
+                        with self._repair_management_status_cache_lock:
+                            self._repair_management_missing_event_ids.pop(
+                                direct_record_id,
+                                None,
+                            )
 
             for item in records:
-                event_record = event_by_id.get(
-                    str(item.get("source_event_id") or "").strip()
-                )
+                source_event_id = str(item.get("source_event_id") or "").strip()
+                event_record = event_by_id.get(source_event_id)
                 if not event_record:
+                    if source_event_id in known_missing_ids:
+                        item["event_relation_stale"] = True
+                        item["event_relation_status"] = (
+                            "来源事件已归档，当前显示维修单中已保存的信息"
+                        )
                     continue
                 event = self._repair_management_event_item(event_record)
                 item["title"] = str(
@@ -6862,9 +7041,9 @@ class MaintenancePortalService:
                     or ""
                 ).strip()
                 item["event_title"] = str(event.get("title") or "").strip()
-            return []
-        except Exception as exc:
-            return [f"关联事件信息暂未刷新：{exc}"]
+            return list(dict.fromkeys(warnings))
+        except Exception:
+            return ["关联事件暂未更新，当前显示维修单中已保存的信息。"]
 
     def get_repair_management_status(
         self,
@@ -10126,14 +10305,16 @@ class MaintenancePortalService:
 
     def _repair_specialty(self, record: dict[str, Any]) -> str:
         fields = record.get("display_fields") or {}
-        specialty = self._repair_management_canonical_select_text(
-            "所属专业", fields.get("所属专业")
-        )
-        if specialty:
-            return specialty
-        return self._repair_management_canonical_select_text(
-            "专业（推送消息用）", fields.get("专业（推送消息用）")
-        )
+        for field_name in ("所属专业", "专业（推送消息用）"):
+            specialty = self._clean_source_text(
+                self._repair_management_canonical_select_text(
+                    field_name,
+                    fields.get(field_name),
+                )
+            )
+            if specialty:
+                return specialty
+        return ""
 
     def _repair_record_building_codes(self, record: dict[str, Any]) -> list[str]:
         fields = record.get("display_fields") or {}
@@ -10202,20 +10383,25 @@ class MaintenancePortalService:
         )
 
     def _repair_target_record_id(self, record: dict[str, Any]) -> str:
-        raw_value = (record.get("raw_fields") or {}).get("设备检修关联")
-        values = raw_value if isinstance(raw_value, list) else [raw_value]
-        for item in values:
-            if not isinstance(item, dict):
-                continue
-            record_ids = item.get("record_ids")
-            if isinstance(record_ids, list):
-                for record_id in record_ids:
-                    text = str(record_id or "").strip()
-                    if text:
-                        return text
-            text = str(item.get("record_id") or item.get("id") or "").strip()
-            if text:
-                return text
+        raw_fields = (
+            record.get("raw_fields")
+            if isinstance(record.get("raw_fields"), dict)
+            else {}
+        )
+        display_fields = (
+            record.get("display_fields")
+            if isinstance(record.get("display_fields"), dict)
+            else {}
+        )
+        for value in (
+            raw_fields.get("设备检修关联"),
+            raw_fields.get("设备检修关联-L"),
+            display_fields.get("设备检修关联"),
+            display_fields.get("设备检修关联-L"),
+        ):
+            record_ids = self._repair_management_record_ids(value)
+            if record_ids:
+                return record_ids[0]
         return ""
 
     @staticmethod
@@ -10338,7 +10524,7 @@ class MaintenancePortalService:
         )
         if sync_record_id not in linked_ids:
             linked_ids.append(sync_record_id)
-        self._patch_record_fields(
+        self._patch_record_fields_exact(
             app_token=source_app_token,
             table_id=source_table_id,
             record_id=source_record_id,
@@ -11420,6 +11606,45 @@ class MaintenancePortalService:
             )
         except Exception:
             pass
+        repair_sync_warning = ""
+        try:
+            repair_sync = self.sync_repair_management_notice_action(
+                prepared,
+                action=action,
+                target_record_id=target_record_id,
+            )
+            sync_warnings = [
+                str(item or "").strip()
+                for item in (repair_sync.get("warnings") or [])
+                if str(item or "").strip()
+            ]
+            if sync_warnings:
+                repair_sync_warning = "；".join(dict.fromkeys(sync_warnings))
+        except Exception as exc:
+            repair_sync_warning = f"维修项目字段同步失败：{exc}"
+            logging.warning(
+                "检修通告成功后同步维修项目失败 source=%s target=%s action=%s: %s",
+                source_record_id,
+                target_record_id,
+                action,
+                exc,
+            )
+        if repair_sync_warning:
+            latest_job = self.get_job(job_id) or {}
+            existing_warning = str(latest_job.get("message_warning") or "").strip()
+            combined_warning = "；".join(
+                dict.fromkeys(
+                    item
+                    for item in (existing_warning, repair_sync_warning)
+                    if item
+                )
+            )
+            self.mark_job(
+                job_id,
+                _persist=False,
+                message_warning=combined_warning,
+                repair_management_sync_warning=repair_sync_warning,
+            )
         self._schedule_repair_link_task_after_success(
             prepared,
             action=action,
@@ -11439,11 +11664,9 @@ class MaintenancePortalService:
             return
         if str((prepared or {}).get("work_type") or "").strip() != WORK_TYPE_REPAIR:
             return
-        if self._truthy_flag((prepared or {}).get("manual")):
-            return
         source_record_id = canonical_source_record_id(prepared)
         target_record_id = str(target_record_id or "").strip()
-        if not source_record_id or not target_record_id:
+        if not source_record_id.startswith("rec") or not target_record_id.startswith("rec"):
             return
         source_app_token = str(
             (prepared or {}).get("source_app_token") or REPAIR_SOURCE_APP_TOKEN
@@ -11466,7 +11689,7 @@ class MaintenancePortalService:
                 "target_table_id": str(config.table_id_overhaul or "").strip(),
                 "target_record_id": target_record_id,
                 "link_field_name": REPAIR_LINK_FIELD_NAME,
-                "due_at": now + REPAIR_LINK_DELAY_SECONDS,
+                "due_at": now,
                 "attempts": 0,
                 "max_attempts": REPAIR_LINK_MAX_ATTEMPTS,
                 "last_error": "",
@@ -11474,6 +11697,51 @@ class MaintenancePortalService:
                 "created_at": now,
             }
         )
+        self._process_repair_link_tasks_async()
+
+    def _process_repair_link_tasks_async(self) -> None:
+        with self._repair_link_task_worker_lock:
+            self._repair_link_task_worker_pending = True
+            if self._repair_link_task_worker_running:
+                return
+            self._repair_link_task_worker_running = True
+
+        def run() -> None:
+            try:
+                while True:
+                    with self._repair_link_task_worker_lock:
+                        self._repair_link_task_worker_pending = False
+                    try:
+                        stats = self.process_due_repair_link_tasks(limit=20)
+                    except Exception as exc:
+                        logging.warning("检修源表关联即时补写失败: %s", exc)
+                        stats = {"checked": 0}
+                    with self._repair_link_task_worker_lock:
+                        if int(stats.get("checked") or 0) >= 20:
+                            self._repair_link_task_worker_pending = True
+                        if self._repair_link_task_worker_pending:
+                            continue
+                        self._repair_link_task_worker_running = False
+                        return
+            finally:
+                with self._repair_link_task_worker_lock:
+                    self._repair_link_task_worker_running = False
+
+        threading.Thread(
+            target=run,
+            name="RepairLinkTask",
+            daemon=True,
+        ).start()
+
+    def resume_repair_link_tasks_async(self) -> int:
+        expedited = self._state_store.expedite_pending_repair_link_tasks()
+        due_tasks = self._state_store.list_due_repair_link_tasks(
+            now=time.time(),
+            limit=1,
+        )
+        if expedited or due_tasks:
+            self._process_repair_link_tasks_async()
+        return expedited
 
     @staticmethod
     def _repair_link_retry_delay_seconds(attempts: int) -> int:

@@ -498,7 +498,13 @@ class FastAPIPortalController:
                     )
                 search = str(request.query_params.get("search") or "")
                 specialty = str(request.query_params.get("specialty") or "")
-                record_id = str(request.query_params.get("record_id") or "")
+                record_id = str(request.query_params.get("record_id") or "").strip()
+                if not record_id and repair_notice_prefill:
+                    record_id = str(
+                        repair_notice_prefill.get("source_record_id")
+                        or repair_management_record_id
+                        or ""
+                    ).strip()
                 active_item_id = str(request.query_params.get("active_item_id") or "")
                 pending_page = str(request.query_params.get("pending_page") or "1")
                 ongoing_page = str(request.query_params.get("ongoing_page") or "1")
@@ -548,6 +554,31 @@ class FastAPIPortalController:
                     since_seconds=3 * 24 * 60 * 60,
                 )
                 payload, notice_undos = await asyncio.gather(payload_task, undo_task)
+                prefill_source_record = repair_notice_prefill.get("source_record")
+                if (
+                    isinstance(payload, dict)
+                    and isinstance(prefill_source_record, dict)
+                    and record_id
+                ):
+                    payload_records = [
+                        item
+                        for item in (payload.get("records") or [])
+                        if isinstance(item, dict)
+                    ]
+                    if not any(
+                        str(
+                            item.get("record_id")
+                            or item.get("source_record_id")
+                            or ""
+                        ).strip()
+                        == record_id
+                        for item in payload_records
+                    ):
+                        payload = dict(payload)
+                        payload["records"] = [
+                            dict(prefill_source_record),
+                            *payload_records,
+                        ]
                 scope_options = PortalRuntime.auth_manager.filter_scope_options(
                     SCOPE_OPTIONS,
                     session,
@@ -4930,6 +4961,10 @@ class FastAPIPortalController:
             pass
         try:
             PortalRuntime.service.start_repair_snapshot_warmup_async()
+        except Exception:
+            pass
+        try:
+            PortalRuntime.service.resume_repair_link_tasks_async()
         except Exception:
             pass
         try:

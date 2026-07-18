@@ -1083,7 +1083,8 @@ def _build_playwright_script(url: str, session_id: str) -> str:
               const panels = Array.from(document.querySelectorAll('.workspace > .panel'));
               if (panels.length) {{
                 const rails = Array.from(document.querySelectorAll('.rail-fold .rail-panel, .result-rail .rail-panel'));
-                if (panels.length < 2 || rails.length < 1) {{
+                const noticeDrawer = document.querySelector('.notice-detail-overlay > .notice-detail-drawer');
+                if ((panels.length < 2 && !noticeDrawer) || rails.length < 1) {{
                   result.push(`workspace panel count ${{panels.length}}, folded rail count ${{rails.length}}`);
                 }}
                 const narrow = panels
@@ -1500,6 +1501,9 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           if (!page.url().includes('repair_management_record_id=repair-mgmt-a-001')) {{
             throw new Error(`repair management prefill id missing: ${{page.url()}}`);
           }}
+          if (!page.url().includes('record_id=repair-mgmt-a-001')) {{
+            throw new Error(`repair source selection id missing: ${{page.url()}}`);
+          }}
           const repairSourceId = await page.locator('input[name="source_record_id"]').getAttribute('value');
           const repairTargetId = await page.locator('input[name="target_record_id"]').getAttribute('value');
           const repairTitleValue = await page.locator('input[name="title"]').getAttribute('value');
@@ -1533,7 +1537,11 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           const isLiteWorkbench = page.url().includes('/workbench-lite');
           if (isLiteWorkbench) {{
             const litePanels = await page.locator('.workspace > .panel').count();
-            if (litePanels < 2) throw new Error(`lite workbench panel count ${{litePanels}}`);
+            if (litePanels < 1) throw new Error(`lite workbench panel count ${{litePanels}}`);
+            const liteDrawerCount = await page.locator('#lite-notice-detail-overlay > #detail-panel').count();
+            if (liteDrawerCount !== 1) throw new Error(`lite notice drawer count ${{liteDrawerCount}}`);
+            const liteDrawerInitiallyOpen = await page.locator('#lite-notice-detail-overlay').evaluate(node => node.classList.contains('open'));
+            if (liteDrawerInitiallyOpen) throw new Error('lite notice drawer opened before selecting a notice');
             const liteRails = await page.locator('.rail-fold .rail-panel, .result-rail .rail-panel').count();
             if (liteRails < 1) throw new Error(`lite workbench folded rail count ${{liteRails}}`);
             const typeCounts = await page.locator('.type-tab .type-count').count();
@@ -1587,6 +1595,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             }});
             await page.locator('.ongoing-row').filter({{ hasText: 'A楼纯手填待关联维保通告' }}).first().click();
             await page.waitForSelector('text=目标多维关系', {{ state: 'attached', timeout: 10000 }});
+            await page.waitForSelector('#lite-notice-detail-overlay.open', {{ timeout: 10000 }});
             const markerAfterOngoingClick = await page.evaluate(() => window.__clipflowLiteNoReloadMarker || '');
             if (markerAfterOngoingClick !== 'alive') {{
               throw new Error('lite ongoing click caused full page reload');
@@ -1634,13 +1643,42 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             }}
             await page.locator('#lite-notice-form textarea[name="progress"]').fill('未发送修改测试');
             await page.waitForSelector('text=有未发送修改', {{ timeout: 10000 }});
-            await page.locator('.notice-row').first().click();
+            await page.locator('#lite-notice-drawer-close').click();
             await page.waitForSelector('#lite-discard-confirm:not([hidden])', {{ timeout: 10000 }});
             const sawDirtyConfirm = await page.locator('#lite-discard-confirm').innerText();
-            if (!sawDirtyConfirm.includes('未发送修改')) throw new Error('lite dirty form warning did not appear before switching item');
+            if (!sawDirtyConfirm.includes('未发送修改')) throw new Error('lite dirty form warning did not appear before closing the drawer');
+            await page.locator('#lite-discard-cancel').click();
+            await page.waitForFunction(() => document.querySelector('#lite-discard-confirm')?.hidden === true, null, {{ timeout: 10000 }});
+            await page.waitForFunction(() => document.activeElement?.id === 'lite-notice-drawer-close', null, {{ timeout: 10000 }});
+            const dirtyCancelState = await page.evaluate(() => ({{
+              drawerOpen: document.querySelector('#lite-notice-detail-overlay')?.classList.contains('open') || false,
+              focusedId: document.activeElement?.id || '',
+            }}));
+            if (!dirtyCancelState.drawerOpen || dirtyCancelState.focusedId !== 'lite-notice-drawer-close') {{
+              throw new Error(`lite dirty cancel did not restore drawer focus: ${{JSON.stringify(dirtyCancelState)}}`);
+            }}
+            await page.locator('#lite-notice-drawer-close').click();
+            await page.waitForSelector('#lite-discard-confirm:not([hidden])', {{ timeout: 10000 }});
             await page.locator('#lite-discard-confirm-button').click();
+            await page.waitForFunction(() => !document.querySelector('#lite-notice-detail-overlay')?.classList.contains('open'), null, {{ timeout: 10000 }});
+            await page.waitForFunction(() => document.activeElement?.classList.contains('ongoing-row') || false, null, {{ timeout: 10000 }});
+            const triggerFocusedAfterClose = await page.evaluate(() => document.activeElement?.classList.contains('ongoing-row') || false);
+            if (!triggerFocusedAfterClose) throw new Error('lite notice drawer did not restore focus to its triggering row');
+            await page.locator('.notice-row').first().click();
+            await page.waitForSelector('#lite-notice-detail-overlay.open', {{ timeout: 10000 }});
+            await page.evaluate(() => {{
+              const body = document.querySelector('.notice-drawer-body');
+              if (body) body.scrollTop = Math.min(420, body.scrollHeight);
+            }});
             await assertLayout(page, 'lite-workbench');
             await assertVnetSkin(page, 'lite-workbench');
+            await page.locator('#lite-notice-drawer-close').click();
+            await page.waitForFunction(() => !document.querySelector('#lite-notice-detail-overlay')?.classList.contains('open'), null, {{ timeout: 10000 }});
+            await page.locator('.notice-row').first().click();
+            await page.waitForSelector('#lite-notice-detail-overlay.open', {{ timeout: 10000 }});
+            await page.waitForFunction(() => (document.querySelector('.notice-drawer-body')?.scrollTop || 0) === 0, null, {{ timeout: 10000 }});
+            await page.locator('#lite-notice-drawer-close').click();
+            await page.waitForFunction(() => !document.querySelector('#lite-notice-detail-overlay')?.classList.contains('open'), null, {{ timeout: 10000 }});
             await page.getByRole('button', {{ name: '刷新数据' }}).click();
             await page.waitForSelector('text=刷新本页', {{ timeout: 10000 }});
             await page.waitForSelector('text=刷新检修', {{ timeout: 10000 }});
@@ -1675,7 +1713,9 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             if (!pageRefreshEnabled) {{
               throw new Error('lite page refresh button stayed disabled after successful refresh');
             }}
-            await page.locator('details.paste-drawer summary').click();
+            await page.locator('.notice-row').first().click();
+            await page.waitForSelector('#lite-notice-detail-overlay.open', {{ timeout: 10000 }});
+            await page.locator('#lite-paste-toggle').click();
             await page.locator('form[action="/workbench-lite/parse"] textarea[name="paste_text"]').fill(`【设备轮巡】状态：开始
 【标题】EA118机房A楼制冷单元轮巡通告
 【时间】2026-06-24 09:30~2026-06-24 18:30
@@ -1683,7 +1723,51 @@ def _build_playwright_script(url: str, session_id: str) -> str:
 【内容】测试测试
 【影响】测试测试
 【进度】测试测试`);
-            await page.getByRole('button', {{ name: '解析到当前通告' }}).click();
+            const parseSubmitButton = page.getByRole('button', {{ name: '解析到当前通告' }});
+            await parseSubmitButton.scrollIntoViewIfNeeded();
+            const parseSubmitGeometry = await parseSubmitButton.evaluate(button => {{
+              const summarize = node => {{
+                if (!(node instanceof Element)) return null;
+                const rect = node.getBoundingClientRect();
+                const style = getComputedStyle(node);
+                return {{
+                  tag: node.tagName.toLowerCase(),
+                  id: node.id || '',
+                  className: String(node.className || ''),
+                  rect: {{
+                    left: Math.round(rect.left),
+                    top: Math.round(rect.top),
+                    right: Math.round(rect.right),
+                    bottom: Math.round(rect.bottom),
+                    width: Math.round(rect.width),
+                    height: Math.round(rect.height),
+                  }},
+                  display: style.display,
+                  position: style.position,
+                  overflow: style.overflow,
+                  zIndex: style.zIndex,
+                }};
+              }};
+              const rect = button.getBoundingClientRect();
+              const x = rect.left + rect.width / 2;
+              const y = rect.top + rect.height / 2;
+              const hitNodes = document.elementsFromPoint(x, y).slice(0, 8);
+              return {{
+                button: summarize(button),
+                parseForm: summarize(button.closest('form')),
+                parseDrawer: summarize(button.closest('.paste-drawer')),
+                drawerHead: summarize(document.querySelector('.notice-drawer-head')),
+                drawerBody: summarize(document.querySelector('.notice-drawer-body')),
+                detailForm: summarize(document.querySelector('#lite-notice-form')),
+                bodyScrollTop: document.querySelector('.notice-drawer-body')?.scrollTop || 0,
+                hitNodes: hitNodes.map(summarize),
+                buttonHit: hitNodes.includes(button),
+              }};
+            }});
+            if (!parseSubmitGeometry.buttonHit) {{
+              throw new Error(`lite parse submit is visually covered: ${{JSON.stringify(parseSubmitGeometry)}}`);
+            }}
+            await parseSubmitButton.click();
             await page.waitForSelector('text=EA118机房A楼制冷单元轮巡通告', {{ timeout: 10000 }});
             const markerAfterParse = await page.evaluate(() => window.__clipflowLiteNoReloadMarker || '');
             if (markerAfterParse !== 'alive') {{
@@ -1732,6 +1816,11 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             await page.setViewportSize({{ width: 900, height: 900 }});
             await assertLayout(page, 'lite-workbench-narrow');
             await page.setViewportSize({{ width: 1440, height: 900 }});
+            const noticeDrawerOpenBeforeReturn = await page.locator('#lite-notice-detail-overlay').evaluate(node => node.classList.contains('open'));
+            if (noticeDrawerOpenBeforeReturn) {{
+              await page.locator('#lite-notice-drawer-close').click();
+              await page.waitForFunction(() => !document.querySelector('#lite-notice-detail-overlay')?.classList.contains('open'), null, {{ timeout: 10000 }});
+            }}
             await page.getByRole('link', {{ name: /^返回$/ }}).click();
             await page.waitForSelector('text=业务工作台', {{ timeout: 10000 }});
             await assertHeaderSubtitle(page, '功能选择 · 请选择功能', 'lite-home-after-return');

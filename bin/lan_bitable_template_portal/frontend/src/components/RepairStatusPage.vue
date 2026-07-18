@@ -88,6 +88,13 @@
               <b v-if="record.specialty">{{ record.specialty }}</b>
               <i v-if="record.event_sent_time">{{ formatTime(record.event_sent_time) }}</i>
               <i v-if="record.location">{{ record.location }}</i>
+              <i
+                v-if="record.event_relation_stale"
+                class="relation-stale"
+                :title="String(record.event_relation_status || '')"
+              >
+                来源事件已归档
+              </i>
             </span>
           </div>
           <div>
@@ -741,6 +748,15 @@ onBeforeUnmount(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   font-style: normal;
+}
+
+.project-cell .relation-stale {
+  flex: 0 0 auto;
+  border-radius: 6px;
+  padding: 2px 6px;
+  background: #fff4df;
+  color: #9a5a08;
+  font-weight: 800;
 }
 
 .state-pill {
