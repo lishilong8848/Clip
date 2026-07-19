@@ -1135,6 +1135,36 @@ function requestResetDraft(): void {
   );
 }
 
+function scheduleLinkedEventPrefillIfNeeded(): void {
+  const recordId = editingRecordId.value;
+  const eventRecordId = sourceEventId.value;
+  const faultTimeField = fields.value.find(
+    (field) => String(field.field_name || "").trim() === "故障发生时间",
+  );
+  if (
+    !recordId
+    || !eventRecordId
+    || !faultTimeField
+    || String(fieldDraft["故障发生时间"] || "").trim()
+  ) {
+    return;
+  }
+  const repairRecordIds = selectedRepairIds.value.slice(0, 1);
+  queueMicrotask(() => {
+    if (
+      editingRecordId.value !== recordId
+      || sourceEventId.value !== eventRecordId
+      || String(fieldDraft["故障发生时间"] || "").trim()
+    ) {
+      return;
+    }
+    void applyCombinedPrefill(true, {
+      eventRecordId,
+      repairRecordIds,
+    });
+  });
+}
+
 function resetDraft(): void {
   dirtyFieldNames.clear();
   hasUnsavedChanges.value = false;
@@ -1179,6 +1209,7 @@ function resetDraft(): void {
     fieldDraft[name] = repairDraftInputValue(field, value);
   }
   if (!editingRecordId.value && eventTitle.value) prefillEventTitle();
+  scheduleLinkedEventPrefillIfNeeded();
 }
 
 function hydrateUnlinkedRepairDraftFields(): void {
@@ -1626,6 +1657,10 @@ function selectRecordNow(record: LooseDict, initialTab: WorkspaceTab = "project"
   recordDetailRequestVersion += 1;
   recordDetailAbortController?.abort();
   recordDetailAbortController = null;
+  prefillRequestVersion += 1;
+  prefillAbortController?.abort();
+  prefillAbortController = null;
+  prefillLoading.value = false;
   messageText.value = "";
   prefillWarnings.value = [];
   createOperationId.value = "";
@@ -1668,6 +1703,7 @@ function requestSelectRecord(record: LooseDict, initialTab: WorkspaceTab = "proj
     projectDrawerOpen.value = true;
     openWorkspaceTab(initialTab);
     focusProjectDrawer();
+    scheduleLinkedEventPrefillIfNeeded();
     return;
   }
   runWithUnsavedGuard(() => selectRecordNow(record, initialTab));
@@ -1677,6 +1713,10 @@ function startCreateNow(): void {
   recordDetailRequestVersion += 1;
   recordDetailAbortController?.abort();
   recordDetailAbortController = null;
+  prefillRequestVersion += 1;
+  prefillAbortController?.abort();
+  prefillAbortController = null;
+  prefillLoading.value = false;
   messageText.value = "";
   createOperationId.value = "";
   pendingRecordFocusId.value = "";

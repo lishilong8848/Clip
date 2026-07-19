@@ -446,7 +446,6 @@ class _SmokePortalService:
                 "last_modified_time": "2026-06-01 10:00:00",
                 "display_fields": {
                     "维修名称": "A楼测试检修管理记录",
-                    "故障发生时间": "2026-06-25 10:00",
                     "所属数据中心/楼栋-使用": "南通A楼",
                     "所属专业": "弱电",
                     "当前维修进度": "50%",
@@ -455,7 +454,6 @@ class _SmokePortalService:
                 },
                 "raw_fields": {
                     "维修名称": "A楼测试检修管理记录",
-                    "故障发生时间": "2026-06-25 10:00",
                     "所属数据中心/楼栋-使用": "南通A楼",
                     "所属专业": "弱电",
                     "当前维修进度": 0.5,
@@ -1007,6 +1005,7 @@ class _SmokePortalService:
             },
             "fields": {
                 "维修名称": "A楼测试事件转检修",
+                "故障发生时间": "2026-06-25 10:00",
                 "故障维修原因": "测试告警",
                 "所属数据中心/楼栋-使用": "南通A楼",
                 "所属专业": "弱电",
@@ -1519,6 +1518,10 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await assertLayout(page, 'repair-management-entry');
           await page.getByRole('button', {{ name: '维修单信息' }}).click();
           const linkedEventFaultTime = page.locator('[data-field-name="故障发生时间"] input[type="datetime-local"]');
+          await page.waitForFunction(() => {{
+            const input = document.querySelector('[data-field-name="故障发生时间"] input[type="datetime-local"]');
+            return input instanceof HTMLInputElement && input.value === '2026-06-25T10:00';
+          }}, null, {{ timeout: 10000 }});
           if (await linkedEventFaultTime.inputValue() !== '2026-06-25T10:00') {{
             throw new Error(`linked event occurrence time was not applied: ${{await linkedEventFaultTime.inputValue()}}`);
           }}
