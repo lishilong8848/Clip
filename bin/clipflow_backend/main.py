@@ -130,7 +130,6 @@ from lan_bitable_template_portal.portal_service import (
     PortalError,
     REPAIR_SOURCE_APP_TOKEN,
     REPAIR_SOURCE_TABLE_ID,
-    REPAIR_SYNC_TABLE_ID,
     SCOPE_OPTIONS,
     WORK_TYPE_BY_NOTICE_TYPE,
     ZHIHANG_CHANGE_APP_TOKEN,

@@ -1206,7 +1206,12 @@ function resetDraft(): void {
       );
       continue;
     }
-    fieldDraft[name] = repairDraftInputValue(field, value);
+    const normalizedValue = repairDraftInputValue(field, value);
+    fieldDraft[name] = normalizedValue || (
+      fieldType === 5
+        ? repairDraftInputValue(field, displayFields[name])
+        : normalizedValue
+    );
   }
   if (!editingRecordId.value && eventTitle.value) prefillEventTitle();
   scheduleLinkedEventPrefillIfNeeded();

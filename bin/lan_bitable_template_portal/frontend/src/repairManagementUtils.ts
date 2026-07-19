@@ -41,19 +41,54 @@ export function repairFieldBadge(field: LooseDict, editingRecordId = ""): string
   return String(field.ui_type || "可编辑");
 }
 
+function repairDateTimeInputValue(value: unknown, depth = 0): string {
+  if (value === null || value === undefined || depth > 6) return "";
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const normalized = repairDateTimeInputValue(item, depth + 1);
+      if (normalized) return normalized;
+    }
+    return "";
+  }
+  if (isValueRecord(value)) {
+    for (const key of ["timestamp", "value", "date", "datetime", "time", "text"]) {
+      if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+      const normalized = repairDateTimeInputValue(value[key], depth + 1);
+      if (normalized) return normalized;
+    }
+    return "";
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const timestamp = Math.abs(value) < 100_000_000_000 ? value * 1000 : value;
+    const date = new Date(timestamp);
+    if (!Number.isNaN(date.getTime())) {
+      const pad = (item: number) => String(item).padStart(2, "0");
+      return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    }
+    return "";
+  }
+  const sourceText = String(value || "").trim();
+  if (!sourceText) return "";
+  const decoded = decodedStructuredText(sourceText);
+  if (decoded !== undefined) return repairDateTimeInputValue(decoded, depth + 1);
+  if (/^\d{10,13}$/.test(sourceText)) {
+    return repairDateTimeInputValue(Number(sourceText), depth + 1);
+  }
+  const text = sourceText
+    .replace(/\//g, "-")
+    .replace(/\s+/, "T");
+  const matched = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})T(\d{1,2}):(\d{1,2})/);
+  if (!matched) return "";
+  const [, year, month, day, hour, minute] = matched;
+  const pad = (item: string) => item.padStart(2, "0");
+  return `${year}-${pad(month)}-${pad(day)}T${pad(hour)}:${pad(minute)}`;
+}
+
 export function repairDraftInputValue(field: LooseDict, value: unknown): string {
   const uiType = String(field.ui_type || "").toLowerCase();
   const fieldType = Number(field.field_type || 0);
   if (fieldType === 5 || uiType.includes("datetime")) {
-    if (typeof value === "number" && Number.isFinite(value)) {
-      const date = new Date(value);
-      if (!Number.isNaN(date.getTime())) {
-        const pad = (item: number) => String(item).padStart(2, "0");
-        return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
-      }
-    }
-    const text = repairFieldValueToText(value).trim().replace(" ", "T");
-    return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(text) ? text.slice(0, 16) : "";
+    return repairDateTimeInputValue(value);
   }
   if (fieldType === 15 || uiType === "url") {
     const link = value && typeof value === "object" && !Array.isArray(value)

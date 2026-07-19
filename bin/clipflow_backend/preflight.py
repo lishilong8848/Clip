@@ -14,7 +14,6 @@ from lan_bitable_template_portal.portal_service import (
     NOTICE_TYPE_REPAIR,
     REPAIR_SOURCE_APP_TOKEN,
     REPAIR_SOURCE_TABLE_ID,
-    REPAIR_SYNC_TABLE_ID,
     ZHIHANG_CHANGE_APP_TOKEN,
     ZHIHANG_CHANGE_TABLE_ID,
     MaintenancePortalService,
@@ -190,14 +189,6 @@ def build_backend_preflight_report(service: MaintenancePortalService) -> dict:
                 optional_aliases={
                     "标题": ["名称", "变更名称", "变更标题", "变更简述", "工作内容"]
                 },
-            ),
-            _check_field_set(
-                service,
-                label="检修同步表字段",
-                app_token=REPAIR_SOURCE_APP_TOKEN,
-                table_id=REPAIR_SYNC_TABLE_ID,
-                required=[],
-                optional=["名称（标题）", "名称"],
             ),
             _check_field_set(
                 service,

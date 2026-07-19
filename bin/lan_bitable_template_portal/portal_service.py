@@ -228,7 +228,6 @@ REPAIR_MANAGEMENT_FOLLOWUP_AUTO_FIELD_NAMES = (
 REPAIR_MANAGEMENT_PROTECTED_FIELD_NAMES.update(
     REPAIR_MANAGEMENT_FOLLOWUP_AUTO_FIELD_NAMES
 )
-REPAIR_SYNC_TABLE_ID = "tblSA9euoote8aCA"
 REPAIR_MANAGEMENT_REPAIR_TABLE_ID = "tblpaHktT0mn0hwg"
 REPAIR_FOLLOWUP_TABLE_ID = "tblkJByibuNWWGJh"
 REPAIR_EQUIPMENT_CATALOG_TABLE_ID = "tblkKnYwajfRmquQ"
@@ -3580,6 +3579,18 @@ class MaintenancePortalService:
             if record_id.startswith("rec"):
                 result.append(record_id)
         return list(dict.fromkeys(result))
+
+    @staticmethod
+    def _repair_management_relation_table_ids(value: Any) -> list[str]:
+        pending: list[Any] = value if isinstance(value, list) else [value]
+        result: list[str] = []
+        for item in pending:
+            if not isinstance(item, dict):
+                continue
+            table_id = str(item.get("table_id") or "").strip()
+            if table_id and table_id not in result:
+                result.append(table_id)
+        return result
 
     @staticmethod
     def _repair_management_users(value: Any) -> list[dict[str, Any]]:
@@ -9268,8 +9279,8 @@ class MaintenancePortalService:
                 display_fields.get("故障维修原因") or title
             )
             occurrence_time = self._repair_management_plain_text(
-                raw_fields.get("故障发生时间")
-                or display_fields.get("故障发生时间")
+                display_fields.get("故障发生时间")
+                or raw_fields.get("故障发生时间")
             )
             specialty = self._repair_management_canonical_select_text(
                 "所属专业",
@@ -9314,8 +9325,11 @@ class MaintenancePortalService:
                 "display_fields": historical_event_fields,
                 "raw_fields": raw_fields,
                 "historical_fallback": True,
+                "relation_table_ids": self._repair_management_relation_table_ids(
+                    raw_fields.get("关联事件单")
+                ),
                 "resolution_warning": (
-                    "来源事件属于历史事件表，已使用维修单中保存的事件字段。"
+                    "关联事件已不在当前事件表中，已使用维修单中保存的事件字段。"
                 ),
             }
         return {}
@@ -9342,6 +9356,17 @@ class MaintenancePortalService:
             if not self._scope_matches_item(scope, event_item):
                 raise PortalError("当前账号无权关联该楼栋事件。")
             return event_item
+        saved_event = self._repair_management_event_from_project_snapshot(
+            scope=scope,
+            record_id=record_id,
+        )
+        linked_table_ids = {
+            str(table_id or "").strip()
+            for table_id in (saved_event.get("relation_table_ids") or [])
+            if str(table_id or "").strip()
+        }
+        if saved_event and linked_table_ids and event_table_id not in linked_table_ids:
+            return saved_event
         try:
             payload = self._request_json(
                 f"records/{record_id}",
@@ -9352,12 +9377,8 @@ class MaintenancePortalService:
         except PortalError as exc:
             if not self._repair_management_record_not_found_error(exc):
                 raise
-            historical = self._repair_management_event_from_project_snapshot(
-                scope=scope,
-                record_id=record_id,
-            )
-            if historical:
-                return historical
+            if saved_event:
+                return saved_event
             raise
         raw_record = (payload.get("data") or {}).get("record")
         if not isinstance(raw_record, dict):
@@ -11142,133 +11163,6 @@ class MaintenancePortalService:
                 return record_ids[0]
         return ""
 
-    @staticmethod
-    def _decode_repair_sync_source_id(value: Any) -> str:
-        text = str(value or "").strip()
-        if not text:
-            return ""
-        try:
-            padded = text + ("=" * (-len(text) % 4))
-            return base64.b64decode(padded).decode("utf-8", errors="replace")
-        except Exception:
-            return ""
-
-    def _repair_sync_record_matches_target(
-        self, record: dict[str, Any], target_record_id: str
-    ) -> bool:
-        target_record_id = str(target_record_id or "").strip()
-        if not target_record_id:
-            return False
-        fields = record.get("display_fields") or record.get("fields") or {}
-        source_id = fields.get("SourceID")
-        if not isinstance(source_id, str):
-            source_id = self._normalize_field_value("SourceID", source_id, {})
-        decoded = self._decode_repair_sync_source_id(source_id)
-        parts = [part.strip() for part in decoded.split(":")]
-        return len(parts) >= 2 and parts[1] == target_record_id
-
-    def _find_repair_sync_record_id(
-        self,
-        *,
-        target_record_id: str,
-        sync_app_token: str = REPAIR_SOURCE_APP_TOKEN,
-        sync_table_id: str = REPAIR_SYNC_TABLE_ID,
-        max_pages: int = 40,
-    ) -> str:
-        target_record_id = str(target_record_id or "").strip()
-        if not target_record_id:
-            return ""
-        page_token = ""
-        pages = 0
-        while pages < max_pages:
-            pages += 1
-            params: dict[str, Any] = {"page_size": 500}
-            if page_token:
-                params["page_token"] = page_token
-            payload = self._request_json(
-                "records",
-                params=params,
-                app_token=sync_app_token,
-                table_id=sync_table_id,
-            )
-            data = payload.get("data") or {}
-            for item in data.get("items") or []:
-                if not isinstance(item, dict):
-                    continue
-                if self._repair_sync_record_matches_target(item, target_record_id):
-                    return str(item.get("record_id") or item.get("id") or "").strip()
-            if not data.get("has_more"):
-                break
-            page_token = str(data.get("page_token") or "").strip()
-            if not page_token:
-                break
-        return ""
-
-    @staticmethod
-    def _linked_record_ids_from_value(value: Any) -> list[str]:
-        linked: list[str] = []
-
-        def add(candidate: Any) -> None:
-            text = str(candidate or "").strip()
-            if text and text not in linked:
-                linked.append(text)
-
-        if isinstance(value, dict):
-            for key in ("link_record_ids", "record_ids"):
-                ids = value.get(key)
-                if isinstance(ids, list):
-                    for item in ids:
-                        add(item)
-            add(value.get("record_id") or value.get("id"))
-        elif isinstance(value, list):
-            for item in value:
-                if isinstance(item, dict):
-                    for key in ("link_record_ids", "record_ids"):
-                        ids = item.get(key)
-                        if isinstance(ids, list):
-                            for record_id in ids:
-                                add(record_id)
-                    add(item.get("record_id") or item.get("id"))
-                else:
-                    add(item)
-        else:
-            add(value)
-        return linked
-
-    def _source_repair_link_record_ids(
-        self, *, source_app_token: str, source_table_id: str, source_record_id: str
-    ) -> list[str]:
-        payload = self._request_json(
-            f"records/{source_record_id}",
-            app_token=source_app_token,
-            table_id=source_table_id,
-        )
-        record = (payload.get("data") or {}).get("record") or {}
-        fields = record.get("fields") or {}
-        return self._linked_record_ids_from_value(fields.get(REPAIR_LINK_FIELD_NAME))
-
-    def _write_source_repair_link(
-        self,
-        *,
-        source_app_token: str,
-        source_table_id: str,
-        source_record_id: str,
-        sync_record_id: str,
-    ) -> None:
-        linked_ids = self._source_repair_link_record_ids(
-            source_app_token=source_app_token,
-            source_table_id=source_table_id,
-            source_record_id=source_record_id,
-        )
-        if sync_record_id not in linked_ids:
-            linked_ids.append(sync_record_id)
-        self._patch_record_fields_exact(
-            app_token=source_app_token,
-            table_id=source_table_id,
-            record_id=source_record_id,
-            fields={REPAIR_LINK_FIELD_NAME: {"link_record_ids": linked_ids}},
-        )
-
     def _repair_has_started(self, record: dict[str, Any]) -> bool:
         fields = record.get("display_fields") or {}
         return bool(self._clean_source_text(fields.get("维修开始时间")))
@@ -12427,8 +12321,8 @@ class MaintenancePortalService:
                 "source_app_token": source_app_token,
                 "source_table_id": source_table_id,
                 "source_record_id": source_record_id,
-                "sync_app_token": REPAIR_SOURCE_APP_TOKEN,
-                "sync_table_id": REPAIR_SYNC_TABLE_ID,
+                "sync_app_token": "",
+                "sync_table_id": "",
                 "target_app_token": str(config.app_token or "").strip(),
                 "target_table_id": str(config.table_id_overhaul or "").strip(),
                 "target_record_id": target_record_id,
@@ -12515,13 +12409,6 @@ class MaintenancePortalService:
                 ).strip()
                 source_record_id = str(task.get("source_record_id") or "").strip()
                 target_record_id = str(task.get("target_record_id") or "").strip()
-                sync_app_token = str(
-                    task.get("sync_app_token") or REPAIR_SOURCE_APP_TOKEN
-                ).strip()
-                sync_table_id = str(
-                    task.get("sync_table_id") or REPAIR_SYNC_TABLE_ID
-                ).strip()
-                sync_record_id = str(task.get("sync_record_id") or "").strip()
                 link_field_name = str(
                     task.get("link_field_name") or REPAIR_LINK_FIELD_NAME
                 ).strip()
@@ -12534,58 +12421,16 @@ class MaintenancePortalService:
                     raise PortalError(
                         f"维修项目表缺少字段“{link_field_name}”"
                     )
-                if not self._repair_management_field_is_relation(link_meta):
-                    self._patch_record_fields_exact(
-                        app_token=source_app_token,
-                        table_id=source_table_id,
-                        record_id=source_record_id,
-                        fields={link_field_name: target_record_id},
-                    )
-                    if (
-                        source_app_token == REPAIR_SOURCE_APP_TOKEN
-                        and source_table_id == REPAIR_MANAGEMENT_TABLE_ID
-                    ):
-                        self._upsert_repair_snapshot_fields(
-                            source_key=REPAIR_SNAPSHOT_SOURCE_PROJECTS,
-                            record_id=source_record_id,
-                            fields={link_field_name: target_record_id},
-                        )
-                        self._invalidate_repair_management_status_cache()
-                    self._state_store.update_repair_link_task(
-                        task_key,
-                        {
-                            "status": "linked",
-                            "attempts": attempts,
-                            "sync_record_id": "",
-                            "link_mode": "text",
-                            "last_error": "",
-                        },
-                    )
-                    stats["linked"] += 1
-                    continue
-                if not sync_record_id:
-                    sync_record_id = self._find_repair_sync_record_id(
-                        target_record_id=target_record_id,
-                        sync_app_token=sync_app_token,
-                        sync_table_id=sync_table_id,
-                    )
-                if not sync_record_id:
+                if self._repair_management_field_is_relation(link_meta):
                     raise PortalError(
-                        f"同步表尚未出现目标检修记录 {target_record_id}"
+                        f"维修项目表“{link_field_name}”必须为文本记录 ID 字段"
                     )
-                linked_ids = self._source_repair_link_record_ids(
-                    source_app_token=source_app_token,
-                    source_table_id=source_table_id,
-                    source_record_id=source_record_id,
+                self._patch_record_fields_exact(
+                    app_token=source_app_token,
+                    table_id=source_table_id,
+                    record_id=source_record_id,
+                    fields={link_field_name: target_record_id},
                 )
-                if sync_record_id not in linked_ids:
-                    self._write_source_repair_link(
-                        source_app_token=source_app_token,
-                        source_table_id=source_table_id,
-                        source_record_id=source_record_id,
-                        sync_record_id=sync_record_id,
-                    )
-                    linked_ids.append(sync_record_id)
                 if (
                     source_app_token == REPAIR_SOURCE_APP_TOKEN
                     and source_table_id == REPAIR_MANAGEMENT_TABLE_ID
@@ -12593,7 +12438,7 @@ class MaintenancePortalService:
                     self._upsert_repair_snapshot_fields(
                         source_key=REPAIR_SNAPSHOT_SOURCE_PROJECTS,
                         record_id=source_record_id,
-                        fields={link_field_name: linked_ids},
+                        fields={link_field_name: target_record_id},
                     )
                     self._invalidate_repair_management_status_cache()
                 self._state_store.update_repair_link_task(
@@ -12601,7 +12446,8 @@ class MaintenancePortalService:
                     {
                         "status": "linked",
                         "attempts": attempts,
-                        "sync_record_id": sync_record_id,
+                        "sync_record_id": "",
+                        "link_mode": "text",
                         "last_error": "",
                     },
                 )

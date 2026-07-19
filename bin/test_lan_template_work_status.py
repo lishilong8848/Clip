@@ -8,7 +8,6 @@ import time
 import unittest
 import json
 import datetime as dt
-import base64
 import ast
 import re
 import gc
@@ -516,14 +515,7 @@ def _build_repair_record(
         fault_time = _test_datetime(8, "08:20")
     raw_fields = {}
     if target_record_id:
-        raw_fields["设备检修关联"] = [
-            {
-                "record_ids": [target_record_id],
-                "table_id": "tblSA9euoote8aCA",
-                "text": f"{title}-目标",
-                "type": "text",
-            }
-        ]
+        raw_fields["设备检修关联"] = target_record_id
     return {
         "record_id": record_id,
         "raw_fields": raw_fields,
@@ -5328,7 +5320,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(len(tasks), 1)
             self.assertEqual(tasks[0]["source_record_id"], "rec_source_repair_1")
             self.assertEqual(tasks[0]["target_record_id"], "rec_target_repair_1")
-            self.assertEqual(tasks[0]["sync_table_id"], "tblSA9euoote8aCA")
+            self.assertEqual(tasks[0]["sync_table_id"], "")
             process_async.assert_called_once_with()
 
     def test_repair_link_task_is_retried_after_repair_update_success(self):
@@ -5366,15 +5358,11 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(tasks[0]["action"], "update")
             process_async.assert_called_once_with()
 
-    def test_process_due_repair_link_task_links_source_record_once(self):
+    def test_process_due_repair_link_task_rejects_relation_field_without_sync_table(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
             source_record_id = "source-repair-1"
             target_record_id = "target-repair-1"
-            sync_record_id = "sync-repair-1"
-            encoded_source_id = base64.b64encode(
-                f"7612849140323470524:{target_record_id}:hash:1".encode("utf-8")
-            ).decode("ascii")
             service._state_store.upsert_repair_link_task(
                 {
                     "task_key": f"repair_link:{source_record_id}:{target_record_id}",
@@ -5390,41 +5378,19 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "link_field_name": "设备检修关联",
                     "due_at": time.time() - 1,
                     "attempts": 0,
-                    "max_attempts": 12,
+                    "max_attempts": 1,
                 }
             )
-            updates = []
-
-            def fake_request(path, *, params=None, app_token=None, table_id=None):
-                if path == "records":
-                    return {
-                        "data": {
-                            "items": [
-                                {
-                                    "record_id": sync_record_id,
-                                    "fields": {"SourceID": encoded_source_id},
-                                }
-                            ],
-                            "has_more": False,
-                        }
-                    }
-                if path == f"records/{source_record_id}":
-                    return {
-                        "data": {
-                            "record": {
-                                "record_id": source_record_id,
-                                "fields": {"设备检修关联": []},
-                            }
-                        }
-                    }
-                raise AssertionError(path)
-
-            def fake_patch(**kwargs):
-                updates.append(kwargs)
-                return {"code": 0, "msg": "success"}
-
-            service._request_json = fake_request
-            service._patch_record_fields_exact = fake_patch
+            service._request_json = (  # type: ignore[method-assign]
+                lambda *_args, **_kwargs: self.fail(
+                    "retired repair sync tables must never be queried"
+                )
+            )
+            service._patch_record_fields_exact = (  # type: ignore[method-assign]
+                lambda **_kwargs: self.fail(
+                    "relation fields must not receive a text target id"
+                )
+            )
             link_meta = FieldMeta(
                 "fld_link",
                 "设备检修关联",
@@ -5441,13 +5407,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
             stats = service.process_due_repair_link_tasks(limit=3)
 
-            self.assertEqual(stats["linked"], 1)
-            self.assertEqual(len(updates), 1)
-            self.assertEqual(updates[0]["record_id"], source_record_id)
-            self.assertEqual(
-                updates[0]["fields"],
-                {"设备检修关联": {"link_record_ids": [sync_record_id]}},
-            )
+            self.assertEqual(stats["failed"], 1)
             self.assertEqual(
                 service._state_store.list_due_repair_link_tasks(
                     now=time.time() + 3600,
@@ -5560,7 +5520,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(tasks[0]["source_record_id"], "source-upgrade")
             self.assertEqual(float(tasks[0]["due_at"]), 1000)
 
-    def test_repair_link_task_reschedules_when_sync_record_is_not_ready(self):
+    def test_repair_link_task_reschedules_when_text_write_temporarily_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
             source_record_id = "source-repair-1"
@@ -5584,17 +5544,11 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 }
             )
 
-            def fake_request(path, *, params=None, app_token=None, table_id=None):
-                if path == "records":
-                    return {"data": {"items": [], "has_more": False}}
-                raise AssertionError(path)
-
-            service._request_json = fake_request
             link_meta = FieldMeta(
                 "fld_link",
                 "设备检修关联",
-                "DuplexLink",
-                21,
+                "Text",
+                1,
                 False,
                 {},
                 [],
@@ -5602,6 +5556,16 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             )
             service._load_table_fields = (  # type: ignore[method-assign]
                 lambda **_kwargs: ([link_meta], {"设备检修关联": link_meta})
+            )
+            service._request_json = (  # type: ignore[method-assign]
+                lambda *_args, **_kwargs: self.fail(
+                    "text ID retries must not query a repair sync table"
+                )
+            )
+            service._patch_record_fields_exact = (  # type: ignore[method-assign]
+                lambda **_kwargs: (_ for _ in ()).throw(
+                    PortalError("飞书临时不可用")
+                )
             )
             before = time.time()
 
@@ -5621,7 +5585,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             )
             self.assertEqual(len(tasks), 1)
             self.assertEqual(tasks[0]["attempts"], 1)
-            self.assertIn("同步表尚未出现目标检修记录", tasks[0]["last_error"])
+            self.assertIn("飞书临时不可用", tasks[0]["last_error"])
 
     def test_server_get_ongoing_reads_sqlite_before_qt_callback(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -17456,16 +17420,14 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertTrue(payload["event_context_missing"])
         self.assertIn("仍可手动选择", payload["warnings"][0])
 
-    def test_repair_management_event_resolver_uses_linked_project_for_old_event_table(self):
+    def test_repair_management_event_resolver_uses_saved_fields_for_stale_relation(self):
         service = _TestMaintenancePortalService()
         service._load_repair_management_event_records = (  # type: ignore[method-assign]
             lambda: ([], {}, [])
         )
         service._request_json = (  # type: ignore[method-assign]
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                PortalError(
-                    "飞书接口失败: code=1254043, msg=RecordIdNotFound"
-                )
+            lambda *_args, **_kwargs: self.fail(
+                "stale relation must not query the current event table"
             )
         )
         service._load_repair_management_project_records = (  # type: ignore[method-assign]
@@ -17483,7 +17445,14 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                             "所属专业": "暖通",
                             "所属数据中心/楼栋-使用": "南通E楼",
                         },
-                        "raw_fields": {"关联事件单": "rec_old_event"},
+                        "raw_fields": {
+                            "关联事件单": [
+                                {
+                                    "record_ids": ["rec_stale_event"],
+                                    "table_id": "tbl_retired_event",
+                                }
+                            ]
+                        },
                     }
                 ],
             )
@@ -17491,14 +17460,14 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
         event = service._event_snapshot_record_for_repair(
             scope="E",
-            record_id="rec_old_event",
+            record_id="rec_stale_event",
             month="2026-07",
         )
 
-        self.assertEqual(event["record_id"], "rec_old_event")
+        self.assertEqual(event["record_id"], "rec_stale_event")
         self.assertEqual(event["building_codes"], ["E"])
         self.assertEqual(event["specialty"], "暖通")
-        self.assertIn("历史事件表", event["resolution_warning"])
+        self.assertIn("当前事件表", event["resolution_warning"])
 
     def test_event_notice_repair_project_helper_is_idempotent(self):
         service = _TestMaintenancePortalService()
