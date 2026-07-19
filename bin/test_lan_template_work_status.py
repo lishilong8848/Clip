@@ -9119,6 +9119,84 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             r'class="notice-row active"[^>]+data-record-id="rec_maintenance"',
         )
 
+    def test_workbench_lite_pending_repair_can_prefill_from_incomplete_event_project(self):
+        from lan_bitable_template_portal.workbench_lite import render_workbench_lite
+
+        payload = {
+            "records": [
+                {
+                    "record_id": "rec_repair_pending",
+                    "source_record_id": "rec_repair_pending",
+                    "work_type": "repair",
+                    "notice_type": "设备检修",
+                    "title": "E楼精密空调检修",
+                    "building": "E楼",
+                    "display_fields": {
+                        "事件描述": "E楼精密空调告警",
+                    },
+                    "raw_fields": {
+                        "关联事件单": "rec_event_current",
+                    },
+                }
+            ],
+            "ongoing": [],
+            "daily_summary": {"stats": {}},
+            "record_type_counts": {"repair": 1},
+            "ongoing_type_counts": {"repair": 0},
+        }
+
+        html = render_workbench_lite(
+            payload=payload,
+            session={"user": {"name": "测试用户"}, "is_admin": False},
+            scope="E",
+            work_type="repair",
+            record_id="rec_repair_pending",
+        )
+
+        self.assertIn('id="lite-repair-event-open"', html)
+        self.assertIn('data-source-event-id="rec_event_current"', html)
+        self.assertIn("E楼精密空调告警", html)
+        self.assertRegex(
+            html,
+            r'<section class="repair-event-link-panel" data-repair-event-link>',
+        )
+        self.assertIn('id="lite-repair-event-candidates"', html)
+        self.assertIn("/api/workbench/repair-event-candidates", html)
+        self.assertIn("/api/workbench/repair-event-bind", html)
+        self.assertIn("保存关联并填入", html)
+        self.assertIn("const draftComplete = result.draft_complete === true", html)
+        self.assertIn("if (draftComplete)", html)
+        self.assertIn("事件关联已保存；当前通告已切换", html)
+        self.assertIn("function confirmRepairEventCandidate()", html)
+        self.assertIn("let liteRepairEventRequestController = null", html)
+        self.assertIn("liteRepairEventRequestController.abort()", html)
+        self.assertIn("let liteRepairEventPrefillController = null", html)
+        self.assertIn("liteRepairEventPrefillController.abort()", html)
+        self.assertIn(
+            "requestSequence !== liteRepairEventRequestSequence",
+            html,
+        )
+        self.assertIn(
+            "previewValue(form, 'source_record_id') !== sourceRecordIdAtStart",
+            html,
+        )
+        self.assertIn(
+            "resetRepairEventSelection(form, !linkedOngoing && workType === 'repair')",
+            html,
+        )
+        self.assertNotIn(
+            "setFormValue(form, 'source_record_id', candidate.event_record_id",
+            html,
+        )
+        self.assertNotIn(
+            "setFormValue(form, 'target_record_id', candidate.event_record_id",
+            html,
+        )
+        self.assertIn(
+            "candidate_project_record_id: repairManagementRecordId",
+            html,
+        )
+
     def test_converted_maintenance_change_allows_empty_maintenance_cycle_for_pair_upload(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
@@ -15315,6 +15393,468 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(draft["reason"], "过滤器堵塞")
         self.assertEqual(draft["spare_parts"], "过滤器 × 2")
         self.assertEqual(draft["discovery"], "BMS系统")
+
+    def test_repair_notice_event_candidates_only_include_incomplete_linked_projects(self):
+        service = _TestMaintenancePortalService()
+        service._load_repair_management_project_records = (  # type: ignore[method-assign]
+            lambda **_kwargs: (
+                [],
+                {},
+                [
+                    {
+                        "record_id": "rec_project_incomplete",
+                        "last_modified_time": "2026-07-18 10:20",
+                        "display_fields": {
+                            "维修名称": "E楼精密空调维修",
+                            "所属数据中心/楼栋-使用": "南通E楼",
+                            "所属专业": "暖通",
+                            "当前维修进度": "65%",
+                        },
+                        "raw_fields": {
+                            "关联事件单": ["rec_event_incomplete"],
+                            "当前维修进度": 0.65,
+                        },
+                    },
+                    {
+                        "record_id": "rec_project_complete",
+                        "display_fields": {
+                            "维修名称": "E楼已完成维修",
+                            "所属数据中心/楼栋-使用": "南通E楼",
+                            "当前维修进度": "100%",
+                        },
+                        "raw_fields": {
+                            "关联事件单": ["rec_event_complete"],
+                            "当前维修进度": 1,
+                        },
+                    },
+                    {
+                        "record_id": "rec_project_without_event",
+                        "display_fields": {
+                            "维修名称": "E楼未关联事件维修",
+                            "所属数据中心/楼栋-使用": "南通E楼",
+                            "当前维修进度": "20%",
+                        },
+                        "raw_fields": {},
+                    },
+                    {
+                        "record_id": "rec_project_other_scope",
+                        "display_fields": {
+                            "维修名称": "A楼维修",
+                            "所属数据中心/楼栋-使用": "南通A楼",
+                            "当前维修进度": "30%",
+                        },
+                        "raw_fields": {
+                            "关联事件单": ["rec_event_other_scope"],
+                        },
+                    },
+                    {
+                        "record_id": "rec_project_mismatched_event_scope",
+                        "display_fields": {
+                            "维修名称": "E楼错误关联维修",
+                            "所属数据中心/楼栋-使用": "南通E楼",
+                            "当前维修进度": "30%",
+                        },
+                        "raw_fields": {
+                            "关联事件单": ["rec_event_a_scope"],
+                            "当前维修进度": 0.3,
+                        },
+                    },
+                ],
+            )
+        )
+        service._load_repair_management_event_records = (  # type: ignore[method-assign]
+            lambda **_kwargs: (
+                [],
+                {},
+                [
+                    {
+                        "record_id": "rec_event_incomplete",
+                        "display_fields": {
+                            "事件简述": "E楼精密空调高压告警",
+                            "告警描述": "压缩机高压告警",
+                            "机楼": "E楼",
+                            "专业": "暖通",
+                            "事件等级": "I3",
+                            "事件发现来源（统一）": "BMS系统",
+                            "事件发生时间": "2026-07-18 09:30",
+                        },
+                        "raw_fields": {},
+                    },
+                    {
+                        "record_id": "rec_event_a_scope",
+                        "display_fields": {
+                            "事件简述": "A楼越权事件",
+                            "机楼": "A楼",
+                            "事件发生时间": "2026-07-18 09:40",
+                        },
+                        "raw_fields": {},
+                    }
+                ],
+            )
+        )
+
+        payload = service.list_repair_notice_event_candidates(
+            scope="E",
+            query="精密空调",
+        )
+
+        self.assertEqual(payload["total"], 1)
+        candidate = payload["records"][0]
+        self.assertEqual(candidate["event_record_id"], "rec_event_incomplete")
+        self.assertEqual(
+            candidate["repair_management_record_id"],
+            "rec_project_incomplete",
+        )
+        self.assertEqual(candidate["title"], "E楼精密空调高压告警")
+        self.assertEqual(candidate["progress_percent"], 65)
+        self.assertEqual(candidate["progress_label"], "65%")
+        self.assertEqual(candidate["building"], "E楼")
+        self.assertEqual(candidate["specialty"], "暖通")
+
+    def test_repair_notice_event_candidates_fall_back_when_event_snapshot_fails(self):
+        service = _TestMaintenancePortalService()
+        service._load_repair_management_project_records = (  # type: ignore[method-assign]
+            lambda **_kwargs: (
+                [],
+                {},
+                [
+                    {
+                        "record_id": "rec_project_snapshot_only",
+                        "display_fields": {
+                            "维修名称": "E楼精密空调维修",
+                            "事件描述": "E楼精密空调告警",
+                            "所属数据中心/楼栋-使用": "南通E楼",
+                            "所属专业": "暖通",
+                            "当前维修进度": "40%",
+                        },
+                        "raw_fields": {
+                            "关联事件单": ["rec_event_snapshot_unavailable"],
+                            "当前维修进度": 0.4,
+                        },
+                    }
+                ],
+            )
+        )
+
+        def fail_event_snapshot(**_kwargs):
+            raise PortalError("事件快照暂不可用")
+
+        service._load_repair_management_event_records = fail_event_snapshot  # type: ignore[method-assign]
+
+        payload = service.list_repair_notice_event_candidates(scope="E")
+
+        self.assertEqual(payload["total"], 1)
+        self.assertEqual(
+            payload["records"][0]["event_record_id"],
+            "rec_event_snapshot_unavailable",
+        )
+        self.assertEqual(payload["records"][0]["progress_percent"], 40)
+        self.assertIn("事件快照暂不可用", payload["warnings"][0])
+
+    def test_repair_notice_event_binding_updates_current_project_without_sending(self):
+        service = _TestMaintenancePortalService()
+        records = {
+            "rec_current_project": {
+                "record_id": "rec_current_project",
+                "display_fields": {
+                    "维修名称": "E楼当前待发起检修",
+                    "所属数据中心/楼栋-使用": "南通E楼",
+                },
+                "raw_fields": {},
+            },
+            "rec_candidate_project": {
+                "record_id": "rec_candidate_project",
+                "display_fields": {
+                    "维修名称": "E楼事件转检修项目",
+                    "所属数据中心/楼栋-使用": "南通E楼",
+                    "当前维修进度": "60%",
+                },
+                "raw_fields": {
+                    "关联事件单": ["rec_event_bind"],
+                    "当前维修进度": 0.6,
+                },
+            },
+        }
+        event_link_meta = FieldMeta(
+            "fld_event",
+            "关联事件单",
+            "Text",
+            1,
+            False,
+            {},
+            [],
+            False,
+        )
+        service._load_repair_management_project_records = (  # type: ignore[method-assign]
+            lambda **_kwargs: (
+                [event_link_meta],
+                {"关联事件单": event_link_meta},
+                list(records.values()),
+            )
+        )
+        service._ensure_repair_management_record_in_scope = (  # type: ignore[method-assign]
+            lambda record_id, _scope, **_kwargs: records[record_id]
+        )
+        service._event_snapshot_record_for_repair = (  # type: ignore[method-assign]
+            lambda **_kwargs: {
+                "source_record_id": "rec_event_bind",
+                "record_id": "rec_event_bind",
+                "title": "E楼精密空调高压告警",
+                "alarm_desc": "压缩机高压告警",
+                "building": "E楼",
+                "building_codes": ["E"],
+                "specialty": "暖通",
+                "occurrence_time": "2026-07-18 09:30",
+                "display_fields": {},
+                "raw_fields": {},
+            }
+        )
+        update_calls = []
+        service.update_repair_management_record = (  # type: ignore[method-assign]
+            lambda record_id, fields, **kwargs: (
+                update_calls.append(
+                    {
+                        "record_id": record_id,
+                        "fields": fields,
+                        **kwargs,
+                    }
+                )
+                or {
+                    "fields": {
+                        "关联事件单": "rec_event_bind",
+                        "故障维修原因": "压缩机高压告警",
+                    },
+                    "warnings": [],
+                }
+            )
+        )
+        service.repair_management_notice_prefill = (  # type: ignore[method-assign]
+            lambda record_id, **_kwargs: {
+                "source_record": records[record_id],
+                "draft": {
+                    "title": "E楼当前待发起检修",
+                    "reason": "压缩机高压告警",
+                },
+            }
+        )
+
+        payload = service.bind_repair_notice_event(
+            source_record_id="rec_current_project",
+            event_record_id="rec_event_bind",
+            candidate_project_record_id="rec_candidate_project",
+            scope="E",
+        )
+
+        self.assertTrue(payload["saved"])
+        self.assertEqual(payload["source_record_id"], "rec_current_project")
+        self.assertEqual(payload["event_record_id"], "rec_event_bind")
+        self.assertEqual(len(update_calls), 1)
+        self.assertEqual(update_calls[0]["record_id"], "rec_current_project")
+        self.assertEqual(update_calls[0]["fields"], {})
+        self.assertEqual(update_calls[0]["source_event_id"], "rec_event_bind")
+        self.assertEqual(update_calls[0]["source_repair_ids"], [])
+        self.assertFalse(update_calls[0]["replace_source_relations"])
+        self.assertFalse(update_calls[0]["validate_required"])
+        self.assertTrue(payload["draft_complete"])
+        self.assertEqual(payload["draft"]["reason"], "压缩机高压告警")
+        self.assertEqual(payload["draft"]["solution"], "")
+        self.assertEqual(payload["draft"]["spare_parts"], "")
+        self.assertNotIn("target_record_id", payload)
+
+        service.repair_management_notice_prefill = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                PortalError("事件详情暂不可用")
+            )
+        )
+        saved_without_prefill = service.bind_repair_notice_event(
+            source_record_id="rec_current_project",
+            event_record_id="rec_event_bind",
+            candidate_project_record_id="rec_candidate_project",
+            scope="E",
+        )
+
+        self.assertTrue(saved_without_prefill["saved"])
+        self.assertFalse(saved_without_prefill["draft_complete"])
+        self.assertEqual(saved_without_prefill["draft"], {})
+        self.assertEqual(
+            saved_without_prefill["source_record"]["raw_fields"]["关联事件单"],
+            "rec_event_bind",
+        )
+        self.assertIn("事件关联已保存", saved_without_prefill["warnings"][-1])
+        self.assertIn("事件详情暂不可用", saved_without_prefill["warnings"][-1])
+
+    def test_repair_notice_event_binding_rejects_completed_candidate(self):
+        service = _TestMaintenancePortalService()
+        records = {
+            "rec_current_project": {
+                "record_id": "rec_current_project",
+                "display_fields": {
+                    "所属数据中心/楼栋-使用": "南通E楼",
+                },
+                "raw_fields": {},
+            },
+            "rec_completed_project": {
+                "record_id": "rec_completed_project",
+                "display_fields": {
+                    "所属数据中心/楼栋-使用": "南通E楼",
+                    "当前维修进度": "100%",
+                },
+                "raw_fields": {
+                    "关联事件单": ["rec_event_completed"],
+                    "当前维修进度": 1,
+                },
+            },
+        }
+        event_link_meta = FieldMeta(
+            "fld_event",
+            "关联事件单",
+            "Text",
+            1,
+            False,
+            {},
+            [],
+            False,
+        )
+        service._load_repair_management_project_records = (  # type: ignore[method-assign]
+            lambda **_kwargs: (
+                [event_link_meta],
+                {"关联事件单": event_link_meta},
+                list(records.values()),
+            )
+        )
+        service._ensure_repair_management_record_in_scope = (  # type: ignore[method-assign]
+            lambda record_id, _scope, **_kwargs: records[record_id]
+        )
+
+        with self.assertRaisesRegex(PortalError, "检修进展已完成"):
+            service.bind_repair_notice_event(
+                source_record_id="rec_current_project",
+                event_record_id="rec_event_completed",
+                candidate_project_record_id="rec_completed_project",
+                scope="E",
+            )
+
+    def test_repair_notice_event_binding_serializes_same_current_project(self):
+        service = _TestMaintenancePortalService()
+        records = {
+            "rec_current_project": {
+                "record_id": "rec_current_project",
+                "display_fields": {
+                    "维修名称": "E楼当前待发起检修",
+                    "所属数据中心/楼栋-使用": "南通E楼",
+                },
+                "raw_fields": {},
+            },
+            "rec_candidate_one": {
+                "record_id": "rec_candidate_one",
+                "display_fields": {
+                    "所属数据中心/楼栋-使用": "南通E楼",
+                    "当前维修进度": "20%",
+                },
+                "raw_fields": {
+                    "关联事件单": ["rec_event_one"],
+                    "当前维修进度": 0.2,
+                },
+            },
+            "rec_candidate_two": {
+                "record_id": "rec_candidate_two",
+                "display_fields": {
+                    "所属数据中心/楼栋-使用": "南通E楼",
+                    "当前维修进度": "40%",
+                },
+                "raw_fields": {
+                    "关联事件单": ["rec_event_two"],
+                    "当前维修进度": 0.4,
+                },
+            },
+        }
+        event_link_meta = FieldMeta(
+            "fld_event",
+            "关联事件单",
+            "Text",
+            1,
+            False,
+            {},
+            [],
+            False,
+        )
+        service._load_repair_management_project_records = (  # type: ignore[method-assign]
+            lambda **_kwargs: (
+                [event_link_meta],
+                {"关联事件单": event_link_meta},
+                list(records.values()),
+            )
+        )
+        service._ensure_repair_management_record_in_scope = (  # type: ignore[method-assign]
+            lambda record_id, _scope, **_kwargs: records[record_id]
+        )
+        service._event_snapshot_record_for_repair = (  # type: ignore[method-assign]
+            lambda **kwargs: {
+                "source_record_id": kwargs["record_id"],
+                "record_id": kwargs["record_id"],
+                "title": kwargs["record_id"],
+                "building": "E楼",
+                "building_codes": ["E"],
+                "display_fields": {},
+                "raw_fields": {},
+            }
+        )
+        state = {"active": 0, "max_active": 0}
+        state_lock = threading.Lock()
+
+        def slow_update(_record_id, _fields, **kwargs):
+            with state_lock:
+                state["active"] += 1
+                state["max_active"] = max(state["max_active"], state["active"])
+            time.sleep(0.03)
+            with state_lock:
+                state["active"] -= 1
+            return {
+                "fields": {"关联事件单": kwargs["source_event_id"]},
+                "warnings": [],
+            }
+
+        service.update_repair_management_record = slow_update  # type: ignore[method-assign]
+        service.repair_management_notice_prefill = (  # type: ignore[method-assign]
+            lambda record_id, **_kwargs: {
+                "source_record": records[record_id],
+                "draft": {"title": "E楼当前待发起检修"},
+            }
+        )
+        results = []
+        errors = []
+
+        def bind(event_record_id, candidate_record_id):
+            try:
+                results.append(
+                    service.bind_repair_notice_event(
+                        source_record_id="rec_current_project",
+                        event_record_id=event_record_id,
+                        candidate_project_record_id=candidate_record_id,
+                        scope="E",
+                    )
+                )
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(
+                target=bind,
+                args=("rec_event_one", "rec_candidate_one"),
+            ),
+            threading.Thread(
+                target=bind,
+                args=("rec_event_two", "rec_candidate_two"),
+            ),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=2.0)
+
+        self.assertFalse(errors)
+        self.assertEqual(len(results), 2)
+        self.assertEqual(state["max_active"], 1)
 
     def test_repair_target_record_id_accepts_writable_text_mirror(self):
         service = _TestMaintenancePortalService()

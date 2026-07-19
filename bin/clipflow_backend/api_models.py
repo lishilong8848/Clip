@@ -83,6 +83,16 @@ class RepairManagementPrefillRequest(APIModel):
         extra = "forbid"
 
 
+class RepairNoticeEventBindRequest(APIModel):
+    scope: str = "ALL"
+    source_record_id: str
+    event_record_id: str
+    candidate_project_record_id: str
+
+    class Config(APIModel.Config):
+        extra = "forbid"
+
+
 class RepairFollowupRecordRequest(APIModel):
     operation_id: str = Field(default="", max_length=128)
     scope: str = "ALL"

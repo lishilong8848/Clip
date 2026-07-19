@@ -69,6 +69,7 @@ from clipflow_backend.api_models import (
     PermissionRequestReviewRequest,
     RepairManagementPrefillRequest,
     RepairManagementRecordRequest,
+    RepairNoticeEventBindRequest,
     RepairFollowupRecordRequest,
     QtClipboardAckRequest,
     QtClipboardEventRequest,
@@ -2827,6 +2828,80 @@ class FastAPIPortalController:
                     record_id=str(request.query_params.get("record_id") or ""),
                     month=str(request.query_params.get("month") or ""),
                 )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.get("/api/workbench/repair-event-candidates")
+        async def workbench_repair_event_candidates(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_scope_or_error(
+                    session, request.query_params.get("scope") or "ALL"
+                )
+                try:
+                    limit = int(request.query_params.get("limit") or 100)
+                except ValueError:
+                    limit = 100
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.list_repair_notice_event_candidates,
+                    scope=scope,
+                    query=str(request.query_params.get("q") or ""),
+                    limit=limit,
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
+        @app.get("/api/workbench/repair-event-prefill")
+        async def workbench_repair_event_prefill(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_scope_or_error(
+                    session, request.query_params.get("scope") or "ALL"
+                )
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.repair_management_notice_prefill,
+                    str(
+                        request.query_params.get("repair_management_record_id")
+                        or ""
+                    ),
+                    scope=scope,
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.post("/api/workbench/repair-event-bind")
+        async def workbench_repair_event_bind(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                payload = (
+                    await self._read_model_request(
+                        request,
+                        RepairNoticeEventBindRequest,
+                    )
+                ).to_payload()
+                scope = self._authorized_scope_or_error(
+                    session,
+                    payload.get("scope") or "ALL",
+                )
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.bind_repair_notice_event,
+                    source_record_id=str(payload.get("source_record_id") or ""),
+                    event_record_id=str(payload.get("event_record_id") or ""),
+                    candidate_project_record_id=str(
+                        payload.get("candidate_project_record_id") or ""
+                    ),
+                    scope=scope,
+                )
+                PortalRuntime.clear_payload_cache()
                 return self._json_ok(request, session, data)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)

@@ -989,6 +989,8 @@ class MaintenancePortalService:
         self._repair_management_status_load_lock = threading.Lock()
         self._repair_management_status_cache: dict[str, Any] | None = None
         self._repair_management_missing_event_ids: dict[str, float] = {}
+        self._repair_management_record_locks_guard = threading.RLock()
+        self._repair_management_record_locks: dict[str, threading.RLock] = {}
         self._repair_snapshots_enabled = bool(enable_repair_snapshots)
         self._repair_snapshot_locks_guard = threading.RLock()
         self._repair_snapshot_locks: dict[str, threading.Lock] = {}
@@ -1138,6 +1140,17 @@ class MaintenancePortalService:
             if lock is None:
                 lock = threading.Lock()
                 self._repair_snapshot_locks[source_key] = lock
+            return lock
+
+    def _repair_management_record_lock(self, record_id: str) -> threading.RLock:
+        record_key = str(record_id or "").strip()
+        if not record_key:
+            raise PortalError("缺少维修项目记录 ID。")
+        with self._repair_management_record_locks_guard:
+            lock = self._repair_management_record_locks.get(record_key)
+            if lock is None:
+                lock = threading.RLock()
+                self._repair_management_record_locks[record_key] = lock
             return lock
 
     @classmethod
@@ -8032,6 +8045,31 @@ class MaintenancePortalService:
         replace_source_relations: bool = False,
         source_month: str | None = None,
         scope: str = "ALL",
+        validate_required: bool = True,
+    ) -> dict[str, Any]:
+        with self._repair_management_record_lock(record_id):
+            return self._update_repair_management_record_unlocked(
+                record_id,
+                fields,
+                source_event_id=source_event_id,
+                source_repair_ids=source_repair_ids,
+                replace_source_relations=replace_source_relations,
+                source_month=source_month,
+                scope=scope,
+                validate_required=validate_required,
+            )
+
+    def _update_repair_management_record_unlocked(
+        self,
+        record_id: str,
+        fields: dict[str, Any],
+        *,
+        source_event_id: str = "",
+        source_repair_ids: list[str] | tuple[str, ...] | None = None,
+        replace_source_relations: bool = False,
+        source_month: str | None = None,
+        scope: str = "ALL",
+        validate_required: bool = True,
     ) -> dict[str, Any]:
         _metas, meta_by_name, _records = (
             self._load_repair_management_project_records()
@@ -8152,12 +8190,15 @@ class MaintenancePortalService:
             **existing_raw,
             **prepared,
         }
-        missing = self._missing_repair_management_required_fields(
-            effective_fields,
-            meta_by_name,
-        )
-        if missing:
-            raise PortalError("请先填写检修单必填字段：" + "、".join(missing) + "。")
+        if validate_required:
+            missing = self._missing_repair_management_required_fields(
+                effective_fields,
+                meta_by_name,
+            )
+            if missing:
+                raise PortalError(
+                    "请先填写检修单必填字段：" + "、".join(missing) + "。"
+                )
         if not self._repair_management_fields_in_scope(prepared, scope):
             raise PortalError("当前账号无权把检修记录改到该楼栋。")
         self._patch_record_fields(
@@ -9031,6 +9072,385 @@ class MaintenancePortalService:
         if not self._scope_matches_item(scope, event_item):
             raise PortalError("当前账号无权关联该楼栋事件。")
         return event_item
+
+    def list_repair_notice_event_candidates(
+        self,
+        *,
+        scope: str = "ALL",
+        query: str = "",
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """List incomplete event-to-repair projects for notice form prefill."""
+        _project_metas, project_meta_by_name, project_records = (
+            self._load_repair_management_project_records()
+        )
+        event_by_id: dict[str, dict[str, Any]] = {}
+        warnings: list[str] = []
+        try:
+            _event_metas, _event_meta_by_name, event_records = (
+                self._load_repair_management_event_records()
+            )
+            for event_record in event_records:
+                if not isinstance(event_record, dict):
+                    continue
+                event_item = self._repair_management_event_item(event_record)
+                event_record_id = str(
+                    event_item.get("source_record_id")
+                    or event_item.get("record_id")
+                    or ""
+                ).strip()
+                if event_record_id:
+                    event_by_id[event_record_id] = event_item
+        except PortalError as exc:
+            warnings.append(
+                f"关联事件信息暂未刷新，当前仍可按维修项目选择：{exc}"
+            )
+
+        query_text = str(query or "").strip().lower()
+        candidates: list[dict[str, Any]] = []
+        for project_record in project_records:
+            if not isinstance(project_record, dict):
+                continue
+            if not self._repair_management_record_in_scope(project_record, scope):
+                continue
+            project = self._repair_management_record_payload(
+                project_record,
+                meta_by_name=project_meta_by_name,
+            )
+            event_record_id = str(project.get("source_event_id") or "").strip()
+            if not event_record_id:
+                continue
+            progress_percent = max(
+                0,
+                min(100, int(project.get("progress_percent") or 0)),
+            )
+            if progress_percent >= 100:
+                continue
+
+            display_fields = (
+                project.get("display_fields")
+                if isinstance(project.get("display_fields"), dict)
+                else {}
+            )
+            raw_fields = (
+                project.get("raw_fields")
+                if isinstance(project.get("raw_fields"), dict)
+                else {}
+            )
+            progress_raw = raw_fields.get("当前维修进度")
+            if progress_raw in (None, "", [], {}):
+                progress_raw = display_fields.get("当前维修进度")
+            event = event_by_id.get(event_record_id) or {}
+            if event and not self._scope_matches_item(scope, event):
+                continue
+            project_title = str(project.get("title") or "未命名维修项目").strip()
+            event_title = str(
+                event.get("title")
+                or event.get("alarm_desc")
+                or self._repair_first_field(
+                    display_fields,
+                    "事件描述",
+                    "故障维修原因",
+                    "故障发生现象描述",
+                )
+                or project_title
+            ).strip()
+            building_codes = (
+                event.get("building_codes")
+                if isinstance(event.get("building_codes"), list)
+                else project.get("building_codes")
+            ) or []
+            building = str(
+                event.get("building")
+                or self._building_label_from_codes(building_codes)
+                or self._repair_first_field(
+                    display_fields,
+                    "所属数据中心/楼栋-使用",
+                    "所属数据中心/楼栋（关联CMDB唯一ID关联,DE不选）",
+                )
+            ).strip()
+            specialty = str(
+                event.get("specialty")
+                or self._repair_specialty(project_record)
+            ).strip()
+            level = str(
+                event.get("level")
+                or self._repair_first_field(display_fields, "紧急程度")
+                or self._repair_level(display_fields)
+            ).strip()
+            source = str(
+                event.get("source")
+                or self._repair_management_canonical_select_text(
+                    "对应来源",
+                    display_fields.get("对应来源"),
+                )
+            ).strip()
+            occurrence_time = str(
+                event.get("occurrence_time")
+                or self._repair_first_field(
+                    display_fields,
+                    "故障发生时间",
+                    "发现故障时间",
+                    "维修开始时间",
+                )
+            ).strip()
+            candidate = {
+                "event_record_id": event_record_id,
+                "repair_management_record_id": str(
+                    project.get("record_id") or ""
+                ).strip(),
+                "title": event_title,
+                "project_title": project_title,
+                "building": building,
+                "building_codes": building_codes,
+                "specialty": specialty,
+                "level": level,
+                "source": source,
+                "event_status": str(event.get("status") or "").strip(),
+                "occurrence_time": occurrence_time,
+                "progress_percent": progress_percent,
+                "progress_label": (
+                    f"{progress_percent}%"
+                    if progress_raw not in (None, "", [], {})
+                    else "未填写"
+                ),
+                "workflow": str(project.get("workflow") or "").strip(),
+                "last_modified_time": str(
+                    project.get("last_modified_time")
+                    or project.get("latest_followup_time")
+                    or occurrence_time
+                    or ""
+                ).strip(),
+            }
+            if query_text:
+                haystack = "\n".join(
+                    str(value or "")
+                    for value in (
+                        candidate.get("title"),
+                        candidate.get("project_title"),
+                        candidate.get("building"),
+                        candidate.get("specialty"),
+                        candidate.get("level"),
+                        candidate.get("source"),
+                        candidate.get("workflow"),
+                        candidate.get("occurrence_time"),
+                    )
+                ).lower()
+                if query_text not in haystack:
+                    continue
+            candidates.append(candidate)
+
+        candidates.sort(
+            key=lambda item: (
+                str(item.get("last_modified_time") or ""),
+                str(item.get("occurrence_time") or ""),
+            ),
+            reverse=True,
+        )
+        max_limit = max(1, min(int(limit or 100), 200))
+        return {
+            "scope": self._normalize_scope(scope),
+            "records": candidates[:max_limit],
+            "total": len(candidates),
+            "returned": min(len(candidates), max_limit),
+            "warnings": list(dict.fromkeys(warnings)),
+        }
+
+    def bind_repair_notice_event(
+        self,
+        *,
+        source_record_id: str,
+        event_record_id: str,
+        candidate_project_record_id: str,
+        scope: str = "ALL",
+    ) -> dict[str, Any]:
+        """Persist an event relation on a pending repair project without sending."""
+        source_record_id = str(source_record_id or "").strip()
+        if not source_record_id.startswith("rec"):
+            raise PortalError("当前待发起检修缺少有效的源记录 ID。")
+        with self._repair_management_record_lock(source_record_id):
+            return self._bind_repair_notice_event_unlocked(
+                source_record_id=source_record_id,
+                event_record_id=event_record_id,
+                candidate_project_record_id=candidate_project_record_id,
+                scope=scope,
+            )
+
+    def _bind_repair_notice_event_unlocked(
+        self,
+        *,
+        source_record_id: str,
+        event_record_id: str,
+        candidate_project_record_id: str,
+        scope: str = "ALL",
+    ) -> dict[str, Any]:
+        source_record_id = str(source_record_id or "").strip()
+        event_record_id = str(event_record_id or "").strip()
+        candidate_project_record_id = str(
+            candidate_project_record_id or ""
+        ).strip()
+        if not source_record_id.startswith("rec"):
+            raise PortalError("当前待发起检修缺少有效的源记录 ID。")
+        if not event_record_id.startswith("rec"):
+            raise PortalError("请选择有效的关联事件。")
+        if not candidate_project_record_id.startswith("rec"):
+            raise PortalError("关联事件缺少有效的维修项目记录。")
+
+        _metas, meta_by_name, _records = (
+            self._load_repair_management_project_records()
+        )
+        event_link_meta = meta_by_name.get(
+            REPAIR_MANAGEMENT_EVENT_LINK_FIELD_NAMES[0]
+        )
+        if event_link_meta is None:
+            raise PortalError("维修项目表缺少可写的“关联事件单”字段。")
+        event_link_probe, _event_link_warnings = (
+            self._coerce_repair_management_fields(
+                {
+                    REPAIR_MANAGEMENT_EVENT_LINK_FIELD_NAMES[0]: event_record_id,
+                },
+                meta_by_name,
+                excluded_field_names=REPAIR_MANAGEMENT_RETIRED_FIELD_NAMES,
+            )
+        )
+        if REPAIR_MANAGEMENT_EVENT_LINK_FIELD_NAMES[0] not in event_link_probe:
+            raise PortalError("“关联事件单”字段无法写入事件记录 ID，请检查字段格式。")
+
+        source_record = self._ensure_repair_management_record_in_scope(
+            source_record_id,
+            scope,
+        )
+        candidate_record = self._ensure_repair_management_record_in_scope(
+            candidate_project_record_id,
+            scope,
+        )
+        candidate_raw_fields = (
+            candidate_record.get("raw_fields")
+            if isinstance(candidate_record.get("raw_fields"), dict)
+            else {}
+        )
+        candidate_event_ids = self._repair_management_record_ids(
+            candidate_raw_fields.get("关联事件单")
+        )
+        if event_record_id not in candidate_event_ids:
+            raise PortalError("所选事件与候选维修项目的关联关系已变化，请重新选择。")
+
+        candidate_payload = self._repair_management_record_payload(candidate_record)
+        if int(candidate_payload.get("progress_percent") or 0) >= 100:
+            raise PortalError("所选事件对应的检修进展已完成，请重新选择。")
+
+        event_item = self._event_snapshot_record_for_repair(
+            scope=scope,
+            record_id=event_record_id,
+            month=None,
+        )
+        if not self._scope_matches_item(scope, event_item):
+            raise PortalError("当前账号无权关联该楼栋事件。")
+
+        update_result = self.update_repair_management_record(
+            source_record_id,
+            {},
+            source_event_id=event_record_id,
+            source_repair_ids=[],
+            replace_source_relations=False,
+            scope=scope,
+            validate_required=False,
+        )
+        if REPAIR_MANAGEMENT_EVENT_LINK_FIELD_NAMES[0] not in (
+            update_result.get("fields") or {}
+        ):
+            raise PortalError("事件关联字段未成功写入，请检查维修项目表字段配置。")
+        prefill: dict[str, Any] = {}
+        prefill_warning = ""
+        try:
+            prefill = self.repair_management_notice_prefill(
+                source_record_id,
+                scope=scope,
+            )
+        except Exception as exc:
+            prefill_warning = (
+                "事件关联已保存，但页面字段暂未刷新："
+                f"{str(exc or '读取失败').strip() or '读取失败'}"
+            )
+        fillable_keys = (
+            "title",
+            "location",
+            "level",
+            "specialty",
+            "start_time",
+            "end_time",
+            "content",
+            "repair_device",
+            "repair_fault",
+            "fault_type",
+            "repair_mode",
+            "impact",
+            "discovery",
+            "symptom",
+            "reason",
+            "solution",
+            "spare_parts",
+            "progress",
+        )
+        prefill_draft = (
+            prefill.get("draft")
+            if isinstance(prefill.get("draft"), dict)
+            else {}
+        )
+        draft_complete = not bool(prefill_warning)
+        complete_draft = (
+            {
+                key: str(prefill_draft.get(key) or "").strip()
+                for key in fillable_keys
+            }
+            if draft_complete
+            else {}
+        )
+        fallback_source_record = self._serialize_record(source_record)
+        for field_bucket in ("display_fields", "raw_fields"):
+            merged_fields = (
+                dict(fallback_source_record.get(field_bucket) or {})
+                if isinstance(fallback_source_record.get(field_bucket), dict)
+                else {}
+            )
+            merged_fields.update(dict(update_result.get("fields") or {}))
+            fallback_source_record[field_bucket] = merged_fields
+        prefill_source_record = (
+            prefill.get("source_record")
+            if isinstance(prefill.get("source_record"), dict)
+            else fallback_source_record
+        )
+        return {
+            "saved": True,
+            "draft_complete": draft_complete,
+            "source_record_id": source_record_id,
+            "event_record_id": event_record_id,
+            "repair_management_record_id": source_record_id,
+            "event": {
+                "title": str(
+                    event_item.get("title")
+                    or event_item.get("alarm_desc")
+                    or ""
+                ).strip(),
+                "building": str(event_item.get("building") or "").strip(),
+                "specialty": str(event_item.get("specialty") or "").strip(),
+                "occurrence_time": str(
+                    event_item.get("occurrence_time") or ""
+                ).strip(),
+            },
+            "fields": dict(update_result.get("fields") or {}),
+            "draft": complete_draft,
+            "source_record": dict(prefill_source_record),
+            "warnings": list(
+                dict.fromkeys(
+                    [
+                        *(update_result.get("warnings") or []),
+                        *(prefill.get("warnings") or []),
+                        *([prefill_warning] if prefill_warning else []),
+                    ]
+                )
+            ),
+        }
 
     def list_repair_management_event_candidates(
         self,

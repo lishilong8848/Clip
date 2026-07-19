@@ -241,6 +241,52 @@ def _field(record: dict[str, Any], *names: str) -> str:
     return ""
 
 
+def _relation_record_ids(record: dict[str, Any], *names: str) -> list[str]:
+    raw_fields = (
+        record.get("raw_fields")
+        if isinstance(record.get("raw_fields"), dict)
+        else {}
+    )
+    result: list[str] = []
+
+    def collect(value: Any) -> None:
+        if isinstance(value, dict):
+            nested = value.get("record_ids")
+            if not isinstance(nested, list):
+                nested = value.get("link_record_ids")
+            if isinstance(nested, list):
+                for item in nested:
+                    collect(item)
+                return
+            collect(
+                value.get("record_id")
+                or value.get("id")
+                or value.get("text")
+                or ""
+            )
+            return
+        if isinstance(value, list):
+            for item in value:
+                collect(item)
+            return
+        text = str(value or "").strip()
+        if not text:
+            return
+        if text.startswith(("[", "{")):
+            try:
+                collect(json.loads(text))
+                return
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+        for record_id in re.findall(r"\brec[A-Za-z0-9_-]+", text):
+            if record_id not in result:
+                result.append(record_id)
+
+    for name in names:
+        collect(raw_fields.get(name))
+    return result
+
+
 def _first(*values: Any) -> str:
     for value in values:
         text = str(value or "").strip()
@@ -1073,6 +1119,15 @@ def _record_rows(
         site_photo_count = _site_photo_count(row_source)
         mop_status = _mop_status_text(row_source, row_work_type)
         linked_active_item_id = str((linked_ongoing or {}).get("active_item_id") or "")
+        source_event_ids = _relation_record_ids(record, "关联事件单")
+        source_event_id = str(
+            record.get("source_event_id")
+            or (source_event_ids[0] if source_event_ids else "")
+        ).strip()
+        source_event_title = _first(
+            record.get("event_title"),
+            _field(record, "事件描述", "故障维修原因", "故障发生现象描述"),
+        )
         linked_target_record_id = str(
             (linked_ongoing or {}).get("target_record_id")
             or (linked_ongoing or {}).get("record_id")
@@ -1088,6 +1143,8 @@ def _record_rows(
         f" data-work-type=\"{_e(row_work_type)}\""
         f" data-record-id=\"{_e(record_id)}\""
         f" data-source-record-id=\"{_e(source_record_id)}\""
+        f" data-source-event-id=\"{_e(source_event_id)}\""
+        f" data-source-event-title=\"{_e(source_event_title)}\""
         f" data-linked-ongoing=\"{'1' if linked_ongoing else '0'}\""
         f" data-active-item-id=\"{_e(linked_active_item_id)}\""
         f" data-target-record-id=\"{_e(linked_target_record_id)}\""
@@ -1404,6 +1461,35 @@ def _target_link_panel(work_type: str, target_record_id: str) -> str:
     """
 
 
+def _repair_event_link_panel(
+    source: dict[str, Any],
+    *,
+    visible: bool,
+) -> str:
+    event_record_ids = _relation_record_ids(source, "关联事件单")
+    event_record_id = str(
+        source.get("source_event_id")
+        or (event_record_ids[0] if event_record_ids else "")
+    ).strip()
+    event_title = _first(
+        source.get("event_title"),
+        _field(source, "事件描述", "故障维修原因", "故障发生现象描述"),
+    )
+    status = event_title or ("已关联事件" if event_record_id else "未选择")
+    hidden_attr = "" if visible else " hidden"
+    return f"""
+        <section class="repair-event-link-panel" data-repair-event-link{hidden_attr}>
+          <input type="hidden" name="related_event_record_id" value="{_e(event_record_id)}">
+          <input type="hidden" name="related_repair_management_record_id" value="">
+          <div>
+            <strong>对应事件</strong>
+            <span id="lite-repair-event-link-status">{_e(status)}</span>
+          </div>
+          <button class="btn ghost" id="lite-repair-event-open" type="button">对应事件关联</button>
+        </section>
+    """
+
+
 def _mop_next_action_panel(
     *,
     scope: str,
@@ -1592,6 +1678,14 @@ def _detail_form(
         source_record_id=source_record_id,
         mop_status=mop_status,
     )
+    repair_event_link_panel = (
+        _repair_event_link_panel(
+            source,
+            visible=bool(record) and not ongoing_item and not effective_manual,
+        )
+        if work == "repair"
+        else ""
+    )
     if ongoing_item:
         admin_remove_button = (
             "<button class=\"btn danger-ghost\" type=\"button\" data-ongoing-delete-mode=\"local\">移除显示</button>"
@@ -1677,6 +1771,7 @@ def _detail_form(
         </header>
         {mop_action_panel}
         {source_link_html}
+        {repair_event_link_panel}
         {_target_link_panel(work, target_record_id)}
         {_form_fields(work, draft)}
         {_site_photo_uploader(work, site_photo_count)}
@@ -2175,6 +2270,11 @@ def render_workbench_lite(
     .target-link-panel strong {{ display:block; color:#0c244d; font-size:11px; line-height:1.2; white-space:nowrap; }}
     .target-link-panel span {{ display:block; margin:0; color:#64748b; font-size:11px; font-weight:900; line-height:1.2; }}
     .target-link-panel .btn {{ flex:0 0 auto; min-height:28px; padding:5px 9px; border-radius:999px; }}
+    .repair-event-link-panel {{ display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:6px; width:max-content; max-width:100%; border:1px solid #c4b5fd; border-radius:999px; padding:4px 6px 4px 9px; background:linear-gradient(135deg,#f8f7ff,#ffffff); }}
+    .repair-event-link-panel > div {{ min-width:0; display:flex; align-items:center; gap:6px; }}
+    .repair-event-link-panel strong {{ color:#4338ca; font-size:11px; line-height:1.2; white-space:nowrap; }}
+    .repair-event-link-panel span {{ max-width:360px; overflow:hidden; color:#64748b; font-size:11px; font-weight:900; line-height:1.2; text-overflow:ellipsis; white-space:nowrap; }}
+    .repair-event-link-panel .btn {{ flex:0 0 auto; min-height:28px; padding:5px 9px; border-radius:999px; }}
     .notice-preview {{ border:1px solid #d8e5f7; border-radius:14px; background:#fbfdff; overflow:hidden; }}
     .preview-head {{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 12px; border-bottom:1px solid #e5edf8; background:linear-gradient(180deg,#f8fbff,#eef6ff); }}
     .preview-head span {{ color:#0a57d8; font-size:13px; font-weight:900; }}
@@ -2210,6 +2310,7 @@ def render_workbench_lite(
     .end-check-list small {{ display:block; margin-top:3px; color:#64748b; line-height:1.45; }}
     .end-check-actions {{ display:flex; justify-content:flex-end; gap:10px; padding:12px 18px 15px; border-top:1px solid #e5edf8; background:#fbfdff; }}
     .target-candidate-dialog {{ width:min(760px,100%); max-height:min(760px,88vh); display:grid; grid-template-rows:auto minmax(0,1fr) auto; }}
+    .repair-event-candidate-dialog {{ width:min(980px,100%); }}
     .target-candidate-list {{ display:grid; gap:9px; overflow:auto; padding:16px 20px; }}
     .target-candidate-row {{ border:1px solid #dce8f8; border-radius:16px; padding:12px; background:#fff; text-align:left; cursor:pointer; display:grid; gap:7px; color:#0c244d; }}
     .target-candidate-row:hover,.target-candidate-row.active {{ border-color:#1f63ff; box-shadow:0 0 0 3px rgba(31,99,255,.12); background:#f7fbff; }}
@@ -2395,6 +2496,22 @@ def render_workbench_lite(
       <footer class="end-check-actions">
         <button class="btn ghost" type="button" id="lite-manual-source-cancel">取消</button>
         <button class="btn primary" type="button" id="lite-manual-source-confirm" disabled>确认绑定</button>
+      </footer>
+    </section>
+  </div>
+  <div class="end-check-backdrop" id="lite-repair-event-candidates" hidden>
+    <section class="end-check-dialog target-candidate-dialog repair-event-candidate-dialog" role="dialog" aria-modal="true" aria-labelledby="lite-repair-event-title">
+      <header class="end-check-head">
+        <span>事件转检修</span>
+        <strong id="lite-repair-event-title">选择对应事件</strong>
+      </header>
+      <div class="manual-source-tools">
+        <input id="lite-repair-event-search" type="search" placeholder="搜索事件、维修项目、楼栋或专业" autocomplete="off">
+      </div>
+      <div class="target-candidate-list" id="lite-repair-event-list"></div>
+      <footer class="end-check-actions">
+        <button class="btn ghost" type="button" id="lite-repair-event-cancel">取消</button>
+        <button class="btn primary" type="button" id="lite-repair-event-confirm" disabled>保存关联并填入</button>
       </footer>
     </section>
   </div>
@@ -3557,6 +3674,283 @@ def render_workbench_lite(
       closeManualSourceCandidates();
       setLiteStatus('已绑定待发起事项');
     }}
+    let liteRepairEventCandidates = [];
+    let liteSelectedRepairEventIndex = -1;
+    let liteRepairEventSearchTimer = 0;
+    let liteRepairEventRequestController = null;
+    let liteRepairEventRequestSequence = 0;
+    let liteRepairEventPrefillController = null;
+    let liteRepairEventPrefillSequence = 0;
+    function repairEventModal() {{
+      return document.getElementById('lite-repair-event-candidates');
+    }}
+    function closeRepairEventCandidates() {{
+      window.clearTimeout(liteRepairEventSearchTimer);
+      liteRepairEventSearchTimer = 0;
+      liteRepairEventRequestSequence += 1;
+      if (liteRepairEventRequestController) liteRepairEventRequestController.abort();
+      liteRepairEventRequestController = null;
+      liteRepairEventPrefillSequence += 1;
+      if (liteRepairEventPrefillController) liteRepairEventPrefillController.abort();
+      liteRepairEventPrefillController = null;
+      const modal = repairEventModal();
+      if (modal) modal.hidden = true;
+      liteRepairEventCandidates = [];
+      liteSelectedRepairEventIndex = -1;
+    }}
+    function resetRepairEventSelection(form, visible) {{
+      const panel = form?.querySelector('[data-repair-event-link]');
+      if (!panel) return;
+      panel.hidden = !visible;
+      setFormValue(form, 'related_event_record_id', '');
+      setFormValue(form, 'related_repair_management_record_id', '');
+      const status = panel.querySelector('#lite-repair-event-link-status');
+      if (status) status.textContent = '未选择';
+    }}
+    function renderRepairEventCandidates(items) {{
+      const list = document.getElementById('lite-repair-event-list');
+      const confirmButton = document.getElementById('lite-repair-event-confirm');
+      if (!list || !confirmButton) return;
+      liteRepairEventCandidates = Array.isArray(items) ? items : [];
+      liteSelectedRepairEventIndex = -1;
+      confirmButton.disabled = true;
+      if (!liteRepairEventCandidates.length) {{
+        const empty = document.createElement('div');
+        empty.className = 'target-candidate-empty';
+        empty.textContent = '没有检修进展不足 100% 的事件转检修记录。';
+        list.replaceChildren(empty);
+        return;
+      }}
+      const rows = liteRepairEventCandidates.map((candidate, index) => {{
+        const row = document.createElement('button');
+        row.className = 'target-candidate-row';
+        row.type = 'button';
+        row.setAttribute('data-repair-event-index', String(index));
+        const title = document.createElement('strong');
+        title.textContent = candidate.title || candidate.project_title || '未命名事件';
+        const project = document.createElement('span');
+        project.textContent = [
+          candidate.project_title && candidate.project_title !== candidate.title
+            ? '维修项目 ' + candidate.project_title
+            : '',
+          candidate.building || '',
+          candidate.specialty || '',
+          candidate.source || '',
+          candidate.occurrence_time ? '事件时间 ' + candidate.occurrence_time : '',
+        ].filter(Boolean).join(' · ');
+        const progress = document.createElement('small');
+        progress.textContent = '检修进展 ' + (candidate.progress_label || `${{Number(candidate.progress_percent || 0)}}%`);
+        row.append(title, project, progress);
+        return row;
+      }});
+      list.replaceChildren(...rows);
+    }}
+    async function loadRepairEventCandidates(search) {{
+      const form = document.getElementById('lite-notice-form');
+      const list = document.getElementById('lite-repair-event-list');
+      if (!form || !list) return false;
+      const requestSequence = ++liteRepairEventRequestSequence;
+      if (liteRepairEventRequestController) liteRepairEventRequestController.abort();
+      const controller = new AbortController();
+      liteRepairEventRequestController = controller;
+      const loading = document.createElement('div');
+      loading.className = 'target-candidate-empty';
+      loading.textContent = '正在读取事件转检修记录...';
+      list.replaceChildren(loading);
+      const url = new URL('/api/workbench/repair-event-candidates', location.origin);
+      url.searchParams.set('scope', previewValue(form, 'scope') || getCurrentScope());
+      url.searchParams.set('limit', '100');
+      if (String(search || '').trim()) url.searchParams.set('q', String(search || '').trim());
+      try {{
+        const response = await fetch(url.pathname + url.search, {{
+          credentials: 'same-origin',
+          cache: 'no-store',
+          signal: controller.signal,
+        }});
+        const data = await response.json().catch(() => ({{}}));
+        if (controller.signal.aborted || requestSequence !== liteRepairEventRequestSequence) {{
+          return false;
+        }}
+        if (handleLiteAuthRequired(response, data)) return false;
+        if (!response.ok || data.ok === false) {{
+          throw new Error(data.error || '读取事件转检修记录失败');
+        }}
+        const result = data.data || data;
+        renderRepairEventCandidates(result.records || []);
+        const warnings = Array.isArray(result.warnings) ? result.warnings.filter(Boolean) : [];
+        setLiteStatus(
+          warnings.length
+            ? warnings.join('；')
+            : `找到 ${{Number(result.total || (result.records || []).length)}} 条可选记录`
+        );
+        return true;
+      }} catch (error) {{
+        if (controller.signal.aborted || requestSequence !== liteRepairEventRequestSequence) {{
+          return false;
+        }}
+        throw error;
+      }} finally {{
+        if (liteRepairEventRequestController === controller) {{
+          liteRepairEventRequestController = null;
+        }}
+      }}
+    }}
+    async function openRepairEventCandidates(opener) {{
+      const form = document.getElementById('lite-notice-form');
+      const panel = form?.querySelector('[data-repair-event-link]');
+      if (!form || !panel || panel.hidden || form.dataset.detailMode !== 'source') return;
+      const modal = repairEventModal();
+      const search = document.getElementById('lite-repair-event-search');
+      if (!modal) return;
+      modal.hidden = false;
+      if (search) search.value = '';
+      setButtonBusy(opener, true);
+      try {{
+        const loaded = await loadRepairEventCandidates('');
+        if (loaded) search?.focus();
+      }} catch (error) {{
+        closeRepairEventCandidates();
+        showLiteError(error && error.message ? error.message : '读取事件转检修记录失败');
+      }} finally {{
+        setButtonBusy(opener, false);
+      }}
+    }}
+    function selectRepairEventCandidate(index) {{
+      liteSelectedRepairEventIndex = Number.isInteger(index) ? index : -1;
+      document.querySelectorAll('[data-repair-event-index]').forEach(row => {{
+        row.classList.toggle(
+          'active',
+          Number(row.getAttribute('data-repair-event-index')) === liteSelectedRepairEventIndex
+        );
+      }});
+      const confirmButton = document.getElementById('lite-repair-event-confirm');
+      if (confirmButton) confirmButton.disabled = liteSelectedRepairEventIndex < 0;
+    }}
+    function normalizeRepairEventPrefillValue(name, value) {{
+      const normalized = String(value == null ? '' : value).trim();
+      if (!normalized || !['start_time', 'end_time'].includes(name)) return normalized;
+      const dateTime = normalized.replace(' ', 'T');
+      return /^\\d{{4}}-\\d{{2}}-\\d{{2}}T\\d{{2}}:\\d{{2}}/.test(dateTime)
+        ? dateTime.slice(0, 16)
+        : normalized;
+    }}
+    async function confirmRepairEventCandidate() {{
+      const candidate = liteRepairEventCandidates[liteSelectedRepairEventIndex];
+      const form = document.getElementById('lite-notice-form');
+      const repairManagementRecordId = String(candidate?.repair_management_record_id || '').trim();
+      if (!candidate || !form || !repairManagementRecordId) return;
+      const sourceRecordIdAtStart = previewValue(form, 'source_record_id');
+      const recordIdAtStart = previewValue(form, 'record_id');
+      const detailModeAtStart = String(form.dataset.detailMode || '');
+      const wasDirtyAtStart = liteFormDirty;
+      if (!sourceRecordIdAtStart || detailModeAtStart !== 'source') {{
+        showLiteError('请先选择一条待发起检修事项。');
+        return;
+      }}
+      const requestSequence = ++liteRepairEventPrefillSequence;
+      if (liteRepairEventPrefillController) liteRepairEventPrefillController.abort();
+      const controller = new AbortController();
+      liteRepairEventPrefillController = controller;
+      const confirmButton = document.getElementById('lite-repair-event-confirm');
+      setButtonBusy(confirmButton, true);
+      try {{
+        const response = await fetch('/api/workbench/repair-event-bind', {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          credentials: 'same-origin',
+          cache: 'no-store',
+          signal: controller.signal,
+          body: JSON.stringify({{
+            scope: previewValue(form, 'scope') || getCurrentScope(),
+            source_record_id: sourceRecordIdAtStart,
+            event_record_id: String(candidate.event_record_id || '').trim(),
+            candidate_project_record_id: repairManagementRecordId,
+          }}),
+        }});
+        const data = await response.json().catch(() => ({{}}));
+        if (controller.signal.aborted || requestSequence !== liteRepairEventPrefillSequence) {{
+          return;
+        }}
+        if (handleLiteAuthRequired(response, data)) return;
+        if (!response.ok || data.ok === false) {{
+          throw new Error(data.error || '保存事件关联失败');
+        }}
+        const activeForm = document.getElementById('lite-notice-form');
+        if (
+          activeForm !== form
+          || previewValue(form, 'source_record_id') !== sourceRecordIdAtStart
+          || previewValue(form, 'record_id') !== recordIdAtStart
+          || String(form.dataset.detailMode || '') !== detailModeAtStart
+        ) {{
+          closeRepairEventCandidates();
+          setLiteStatus('事件关联已保存；当前通告已切换，未改写当前表单');
+          return;
+        }}
+        const result = data.data || data;
+        const draft = result.draft && typeof result.draft === 'object' ? result.draft : {{}};
+        const draftComplete = result.draft_complete === true;
+        const fillableKeys = [
+          'title', 'location', 'level', 'specialty', 'start_time', 'end_time',
+          'content', 'repair_device', 'repair_fault', 'fault_type', 'repair_mode',
+          'impact', 'discovery', 'symptom', 'reason', 'solution', 'spare_parts',
+          'progress'
+        ];
+        let filledCount = 0;
+        if (draftComplete) {{
+          for (const key of fillableKeys) {{
+            const value = normalizeRepairEventPrefillValue(key, draft[key]);
+            const field = form.querySelector(`[name="${{CSS.escape(key)}}"]`);
+            if (!field) continue;
+            if (String(field.value || '') !== value) {{
+              field.value = value;
+              filledCount += 1;
+            }}
+          }}
+        }}
+        setFormValue(form, 'related_event_record_id', candidate.event_record_id || '');
+        setFormValue(form, 'related_repair_management_record_id', sourceRecordIdAtStart);
+        const status = document.getElementById('lite-repair-event-link-status');
+        if (status) status.textContent = candidate.title || candidate.project_title || '已选择事件';
+        const sourceRow = Array.from(document.querySelectorAll('.notice-row')).find(row =>
+          [row.getAttribute('data-source-record-id'), row.getAttribute('data-record-id')]
+            .map(value => String(value || '').trim())
+            .includes(sourceRecordIdAtStart)
+        );
+        if (sourceRow) {{
+          if (draftComplete) {{
+            setSafeDraftAttr(sourceRow, Object.assign({{}}, draftFromRow(sourceRow), draft));
+          }}
+          sourceRow.setAttribute('data-source-event-id', String(candidate.event_record_id || '').trim());
+          sourceRow.setAttribute(
+            'data-source-event-title',
+            candidate.title || candidate.project_title || '已关联事件'
+          );
+        }}
+        setLiteFormDirty(wasDirtyAtStart);
+        updateNoticePreview(form);
+        closeRepairEventCandidates();
+        const warnings = Array.isArray(result.warnings) ? result.warnings.filter(Boolean) : [];
+        setLiteStatus(
+          !draftComplete
+            ? (warnings.join('；') || '事件关联已保存，页面字段暂未刷新')
+            : (
+              warnings.length
+                ? `事件关联已保存，已更新 ${{filledCount}} 个字段；${{warnings.join('；')}}`
+                : `事件关联已保存，已更新 ${{filledCount}} 个字段`
+            )
+        );
+      }} catch (error) {{
+        if (controller.signal.aborted || requestSequence !== liteRepairEventPrefillSequence) {{
+          return;
+        }}
+        showLiteError(error && error.message ? error.message : '保存事件关联失败');
+      }} finally {{
+        if (liteRepairEventPrefillController === controller) {{
+          liteRepairEventPrefillController = null;
+        }}
+        setButtonBusy(confirmButton, false);
+      }}
+    }}
     let pendingUndoButton = null;
     function closeUndoConfirm() {{
       const modal = document.getElementById('lite-undo-confirm');
@@ -3870,13 +4264,22 @@ def render_workbench_lite(
       form.dataset.targetEnded = '';
       setFormValue(form, 'manual', '');
       setFormValue(form, 'manual_id', '');
+      resetRepairEventSelection(form, !linkedOngoing && workType === 'repair');
       for (const [key, value] of Object.entries(draft)) {{
         setFormValue(form, key, value);
       }}
       const sourceRecordId = link.getAttribute('data-source-record-id') || link.getAttribute('data-record-id') || '';
+      const sourceEventId = link.getAttribute('data-source-event-id') || '';
+      const sourceEventTitle = link.getAttribute('data-source-event-title') || '';
       const targetRecordId = linkedOngoing ? (link.getAttribute('data-target-record-id') || '') : '';
       setFormValue(form, 'record_id', targetRecordId || sourceRecordId);
       setFormValue(form, 'source_record_id', sourceRecordId);
+      setFormValue(form, 'related_event_record_id', sourceEventId);
+      setFormValue(form, 'related_repair_management_record_id', sourceEventId ? sourceRecordId : '');
+      const repairEventStatus = form.querySelector('#lite-repair-event-link-status');
+      if (repairEventStatus && !linkedOngoing && workType === 'repair') {{
+        repairEventStatus.textContent = sourceEventTitle || (sourceEventId ? '已关联事件' : '未选择');
+      }}
       setSourceLinkDisplay(form, sourceRecordId, '已关联');
       setFormValue(form, 'target_record_id', targetRecordId);
       setFormValue(form, 'active_item_id', linkedOngoing ? (link.getAttribute('data-active-item-id') || '') : '');
@@ -3906,6 +4309,7 @@ def render_workbench_lite(
       form.dataset.targetEnded = '';
       setFormValue(form, 'manual', '');
       setFormValue(form, 'manual_id', '');
+      resetRepairEventSelection(form, false);
       setFormValue(form, 'record_id', link.getAttribute('data-target-record-id') || link.getAttribute('data-record-id') || '');
       setFormValue(form, 'source_record_id', link.getAttribute('data-source-record-id') || '');
       setSourceLinkDisplay(form, link.getAttribute('data-source-record-id') || '', '已关联');
@@ -4101,6 +4505,30 @@ def render_workbench_lite(
         await confirmTargetCandidateBinding();
         return;
       }}
+      const repairEventOpen = target.closest('#lite-repair-event-open');
+      if (repairEventOpen) {{
+        event.preventDefault();
+        await openRepairEventCandidates(repairEventOpen);
+        return;
+      }}
+      const repairEventRow = target.closest('[data-repair-event-index]');
+      if (repairEventRow) {{
+        event.preventDefault();
+        selectRepairEventCandidate(Number(repairEventRow.getAttribute('data-repair-event-index')));
+        return;
+      }}
+      const repairEventCancel = target.closest('#lite-repair-event-cancel');
+      if (repairEventCancel) {{
+        event.preventDefault();
+        closeRepairEventCandidates();
+        return;
+      }}
+      const repairEventConfirm = target.closest('#lite-repair-event-confirm');
+      if (repairEventConfirm) {{
+        event.preventDefault();
+        await confirmRepairEventCandidate();
+        return;
+      }}
       const discardCancel = target.closest('#lite-discard-cancel');
       if (discardCancel) {{
         event.preventDefault();
@@ -4195,8 +4623,8 @@ def render_workbench_lite(
           }});
         }}
         const detailNeedsReload = noticeDrawerOverlay()?.dataset.detailNeedsReload === '1';
-        const appliedLocally = !detailNeedsReload && isRow && navLink.matches('.notice-row') && applySourceRowToDetail(navLink);
-        const appliedOngoingLocally = !detailNeedsReload && isRow && navLink.matches('.ongoing-row') && applyOngoingRowToDetail(navLink);
+        const appliedLocally = isRow && navLink.matches('.notice-row') && !detailNeedsReload && applySourceRowToDetail(navLink);
+        const appliedOngoingLocally = isRow && navLink.matches('.ongoing-row') && !detailNeedsReload && applyOngoingRowToDetail(navLink);
         if (appliedLocally || appliedOngoingLocally) {{
           const selectingOngoing = navLink.matches('.ongoing-row');
           document.querySelectorAll('.notice-row').forEach(node => {{
@@ -4410,6 +4838,7 @@ def render_workbench_lite(
         closeEndCheck();
         closeTargetCandidates();
         closeManualSourceCandidates();
+        closeRepairEventCandidates();
         closeUndoConfirm();
         if (!hadOpenDialog) requestCloseNoticeDrawer().catch(() => null);
       }}
@@ -4975,6 +5404,18 @@ def render_workbench_lite(
         liteManualSourceSearchTimer = window.setTimeout(() => {{
           loadManualSourceCandidates(event.target.value).catch(error => {{
             showLiteError(error && error.message ? error.message : '搜索待发起事项失败');
+          }});
+        }}, 260);
+        return;
+      }}
+      if (event.target && event.target.id === 'lite-repair-event-search') {{
+        window.clearTimeout(liteRepairEventSearchTimer);
+        liteRepairEventRequestSequence += 1;
+        if (liteRepairEventRequestController) liteRepairEventRequestController.abort();
+        liteRepairEventRequestController = null;
+        liteRepairEventSearchTimer = window.setTimeout(() => {{
+          loadRepairEventCandidates(event.target.value).catch(error => {{
+            showLiteError(error && error.message ? error.message : '搜索事件转检修记录失败');
           }});
         }}, 260);
         return;
