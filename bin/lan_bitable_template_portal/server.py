@@ -43,13 +43,12 @@ from upload_event_module.services.handlers import NoticePayload
 from upload_event_module.services.service_registry import (
     create_bitable_record_fields,
     create_bitable_record_by_payload,
+    delete_bitable_record,
     query_record_by_id,
     upload_media_to_feishu,
     update_bitable_record_fields,
     update_bitable_record_by_payload,
 )
-from upload_event_module.services.feishu_service import delete_bitable_record
-from upload_event_module.services.robot_webhook import send_text_to_open_ids
 from upload_event_module.core.parser import extract_event_info, extract_notice_info
 from upload_event_module.logger import log_warning
 from upload_event_module.time_parser import parse_time_range
@@ -109,6 +108,8 @@ def _send_text_to_open_ids_guarded(text: str, recipients: list[str]) -> tuple[bo
         ]
     if not guard.get("real_write_allowed"):
         return False, str(guard.get("reason") or "真实外部写入未确认。"), []
+    from upload_event_module.services.robot_webhook import send_text_to_open_ids
+
     return send_text_to_open_ids(text, clean_recipients)
 
 

@@ -22,38 +22,38 @@
       <tr v-for="(row, rowIndex) in renderedRows" :key="rowIndex">
         <th class="row-head">{{ rowIndex + 1 }}</th>
         <template
-          v-for="colIndex in columnIndexes"
-          :key="`${rowIndex}:${colIndex}`"
+          v-for="cell in rowCells(row, rowIndex)"
+          :key="cell.key"
         >
           <td
-            v-if="!cellMergeSpan(rowIndex, colIndex).hidden"
-            :data-mop-cell-key="mopCellKey(rowIndex, colIndex)"
-            :rowspan="cellMergeSpan(rowIndex, colIndex).rowspan"
-            :colspan="cellMergeSpan(rowIndex, colIndex).colspan"
+            v-if="!cell.hidden"
+            :data-mop-cell-key="cell.key"
+            :rowspan="cell.rowspan"
+            :colspan="cell.colspan"
             :class="{
-              merged: cellMergeSpan(rowIndex, colIndex).rowspan > 1 || cellMergeSpan(rowIndex, colIndex).colspan > 1,
-              fillable: Boolean(checkboxCellAt(rowIndex, colIndex)),
-              'field-fillable': Boolean(maintenanceFieldAt(rowIndex, colIndex)),
-              'raw-editable': Boolean(editableCellAt(rowIndex, colIndex)),
-              'cell-modified': mopCellHasOverride(rowIndex, colIndex),
-              'selected-cell': isMopCellSelected(rowIndex, colIndex),
-              'active-cell': activeMopCellKey === mopCellKey(rowIndex, colIndex),
-              'signature-cell': Boolean(signatureRoleAtCell(rowIndex, colIndex)),
-              'signature-cell-empty': Boolean(signatureRoleAtCell(rowIndex, colIndex)) && !cellSignatures(rowIndex, colIndex).length,
-              normal: checkboxCellAt(rowIndex, colIndex) ? checkboxStateLabel(checkboxCellAt(rowIndex, colIndex) as Dict).includes('正常') : false,
-              abnormal: checkboxCellAt(rowIndex, colIndex) ? checkboxStateLabel(checkboxCellAt(rowIndex, colIndex) as Dict).includes('异常') : false
+              merged: cell.rowspan > 1 || cell.colspan > 1,
+              fillable: Boolean(cell.checkbox),
+              'field-fillable': cell.fieldFillable,
+              'raw-editable': cell.rawEditable,
+              'cell-modified': cell.modified,
+              'selected-cell': cell.selected,
+              'active-cell': cell.active,
+              'signature-cell': Boolean(cell.signatureRole),
+              'signature-cell-empty': Boolean(cell.signatureRole) && !cell.signatures.length,
+              normal: cell.checkboxLabel.includes('正常'),
+              abnormal: cell.checkboxLabel.includes('异常')
             }"
-            @mousedown.left.stop.prevent="emit('cell-mousedown', rowIndex, colIndex, $event)"
-            @mouseenter="emit('cell-enter', rowIndex, colIndex, $event)"
+            @mousedown.left.stop.prevent="emit('cell-mousedown', rowIndex, cell.colIndex, $event)"
+            @mouseenter="emit('cell-enter', rowIndex, cell.colIndex, $event)"
           >
             <div
-              v-if="signatureRoleAtCell(rowIndex, colIndex)"
+              v-if="cell.signatureRole"
               class="sheet-cell-signatures"
               :style="signatureCellStyle(rowIndex)"
             >
               <img
-                v-for="person in cellSignatures(rowIndex, colIndex).slice(0, 3)"
-                :key="`${rowIndex}:${colIndex}:${person.record_id}`"
+                v-for="person in cell.signatures.slice(0, 3)"
+                :key="`${rowIndex}:${cell.colIndex}:${person.record_id}`"
                 :src="person.signature_preview_url"
                 :alt="person.name || '签名'"
                 :style="signatureImageStyle(rowIndex)"
@@ -61,19 +61,28 @@
                 decoding="async"
               />
               <em
-                v-if="cellSignatures(rowIndex, colIndex).length > 3"
+                v-if="cell.signatures.length > 3"
                 class="signature-more-count"
                 :style="signatureMoreStyle(rowIndex)"
               >
-                +{{ cellSignatures(rowIndex, colIndex).length - 3 }}
+                +{{ cell.signatures.length - 3 }}
               </em>
-              <span v-if="!cellSignatures(rowIndex, colIndex).length">
-                点击添加{{ signatureRoleAtCell(rowIndex, colIndex) === 'auditor' ? '审核人' : '实施人' }}签名
+              <span v-if="!cell.signatures.length">
+                点击添加{{ cell.signatureRole === 'auditor' ? '审核人' : '实施人' }}签名
               </span>
             </div>
-            <template v-else>{{ cellOverrideValue(rowIndex, colIndex) || row[colIndex] || "" }}</template>
+            <template v-else>{{ cell.value }}</template>
           </td>
         </template>
+      </tr>
+      <tr
+        v-if="hasMoreRows"
+        ref="loadMoreRowRef"
+        class="mop-load-more-row"
+      >
+        <td :colspan="columnIndexes.length + 1">
+          <button type="button" @click="loadNextRows">继续加载表格</button>
+        </td>
       </tr>
     </tbody>
   </table>
@@ -101,7 +110,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import MopCellPopover, { type MopCellPopoverMode } from "./MopCellPopover.vue";
 import MopTableFillToolbar from "./MopTableFillToolbar.vue";
 
@@ -143,40 +152,97 @@ const props = defineProps<{
 const initialRenderRows = 80;
 const renderStepRows = 120;
 const renderedRowLimit = ref(initialRenderRows);
-let rowRenderTimer: ReturnType<typeof setTimeout> | null = null;
+const loadMoreRowRef = ref<HTMLElement | null>(null);
+let loadMoreObserver: IntersectionObserver | null = null;
+let loadMoreFrame = 0;
 
 const activeRows = computed<unknown[][]>(() => (
   Array.isArray(props.activeSheet?.rows) ? props.activeSheet.rows : []
 ));
 const renderedRows = computed(() => activeRows.value.slice(0, renderedRowLimit.value));
+const hasMoreRows = computed(() => renderedRowLimit.value < activeRows.value.length);
 
-function cancelProgressiveRender(): void {
-  if (rowRenderTimer) {
-    clearTimeout(rowRenderTimer);
-    rowRenderTimer = null;
+function cellView(row: unknown[], rowIndex: number, colIndex: number) {
+  const merge = props.cellMergeSpan(rowIndex, colIndex) || {};
+  const checkbox = props.checkboxCellAt(rowIndex, colIndex);
+  const signatureRole = props.signatureRoleAtCell(rowIndex, colIndex);
+  const signatures = signatureRole ? props.cellSignatures(rowIndex, colIndex) : [];
+  const overrideValue = props.cellOverrideValue(rowIndex, colIndex);
+  const modified = props.mopCellHasOverride(rowIndex, colIndex);
+  const key = props.mopCellKey(rowIndex, colIndex);
+  return {
+    colIndex,
+    key,
+    hidden: Boolean(merge.hidden),
+    rowspan: Number(merge.rowspan || 1),
+    colspan: Number(merge.colspan || 1),
+    checkbox,
+    checkboxLabel: checkbox ? props.checkboxStateLabel(checkbox) : "",
+    fieldFillable: Boolean(props.maintenanceFieldAt(rowIndex, colIndex)),
+    rawEditable: Boolean(props.editableCellAt(rowIndex, colIndex)),
+    modified,
+    selected: props.isMopCellSelected(rowIndex, colIndex),
+    active: props.activeMopCellKey === key,
+    signatureRole,
+    signatures,
+    value: modified ? overrideValue : (row[colIndex] ?? ""),
+  };
+}
+
+function rowCells(row: unknown[], rowIndex: number) {
+  return props.columnIndexes.map((colIndex) => cellView(row, rowIndex, colIndex));
+}
+
+function cancelLoadMoreFrame(): void {
+  if (loadMoreFrame) {
+    window.cancelAnimationFrame(loadMoreFrame);
+    loadMoreFrame = 0;
   }
 }
 
-function scheduleProgressiveRender(): void {
-  cancelProgressiveRender();
-  const total = activeRows.value.length;
-  if (renderedRowLimit.value >= total) return;
-  rowRenderTimer = setTimeout(() => {
-    renderedRowLimit.value = Math.min(total, renderedRowLimit.value + renderStepRows);
-    scheduleProgressiveRender();
-  }, 16);
+function loadNextRows(): void {
+  if (!hasMoreRows.value || loadMoreFrame) return;
+  loadMoreFrame = window.requestAnimationFrame(() => {
+    loadMoreFrame = 0;
+    renderedRowLimit.value = Math.min(
+      activeRows.value.length,
+      renderedRowLimit.value + renderStepRows,
+    );
+    void nextTick(observeLoadMoreRow);
+  });
+}
+
+function observeLoadMoreRow(): void {
+  loadMoreObserver?.disconnect();
+  if (!hasMoreRows.value || !loadMoreRowRef.value || !loadMoreObserver) return;
+  loadMoreObserver.observe(loadMoreRowRef.value);
 }
 
 watch(
   () => `${props.activeSheet?.name || ""}:${activeRows.value.length}`,
   () => {
     renderedRowLimit.value = Math.min(initialRenderRows, activeRows.value.length || initialRenderRows);
-    scheduleProgressiveRender();
+    void nextTick(observeLoadMoreRow);
   },
   { immediate: true },
 );
 
-onBeforeUnmount(cancelProgressiveRender);
+onMounted(() => {
+  if (typeof IntersectionObserver === "undefined") return;
+  loadMoreObserver = new IntersectionObserver(
+    (entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) loadNextRows();
+    },
+    { rootMargin: "900px 0px" },
+  );
+  observeLoadMoreRow();
+});
+
+onBeforeUnmount(() => {
+  cancelLoadMoreFrame();
+  loadMoreObserver?.disconnect();
+  loadMoreObserver = null;
+});
 
 const emit = defineEmits<{
   "mark-all-normal": [];
@@ -385,5 +451,25 @@ td.selected-cell.active-cell {
   font-size: 13px;
   font-weight: 850;
   text-align: center;
+}
+
+.mop-load-more-row td {
+  height: 44px;
+  padding: 6px;
+  text-align: center;
+  background: #f8fbff;
+}
+
+.mop-load-more-row button {
+  min-height: 30px;
+  border: 1px solid #bfd4f4;
+  border-radius: 8px;
+  padding: 0 14px;
+  background: #ffffff;
+  color: #1d5bbf;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
 }
 </style>

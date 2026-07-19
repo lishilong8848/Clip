@@ -3,23 +3,7 @@ import logging
 import os
 import tempfile
 import threading
-from typing import Callable
-
-import lark_oapi as lark
-from lark_oapi.api.bitable.v1 import (
-    AppTableRecord,
-    BatchCreateAppTableRecordRequest,
-    BatchCreateAppTableRecordRequestBody,
-    BatchUpdateAppTableRecordRequest,
-    BatchUpdateAppTableRecordRequestBody,
-    CreateAppTableRecordRequest,
-    DeleteAppTableRecordRequest,
-    GetAppTableRecordRequest,
-    UpdateAppTableRecordRequest,
-    ListAppTableFieldRequest,
-)
-from lark_oapi.api.drive.v1 import UploadAllMediaRequest, UploadAllMediaRequestBody
-from lark_oapi.api.wiki.v2 import GetNodeSpaceRequest
+from typing import Any, Callable
 
 from ..config import config
 from ..logger import log_error, log_info, log_warning
@@ -69,6 +53,79 @@ OPTIONAL_TARGET_FIELD_NAMES = {
 }
 _field_cache_lock = threading.RLock()
 _field_cache: dict[str, list[str]] = {}
+_lark_sdk_lock = threading.RLock()
+lark: Any = None
+AppTableRecord: Any = None
+BatchCreateAppTableRecordRequest: Any = None
+BatchCreateAppTableRecordRequestBody: Any = None
+BatchUpdateAppTableRecordRequest: Any = None
+BatchUpdateAppTableRecordRequestBody: Any = None
+CreateAppTableRecordRequest: Any = None
+DeleteAppTableRecordRequest: Any = None
+GetAppTableRecordRequest: Any = None
+UpdateAppTableRecordRequest: Any = None
+ListAppTableFieldRequest: Any = None
+UploadAllMediaRequest: Any = None
+UploadAllMediaRequestBody: Any = None
+GetNodeSpaceRequest: Any = None
+
+
+def _ensure_lark_sdk_loaded() -> None:
+    """Load the large Feishu SDK only when an SDK-backed operation runs."""
+
+    global lark
+    global AppTableRecord
+    global BatchCreateAppTableRecordRequest
+    global BatchCreateAppTableRecordRequestBody
+    global BatchUpdateAppTableRecordRequest
+    global BatchUpdateAppTableRecordRequestBody
+    global CreateAppTableRecordRequest
+    global DeleteAppTableRecordRequest
+    global GetAppTableRecordRequest
+    global UpdateAppTableRecordRequest
+    global ListAppTableFieldRequest
+    global UploadAllMediaRequest
+    global UploadAllMediaRequestBody
+    global GetNodeSpaceRequest
+
+    if lark is not None:
+        return
+    with _lark_sdk_lock:
+        if lark is not None:
+            return
+        import lark_oapi as loaded_lark
+        from lark_oapi.api.bitable.v1 import (
+            AppTableRecord as LoadedAppTableRecord,
+            BatchCreateAppTableRecordRequest as LoadedBatchCreateAppTableRecordRequest,
+            BatchCreateAppTableRecordRequestBody as LoadedBatchCreateAppTableRecordRequestBody,
+            BatchUpdateAppTableRecordRequest as LoadedBatchUpdateAppTableRecordRequest,
+            BatchUpdateAppTableRecordRequestBody as LoadedBatchUpdateAppTableRecordRequestBody,
+            CreateAppTableRecordRequest as LoadedCreateAppTableRecordRequest,
+            DeleteAppTableRecordRequest as LoadedDeleteAppTableRecordRequest,
+            GetAppTableRecordRequest as LoadedGetAppTableRecordRequest,
+            ListAppTableFieldRequest as LoadedListAppTableFieldRequest,
+            UpdateAppTableRecordRequest as LoadedUpdateAppTableRecordRequest,
+        )
+        from lark_oapi.api.drive.v1 import (
+            UploadAllMediaRequest as LoadedUploadAllMediaRequest,
+            UploadAllMediaRequestBody as LoadedUploadAllMediaRequestBody,
+        )
+        from lark_oapi.api.wiki.v2 import GetNodeSpaceRequest as LoadedGetNodeSpaceRequest
+
+        lark = loaded_lark
+        AppTableRecord = LoadedAppTableRecord
+        BatchCreateAppTableRecordRequest = LoadedBatchCreateAppTableRecordRequest
+        BatchCreateAppTableRecordRequestBody = LoadedBatchCreateAppTableRecordRequestBody
+        BatchUpdateAppTableRecordRequest = LoadedBatchUpdateAppTableRecordRequest
+        BatchUpdateAppTableRecordRequestBody = LoadedBatchUpdateAppTableRecordRequestBody
+        CreateAppTableRecordRequest = LoadedCreateAppTableRecordRequest
+        DeleteAppTableRecordRequest = LoadedDeleteAppTableRecordRequest
+        GetAppTableRecordRequest = LoadedGetAppTableRecordRequest
+        UpdateAppTableRecordRequest = LoadedUpdateAppTableRecordRequest
+        ListAppTableFieldRequest = LoadedListAppTableFieldRequest
+        UploadAllMediaRequest = LoadedUploadAllMediaRequest
+        UploadAllMediaRequestBody = LoadedUploadAllMediaRequestBody
+        GetNodeSpaceRequest = LoadedGetNodeSpaceRequest
 
 
 def _info_logging_enabled() -> bool:
@@ -80,7 +137,8 @@ def _is_token_error(response) -> bool:
     return response.code in [99991663, 99991664, 99991665, 99991677] or "token" in msg
 
 
-def _build_client() -> lark.Client:
+def _build_client() -> Any:
+    _ensure_lark_sdk_loaded()
     return (
         lark.Client.builder()
         .enable_set_token(True)
@@ -348,12 +406,7 @@ def resolve_bitable_app_token(
         return app_token, False
 
     try:
-        client = (
-            lark.Client.builder()
-            .enable_set_token(True)
-            .log_level(lark.LogLevel.ERROR)
-            .build()
-        )
+        client = _build_client()
         request = (
             GetNodeSpaceRequest.builder().token(app_token).obj_type("wiki").build()
         )
@@ -969,6 +1022,7 @@ def batch_update_bitable_records_by_payload(notice_type: str, updates: list[tupl
         )
         for _record_id, payload in normalized
     ]
+    client = _build_client()
     records = [
         AppTableRecord.builder().record_id(record_id).fields(fields).build()
         for (record_id, _payload), fields in zip(normalized, fields_list)
@@ -976,7 +1030,6 @@ def batch_update_bitable_records_by_payload(notice_type: str, updates: list[tupl
     if _info_logging_enabled():
         log_info(f"Batch updating records({notice_type}) count={len(records)}")
 
-    client = _build_client()
     request = (
         BatchUpdateAppTableRecordRequest.builder()
         .app_token(config.app_token)

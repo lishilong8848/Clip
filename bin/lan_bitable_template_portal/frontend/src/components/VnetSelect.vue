@@ -141,6 +141,8 @@ const open = ref(false);
 const query = ref("");
 const activeIndex = ref(-1);
 const menuPosition = ref({ top: 0, left: 0, width: 220 });
+let positionFrame = 0;
+let globalListenersAttached = false;
 
 const normalizedOptions = computed(() => Array.from(new Set(
   props.options.map((item) => String(item || "").trim()).filter(Boolean),
@@ -168,6 +170,7 @@ function optionId(index: number): string {
 }
 
 function updatePosition(): void {
+  if (!open.value) return;
   const trigger = triggerRef.value;
   if (!trigger) return;
   const rect = trigger.getBoundingClientRect();
@@ -183,6 +186,34 @@ function updatePosition(): void {
   };
 }
 
+function schedulePositionUpdate(): void {
+  if (!open.value || positionFrame) return;
+  positionFrame = window.requestAnimationFrame(() => {
+    positionFrame = 0;
+    updatePosition();
+  });
+}
+
+function attachGlobalListeners(): void {
+  if (globalListenersAttached) return;
+  globalListenersAttached = true;
+  document.addEventListener("pointerdown", handleDocumentPointerDown, true);
+  window.addEventListener("resize", schedulePositionUpdate);
+  window.addEventListener("scroll", schedulePositionUpdate, true);
+}
+
+function detachGlobalListeners(): void {
+  if (!globalListenersAttached) return;
+  globalListenersAttached = false;
+  document.removeEventListener("pointerdown", handleDocumentPointerDown, true);
+  window.removeEventListener("resize", schedulePositionUpdate);
+  window.removeEventListener("scroll", schedulePositionUpdate, true);
+  if (positionFrame) {
+    window.cancelAnimationFrame(positionFrame);
+    positionFrame = 0;
+  }
+}
+
 function initialActiveIndex(): number {
   const selectedIndex = filteredOptions.value.indexOf(props.modelValue);
   return selectedIndex >= 0 ? selectedIndex : (filteredOptions.value.length ? 0 : -1);
@@ -192,6 +223,7 @@ async function showMenu(initialQuery = ""): Promise<void> {
   if (props.disabled || open.value) return;
   query.value = initialQuery;
   open.value = true;
+  attachGlobalListeners();
   activeIndex.value = initialActiveIndex();
   await nextTick();
   updatePosition();
@@ -202,6 +234,7 @@ async function showMenu(initialQuery = ""): Promise<void> {
 function closeMenu(focusTrigger = false): void {
   if (!open.value) return;
   open.value = false;
+  detachGlobalListeners();
   query.value = "";
   activeIndex.value = -1;
   if (focusTrigger) nextTick(() => triggerRef.value?.focus());
@@ -314,20 +347,14 @@ function handleDocumentPointerDown(event: PointerEvent): void {
 
 watch(filteredOptions, () => {
   activeIndex.value = initialActiveIndex();
-  if (open.value) nextTick(updatePosition);
+  if (open.value) nextTick(schedulePositionUpdate);
 });
 watch(() => props.disabled, (disabled) => {
   if (disabled) closeMenu();
 });
 
-document.addEventListener("pointerdown", handleDocumentPointerDown, true);
-window.addEventListener("resize", updatePosition);
-window.addEventListener("scroll", updatePosition, true);
-
 onBeforeUnmount(() => {
-  document.removeEventListener("pointerdown", handleDocumentPointerDown, true);
-  window.removeEventListener("resize", updatePosition);
-  window.removeEventListener("scroll", updatePosition, true);
+  detachGlobalListeners();
 });
 </script>
 

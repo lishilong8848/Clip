@@ -448,6 +448,7 @@ class _SmokePortalService:
                     "维修名称": "A楼测试检修管理记录",
                     "所属数据中心/楼栋-使用": "南通A楼",
                     "所属专业": "弱电",
+                    "当前维修进度": "50%",
                     "关联事件单": "A楼测试事件转检修",
                     "设备检修关联": "A楼测试设备检修",
                 },
@@ -455,6 +456,7 @@ class _SmokePortalService:
                     "维修名称": "A楼测试检修管理记录",
                     "所属数据中心/楼栋-使用": "南通A楼",
                     "所属专业": "弱电",
+                    "当前维修进度": 0.5,
                     "关联事件单": "rec-smoke-event-a-001",
                     "设备检修关联": "rec-smoke-repair-a-001",
                 },
@@ -471,6 +473,7 @@ class _SmokePortalService:
                     "维修名称": "A楼第二测试检修管理记录",
                     "所属数据中心/楼栋-使用": "南通A楼",
                     "所属专业": "电气",
+                    "当前维修进度": "50%",
                     "关联事件单": "",
                     "设备检修关联": "",
                 },
@@ -478,6 +481,7 @@ class _SmokePortalService:
                     "维修名称": "A楼第二测试检修管理记录",
                     "所属数据中心/楼栋-使用": "南通A楼",
                     "所属专业": "电气",
+                    "当前维修进度": 0.5,
                 },
                 "building_codes": ["A"],
                 "source_event_id": "",
@@ -513,6 +517,7 @@ class _SmokePortalService:
                 {"field_name": "故障维修原因", "editable": True, "ui_type": "text"},
                 {"field_name": "所属数据中心/楼栋-使用", "editable": True, "ui_type": "text"},
                 {"field_name": "所属专业", "editable": True, "ui_type": "single_select", "options": ["弱电"]},
+                {"field_name": "当前维修进度", "editable": False, "auto_filled": True, "field_type": 2, "ui_type": "progress"},
                 {"field_name": "关联事件单", "editable": False, "auto_filled": True, "ui_type": "text"},
                 {"field_name": "设备检修关联", "editable": False, "auto_filled": True, "ui_type": "text"},
                 {"field_name": "维修跟进记录", "editable": False, "auto_filled": True, "ui_type": "text"},
@@ -1390,6 +1395,17 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           if (projectColumnCount !== 4) {{
             throw new Error(`repair project form should use four desktop columns, got ${{projectColumnCount}}`);
           }}
+          const currentProgress = page.locator('[data-field-name="当前维修进度"]');
+          await currentProgress.waitFor({{ state: 'visible' }});
+          if (String(await currentProgress.locator('[data-progress-value]').textContent() || '').trim() !== '50') {{
+            throw new Error('current repair progress did not render the latest followup percentage');
+          }}
+          if (await currentProgress.locator('input').count()) {{
+            throw new Error('current repair progress must remain read-only');
+          }}
+          if (await currentProgress.getByRole('progressbar').getAttribute('aria-valuenow') !== '50') {{
+            throw new Error('current repair progress accessibility value is incorrect');
+          }}
           await page.getByRole('button', {{ name: /^跟进记录/ }}).first().click();
           await waitForTextOrDump(page, 'A楼测试维修跟进记录', 'repair-management-autofill');
           const followupPanel = page.locator('.followup-panel');
@@ -1489,6 +1505,13 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await followupOptions.last().click();
           const progressInput = followupPanel.locator('[data-field-name="维修进度"] [data-progress-number]');
           await progressInput.fill('60');
+          const progressControl = followupPanel.locator('[data-field-name="维修进度"] .repair-percentage-control');
+          if (String(await progressControl.locator('.percentage-stage').textContent() || '').trim() !== '维修中') {{
+            throw new Error('repair progress stage did not update to 维修中 at 60%');
+          }}
+          if (await progressControl.locator('.percentage-range').inputValue() !== '60') {{
+            throw new Error('repair progress slider did not stay in sync with the number input');
+          }}
           await followupPanel.getByRole('button', {{ name: '更新跟进记录', exact: true }}).click();
           await followupPanel.getByText('维修跟进记录已更新。', {{ exact: true }}).waitFor({{ state: 'visible' }});
           await assertLayout(page, 'repair-management-entry');

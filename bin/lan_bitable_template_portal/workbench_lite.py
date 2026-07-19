@@ -95,6 +95,7 @@ _DRAFT_DOM_KEYS = {
     "source_record_id",
     "target_record_id",
     "record_id",
+    "repair_management_record_id",
     "manual_id",
     "scope",
     "work_type",
@@ -934,6 +935,9 @@ def _draft_from_record(record: dict[str, Any], *, manual: bool = False, work_typ
         "device": _first(record.get("device"), _field(record, "设备")),
         "cabinet": _first(record.get("cabinet"), _field(record, "柜号")),
         "quantity": _first(record.get("quantity"), _field(record, "数量")),
+        "repair_management_record_id": str(
+            record.get("repair_management_record_id") or ""
+        ).strip(),
     }
     source_work_type = str(record.get("source_work_type") or "").strip()
     converted_from = str(record.get("converted_from_work_type") or "").strip()
@@ -1465,6 +1469,7 @@ def _repair_event_link_panel(
     source: dict[str, Any],
     *,
     visible: bool,
+    repair_management_record_id: str = "",
 ) -> str:
     event_record_ids = _relation_record_ids(source, "关联事件单")
     event_record_id = str(
@@ -1476,11 +1481,16 @@ def _repair_event_link_panel(
         _field(source, "事件描述", "故障维修原因", "故障发生现象描述"),
     )
     status = event_title or ("已关联事件" if event_record_id else "未选择")
+    repair_management_record_id = str(
+        repair_management_record_id
+        or source.get("repair_management_record_id")
+        or ""
+    ).strip()
     hidden_attr = "" if visible else " hidden"
     return f"""
         <section class="repair-event-link-panel" data-repair-event-link{hidden_attr}>
           <input type="hidden" name="related_event_record_id" value="{_e(event_record_id)}">
-          <input type="hidden" name="related_repair_management_record_id" value="">
+          <input type="hidden" name="repair_management_record_id" value="{_e(repair_management_record_id)}">
           <div>
             <strong>对应事件</strong>
             <span id="lite-repair-event-link-status">{_e(status)}</span>
@@ -1682,6 +1692,15 @@ def _detail_form(
         _repair_event_link_panel(
             source,
             visible=bool(record) and not ongoing_item and not effective_manual,
+            repair_management_record_id=str(
+                source.get("repair_management_record_id")
+                or prefill_context_id
+                or (
+                    source_record_id
+                    if source_record_id and not effective_manual
+                    else ""
+                )
+            ).strip(),
         )
         if work == "repair"
         else ""
@@ -2930,6 +2949,7 @@ def render_workbench_lite(
     const liteDraftCache = window.__clipflowLiteDraftCache || (window.__clipflowLiteDraftCache = new Map());
     const liteDraftDomKeys = [
       'action', 'operation_id', 'active_item_id', 'source_record_id', 'target_record_id', 'record_id',
+      'repair_management_record_id',
       'manual_id', 'scope', 'work_type', 'notice_type', 'title', 'building', 'buildings', 'specialty',
       'maintenance_cycle', 'level', 'start_time', 'end_time', 'status', 'site_photo_count', 'mop_status',
       'source_work_type', 'converted_from_work_type', 'converted_to_work_type', 'sync_maintenance_target',
@@ -2988,6 +3008,7 @@ def render_workbench_lite(
       'manual', 'manual_id', 'scope', 'action', 'work_type', 'notice_type', 'operation_id',
       'manual_binding_choice', 'manual_binding_required',
       'active_item_id', 'source_record_id', 'target_record_id', 'record_id',
+      'repair_management_record_id',
       'source_work_type', 'converted_from_work_type', 'converted_to_work_type', 'sync_maintenance_target',
       'paired_maintenance_target_record_id', 'paired_maintenance_original_title',
       'paired_maintenance_actual_start_time',
@@ -3703,7 +3724,7 @@ def render_workbench_lite(
       if (!panel) return;
       panel.hidden = !visible;
       setFormValue(form, 'related_event_record_id', '');
-      setFormValue(form, 'related_repair_management_record_id', '');
+      setFormValue(form, 'repair_management_record_id', '');
       const status = panel.querySelector('#lite-repair-event-link-status');
       if (status) status.textContent = '未选择';
     }}
@@ -3908,7 +3929,7 @@ def render_workbench_lite(
           }}
         }}
         setFormValue(form, 'related_event_record_id', candidate.event_record_id || '');
-        setFormValue(form, 'related_repair_management_record_id', sourceRecordIdAtStart);
+        setFormValue(form, 'repair_management_record_id', sourceRecordIdAtStart);
         const status = document.getElementById('lite-repair-event-link-status');
         if (status) status.textContent = candidate.title || candidate.project_title || '已选择事件';
         const sourceRow = Array.from(document.querySelectorAll('.notice-row')).find(row =>
@@ -4275,7 +4296,7 @@ def render_workbench_lite(
       setFormValue(form, 'record_id', targetRecordId || sourceRecordId);
       setFormValue(form, 'source_record_id', sourceRecordId);
       setFormValue(form, 'related_event_record_id', sourceEventId);
-      setFormValue(form, 'related_repair_management_record_id', sourceEventId ? sourceRecordId : '');
+      setFormValue(form, 'repair_management_record_id', sourceRecordId);
       const repairEventStatus = form.querySelector('#lite-repair-event-link-status');
       if (repairEventStatus && !linkedOngoing && workType === 'repair') {{
         repairEventStatus.textContent = sourceEventTitle || (sourceEventId ? '已关联事件' : '未选择');
@@ -4855,6 +4876,14 @@ def render_workbench_lite(
       const patch = Object.fromEntries(fd.entries());
       const photos = sitePhotoPayload(form);
       const sourceRecordId = String(patch.source_record_id || '').trim();
+      const repairManagementRecordId = String(
+        patch.repair_management_record_id
+        || (
+          patch.work_type === 'repair' && sourceRecordId.startsWith('rec')
+            ? sourceRecordId
+            : ''
+        )
+      ).trim();
       const rawRecordId = String(patch.record_id || '').trim();
       const explicitTargetRecordId = String(patch.target_record_id || '').trim();
       let targetRecordId = explicitTargetRecordId;
@@ -4877,6 +4906,7 @@ def render_workbench_lite(
       patch.actual_action_time = actualActionTime || patch.actual_action_time || '';
       patch.response_time = patch.actual_action_time || patch.response_time || '';
       patch.source_record_id = sourceRecordId;
+      patch.repair_management_record_id = repairManagementRecordId;
       patch.target_record_id = targetRecordId;
       patch.record_id = submitRecordId;
       patch.operation_id = `${{patch.scope}}:${{patch.work_type}}:${{operationIdentity}}:${{action}}:${{Date.now()}}`;
@@ -4899,6 +4929,7 @@ def render_workbench_lite(
         active_item_id: patch.active_item_id || '',
         source_record_id: sourceRecordId,
         target_record_id: targetRecordId,
+        repair_management_record_id: repairManagementRecordId,
         record_id: submitRecordId,
         actual_action_time: patch.actual_action_time || '',
         operation_id: patch.operation_id,

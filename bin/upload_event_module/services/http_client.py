@@ -53,16 +53,28 @@ class FeishuHttpClient:
     ) -> None:
         self.timeout = timeout
         self.retries = max(0, int(retries or 0))
-        client_kwargs = {"timeout": timeout, "follow_redirects": False}
-        if transport is not None:
-            client_kwargs["transport"] = transport
-        self._client = httpx.Client(**client_kwargs)
+        self._transport = transport
+        self._client: httpx.Client | None = None
         self._lock = threading.RLock()
         _CLIENTS.add(self)
 
+    def _ensure_client_locked(self) -> httpx.Client:
+        client = self._client
+        if client is not None:
+            return client
+        client_kwargs = {"timeout": self.timeout, "follow_redirects": False}
+        if self._transport is not None:
+            client_kwargs["transport"] = self._transport
+        client = httpx.Client(**client_kwargs)
+        self._client = client
+        return client
+
     def close(self) -> None:
         with self._lock:
-            self._client.close()
+            client = self._client
+            self._client = None
+            if client is not None:
+                client.close()
 
     def __del__(self) -> None:
         try:
@@ -85,7 +97,7 @@ class FeishuHttpClient:
         for attempt in range(retry_count + 1):
             try:
                 with self._lock:
-                    response = self._client.request(
+                    response = self._ensure_client_locked().request(
                         method,
                         url,
                         headers=headers,
@@ -126,6 +138,79 @@ class FeishuHttpClient:
                 raise FeishuHTTPError(last_error, category="network") from exc
         raise FeishuHTTPError(last_error or "HTTP 请求失败", category="network")
 
+    def request_file_json(
+        self,
+        method: str,
+        url: str,
+        *,
+        file_path: str,
+        file_name: str,
+        data: dict[str, Any],
+        headers: dict[str, str] | None = None,
+        file_field: str = "file",
+        content_type: str = "application/octet-stream",
+        retries: int | None = None,
+    ) -> dict[str, Any]:
+        """Upload one file as multipart data and return a JSON object.
+
+        The file is reopened for every retry so a partial request never leaves
+        the next attempt reading from the previous file position.
+        """
+
+        retry_count = self.retries if retries is None else max(0, int(retries or 0))
+        last_error = ""
+        for attempt in range(retry_count + 1):
+            try:
+                with open(file_path, "rb") as file_obj:
+                    files = {
+                        str(file_field or "file"): (
+                            str(file_name or "upload.bin"),
+                            file_obj,
+                            str(content_type or "application/octet-stream"),
+                        )
+                    }
+                    with self._lock:
+                        response = self._ensure_client_locked().request(
+                            method,
+                            url,
+                            headers=headers,
+                            data=data,
+                            files=files,
+                        )
+                if response.status_code in RETRY_STATUS_CODES and attempt < retry_count:
+                    time.sleep(0.35 * (2**attempt) + random.random() * 0.2)
+                    continue
+                try:
+                    payload = response.json()
+                except ValueError:
+                    response.raise_for_status()
+                    raise FeishuHTTPError("接口返回不是 JSON 对象", category="business")
+                if isinstance(payload, dict):
+                    if response.status_code >= 400 and int(payload.get("code") or 0) == 0:
+                        response.raise_for_status()
+                    return payload
+                response.raise_for_status()
+                raise FeishuHTTPError("接口返回不是 JSON 对象", category="business")
+            except httpx.HTTPStatusError as exc:
+                status = int(exc.response.status_code if exc.response else 0)
+                last_error = str(exc)
+                if status in RETRY_STATUS_CODES and attempt < retry_count:
+                    time.sleep(0.35 * (2**attempt) + random.random() * 0.2)
+                    continue
+                raise FeishuHTTPError(
+                    last_error,
+                    category=classify_feishu_error(status_code=status),
+                ) from exc
+            except Exception as exc:
+                last_error = str(exc)
+                if attempt < retry_count:
+                    time.sleep(0.35 * (2**attempt) + random.random() * 0.2)
+                    continue
+                if isinstance(exc, FeishuHTTPError):
+                    raise
+                raise FeishuHTTPError(last_error, category="network") from exc
+        raise FeishuHTTPError(last_error or "HTTP 上传失败", category="network")
+
     def request_bytes(
         self,
         method: str,
@@ -141,7 +226,7 @@ class FeishuHttpClient:
         for attempt in range(retry_count + 1):
             try:
                 with self._lock:
-                    response = self._client.request(
+                    response = self._ensure_client_locked().request(
                         method,
                         url,
                         headers=headers,

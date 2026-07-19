@@ -5,6 +5,8 @@ import socket
 import subprocess
 import sys
 import ipaddress
+import locale
+import threading
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
@@ -17,6 +19,7 @@ from ..services.event_relay_server import EventRelayServer
 class EventRelayBridge(QObject):
     event_received = pyqtSignal(str, str, str)  # content, status, notice_type
     status_changed = pyqtSignal(str)
+    _display_host_resolved = pyqtSignal(str)
 
     def __init__(
         self,
@@ -36,12 +39,17 @@ class EventRelayBridge(QObject):
         self._max_per_tick = max_per_tick
         self._interval_ms = interval_ms
         self._status_callback = status_callback
+        self._display_host_refresh_lock = threading.Lock()
+        self._display_host_refresh_running = False
+        self._display_host_resolved.connect(self._apply_display_host)
 
         bind_host = (
             host or getattr(config, "relay_bind_host", "0.0.0.0") or "0.0.0.0"
         ).strip()
         self._host = bind_host if bind_host else "0.0.0.0"
-        self._display_host = self._resolve_display_host()
+        self._display_host = (
+            self._host if self._is_private_lan_ipv4(self._host) else "127.0.0.1"
+        )
 
         self._server = EventRelayServer(
             host=self._host,
@@ -58,7 +66,7 @@ class EventRelayBridge(QObject):
 
         # Keep display IP/hostname in sync when network changes.
         self._display_host_timer = QTimer(self)
-        self._display_host_timer.setInterval(15_000)
+        self._display_host_timer.setInterval(120_000)
         self._display_host_timer.timeout.connect(self._refresh_display_host_status)
 
     def start(self):
@@ -66,8 +74,8 @@ class EventRelayBridge(QObject):
             ok = self._server.start()
             if ok:
                 self._running = True
-                self._display_host = self._resolve_display_host()
                 self._set_status(self._format_running_status(self._display_host))
+                self._refresh_display_host_status()
                 if not self._display_host_timer.isActive():
                     self._display_host_timer.start()
             else:
@@ -107,7 +115,32 @@ class EventRelayBridge(QObject):
     def _refresh_display_host_status(self):
         if not self._running:
             return
-        new_host = self._resolve_display_host()
+        with self._display_host_refresh_lock:
+            if self._display_host_refresh_running:
+                return
+            self._display_host_refresh_running = True
+
+        def resolve() -> None:
+            try:
+                resolved_host = self._resolve_display_host()
+                try:
+                    self._display_host_resolved.emit(resolved_host)
+                except (RuntimeError, TypeError):
+                    pass
+            finally:
+                with self._display_host_refresh_lock:
+                    self._display_host_refresh_running = False
+
+        threading.Thread(
+            target=resolve,
+            name="ClipFlowRelayDisplayHost",
+            daemon=True,
+        ).start()
+
+    def _apply_display_host(self, new_host: str) -> None:
+        if not self._running:
+            return
+        new_host = str(new_host or "").strip() or "127.0.0.1"
         if new_host == self._display_host:
             return
         self._display_host = new_host
@@ -117,18 +150,14 @@ class EventRelayBridge(QObject):
         preferred = self._resolve_preferred_ipv4_from_adapters()
         if preferred:
             return preferred
+        return self._resolve_fast_ipv4_for_display()
+
+    def _resolve_fast_ipv4_for_display(self) -> str:
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.settimeout(1.0)
                 sock.connect(("8.8.8.8", 80))
                 ip = sock.getsockname()[0]
-                if self._is_private_lan_ipv4(ip):
-                    return ip
-        except Exception:
-            pass
-        try:
-            host = socket.gethostname()
-            _, _, addr_list = socket.gethostbyname_ex(host)
-            for ip in addr_list:
                 if self._is_private_lan_ipv4(ip):
                     return ip
         except Exception:
@@ -169,9 +198,10 @@ class EventRelayBridge(QObject):
                 ["ipconfig"],
                 capture_output=True,
                 text=True,
-                encoding="utf-8",
+                encoding=locale.getpreferredencoding(False) or "utf-8",
                 errors="ignore",
                 check=False,
+                timeout=4.0,
                 startupinfo=startupinfo,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )

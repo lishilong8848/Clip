@@ -1257,7 +1257,10 @@ function maintenanceFieldValueByLabel(labelText: string): string {
 }
 
 function sheetCellDisplayText(rowIndex: number, colIndex: number): string {
-  return String(cellOverrideValue(rowIndex, colIndex) || activeSheet.value?.rows?.[rowIndex]?.[colIndex] || "");
+  if (mopCellHasOverride(rowIndex, colIndex)) {
+    return String(cellOverrideValue(rowIndex, colIndex));
+  }
+  return String(activeSheet.value?.rows?.[rowIndex]?.[colIndex] ?? "");
 }
 
 function detectInvolvedPeopleRequirement(): { count: number; cell_ref: string } {
@@ -1330,6 +1333,17 @@ function focusSheetWithoutScroll(): void {
 
 function updateActiveMopCellOverlayPosition(): void {
   mopCellSelection.updateOverlay(mopCellPopoverMode.value);
+}
+
+let activeMopCellOverlayFrame = 0;
+
+function scheduleActiveMopCellOverlayPosition(): void {
+  if (!mopCellSelection.activeKey.value || signatureManagerOpen.value) return;
+  if (activeMopCellOverlayFrame) return;
+  activeMopCellOverlayFrame = window.requestAnimationFrame(() => {
+    activeMopCellOverlayFrame = 0;
+    updateActiveMopCellOverlayPosition();
+  });
 }
 
 function isMopCellSelected(rowIndex: number, colIndex: number): boolean {
@@ -1531,7 +1545,10 @@ function restoreActiveMopSelection(): void {
 }
 
 function mopCellCurrentText(rowIndex: number, colIndex: number): string {
-  return String(cellOverrideValue(rowIndex, colIndex) || activeSheet.value?.rows?.[rowIndex]?.[colIndex] || "");
+  if (mopCellHasOverride(rowIndex, colIndex)) {
+    return String(cellOverrideValue(rowIndex, colIndex));
+  }
+  return String(activeSheet.value?.rows?.[rowIndex]?.[colIndex] ?? "");
 }
 
 async function writeTextClipboard(text: string): Promise<void> {
@@ -3098,8 +3115,8 @@ watch(activeSheetName, () => {
 
 onMounted(() => {
   ensureSignatureCanvasObserver();
-  window.addEventListener("scroll", updateActiveMopCellOverlayPosition, true);
-  window.addEventListener("resize", updateActiveMopCellOverlayPosition);
+  window.addEventListener("scroll", scheduleActiveMopCellOverlayPosition, true);
+  window.addEventListener("resize", scheduleActiveMopCellOverlayPosition);
   if (props.loggedIn) void loadPage();
 });
 
@@ -3114,8 +3131,12 @@ onBeforeUnmount(() => {
   }
   temporarySignaturePolling.stop();
   formalSignaturePolling.stop();
-  window.removeEventListener("scroll", updateActiveMopCellOverlayPosition, true);
-  window.removeEventListener("resize", updateActiveMopCellOverlayPosition);
+  window.removeEventListener("scroll", scheduleActiveMopCellOverlayPosition, true);
+  window.removeEventListener("resize", scheduleActiveMopCellOverlayPosition);
+  if (activeMopCellOverlayFrame) {
+    window.cancelAnimationFrame(activeMopCellOverlayFrame);
+    activeMopCellOverlayFrame = 0;
+  }
   disconnectSignatureCanvasObserver();
   releaseMopEditSession();
 });

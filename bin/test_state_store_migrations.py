@@ -40,6 +40,21 @@ class StateStoreMigrationTests(unittest.TestCase):
             self.assertEqual(before.get("sentinel"), "keep")
             self.assertEqual(after.get("sentinel"), "keep")
 
+    def test_recreated_database_at_same_path_is_initialized_again(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "state.sqlite3"
+            store = LanPortalStateStore(db_path)
+            store.put_settings({"sentinel": "old"})
+
+            for candidate in db_path.parent.glob(f"{db_path.name}*"):
+                candidate.unlink()
+
+            store.put_settings({"sentinel": "new"})
+            health = store.schema_health()
+
+            self.assertTrue(health["ok"], health)
+            self.assertEqual(store.get_settings().get("sentinel"), "new")
+
     def test_schema_migrations_table_is_idempotent(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "state.sqlite3"

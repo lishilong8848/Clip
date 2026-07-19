@@ -7,7 +7,6 @@ from typing import List, Optional, Sequence, Union
 from ...core.parser import extract_event_info
 from ...config import STATUS_END
 from ...time_parser import parse_single_datetime, parse_time_only
-from ..robot_webhook import send_robot_title_and_content
 
 
 @dataclass
@@ -82,6 +81,8 @@ class BaseNoticeHandler:
         return tokens
 
     def send_group_robot_message(self, title: str, content: str, notice_type: str, level: str):
+        from ..robot_webhook import send_robot_title_and_content
+
         return send_robot_title_and_content(title, content, notice_type, level)
 
     def build_robot_message(self, payload: NoticePayload):

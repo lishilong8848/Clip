@@ -379,7 +379,7 @@ class ClipboardTool(
             "timeout",
             self._refresh_patch_button,
         )
-        self.patch_check_timer.start(3000)
+        self.patch_check_timer.start(30_000)
         self._init_remote_patch_updater()
 
         self.connection_registry.connect(

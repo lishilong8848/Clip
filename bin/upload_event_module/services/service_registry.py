@@ -1,10 +1,35 @@
 from __future__ import annotations
 
 import importlib
+import threading
 from dataclasses import dataclass
 from types import ModuleType
 
 from ..logger import log_info
+
+
+class LazyServiceModule(ModuleType):
+    """Module proxy that imports the real service on first attribute access."""
+
+    def __init__(self, module_name: str) -> None:
+        super().__init__(module_name)
+        self.__dict__["_target_module_name"] = module_name
+        self.__dict__["_target_module"] = None
+        self.__dict__["_target_lock"] = threading.RLock()
+
+    def _load(self) -> ModuleType:
+        target = self.__dict__.get("_target_module")
+        if isinstance(target, ModuleType):
+            return target
+        with self.__dict__["_target_lock"]:
+            target = self.__dict__.get("_target_module")
+            if not isinstance(target, ModuleType):
+                target = importlib.import_module(self.__dict__["_target_module_name"])
+                self.__dict__["_target_module"] = target
+            return target
+
+    def __getattr__(self, name: str):
+        return getattr(self._load(), name)
 
 
 @dataclass
@@ -40,7 +65,10 @@ def _load_handlers() -> ModuleType:
 
 
 def build_default_registry() -> ServiceRegistry:
-    return ServiceRegistry(_load_feishu(), _load_handlers())
+    return ServiceRegistry(
+        LazyServiceModule("upload_event_module.services.feishu_service"),
+        LazyServiceModule("upload_event_module.services.handlers"),
+    )
 
 
 service_registry = build_default_registry()
@@ -50,8 +78,6 @@ def set_registry(new_registry: ServiceRegistry) -> None:
     global service_registry
     service_registry = new_registry
 
-
-import threading
 
 # 全局飞书 API 请求锁 (防止 SSL 多线程冲突)
 _feishu_lock = threading.RLock()
@@ -135,6 +161,11 @@ def batch_create_bitable_records_by_payload(*args, **kwargs):
 def query_record_by_id(*args, **kwargs):
     with _feishu_lock:
         return service_registry.feishu_module.query_record_by_id(*args, **kwargs)
+
+
+def delete_bitable_record(*args, **kwargs):
+    with _feishu_lock:
+        return service_registry.feishu_module.delete_bitable_record(*args, **kwargs)
 
 
 def update_bitable_record(*args, **kwargs):

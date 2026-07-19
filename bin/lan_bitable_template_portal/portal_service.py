@@ -28,17 +28,12 @@ from typing import Any, Callable
 from urllib.parse import quote, urlparse
 import xml.etree.ElementTree as ET
 
-import lark_oapi as lark
-from lark_oapi.api.drive.v1 import UploadAllMediaRequest, UploadAllMediaRequestBody
-
 from upload_event_module.config import EVENT_NOTICE_FIELDS, config, get_field_config
-from upload_event_module.services.feishu_service import (
+from upload_event_module.services.service_registry import (
     ensure_feishu_token,
     refresh_feishu_token,
 )
-from upload_event_module.services.feishu_token_manager import TOKEN_ERROR_CODES
 from upload_event_module.services.http_client import FeishuHTTPError, FeishuHttpClient
-from upload_event_module.services.robot_webhook import send_text_to_open_ids
 from upload_event_module.utils import get_data_file_path
 
 from .state_store import LanPortalStateStore
@@ -58,6 +53,7 @@ from .signature_crypto import (
 
 DEFAULT_APP_TOKEN = "HU38bc1vnamMK9sCeOgclUvXnFc"
 DEFAULT_TABLE_ID = "tblzk7WrXxNWQy6V"
+TOKEN_ERROR_CODES = {99991663, 99991664, 99991665, 99991668, 99991677}
 CHANGE_SOURCE_APP_TOKEN = "JhiVwgfoIimAqEk8YwEc09sknGd"
 CHANGE_SOURCE_TABLE_ID = "tblBvg6wCYSX3hcg"
 ZHIHANG_CHANGE_APP_TOKEN = "IrIibPkUOa6udGsMhu2cbOqhnWg"
@@ -950,6 +946,17 @@ class FieldMeta:
     read_fallback_field_name: str = ""
 
 
+def send_text_to_open_ids(
+    text: str,
+    open_ids: list[str],
+) -> tuple[bool, str, list[dict[str, Any]]]:
+    from upload_event_module.services.robot_webhook import (
+        send_text_to_open_ids as send_impl,
+    )
+
+    return send_impl(text, open_ids)
+
+
 class MaintenancePortalService:
     _memory_lock = threading.RLock()
     _summary_lock = threading.RLock()
@@ -1165,14 +1172,21 @@ class MaintenancePortalService:
             if isinstance(record.get("display_fields"), dict)
             else {}
         )
+        raw_fields = (
+            record.get("raw_fields")
+            if isinstance(record.get("raw_fields"), dict)
+            else {}
+        )
         record_id = str(
             record.get("record_id") or record.get("source_record_id") or ""
         ).strip()
         parent_record_id = ""
         if parent_field_name:
-            parent_record_id = cls._repair_management_plain_text(
-                display_fields.get(parent_field_name)
-            ).strip()
+            parent_record_ids = cls._repair_management_record_ids(
+                raw_fields.get(parent_field_name)
+                or display_fields.get(parent_field_name)
+            )
+            parent_record_id = parent_record_ids[0] if parent_record_ids else ""
         title = cls._repair_management_plain_text(
             display_fields.get("维修名称")
             or display_fields.get("名称（标题）")
@@ -1208,6 +1222,8 @@ class MaintenancePortalService:
             or display_fields.get("事件发生时间")
             or display_fields.get("故障发生时间")
             or display_fields.get("创建时间")
+            or record.get("last_modified_time")
+            or record.get("created_time")
             or ""
         )
         sort_dt = cls._parse_notice_datetime(
@@ -1266,13 +1282,14 @@ class MaintenancePortalService:
         ttl = float(REPAIR_SNAPSHOT_TTL_SECONDS.get(source_key) or 120)
         lock = self._repair_snapshot_lock(source_key)
         with lock:
-            current = self._state_store.get_repair_snapshot(source_key)
-            refreshed_at = float(current.get("refreshed_at") or 0)
+            current_meta = self._state_store.get_repair_snapshot_meta(source_key)
+            refreshed_at = float(current_meta.get("refreshed_at") or 0)
             if (
                 not force_refresh
                 and refreshed_at > 0
                 and time.time() - refreshed_at <= ttl
             ):
+                current = self._state_store.get_repair_snapshot(source_key)
                 return self._repair_snapshot_from_local(current)
             try:
                 metas, records = loader()
@@ -1466,7 +1483,7 @@ class MaintenancePortalService:
             return
         self._state_store.delete_repair_snapshot_record(source_key, record_id)
 
-    def start_repair_snapshot_warmup_async(self, *, delay_seconds: float = 2.0) -> None:
+    def start_repair_snapshot_warmup_async(self, *, delay_seconds: float = 8.0) -> None:
         if not self._repair_snapshots_enabled:
             return
         warmup_key = "__warmup__"
@@ -1479,16 +1496,44 @@ class MaintenancePortalService:
             try:
                 if delay_seconds > 0:
                     time.sleep(float(delay_seconds))
-                loaders: tuple[Callable[[], Any], ...] = (
-                    self._load_repair_management_project_records,
-                    self._load_repair_followup_snapshot,
-                    self._load_repair_management_event_records,
-                    self._load_repair_management_target_records,
-                    self._load_repair_management_cmdb_records,
+                eager = (
+                    str(os.environ.get("CLIPFLOW_EAGER_REPAIR_WARMUP") or "")
+                    .strip()
+                    .lower()
+                    in {"1", "true", "yes"}
                 )
-                for loader in loaders:
+                loaders: tuple[tuple[str, Callable[[], Any]], ...] = (
+                    (
+                        REPAIR_SNAPSHOT_SOURCE_PROJECTS,
+                        self._load_repair_management_project_records,
+                    ),
+                    (
+                        REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS,
+                        self._load_repair_followup_snapshot,
+                    ),
+                    (
+                        REPAIR_SNAPSHOT_SOURCE_EVENTS,
+                        self._load_repair_management_event_records,
+                    ),
+                    (
+                        REPAIR_SNAPSHOT_SOURCE_NOTICES,
+                        self._load_repair_management_target_records,
+                    ),
+                    (
+                        REPAIR_SNAPSHOT_SOURCE_CMDB,
+                        self._load_repair_management_cmdb_records,
+                    ),
+                )
+                for source_key, loader in loaders:
+                    if not eager:
+                        source_meta = self._state_store.get_repair_snapshot_meta(
+                            source_key
+                        )
+                        if int(source_meta.get("record_count") or 0) > 0:
+                            continue
                     with suppress(Exception):
                         loader()
+                    time.sleep(0.5)
             finally:
                 with self._repair_snapshot_locks_guard:
                     self._repair_snapshot_refreshing.discard(warmup_key)
@@ -2317,7 +2362,7 @@ class MaintenancePortalService:
     ) -> tuple[list[FieldMeta], dict[str, FieldMeta]]:
         with self._repair_followup_schema_lock:
             if self._repair_followup_schema_ready and self._repair_snapshots_enabled:
-                snapshot = self._state_store.get_repair_snapshot(
+                snapshot = self._state_store.get_repair_snapshot_meta(
                     REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS
                 )
                 if (
@@ -2326,9 +2371,14 @@ class MaintenancePortalService:
                     and str(snapshot.get("table_id") or "").strip()
                     == REPAIR_FOLLOWUP_TABLE_ID
                 ):
-                    cached_metas, cached_by_name, _cached_records = (
-                        self._repair_snapshot_from_local(snapshot)
-                    )
+                    cached_metas = [
+                        self._repair_snapshot_field_meta(item)
+                        for item in (snapshot.get("fields") or [])
+                        if isinstance(item, dict)
+                    ]
+                    cached_by_name = {
+                        meta.field_name: meta for meta in cached_metas
+                    }
                     cached_parent = cached_by_name.get(
                         REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME
                     )
@@ -3582,6 +3632,14 @@ class MaintenancePortalService:
             linked[field_name] = ids[0]
         return linked
 
+    @staticmethod
+    def _repair_management_field_is_relation(meta: FieldMeta | None) -> bool:
+        if meta is None:
+            return False
+        return int(meta.field_type or 0) in {18, 21} or "link" in str(
+            meta.ui_type or ""
+        ).strip().lower()
+
     @classmethod
     def _repair_management_datetime_ms(cls, value: Any) -> int | None:
         if isinstance(value, bool):
@@ -4172,7 +4230,7 @@ class MaintenancePortalService:
                     "来源事件已不在当前事件表中，候选列表仍可手动选择。"
                 )
             resolution_warning = str(event.get("resolution_warning") or "").strip()
-            if resolution_warning:
+            if resolution_warning and not bool(event.get("historical_fallback")):
                 warnings.append(resolution_warning)
         _metas, _meta_by_name, records = self._load_repair_management_target_records()
         query_text = str(query or "").strip().lower()
@@ -4482,6 +4540,38 @@ class MaintenancePortalService:
                     counts[normalized_id] = counts.get(normalized_id, 0) + 1
         return counts
 
+    def _repair_followup_counts_from_local_snapshot(
+        self,
+        summary_record_ids: list[str] | tuple[str, ...],
+    ) -> dict[str, int] | None:
+        normalized_ids = list(
+            dict.fromkeys(
+                str(value or "").strip()
+                for value in summary_record_ids
+                if str(value or "").strip()
+            )
+        )
+        if not normalized_ids or not self._repair_snapshots_enabled:
+            return None
+        snapshot = self._state_store.get_repair_snapshot(
+            REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS
+        )
+        if not snapshot.get("exists"):
+            return None
+        counts = self._repair_followup_counts_by_summary(
+            [
+                item
+                for item in (snapshot.get("records") or [])
+                if isinstance(item, dict)
+            ]
+        )
+        return {
+            summary_record_id: max(
+                0, int(counts.get(summary_record_id) or 0)
+            )
+            for summary_record_id in normalized_ids
+        }
+
     @classmethod
     def _repair_followup_order_key(
         cls,
@@ -4560,29 +4650,67 @@ class MaintenancePortalService:
         )
         return metas, meta_by_name, records
 
+    def _load_repair_followup_records_remote(
+        self,
+    ) -> tuple[list[FieldMeta], list[dict[str, Any]]]:
+        metas, meta_by_name = self._ensure_repair_followup_parent_id_field()
+        records = self._load_table_records(
+            app_token=REPAIR_SOURCE_APP_TOKEN,
+            table_id=REPAIR_FOLLOWUP_TABLE_ID,
+            meta_by_name=meta_by_name,
+            work_type=WORK_TYPE_REPAIR,
+            notice_type=NOTICE_TYPE_REPAIR,
+        )
+        return metas, records
+
     def _load_repair_followup_snapshot(
         self,
         *,
         force_refresh: bool = False,
     ) -> tuple[list[FieldMeta], dict[str, FieldMeta], list[dict[str, Any]]]:
-        def load_remote() -> tuple[list[FieldMeta], list[dict[str, Any]]]:
-            metas, meta_by_name = self._ensure_repair_followup_parent_id_field()
-            records = self._load_table_records(
-                app_token=REPAIR_SOURCE_APP_TOKEN,
-                table_id=REPAIR_FOLLOWUP_TABLE_ID,
-                meta_by_name=meta_by_name,
-                work_type=WORK_TYPE_REPAIR,
-                notice_type=NOTICE_TYPE_REPAIR,
-            )
-            return metas, records
-
         return self._load_repair_snapshot_source(
             source_key=REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS,
             app_token=REPAIR_SOURCE_APP_TOKEN,
             table_id=REPAIR_FOLLOWUP_TABLE_ID,
-            loader=load_remote,
+            loader=self._load_repair_followup_records_remote,
             parent_field_name=REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME,
             force_refresh=force_refresh,
+        )
+
+    def _schedule_repair_followup_snapshot_refresh_if_stale(self) -> None:
+        if not self._repair_snapshots_enabled:
+            return
+        snapshot_meta = self._state_store.get_repair_snapshot_meta(
+            REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS
+        )
+        if not snapshot_meta.get("exists"):
+            return
+        if (
+            str(snapshot_meta.get("app_token") or "").strip()
+            != REPAIR_SOURCE_APP_TOKEN
+            or str(snapshot_meta.get("table_id") or "").strip()
+            != REPAIR_FOLLOWUP_TABLE_ID
+        ):
+            return
+        now = time.time()
+        ttl = float(
+            REPAIR_SNAPSHOT_TTL_SECONDS.get(REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS)
+            or 120
+        )
+        if now - float(snapshot_meta.get("refreshed_at") or 0) <= ttl:
+            return
+        if (
+            str(snapshot_meta.get("status") or "") == "failed"
+            and now - float(snapshot_meta.get("updated_at") or 0)
+            < REPAIR_SNAPSHOT_FAILURE_BACKOFF_SECONDS
+        ):
+            return
+        self._schedule_repair_snapshot_refresh(
+            source_key=REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS,
+            app_token=REPAIR_SOURCE_APP_TOKEN,
+            table_id=REPAIR_FOLLOWUP_TABLE_ID,
+            loader=self._load_repair_followup_records_remote,
+            parent_field_name=REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME,
         )
 
     def list_repair_management_cmdb_candidates(
@@ -6051,7 +6179,7 @@ class MaintenancePortalService:
                     "来源事件已不在当前事件表中，已保留现有维修单内容；可重新选择事件。"
                 )
         resolution_warning = str(event.get("resolution_warning") or "").strip()
-        if resolution_warning:
+        if resolution_warning and not bool(event.get("historical_fallback")):
             warnings.append(resolution_warning)
 
         requested_repair_ids = list(
@@ -6170,6 +6298,7 @@ class MaintenancePortalService:
 
         result: dict[str, Any] = {}
         if event:
+            historical_fallback = bool(event.get("historical_fallback"))
             source = self._repair_management_canonical_select_text(
                 "对应来源",
                 self._repair_management_plain_text(
@@ -6234,11 +6363,11 @@ class MaintenancePortalService:
             self._repair_management_prefill_put(
                 result, meta_by_name, "事件描述", event_summary
             )
-            if not source:
+            if not source and not historical_fallback:
                 warnings.append(
                     "关联事件缺少“事件发现来源（统一）”，对应来源未回填。"
                 )
-            if not alarm_desc:
+            if not alarm_desc and not historical_fallback:
                 warnings.append(
                     "关联事件缺少“告警描述”，故障维修原因未回填。"
                 )
@@ -6603,32 +6732,87 @@ class MaintenancePortalService:
         codes = self._repair_record_building_codes({"display_fields": fields})
         return not codes or self._scope_matches_buildings(normalized_scope, codes)
 
+    def _load_repair_management_project_records_remote(
+        self,
+    ) -> tuple[list[FieldMeta], list[dict[str, Any]]]:
+        metas, meta_by_name = self._load_table_fields(
+            app_token=REPAIR_SOURCE_APP_TOKEN,
+            table_id=REPAIR_MANAGEMENT_TABLE_ID,
+        )
+        records = self._load_table_records(
+            app_token=REPAIR_SOURCE_APP_TOKEN,
+            table_id=REPAIR_MANAGEMENT_TABLE_ID,
+            meta_by_name=meta_by_name,
+            work_type=WORK_TYPE_REPAIR,
+            notice_type=NOTICE_TYPE_REPAIR,
+        )
+        return metas, records
+
     def _load_repair_management_project_records(
         self,
         *,
         force_refresh: bool = False,
     ) -> tuple[list[FieldMeta], dict[str, FieldMeta], list[dict[str, Any]]]:
-        def load_remote() -> tuple[list[FieldMeta], list[dict[str, Any]]]:
-            metas, meta_by_name = self._load_table_fields(
-                app_token=REPAIR_SOURCE_APP_TOKEN,
-                table_id=REPAIR_MANAGEMENT_TABLE_ID,
-            )
-            records = self._load_table_records(
-                app_token=REPAIR_SOURCE_APP_TOKEN,
-                table_id=REPAIR_MANAGEMENT_TABLE_ID,
-                meta_by_name=meta_by_name,
-                work_type=WORK_TYPE_REPAIR,
-                notice_type=NOTICE_TYPE_REPAIR,
-            )
-            return metas, records
-
         return self._load_repair_snapshot_source(
             source_key=REPAIR_SNAPSHOT_SOURCE_PROJECTS,
             app_token=REPAIR_SOURCE_APP_TOKEN,
             table_id=REPAIR_MANAGEMENT_TABLE_ID,
-            loader=load_remote,
+            loader=self._load_repair_management_project_records_remote,
             force_refresh=force_refresh,
         )
+
+    def _repair_management_snapshot_schema(
+        self,
+        *,
+        force_refresh: bool = False,
+    ) -> tuple[list[FieldMeta], dict[str, FieldMeta]] | None:
+        if not self._repair_snapshots_enabled:
+            return None
+        snapshot_meta = self._state_store.get_repair_snapshot_meta(
+            REPAIR_SNAPSHOT_SOURCE_PROJECTS
+        )
+        source_matches = (
+            str(snapshot_meta.get("app_token") or "").strip()
+            == REPAIR_SOURCE_APP_TOKEN
+            and str(snapshot_meta.get("table_id") or "").strip()
+            == REPAIR_MANAGEMENT_TABLE_ID
+        )
+        if force_refresh or not snapshot_meta.get("exists") or not source_matches:
+            metas, _meta_by_name, _records = (
+                self._load_repair_management_project_records(
+                    force_refresh=True,
+                )
+            )
+            return metas, {meta.field_name: meta for meta in metas}
+
+        field_payloads = [
+            item
+            for item in (snapshot_meta.get("fields") or [])
+            if isinstance(item, dict)
+        ]
+        metas = [self._repair_snapshot_field_meta(item) for item in field_payloads]
+        meta_by_name = {meta.field_name: meta for meta in metas}
+
+        now = time.time()
+        refreshed_at = float(snapshot_meta.get("refreshed_at") or 0)
+        ttl = float(
+            REPAIR_SNAPSHOT_TTL_SECONDS.get(REPAIR_SNAPSHOT_SOURCE_PROJECTS)
+            or 120
+        )
+        stale = refreshed_at <= 0 or now - refreshed_at > ttl
+        in_failure_backoff = (
+            str(snapshot_meta.get("status") or "") == "failed"
+            and now - float(snapshot_meta.get("updated_at") or 0)
+            < REPAIR_SNAPSHOT_FAILURE_BACKOFF_SECONDS
+        )
+        if stale and not in_failure_backoff:
+            self._schedule_repair_snapshot_refresh(
+                source_key=REPAIR_SNAPSHOT_SOURCE_PROJECTS,
+                app_token=REPAIR_SOURCE_APP_TOKEN,
+                table_id=REPAIR_MANAGEMENT_TABLE_ID,
+                loader=self._load_repair_management_project_records_remote,
+            )
+        return metas, meta_by_name
 
     def _ensure_repair_management_record_in_scope(
         self,
@@ -6787,21 +6971,27 @@ class MaintenancePortalService:
         if str((prepared or {}).get("work_type") or "").strip() != WORK_TYPE_REPAIR:
             return {"synced": False, "skipped": True, "warnings": []}
 
-        source_record_id = canonical_source_record_id(prepared)
-        target_record_id = str(target_record_id or "").strip()
         source_table_id = str(
-            (prepared or {}).get("source_table_id") or REPAIR_SOURCE_TABLE_ID
+            (prepared or {}).get("source_table_id") or ""
+        ).strip()
+        repair_management_record_id = str(
+            (prepared or {}).get("repair_management_record_id") or ""
         ).strip()
         if (
-            not source_record_id.startswith("rec")
+            not repair_management_record_id
+            and source_table_id == REPAIR_MANAGEMENT_TABLE_ID
+        ):
+            repair_management_record_id = canonical_source_record_id(prepared)
+        target_record_id = str(target_record_id or "").strip()
+        if (
+            not repair_management_record_id.startswith("rec")
             or not target_record_id.startswith("rec")
-            or source_table_id != REPAIR_MANAGEMENT_TABLE_ID
         ):
             return {"synced": False, "skipped": True, "warnings": []}
 
         scope = str((prepared or {}).get("scope") or "ALL").strip() or "ALL"
         existing = self._ensure_repair_management_record_in_scope(
-            source_record_id,
+            repair_management_record_id,
             scope,
         )
         _metas, meta_by_name, _records = (
@@ -6818,9 +7008,13 @@ class MaintenancePortalService:
             else {}
         )
 
-        desired: dict[str, Any] = {
-            "设备检修关联": target_record_id,
-        }
+        repair_link_meta = meta_by_name.get(REPAIR_LINK_FIELD_NAME)
+        repair_link_deferred = self._repair_management_field_is_relation(
+            repair_link_meta
+        )
+        desired: dict[str, Any] = {}
+        if not repair_link_deferred:
+            desired[REPAIR_LINK_FIELD_NAME] = target_record_id
         title = str((prepared or {}).get("title") or "").strip()
         if title:
             desired["检修通告名称"] = title
@@ -6859,20 +7053,22 @@ class MaintenancePortalService:
         self._patch_record_fields(
             app_token=REPAIR_SOURCE_APP_TOKEN,
             table_id=REPAIR_MANAGEMENT_TABLE_ID,
-            record_id=source_record_id,
+            record_id=repair_management_record_id,
             fields=coerced,
         )
         self._upsert_repair_snapshot_fields(
             source_key=REPAIR_SNAPSHOT_SOURCE_PROJECTS,
-            record_id=source_record_id,
+            record_id=repair_management_record_id,
             fields=coerced,
         )
         self._invalidate_repair_management_status_cache()
         return {
             "synced": True,
             "skipped": False,
-            "source_record_id": source_record_id,
+            "repair_management_record_id": repair_management_record_id,
+            "source_record_id": canonical_source_record_id(prepared),
             "target_record_id": target_record_id,
+            "link_deferred": repair_link_deferred,
             "fields": coerced,
             "warnings": list(dict.fromkeys(warnings)),
         }
@@ -7470,20 +7666,47 @@ class MaintenancePortalService:
         record_id = str(record_id or "").strip()
         if not record_id:
             raise PortalError("缺少维修项目 ID。")
-        metas, meta_by_name, records = self._load_repair_management_project_records(
+        snapshot_schema = self._repair_management_snapshot_schema(
             force_refresh=force_refresh
         )
-        record = next(
-            (
-                item
-                for item in records
-                if str(item.get("record_id") or "").strip() == record_id
-            ),
-            None,
-        )
-        if record is None and self._repair_snapshots_enabled and not force_refresh:
-            metas, meta_by_name, records = self._load_repair_management_project_records(
-                force_refresh=True
+        if snapshot_schema is not None:
+            metas, meta_by_name = snapshot_schema
+            snapshot = self._state_store.get_repair_snapshot(
+                REPAIR_SNAPSHOT_SOURCE_PROJECTS,
+                record_ids=[record_id],
+            )
+            record = next(
+                (
+                    item
+                    for item in (snapshot.get("records") or [])
+                    if isinstance(item, dict)
+                    if str(item.get("record_id") or "").strip() == record_id
+                ),
+                None,
+            )
+            if record is None and not force_refresh:
+                metas, meta_by_name = (
+                    self._repair_management_snapshot_schema(force_refresh=True)
+                    or (metas, meta_by_name)
+                )
+                snapshot = self._state_store.get_repair_snapshot(
+                    REPAIR_SNAPSHOT_SOURCE_PROJECTS,
+                    record_ids=[record_id],
+                )
+                record = next(
+                    (
+                        item
+                        for item in (snapshot.get("records") or [])
+                        if isinstance(item, dict)
+                        if str(item.get("record_id") or "").strip() == record_id
+                    ),
+                    None,
+                )
+        else:
+            metas, meta_by_name, records = (
+                self._load_repair_management_project_records(
+                    force_refresh=force_refresh
+                )
             )
             record = next(
                 (
@@ -7498,15 +7721,25 @@ class MaintenancePortalService:
         if not self._repair_management_record_in_scope(record, scope):
             raise PortalError("当前账号无权查看该楼栋维修项目。")
         authoritative_followup_count: int | None = None
-        try:
-            _followup_metas, _followup_meta_by_name, followups = (
-                self._load_repair_followup_snapshot(force_refresh=force_refresh)
+        if self._repair_snapshots_enabled and not force_refresh:
+            self._schedule_repair_followup_snapshot_refresh_if_stale()
+            verified_counts = self._repair_followup_counts_from_local_snapshot(
+                [record_id]
             )
-            authoritative_followup_count = self._repair_followup_counts_by_summary(
-                followups
-            ).get(record_id, 0)
-        except PortalError:
-            pass
+            if verified_counts is not None:
+                authoritative_followup_count = verified_counts.get(record_id, 0)
+        else:
+            try:
+                _followup_metas, _followup_meta_by_name, followups = (
+                    self._load_repair_followup_snapshot(
+                        force_refresh=force_refresh
+                    )
+                )
+                authoritative_followup_count = (
+                    self._repair_followup_counts_by_summary(followups).get(record_id)
+                )
+            except PortalError:
+                pass
         return {
             "record": self._repair_management_record_payload(
                 record,
@@ -7527,6 +7760,61 @@ class MaintenancePortalService:
         focus_record_id: str = "",
         force_refresh: bool = False,
     ) -> dict[str, Any]:
+        snapshot_schema = self._repair_management_snapshot_schema(
+            force_refresh=force_refresh
+        )
+        if snapshot_schema is not None:
+            metas, meta_by_name = snapshot_schema
+            page = self._state_store.query_repair_snapshot_page(
+                REPAIR_SNAPSHOT_SOURCE_PROJECTS,
+                scope=self._normalize_scope(scope),
+                query=query,
+                excluded_statuses=[REPAIR_MANAGEMENT_COMPLETED_WORKFLOW],
+                limit=limit,
+                offset=offset,
+                focus_record_id=focus_record_id,
+            )
+            page_records = [
+                item
+                for item in (page.get("records") or [])
+                if isinstance(item, dict)
+            ]
+            self._schedule_repair_followup_snapshot_refresh_if_stale()
+            record_ids = [
+                str(item.get("record_id") or "").strip()
+                for item in page_records
+                if str(item.get("record_id") or "").strip()
+            ]
+            followup_counts = (
+                self._repair_followup_counts_from_local_snapshot(record_ids)
+                or {}
+            )
+            payload_records = [
+                self._repair_management_record_payload(
+                    item,
+                    meta_by_name=meta_by_name,
+                    authoritative_followup_count=followup_counts.get(
+                        str(item.get("record_id") or "").strip()
+                    ),
+                )
+                for item in page_records
+            ]
+            return {
+                "app_token": REPAIR_SOURCE_APP_TOKEN,
+                "table_id": REPAIR_MANAGEMENT_TABLE_ID,
+                "fields": [
+                    self._repair_management_field_payload(meta) for meta in metas
+                ],
+                "schema_warnings": self._repair_management_schema_warnings(
+                    meta_by_name
+                ),
+                "records": payload_records,
+                "total": int(page.get("total") or 0),
+                "returned": len(payload_records),
+                "offset": int(page.get("offset") or 0),
+                "has_more": bool(page.get("has_more")),
+            }
+
         metas, meta_by_name, records = self._load_repair_management_project_records(
             force_refresh=force_refresh
         )
@@ -8992,6 +9280,19 @@ class MaintenancePortalService:
             level = self._repair_management_canonical_select_text(
                 "对应事件等级", display_fields.get("对应事件等级")
             )
+            fault_phenomenon = self._repair_management_plain_text(
+                display_fields.get("故障发生现象描述") or title
+            )
+            historical_event_fields = {
+                **display_fields,
+                "事件发现来源（统一）": source,
+                "告警描述": alarm_desc,
+                "机楼": self._building_label_from_codes(building_codes),
+                "专业": specialty,
+                "事件等级": level,
+                "事件发生时间": occurrence_time,
+                "故障现象": fault_phenomenon,
+            }
             return {
                 "source_record_id": record_id,
                 "record_id": record_id,
@@ -9006,12 +9307,11 @@ class MaintenancePortalService:
                 "occurrence_time": occurrence_time,
                 "sent_time": occurrence_time,
                 "fault_reason": alarm_desc,
-                "fault_phenomenon": self._repair_management_plain_text(
-                    display_fields.get("故障发生现象描述") or title
-                ),
+                "fault_phenomenon": fault_phenomenon,
                 "transfer_to_overhaul": True,
-                "display_fields": display_fields,
+                "display_fields": historical_event_fields,
                 "raw_fields": raw_fields,
+                "historical_fallback": True,
                 "resolution_warning": (
                     "来源事件属于历史事件表，已使用维修单中保存的事件字段。"
                 ),
@@ -11762,6 +12062,11 @@ class MaintenancePortalService:
                 or request.get("site_photo_count")
                 or "0"
             ).strip(),
+            "repair_management_record_id": str(
+                prepared.get("repair_management_record_id")
+                or request.get("repair_management_record_id")
+                or ""
+            ).strip(),
             "message": str(message or "").strip(),
         }
         if not success and isinstance(target_selection, dict):
@@ -11973,6 +12278,7 @@ class MaintenancePortalService:
                 "solution",
                 "fault_time",
                 "expected_time",
+                "repair_management_record_id",
             ):
                 value = prepared.get(field)
                 if value not in (None, ""):
@@ -12080,20 +12386,20 @@ class MaintenancePortalService:
         target_record_id: str,
         job_id: str = "",
     ) -> None:
-        if action != "start":
+        if action not in {"start", "update", "end"}:
             return
         if str((prepared or {}).get("work_type") or "").strip() != WORK_TYPE_REPAIR:
             return
-        source_record_id = canonical_source_record_id(prepared)
+        source_record_id = str(
+            (prepared or {}).get("repair_management_record_id")
+            or canonical_source_record_id(prepared)
+            or ""
+        ).strip()
         target_record_id = str(target_record_id or "").strip()
         if not source_record_id.startswith("rec") or not target_record_id.startswith("rec"):
             return
-        source_app_token = str(
-            (prepared or {}).get("source_app_token") or REPAIR_SOURCE_APP_TOKEN
-        ).strip()
-        source_table_id = str(
-            (prepared or {}).get("source_table_id") or REPAIR_SOURCE_TABLE_ID
-        ).strip()
+        source_app_token = REPAIR_SOURCE_APP_TOKEN
+        source_table_id = REPAIR_MANAGEMENT_TABLE_ID
         task_key = f"repair_link:{source_record_id}:{target_record_id}"
         now = time.time()
         self._state_store.upsert_repair_link_task(
@@ -12113,6 +12419,7 @@ class MaintenancePortalService:
                 "attempts": 0,
                 "max_attempts": REPAIR_LINK_MAX_ATTEMPTS,
                 "last_error": "",
+                "action": action,
                 "job_id": str(job_id or ""),
                 "created_at": now,
             }
@@ -12197,6 +12504,47 @@ class MaintenancePortalService:
                     task.get("sync_table_id") or REPAIR_SYNC_TABLE_ID
                 ).strip()
                 sync_record_id = str(task.get("sync_record_id") or "").strip()
+                link_field_name = str(
+                    task.get("link_field_name") or REPAIR_LINK_FIELD_NAME
+                ).strip()
+                _source_metas, source_meta_by_name = self._load_table_fields(
+                    app_token=source_app_token,
+                    table_id=source_table_id,
+                )
+                link_meta = source_meta_by_name.get(link_field_name)
+                if link_meta is None:
+                    raise PortalError(
+                        f"维修项目表缺少字段“{link_field_name}”"
+                    )
+                if not self._repair_management_field_is_relation(link_meta):
+                    self._patch_record_fields_exact(
+                        app_token=source_app_token,
+                        table_id=source_table_id,
+                        record_id=source_record_id,
+                        fields={link_field_name: target_record_id},
+                    )
+                    if (
+                        source_app_token == REPAIR_SOURCE_APP_TOKEN
+                        and source_table_id == REPAIR_MANAGEMENT_TABLE_ID
+                    ):
+                        self._upsert_repair_snapshot_fields(
+                            source_key=REPAIR_SNAPSHOT_SOURCE_PROJECTS,
+                            record_id=source_record_id,
+                            fields={link_field_name: target_record_id},
+                        )
+                        self._invalidate_repair_management_status_cache()
+                    self._state_store.update_repair_link_task(
+                        task_key,
+                        {
+                            "status": "linked",
+                            "attempts": attempts,
+                            "sync_record_id": "",
+                            "link_mode": "text",
+                            "last_error": "",
+                        },
+                    )
+                    stats["linked"] += 1
+                    continue
                 if not sync_record_id:
                     sync_record_id = self._find_repair_sync_record_id(
                         target_record_id=target_record_id,
@@ -12219,6 +12567,17 @@ class MaintenancePortalService:
                         source_record_id=source_record_id,
                         sync_record_id=sync_record_id,
                     )
+                    linked_ids.append(sync_record_id)
+                if (
+                    source_app_token == REPAIR_SOURCE_APP_TOKEN
+                    and source_table_id == REPAIR_MANAGEMENT_TABLE_ID
+                ):
+                    self._upsert_repair_snapshot_fields(
+                        source_key=REPAIR_SNAPSHOT_SOURCE_PROJECTS,
+                        record_id=source_record_id,
+                        fields={link_field_name: linked_ids},
+                    )
+                    self._invalidate_repair_management_status_cache()
                 self._state_store.update_repair_link_task(
                     task_key,
                     {
@@ -14536,7 +14895,19 @@ class MaintenancePortalService:
         with self._hidden_ongoing_lock:
             payload = self._load_hidden_ongoing_locked()
             hidden = payload.get("hidden") or {}
-            return any(key in hidden for key in keys)
+            if any(key in hidden for key in keys):
+                return True
+            source_record_id = canonical_source_record_id(item)
+            if not source_record_id:
+                return False
+            work_type = self._item_work_type(item)
+            return any(
+                isinstance(entry, dict)
+                and str(entry.get("work_type") or "").strip() == work_type
+                and str(entry.get("source_record_id") or "").strip()
+                == source_record_id
+                for entry in hidden.values()
+            )
 
     def hide_ongoing_item(
         self, item: dict[str, Any], *, scope: str = "ALL", deleted_by: str = ""
@@ -16509,6 +16880,169 @@ class MaintenancePortalService:
             projected.append(copied)
         return projected
 
+    def _supplement_source_ongoing_items(
+        self,
+        scope: str,
+        source_records: list[dict[str, Any]],
+        ongoing_items: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Surface source rows marked ongoing when their local active row is missing."""
+        scope = self._normalize_scope(scope)
+        projected = [
+            copy.deepcopy(item)
+            for item in (ongoing_items or [])
+            if isinstance(item, dict)
+        ]
+        if not source_records:
+            return projected
+        summary_by_record = self._work_status_by_records(
+            source_records,
+            scope=scope,
+        )
+        existing_keys: set[str] = set()
+        for item in projected:
+            existing_keys.update(self._ongoing_merge_identity_keys(item))
+
+        for record in source_records:
+            if not isinstance(record, dict):
+                continue
+            source_record_id = str(record.get("record_id") or "").strip()
+            if not source_record_id:
+                continue
+            serialized = self._serialize_record(record, summary_by_record)
+            progress = str(serialized.get("source_progress") or "").strip()
+            if "进行中" not in progress and "未结束" not in progress:
+                continue
+            work_type = self._record_work_type(record)
+            source_identity_key = f"{work_type}:source:{source_record_id}"
+            status_item = summary_by_record.get(source_record_id)
+            status_keys = (
+                self._ongoing_merge_identity_keys(status_item)
+                if isinstance(status_item, dict)
+                else set()
+            )
+            if source_identity_key in existing_keys or status_keys & existing_keys:
+                continue
+
+            projection = copy.deepcopy(serialized)
+            source_fields = (
+                copy.deepcopy(record.get("display_fields"))
+                if isinstance(record.get("display_fields"), dict)
+                else {}
+            )
+            if (
+                isinstance(status_item, dict)
+                and not self._is_completed_work_status_item(status_item)
+            ):
+                for key, value in status_item.items():
+                    if key == "record_id" or value in (None, "", [], {}):
+                        continue
+                    projection[key] = copy.deepcopy(value)
+            projected_fields = (
+                projection.get("display_fields")
+                if isinstance(projection.get("display_fields"), dict)
+                else {}
+            )
+            projection["display_fields"] = {
+                **source_fields,
+                **copy.deepcopy(projected_fields),
+            }
+            projection["work_type"] = work_type
+            projection["notice_type"] = str(
+                projection.get("notice_type")
+                or NOTICE_TYPE_BY_WORK_TYPE.get(
+                    work_type, NOTICE_TYPE_MAINTENANCE
+                )
+            ).strip()
+            projection["source_record_id"] = source_record_id
+
+            if work_type == WORK_TYPE_CHANGE:
+                title = self._change_title(record)
+                building_codes = self._change_record_building_codes(record)
+                specialty = self._change_specialty(record)
+            elif work_type == WORK_TYPE_REPAIR:
+                title = self._repair_title(record)
+                building_codes = self._repair_record_building_codes(record)
+                specialty = self._repair_specialty(record)
+            else:
+                title = self._maintenance_title(record)
+                building_codes = self._building_codes_from_value(
+                    source_fields.get("楼栋")
+                )
+                specialty = str(
+                    source_fields.get("专业类别")
+                    or source_fields.get("专业")
+                    or ""
+                ).strip()
+            projection["title"] = str(
+                projection.get("title") or title or source_record_id
+            ).strip()
+            projection["building_codes"] = list(
+                projection.get("building_codes") or building_codes
+            )
+            projection["building"] = str(
+                projection.get("building")
+                or source_fields.get("楼栋")
+                or source_fields.get("变更楼栋")
+                or self._building_label_from_codes(building_codes)
+            ).strip()
+            projection["specialty"] = str(
+                projection.get("specialty") or specialty
+            ).strip()
+
+            target_record_id = str(
+                (status_item or {}).get("target_record_id")
+                if isinstance(status_item, dict)
+                else ""
+            ).strip()
+            if not target_record_id:
+                target_record_id = self._target_record_id_from_identity_map(
+                    work_type=work_type,
+                    active_item_id=str(
+                        (status_item or {}).get("active_item_id")
+                        if isinstance(status_item, dict)
+                        else ""
+                    ).strip(),
+                    source_record_id=source_record_id,
+                )
+            if (
+                not target_record_id
+                and work_type == WORK_TYPE_REPAIR
+            ):
+                target_record_id = self._repair_target_record_id(record)
+            if (
+                target_record_id == source_record_id
+                or is_local_record_id(target_record_id)
+            ):
+                target_record_id = ""
+
+            projection["active_item_id"] = str(
+                projection.get("active_item_id")
+                or f"source-ongoing-{work_type}-{source_record_id}"
+            ).strip()
+            if target_record_id:
+                projection["target_record_id"] = target_record_id
+                projection["record_id"] = target_record_id
+                projection["binding_status"] = "bound"
+            else:
+                projection.pop("target_record_id", None)
+                projection["record_id"] = ""
+                projection["binding_status"] = "needs_binding"
+            projection["status"] = "进行中"
+            projection["source_progress"] = "进行中"
+            projection["source_status"] = "进行中"
+            projection["recovered_from_source"] = True
+            projection.setdefault("origin", "source_ongoing_recovery")
+            projection = normalize_notice_identity_payload(projection)
+            if self._is_ongoing_hidden(projection):
+                continue
+            projection_keys = self._ongoing_merge_identity_keys(projection)
+            if projection_keys & existing_keys:
+                continue
+            projected.append(projection)
+            existing_keys.update(projection_keys)
+        return projected
+
     def _ongoing_identity_conflicts(
         self, existing: dict[str, Any], incoming: dict[str, Any]
     ) -> bool:
@@ -16999,6 +17533,11 @@ class MaintenancePortalService:
         merged_ongoing = self._project_ongoing_items(scope, ongoing_items or [])
         scoped_records = self._workbench_records(
             month=month, specialty=specialty, scope=scope
+        )
+        merged_ongoing = self._supplement_source_ongoing_items(
+            scope,
+            scoped_records,
+            merged_ongoing,
         )
         linked_zhihang_ids = self._linked_zhihang_record_ids(merged_ongoing)
         zhihang_records = self._filter_zhihang_change_records(
@@ -18030,12 +18569,6 @@ class MaintenancePortalService:
         self._touch_state_cache_version()
         return {"binding": binding}
 
-    @staticmethod
-    def _lark_response_is_token_error(response: Any) -> bool:
-        code = int(getattr(response, "code", 0) or 0)
-        msg = str(getattr(response, "msg", "") or "").lower()
-        return code in TOKEN_ERROR_CODES or "token" in msg or "access_token" in msg
-
     @classmethod
     def _signature_open_id_from_any(cls, value: Any) -> str:
         """Return a Feishu open_id from user fields, text fields, or nested payloads."""
@@ -18170,10 +18703,64 @@ class MaintenancePortalService:
         transparent.save(output, format="PNG", optimize=True)
         return output.getvalue()
 
-    def _upload_signature_image(self, *, signature_bytes: bytes, file_name: str) -> str:
+    def _upload_drive_media_file(
+        self,
+        *,
+        file_path: str | Path,
+        file_name: str,
+        parent_type: str,
+        parent_node: str,
+        size: int,
+        context: str,
+    ) -> str:
         token = str(ensure_feishu_token() or config.user_token or "").strip()
         if not token:
-            raise PortalError("未配置有效的飞书 user_token，无法上传签名。")
+            raise PortalError(f"未配置有效的飞书 user_token，无法{context}。")
+        path = Path(str(file_path or "")).resolve()
+        if not path.is_file():
+            raise PortalError(f"{context}失败：待上传文件不存在。")
+        upload_name = str(file_name or path.name).strip() or path.name
+        upload_size = int(size or path.stat().st_size)
+        if upload_size <= 0:
+            raise PortalError(f"{context}失败：待上传文件为空。")
+
+        def attempt_upload(upload_token: str) -> dict[str, Any]:
+            try:
+                return self._http_client.request_file_json(
+                    "POST",
+                    "https://open.feishu.cn/open-apis/drive/v1/medias/upload_all",
+                    headers={"Authorization": f"Bearer {upload_token}"},
+                    data={
+                        "file_name": upload_name,
+                        "parent_type": str(parent_type or "").strip(),
+                        "parent_node": str(parent_node or "").strip(),
+                        "size": str(upload_size),
+                    },
+                    file_path=str(path),
+                    file_name=upload_name,
+                )
+            except FeishuHTTPError as exc:
+                raise PortalError(f"{context} HTTP失败: {exc}") from exc
+
+        payload = attempt_upload(token)
+        code = int(payload.get("code") or 0)
+        if code in TOKEN_ERROR_CODES:
+            token = str(refresh_feishu_token() or config.user_token or "").strip()
+            if not token:
+                raise PortalError(f"{context}失败：飞书登录凭证已失效。")
+            payload = attempt_upload(token)
+            code = int(payload.get("code") or 0)
+        if code != 0:
+            raise PortalError(
+                f"{context}失败: {code} - {payload.get('msg') or 'unknown'}"
+            )
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        file_token = str(data.get("file_token") or "").strip()
+        if not file_token:
+            raise PortalError(f"{context}成功但未返回 file_token。")
+        return file_token
+
+    def _upload_signature_image(self, *, signature_bytes: bytes, file_name: str) -> str:
         temp_file_path = ""
         try:
             with tempfile.NamedTemporaryFile(
@@ -18184,51 +18771,20 @@ class MaintenancePortalService:
                 tmp.write(signature_bytes)
                 temp_file_path = tmp.name
 
-            def attempt_upload(upload_token: str) -> Any:
-                with open(temp_file_path, "rb") as file_obj:
-                    client = (
-                        lark.Client.builder()
-                        .enable_set_token(True)
-                        .log_level(lark.LogLevel.ERROR)
-                        .build()
-                    )
-                    request = (
-                        UploadAllMediaRequest.builder()
-                        .request_body(
-                            UploadAllMediaRequestBody.builder()
-                            .file_name(file_name)
-                            .parent_type("bitable_image")
-                            .parent_node(SIGNATURE_APP_TOKEN)
-                            .size(str(len(signature_bytes)))
-                            .file(file_obj)
-                            .build()
-                        )
-                        .build()
-                    )
-                    option = lark.RequestOption.builder().user_access_token(upload_token).build()
-                    return client.drive.v1.media.upload_all(request, option)
-
-            response = attempt_upload(token)
-            if not response.success() and self._lark_response_is_token_error(response):
-                token = str(refresh_feishu_token() or config.user_token or "").strip()
-                response = attempt_upload(token)
-            if not response.success():
-                raise PortalError(
-                    f"签名图片上传失败: {response.code} - {response.msg}"
-                )
-            file_token = str(getattr(response.data, "file_token", "") or "").strip()
-            if not file_token:
-                raise PortalError("签名图片上传成功但未返回 file_token。")
-            return file_token
+            return self._upload_drive_media_file(
+                file_path=temp_file_path,
+                file_name=file_name,
+                parent_type="bitable_image",
+                parent_node=SIGNATURE_APP_TOKEN,
+                size=len(signature_bytes),
+                context="签名图片上传",
+            )
         finally:
             if temp_file_path:
                 with suppress(Exception):
                     os.remove(temp_file_path)
 
     def _upload_encrypted_signature_file(self, *, encrypted_bytes: bytes, file_name: str) -> str:
-        token = str(ensure_feishu_token() or config.user_token or "").strip()
-        if not token:
-            raise PortalError("未配置有效的飞书 user_token，无法上传签名。")
         if not encrypted_bytes:
             raise PortalError("加密签名文件为空，无法上传。")
         upload_name = str(file_name or "").strip() or encrypted_signature_file_name("signature")
@@ -18244,42 +18800,14 @@ class MaintenancePortalService:
                 tmp.write(encrypted_bytes)
                 temp_file_path = tmp.name
 
-            def attempt_upload(upload_token: str) -> Any:
-                with open(temp_file_path, "rb") as file_obj:
-                    client = (
-                        lark.Client.builder()
-                        .enable_set_token(True)
-                        .log_level(lark.LogLevel.ERROR)
-                        .build()
-                    )
-                    request = (
-                        UploadAllMediaRequest.builder()
-                        .request_body(
-                            UploadAllMediaRequestBody.builder()
-                            .file_name(upload_name)
-                            .parent_type("bitable_file")
-                            .parent_node(SIGNATURE_APP_TOKEN)
-                            .size(str(len(encrypted_bytes)))
-                            .file(file_obj)
-                            .build()
-                        )
-                        .build()
-                    )
-                    option = lark.RequestOption.builder().user_access_token(upload_token).build()
-                    return client.drive.v1.media.upload_all(request, option)
-
-            response = attempt_upload(token)
-            if not response.success() and self._lark_response_is_token_error(response):
-                token = str(refresh_feishu_token() or config.user_token or "").strip()
-                response = attempt_upload(token)
-            if not response.success():
-                raise PortalError(
-                    f"签名加密文件上传失败: {response.code} - {response.msg}"
-                )
-            file_token = str(getattr(response.data, "file_token", "") or "").strip()
-            if not file_token:
-                raise PortalError("签名加密文件上传成功但未返回 file_token。")
-            return file_token
+            return self._upload_drive_media_file(
+                file_path=temp_file_path,
+                file_name=upload_name,
+                parent_type="bitable_file",
+                parent_node=SIGNATURE_APP_TOKEN,
+                size=len(encrypted_bytes),
+                context="签名加密文件上传",
+            )
         finally:
             if temp_file_path:
                 with suppress(Exception):
@@ -18631,9 +19159,6 @@ class MaintenancePortalService:
         file_name: str = "",
         app_token: str = DEFAULT_APP_TOKEN,
     ) -> str:
-        token = str(ensure_feishu_token() or config.user_token or "").strip()
-        if not token:
-            raise PortalError("未配置有效的飞书 user_token，无法上传 MOP 文件。")
         path = Path(str(file_path or "")).resolve()
         if not path.is_file():
             raise PortalError("待上传的已签名 MOP 文件不存在。")
@@ -18642,40 +19167,14 @@ class MaintenancePortalService:
         if size <= 0:
             raise PortalError("待上传的已签名 MOP 文件为空。")
 
-        def attempt_upload(upload_token: str) -> Any:
-            with open(path, "rb") as file_obj:
-                client = (
-                    lark.Client.builder()
-                    .enable_set_token(True)
-                    .log_level(lark.LogLevel.ERROR)
-                    .build()
-                )
-                request = (
-                    UploadAllMediaRequest.builder()
-                    .request_body(
-                        UploadAllMediaRequestBody.builder()
-                        .file_name(upload_name)
-                        .parent_type("bitable_file")
-                        .parent_node(str(app_token or DEFAULT_APP_TOKEN))
-                        .size(str(size))
-                        .file(file_obj)
-                        .build()
-                    )
-                    .build()
-                )
-                option = lark.RequestOption.builder().user_access_token(upload_token).build()
-                return client.drive.v1.media.upload_all(request, option)
-
-        response = attempt_upload(token)
-        if not response.success() and self._lark_response_is_token_error(response):
-            token = str(refresh_feishu_token() or config.user_token or "").strip()
-            response = attempt_upload(token)
-        if not response.success():
-            raise PortalError(f"MOP 文件上传失败: {response.code} - {response.msg}")
-        file_token = str(getattr(response.data, "file_token", "") or "").strip()
-        if not file_token:
-            raise PortalError("MOP 文件上传成功但未返回 file_token。")
-        return file_token
+        return self._upload_drive_media_file(
+            file_path=path,
+            file_name=upload_name,
+            parent_type="bitable_file",
+            parent_node=str(app_token or DEFAULT_APP_TOKEN),
+            size=size,
+            context="MOP 文件上传",
+        )
 
     def _load_signature_people(self, *, force: bool = False) -> list[dict[str, Any]]:
         now = time.time()
@@ -21170,10 +21669,16 @@ class MaintenancePortalService:
             marker = json.loads(marker_path.read_text(encoding="utf-8")) if marker_path.is_file() else {}
         except Exception:
             marker = {}
+        retry_items: list[dict[str, Any]] = []
         if isinstance(marker, dict) and marker.get("date") == today:
             status = str(marker.get("status") or "").strip()
             if status == "success":
                 return
+            retry_items = [
+                dict(item)
+                for item in (marker.get("failed_items") or [])
+                if isinstance(item, dict)
+            ]
             try:
                 next_retry_at = float(marker.get("next_retry_at") or 0)
             except Exception:
@@ -21186,66 +21691,159 @@ class MaintenancePortalService:
             self._attachment_cache_refresh_running = True
         thread = threading.Thread(
             target=self._refresh_attachment_cache_daily,
-            args=(today,),
+            args=(today, retry_items),
             name="clipflow-attachment-cache-refresh",
             daemon=True,
         )
         thread.start()
 
-    def _refresh_attachment_cache_daily(self, today: str) -> None:
+    @staticmethod
+    def _attachment_cache_retry_item(
+        attachment: dict[str, Any],
+    ) -> dict[str, str]:
+        return {
+            key: str(attachment.get(key) or "")
+            for key in (
+                "cache_category",
+                "app_token",
+                "table_id",
+                "record_id",
+                "file_token",
+                "url",
+                "name",
+                "size",
+                "mime_type",
+                "latest_publish_time",
+            )
+        }
+
+    @staticmethod
+    def _attachment_has_download_source(attachment: dict[str, Any]) -> bool:
+        return bool(
+            str(attachment.get("file_token") or "").strip()
+            or str(attachment.get("url") or "").strip()
+        )
+
+    def start_daily_attachment_cache_refresh_async(
+        self, *, delay_seconds: float = 75.0
+    ) -> None:
+        def worker() -> None:
+            if delay_seconds > 0:
+                time.sleep(float(delay_seconds))
+            self._maybe_start_daily_attachment_cache_refresh()
+
+        threading.Thread(
+            target=worker,
+            name="clipflow-attachment-cache-start",
+            daemon=True,
+        ).start()
+
+    def _refresh_attachment_cache_daily(
+        self,
+        today: str,
+        retry_items: list[dict[str, Any]] | None = None,
+    ) -> None:
+        retry_items = [
+            dict(item) for item in (retry_items or []) if isinstance(item, dict)
+        ]
         stats = {
             "date": today,
             "started_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "mop_checked": 0,
             "signature_checked": 0,
+            "skipped_invalid": 0,
             "failed": 0,
             "errors": [],
+            "failed_items": [],
+            "retry_only": bool(retry_items),
         }
+
+        def download(
+            attachment: dict[str, Any],
+            *,
+            label: str,
+            signature: bool = False,
+        ) -> None:
+            if signature:
+                stats["signature_checked"] += 1
+            else:
+                stats["mop_checked"] += 1
+            if not self._attachment_has_download_source(attachment):
+                stats["skipped_invalid"] += 1
+                return
+            try:
+                self._download_mop_attachment(attachment)
+            except Exception as exc:
+                stats["failed"] += 1
+                if len(stats["errors"]) < 10:
+                    stats["errors"].append(f"{label}: {exc}")
+                if len(stats["failed_items"]) < 100:
+                    stats["failed_items"].append(
+                        self._attachment_cache_retry_item(attachment)
+                    )
+
         try:
-            try:
-                candidates, _warnings, _settings = self._load_engineer_mop_candidates(force=True)
-                for candidate in candidates:
-                    for attachment in candidate.get("attachments") or []:
-                        if not isinstance(attachment, dict):
-                            continue
-                        stats["mop_checked"] += 1
-                        try:
-                            self._download_mop_attachment(attachment)
-                        except Exception as exc:
-                            stats["failed"] += 1
-                            if len(stats["errors"]) < 10:
-                                stats["errors"].append(f"MOP:{candidate.get('title') or candidate.get('record_id')}: {exc}")
-            except Exception as exc:
-                stats["failed"] += 1
-                stats["errors"].append(f"MOP扫描失败: {exc}")
-            try:
-                people = self._load_signature_people(force=True)
-                for person in people:
-                    fields = person.get("raw_fields") if isinstance(person.get("raw_fields"), dict) else {}
-                    for attachment in self._extract_signature_attachments(fields):
-                        contextual = self._attachment_with_cache_context(
-                            attachment,
-                            category="signature",
-                            app_token=SIGNATURE_APP_TOKEN,
-                            table_id=SIGNATURE_TABLE_ID,
-                            record_id=str(person.get("record_id") or ""),
-                            latest_publish_time=str(person.get("latest_publish_time") or ""),
+            if retry_items:
+                for attachment in retry_items:
+                    category = str(
+                        attachment.get("cache_category") or ""
+                    ).strip()
+                    download(
+                        attachment,
+                        label=f"附件:{attachment.get('name') or attachment.get('record_id')}",
+                        signature="signature" in category,
+                    )
+            else:
+                try:
+                    candidates, _warnings, _settings = (
+                        self._load_engineer_mop_candidates(force=True)
+                    )
+                    for candidate in candidates:
+                        for attachment in candidate.get("attachments") or []:
+                            if not isinstance(attachment, dict):
+                                continue
+                            download(
+                                attachment,
+                                label=f"MOP:{candidate.get('title') or candidate.get('record_id')}",
+                            )
+                except Exception as exc:
+                    stats["failed"] += 1
+                    stats["errors"].append(f"MOP扫描失败: {exc}")
+                try:
+                    people = self._load_signature_people(force=True)
+                    for person in people:
+                        fields = (
+                            person.get("raw_fields")
+                            if isinstance(person.get("raw_fields"), dict)
+                            else {}
                         )
-                        stats["signature_checked"] += 1
-                        try:
-                            self._download_mop_attachment(contextual)
-                        except Exception as exc:
-                            stats["failed"] += 1
-                            if len(stats["errors"]) < 10:
-                                stats["errors"].append(f"签名:{person.get('name') or person.get('record_id')}: {exc}")
-            except Exception as exc:
-                stats["failed"] += 1
-                stats["errors"].append(f"签名扫描失败: {exc}")
+                        for attachment in self._extract_signature_attachments(
+                            fields
+                        ):
+                            contextual = self._attachment_with_cache_context(
+                                attachment,
+                                category="signature",
+                                app_token=SIGNATURE_APP_TOKEN,
+                                table_id=SIGNATURE_TABLE_ID,
+                                record_id=str(person.get("record_id") or ""),
+                                latest_publish_time=str(
+                                    person.get("latest_publish_time") or ""
+                                ),
+                            )
+                            download(
+                                contextual,
+                                label=f"签名:{person.get('name') or person.get('record_id')}",
+                                signature=True,
+                            )
+                except Exception as exc:
+                    stats["failed"] += 1
+                    stats["errors"].append(f"签名扫描失败: {exc}")
         finally:
             stats["finished_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             stats["status"] = "success" if not stats["failed"] else "partial" if (stats["mop_checked"] or stats["signature_checked"]) else "failed"
             if stats["failed"]:
-                stats["next_retry_at"] = time.time() + 30 * 60
+                retry_delay = 2 * 60 * 60 if stats["failed_items"] else 30 * 60
+                stats["next_retry_at"] = time.time() + retry_delay
                 stats["next_retry_at_text"] = dt.datetime.fromtimestamp(
                     float(stats["next_retry_at"])
                 ).strftime("%Y-%m-%d %H:%M:%S")
@@ -22828,6 +23426,11 @@ class MaintenancePortalService:
         manual_source_binding = bool(manual and manual_binding_choice == "bind")
         raw_record_id = str(payload.get("record_id") or patch.get("record_id") or "").strip()
         source_record_id = str(payload.get("source_record_id") or patch.get("source_record_id") or "").strip()
+        repair_management_record_id = str(
+            payload.get("repair_management_record_id")
+            or patch.get("repair_management_record_id")
+            or ""
+        ).strip()
         if manual and action == "start" and manual_binding_required:
             if manual_binding_choice not in {"bind", "unbound"}:
                 raise PortalError("纯手填通告必须选择绑定待发起事项或不绑定。")
@@ -22975,6 +23578,10 @@ class MaintenancePortalService:
 
             active_item_id = active_item_id or resolved_active_item_id
             source_record_id = source_record_id or resolved_source_record_id
+            repair_management_record_id = (
+                repair_management_record_id
+                or str(base.get("repair_management_record_id") or "").strip()
+            )
 
         if (
             action in {"update", "end"}
@@ -22999,6 +23606,7 @@ class MaintenancePortalService:
             "source_record_id",
             "target_record_id",
             "record_id",
+            "repair_management_record_id",
             "operation_id",
             "_auth_open_id",
             "_auth_user_name",
@@ -23020,6 +23628,15 @@ class MaintenancePortalService:
             expanded["target_record_id"] = target_record_id
         if source_record_id:
             expanded["source_record_id"] = source_record_id
+        if (
+            work_type == WORK_TYPE_REPAIR
+            and not repair_management_record_id
+            and source_record_id
+            and not is_local_record_id(source_record_id)
+        ):
+            repair_management_record_id = source_record_id
+        if repair_management_record_id:
+            expanded["repair_management_record_id"] = repair_management_record_id
         if (
             action == "start"
             and source_record_id
@@ -23327,6 +23944,7 @@ class MaintenancePortalService:
             "source_record_id",
             "target_record_id",
             "active_item_id",
+            "repair_management_record_id",
             "operation_id",
         )
         return {
@@ -25188,6 +25806,17 @@ class MaintenancePortalService:
             raise PortalError(recipient_error)
         skip_personal_message = False
         response_time = self._action_response_time(request_payload)
+        repair_management_record_id = str(
+            request_payload.get("repair_management_record_id")
+            or request_payload.get("related_repair_management_record_id")
+            or ""
+        ).strip()
+        if (
+            not repair_management_record_id
+            and source_record_id
+            and not is_local_record_id(source_record_id)
+        ):
+            repair_management_record_id = source_record_id
         return {
             "job_id": job_id,
             "work_type": WORK_TYPE_REPAIR,
@@ -25204,6 +25833,7 @@ class MaintenancePortalService:
             "record_id": record_id,
             "source_record_id": source_record_id,
             "target_record_id": target_record_id,
+            "repair_management_record_id": repair_management_record_id,
             "active_item_id": str(request_payload.get("active_item_id") or "").strip(),
             "title": title,
             "building": building,

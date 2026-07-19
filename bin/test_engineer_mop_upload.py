@@ -3,7 +3,11 @@ import sys
 import tempfile
 import unittest
 import datetime as dt
+import json
+import threading
+import time
 from pathlib import Path
+from unittest.mock import patch
 
 BIN_DIR = Path(__file__).resolve().parent
 if str(BIN_DIR) not in sys.path:
@@ -113,6 +117,48 @@ class EngineerMopUploadTests(unittest.TestCase):
             {"role": "implementer", "record_id": "person-1"},
             {"role": "auditor", "record_id": "person-2"},
         ]
+
+    def test_attachment_cache_retries_source_scan_failure_after_delay(self):
+        class ImmediateThread:
+            def __init__(self, *, target, args=(), **_kwargs):
+                self.target = target
+                self.args = args
+
+            def start(self):
+                self.target(*self.args)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            marker_path = Path(tmpdir) / "attachment_cache_daily_scan.json"
+            marker_path.write_text(
+                json.dumps(
+                    {
+                        "date": dt.date.today().isoformat(),
+                        "status": "partial",
+                        "failed_items": [],
+                        "next_retry_at": time.time() - 1,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            service = object.__new__(MaintenancePortalService)
+            service._attachment_cache_refresh_lock = threading.Lock()
+            service._attachment_cache_refresh_running = False
+            service._attachment_cache_daily_marker_path = lambda: marker_path
+            calls = []
+            service._refresh_attachment_cache_daily = (
+                lambda today, retry_items: calls.append((today, retry_items))
+            )
+
+            with patch(
+                "lan_bitable_template_portal.portal_service.threading.Thread",
+                ImmediateThread,
+            ):
+                service._maybe_start_daily_attachment_cache_refresh()
+
+            self.assertEqual(
+                calls,
+                [(dt.date.today().isoformat(), [])],
+            )
 
     def _confirm_staff_usage(
         self,

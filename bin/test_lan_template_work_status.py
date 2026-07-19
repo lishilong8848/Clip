@@ -40,6 +40,7 @@ from lan_bitable_template_portal.portal_service import REPAIR_FOLLOWUP_BACKFILL_
 from lan_bitable_template_portal.portal_service import REPAIR_CMDB_TABLE_ID  # noqa: E402
 from lan_bitable_template_portal.portal_service import REPAIR_FOLLOWUP_CMDB_FIELD_NAME  # noqa: E402
 from lan_bitable_template_portal.portal_service import REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME  # noqa: E402
+from lan_bitable_template_portal.portal_service import REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS  # noqa: E402
 from lan_bitable_template_portal.portal_service import REPAIR_SNAPSHOT_SOURCE_PROJECTS  # noqa: E402
 from lan_bitable_template_portal.portal_service import WORK_TYPE_CHANGE  # noqa: E402
 from lan_bitable_template_portal.portal_service import WORK_TYPE_MAINTENANCE  # noqa: E402
@@ -2040,6 +2041,27 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(events[-1]["payload"]["value"], 1)
             self.assertGreaterEqual(stats["written"], 2)
             self.assertFalse(stats["alive"])
+
+    def test_lan_portal_state_store_shutdown_drains_large_write_backlog(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            total = 250
+            for index in range(total):
+                self.assertTrue(
+                    store.append_event_async(
+                        "shutdown_drain",
+                        {"index": index},
+                    )
+                )
+
+            store.shutdown_write_worker(timeout=5.0)
+            events = store.list_events_after("shutdown_drain", 0, limit=1000)
+            stats = store.get_write_worker_stats()
+
+            self.assertEqual(len(events), total)
+            self.assertEqual(events[-1]["payload"]["index"], total - 1)
+            self.assertFalse(stats["alive"])
+            self.assertEqual(stats["queue_size"], 0)
 
     def test_lan_portal_state_store_background_write_worker_coalesces_runtime(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -5309,6 +5331,41 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(tasks[0]["sync_table_id"], "tblSA9euoote8aCA")
             process_async.assert_called_once_with()
 
+    def test_repair_link_task_is_retried_after_repair_update_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            prepared = {
+                "work_type": "repair",
+                "repair_management_record_id": "rec_source_repair_update",
+            }
+
+            with patch.object(
+                service,
+                "_process_repair_link_tasks_async",
+            ) as process_async:
+                service._schedule_repair_link_task_after_success(
+                    prepared,
+                    action="update",
+                    target_record_id="rec_target_repair_update",
+                    job_id="job-update",
+                )
+
+            tasks = service._state_store.list_due_repair_link_tasks(
+                now=time.time() + 1,
+                limit=10,
+            )
+            self.assertEqual(len(tasks), 1)
+            self.assertEqual(
+                tasks[0]["source_record_id"],
+                "rec_source_repair_update",
+            )
+            self.assertEqual(
+                tasks[0]["target_record_id"],
+                "rec_target_repair_update",
+            )
+            self.assertEqual(tasks[0]["action"], "update")
+            process_async.assert_called_once_with()
+
     def test_process_due_repair_link_task_links_source_record_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
@@ -5368,6 +5425,19 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
             service._request_json = fake_request
             service._patch_record_fields_exact = fake_patch
+            link_meta = FieldMeta(
+                "fld_link",
+                "设备检修关联",
+                "DuplexLink",
+                21,
+                False,
+                {},
+                [],
+                False,
+            )
+            service._load_table_fields = (  # type: ignore[method-assign]
+                lambda **_kwargs: ([link_meta], {"设备检修关联": link_meta})
+            )
 
             stats = service.process_due_repair_link_tasks(limit=3)
 
@@ -5384,6 +5454,57 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     limit=10,
                 ),
                 [],
+            )
+
+    def test_process_due_repair_link_task_writes_text_record_id_directly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            source_record_id = "rec_source_text_link"
+            target_record_id = "rec_target_text_link"
+            service._state_store.upsert_repair_link_task(
+                {
+                    "task_key": f"repair_link:{source_record_id}:{target_record_id}",
+                    "status": "pending",
+                    "source_app_token": "source-app",
+                    "source_table_id": "source-table",
+                    "source_record_id": source_record_id,
+                    "sync_app_token": "source-app",
+                    "sync_table_id": "sync-table",
+                    "target_record_id": target_record_id,
+                    "link_field_name": "设备检修关联",
+                    "due_at": time.time() - 1,
+                }
+            )
+            link_meta = FieldMeta(
+                "fld_link",
+                "设备检修关联",
+                "Text",
+                1,
+                False,
+                {},
+                [],
+                False,
+            )
+            service._load_table_fields = (  # type: ignore[method-assign]
+                lambda **_kwargs: ([link_meta], {"设备检修关联": link_meta})
+            )
+            service._request_json = (  # type: ignore[method-assign]
+                lambda *_args, **_kwargs: self.fail(
+                    "text ID fields must not query the repair sync table"
+                )
+            )
+            updates: list[dict] = []
+            service._patch_record_fields_exact = (  # type: ignore[method-assign]
+                lambda **kwargs: updates.append(kwargs) or {"code": 0}
+            )
+
+            stats = service.process_due_repair_link_tasks(limit=3)
+
+            self.assertEqual(stats["linked"], 1)
+            self.assertEqual(len(updates), 1)
+            self.assertEqual(
+                updates[0]["fields"],
+                {"设备检修关联": target_record_id},
             )
 
     def test_repair_link_task_claim_has_recoverable_lease(self):
@@ -5469,6 +5590,19 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 raise AssertionError(path)
 
             service._request_json = fake_request
+            link_meta = FieldMeta(
+                "fld_link",
+                "设备检修关联",
+                "DuplexLink",
+                21,
+                False,
+                {},
+                [],
+                False,
+            )
+            service._load_table_fields = (  # type: ignore[method-assign]
+                lambda **_kwargs: ([link_meta], {"设备检修关联": link_meta})
+            )
             before = time.time()
 
             stats = service.process_due_repair_link_tasks(limit=3)
@@ -6325,7 +6459,14 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 [item["record_id"] for item in campus["records"]],
                 ["c2", "c3"],
             )
-            self.assertEqual(campus["ongoing"], [])
+            self.assertEqual(
+                [
+                    item["source_record_id"]
+                    for item in campus["ongoing"]
+                ],
+                ["c3"],
+            )
+            self.assertTrue(campus["ongoing"][0]["recovered_from_source"])
 
             with patch.object(
                 service, "_target_records_for_notice_type", return_value=[]
@@ -8080,7 +8221,13 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
             self.assertEqual([item["record_id"] for item in result["records"]], ["r1"])
             self.assertEqual(result["records"][0]["source_progress"], "进行中")
-            self.assertEqual(result["ongoing"], [])
+            self.assertEqual(len(result["ongoing"]), 1)
+            self.assertEqual(result["ongoing"][0]["source_record_id"], "r1")
+            self.assertEqual(
+                result["ongoing"][0]["target_record_id"],
+                "target-r1",
+            )
+            self.assertTrue(result["ongoing"][0]["recovered_from_source"])
 
     def test_repair_source_ongoing_update_uses_linked_target_record(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -8469,6 +8616,71 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 merged = service._merge_ongoing_items("C", [])
 
             self.assertEqual(merged, [])
+
+    def test_query_records_recovers_source_ongoing_change_without_qt_item(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            service._change_records = [
+                _build_change_record(
+                    "source-change-recovered",
+                    building="C楼",
+                    progress="进行中",
+                    title="C楼柴油发电机测试变更",
+                )
+            ]
+
+            result = service.query_records(scope="C", ongoing_items=[])
+
+            self.assertEqual(len(result["ongoing"]), 1)
+            recovered = result["ongoing"][0]
+            self.assertEqual(
+                recovered["source_record_id"], "source-change-recovered"
+            )
+            self.assertEqual(recovered["work_type"], WORK_TYPE_CHANGE)
+            self.assertEqual(recovered["status"], "进行中")
+            self.assertTrue(recovered["active_item_id"])
+            self.assertEqual(recovered.get("target_record_id", ""), "")
+            self.assertEqual(recovered.get("record_id", ""), "")
+            self.assertTrue(recovered["recovered_from_source"])
+
+    def test_query_records_does_not_duplicate_recovered_source_ongoing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            service._change_records = [
+                _build_change_record(
+                    "source-change-existing",
+                    building="C楼",
+                    progress="进行中",
+                    title="C楼柴油发电机测试变更",
+                )
+            ]
+            ongoing_item = {
+                "active_item_id": "active-change-existing",
+                "source_record_id": "source-change-existing",
+                "target_record_id": "target-change-existing",
+                "record_id": "target-change-existing",
+                "work_type": WORK_TYPE_CHANGE,
+                "notice_type": "变更通告",
+                "scope": "C",
+                "building": "C楼",
+                "building_codes": ["C"],
+                "title": "C楼柴油发电机测试变更",
+                "status": "进行中",
+            }
+
+            result = service.query_records(
+                scope="C",
+                ongoing_items=[ongoing_item],
+            )
+
+            self.assertEqual(len(result["ongoing"]), 1)
+            self.assertEqual(
+                result["ongoing"][0]["active_item_id"],
+                "active-change-existing",
+            )
+            self.assertFalse(
+                bool(result["ongoing"][0].get("recovered_from_source"))
+            )
 
     def test_zhihang_change_records_filter_by_progress_and_title_scope(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -9932,6 +10144,31 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
             self.assertEqual(merged, [])
 
+    def test_query_records_recovers_source_ongoing_repair_without_qt_item(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            service._repair_records = [
+                _build_repair_record(
+                    "source-repair-recovered",
+                    title="D楼UPS故障检修",
+                    building="D楼",
+                    started=True,
+                    target_record_id="",
+                )
+            ]
+
+            result = service.query_records(scope="D", ongoing_items=[])
+
+            self.assertEqual(len(result["ongoing"]), 1)
+            recovered = result["ongoing"][0]
+            self.assertEqual(
+                recovered["source_record_id"], "source-repair-recovered"
+            )
+            self.assertEqual(recovered["work_type"], WORK_TYPE_REPAIR)
+            self.assertEqual(recovered["status"], "进行中")
+            self.assertTrue(recovered["active_item_id"])
+            self.assertEqual(recovered.get("target_record_id", ""), "")
+
     def test_hidden_ongoing_item_is_removed_from_refresh_results(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
@@ -9962,6 +10199,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 merged = service._merge_ongoing_items("C", [])
 
             self.assertEqual(merged, [])
+            result = service.query_records(scope="C", ongoing_items=[])
+            self.assertEqual(result["ongoing"], [])
 
     def test_hidden_ongoing_uses_active_item_identity_for_qt_items(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -14377,8 +14616,52 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             expanded_bound.get("source_record_id"),
             "repair-pending-source",
         )
+        self.assertEqual(
+            expanded_bound.get("repair_management_record_id"),
+            "repair-pending-source",
+        )
         self.assertFalse(expanded_bound.get("target_record_id"))
         self.assertEqual(expanded_bound["manual_binding_choice"], "bind")
+
+    def test_repair_notice_command_recovers_management_relation_from_ongoing(self):
+        service = _TestMaintenancePortalService()
+
+        expanded = service.expand_workbench_action_command(
+            {
+                "command_format": "notice_command",
+                "action": "update",
+                "scope": "E",
+                "work_type": WORK_TYPE_REPAIR,
+                "active_item_id": "active-repair-linked",
+                "target_record_id": "rec_repair_target",
+                "record_id": "rec_repair_target",
+                "patch": {
+                    "scope": "E",
+                    "work_type": WORK_TYPE_REPAIR,
+                    "action": "update",
+                    "progress": "维修工作继续进行",
+                },
+            },
+            scope="E",
+            ongoing_items=[
+                {
+                    "active_item_id": "active-repair-linked",
+                    "target_record_id": "rec_repair_target",
+                    "record_id": "rec_repair_target",
+                    "repair_management_record_id": "rec_repair_summary",
+                    "work_type": WORK_TYPE_REPAIR,
+                    "notice_type": "设备检修",
+                    "title": "EA118机房E楼精密空调检修",
+                    "building": "E楼",
+                }
+            ],
+        )
+
+        self.assertEqual(
+            expanded.get("repair_management_record_id"),
+            "rec_repair_summary",
+        )
+        self.assertEqual(expanded.get("target_record_id"), "rec_repair_target")
 
     def test_qt_pending_update_does_not_reuse_stale_extra_images(self):
         workflow_path = BIN_DIR / "upload_event_module" / "ui" / "main_window_workflow.py"
@@ -14614,6 +14897,59 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         payload = service.get_repair_management_records(limit=20)
 
         self.assertEqual(payload["records"][0]["followup_count"], 0)
+
+    def test_repair_followup_snapshot_parent_uses_record_id_parser(self):
+        envelope = MaintenancePortalService._repair_snapshot_record_payload(
+            {
+                "record_id": "rec_followup_parent",
+                "display_fields": {
+                    REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: "维修项目显示名称",
+                },
+                "raw_fields": {
+                    REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: {
+                        "link_record_ids": ["rec_summary_parent"]
+                    },
+                },
+            },
+            parent_field_name=REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME,
+        )
+
+        self.assertEqual(envelope["parent_record_id"], "rec_summary_parent")
+
+    def test_repair_followup_local_snapshot_count_verifies_record_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            service._repair_snapshots_enabled = True
+            service._state_store.replace_repair_snapshot(
+                REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS,
+                records=[
+                    {
+                        "record_id": "rec_followup_stale_index",
+                        "parent_record_id": "rec_summary_wrong",
+                        "payload": {
+                            "record_id": "rec_followup_stale_index",
+                            "display_fields": {
+                                REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: "rec_summary_actual"
+                            },
+                            "raw_fields": {
+                                REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: "rec_summary_actual"
+                            },
+                        },
+                    }
+                ],
+            )
+
+            counts = service._repair_followup_counts_from_local_snapshot(
+                ["rec_summary_wrong", "rec_summary_actual"]
+            )
+
+            self.assertEqual(
+                counts,
+                {
+                    "rec_summary_wrong": 0,
+                    "rec_summary_actual": 1,
+                },
+            )
 
     def test_repair_management_records_support_offset_pagination(self):
         service = _TestMaintenancePortalService()
@@ -15988,6 +16324,168 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertNotIn("当前维修进度", end_fields)
             self.assertEqual(len(snapshots), 3)
 
+    def test_repair_notice_action_sync_uses_explicit_management_relation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            metas = [
+                FieldMeta("fld_link", "设备检修关联", "Text", 1, False, {}, [], False),
+                FieldMeta("fld_title", "检修通告名称", "Text", 1, False, {}, [], False),
+            ]
+            meta_by_name = {meta.field_name: meta for meta in metas}
+            current_record = {
+                "record_id": "rec_repair_summary_explicit",
+                "raw_fields": {},
+                "display_fields": {},
+            }
+            ensured_ids: list[str] = []
+            captured: list[dict] = []
+            service._ensure_repair_management_record_in_scope = (  # type: ignore[method-assign]
+                lambda record_id, _scope: (
+                    ensured_ids.append(record_id) or current_record
+                )
+            )
+            service._load_repair_management_project_records = (  # type: ignore[method-assign]
+                lambda **_kwargs: (metas, meta_by_name, [current_record])
+            )
+            service._patch_record_fields = (  # type: ignore[method-assign]
+                lambda **kwargs: captured.append(kwargs) or {"code": 0}
+            )
+            service._upsert_repair_snapshot_fields = (  # type: ignore[method-assign]
+                lambda **_kwargs: None
+            )
+            service._invalidate_repair_management_status_cache = (  # type: ignore[method-assign]
+                lambda: None
+            )
+
+            result = service.sync_repair_management_notice_action(
+                {
+                    "work_type": WORK_TYPE_REPAIR,
+                    "scope": "E",
+                    "manual": True,
+                    "repair_management_record_id": "rec_repair_summary_explicit",
+                    "title": "EA118机房E楼精密空调检修",
+                },
+                action="update",
+                target_record_id="rec_repair_target_explicit",
+            )
+
+            self.assertTrue(result["synced"])
+            self.assertEqual(ensured_ids, ["rec_repair_summary_explicit"])
+            self.assertEqual(
+                captured[-1]["record_id"],
+                "rec_repair_summary_explicit",
+            )
+            self.assertEqual(
+                captured[-1]["fields"]["设备检修关联"],
+                "rec_repair_target_explicit",
+            )
+
+    def test_repair_notice_action_defers_duplex_link_without_blocking_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            metas = [
+                FieldMeta(
+                    "fld_link",
+                    "设备检修关联",
+                    "DuplexLink",
+                    21,
+                    False,
+                    {},
+                    [],
+                    False,
+                ),
+                FieldMeta(
+                    "fld_title",
+                    "检修通告名称",
+                    "Text",
+                    1,
+                    False,
+                    {},
+                    [],
+                    False,
+                ),
+                FieldMeta(
+                    "fld_start",
+                    "维修开始时间",
+                    "DateTime",
+                    5,
+                    False,
+                    {},
+                    [],
+                    False,
+                ),
+            ]
+            meta_by_name = {meta.field_name: meta for meta in metas}
+            current_record = {
+                "record_id": "rec_repair_summary_duplex",
+                "raw_fields": {},
+                "display_fields": {},
+            }
+            captured: list[dict] = []
+            service._ensure_repair_management_record_in_scope = (  # type: ignore[method-assign]
+                lambda *_args, **_kwargs: current_record
+            )
+            service._load_repair_management_project_records = (  # type: ignore[method-assign]
+                lambda **_kwargs: (metas, meta_by_name, [current_record])
+            )
+            service._patch_record_fields = (  # type: ignore[method-assign]
+                lambda **kwargs: captured.append(kwargs) or {"code": 0}
+            )
+            service._upsert_repair_snapshot_fields = (  # type: ignore[method-assign]
+                lambda **_kwargs: None
+            )
+            service._invalidate_repair_management_status_cache = (  # type: ignore[method-assign]
+                lambda: None
+            )
+
+            result = service.sync_repair_management_notice_action(
+                {
+                    "work_type": WORK_TYPE_REPAIR,
+                    "scope": "E",
+                    "repair_management_record_id": "rec_repair_summary_duplex",
+                    "title": "EA118机房E楼精密空调检修",
+                    "response_time": "2026-07-18 09:15",
+                },
+                action="start",
+                target_record_id="rec_repair_target_duplex",
+            )
+
+            self.assertTrue(result["synced"])
+            self.assertTrue(result["link_deferred"])
+            self.assertNotIn("设备检修关联", captured[-1]["fields"])
+            self.assertEqual(
+                captured[-1]["fields"]["检修通告名称"],
+                "EA118机房E楼精密空调检修",
+            )
+            self.assertIn("维修开始时间", captured[-1]["fields"])
+
+    def test_repair_management_prefill_form_carries_management_relation(self):
+        html = workbench_lite_module.render_workbench_lite(
+            payload={
+                "records": [],
+                "ongoing": [],
+                "daily_summary": {"stats": {}},
+                "record_type_counts": {},
+                "ongoing_type_counts": {},
+            },
+            session={"user": {"name": "测试用户"}},
+            scope="E",
+            work_type=WORK_TYPE_REPAIR,
+            prefill_draft={
+                "work_type": WORK_TYPE_REPAIR,
+                "title": "EA118机房E楼精密空调检修",
+            },
+            prefill_source_record_id="rec_repair_summary_form",
+            prefill_context_id="rec_repair_summary_form",
+            scope_options=[{"value": "E", "label": "E楼"}],
+        )
+
+        self.assertIn(
+            'name="repair_management_record_id" value="rec_repair_summary_form"',
+            html,
+        )
+        self.assertNotIn("related_repair_management_record_id", html)
+
     def test_repair_management_notice_prefill_without_notice_link_starts_new_notice(self):
         service = _TestMaintenancePortalService()
         service._ensure_repair_management_record_in_scope = (  # type: ignore[method-assign]
@@ -17115,6 +17613,107 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             "关联事件缺少“告警描述”，故障维修原因未回填。",
             payload["warnings"],
         )
+
+    def test_repair_management_historical_event_uses_saved_project_fields_without_warning(self):
+        service = _TestMaintenancePortalService()
+        project = {
+            "record_id": "rec_project_history",
+            "raw_fields": {
+                "关联事件单": "rec_event_history",
+                "故障发生时间": 1783123200000,
+            },
+            "display_fields": {
+                "关联事件单": "rec_event_history",
+                "对应来源": ["BMS系统"],
+                "对应事件等级": "I3",
+                "故障维修原因": "历史事件告警描述",
+                "故障发生现象描述": "历史事件故障现象",
+                "故障发生时间": "2026-07-04 08:00",
+                "所属专业": "暖通",
+                "所属数据中心/楼栋-使用": "南通A楼",
+            },
+        }
+        service._load_repair_management_project_records = (  # type: ignore[method-assign]
+            lambda: ([], {}, [project])
+        )
+        service._repair_management_record_in_scope = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: True
+        )
+
+        event = service._repair_management_event_from_project_snapshot(
+            scope="ALL",
+            record_id="rec_event_history",
+        )
+        self.assertTrue(event["historical_fallback"])
+        self.assertEqual(
+            event["display_fields"]["事件发现来源（统一）"],
+            "BMS系统",
+        )
+        self.assertEqual(
+            event["display_fields"]["告警描述"],
+            "历史事件告警描述",
+        )
+        self.assertEqual(event["display_fields"]["机楼"], "A楼")
+
+        metas = [
+            FieldMeta(
+                "fld_source",
+                "对应来源",
+                "MultiSelect",
+                4,
+                False,
+                {},
+                ["BMS系统"],
+                False,
+            ),
+            FieldMeta(
+                "fld_reason",
+                "故障维修原因",
+                "Text",
+                1,
+                False,
+                {},
+                [],
+                False,
+            ),
+            FieldMeta(
+                "fld_building",
+                "所属数据中心/楼栋-使用",
+                "Text",
+                1,
+                False,
+                {},
+                [],
+                False,
+            ),
+        ]
+        meta_by_name = {item.field_name: item for item in metas}
+        service._event_snapshot_record_for_repair = (  # type: ignore[method-assign]
+            lambda **_kwargs: event
+        )
+
+        payload = service._build_repair_management_prefill(
+            scope="ALL",
+            event_record_id="rec_event_history",
+            repair_record_ids=[],
+            followup_record_ids=[],
+            month="2026-07",
+            meta_by_name=meta_by_name,
+        )
+
+        self.assertEqual(payload["fields"]["对应来源"], ["BMS系统"])
+        self.assertEqual(
+            payload["fields"]["故障维修原因"],
+            "历史事件告警描述",
+        )
+        self.assertEqual(
+            payload["fields"]["所属数据中心/楼栋-使用"],
+            "南通A楼",
+        )
+        warning_text = "；".join(payload["warnings"])
+        self.assertNotIn("来源事件属于历史事件表", warning_text)
+        self.assertNotIn("事件发现来源（统一）", warning_text)
+        self.assertNotIn("缺少“告警描述”", warning_text)
 
     def test_repair_management_building_uses_repair_fallback_and_rejects_conflict(self):
         service = _TestMaintenancePortalService()

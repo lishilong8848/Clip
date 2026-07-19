@@ -1,8 +1,12 @@
 import contextlib
 import io
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+
+import httpx
 
 
 BIN_DIR = Path(__file__).resolve().parent
@@ -10,6 +14,7 @@ if str(BIN_DIR) not in sys.path:
     sys.path.insert(0, str(BIN_DIR))
 
 from upload_event_module.services import query_record_by_record_id as query_module  # noqa: E402
+from upload_event_module.services.http_client import FeishuHttpClient  # noqa: E402
 
 
 class _FakeFeishuClient:
@@ -59,6 +64,51 @@ class QueryRecordHttpClientTests(unittest.TestCase):
         self.assertEqual(fake.calls[0]["method"], "POST")
         self.assertEqual(fake.calls[1]["method"], "GET")
         self.assertEqual(fake.calls[1]["params"]["user_id_type"], "open_id")
+
+    def test_multipart_upload_reopens_file_and_returns_json(self):
+        captured = {}
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            captured["authorization"] = request.headers.get("authorization")
+            captured["content_type"] = request.headers.get("content-type")
+            captured["body"] = request.content
+            return httpx.Response(
+                200,
+                json={"code": 0, "data": {"file_token": "file-token-1"}},
+            )
+
+        temp_path = ""
+        client = FeishuHttpClient(
+            transport=httpx.MockTransport(handle),
+            retries=0,
+        )
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as temp_file:
+                temp_file.write(b"clipflow-upload")
+                temp_path = temp_file.name
+            payload = client.request_file_json(
+                "POST",
+                "https://open.feishu.cn/open-apis/drive/v1/medias/upload_all",
+                headers={"Authorization": "Bearer test-token"},
+                data={
+                    "file_name": "test.txt",
+                    "parent_type": "bitable_file",
+                    "parent_node": "app-token",
+                    "size": "15",
+                },
+                file_path=temp_path,
+                file_name="test.txt",
+            )
+        finally:
+            client.close()
+            if temp_path:
+                with contextlib.suppress(OSError):
+                    os.remove(temp_path)
+
+        self.assertEqual(payload["data"]["file_token"], "file-token-1")
+        self.assertEqual(captured["authorization"], "Bearer test-token")
+        self.assertIn("multipart/form-data", captured["content_type"])
+        self.assertIn(b"clipflow-upload", captured["body"])
 
 
 if __name__ == "__main__":

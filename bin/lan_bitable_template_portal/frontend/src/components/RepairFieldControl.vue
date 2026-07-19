@@ -22,36 +22,73 @@
       :allow-custom="allowCustomSelect"
       @update:model-value="updateValue"
     />
-    <div v-else-if="percentage" class="repair-percentage-control">
-      <input
-        class="percentage-range"
-        type="range"
-        min="0"
-        max="100"
-        step="1"
-        :value="percentageValue"
-        :disabled="disabled"
-        :aria-label="`${label || field.field_name || '维修进度'}百分比滑块`"
-        @input="handlePercentageInput"
-      />
-      <div class="percentage-number-wrap">
+    <div
+      v-else-if="percentage"
+      class="repair-percentage-control"
+      :class="[percentageTone, { 'is-readonly': disabled }]"
+      :style="percentageStyle"
+    >
+      <div class="percentage-summary">
+        <span class="percentage-stage">
+          <i aria-hidden="true"></i>
+          {{ percentageStage }}
+        </span>
+        <div class="percentage-number-wrap">
+          <output
+            v-if="disabled"
+            :id="inputId"
+            data-progress-value
+            class="percentage-number percentage-output"
+            :aria-label="`${label || field.field_name || '维修进度'}${percentageValue}%`"
+          >
+            {{ percentageValue }}
+          </output>
+          <input
+            v-else
+            :id="inputId"
+            data-repair-control
+            data-progress-number
+            class="percentage-number"
+            type="number"
+            min="0"
+            max="100"
+            step="1"
+            :value="percentageValue"
+            :required="required"
+            :disabled="disabled"
+            :aria-invalid="Boolean(error)"
+            :aria-describedby="error ? errorId : undefined"
+            @input="handlePercentageInput"
+          />
+          <span aria-hidden="true">%</span>
+        </div>
+      </div>
+      <div class="percentage-slider">
+        <div
+          v-if="disabled"
+          class="percentage-readonly-track"
+          role="progressbar"
+          :aria-label="label || String(field.field_name || '维修进度')"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          :aria-valuenow="percentageValue"
+          :aria-valuetext="`${percentageValue}%，${percentageStage}`"
+        >
+          <i aria-hidden="true"></i>
+        </div>
         <input
-          :id="inputId"
-          data-repair-control
-          data-progress-number
-          class="percentage-number"
-          type="number"
+          v-else
+          class="percentage-range"
+          type="range"
           min="0"
           max="100"
           step="1"
           :value="percentageValue"
-          :required="required"
           :disabled="disabled"
-          :aria-invalid="Boolean(error)"
-          :aria-describedby="error ? errorId : undefined"
+          :aria-label="`${label || field.field_name || '维修进度'}百分比滑块`"
+          :aria-valuetext="`${percentageValue}%，${percentageStage}`"
           @input="handlePercentageInput"
         />
-        <span aria-hidden="true">%</span>
       </div>
     </div>
     <div v-else-if="isDate" class="repair-date-control">
@@ -136,6 +173,7 @@
 
 <script setup lang="ts">
 import { computed, ref } from "vue";
+import type { CSSProperties } from "vue";
 import { CalendarDays, X } from "lucide-vue-next";
 import { repairFieldUsesTextarea } from "../repairManagementUtils";
 import type { LooseDict } from "../types";
@@ -201,6 +239,22 @@ const percentageValue = computed(() => {
   const percentageNumber = raw <= 1 ? raw * 100 : raw;
   return Math.min(100, Math.max(0, Math.round(percentageNumber)));
 });
+const percentageStage = computed(() => {
+  if (percentageValue.value <= 0) return "未开始";
+  if (percentageValue.value < 25) return "已开始";
+  if (percentageValue.value < 75) return "维修中";
+  if (percentageValue.value < 100) return "接近完成";
+  return "已完成";
+});
+const percentageTone = computed(() => {
+  if (percentageValue.value <= 0) return "is-idle";
+  if (percentageValue.value < 75) return "is-active";
+  if (percentageValue.value < 100) return "is-near";
+  return "is-complete";
+});
+const percentageStyle = computed<CSSProperties>(() => ({
+  "--repair-progress": `${percentageValue.value}%`,
+}));
 
 function updateValue(value: string): void {
   emit("update:modelValue", value);
@@ -267,9 +321,20 @@ function openDatePicker(): void {
 }
 
 .repair-field-control.compact .repair-percentage-control {
-  min-height: 32px;
-  grid-template-columns: minmax(92px, 1fr) 72px;
-  gap: 7px;
+  min-height: 34px;
+  padding: 3px 7px;
+}
+
+.repair-field-control.compact .percentage-range {
+  height: 18px;
+  min-height: 18px;
+  padding: 0;
+}
+
+.repair-field-control.compact .percentage-number-wrap .percentage-number {
+  min-height: 27px;
+  height: 27px;
+  padding: 3px 27px 3px 8px;
 }
 
 .repair-field-control.compact .date-control-button {
@@ -334,43 +399,195 @@ textarea {
 }
 
 .repair-percentage-control {
-  min-height: 36px;
+  --repair-progress: 0%;
+  --repair-progress-color: #1769e8;
+  --repair-progress-soft: #eaf2ff;
+  min-height: 38px;
   display: grid;
-  grid-template-columns: minmax(120px, 1fr) 86px;
+  grid-template-columns: auto minmax(48px, 1fr) 64px;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
+  border: 1px solid #c9dbf2;
+  border-radius: 10px;
+  padding: 4px 8px;
+  background: #f8fbff;
+  transition: border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
+}
+
+.repair-percentage-control:hover {
+  border-color: #9ebfe9;
+}
+
+.repair-percentage-control:focus-within {
+  border-color: var(--repair-progress-color);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--repair-progress-color) 15%, transparent);
+}
+
+.repair-percentage-control.is-readonly {
+  cursor: default;
+  background: color-mix(in srgb, var(--repair-progress-soft) 34%, #fff);
+}
+
+.repair-percentage-control.is-idle {
+  --repair-progress-color: #70839a;
+  --repair-progress-soft: #eef2f6;
+}
+
+.repair-percentage-control.is-near {
+  --repair-progress-color: #e28a13;
+  --repair-progress-soft: #fff4df;
+}
+
+.repair-percentage-control.is-complete {
+  --repair-progress-color: #12966f;
+  --repair-progress-soft: #e5f7f0;
+}
+
+.percentage-summary {
+  display: contents;
+}
+
+.percentage-stage {
+  grid-column: 1;
+  grid-row: 1;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 999px;
+  padding: 3px 8px;
+  background: var(--repair-progress-soft);
+  color: var(--repair-progress-color);
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.percentage-stage i {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 14%, transparent);
+}
+
+.percentage-slider {
+  grid-column: 2;
+  grid-row: 1;
+  min-width: 0;
+  display: block;
+}
+
+.percentage-readonly-track {
+  position: relative;
+  width: 100%;
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #dce6f2;
+}
+
+.percentage-readonly-track > i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--repair-progress);
+  border-radius: inherit;
+  background: var(--repair-progress-color);
+  transition: width 180ms ease;
 }
 
 .percentage-range {
+  appearance: none;
+  -webkit-appearance: none;
   width: 100%;
-  min-height: 28px;
+  height: 18px;
+  min-height: 18px;
   border: 0;
-  border-radius: 0;
+  border-radius: 999px;
   padding: 0;
-  accent-color: #1464e7;
+  background: linear-gradient(
+    to right,
+    var(--repair-progress-color) 0,
+    var(--repair-progress-color) var(--repair-progress),
+    #dce6f2 var(--repair-progress),
+    #dce6f2 100%
+  );
+  background-size: 100% 5px;
+  background-position: center;
+  background-repeat: no-repeat;
+  box-shadow: none;
+  cursor: pointer;
+}
+
+.percentage-range:focus,
+.percentage-range:focus-visible {
+  outline: 0;
   box-shadow: none;
 }
 
-.percentage-range:focus {
-  box-shadow: none;
+.percentage-range::-webkit-slider-thumb {
+  width: 16px;
+  height: 16px;
+  appearance: none;
+  -webkit-appearance: none;
+  border: 3px solid #fff;
+  border-radius: 50%;
+  background: var(--repair-progress-color);
+  box-shadow: 0 1px 5px rgba(23, 70, 126, 0.28);
+}
+
+.percentage-range::-moz-range-thumb {
+  width: 11px;
+  height: 11px;
+  border: 3px solid #fff;
+  border-radius: 50%;
+  background: var(--repair-progress-color);
+  box-shadow: 0 1px 5px rgba(23, 70, 126, 0.28);
 }
 
 .percentage-number-wrap {
+  grid-column: 3;
+  grid-row: 1;
   position: relative;
+  width: 64px;
 }
 
-.percentage-number-wrap .percentage-number {
+.percentage-number-wrap .percentage-number,
+.percentage-number-wrap .percentage-output {
+  width: 100%;
+  min-height: 27px;
+  height: 27px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  border-color: color-mix(in srgb, var(--repair-progress-color) 28%, #d3dfed);
+  border-style: solid;
+  border-width: 1px;
+  border-radius: 8px;
+  padding-left: 8px;
+  padding-top: 3px;
+  padding-bottom: 3px;
   padding-right: 27px;
+  background: #fff;
+  color: var(--repair-progress-color);
+  font-size: 13px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
   text-align: right;
+}
+
+.percentage-number-wrap .percentage-output {
+  cursor: default;
 }
 
 .percentage-number-wrap > span {
   position: absolute;
   top: 50%;
-  right: 10px;
-  color: #5f7590;
+  right: 9px;
+  color: var(--repair-progress-color);
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 800;
   transform: translateY(-50%);
   pointer-events: none;
 }

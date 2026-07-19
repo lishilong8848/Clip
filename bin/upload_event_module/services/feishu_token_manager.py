@@ -6,12 +6,6 @@ import threading
 import time
 from typing import Any
 
-import lark_oapi as lark
-from lark_oapi.api.auth.v3 import (
-    InternalTenantAccessTokenRequest,
-    InternalTenantAccessTokenRequestBody,
-)
-
 from ..config import config
 from ..logger import log_error, log_info
 from .http_client import FeishuHTTPError, FeishuHttpClient, classify_feishu_error
@@ -210,6 +204,12 @@ class FeishuTokenManager:
 
     @staticmethod
     def _request_tenant_token_sdk(app_id: str, app_secret: str) -> tuple[str, int]:
+        import lark_oapi as lark
+        from lark_oapi.api.auth.v3 import (
+            InternalTenantAccessTokenRequest,
+            InternalTenantAccessTokenRequestBody,
+        )
+
         client = lark.Client.builder().build()
         request = (
             InternalTenantAccessTokenRequest.builder()

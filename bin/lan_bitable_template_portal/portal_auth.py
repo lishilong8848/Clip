@@ -14,10 +14,6 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from upload_event_module.config import config
-from upload_event_module.services.feishu_token_manager import (
-    FeishuTokenError,
-    token_manager,
-)
 from upload_event_module.utils import get_data_file_path
 
 from .portal_service import (
@@ -45,6 +41,33 @@ REQUIRED_ADMIN_USERS = {
     LI_SHILONG_OPEN_ID: "李世龙",
     MA_JINYU_OPEN_ID: "马进宇",
 }
+
+
+class _LazyTokenManager:
+    def __init__(self) -> None:
+        self._manager: Any = None
+        self._lock = threading.RLock()
+
+    def _load(self) -> Any:
+        manager = self._manager
+        if manager is not None:
+            return manager
+        with self._lock:
+            manager = self._manager
+            if manager is None:
+                from upload_event_module.services.feishu_token_manager import (
+                    token_manager as loaded_manager,
+                )
+
+                manager = loaded_manager
+                self._manager = manager
+            return manager
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._load(), name)
+
+
+token_manager = _LazyTokenManager()
 
 
 class PortalAuthManager:
@@ -922,13 +945,13 @@ class PortalAuthManager:
     def _get_app_access_token(self) -> str:
         try:
             return token_manager.get_app_access_token()
-        except FeishuTokenError as exc:
+        except Exception as exc:
             raise PortalError(f"获取飞书 app_access_token 失败: {exc}") from exc
 
     def _exchange_login_code(self, code: str) -> dict[str, Any]:
         try:
             return token_manager.exchange_login_code(code)
-        except FeishuTokenError as exc:
+        except Exception as exc:
             raise PortalError(f"获取飞书用户身份失败: {exc}") from exc
 
     def _fetch_user_info(self, user_access_token: str) -> dict[str, Any]:

@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
+import atexit
 import faulthandler
 import logging
 import os
 import sys
+import threading
+import time
 from logging.handlers import RotatingFileHandler
 
 from .utils import get_data_file_path, migrate_runtime_data_files
@@ -15,6 +18,9 @@ CRASH_TRACE_MAX_BYTES = 2 * 1024 * 1024
 CRASH_TRACE_BACKUP_COUNT = 3
 
 _crash_trace_file = None
+_crash_trace_pending_bytes = 0
+_crash_trace_last_flush = 0.0
+_crash_trace_lock = threading.RLock()
 _logging_initialized = False
 _orig_stdout = sys.stdout
 _orig_stderr = sys.stderr
@@ -72,24 +78,29 @@ def _disable_faulthandler_safe():
 
 
 def _close_crash_trace_stream():
-    global _crash_trace_file
-    _disable_faulthandler_safe()
-    fh = _crash_trace_file
-    _crash_trace_file = None
-    if fh is None:
-        return
-    try:
-        fh.flush()
-    except Exception:
-        pass
-    try:
-        fh.close()
-    except Exception:
-        pass
+    global _crash_trace_file, _crash_trace_pending_bytes
+    with _crash_trace_lock:
+        _disable_faulthandler_safe()
+        fh = _crash_trace_file
+        _crash_trace_file = None
+        _crash_trace_pending_bytes = 0
+        if fh is None:
+            return
+        try:
+            fh.flush()
+        except Exception:
+            pass
+        try:
+            fh.close()
+        except Exception:
+            pass
+
+
+atexit.register(_close_crash_trace_stream)
 
 
 def _open_crash_trace_stream():
-    global _crash_trace_file
+    global _crash_trace_file, _crash_trace_pending_bytes, _crash_trace_last_flush
     _ensure_log_parent_dir(CRASH_TRACE_FILE)
     try:
         _crash_trace_file = open(
@@ -102,6 +113,8 @@ def _open_crash_trace_stream():
         faulthandler.enable(file=_crash_trace_file, all_threads=True)
     except Exception:
         pass
+    _crash_trace_pending_bytes = 0
+    _crash_trace_last_flush = time.monotonic()
     return _crash_trace_file
 
 
@@ -133,30 +146,41 @@ def _reopen_crash_trace_stream_if_needed(force=False):
 
 
 def _should_roll_crash_trace_for_bytes(extra_bytes):
+    global _crash_trace_pending_bytes
     try:
         if extra_bytes <= 0:
             return False
         current_size = 0
         if os.path.exists(CRASH_TRACE_FILE):
             current_size = os.path.getsize(CRASH_TRACE_FILE)
-        return (current_size + int(extra_bytes)) > CRASH_TRACE_MAX_BYTES
+        return (
+            current_size + int(_crash_trace_pending_bytes) + int(extra_bytes)
+        ) > CRASH_TRACE_MAX_BYTES
     except Exception:
         return False
 
 
-def write_crash_trace_message(message):
+def write_crash_trace_message(message, *, force_flush=False):
+    global _crash_trace_pending_bytes, _crash_trace_last_flush
     if not message:
         return
     text = str(message).rstrip("\r\n")
     try:
         encoded = (text + "\n").encode("utf-8", errors="ignore")
-        if _should_roll_crash_trace_for_bytes(len(encoded)):
-            _reopen_crash_trace_stream_if_needed(force=True)
-        fh = _reopen_crash_trace_stream_if_needed()
-        if fh is None:
-            return
-        fh.write(text + "\n")
-        fh.flush()
+        with _crash_trace_lock:
+            if _should_roll_crash_trace_for_bytes(len(encoded)):
+                _reopen_crash_trace_stream_if_needed(force=True)
+                _crash_trace_pending_bytes = 0
+            fh = _crash_trace_file or _open_crash_trace_stream()
+            if fh is None:
+                return
+            fh.write(text + "\n")
+            _crash_trace_pending_bytes += len(encoded)
+            now = time.monotonic()
+            if force_flush or now - _crash_trace_last_flush >= 1.0:
+                fh.flush()
+                _crash_trace_pending_bytes = 0
+                _crash_trace_last_flush = now
     except Exception:
         pass
 

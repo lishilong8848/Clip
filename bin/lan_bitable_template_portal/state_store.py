@@ -56,6 +56,8 @@ class LanPortalStateStore:
     """
 
     SCHEMA_VERSION = 25
+    _schema_process_lock = threading.RLock()
+    _schema_ready_paths: set[str] = set()
     SOURCE_SCOPE_TABLES = {
         "110": "source_records_110",
         "A": "source_records_a",
@@ -150,6 +152,7 @@ class LanPortalStateStore:
         self.db_path = Path(db_path or get_data_file_path(DEFAULT_STATE_DB_NAME))
         self._lock = threading.RLock()
         self._initialized = False
+        self._initialized_db_identity: tuple[int, int] | None = None
         self._wal_initialized = False
         self._write_queue: queue.Queue[dict[str, Any] | None] | None = None
         self._write_thread: threading.Thread | None = None
@@ -191,14 +194,31 @@ class LanPortalStateStore:
         value_ms = max(0, min(value_ms, 1000))
         return value_ms / 1000.0
 
+    @staticmethod
+    def _write_queue_max_size() -> int:
+        raw = str(
+            os.environ.get("CLIPFLOW_SQLITE_WRITE_QUEUE_MAX_SIZE", "") or ""
+        ).strip()
+        try:
+            value = int(raw or "5000")
+        except Exception:
+            value = 5000
+        return max(100, min(value, 100_000))
+
     def _ensure_write_worker(self) -> bool:
         if not self._write_worker_enabled():
             return False
         with self._write_worker_lock:
+            if (
+                self._write_worker_stop.is_set()
+                and self._write_thread
+                and self._write_thread.is_alive()
+            ):
+                return False
             if self._write_worker_started and self._write_thread and self._write_thread.is_alive():
                 return True
             self._write_worker_stop.clear()
-            self._write_queue = queue.Queue()
+            self._write_queue = queue.Queue(maxsize=self._write_queue_max_size())
             self._write_thread = threading.Thread(
                 target=self._run_write_worker,
                 name="ClipFlowSQLiteWriteWorker",
@@ -206,6 +226,9 @@ class LanPortalStateStore:
             )
             self._write_worker_started = True
             self._write_worker_stats["enabled"] = True
+            self._write_worker_stats["max_queue_size"] = (
+                self._write_queue_max_size()
+            )
             self._write_thread.start()
             return True
 
@@ -216,13 +239,16 @@ class LanPortalStateStore:
         if write_queue is None:
             return False
         try:
-            write_queue.put_nowait(
-                {
-                    "operation": str(operation or "").strip(),
-                    "payload": dict(payload or {}),
-                    "queued_at": time.time(),
-                }
-            )
+            with self._write_worker_lock:
+                if self._write_worker_stop.is_set():
+                    return False
+                write_queue.put_nowait(
+                    {
+                        "operation": str(operation or "").strip(),
+                        "payload": dict(payload or {}),
+                        "queued_at": time.time(),
+                    }
+                )
             self._write_worker_stats["queued"] = int(
                 self._write_worker_stats.get("queued") or 0
             ) + 1
@@ -237,18 +263,23 @@ class LanPortalStateStore:
 
     def _run_write_worker(self) -> None:
         batch: list[dict[str, Any]] = []
-        while not self._write_worker_stop.is_set():
+        should_stop = False
+        while not should_stop:
             write_queue = self._write_queue
             if write_queue is None:
                 break
             try:
                 item = write_queue.get(timeout=0.2)
             except queue.Empty:
-                item = None
+                if self._write_worker_stop.is_set():
+                    break
+                continue
             if item is None:
                 if batch:
                     self._flush_background_writes(batch)
                     batch = []
+                if self._write_worker_stop.is_set():
+                    break
                 continue
             batch.append(item)
             deadline = time.monotonic() + self._write_batch_window_seconds()
@@ -261,14 +292,23 @@ class LanPortalStateStore:
                     if next_item is not None:
                         batch.append(next_item)
                     else:
+                        should_stop = self._write_worker_stop.is_set()
                         break
             except queue.Empty:
                 pass
             self._flush_background_writes(batch)
             batch = []
+            if (
+                self._write_worker_stop.is_set()
+                and write_queue.empty()
+            ):
+                should_stop = True
         if batch:
             self._flush_background_writes(batch)
-        self._write_worker_stats["queue_size"] = 0
+        self._write_worker_stats["queue_size"] = (
+            self._write_queue.qsize() if self._write_queue is not None else 0
+        )
+        self._write_worker_stats["enabled"] = False
 
     def _flush_background_writes(self, batch: list[dict[str, Any]]) -> None:
         if not batch:
@@ -340,17 +380,23 @@ class LanPortalStateStore:
     def shutdown_write_worker(self, *, timeout: float = 2.0) -> None:
         if not self._write_worker_started:
             return
-        self._write_worker_stop.set()
-        write_queue = self._write_queue
-        if write_queue is not None:
-            try:
-                write_queue.put_nowait(None)
-            except Exception:
-                pass
+        with self._write_worker_lock:
+            self._write_worker_stop.set()
+            write_queue = self._write_queue
+            if write_queue is not None:
+                try:
+                    write_queue.put_nowait(None)
+                except Exception:
+                    pass
         thread = self._write_thread
         if thread and thread.is_alive():
             thread.join(timeout=max(0.1, float(timeout or 0)))
-        self._write_worker_stats["enabled"] = False
+        still_alive = bool(thread and thread.is_alive())
+        self._write_worker_stats["enabled"] = still_alive
+        if still_alive:
+            self._write_worker_stats["last_error"] = (
+                "SQLite write worker shutdown timed out; queued writes are still draining."
+            )
 
     def get_write_worker_stats(self) -> dict[str, Any]:
         stats = dict(self._write_worker_stats)
@@ -459,9 +505,69 @@ class LanPortalStateStore:
                 conn.commit()
                 return int(cursor.rowcount or 0)
 
+    def _database_file_identity(self) -> tuple[int, int] | None:
+        try:
+            stat = self.db_path.stat()
+            device = int(getattr(stat, "st_dev", 0) or 0)
+            inode = int(getattr(stat, "st_ino", 0) or 0)
+            if inode <= 0:
+                return None
+            return device, inode
+        except OSError:
+            return None
+
+    def _schema_version_matches_locked(self, conn: sqlite3.Connection) -> bool:
+        try:
+            row = conn.execute(
+                "SELECT value FROM meta WHERE key='schema_version'"
+            ).fetchone()
+        except sqlite3.Error:
+            return False
+        if row is None:
+            return False
+        try:
+            return int(row["value"] or 0) == self.SCHEMA_VERSION
+        except (KeyError, TypeError, ValueError):
+            return False
+
     def _ensure_schema_locked(self, conn: sqlite3.Connection) -> None:
-        if self._initialized:
+        db_identity = self._database_file_identity()
+        if (
+            self._initialized
+            and db_identity is not None
+            and db_identity == self._initialized_db_identity
+        ):
             return
+        if (
+            self._initialized
+            and db_identity is None
+            and self._schema_version_matches_locked(conn)
+        ):
+            return
+        self._initialized = False
+        try:
+            conn.execute("PRAGMA journal_mode = WAL")
+            self._wal_initialized = True
+        except sqlite3.Error:
+            pass
+        schema_key = os.path.normcase(str(self.db_path.resolve()))
+        with self._schema_process_lock:
+            if (
+                schema_key in self._schema_ready_paths
+                and self._schema_version_matches_locked(conn)
+            ):
+                self._migrate_legacy_change_notice_labels_locked(conn)
+                self._cleanup_invalid_notice_identity_targets_locked(conn)
+                conn.commit()
+                self._initialized = True
+                self._initialized_db_identity = self._database_file_identity()
+                return
+            self._initialize_schema_locked(conn)
+            self._schema_ready_paths.add(schema_key)
+            self._initialized = True
+            self._initialized_db_identity = self._database_file_identity()
+
+    def _initialize_schema_locked(self, conn: sqlite3.Connection) -> None:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS meta (
@@ -3456,6 +3562,259 @@ class LanPortalStateStore:
             "refreshed_at": float(source_row["refreshed_at"] or 0),
             "updated_at": float(source_row["updated_at"] or 0),
         }
+
+    def get_repair_snapshot_meta(self, source_key: str) -> dict[str, Any]:
+        source_key = self._normalize_repair_snapshot_source_key(source_key)
+        if not self.db_path.exists():
+            return {
+                "exists": False,
+                "source_key": source_key,
+                "record_count": 0,
+                "fields": [],
+                "meta": {},
+                "refreshed_at": 0.0,
+                "updated_at": 0.0,
+                "status": "empty",
+                "error": "",
+            }
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                source_row = conn.execute(
+                    "SELECT * FROM repair_snapshot_sources WHERE source_key=?",
+                    (source_key,),
+                ).fetchone()
+        if not source_row:
+            return {
+                "exists": False,
+                "source_key": source_key,
+                "record_count": 0,
+                "fields": [],
+                "meta": {},
+                "refreshed_at": 0.0,
+                "updated_at": 0.0,
+                "status": "empty",
+                "error": "",
+            }
+        fields = self._loads(str(source_row["fields_json"] or ""), [])
+        meta = self._loads(str(source_row["meta_json"] or ""), {})
+        record_count = int(source_row["record_count"] or 0)
+        return {
+            "exists": record_count > 0
+            or str(source_row["status"] or "") == "active",
+            "source_key": source_key,
+            "app_token": str(source_row["app_token"] or ""),
+            "table_id": str(source_row["table_id"] or ""),
+            "status": str(source_row["status"] or "empty"),
+            "record_count": record_count,
+            "fields": fields if isinstance(fields, list) else [],
+            "meta": meta if isinstance(meta, dict) else {},
+            "error": str(source_row["error"] or ""),
+            "refreshed_at": float(source_row["refreshed_at"] or 0),
+            "updated_at": float(source_row["updated_at"] or 0),
+        }
+
+    def query_repair_snapshot_page(
+        self,
+        source_key: str,
+        *,
+        scope: str = "ALL",
+        query: str = "",
+        excluded_statuses: list[str] | tuple[str, ...] | None = None,
+        limit: int = 200,
+        offset: int = 0,
+        focus_record_id: str = "",
+    ) -> dict[str, Any]:
+        """Filter and page a repair snapshot before decoding record payloads."""
+        source_key = self._normalize_repair_snapshot_source_key(source_key)
+        if not self.db_path.exists():
+            return {
+                "records": [],
+                "total": 0,
+                "returned": 0,
+                "offset": 0,
+                "has_more": False,
+            }
+
+        normalized_scope = self._text(scope).upper() or "ALL"
+        clauses = ["source_key = ?"]
+        params: list[Any] = [source_key]
+        if normalized_scope == "CAMPUS":
+            clauses.append(
+                """
+                (
+                    SELECT COUNT(DISTINCT UPPER(CAST(value AS TEXT)))
+                    FROM json_each(repair_snapshot_records.scope_codes_json)
+                    WHERE UPPER(CAST(value AS TEXT))
+                          IN ('110', 'A', 'B', 'C', 'D', 'E', 'H')
+                ) >= 2
+                """
+            )
+        elif normalized_scope != "ALL":
+            clauses.append(
+                """
+                EXISTS (
+                    SELECT 1
+                    FROM json_each(repair_snapshot_records.scope_codes_json)
+                    WHERE UPPER(CAST(value AS TEXT)) = ?
+                )
+                """
+            )
+            params.append(normalized_scope)
+
+        normalized_statuses = list(
+            dict.fromkeys(
+                re.sub(r"\s+", "", self._text(value))
+                for value in (excluded_statuses or [])
+                if self._text(value)
+            )
+        )
+        if normalized_statuses:
+            placeholders = ",".join("?" for _ in normalized_statuses)
+            clauses.append(
+                "REPLACE(REPLACE(REPLACE(TRIM(status), ' ', ''), "
+                f"CHAR(9), ''), CHAR(10), '') NOT IN ({placeholders})"
+            )
+            params.extend(normalized_statuses)
+
+        query_text = self._text(query).casefold()
+        if query_text:
+            escaped_query = (
+                query_text.replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_")
+            )
+            like_value = f"%{escaped_query}%"
+            clauses.append(
+                """
+                (
+                    LOWER(record_id) LIKE ? ESCAPE '\\'
+                    OR LOWER(title) LIKE ? ESCAPE '\\'
+                    OR LOWER(search_text) LIKE ? ESCAPE '\\'
+                )
+                """
+            )
+            params.extend([like_value, like_value, like_value])
+
+        max_limit = max(1, min(int(limit or 200), 500))
+        page_offset = max(0, int(offset or 0))
+        where_sql = " AND ".join(clauses)
+        order_sql = """
+            sort_time DESC,
+            CASE
+                WHEN json_type(payload_json, '$.last_modified_time')
+                     IN ('integer', 'real')
+                THEN CAST(json_extract(payload_json, '$.last_modified_time') AS REAL)
+                WHEN json_type(payload_json, '$.created_time')
+                     IN ('integer', 'real')
+                THEN CAST(json_extract(payload_json, '$.created_time') AS REAL)
+                ELSE 0
+            END DESC,
+            COALESCE(
+                CAST(json_extract(payload_json, '$.last_modified_time') AS TEXT),
+                CAST(json_extract(payload_json, '$.created_time') AS TEXT),
+                ''
+            ) DESC,
+            record_id ASC
+        """
+
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                total_row = conn.execute(
+                    f"""
+                    SELECT COUNT(*) AS c
+                    FROM repair_snapshot_records
+                    WHERE {where_sql}
+                    """,
+                    tuple(params),
+                ).fetchone()
+                total = int(total_row["c"] or 0) if total_row else 0
+
+                focus_id = self._text(focus_record_id)
+                if focus_id:
+                    focus_row = conn.execute(
+                        f"""
+                        WITH ranked AS (
+                            SELECT
+                                record_id,
+                                ROW_NUMBER() OVER (ORDER BY {order_sql}) - 1
+                                    AS row_index
+                            FROM repair_snapshot_records
+                            WHERE {where_sql}
+                        )
+                        SELECT row_index
+                        FROM ranked
+                        WHERE record_id = ?
+                        LIMIT 1
+                        """,
+                        (*params, focus_id),
+                    ).fetchone()
+                    if focus_row is not None:
+                        focus_index = int(focus_row["row_index"] or 0)
+                        page_offset = (focus_index // max_limit) * max_limit
+
+                rows = conn.execute(
+                    f"""
+                    SELECT payload_json
+                    FROM repair_snapshot_records
+                    WHERE {where_sql}
+                    ORDER BY {order_sql}
+                    LIMIT ? OFFSET ?
+                    """,
+                    (*params, max_limit, page_offset),
+                ).fetchall()
+
+        records: list[dict[str, Any]] = []
+        for row in rows:
+            payload = self._loads(str(row["payload_json"] or ""), {})
+            if isinstance(payload, dict):
+                records.append(payload)
+        return {
+            "records": records,
+            "total": total,
+            "returned": len(records),
+            "offset": page_offset,
+            "has_more": page_offset + len(records) < total,
+        }
+
+    def repair_snapshot_parent_counts(
+        self,
+        source_key: str,
+        parent_record_ids: list[str] | tuple[str, ...],
+    ) -> dict[str, int]:
+        source_key = self._normalize_repair_snapshot_source_key(source_key)
+        normalized_ids = list(
+            dict.fromkeys(
+                self._text(value)
+                for value in parent_record_ids
+                if self._text(value)
+            )
+        )
+        if not normalized_ids or not self.db_path.exists():
+            return {}
+        counts: dict[str, int] = {}
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                for start in range(0, len(normalized_ids), 500):
+                    batch = normalized_ids[start : start + 500]
+                    placeholders = ",".join("?" for _ in batch)
+                    rows = conn.execute(
+                        f"""
+                        SELECT parent_record_id, COUNT(*) AS c
+                        FROM repair_snapshot_records
+                        WHERE source_key = ?
+                          AND parent_record_id IN ({placeholders})
+                        GROUP BY parent_record_id
+                        """,
+                        (source_key, *batch),
+                    ).fetchall()
+                    for row in rows:
+                        parent_id = self._text(row["parent_record_id"])
+                        if parent_id:
+                            counts[parent_id] = int(row["c"] or 0)
+        return counts
 
     def upsert_repair_snapshot_record(
         self,

@@ -6,7 +6,6 @@ import socket
 import time
 
 from lan_bitable_template_portal.portal_service import external_real_write_guard
-from upload_event_module.services.robot_webhook import send_text_to_open_ids
 
 
 def wait_until_listening(host: str, port: int, *, timeout_s: float = 3.0) -> bool:
@@ -53,4 +52,6 @@ def send_text_to_open_ids_guarded(text: str, recipients: list[str]) -> tuple[boo
         ]
     if not guard.get("real_write_allowed"):
         return False, str(guard.get("reason") or "真实外部写入未确认。"), []
+    from upload_event_module.services.robot_webhook import send_text_to_open_ids
+
     return send_text_to_open_ids(text, clean_recipients)

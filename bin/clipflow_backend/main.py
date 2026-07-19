@@ -143,7 +143,7 @@ from lan_bitable_template_portal.portal_auth import PortalAuthManager
 from lan_bitable_template_portal.state_store import LanPortalStateStore
 from upload_event_module.config import config
 from upload_event_module.core.parser import extract_event_info
-from upload_event_module.services.feishu_service import check_token_status
+from upload_event_module.services.service_registry import check_token_status
 
 INLINE_IMAGE_B64_FIELDS = {"bytes_b64", "screenshot_bytes_b64"}
 from upload_event_module.services.service_registry import query_record_by_id
@@ -5043,7 +5043,7 @@ class FastAPIPortalController:
         except Exception:
             pass
         try:
-            PortalRuntime.service._maybe_start_daily_attachment_cache_refresh()
+            PortalRuntime.service.start_daily_attachment_cache_refresh_async()
         except Exception:
             pass
         try:

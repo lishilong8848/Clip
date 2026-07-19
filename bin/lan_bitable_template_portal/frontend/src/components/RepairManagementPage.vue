@@ -260,7 +260,7 @@
           </div>
 
           <div v-if="!fields.length && loading" class="empty-state">正在读取字段...</div>
-          <div v-else-if="!editableFields.length" class="empty-state">暂无可填写字段</div>
+          <div v-else-if="!projectFormFields.length" class="empty-state">暂无可填写字段</div>
           <div v-else class="project-form-sections">
             <section v-for="group in projectFieldGroups" :key="group.key" class="project-field-section">
               <header v-if="group.label">
@@ -286,7 +286,8 @@
                     :model-value="fieldDraft[field.field_name]"
                     :required="isRequiredField(field.field_name)"
                     :error="fieldValidationError(field.field_name)"
-                    :disabled="projectFieldIsSourceControlled(field)"
+                    :disabled="projectFieldIsSourceControlled(field) || isCurrentProjectProgressField(field)"
+                    :percentage="isCurrentProjectProgressField(field)"
                     :wide="usesTextarea(field.field_name)"
                     compact
                     @update:model-value="fieldDraft[field.field_name] = $event"
@@ -463,6 +464,7 @@ const RECORD_PAGE_SIZE = 30;
 const RECORD_RESPONSE_CACHE_TTL_MS = 15_000;
 const REPAIR_SPECIALTY_OPTIONS = ["电气", "暖通", "消防", "弱电"];
 const PROJECT_WORKER_FIELD_NAME = "随工人员（或我方维修人员）";
+const CURRENT_PROJECT_PROGRESS_FIELD_NAME = "当前维修进度";
 const recordResponseCache = new Map<string, { expiresAt: number; payload: LooseDict }>();
 
 function clearRecordResponseCache(): void {
@@ -624,11 +626,14 @@ const eventTitle = ref(routeEventTitle);
 const sourceEventId = ref(routeEventId);
 
 const editableFields = computed(() => sortedFields(fields.value.filter(projectFieldIsEditable)));
+const projectFormFields = computed(() => sortedFields(fields.value.filter(
+  (field) => projectFieldIsEditable(field) || isCurrentProjectProgressField(field),
+)));
 const projectFieldGroups = computed(() => {
   const grouped = new Map<ProjectFieldGroupKey, LooseDict[]>(
     PROJECT_FIELD_GROUPS.map((group) => [group.key, []]),
   );
-  for (const field of editableFields.value) {
+  for (const field of projectFormFields.value) {
     grouped.get(projectFieldGroup(field.field_name))?.push(field);
   }
   return PROJECT_FIELD_GROUPS.map((group) => ({
@@ -764,6 +769,10 @@ function projectFieldIsEditable(field: LooseDict | null | undefined): boolean {
     field.editable
     || (!selectedRepairIds.value.length && field.editable_without_repair_link),
   );
+}
+
+function isCurrentProjectProgressField(field: LooseDict | null | undefined): boolean {
+  return String(field?.field_name || "").trim() === CURRENT_PROJECT_PROGRESS_FIELD_NAME;
 }
 
 function projectFieldIsSourceControlled(field: LooseDict | null | undefined): boolean {
@@ -1153,7 +1162,7 @@ function resetDraft(): void {
   projectWorkerPeople.value = [];
   const rawFields = selectedRecord.value?.raw_fields || {};
   const displayFields = selectedRecord.value?.display_fields || {};
-  for (const field of editableFields.value) {
+  for (const field of projectFormFields.value) {
     const name = String(field.field_name || "");
     const fieldType = Number(field.field_type || 0);
     const prefersRaw = [2, 5, 15].includes(fieldType);
