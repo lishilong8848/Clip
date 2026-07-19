@@ -4766,13 +4766,22 @@ class PortalRuntime:
         active_item_id = str(prepared.get("active_item_id") or "").strip()
         source_record_id = cls._source_record_id_from_prepared_start(prepared)
 
-        target_record_id = ""
+        target_record_id = canonical_target_record_id(prepared)
+        if (
+            is_local_record_id(target_record_id)
+            or target_record_id == source_record_id
+        ):
+            target_record_id = ""
         try:
-            identity = cls.state_store.resolve_notice_identity(
-                work_type=work_type,
-                active_item_id=active_item_id,
-                source_record_id=source_record_id,
-                target_record_id="",
+            identity = (
+                cls.state_store.resolve_notice_identity(
+                    work_type=work_type,
+                    active_item_id=active_item_id,
+                    source_record_id=source_record_id,
+                    target_record_id="",
+                )
+                if not target_record_id
+                else None
             )
         except Exception:
             identity = None

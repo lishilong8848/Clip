@@ -104,6 +104,7 @@
                 />
                 <RepairFieldControl
                   v-else
+                  :class="{ 'followup-progress-field': isProgressField(field) }"
                   :field="field"
                   :input-id="followupFieldInputId(field)"
                   :label="fieldLabel(field.field_name)"
@@ -1534,6 +1535,11 @@ onBeforeUnmount(() => {
   gap: 7px 10px;
 }
 
+.followup-field-grid > .followup-progress-field {
+  grid-column: span 2;
+  min-width: 320px;
+}
+
 .followup-field-section:last-child {
   scroll-margin-bottom: 84px;
 }
@@ -1663,6 +1669,11 @@ onBeforeUnmount(() => {
 
   .followup-field-grid {
     grid-template-columns: 1fr;
+  }
+
+  .followup-field-grid > .followup-progress-field {
+    grid-column: 1;
+    min-width: 0;
   }
 }
 </style>

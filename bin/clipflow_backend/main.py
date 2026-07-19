@@ -166,6 +166,10 @@ MAX_NOTICE_ATTACHMENT_PENDING_BYTES = int(
 )
 
 
+def _current_month_label() -> str:
+    return f"{dt.datetime.now().month}月"
+
+
 def _queue_stats() -> dict:
     qt_outbox_counts: dict[str, int] = {}
     runtime_queue_details: dict[str, dict] = {}
@@ -486,6 +490,10 @@ class FastAPIPortalController:
                 work_type = str(request.query_params.get("work_type") or "maintenance").strip()
                 if work_type != "all" and work_type not in NOTICE_TYPE_BY_WORK_TYPE:
                     work_type = "maintenance"
+                month = str(
+                    request.query_params.get("month")
+                    or _current_month_label()
+                ).strip()
                 repair_management_record_id = str(
                     request.query_params.get("repair_management_record_id") or ""
                 ).strip()
@@ -525,7 +533,7 @@ class FastAPIPortalController:
                         "workbench",
                         open_id,
                         scope,
-                        "",
+                        month,
                         specialty,
                         search,
                         work_type,
@@ -538,6 +546,7 @@ class FastAPIPortalController:
                     ),
                     lambda: PortalRuntime.service.query_records(
                         scope=scope,
+                        month=month,
                         specialty=specialty,
                         search=search,
                         ongoing_items=ongoing,
@@ -589,6 +598,7 @@ class FastAPIPortalController:
                     session=session,
                     scope=scope,
                     work_type=work_type,
+                    month=month,
                     search=search,
                     specialty=specialty,
                     record_id=record_id,
@@ -626,6 +636,7 @@ class FastAPIPortalController:
             request: Request,
             scope: str = Form("ALL"),
             work_type: str = Form("maintenance"),
+            month: str = Form(""),
             paste_text: str = Form(""),
         ):
             session = self._current_session(request)
@@ -646,6 +657,7 @@ class FastAPIPortalController:
                 payload = await asyncio.to_thread(
                     PortalRuntime.service.query_records,
                     scope=checked_scope,
+                    month=month or _current_month_label(),
                     ongoing_items=ongoing,
                     work_type=parsed_work_type,
                     sections=("records", "ongoing", "stats", "zhihang"),
@@ -668,6 +680,7 @@ class FastAPIPortalController:
                     session=session,
                     scope=checked_scope,
                     work_type=parsed_work_type,
+                    month=month or _current_month_label(),
                     manual=True,
                     scope_options=scope_options,
                     parsed_draft=parsed_draft,
@@ -3554,10 +3567,15 @@ class FastAPIPortalController:
                     request.query_params.get("work_type") or "maintenance"
                 ).strip()
                 search = str(request.query_params.get("q") or "").strip()
+                month = str(
+                    request.query_params.get("month")
+                    or _current_month_label()
+                ).strip()
                 items = await asyncio.to_thread(
                     PortalRuntime.service.list_bindable_source_items,
                     scope=scope,
                     work_type=work_type,
+                    month=month,
                     search=search,
                     ongoing_items=self._get_ongoing(scope),
                     limit=200,

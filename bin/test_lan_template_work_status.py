@@ -5854,6 +5854,52 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(stored_status["items"][0]["status"], "已结束")
             self.assertEqual(status_path.read_text(encoding="utf-8"), original)
 
+    def test_current_month_source_record_reuses_month_independent_notice_memory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            current_month = service._current_month_label()
+            service._remember_draft_fields(
+                building="A楼",
+                maintenance_total="UPS厂商巡检维护",
+                item_name="UPS厂商巡检维护",
+                maintenance_cycle="月度",
+                location="A-245配电室",
+                content="按上月记忆执行UPS巡检",
+                reason="按月度计划开展维护",
+                impact="对IT设备无影响",
+                extra_fields={
+                    "progress": "准备工作已完成，人员已就位",
+                    "specialty": "电气",
+                },
+            )
+            service._records = [
+                _build_record(
+                    "maintenance-current-memory",
+                    "A楼",
+                    "UPS厂商巡检维护",
+                    current_month,
+                    maintenance_cycle="月度",
+                )
+            ]
+            service._records[0]["display_fields"].update(
+                {
+                    "计划开始时间": "2026-06-18 09:30",
+                    "计划结束时间": "2026-06-18 18:30",
+                }
+            )
+
+            result = service.query_records(
+                month=current_month,
+                scope="A",
+                work_type=WORK_TYPE_MAINTENANCE,
+            )
+
+            self.assertEqual(len(result["records"]), 1)
+            memory = result["records"][0]["memory"]
+            self.assertEqual(memory["content"], "按上月记忆执行UPS巡检")
+            self.assertEqual(memory["location"], "A-245配电室")
+            self.assertEqual(memory["maintenance_cycle"], "月度")
+
     def test_action_jobs_persist_in_sqlite_and_restart_recovers_pre_send_job(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -6459,14 +6505,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 [item["record_id"] for item in campus["records"]],
                 ["c2", "c3"],
             )
-            self.assertEqual(
-                [
-                    item["source_record_id"]
-                    for item in campus["ongoing"]
-                ],
-                ["c3"],
-            )
-            self.assertTrue(campus["ongoing"][0]["recovered_from_source"])
+            self.assertEqual(campus["ongoing"], [])
 
             with patch.object(
                 service, "_target_records_for_notice_type", return_value=[]
@@ -6535,13 +6574,43 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 ],
             )
 
+            current = service.query_records(
+                scope="A",
+                ongoing_items=[
+                    {
+                        "active_item_id": "active-previous-month",
+                        "source_record_id": "m-previous",
+                        "target_record_id": "target-previous-month",
+                        "record_id": "target-previous-month",
+                        "work_type": WORK_TYPE_MAINTENANCE,
+                        "notice_type": "维保通告",
+                        "title": "上月跨月进行中维保",
+                        "building": "A楼",
+                        "building_codes": ["A"],
+                        "status": "进行中",
+                    }
+                ],
+            )
+            self.assertEqual(
+                [item["record_id"] for item in current["records"]],
+                ["m-current", "c-current", "r-current"],
+            )
+            self.assertEqual(
+                current["filters"]["default_month"],
+                current_label,
+            )
+            self.assertEqual(
+                [item["active_item_id"] for item in current["ongoing"]],
+                ["active-previous-month"],
+            )
+
             previous = service.query_records(month=previous_label, scope="A")
             self.assertEqual(
                 [item["record_id"] for item in previous["records"]],
                 ["m-previous", "c-previous", "r-previous"],
             )
 
-    def test_change_start_rejects_source_progress_that_is_not_not_started(self):
+    def test_change_source_ongoing_can_start_without_active_item(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
             service._change_records = [
@@ -6557,12 +6626,23 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "work_type": "change",
                     "scope": "E",
                     "record_id": "c-e",
+                    "source_record_id": "c-e",
+                    "title": "E楼进行中变更",
+                    "level": "I3",
+                    "start_time": _test_datetime(8, "09:00"),
+                    "end_time": _test_datetime(8, "18:00"),
+                    "location": "E楼",
+                    "content": "测试内容",
+                    "reason": "测试原因",
+                    "impact": "测试影响",
+                    "progress": "准备工作已完成",
                     "operation_id": "change-e-start",
                 }
             )
             self.assertTrue(should_start)
-            with self.assertRaises(PortalError):
-                service.prepare_action_job(job_id)
+            prepared = service.prepare_action_job(job_id)
+            self.assertEqual(prepared["action"], "start")
+            self.assertEqual(prepared["source_progress"], "进行中")
 
     def test_change_source_ongoing_update_resolves_target_record(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -8204,7 +8284,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertIn("【设备检修】状态：开始", prepared["text"])
             self.assertIn("【备件更换情况】无", prepared["text"])
 
-    def test_started_repair_source_record_is_displayed_as_update_candidate(self):
+    def test_started_repair_source_record_stays_in_source_list_without_active_item(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
             service._repair_records = [
@@ -8221,13 +8301,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
             self.assertEqual([item["record_id"] for item in result["records"]], ["r1"])
             self.assertEqual(result["records"][0]["source_progress"], "进行中")
-            self.assertEqual(len(result["ongoing"]), 1)
-            self.assertEqual(result["ongoing"][0]["source_record_id"], "r1")
-            self.assertEqual(
-                result["ongoing"][0]["target_record_id"],
-                "target-r1",
-            )
-            self.assertTrue(result["ongoing"][0]["recovered_from_source"])
+            self.assertEqual(result["ongoing"], [])
 
     def test_repair_source_ongoing_update_uses_linked_target_record(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -8617,7 +8691,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
             self.assertEqual(merged, [])
 
-    def test_query_records_recovers_source_ongoing_change_without_qt_item(self):
+    def test_query_records_keeps_source_ongoing_change_out_of_active_list(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
             service._change_records = [
@@ -8631,17 +8705,12 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
             result = service.query_records(scope="C", ongoing_items=[])
 
-            self.assertEqual(len(result["ongoing"]), 1)
-            recovered = result["ongoing"][0]
             self.assertEqual(
-                recovered["source_record_id"], "source-change-recovered"
+                [item["record_id"] for item in result["records"]],
+                ["source-change-recovered"],
             )
-            self.assertEqual(recovered["work_type"], WORK_TYPE_CHANGE)
-            self.assertEqual(recovered["status"], "进行中")
-            self.assertTrue(recovered["active_item_id"])
-            self.assertEqual(recovered.get("target_record_id", ""), "")
-            self.assertEqual(recovered.get("record_id", ""), "")
-            self.assertTrue(recovered["recovered_from_source"])
+            self.assertEqual(result["records"][0]["source_progress"], "进行中")
+            self.assertEqual(result["ongoing"], [])
 
     def test_query_records_does_not_duplicate_recovered_source_ongoing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -9175,24 +9244,37 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 },
                 origin="test",
             )
-            with self.assertRaisesRegex(PortalError, "已创建目标记录"):
-                service.prepare_change_action(
-                    {
-                        "action": "start",
-                        "scope": "A",
-                        "work_type": WORK_TYPE_CHANGE,
-                        "record_id": "m-convert-running",
-                        "source_record_id": "m-convert-running",
-                        "start_time": "2026-06-12T09:30",
-                        "end_time": "2026-06-12T18:30",
-                        "location": "A楼楼顶",
-                        "content": "工程师进行冷却塔清洗",
-                        "reason": "按计划维护",
-                        "impact": "对IT设备无影响",
-                        "progress": "准备工作已完成",
-                    },
-                    job_id="job-converted-running-duplicate",
+            prepared_again = service.prepare_change_action(
+                {
+                    "action": "start",
+                    "scope": "A",
+                    "work_type": WORK_TYPE_CHANGE,
+                    "record_id": "m-convert-running",
+                    "source_record_id": "m-convert-running",
+                    "start_time": "2026-06-12T09:30",
+                    "end_time": "2026-06-12T18:30",
+                    "location": "A楼楼顶",
+                    "content": "工程师进行冷却塔清洗",
+                    "reason": "按计划维护",
+                    "impact": "对IT设备无影响",
+                    "progress": "准备工作已完成",
+                },
+                job_id="job-converted-running-recover",
+            )
+            with patch.object(
+                PortalRuntime.state_store,
+                "resolve_notice_identity",
+                return_value={"target_record_id": "rec-existing-change"},
+            ), patch(
+                "lan_bitable_template_portal.server.external_real_write_guard",
+                return_value={"mock_external": True},
+            ):
+                existing_target = PortalRuntime._existing_target_for_prepared_start(
+                    prepared_again,
+                    "变更通告",
                 )
+
+            self.assertEqual(existing_target, "rec-existing-change")
 
     def test_workbench_lite_contains_auth_heartbeat(self):
         from lan_bitable_template_portal.workbench_lite import render_workbench_lite
@@ -9612,6 +9694,112 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
             self.assertEqual(prepared["action"], "start")
             self.assertEqual(prepared["source_progress"], "延期未开始")
+
+    def test_unlinked_source_ongoing_records_can_start_for_all_source_types(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            current_month = MaintenancePortalService._current_month_label()
+            service._records = [
+                _build_record(
+                    "m-source-ongoing",
+                    "A楼",
+                    "冷却塔清洗",
+                    current_month,
+                    status="进行中",
+                    maintenance_cycle="每月",
+                )
+            ]
+            service._change_records = [
+                _build_change_record(
+                    "c-source-ongoing",
+                    building="A楼",
+                    progress="进行中",
+                    title="A楼源表进行中变更",
+                )
+            ]
+            service._repair_records = [
+                _build_repair_record(
+                    "r-source-ongoing",
+                    building="A楼",
+                    title="A楼源表进行中检修",
+                    started=True,
+                    target_record_id="target-r-source-ongoing",
+                )
+            ]
+            service._maintenance_loaded_once = True
+            service._change_loaded_once = True
+            service._repair_loaded_once = True
+
+            maintenance = service.prepare_maintenance_action(
+                {
+                    "action": "start",
+                    "scope": "A",
+                    "work_type": WORK_TYPE_MAINTENANCE,
+                    "record_id": "m-source-ongoing",
+                    "source_record_id": "m-source-ongoing",
+                    "specialty": "电气",
+                    "start_time": "2026-06-12T09:30",
+                    "end_time": "2026-06-12T18:30",
+                    "location": "A楼",
+                    "content": "测试内容",
+                    "reason": "测试原因",
+                    "impact": "测试影响",
+                    "progress": "准备工作已完成",
+                },
+                job_id="job-maint-source-ongoing",
+            )
+            change = service.prepare_change_action(
+                {
+                    "action": "start",
+                    "scope": "A",
+                    "work_type": WORK_TYPE_CHANGE,
+                    "source_work_type": WORK_TYPE_CHANGE,
+                    "record_id": "c-source-ongoing",
+                    "source_record_id": "c-source-ongoing",
+                    "title": "A楼源表进行中变更",
+                    "level": "I3",
+                    "start_time": "2026-06-12T09:30",
+                    "end_time": "2026-06-12T18:30",
+                    "location": "A楼",
+                    "content": "测试内容",
+                    "reason": "测试原因",
+                    "impact": "测试影响",
+                    "progress": "准备工作已完成",
+                },
+                job_id="job-change-source-ongoing",
+            )
+            repair = service.prepare_repair_action(
+                {
+                    "action": "start",
+                    "scope": "A",
+                    "work_type": WORK_TYPE_REPAIR,
+                    "record_id": "r-source-ongoing",
+                    "source_record_id": "r-source-ongoing",
+                    "title": "A楼源表进行中检修",
+                    "fault_time": _test_datetime(8, "08:20"),
+                    "expected_time": _test_datetime(8, "18:00"),
+                    "location": "A楼",
+                    "specialty": "电气",
+                    "repair_device": "UPS",
+                    "repair_fault": "测试故障",
+                    "fault_type": "设备故障",
+                    "repair_mode": "自维",
+                    "discovery": "人工发现",
+                    "symptom": "测试现象",
+                    "reason": "测试原因",
+                    "solution": "测试方案",
+                    "progress": "准备工作已完成",
+                },
+                job_id="job-repair-source-ongoing",
+            )
+
+            self.assertEqual(maintenance["source_progress"], "进行中")
+            self.assertEqual(change["source_progress"], "进行中")
+            self.assertEqual(repair["source_progress"], "进行中")
+            self.assertEqual(
+                repair["target_record_id"],
+                "target-r-source-ongoing",
+            )
 
     def test_prepare_actions_reject_time_range_shorter_than_one_hour(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -10144,7 +10332,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
             self.assertEqual(merged, [])
 
-    def test_query_records_recovers_source_ongoing_repair_without_qt_item(self):
+    def test_query_records_keeps_source_ongoing_repair_out_of_active_list(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
             service._repair_records = [
@@ -10159,15 +10347,12 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
             result = service.query_records(scope="D", ongoing_items=[])
 
-            self.assertEqual(len(result["ongoing"]), 1)
-            recovered = result["ongoing"][0]
             self.assertEqual(
-                recovered["source_record_id"], "source-repair-recovered"
+                [item["record_id"] for item in result["records"]],
+                ["source-repair-recovered"],
             )
-            self.assertEqual(recovered["work_type"], WORK_TYPE_REPAIR)
-            self.assertEqual(recovered["status"], "进行中")
-            self.assertTrue(recovered["active_item_id"])
-            self.assertEqual(recovered.get("target_record_id", ""), "")
+            self.assertEqual(result["records"][0]["source_progress"], "进行中")
+            self.assertEqual(result["ongoing"], [])
 
     def test_hidden_ongoing_item_is_removed_from_refresh_results(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -14060,7 +14245,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertIn("绑定待发起事项", html)
         self.assertIn("不绑定", html)
 
-    def test_workbench_source_rows_use_local_status_and_disable_non_pending_items(self):
+    def test_workbench_source_ongoing_row_is_startable_until_active_item_exists(self):
         from lan_bitable_template_portal.workbench_lite import _record_rows
 
         service = _TestMaintenancePortalService()
@@ -14104,10 +14289,12 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             specialty="",
             selected_id="",
         )
-        self.assertEqual(html.count('class="notice-row is-disabled"'), 2)
-        self.assertEqual(html.count('aria-disabled="true"'), 2)
+        self.assertEqual(html.count('class="notice-row is-disabled"'), 1)
+        self.assertEqual(html.count('aria-disabled="true"'), 1)
+        self.assertIn('data-action="start"', html)
+        self.assertIn('data-source-record-id="repair-ongoing-source"', html)
         self.assertIn("该事项已结束，只保留查看状态，不可再次发起。", html)
-        self.assertIn("该事项已在“已开始未结束”中", html)
+        self.assertNotIn("该事项已在“已开始未结束”中", html)
 
     def test_manual_source_options_only_return_pending_unlinked_items(self):
         service = _TestMaintenancePortalService()
@@ -14132,6 +14319,12 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             title="D楼已关联进行中检修",
             building="D楼",
         )
+        unlinked_ongoing = _build_repair_record(
+            "repair-unlinked-ongoing",
+            title="D楼未关联进行中检修",
+            building="D楼",
+            started=True,
+        )
         ongoing_items = [
             {
                 "active_item_id": "active-repair-linked",
@@ -14145,7 +14338,13 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "status": "进行中",
             }
         ]
-        records = [pending, local_ended, remote_ended, linked_ongoing]
+        records = [
+            pending,
+            unlinked_ongoing,
+            local_ended,
+            remote_ended,
+            linked_ongoing,
+        ]
         summaries = {
             "repair-local-ended": {
                 "status": "已结束",
@@ -14172,8 +14371,11 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             )
 
         self.assertEqual(
-            [item["source_record_id"] for item in options],
-            ["repair-pending"],
+            {
+                item["source_record_id"]
+                for item in options
+            },
+            {"repair-pending", "repair-unlinked-ongoing"},
         )
 
     def test_workbench_lite_repair_management_prefill_keeps_ids_distinct(self):
@@ -14485,6 +14687,103 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertIn("const liteIsAdmin = true", html)
         self.assertIn("deleteButton.setAttribute('data-ongoing-delete-mode', 'remote')", html)
         self.assertIn("localRemoveButton.setAttribute('data-ongoing-delete-mode', 'local')", html)
+
+    def test_workbench_lite_defaults_to_current_month_and_preserves_month_selection(self):
+        from lan_bitable_template_portal.workbench_lite import render_workbench_lite
+
+        current_month = MaintenancePortalService._current_month_label()
+        previous_month = MaintenancePortalService._recent_month_labels()[1]
+        html = render_workbench_lite(
+            payload={
+                "records": [],
+                "ongoing": [],
+                "daily_summary": {"stats": {}},
+                "record_type_counts": {},
+                "ongoing_type_counts": {},
+                "filters": {
+                    "default_month": current_month,
+                    "months": [current_month, previous_month],
+                },
+            },
+            session={"user": {"name": "测试用户"}, "is_admin": False},
+            scope="A",
+            work_type="maintenance",
+            scope_options=[{"value": "A", "label": "A楼"}],
+        )
+
+        self.assertIn('id="lite-month-select" name="month"', html)
+        self.assertIn(
+            f'<option value="{current_month}" selected>{current_month}</option>',
+            html,
+        )
+        self.assertIn(
+            f'<input type="hidden" name="source_month" value="{current_month}">',
+            html,
+        )
+        self.assertIn("params.set('month', event.target.value);", html)
+        self.assertIn("params.delete('record_id');", html)
+        self.assertIn("params.delete('active_item_id');", html)
+
+    def test_workbench_lite_applies_history_memory_and_moves_source_times_to_today(self):
+        from lan_bitable_template_portal.workbench_lite import (
+            _draft_from_record,
+            _memory_status_chip,
+        )
+
+        record = {
+            "record_id": "source-memory-current",
+            "source_record_id": "source-memory-current",
+            "work_type": "maintenance",
+            "notice_type": "维保通告",
+            "display_fields": {
+                "楼栋": "A楼",
+                "维护总项": "UPS厂商巡检维护",
+                "维护周期": "月度",
+                "专业类别": "暖通",
+                "计划开始时间": "2026-06-18 09:30",
+                "计划结束时间": "2026-06-18 18:30",
+            },
+            "memory": {
+                "location": "A-245配电室",
+                "content": "工程师按历史记忆执行UPS巡检",
+                "reason": "按月度维护计划执行",
+                "impact": "对IT设备无影响",
+                "progress": "准备工作已完成，人员已就位",
+                "maintenance_cycle": "月度",
+                "specialty": "电气",
+                "updated_at": "2026-06-18 18:30:00",
+            },
+        }
+
+        draft = _draft_from_record(record, work_type="maintenance")
+        today = dt.date.today().isoformat()
+
+        self.assertEqual(draft["location"], "A-245配电室")
+        self.assertEqual(draft["content"], "工程师按历史记忆执行UPS巡检")
+        self.assertEqual(draft["reason"], "按月度维护计划执行")
+        self.assertEqual(draft["impact"], "对IT设备无影响")
+        self.assertEqual(draft["progress"], "准备工作已完成，人员已就位")
+        self.assertEqual(draft["specialty"], "电气")
+        self.assertEqual(draft["start_time"], f"{today}T09:30")
+        self.assertEqual(draft["end_time"], f"{today}T18:30")
+        self.assertIn("已用历史记忆", _memory_status_chip(record))
+
+        ongoing_record = {
+            **record,
+            "active_item_id": "active-memory-current",
+        }
+        ongoing_draft = _draft_from_record(
+            ongoing_record,
+            work_type="maintenance",
+        )
+        self.assertEqual(ongoing_draft["start_time"], "2026-06-18T09:30")
+        self.assertEqual(ongoing_draft["end_time"], "2026-06-18T18:30")
+
+        metadata_only = {
+            **record,
+            "memory": {"updated_at": "2026-06-18 18:30:00"},
+        }
+        self.assertNotIn("已用历史记忆", _memory_status_chip(metadata_only))
 
     def test_api_workbench_all_is_not_treated_as_real_work_type(self):
         main_text = (BIN_DIR / "clipflow_backend" / "main.py").read_text(encoding="utf-8")
@@ -17808,6 +18107,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             for index, name in enumerate(
                 (
                     "对应来源",
+                    "故障发生时间",
                     "故障维修原因",
                     "所属数据中心/楼栋-使用",
                     "维修开始时间",
@@ -17817,6 +18117,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         }
         auto_fields = {
             "对应来源": ["BMS系统"],
+            "故障发生时间": 500,
             "故障维修原因": "事件告警描述",
             "所属数据中心/楼栋-使用": "南通A楼",
             "维修开始时间": 1000,
@@ -17825,6 +18126,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         result = MaintenancePortalService._apply_repair_management_source_controlled_fields(
             {
                 "对应来源": ["旧来源"],
+                "故障发生时间": 999,
                 "故障维修原因": "用户旧值",
                 "所属数据中心/楼栋-使用": "南通B楼",
                 "维修开始时间": 3000,

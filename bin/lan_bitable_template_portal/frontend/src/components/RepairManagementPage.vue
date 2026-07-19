@@ -506,6 +506,7 @@ const PROJECT_FIELD_LABELS: Record<string, string> = {
 };
 const EVENT_SOURCE_CONTROLLED_FIELD_NAMES = new Set([
   "对应来源",
+  "故障发生时间",
   "故障维修原因",
   "所属数据中心/楼栋-使用",
 ]);

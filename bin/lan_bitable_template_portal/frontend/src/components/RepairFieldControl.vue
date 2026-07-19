@@ -404,7 +404,7 @@ textarea {
   --repair-progress-soft: #eaf2ff;
   min-height: 38px;
   display: grid;
-  grid-template-columns: auto minmax(48px, 1fr) 64px;
+  grid-template-columns: minmax(76px, auto) minmax(80px, 1fr) 76px;
   align-items: center;
   gap: 8px;
   border: 1px solid #c9dbf2;
@@ -550,7 +550,7 @@ textarea {
   grid-column: 3;
   grid-row: 1;
   position: relative;
-  width: 64px;
+  width: 76px;
 }
 
 .percentage-number-wrap .percentage-number,
@@ -579,6 +579,18 @@ textarea {
 
 .percentage-number-wrap .percentage-output {
   cursor: default;
+}
+
+.percentage-number-wrap input[type="number"] {
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+.percentage-number-wrap input[type="number"]::-webkit-inner-spin-button,
+.percentage-number-wrap input[type="number"]::-webkit-outer-spin-button {
+  margin: 0;
+  appearance: none;
+  -webkit-appearance: none;
 }
 
 .percentage-number-wrap > span {

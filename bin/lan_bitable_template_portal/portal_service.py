@@ -169,9 +169,11 @@ REPAIR_MANAGEMENT_PROTECTED_FIELD_NAMES = {
 REPAIR_MANAGEMENT_EVENT_AUTO_FIELD_NAMES = (
     "对应来源",
     "对应事件等级",
+    "故障发生时间",
 )
 REPAIR_MANAGEMENT_EVENT_SOURCE_CONTROLLED_FIELD_NAMES = (
     "对应来源",
+    "故障发生时间",
     "故障维修原因",
     "所属数据中心/楼栋-使用",
 )
@@ -10278,7 +10280,7 @@ class MaintenancePortalService:
 
     @classmethod
     def _recent_month_filter_options(cls) -> list[str]:
-        return [RECENT_MONTH_FILTER_LABEL, *cls._recent_month_labels()]
+        return cls._recent_month_labels()
 
     @staticmethod
     def _format_input_datetime(value: Any) -> str:
@@ -10927,9 +10929,25 @@ class MaintenancePortalService:
         # 维保源表按当前月份全量展示；已完成/结束类状态由前端禁用点击。
         return True
 
+    @staticmethod
+    def _source_progress_allows_start(value: Any) -> bool:
+        progress = str(value or "").strip()
+        if not progress:
+            return True
+        if "未结束" not in progress and any(
+            flag in progress
+            for flag in ("已结束", "正常结束", "延期结束", "延迟结束", "已完成", "闭环")
+        ):
+            return False
+        return any(
+            flag in progress
+            for flag in ("未开始", "进行中", "未结束")
+        )
+
     def _maintenance_status_is_startable(self, record: dict[str, Any]) -> bool:
-        status = self._maintenance_status_value(record)
-        return not status or "未开始" in status
+        return self._source_progress_allows_start(
+            self._maintenance_status_value(record)
+        )
 
     def _maintenance_status_is_completed(self, record: dict[str, Any]) -> bool:
         status = self._maintenance_status_value(record)
@@ -12700,7 +12718,7 @@ class MaintenancePortalService:
         include_prepared: bool = False,
     ) -> dict[str, Any]:
         self.ensure_snapshot_loaded()
-        default_month = RECENT_MONTH_FILTER_LABEL
+        default_month = self._current_month_label()
         overview: dict[str, dict[str, Any]] = {}
         prepared_workbenches: dict[str, dict[str, Any]] = {}
         has_scope_filter = scopes is not None
@@ -14895,19 +14913,7 @@ class MaintenancePortalService:
         with self._hidden_ongoing_lock:
             payload = self._load_hidden_ongoing_locked()
             hidden = payload.get("hidden") or {}
-            if any(key in hidden for key in keys):
-                return True
-            source_record_id = canonical_source_record_id(item)
-            if not source_record_id:
-                return False
-            work_type = self._item_work_type(item)
-            return any(
-                isinstance(entry, dict)
-                and str(entry.get("work_type") or "").strip() == work_type
-                and str(entry.get("source_record_id") or "").strip()
-                == source_record_id
-                for entry in hidden.values()
-            )
+            return any(key in hidden for key in keys)
 
     def hide_ongoing_item(
         self, item: dict[str, Any], *, scope: str = "ALL", deleted_by: str = ""
@@ -16880,169 +16886,6 @@ class MaintenancePortalService:
             projected.append(copied)
         return projected
 
-    def _supplement_source_ongoing_items(
-        self,
-        scope: str,
-        source_records: list[dict[str, Any]],
-        ongoing_items: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        """Surface source rows marked ongoing when their local active row is missing."""
-        scope = self._normalize_scope(scope)
-        projected = [
-            copy.deepcopy(item)
-            for item in (ongoing_items or [])
-            if isinstance(item, dict)
-        ]
-        if not source_records:
-            return projected
-        summary_by_record = self._work_status_by_records(
-            source_records,
-            scope=scope,
-        )
-        existing_keys: set[str] = set()
-        for item in projected:
-            existing_keys.update(self._ongoing_merge_identity_keys(item))
-
-        for record in source_records:
-            if not isinstance(record, dict):
-                continue
-            source_record_id = str(record.get("record_id") or "").strip()
-            if not source_record_id:
-                continue
-            serialized = self._serialize_record(record, summary_by_record)
-            progress = str(serialized.get("source_progress") or "").strip()
-            if "进行中" not in progress and "未结束" not in progress:
-                continue
-            work_type = self._record_work_type(record)
-            source_identity_key = f"{work_type}:source:{source_record_id}"
-            status_item = summary_by_record.get(source_record_id)
-            status_keys = (
-                self._ongoing_merge_identity_keys(status_item)
-                if isinstance(status_item, dict)
-                else set()
-            )
-            if source_identity_key in existing_keys or status_keys & existing_keys:
-                continue
-
-            projection = copy.deepcopy(serialized)
-            source_fields = (
-                copy.deepcopy(record.get("display_fields"))
-                if isinstance(record.get("display_fields"), dict)
-                else {}
-            )
-            if (
-                isinstance(status_item, dict)
-                and not self._is_completed_work_status_item(status_item)
-            ):
-                for key, value in status_item.items():
-                    if key == "record_id" or value in (None, "", [], {}):
-                        continue
-                    projection[key] = copy.deepcopy(value)
-            projected_fields = (
-                projection.get("display_fields")
-                if isinstance(projection.get("display_fields"), dict)
-                else {}
-            )
-            projection["display_fields"] = {
-                **source_fields,
-                **copy.deepcopy(projected_fields),
-            }
-            projection["work_type"] = work_type
-            projection["notice_type"] = str(
-                projection.get("notice_type")
-                or NOTICE_TYPE_BY_WORK_TYPE.get(
-                    work_type, NOTICE_TYPE_MAINTENANCE
-                )
-            ).strip()
-            projection["source_record_id"] = source_record_id
-
-            if work_type == WORK_TYPE_CHANGE:
-                title = self._change_title(record)
-                building_codes = self._change_record_building_codes(record)
-                specialty = self._change_specialty(record)
-            elif work_type == WORK_TYPE_REPAIR:
-                title = self._repair_title(record)
-                building_codes = self._repair_record_building_codes(record)
-                specialty = self._repair_specialty(record)
-            else:
-                title = self._maintenance_title(record)
-                building_codes = self._building_codes_from_value(
-                    source_fields.get("楼栋")
-                )
-                specialty = str(
-                    source_fields.get("专业类别")
-                    or source_fields.get("专业")
-                    or ""
-                ).strip()
-            projection["title"] = str(
-                projection.get("title") or title or source_record_id
-            ).strip()
-            projection["building_codes"] = list(
-                projection.get("building_codes") or building_codes
-            )
-            projection["building"] = str(
-                projection.get("building")
-                or source_fields.get("楼栋")
-                or source_fields.get("变更楼栋")
-                or self._building_label_from_codes(building_codes)
-            ).strip()
-            projection["specialty"] = str(
-                projection.get("specialty") or specialty
-            ).strip()
-
-            target_record_id = str(
-                (status_item or {}).get("target_record_id")
-                if isinstance(status_item, dict)
-                else ""
-            ).strip()
-            if not target_record_id:
-                target_record_id = self._target_record_id_from_identity_map(
-                    work_type=work_type,
-                    active_item_id=str(
-                        (status_item or {}).get("active_item_id")
-                        if isinstance(status_item, dict)
-                        else ""
-                    ).strip(),
-                    source_record_id=source_record_id,
-                )
-            if (
-                not target_record_id
-                and work_type == WORK_TYPE_REPAIR
-            ):
-                target_record_id = self._repair_target_record_id(record)
-            if (
-                target_record_id == source_record_id
-                or is_local_record_id(target_record_id)
-            ):
-                target_record_id = ""
-
-            projection["active_item_id"] = str(
-                projection.get("active_item_id")
-                or f"source-ongoing-{work_type}-{source_record_id}"
-            ).strip()
-            if target_record_id:
-                projection["target_record_id"] = target_record_id
-                projection["record_id"] = target_record_id
-                projection["binding_status"] = "bound"
-            else:
-                projection.pop("target_record_id", None)
-                projection["record_id"] = ""
-                projection["binding_status"] = "needs_binding"
-            projection["status"] = "进行中"
-            projection["source_progress"] = "进行中"
-            projection["source_status"] = "进行中"
-            projection["recovered_from_source"] = True
-            projection.setdefault("origin", "source_ongoing_recovery")
-            projection = normalize_notice_identity_payload(projection)
-            if self._is_ongoing_hidden(projection):
-                continue
-            projection_keys = self._ongoing_merge_identity_keys(projection)
-            if projection_keys & existing_keys:
-                continue
-            projected.append(projection)
-            existing_keys.update(projection_keys)
-        return projected
-
     def _ongoing_identity_conflicts(
         self, existing: dict[str, Any], incoming: dict[str, Any]
     ) -> bool:
@@ -17416,7 +17259,7 @@ class MaintenancePortalService:
         ongoing_items: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         self.ensure_snapshot_loaded()
-        default_month = RECENT_MONTH_FILTER_LABEL
+        default_month = self._current_month_label()
         scope = self._normalize_scope(scope)
         merged_ongoing = self._project_ongoing_items(scope, ongoing_items or [])
         filtered_records = self._workbench_records(month=default_month, scope=scope)
@@ -17513,6 +17356,7 @@ class MaintenancePortalService:
     ) -> dict[str, Any]:
         self.ensure_snapshot_loaded()
         scope = self._normalize_scope(scope)
+        selected_month = str(month or self._current_month_label()).strip()
         requested_sections = {
             str(item or "").strip().lower()
             for item in (sections or [])
@@ -17532,16 +17376,11 @@ class MaintenancePortalService:
             requested_work_type = ""
         merged_ongoing = self._project_ongoing_items(scope, ongoing_items or [])
         scoped_records = self._workbench_records(
-            month=month, specialty=specialty, scope=scope
-        )
-        merged_ongoing = self._supplement_source_ongoing_items(
-            scope,
-            scoped_records,
-            merged_ongoing,
+            month=selected_month, specialty=specialty, scope=scope
         )
         linked_zhihang_ids = self._linked_zhihang_record_ids(merged_ongoing)
         zhihang_records = self._filter_zhihang_change_records(
-            month=month, scope=scope, exclude_record_ids=linked_zhihang_ids
+            month=selected_month, scope=scope, exclude_record_ids=linked_zhihang_ids
         )
         if building:
             scoped_records = [
@@ -17686,7 +17525,8 @@ class MaintenancePortalService:
             "records_pagination": records_pagination,
             "ongoing_pagination": ongoing_pagination,
             "filters": {
-                "default_month": month or RECENT_MONTH_FILTER_LABEL,
+                "default_month": selected_month,
+                "months": self._recent_month_labels(),
                 "specialties": self._sorted_unique_work_specialties(),
             },
             "count": len(filtered_records),
@@ -17697,6 +17537,7 @@ class MaintenancePortalService:
         *,
         scope: str = "ALL",
         work_type: str = WORK_TYPE_MAINTENANCE,
+        month: str = "",
         search: str = "",
         ongoing_items: list[dict[str, Any]] | None = None,
         limit: int = 200,
@@ -17712,7 +17553,10 @@ class MaintenancePortalService:
             return []
         records = [
             record
-            for record in self._workbench_records(scope=scope)
+            for record in self._workbench_records(
+                month=month or self._current_month_label(),
+                scope=scope,
+            )
             if self._record_work_type(record) == work_type
         ]
         summary_by_record = self._work_status_by_records(records, scope=scope)
@@ -17730,7 +17574,7 @@ class MaintenancePortalService:
                 continue
             serialized = self._serialize_record(record, summary_by_record)
             progress = str(serialized.get("source_progress") or "").strip()
-            if "未开始" not in progress:
+            if not self._source_progress_allows_start(progress):
                 continue
             if query and not self._source_record_matches_search(record, query):
                 continue
@@ -17770,6 +17614,7 @@ class MaintenancePortalService:
         scope: str,
         work_type: str,
         source_record_id: str,
+        month: str = "",
         ongoing_items: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         source_record_id = str(source_record_id or "").strip()
@@ -17778,13 +17623,14 @@ class MaintenancePortalService:
         items = self.list_bindable_source_items(
             scope=scope,
             work_type=work_type,
+            month=month,
             ongoing_items=ongoing_items,
             limit=500,
         )
         for item in items:
             if str(item.get("source_record_id") or "").strip() == source_record_id:
                 return item
-        raise PortalError("所选事项已进行中、已结束或不属于当前楼栋，不能绑定。")
+        raise PortalError("所选事项已在右侧进行中、已结束或不属于当前楼栋，不能绑定。")
 
     def get_workbench_closed_items(
         self,
@@ -23431,6 +23277,11 @@ class MaintenancePortalService:
             or patch.get("repair_management_record_id")
             or ""
         ).strip()
+        source_month = str(
+            payload.get("source_month")
+            or patch.get("source_month")
+            or ""
+        ).strip()
         if manual and action == "start" and manual_binding_required:
             if manual_binding_choice not in {"bind", "unbound"}:
                 raise PortalError("纯手填通告必须选择绑定待发起事项或不绑定。")
@@ -23439,6 +23290,7 @@ class MaintenancePortalService:
                     scope=scope,
                     work_type=work_type,
                     source_record_id=source_record_id,
+                    month=source_month,
                     ongoing_items=ongoing_items,
                 )
             else:
@@ -24475,7 +24327,7 @@ class MaintenancePortalService:
                 current_status = str(fields.get("维护实施状态") or "").strip()
                 if not self._maintenance_status_is_startable(record):
                     raise PortalError(
-                        f"该计划维护项当前状态不是{DEFAULT_MAINTENANCE_STATUS}: {current_status or '-'}"
+                        f"该计划维护项当前状态不能发起通告: {current_status or '-'}"
                     )
                 building = str(fields.get("楼栋") or "").strip()
                 maintenance_total = str(fields.get("维护总项") or "").strip()
@@ -24905,24 +24757,9 @@ class MaintenancePortalService:
                 fields = record.get("display_fields") or {}
                 source_progress = self._maintenance_status_value(record)
                 if not self._maintenance_status_is_startable(record):
-                    existing_target_record_id = (
-                        self._target_record_id_from_identity_map(
-                            work_type=WORK_TYPE_CHANGE,
-                            source_record_id=source_record_id,
-                        )
-                        or self._target_record_id_from_work_status(
-                            work_type=WORK_TYPE_CHANGE,
-                            source_record_id=source_record_id,
-                        )
+                    raise PortalError(
+                        f"该维保源记录当前状态不能发起变更通告: {source_progress or '-'}"
                     )
-                    if existing_target_record_id:
-                        raise PortalError(
-                            "该维保转变更已创建目标记录，请从“已开始未结束”发送更新。"
-                        )
-                    if "进行中" not in source_progress:
-                        raise PortalError(
-                            f"该维保源记录当前状态不能发起变更通告: {source_progress or '-'}"
-                        )
                 title = (
                     str(request_payload.get("title") or "").strip()
                     or self._maintenance_title(record)
@@ -24957,9 +24794,9 @@ class MaintenancePortalService:
                 source_record_id = record_id
                 fields = record.get("display_fields") or {}
                 source_progress = self._change_progress_value(record)
-                if source_progress != CHANGE_PROGRESS_NOT_STARTED:
+                if not self._source_progress_allows_start(source_progress):
                     raise PortalError(
-                        f"该变更当前源进度不是{CHANGE_PROGRESS_NOT_STARTED}: {source_progress or '-'}"
+                        f"该变更当前源进度不能发起通告: {source_progress or '-'}"
                     )
                 title = (
                     str(request_payload.get("title") or "").strip()
@@ -25482,9 +25319,9 @@ class MaintenancePortalService:
                     source_progress = request_text(
                         "source_progress", DEFAULT_MAINTENANCE_STATUS
                     ) or DEFAULT_MAINTENANCE_STATUS
-                    if source_progress != DEFAULT_MAINTENANCE_STATUS:
+                    if not self._source_progress_allows_start(source_progress):
                         raise PortalError(
-                            f"该检修当前源状态不是{DEFAULT_MAINTENANCE_STATUS}: {source_progress or '-'}"
+                            f"该检修当前源状态不能发起通告: {source_progress or '-'}"
                         ) from exc
                     building = (
                         str(request_payload.get("building") or "").strip()
@@ -25510,9 +25347,9 @@ class MaintenancePortalService:
                     if not self._is_valid_repair_record(record):
                         raise PortalError("该检修记录缺少有效检修通告名称/维修名称或楼栋，不能发起。")
                     source_progress = self._repair_source_status(record)
-                    if source_progress != DEFAULT_MAINTENANCE_STATUS:
+                    if not self._source_progress_allows_start(source_progress):
                         raise PortalError(
-                            f"该检修当前源状态不是{DEFAULT_MAINTENANCE_STATUS}: {source_progress or '-'}"
+                            f"该检修当前源状态不能发起通告: {source_progress or '-'}"
                         )
                     title = request_first_text(
                         ("title", "content"), default=self._repair_title(record)

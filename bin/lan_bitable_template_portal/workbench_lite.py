@@ -5,6 +5,7 @@ import datetime as dt
 import html
 import json
 import re
+from contextlib import suppress
 from typing import Any
 from urllib.parse import urlencode
 
@@ -501,11 +502,15 @@ def _progress_badge(progress: Any) -> str:
     return f"<span class=\"row-status {_e(_progress_tone(text))}\">{_e(text)}</span>"
 
 
-def _record_disabled_reason(progress: Any) -> str:
+def _record_disabled_reason(
+    progress: Any,
+    *,
+    linked_ongoing: bool = False,
+) -> str:
     text = str(progress or "").strip()
     if "未结束" not in text and any(flag in text for flag in ("已结束", "正常结束", "延期结束", "结束", "闭环", "已完成")):
         return "该事项已结束，只保留查看状态，不可再次发起。"
-    if "进行中" in text or "未结束" in text:
+    if linked_ongoing and ("进行中" in text or "未结束" in text):
         return "该事项已在“已开始未结束”中，请从右侧进行中列表处理。"
     return ""
 
@@ -675,13 +680,43 @@ def _mop_status_chip(record: dict[str, Any], work_type: str) -> str:
     return _meta_chip(text, tone=tone)
 
 
+HISTORY_MEMORY_DRAFT_FIELDS = (
+    "location",
+    "content",
+    "reason",
+    "impact",
+    "progress",
+    "maintenance_cycle",
+    "specialty",
+    "level",
+    "repair_device",
+    "repair_fault",
+    "fault_type",
+    "repair_mode",
+    "discovery",
+    "symptom",
+    "solution",
+)
+
+
+def _record_history_memory(record: dict[str, Any]) -> dict[str, Any]:
+    memory = record.get("memory")
+    return memory if isinstance(memory, dict) else {}
+
+
+def _history_memory_has_meaningful_fields(memory: dict[str, Any]) -> bool:
+    return any(
+        str(memory.get(key) or "").strip()
+        for key in HISTORY_MEMORY_DRAFT_FIELDS
+    )
+
+
 def _memory_status_chip(record: dict[str, Any]) -> str:
-    memory = record.get("memory") if isinstance(record.get("memory"), dict) else {}
+    memory = _record_history_memory(record)
     if (
         _truthy_display(record.get("memory_applied"))
         or _truthy_display(record.get("notice_memory_applied"))
-        or bool(memory)
-        or bool(str(record.get("memory_key") or "").strip())
+        or _history_memory_has_meaningful_fields(memory)
     ):
         return _meta_chip("已用历史记忆", tone="success")
     if str(record.get("memory_status") or "").strip() in {"missing", "none", "未匹配"}:
@@ -716,7 +751,12 @@ def _action_for_record(record: dict[str, Any]) -> str:
     ):
         return "start"
     progress = _record_progress(record)
-    return "start" if "未开始" in progress or not progress else "update"
+    return (
+        "start"
+        if not progress
+        or any(flag in progress for flag in ("未开始", "进行中", "未结束"))
+        else "update"
+    )
 
 
 def _query_url(path: str, **params: Any) -> str:
@@ -728,8 +768,14 @@ def _query_url(path: str, **params: Any) -> str:
     return f"{path}?{urlencode(clean)}" if clean else path
 
 
-def _manual_url(scope: str, work_type: str) -> str:
-    return _query_url("/workbench-lite", scope=scope, work_type=work_type, manual="1")
+def _manual_url(scope: str, work_type: str, month: str = "") -> str:
+    return _query_url(
+        "/workbench-lite",
+        scope=scope,
+        work_type=work_type,
+        month=month,
+        manual="1",
+    )
 
 
 def _undo_created_time(value: Any) -> str:
@@ -755,6 +801,32 @@ def _datetime_local(value: Any) -> str:
         return parsed.strftime("%Y-%m-%dT%H:%M")
     except Exception:
         return text[:16].replace(" ", "T")
+
+
+def _datetime_local_on_date(value: Any, target_date: dt.date) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    normalized = (
+        text.replace("T", " ")
+        .replace("：", ":")
+        .replace("．", ".")
+        .replace("。", ".")
+    )
+    hour = minute = None
+    with suppress(Exception):
+        parsed = dt.datetime.fromisoformat(normalized[:19])
+        hour, minute = parsed.hour, parsed.minute
+    if hour is None or minute is None:
+        match = re.search(
+            r"(?:[日号T\s]|^)(\d{1,2})\s*(?:[:.]|时)\s*(\d{1,2})",
+            normalized,
+        )
+        if match:
+            hour, minute = int(match.group(1)), int(match.group(2))
+    if hour is None or minute is None or not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return _datetime_local(value)
+    return f"{target_date.isoformat()}T{hour:02d}:{minute:02d}"
 
 
 def _normalize_notice_label(label: str) -> str:
@@ -939,6 +1011,23 @@ def _draft_from_record(record: dict[str, Any], *, manual: bool = False, work_typ
             record.get("repair_management_record_id") or ""
         ).strip(),
     }
+    memory = _record_history_memory(record)
+    memory_applied = _history_memory_has_meaningful_fields(memory)
+    if memory_applied:
+        for key in HISTORY_MEMORY_DRAFT_FIELDS:
+            value = str(memory.get(key) or "").strip()
+            if value:
+                draft[key] = value
+        if not str(record.get("active_item_id") or "").strip():
+            today = dt.date.today()
+            draft["start_time"] = _datetime_local_on_date(
+                draft.get("start_time"),
+                today,
+            )
+            draft["end_time"] = _datetime_local_on_date(
+                draft.get("end_time"),
+                today,
+            )
     source_work_type = str(record.get("source_work_type") or "").strip()
     converted_from = str(record.get("converted_from_work_type") or "").strip()
     converted_to = str(record.get("converted_to_work_type") or "").strip()
@@ -1089,6 +1178,7 @@ def _record_rows(
     ongoing_items: list[dict[str, Any]] | None,
     scope: str,
     work_type: str,
+    month: str = "",
     search: str,
     specialty: str,
     selected_id: str,
@@ -1107,6 +1197,7 @@ def _record_rows(
             "/workbench-lite",
             scope=scope,
             work_type=work_type,
+            month=month,
             search=search,
             specialty=specialty,
             record_id=record_id,
@@ -1119,7 +1210,10 @@ def _record_rows(
         draft = _draft_from_record(row_source, work_type=row_work_type)
         source_record_id = _source_id(record)
         action = "update" if linked_ongoing else _action_for_record(record)
-        disabled_reason = _record_disabled_reason(progress)
+        disabled_reason = _record_disabled_reason(
+            progress,
+            linked_ongoing=bool(linked_ongoing),
+        )
         site_photo_count = _site_photo_count(row_source)
         mop_status = _mop_status_text(row_source, row_work_type)
         linked_active_item_id = str((linked_ongoing or {}).get("active_item_id") or "")
@@ -1170,6 +1264,7 @@ def _ongoing_rows(
     *,
     scope: str,
     work_type: str,
+    month: str = "",
     selected_id: str,
     pending_page: int = 1,
     ongoing_page: int = 1,
@@ -1186,6 +1281,7 @@ def _ongoing_rows(
             "/workbench-lite",
             scope=scope,
             work_type=work_type,
+            month=month,
             active_item_id=active_id,
             pending_page=pending_page,
             ongoing_page=ongoing_page,
@@ -1226,6 +1322,7 @@ def _attention_rows(
     *,
     work_type: str,
     scope: str,
+    month: str = "",
     pending_page: int | str = 1,
     ongoing_page: int | str = 1,
 ) -> str:
@@ -1253,6 +1350,7 @@ def _attention_rows(
             "/workbench-lite",
             scope=scope,
             work_type=work_type,
+            month=month,
             active_item_id=active_id,
             pending_page=pending_page,
             ongoing_page=ongoing_page,
@@ -1373,7 +1471,10 @@ def _source_link_options(
         if not source_id or source_id in used_source_ids:
             continue
         progress = _record_progress(record)
-        if _record_disabled_reason(progress) or "未开始" not in progress:
+        if _record_disabled_reason(progress) or not any(
+            flag in progress
+            for flag in ("未开始", "进行中", "未结束")
+        ):
             continue
         options.append(
             {
@@ -1576,6 +1677,7 @@ def _detail_form(
     scope: str,
     work_type: str,
     manual: bool,
+    source_month: str = "",
     parsed_draft: dict[str, str] | None = None,
     parsed_action: str = "",
     source_link_options: list[dict[str, str]] | None = None,
@@ -1772,6 +1874,7 @@ def _detail_form(
       <form id="lite-notice-form" class="detail-form" data-action="{_e(action)}" data-detail-mode="{_e(detail_mode)}" data-work-type="{_e(work)}">
         {datalists}
         <input type="hidden" name="scope" value="{_e(scope)}">
+        <input type="hidden" name="source_month" value="{_e(source_month)}">
         <input type="hidden" name="work_type" value="{_e(work)}">
         {notice_type_input}
         {converted_hidden_inputs}
@@ -1817,6 +1920,7 @@ def render_workbench_lite(
     session: dict[str, Any],
     scope: str,
     work_type: str,
+    month: str = "",
     search: str = "",
     specialty: str = "",
     record_id: str = "",
@@ -1837,6 +1941,30 @@ def render_workbench_lite(
 ) -> str:
     records = payload.get("records") if isinstance(payload.get("records"), list) else []
     ongoing = payload.get("ongoing") if isinstance(payload.get("ongoing"), list) else []
+    payload_filters = (
+        payload.get("filters")
+        if isinstance(payload.get("filters"), dict)
+        else {}
+    )
+    selected_month = str(
+        month
+        or payload_filters.get("default_month")
+        or f"{dt.datetime.now().month}月"
+    ).strip()
+    month_options = [
+        str(item or "").strip()
+        for item in (payload_filters.get("months") or [])
+        if str(item or "").strip()
+    ]
+    if not month_options:
+        current_start = dt.datetime(dt.datetime.now().year, dt.datetime.now().month, 1)
+        previous_day = current_start - dt.timedelta(days=1)
+        month_options = [
+            f"{current_start.month}月",
+            f"{previous_day.month}月",
+        ]
+    if selected_month and selected_month not in month_options:
+        month_options.insert(0, selected_month)
     daily = payload.get("daily_summary") if isinstance(payload.get("daily_summary"), dict) else {}
     stats = daily.get("stats") if isinstance(daily.get("stats"), dict) else {}
     view_work = _view_work_type(work_type)
@@ -1918,6 +2046,7 @@ def render_workbench_lite(
     pager_base = {
         "scope": scope,
         "work_type": view_work,
+        "month": selected_month,
         "search": search,
         "specialty": specialty,
         "record_id": effective_record_id,
@@ -1990,13 +2119,19 @@ def render_workbench_lite(
         for option in scope_options
     )
     type_tabs = "".join(
-        f"<a class=\"type-tab{' active' if key == view_work else ''}\" href=\"{_e(_query_url('/workbench-lite', scope=scope, work_type=key))}\" title=\"待发起 {record_counts.get(key, 0)}，进行中 {ongoing_counts.get(key, 0)}\""
+        f"<a class=\"type-tab{' active' if key == view_work else ''}\" href=\"{_e(_query_url('/workbench-lite', scope=scope, work_type=key, month=selected_month))}\" title=\"待发起 {record_counts.get(key, 0)}，进行中 {ongoing_counts.get(key, 0)}\""
         f" aria-current=\"{'page' if key == view_work else 'false'}\">"
         f"<span>{_e(label)}</span><span class=\"type-counts\" aria-label=\"待发起 {record_counts.get(key, 0)}，进行中 {ongoing_counts.get(key, 0)}\"><b class=\"type-count pending\">{_e(record_counts.get(key, 0))}</b><i>/</i><b class=\"type-count ongoing\">{_e(ongoing_counts.get(key, 0))}</b></span>"
         "</a>"
         for key, label in WORK_TYPE_FILTER_LABELS.items()
     )
-    manual_url = _query_url("/workbench-lite", scope=scope, work_type=(work_filter or "maintenance"), manual="1")
+    manual_url = _query_url(
+        "/workbench-lite",
+        scope=scope,
+        work_type=(work_filter or "maintenance"),
+        month=selected_month,
+        manual="1",
+    )
     undo_items = notice_undos or []
     source_loaded_at = str(payload.get("last_loaded_at") or "").strip()
     source_loaded_text = source_loaded_at or "暂无成功同步时间"
@@ -2014,6 +2149,7 @@ def render_workbench_lite(
         ongoing,
         work_type=view_work,
         scope=scope,
+        month=selected_month,
         pending_page=pending_page_num,
         ongoing_page=ongoing_page_num,
     )
@@ -2401,7 +2537,7 @@ def render_workbench_lite(
       <div class="manual-picker" id="manual-picker">
         <button class="btn ghost" id="manual-open" type="button" aria-expanded="false" aria-controls="manual-menu">纯手填</button>
         <div class="manual-menu" id="manual-menu">
-          {''.join(f'<a href="{_e(_manual_url(scope, key))}">{_e(label)}</a>' for key, label in WORK_TYPE_LABELS.items())}
+          {''.join(f'<a href="{_e(_manual_url(scope, key, selected_month))}">{_e(label)}</a>' for key, label in WORK_TYPE_LABELS.items())}
         </div>
       </div>
       <div class="refresh-picker" id="refresh-picker">
@@ -2416,6 +2552,10 @@ def render_workbench_lite(
       <form method="get" action="/workbench-lite">
         <input type="hidden" name="scope" value="{_e(scope)}">
         <input type="hidden" name="work_type" value="{_e(view_work)}">
+        <label class="visually-hidden" for="lite-month-select">筛选月份</label>
+        <select id="lite-month-select" name="month" aria-label="筛选月份">
+          {''.join(f'<option value="{_e(item)}"{" selected" if item == selected_month else ""}>{_e(item)}</option>' for item in month_options)}
+        </select>
         <label class="visually-hidden" for="lite-search-input">搜索标题、楼栋、专业</label>
         <input id="lite-search-input" name="search" value="{_e(search)}" placeholder="搜索标题、楼栋、专业">
         <label class="visually-hidden" for="lite-specialty-select">筛选专业</label>
@@ -2438,12 +2578,12 @@ def render_workbench_lite(
         </div>
         <section class="inbox-section pending-inbox-panel">
           <h3><span>待发起事项</span><b>{_e(current_pending_count)}</b></h3>
-          <div class="list">{_record_rows(visible_records, ongoing_items=ongoing, scope=scope, work_type=view_work, search=search, specialty=specialty, selected_id=selected_record_id, pending_page=pending_page_num, ongoing_page=ongoing_page_num)}</div>
+          <div class="list">{_record_rows(visible_records, ongoing_items=ongoing, scope=scope, work_type=view_work, month=selected_month, search=search, specialty=specialty, selected_id=selected_record_id, pending_page=pending_page_num, ongoing_page=ongoing_page_num)}</div>
           {pending_pager}
         </section>
         <section class="inbox-section ongoing-inbox-panel" data-ongoing-panel>
           <h3><span>已开始未结束</span><b class="panel-count">{_e(current_ongoing_count)}</b></h3>
-          <div class="list">{_ongoing_rows(visible_ongoing, scope=scope, work_type=view_work, selected_id=active_item_id, pending_page=pending_page_num, ongoing_page=ongoing_page_num)}</div>
+          <div class="list">{_ongoing_rows(visible_ongoing, scope=scope, work_type=view_work, month=selected_month, selected_id=active_item_id, pending_page=pending_page_num, ongoing_page=ongoing_page_num)}</div>
           {ongoing_pager}
         </section>
         <details class="rail-fold attention"{' open' if attention_count else ''}><summary>待处理问题 <b class="panel-count">{_e(attention_count)}</b></summary><section class="rail-panel attention"><h2>待处理问题</h2><div class="attention-list">{attention_html}</div></section></details>
@@ -2465,12 +2605,13 @@ def render_workbench_lite(
                 <form method="post" action="/workbench-lite/parse">
                   <input type="hidden" name="scope" value="{_e(scope)}">
                   <input type="hidden" name="work_type" value="{_e(view_work)}">
+                  <input type="hidden" name="month" value="{_e(selected_month)}">
                   <textarea name="paste_text" placeholder="粘贴完整通告文本">{_e(paste_text)}</textarea>
                   <button class="btn primary" type="submit">解析到当前通告</button>
                 </form>
               </div>
             </section>
-            {_detail_form(record=selected_record, ongoing_item=selected_ongoing, scope=scope, work_type=detail_work, manual=manual or bool(parsed_draft), parsed_draft=parsed_draft, parsed_action=parsed_action, source_link_options=source_options, is_admin=is_admin_session, prefill_draft=prefill_draft, prefill_source_record_id=prefill_source_record_id, prefill_target_record_id=prefill_target_record_id, prefill_action=prefill_action, prefill_context_id=prefill_context_id)}
+            {_detail_form(record=selected_record, ongoing_item=selected_ongoing, scope=scope, work_type=detail_work, manual=manual or bool(parsed_draft), source_month=selected_month, parsed_draft=parsed_draft, parsed_action=parsed_action, source_link_options=source_options, is_admin=is_admin_session, prefill_draft=prefill_draft, prefill_source_record_id=prefill_source_record_id, prefill_target_record_id=prefill_target_record_id, prefill_action=prefill_action, prefill_context_id=prefill_context_id)}
           </div>
         </section>
       </div>
@@ -2908,10 +3049,12 @@ def render_workbench_lite(
       const form = nextDoc.querySelector('#lite-notice-form');
       const nextScope = form?.querySelector('input[name="scope"]')?.value || getCurrentScope();
       const nextWorkType = form?.querySelector('input[name="work_type"]')?.value || new URLSearchParams(location.search).get('work_type') || 'maintenance';
+      const nextMonth = form?.querySelector('input[name="source_month"]')?.value || new URLSearchParams(location.search).get('month') || '';
       const isManual = form?.querySelector('input[name="manual"]')?.value === '1';
       const url = new URL('/workbench-lite', location.origin);
       url.searchParams.set('scope', nextScope);
       url.searchParams.set('work_type', nextWorkType);
+      if (nextMonth) url.searchParams.set('month', nextMonth);
       if (isManual) url.searchParams.set('manual', '1');
       return url.pathname + url.search;
     }}
@@ -2950,7 +3093,7 @@ def render_workbench_lite(
     const liteDraftDomKeys = [
       'action', 'operation_id', 'active_item_id', 'source_record_id', 'target_record_id', 'record_id',
       'repair_management_record_id',
-      'manual_id', 'scope', 'work_type', 'notice_type', 'title', 'building', 'buildings', 'specialty',
+      'manual_id', 'scope', 'source_month', 'work_type', 'notice_type', 'title', 'building', 'buildings', 'specialty',
       'maintenance_cycle', 'level', 'start_time', 'end_time', 'status', 'site_photo_count', 'mop_status',
       'source_work_type', 'converted_from_work_type', 'converted_to_work_type', 'sync_maintenance_target',
       'paired_maintenance_target_record_id', 'paired_maintenance_original_title', 'paired_maintenance_actual_start_time',
@@ -3005,7 +3148,7 @@ def render_workbench_lite(
       return compact;
     }}
     const commandPatchKeys = new Set([
-      'manual', 'manual_id', 'scope', 'action', 'work_type', 'notice_type', 'operation_id',
+      'manual', 'manual_id', 'scope', 'source_month', 'action', 'work_type', 'notice_type', 'operation_id',
       'manual_binding_choice', 'manual_binding_required',
       'active_item_id', 'source_record_id', 'target_record_id', 'record_id',
       'repair_management_record_id',
@@ -3069,6 +3212,8 @@ def render_workbench_lite(
       const url = new URL('/workbench-lite', location.origin);
       url.searchParams.set('scope', scope || getCurrentScope());
       url.searchParams.set('work_type', workType || currentViewWorkType() || 'maintenance');
+      const month = new URLSearchParams(location.search).get('month') || '';
+      if (month) url.searchParams.set('month', month);
       return url.pathname + url.search;
     }}
     async function deleteOngoingFromForm(button) {{
@@ -3625,7 +3770,7 @@ def render_workbench_lite(
       if (!liteManualSourceCandidates.length) {{
         const empty = document.createElement('div');
         empty.className = 'target-candidate-empty';
-        empty.textContent = '没有可绑定的待发起事项。进行中和已结束事项不会出现在这里。';
+        empty.textContent = '没有可绑定的待发起事项。已在右侧进行中和已结束事项不会出现在这里。';
         list.replaceChildren(empty);
         return;
       }}
@@ -3658,6 +3803,8 @@ def render_workbench_lite(
       const url = new URL('/api/workbench/source-options', location.origin);
       url.searchParams.set('scope', previewValue(form, 'scope') || getCurrentScope());
       url.searchParams.set('work_type', previewValue(form, 'work_type') || form.dataset.workType || 'maintenance');
+      const sourceMonth = previewValue(form, 'source_month') || new URLSearchParams(location.search).get('month') || '';
+      if (sourceMonth) url.searchParams.set('month', sourceMonth);
       if (String(search || '').trim()) url.searchParams.set('q', String(search || '').trim());
       const response = await fetch(url.pathname + url.search, {{ credentials: 'same-origin', cache: 'no-store' }});
       const data = await response.json().catch(() => ({{}}));
@@ -4788,13 +4935,48 @@ def render_workbench_lite(
       return field.value;
     }}
     document.addEventListener('change', async (event) => {{
+      if (event.target && event.target.id === 'lite-month-select') {{
+        if (!(await confirmDiscardLiteChanges())) {{
+          event.target.value = new URLSearchParams(location.search).get('month') || '{_e(selected_month)}';
+          return;
+        }}
+        setLiteFormDirty(false);
+        const filterForm = event.target.closest('form');
+        const params = new URLSearchParams();
+        if (filterForm) {{
+          new FormData(filterForm).forEach((value, key) => {{
+            if (String(value || '').trim()) params.set(key, String(value));
+          }});
+        }}
+        params.set('month', event.target.value);
+        params.delete('record_id');
+        params.delete('active_item_id');
+        params.delete('manual');
+        params.delete('pending_page');
+        const url = '/workbench-lite?' + params.toString();
+        try {{
+          await navigateLite(url, {{
+            label: '正在切换月份...',
+            selectors: ['.status', '.summary', '.toolbar', '.workbench-guide', '.workspace'],
+          }});
+        }} catch (error) {{
+          location.href = url;
+        }}
+        return;
+      }}
       if (event.target && event.target.id === 'lite-scope-select') {{
         if (!(await confirmDiscardLiteChanges())) {{
           event.target.value = currentUrlScope();
           return;
         }}
         setLiteFormDirty(false);
-        const url = '/workbench-lite?scope=' + encodeURIComponent(event.target.value) + '&work_type=' + encodeURIComponent(new URLSearchParams(location.search).get('work_type') || '{_e(view_work)}');
+        const params = new URLSearchParams(location.search);
+        params.set('scope', event.target.value);
+        params.set('work_type', params.get('work_type') || '{_e(view_work)}');
+        params.delete('record_id');
+        params.delete('active_item_id');
+        params.delete('manual');
+        const url = '/workbench-lite?' + params.toString();
         try {{ await navigateLite(url, {{ label: '正在切换楼栋...', selectors: ['.topbar', '.status', '.summary', '.toolbar', '.workbench-guide', '.workspace'] }}); }}
         catch (error) {{ location.href = url; }}
         return;

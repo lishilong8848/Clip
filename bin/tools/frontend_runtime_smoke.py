@@ -446,6 +446,7 @@ class _SmokePortalService:
                 "last_modified_time": "2026-06-01 10:00:00",
                 "display_fields": {
                     "维修名称": "A楼测试检修管理记录",
+                    "故障发生时间": "2026-06-25 10:00",
                     "所属数据中心/楼栋-使用": "南通A楼",
                     "所属专业": "弱电",
                     "当前维修进度": "50%",
@@ -454,6 +455,7 @@ class _SmokePortalService:
                 },
                 "raw_fields": {
                     "维修名称": "A楼测试检修管理记录",
+                    "故障发生时间": "2026-06-25 10:00",
                     "所属数据中心/楼栋-使用": "南通A楼",
                     "所属专业": "弱电",
                     "当前维修进度": 0.5,
@@ -1516,7 +1518,14 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await followupPanel.getByText('维修跟进记录已更新。', {{ exact: true }}).waitFor({{ state: 'visible' }});
           await assertLayout(page, 'repair-management-entry');
           await page.getByRole('button', {{ name: '维修单信息' }}).click();
-          await page.locator('[data-field-name="故障发生时间"] input[type="datetime-local"]').fill('2026-06-01T09:00');
+          const linkedEventFaultTime = page.locator('[data-field-name="故障发生时间"] input[type="datetime-local"]');
+          if (await linkedEventFaultTime.inputValue() !== '2026-06-25T10:00') {{
+            throw new Error(`linked event occurrence time was not applied: ${{await linkedEventFaultTime.inputValue()}}`);
+          }}
+          if (!(await linkedEventFaultTime.isDisabled())) {{
+            throw new Error('linked event occurrence time must be source-controlled');
+          }}
+          await page.locator('[data-field-name="维修名称"] input').fill('A楼测试检修管理记录-烟测修改');
           await page.getByRole('button', {{ name: '检修通告', exact: true }}).click();
           await page.getByText('保存后填写检修通告？', {{ exact: true }}).waitFor({{ state: 'visible' }});
           await page.getByRole('button', {{ name: '保存并继续', exact: true }}).click();
