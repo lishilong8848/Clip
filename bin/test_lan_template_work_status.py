@@ -14227,6 +14227,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             ended_record,
             {
                 "repair-ended-source": {
+                    "source_record_id": "repair-ended-source",
                     "status": "已结束",
                     "ended_at": "2026-07-18 12:00",
                 }
@@ -14236,6 +14237,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             ongoing_record,
             {
                 "repair-ongoing-source": {
+                    "source_record_id": "repair-ongoing-source",
                     "status": "进行中",
                     "started_at": "2026-07-18 09:00",
                 }
@@ -14259,6 +14261,40 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertIn('data-source-record-id="repair-ongoing-source"', html)
         self.assertIn("该事项已结束，只保留查看状态，不可再次发起。", html)
         self.assertNotIn("该事项已在“已开始未结束”中", html)
+
+    def test_source_status_does_not_inherit_same_title_historical_work_status(self):
+        service = _TestMaintenancePortalService()
+        record = _build_record(
+            "maintenance-current",
+            "B楼",
+            "UPS厂商巡检维护",
+            "7月",
+            status="未开始",
+            maintenance_cycle="半年",
+        )
+        historical_status = {
+            "source_record_id": "maintenance-old",
+            "work_type": "maintenance",
+            "work_fallback_key": service._record_fallback_key(record),
+            "fallback_key": service._record_legacy_summary_key(record),
+            "status": "已结束",
+            "ended_at": "2025-07-20 18:00",
+        }
+
+        with patch.object(
+            service,
+            "_load_work_status_items_locked",
+            return_value=[historical_status],
+        ):
+            summaries = service._work_status_by_records([record], scope="B")
+
+        self.assertEqual(summaries, {})
+        serialized = service._serialize_record(
+            record,
+            {"maintenance-current": historical_status},
+        )
+        self.assertEqual(serialized["source_progress"], "未开始")
+        self.assertEqual(serialized["work_summary"], {})
 
     def test_manual_source_options_only_return_pending_unlinked_items(self):
         service = _TestMaintenancePortalService()
@@ -14311,6 +14347,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         ]
         summaries = {
             "repair-local-ended": {
+                "source_record_id": "repair-local-ended",
                 "status": "已结束",
                 "ended_at": "2026-07-18 12:00",
             }

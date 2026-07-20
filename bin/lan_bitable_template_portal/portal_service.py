@@ -13025,12 +13025,6 @@ class MaintenancePortalService:
             for item in status_items
             if str(item.get("source_record_id") or "").strip()
         }
-        by_fallback: dict[str, dict[str, Any]] = {}
-        for item in status_items:
-            for key_name in ("work_fallback_key", "fallback_key"):
-                fallback_key = str(item.get(key_name) or "").strip()
-                if fallback_key and fallback_key not in by_fallback:
-                    by_fallback[fallback_key] = item
         for item in daily_items or []:
             if not isinstance(item, dict):
                 continue
@@ -13039,12 +13033,6 @@ class MaintenancePortalService:
             source_key = (item_work_type, source_record_id)
             if source_record_id and source_key not in by_source:
                 by_source[source_key] = copy.deepcopy(item)
-            fallback_key = str(item.get("fallback_key") or "").strip()
-            if fallback_key and fallback_key not in by_fallback:
-                by_fallback[fallback_key] = copy.deepcopy(item)
-            work_fallback_key = str(item.get("work_fallback_key") or "").strip()
-            if work_fallback_key and work_fallback_key not in by_fallback:
-                by_fallback[work_fallback_key] = copy.deepcopy(item)
         result: dict[str, dict[str, Any]] = {}
         for record in records:
             record_id = str(record.get("record_id") or "").strip()
@@ -13054,10 +13042,6 @@ class MaintenancePortalService:
             item = by_source.get((work_type, record_id))
             if item is None and work_type == WORK_TYPE_MAINTENANCE:
                 item = by_source.get(("", record_id))
-            if item is None:
-                item = by_fallback.get(self._record_fallback_key(record))
-            if item is None:
-                item = by_fallback.get(self._record_legacy_summary_key(record))
             if item is not None:
                 result[record_id] = copy.deepcopy(item)
         return result
@@ -14345,7 +14329,15 @@ class MaintenancePortalService:
         self, record: dict[str, Any], summary_by_record: dict[str, dict[str, Any]] | None = None
     ) -> dict[str, Any]:
         summary_by_record = summary_by_record or {}
-        work_summary = summary_by_record.get(record["record_id"]) or {}
+        record_id = str(record.get("record_id") or "").strip()
+        work_summary = summary_by_record.get(record_id) or {}
+        summary_source_record_id = str(
+            work_summary.get("source_record_id") or ""
+        ).strip()
+        if work_summary and summary_source_record_id != record_id:
+            # Source rows must never inherit status from a same-title historical
+            # notice. Only an exact source relation may override source progress.
+            work_summary = {}
         work_type = str(record.get("work_type") or WORK_TYPE_MAINTENANCE)
         source_work_type = self._record_source_work_type(record)
         if source_work_type == WORK_TYPE_MAINTENANCE:
@@ -14371,8 +14363,8 @@ class MaintenancePortalService:
             else ""
         )
         return {
-            "record_id": record["record_id"],
-            "source_record_id": record["record_id"],
+            "record_id": record_id,
+            "source_record_id": record_id,
             "source_work_type": source_work_type,
             "converted_from_work_type": str(record.get("converted_from_work_type") or ""),
             "converted_to_work_type": str(record.get("converted_to_work_type") or ""),
