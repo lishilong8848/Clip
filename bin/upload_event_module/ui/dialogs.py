@@ -3385,6 +3385,7 @@ class ScreenshotConfirmDialog(QDialog):
         self.event_source_container.setVisible(self.enable_event_source_select)
 
         self.building_container.setVisible(self.require_building)
+        self._refresh_building_options()
 
         self._update_recover_visibility()
 
@@ -3713,6 +3714,11 @@ class ScreenshotConfirmDialog(QDialog):
                 selected_buildings = cached_buildings
             elif detected_buildings:
                 selected_buildings = detected_buildings
+            selected_buildings = [
+                building
+                for building in selected_buildings
+                if building in self.building_options
+            ]
 
             if selected_buildings:
 
@@ -3798,49 +3804,56 @@ class ScreenshotConfirmDialog(QDialog):
 
 
 
+    @staticmethod
+    def _building_options_for_notice(notice_type):
+        options = list(BUILDING_OPTIONS)
+        if str(notice_type or "").strip() == "维保通告":
+            options = [option for option in options if option != OPTION_SLASH]
+        return options
+
+    def _refresh_building_options(self):
+        options = self._building_options_for_notice(self.notice_type)
+        self.building_options = list(options)
+        self.building_combo.blockSignals(True)
+        self.building_combo.clear()
+        self.building_combo.addItem(BUILDING_PLACEHOLDER)
+        for option in options:
+            self.building_combo.addItem(option)
+        self.building_combo.blockSignals(False)
+
+    @staticmethod
+    def _specialty_options_for_notice(notice_type):
+        notice_type = str(notice_type or "").strip()
+        if notice_type == "事件通告":
+            return [
+                SPECIALTY_ELECTRIC,
+                SPECIALTY_HVAC,
+                SPECIALTY_FIRE,
+                SPECIALTY_WEAK,
+                OPTION_SLASH,
+            ]
+        if notice_type in ("设备调整", "设备轮巡", "设备轮询", "维保通告"):
+            options = [
+                SPECIALTY_ELECTRIC,
+                SPECIALTY_HVAC,
+                SPECIALTY_FIRE,
+                SPECIALTY_WEAK,
+                SPECIALTY_OTHER,
+                OPTION_SLASH,
+            ]
+            if notice_type == "维保通告":
+                options = [option for option in options if option != OPTION_SLASH]
+            return options
+        return list(SPECIALTY_OPTIONS)
+
     def _refresh_specialty_options(self):
 
         if not self.enable_specialty_select:
 
             return
 
-        if self.notice_type == "事件通告":
-
-            options = [
-
-                SPECIALTY_ELECTRIC,
-
-                SPECIALTY_HVAC,
-
-                SPECIALTY_FIRE,
-
-                SPECIALTY_WEAK,
-
-                OPTION_SLASH,
-
-            ]
-
-        elif self.notice_type in ("设备调整", "设备轮巡", "设备轮询", "维保通告"):
-
-            options = [
-
-                SPECIALTY_ELECTRIC,
-
-                SPECIALTY_HVAC,
-
-                SPECIALTY_FIRE,
-
-                SPECIALTY_WEAK,
-
-                SPECIALTY_OTHER,
-
-                OPTION_SLASH,
-
-            ]
-
-        else:
-
-            options = list(self.specialty_options)
+        options = self._specialty_options_for_notice(self.notice_type)
+        self.specialty_options = list(options)
 
 
 
@@ -6023,6 +6036,9 @@ class ScreenshotConfirmDialog(QDialog):
         cycle_valid = (not self.enable_maintenance_cycle_select) or bool(
             self.selected_maintenance_cycle
         )
+        specialty_valid = (not self.enable_specialty_select) or bool(
+            self.selected_specialty
+        )
 
         enable_btns = (
             time_valid
@@ -6030,6 +6046,7 @@ class ScreenshotConfirmDialog(QDialog):
             and level_valid
             and source_valid
             and cycle_valid
+            and specialty_valid
         )
 
         self.btn_confirm.setEnabled(enable_btns)

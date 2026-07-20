@@ -3861,11 +3861,25 @@ class PortalRuntime:
                 text=str(prepared.get("text") or ""),
                 level=level,
             )
+        raw_buildings = prepared.get("buildings")
+        if isinstance(raw_buildings, str):
+            raw_buildings = [raw_buildings]
+        elif not isinstance(raw_buildings, (list, tuple, set)):
+            raw_buildings = []
         buildings = [
             str(item or "").strip()
-            for item in (prepared.get("buildings") or [])
+            for item in raw_buildings
             if str(item or "").strip()
         ]
+        if notice_type == "维保通告":
+            building_codes = MaintenancePortalService._clean_building_codes(
+                prepared.get("building_codes")
+            )
+            if building_codes:
+                buildings = [
+                    MaintenancePortalService._building_label_from_code(code)
+                    for code in building_codes
+                ]
         if not buildings and str(prepared.get("building") or "").strip():
             buildings = [str(prepared.get("building") or "").strip()]
         return NoticePayload(

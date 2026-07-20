@@ -96,6 +96,7 @@ from upload_event_module.services.handlers.device_adjust_notice import (  # noqa
 from upload_event_module.core.parser import extract_event_info  # noqa: E402
 import upload_event_module.services.feishu_service as feishu_service_module  # noqa: E402
 from upload_event_module.ui.active_cache_store import ActiveCacheStore  # noqa: E402
+from upload_event_module.ui.dialogs import ScreenshotConfirmDialog  # noqa: E402
 from upload_event_module.ui.main_window_records import MainWindowRecordsMixin  # noqa: E402
 from upload_event_module.ui.main_window_workflow import MainWindowWorkflowMixin  # noqa: E402
 from upload_event_module.ui.main_window_ui import MainWindowUiMixin  # noqa: E402
@@ -2297,9 +2298,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "active_item_id": "active-placeholder-1",
                 "record_id": "local-placeholder-1",
                 "notice_type": "维保通告",
-                "text": "【维保通告】状态：开始\n【标题】测试测试测试\n【时间】2026-05-24 09:30~2026-05-24 18:30",
-                "buildings": ["A楼"],
-                "specialty": "测试",
+                "text": "【维保通告】状态：开始\n【名称】EA118机房A楼B楼测试维保\n【时间】2026-05-24 09:30~2026-05-24 18:30",
+                "buildings": ["A楼", "B楼"],
+                "specialty": "消防",
                 "time_str": "2026-05-24 09:30~2026-05-24 18:30",
                 "maintenance_cycle": "/",
                 "_is_placeholder_record": True,
@@ -2313,6 +2314,14 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         }
         old_store = PortalRuntime.state_store
         stored_payload = {}
+        uploaded_fields = {}
+
+        def fake_create(notice_type, payload):
+            uploaded_fields.update(
+                MaintenanceNoticeHandler(notice_type).build_create_fields(payload)
+            )
+            return True, "rec-backend-1"
+
         with tempfile.TemporaryDirectory() as tmp:
             PortalRuntime.state_store = LanPortalStateStore(
                 Path(tmp) / "lan_portal_state.sqlite3"
@@ -2321,7 +2330,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 with patch.object(
                     portal_server_module,
                     "create_bitable_record_by_payload",
-                    return_value=(True, "rec-backend-1"),
+                    side_effect=fake_create,
                 ):
                     result = PortalRuntime.execute_local_notice_upload(request_payload)
                 items = PortalRuntime.state_store.list_qt_active_items()
@@ -2339,6 +2348,16 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertFalse(stored_payload["_upload_in_progress"])
         self.assertEqual(stored_payload["_last_upload_error"], "")
         self.assertEqual(stored_payload["binding_status"], "bound")
+        self.assertEqual(stored_payload["buildings"], ["A楼", "B楼"])
+        self.assertEqual(stored_payload["specialty"], "消防")
+        self.assertEqual(
+            uploaded_fields[MAINTENANCE_NOTICE_FIELDS["building"]],
+            ["A楼", "B楼"],
+        )
+        self.assertEqual(
+            uploaded_fields[MAINTENANCE_NOTICE_FIELDS["specialty"]],
+            "消防",
+        )
 
     def test_qt_upload_field_resolver_preserves_saved_fields_when_dialog_empty(self):
         harness = _UploadFieldResolverHarness({})
@@ -11604,6 +11623,153 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             fields[MAINTENANCE_NOTICE_FIELDS["maintenance_cycle"]],
             "月度",
         )
+        self.assertEqual(
+            fields[MAINTENANCE_NOTICE_FIELDS["building"]],
+            ["A楼"],
+        )
+        self.assertEqual(
+            fields[MAINTENANCE_NOTICE_FIELDS["specialty"]],
+            "电气",
+        )
+
+    def test_maintenance_target_select_fields_are_normalized_for_create_and_update(self):
+        handler = MaintenanceNoticeHandler("维保通告")
+        create_fields = handler.build_create_fields(
+            NoticePayload(
+                text=(
+                    "【维保通告】状态：开始\n"
+                    "【名称】EA118机房A楼B楼测试维保\n"
+                    "【时间】2026-05-15 09:30~2026-05-15 18:30"
+                ),
+                buildings=["南通A楼、B栋"],
+                specialty="电气专业",
+            )
+        )
+        update_fields = handler.build_update_fields(
+            NoticePayload(
+                text=(
+                    "【维保通告】状态：更新\n"
+                    "【名称】EA118机房110站测试维保\n"
+                    "【时间】2026-05-15 09:30~2026-05-15 18:30"
+                ),
+                buildings=["110"],
+                specialty="暖通",
+            )
+        )
+
+        self.assertEqual(
+            create_fields[MAINTENANCE_NOTICE_FIELDS["building"]],
+            ["A楼", "B楼"],
+        )
+        self.assertEqual(
+            create_fields[MAINTENANCE_NOTICE_FIELDS["specialty"]],
+            "电气",
+        )
+        self.assertEqual(
+            update_fields[MAINTENANCE_NOTICE_FIELDS["building"]],
+            ["110站"],
+        )
+        self.assertEqual(
+            update_fields[MAINTENANCE_NOTICE_FIELDS["specialty"]],
+            "暖通",
+        )
+
+    def test_maintenance_target_select_fields_use_only_writable_options(self):
+        handler = MaintenanceNoticeHandler("维保通告")
+        fields = handler.build_create_fields(
+            NoticePayload(
+                text=(
+                    "【维保通告】状态：开始\n"
+                    "【名称】EA118机房园区测试维保\n"
+                    "【时间】2026-05-15 09:30~2026-05-15 18:30"
+                ),
+                buildings=["园区（ABCDE楼）"],
+                specialty="/",
+            )
+        )
+
+        self.assertEqual(
+            fields[MAINTENANCE_NOTICE_FIELDS["building"]],
+            ["A楼", "B楼", "C楼", "D楼", "E楼"],
+        )
+        self.assertEqual(
+            fields[MAINTENANCE_NOTICE_FIELDS["specialty"]],
+            "其他",
+        )
+        self.assertNotIn(
+            "/",
+            ScreenshotConfirmDialog._building_options_for_notice("维保通告"),
+        )
+        self.assertNotIn(
+            "/",
+            ScreenshotConfirmDialog._specialty_options_for_notice("维保通告"),
+        )
+
+    def test_maintenance_payload_uses_building_codes_for_multi_select(self):
+        payload = PortalRuntime._prepared_to_notice_payload(
+            {
+                "notice_type": "维保通告",
+                "text": "【维保通告】状态：开始\n【名称】测试维保",
+                "building": "A楼、B楼",
+                "building_codes": ["A", "B"],
+                "specialty": "消防",
+            }
+        )
+
+        self.assertEqual(payload.buildings, ["A楼", "B楼"])
+        self.assertEqual(payload.specialty, "消防")
+
+    def test_paired_maintenance_payload_keeps_all_selected_buildings(self):
+        service = _TestMaintenancePortalService()
+        paired = service._build_paired_maintenance_upload(
+            request_payload={"scope": "A", "operation_id": "paired-multi"},
+            job_id="job-paired-multi",
+            action="start",
+            status="开始",
+            source_record_id="source-paired-multi",
+            target_record_id="",
+            active_item_id="active-paired-multi",
+            original_title="EA118机房A楼B楼测试维保",
+            building="A楼、B楼",
+            building_codes=["A", "B"],
+            specialty="消防",
+            maintenance_cycle="每月",
+            start_time="2026-05-15T09:30",
+            end_time="2026-05-15T18:30",
+            location="A楼、B楼",
+            content="测试",
+            reason="测试",
+            impact="无",
+            progress="准备开始",
+            response_time="2026-05-15 09:30",
+        )
+        payload = PortalRuntime._prepared_to_notice_payload(paired)
+        fields = MaintenanceNoticeHandler("维保通告").build_create_fields(payload)
+
+        self.assertEqual(paired["buildings"], ["A楼", "B楼"])
+        self.assertEqual(payload.buildings, ["A楼", "B楼"])
+        self.assertEqual(
+            fields[MAINTENANCE_NOTICE_FIELDS["building"]],
+            ["A楼", "B楼"],
+        )
+        self.assertEqual(
+            fields[MAINTENANCE_NOTICE_FIELDS["specialty"]],
+            "消防",
+        )
+
+    def test_maintenance_undo_restore_preserves_select_field_shapes(self):
+        fields = PortalRuntime._undo_restore_fields(
+            "维保通告",
+            {
+                "楼栋": ["A楼", "B楼"],
+                "专业": "暖通",
+                "不存在字段": "不应恢复",
+            },
+        )
+
+        self.assertEqual(fields["楼栋"], ["A楼", "B楼"])
+        self.assertEqual(fields["专业"], "暖通")
+        self.assertNotIn("不存在字段", fields)
 
     def test_maintenance_cycle_options_match_qt_and_portal(self):
         dialogs_source = (BIN_DIR / "upload_event_module" / "ui" / "dialogs.py").read_text(

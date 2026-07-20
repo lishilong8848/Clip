@@ -1,8 +1,23 @@
 import re
 from datetime import datetime
 
+from ...building_normalizer import normalize_building_name
 from ...core.parser import extract_event_info
-from ...config import MAINTENANCE_NOTICE_FIELDS, STATUS_END
+from ...config import (
+    BUILDING_110,
+    BUILDING_A,
+    BUILDING_B,
+    BUILDING_C,
+    BUILDING_D,
+    BUILDING_E,
+    BUILDING_H,
+    BUILDING_PARK,
+    MAINTENANCE_NOTICE_FIELDS,
+    OPTION_SLASH,
+    SPECIALTY_OTHER,
+    SPECIALTY_OPTIONS,
+    STATUS_END,
+)
 from ...time_parser import parse_time_range, parse_single_datetime, parse_time_only
 from .base import BaseNoticeHandler, NoticePayload
 
@@ -28,12 +43,12 @@ class MaintenanceNoticeHandler(BaseNoticeHandler):
         if title:
             fields[MAINTENANCE_NOTICE_FIELDS["name"]] = title
 
-        if payload.specialty:
-            fields[MAINTENANCE_NOTICE_FIELDS["specialty"]] = payload.specialty
-        if payload.buildings:
-            fields[MAINTENANCE_NOTICE_FIELDS["building"]] = self._normalize_buildings_multi(
-                payload.buildings
-            )
+        specialty = self._normalize_specialty_single(payload.specialty)
+        if specialty:
+            fields[MAINTENANCE_NOTICE_FIELDS["specialty"]] = specialty
+        buildings = self._normalize_buildings_multi(payload.buildings)
+        if buildings:
+            fields[MAINTENANCE_NOTICE_FIELDS["building"]] = buildings
         if payload.maintenance_cycle:
             fields[MAINTENANCE_NOTICE_FIELDS["maintenance_cycle"]] = payload.maintenance_cycle
 
@@ -96,12 +111,12 @@ class MaintenanceNoticeHandler(BaseNoticeHandler):
         if title:
             fields[MAINTENANCE_NOTICE_FIELDS["name"]] = title
 
-        if payload.specialty:
-            fields[MAINTENANCE_NOTICE_FIELDS["specialty"]] = payload.specialty
-        if payload.buildings:
-            fields[MAINTENANCE_NOTICE_FIELDS["building"]] = self._normalize_buildings_multi(
-                payload.buildings
-            )
+        specialty = self._normalize_specialty_single(payload.specialty)
+        if specialty:
+            fields[MAINTENANCE_NOTICE_FIELDS["specialty"]] = specialty
+        buildings = self._normalize_buildings_multi(payload.buildings)
+        if buildings:
+            fields[MAINTENANCE_NOTICE_FIELDS["building"]] = buildings
         if payload.maintenance_cycle:
             fields[MAINTENANCE_NOTICE_FIELDS["maintenance_cycle"]] = payload.maintenance_cycle
 
@@ -171,10 +186,77 @@ class MaintenanceNoticeHandler(BaseNoticeHandler):
 
     def _normalize_buildings_multi(self, buildings):
         if not buildings:
-            return None
-        if isinstance(buildings, (list, tuple, set)):
-            return [item for item in buildings if item]
-        return [buildings]
+            return []
+        raw_values = (
+            list(buildings)
+            if isinstance(buildings, (list, tuple, set))
+            else [buildings]
+        )
+        target_order = [
+            BUILDING_A,
+            BUILDING_B,
+            BUILDING_C,
+            BUILDING_D,
+            BUILDING_E,
+            BUILDING_H,
+            BUILDING_110,
+        ]
+        selected: list[str] = []
+
+        def append(value: str) -> None:
+            if value in target_order and value not in selected:
+                selected.append(value)
+
+        for raw_value in raw_values:
+            text = str(raw_value or "").strip()
+            if not text:
+                continue
+            normalized = normalize_building_name(text)
+            if normalized in {BUILDING_PARK, "园区", "CAMPUS"}:
+                for value in (
+                    BUILDING_A,
+                    BUILDING_B,
+                    BUILDING_C,
+                    BUILDING_D,
+                    BUILDING_E,
+                ):
+                    append(value)
+                continue
+            if normalized in target_order:
+                append(normalized)
+                continue
+
+            upper_text = text.upper()
+            if upper_text in {"A", "B", "C", "D", "E", "H"}:
+                append(f"{upper_text}楼")
+                continue
+            if upper_text == "110":
+                append(BUILDING_110)
+                continue
+            if "110" in upper_text:
+                append(BUILDING_110)
+            for match in re.finditer(r"(?<![A-Z0-9])([ABCDEH])\s*(?:楼|栋)", upper_text):
+                append(f"{match.group(1)}楼")
+
+        return [value for value in target_order if value in selected]
+
+    @staticmethod
+    def _normalize_specialty_single(specialty) -> str:
+        text = str(specialty or "").strip()
+        if not text:
+            return ""
+        writable_options = [
+            option
+            for option in SPECIALTY_OPTIONS
+            if option and option != OPTION_SLASH
+        ]
+        if text in writable_options:
+            return text
+        compact = re.sub(r"\s+|专业", "", text)
+        for option in writable_options:
+            if compact == re.sub(r"\s+|专业", "", option):
+                return option
+        return SPECIALTY_OTHER
 
     def _to_timestamp_ms(self, dt: datetime) -> int:
         return int(dt.timestamp() * 1000)

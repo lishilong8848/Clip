@@ -24480,7 +24480,11 @@ class MaintenancePortalService:
             "active_item_id": active_item_id,
             "title": title,
             "building": building,
-            "buildings": [building] if building else [],
+            "buildings": [
+                self._building_label_from_code(code)
+                for code in building_codes
+                if self._building_label_from_code(code)
+            ],
             "building_code": (
                 "CAMPUS"
                 if len(building_codes) >= 2
