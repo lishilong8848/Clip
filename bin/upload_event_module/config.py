@@ -972,6 +972,7 @@ EVENT_NOTICE_FIELDS = {
 
 CHANGE_NOTICE_FIELDS = {
     "status": "变更状态",
+    "specialty": "专业",
     "start_snapshot": "变更开始钉钉截图",
     "start_time": "变更开始时间",
     "update_snapshot": "过程更新钉钉截图",

@@ -29,6 +29,15 @@ class ChangeNoticeHandler(BaseNoticeHandler):
 
     notice_types = ("变更通告",)
     table_id_attr = "table_id_biangeng"
+    TARGET_SPECIALTY_OPTIONS = (
+        "消防",
+        "电气",
+        "暖通",
+        "弱电",
+        "灾害",
+        "土建",
+        "其它",
+    )
 
     ALI_LEVEL_OPTIONS = tuple(CHANGE_ALI_LEVEL_OPTIONS)
     ZHIHANG_LEVEL_MAP = {
@@ -87,6 +96,10 @@ class ChangeNoticeHandler(BaseNoticeHandler):
             fields[CHANGE_NOTICE_FIELDS["building"]] = self._normalize_buildings_multi(
                 payload.buildings
             )
+
+        specialty = self._normalize_specialty_single(payload.specialty)
+        if specialty:
+            fields[CHANGE_NOTICE_FIELDS["specialty"]] = specialty
 
         location = self._extract_section(payload.text, "位置")
         if location:
@@ -156,6 +169,10 @@ class ChangeNoticeHandler(BaseNoticeHandler):
             fields[CHANGE_NOTICE_FIELDS["building"]] = self._normalize_buildings_multi(
                 payload.buildings
             )
+
+        specialty = self._normalize_specialty_single(payload.specialty)
+        if specialty:
+            fields[CHANGE_NOTICE_FIELDS["specialty"]] = specialty
 
         location = self._extract_section(payload.text, "位置")
         if location:
@@ -256,6 +273,25 @@ class ChangeNoticeHandler(BaseNoticeHandler):
         if isinstance(buildings, (list, tuple, set)):
             return [item for item in buildings if item]
         return [buildings]
+
+    @classmethod
+    def _normalize_specialty_single(cls, specialty) -> str:
+        text = str(specialty or "").strip()
+        if not text:
+            return ""
+        if text in cls.TARGET_SPECIALTY_OPTIONS:
+            return text
+        aliases = {
+            "其他": "其它",
+            OPTION_SLASH: "其它",
+        }
+        if text in aliases:
+            return aliases[text]
+        compact = re.sub(r"\s+|专业", "", text)
+        for option in cls.TARGET_SPECIALTY_OPTIONS:
+            if compact == re.sub(r"\s+|专业", "", option):
+                return option
+        return "其它"
 
     def _parse_response_datetime(self, response_time: str, base_dt: datetime):
         if not response_time:

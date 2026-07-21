@@ -1245,6 +1245,54 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             ],
         )
 
+    def test_change_handler_writes_single_select_specialty_on_create_and_update(self):
+        handler = ChangeNoticeHandler("变更通告")
+        create_fields = handler.build_create_fields(
+            NoticePayload(
+                text=(
+                    "【变更通告】状态：开始\n"
+                    "【名称】测试变更\n"
+                    "【等级】低风险\n"
+                    "【时间】2026-06-12 09:30~2026-06-12 18:30"
+                ),
+                specialty="电气专业",
+            )
+        )
+        update_fields = handler.build_update_fields(
+            NoticePayload(
+                text=(
+                    "【变更通告】状态：更新\n"
+                    "【名称】测试变更\n"
+                    "【等级】低风险\n"
+                    "【时间】2026-06-12 09:30~2026-06-12 18:30"
+                ),
+                specialty="其他",
+            )
+        )
+        end_fields = handler.build_update_fields(
+            NoticePayload(
+                text=(
+                    "【变更通告】状态：结束\n"
+                    "【名称】测试变更\n"
+                    "【等级】低风险\n"
+                    "【时间】2026-06-12 09:30~2026-06-12 18:30"
+                ),
+                specialty="消防",
+                response_time="2026-06-12 18:35",
+            )
+        )
+
+        self.assertEqual(create_fields[CHANGE_NOTICE_FIELDS["specialty"]], "电气")
+        self.assertEqual(update_fields[CHANGE_NOTICE_FIELDS["specialty"]], "其它")
+        self.assertEqual(end_fields[CHANGE_NOTICE_FIELDS["specialty"]], "消防")
+
+        restored_fields = PortalRuntime._undo_restore_fields(
+            "变更通告",
+            {"专业": "暖通", "不存在字段": "不应恢复"},
+        )
+        self.assertEqual(restored_fields["专业"], "暖通")
+        self.assertNotIn("不存在字段", restored_fields)
+
     def test_update_notice_screenshots_append_to_type_specific_fields(self):
         cases = [
             (
@@ -8932,6 +8980,14 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(prepared["record_id"], "m-convert-start-a")
             self.assertEqual(prepared["building_codes"], ["A"])
             self.assertEqual(prepared["specialty"], "电气")
+            change_payload = PortalRuntime._prepared_to_notice_payload(prepared)
+            change_fields = ChangeNoticeHandler("变更通告").build_create_fields(
+                change_payload
+            )
+            self.assertEqual(
+                change_fields[CHANGE_NOTICE_FIELDS["specialty"]],
+                "电气",
+            )
             self.assertEqual(prepared["level"], "I3")
             self.assertIn("【变更通告】状态：开始", prepared["text"])
             self.assertIn("【名称】EA118机房A楼冷却塔清洗", prepared["text"])
@@ -9018,6 +9074,15 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             )
 
             self.assertEqual(prepared["target_record_id"], "rec-main-change")
+            self.assertEqual(prepared["specialty"], "电气")
+            prepared_payload = PortalRuntime._prepared_to_notice_payload(prepared)
+            prepared_fields = ChangeNoticeHandler("变更通告").build_update_fields(
+                prepared_payload
+            )
+            self.assertEqual(
+                prepared_fields[CHANGE_NOTICE_FIELDS["specialty"]],
+                "电气",
+            )
             self.assertEqual(
                 prepared["paired_maintenance_target_record_id"],
                 "rec-paired-maintenance",
@@ -9053,6 +9118,17 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 job_id="job-converted-change-end",
             )
             self.assertEqual(prepared_end["target_record_id"], "rec-main-change")
+            self.assertEqual(prepared_end["specialty"], "电气")
+            prepared_end_payload = PortalRuntime._prepared_to_notice_payload(
+                prepared_end
+            )
+            prepared_end_fields = ChangeNoticeHandler(
+                "变更通告"
+            ).build_update_fields(prepared_end_payload)
+            self.assertEqual(
+                prepared_end_fields[CHANGE_NOTICE_FIELDS["specialty"]],
+                "电气",
+            )
             self.assertEqual(
                 prepared_end["paired_maintenance_target_record_id"],
                 "rec-paired-maintenance",
