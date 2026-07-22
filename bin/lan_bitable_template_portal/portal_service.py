@@ -1394,7 +1394,17 @@ class MaintenancePortalService:
                 and time.time() - refreshed_at <= ttl
             ):
                 current = self._state_store.get_repair_snapshot(source_key)
-                return self._repair_snapshot_from_local(current)
+                same_source = (
+                    str(current.get("app_token") or "").strip()
+                    == str(app_token or "").strip()
+                    and str(current.get("table_id") or "").strip()
+                    == str(table_id or "").strip()
+                )
+                if same_source and not self._repair_snapshot_requires_workflow_refresh(
+                    current,
+                    table_id,
+                ):
+                    return self._repair_snapshot_from_local(current)
             try:
                 metas, records = loader()
                 self._state_store.replace_repair_snapshot(
@@ -1423,6 +1433,9 @@ class MaintenancePortalService:
                     == str(app_token or "").strip()
                     and str(stale.get("table_id") or "").strip()
                     == str(table_id or "").strip()
+                ) and not self._repair_snapshot_requires_workflow_refresh(
+                    stale,
+                    table_id,
                 ):
                     return self._repair_snapshot_from_local(stale)
                 raise

@@ -436,6 +436,35 @@ def _record_title(record: dict[str, Any]) -> str:
     return _maintenance_prefixed_title(record, title)
 
 
+def _record_display_title(record: dict[str, Any]) -> str:
+    """Return a business label without exposing internal identity values."""
+    title = str(_record_title(record) or "").strip()
+    technical_ids = {
+        str(record.get(key) or "").strip()
+        for key in (
+            "active_item_id",
+            "source_record_id",
+            "target_record_id",
+            "record_id",
+        )
+        if str(record.get(key) or "").strip()
+    }
+    title_exposes_identity = any(
+        title == technical_id or title.endswith(technical_id)
+        for technical_id in technical_ids
+    )
+    if title and not title_exposes_identity:
+        return title
+    work_type = _item_work_type(record)
+    raw_notice_type = str(record.get("notice_type") or "").strip()
+    notice_label = (
+        raw_notice_type
+        if WORK_TYPE_BY_NOTICE_TYPE.get(raw_notice_type) == work_type
+        else NOTICE_TYPE_BY_WORK_TYPE.get(work_type, "通告")
+    )
+    return f"未命名{notice_label}"
+
+
 def _record_building(record: dict[str, Any]) -> str:
     return _first(
         record.get("building"),
@@ -500,6 +529,19 @@ def _progress_tone(progress: Any) -> str:
 def _progress_badge(progress: Any) -> str:
     text = str(progress or "").strip() or "未开始"
     return f"<span class=\"row-status {_e(_progress_tone(text))}\">{_e(text)}</span>"
+
+
+def _ongoing_display_status(record: dict[str, Any]) -> str:
+    status_text = " ".join(
+        str(record.get(key) or "").strip()
+        for key in ("status", "phase", "error", "last_error", "failure_reason")
+        if str(record.get(key) or "").strip()
+    )
+    if any(flag in status_text for flag in ("失败", "错误", "异常")):
+        return "发送失败"
+    if any(flag in status_text for flag in ("待处理", "需处理", "重试")):
+        return "需处理"
+    return "进行中"
 
 
 def _record_disabled_reason(
@@ -1287,11 +1329,11 @@ def _ongoing_rows(
             ongoing_page=ongoing_page,
         )
         active = " active" if active_id == selected_id else ""
-        title = _record_title(item)
+        title = _record_display_title(item)
         draft = _draft_from_record(item, work_type=row_work_type)
         target_record_id = str(item.get("target_record_id") or item.get("record_id") or "")
         source_record_id = _explicit_source_id(item)
-        status = item.get("status") or "进行中"
+        status = _ongoing_display_status(item)
         site_photo_count = _site_photo_count(item)
         mop_status = _mop_status_text(item, row_work_type)
         needs_site_class = " needs-site-photo" if row_work_type in SITE_PHOTO_REQUIRED_WORK_TYPES and site_photo_count <= 0 else ""
@@ -1311,7 +1353,7 @@ def _ongoing_rows(
             f" data-title=\"{_e(title)}\""
         f" data-draft=\"{_e(_safe_draft_json_attr(draft))}\">"
             f"<span class=\"row-main\"><strong>{_e(title)}</strong>{_progress_badge(status)}</span>"
-            f"{_row_meta(_record_building(item), _record_specialty(item), progress=status, extra_chips=_record_extra_chips(item, row_work_type, ongoing=True))}"
+            f"{_row_meta(_record_building(item), _record_specialty(item), extra_chips=_record_extra_chips(item, row_work_type, ongoing=True))}"
             "</a>"
         )
     return "\n".join(rows)
@@ -5228,8 +5270,34 @@ def render_workbench_lite(
       chip.textContent = text;
       parent.appendChild(chip);
     }}
+    function setOngoingRowStatus(row, text, tone) {{
+      const status = row?.querySelector('.row-status');
+      if (!status) return;
+      status.className = 'row-status ' + (tone || 'working');
+      status.textContent = text || '进行中';
+    }}
+    function ongoingDisplayTitle(draft) {{
+      const rawTitle = String(draft?.title || '').trim();
+      const technicalIds = [
+        draft?.active_item_id,
+        draft?.source_record_id,
+        draft?.target_record_id,
+        draft?.record_id,
+      ].map(value => String(value || '').trim()).filter(Boolean);
+      const exposesIdentity = technicalIds.some(value => rawTitle === value || rawTitle.endsWith(value));
+      if (rawTitle && !exposesIdentity) return rawTitle;
+      const labels = {{
+        maintenance: '维保通告',
+        change: '变更通告',
+        repair: '设备检修',
+        power: String(draft?.notice_type || '') === '下电通告' ? '下电通告' : '上电通告',
+        polling: '设备轮巡',
+        adjust: '设备调整',
+      }};
+      return '未命名' + (labels[String(draft?.work_type || '')] || '通告');
+    }}
     function renderOngoingRow(row, draft, action) {{
-      const title = String(draft.title || '进行中通告').trim();
+      const title = ongoingDisplayTitle(draft);
       const isEnding = action === 'end';
       const status = isEnding ? '结束发送中' : '发送中';
       row.className = 'ongoing-row active optimistic';
@@ -5259,7 +5327,6 @@ def render_workbench_lite(
       rowMain.append(strong, badge);
       const meta = document.createElement('span');
       meta.className = 'row-meta';
-      setMetaChip(meta, status, 'ready');
       setMetaChip(meta, draft.building || draft.buildings || getCurrentScope());
       setMetaChip(meta, draft.specialty || '');
       if (draft.maintenance_cycle) setMetaChip(meta, '周期 ' + draft.maintenance_cycle, 'ready');
@@ -5295,7 +5362,7 @@ def render_workbench_lite(
       const row = findOngoingRowByDraft(draft);
       if (row) {{
         row.classList.add('optimistic');
-        row.querySelector('.row-status')?.replaceChildren(document.createTextNode('发送中'));
+        setOngoingRowStatus(row, action === 'end' ? '结束发送中' : '发送中', 'working');
       }} else if (action === 'start') {{
         const {{ list }} = ongoingListElements();
         if (list) {{
@@ -5348,10 +5415,7 @@ def render_workbench_lite(
       if (!row) return;
       row.classList.remove('optimistic');
       row.classList.toggle('failed', !ok);
-      const status = row.querySelector('.row-status');
-      if (status) status.textContent = ok ? '发送成功' : '发送失败';
-      const meta = row.querySelector('.row-meta');
-      if (meta && message) setMetaChip(meta, String(message).slice(0, 36), ok ? 'success' : 'warn');
+      setOngoingRowStatus(row, ok ? '进行中' : '发送失败', ok ? 'working' : 'danger');
     }}
     function removeOngoingRow(row) {{
       if (!row) return;
@@ -5416,11 +5480,7 @@ def render_workbench_lite(
         }}
         row.classList.remove('optimistic');
         row.classList.add('failed');
-        const status = row.querySelector('.row-status');
-        if (status) status.textContent = '发送失败';
-        const meta = row.querySelector('.row-meta');
-        const failMessage = patch.target_selection_message || patch.message || message || '发送失败';
-        if (meta && failMessage) setMetaChip(meta, String(failMessage).slice(0, 36), 'warn');
+        setOngoingRowStatus(row, '发送失败', 'danger');
         return;
       }}
       if (!row && draft.action === 'start') {{
@@ -5442,16 +5502,14 @@ def render_workbench_lite(
       row.setAttribute('data-site-photo-count', draft.site_photo_count || row.getAttribute('data-site-photo-count') || '0');
       row.setAttribute('data-operation-id', draft.operation_id || row.getAttribute('data-operation-id') || '');
       if (draft.title) {{
-        row.setAttribute('data-title', draft.title);
-        row.title = draft.title;
+        const displayTitle = ongoingDisplayTitle(draft);
+        row.setAttribute('data-title', displayTitle);
+        row.title = displayTitle;
         const strong = row.querySelector('.row-main strong');
-        if (strong) strong.textContent = draft.title;
+        if (strong) strong.textContent = displayTitle;
       }}
-      const status = row.querySelector('.row-status');
-      if (status) status.textContent = '发送成功';
+      setOngoingRowStatus(row, '进行中', 'working');
       setSafeDraftAttr(row, Object.assign({{}}, draftFromRow(row), draft));
-      const meta = row.querySelector('.row-meta');
-      if (meta) setMetaChip(meta, String(message || patch.message || '已完成').slice(0, 36), 'success');
       if (draft.action === 'start') {{
         promoteSubmittedStartToOngoing(draft);
         removeSourceRowForDraft(draft);
@@ -5480,6 +5538,11 @@ def render_workbench_lite(
       }};
       return map[String(phase || '')] || String(phase || '发送中');
     }}
+    function successfulNoticeActionText(action) {{
+      if (action === 'end') return '结束成功，已从进行中移除';
+      if (action === 'update') return '更新成功，通告仍在进行中';
+      return '发送成功，通告已进入进行中';
+    }}
     async function pollSubmittedJob(jobId, label, payload) {{
       if (!jobId) return false;
       const startedAt = Date.now();
@@ -5495,7 +5558,7 @@ def render_workbench_lite(
           const phase = String(job.phase || '');
           if (phase === 'success') {{
             applyJobPatch(job.frontend_patch, payload, true, job.upload_message || '已完成');
-            setLiteStatus('发送成功，列表已局部更新');
+            setLiteStatus(successfulNoticeActionText(payload?.action));
             return true;
           }}
           if (phase === 'failed') {{

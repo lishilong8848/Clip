@@ -417,6 +417,28 @@ class PortalAuthManager:
             self._save_permissions_locked(payload)
         return self.get_permissions_payload()
 
+    def remove_permission_user(
+        self,
+        open_id: str,
+        *,
+        updated_by: str = "",
+    ) -> tuple[dict[str, Any], bool]:
+        open_id = str(open_id or "").strip()
+        if not open_id:
+            raise PortalError("缺少 open_id，无法删除门户权限。")
+        if open_id in REQUIRED_ADMIN_USERS:
+            raise PortalError("固定管理员不能删除。")
+        with self._lock:
+            payload = self._load_permissions_locked()
+            users = payload.get("users") if isinstance(payload.get("users"), dict) else {}
+            payload["users"] = users
+            removed = users.pop(open_id, None) is not None
+            if removed:
+                payload["updated_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                payload["updated_by"] = str(updated_by or "")
+                self._save_permissions_locked(payload)
+        return self.get_permissions_payload(), removed
+
     def bulk_merge_permission_users(
         self,
         raw_users: Any,

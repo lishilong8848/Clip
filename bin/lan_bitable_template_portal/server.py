@@ -2794,6 +2794,32 @@ class PortalRuntime:
                 )
             except (PortalError, ValueError, json.JSONDecodeError) as exc:
                 return self._send_json(400, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/auth/permissions/remove":
+            if not self._require_admin_json(session):
+                return
+            try:
+                payload = self._read_json_body()
+                open_id = str(payload.get("open_id") or "").strip()
+                actor = session.get("user") if isinstance(session.get("user"), dict) else {}
+                actor_open_id = str(actor.get("open_id") or "").strip()
+                if open_id and open_id == actor_open_id:
+                    raise PortalError("不能删除当前登录管理员自己的权限。")
+                permissions, removed = PortalRuntime.auth_manager.remove_permission_user(
+                    open_id,
+                    updated_by=actor_open_id,
+                )
+                return self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "data": self._with_auth_context(
+                            {"permissions": permissions, "removed": removed},
+                            session,
+                        ),
+                    },
+                )
+            except (PortalError, ValueError, json.JSONDecodeError) as exc:
+                return self._send_json(400, {"ok": False, "error": str(exc)})
         if parsed.path == "/api/generate":
             try:
                 payload = self._read_json_body()

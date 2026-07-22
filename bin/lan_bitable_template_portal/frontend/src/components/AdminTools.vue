@@ -917,15 +917,23 @@ async function removePermissionUser(user: Dict): Promise<void> {
     tone: "danger",
     kicker: "权限删除",
     title: `删除「${label}」`,
-    message: "该人员会先从当前编辑列表移除，点击保存权限后才真正生效。",
-    details: ["固定管理员不会被删除", "删除后该 openid 将无法进入已授权楼栋"],
-    confirmLabel: "移除人员",
+    message: "确认后立即删除该人员的门户权限。",
+    details: ["固定管理员和当前登录管理员不会被删除", "删除后该人员将无法进入已授权楼栋"],
+    confirmLabel: "确认删除",
   });
   if (!confirmed) return;
-  const index = permissions.users.indexOf(user);
-  if (index >= 0) {
-    permissions.users.splice(index, 1);
-    message.value = "已从列表移除，点击保存权限后生效。";
+  busy.value = true;
+  try {
+    const data = await api("/api/auth/permissions/remove", {
+      method: "POST",
+      body: JSON.stringify({ open_id: String(user.open_id || "").trim() }),
+    });
+    message.value = data.removed ? "用户权限已删除" : "该用户已不在权限列表中";
+    await Promise.all([loadPermissions(), loadPermissionDirectory(false)]);
+  } catch (error: any) {
+    message.value = error?.message || "用户权限删除失败";
+  } finally {
+    busy.value = false;
   }
 }
 

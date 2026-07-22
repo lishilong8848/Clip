@@ -147,6 +147,10 @@ class AuthPermissionsSaveRequest(APIModel):
     users: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class AuthPermissionRemoveRequest(APIModel):
+    open_id: str = ""
+
+
 class PermissionDirectoryGrantRequest(APIModel):
     record_ids: list[str] = Field(default_factory=list)
     scopes: list[str] = Field(default_factory=list)

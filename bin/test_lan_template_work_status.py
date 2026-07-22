@@ -867,6 +867,72 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertNotIn("流程", records[0]["display_fields"])
         self.assertEqual(metas, [])
 
+    def test_repair_snapshot_refresh_bypasses_fresh_legacy_workflow_cache(self):
+        service = MaintenancePortalService()
+        legacy_snapshot = {
+            "app_token": REPAIR_SOURCE_APP_TOKEN,
+            "table_id": REPAIR_MANAGEMENT_TABLE_ID,
+            "refreshed_at": time.time(),
+            "fields": [
+                {
+                    "field_id": "fld_legacy_stage",
+                    "field_name": "流程",
+                    "ui_type": "Stage",
+                    "field_type": 24,
+                }
+            ],
+            "records": [
+                {
+                    "record_id": "rec_legacy_stage",
+                    "raw_fields": {"流程": "opt_legacy"},
+                    "display_fields": {"流程": "旧流程状态"},
+                }
+            ],
+        }
+        replacement = {}
+        service._state_store.get_repair_snapshot_meta = (  # type: ignore[method-assign]
+            lambda _source_key: {"refreshed_at": time.time()}
+        )
+        service._state_store.get_repair_snapshot = (  # type: ignore[method-assign]
+            lambda _source_key, **_kwargs: legacy_snapshot
+        )
+        service._state_store.replace_repair_snapshot = (  # type: ignore[method-assign]
+            lambda source_key, **kwargs: replacement.update(
+                {"source_key": source_key, **kwargs}
+            )
+        )
+        loader_calls = []
+        workflow_meta = FieldMeta(
+            "fld_workflow_l",
+            "流程",
+            "SingleSelect",
+            3,
+            False,
+            {
+                "opt_pending": "未开始",
+                "opt_running": "维修中",
+                "opt_done": "维修完成",
+            },
+            ["未开始", "维修中", "维修完成"],
+            False,
+        )
+
+        def loader():
+            loader_calls.append(True)
+            return [workflow_meta], []
+
+        metas, meta_by_name, _records = service._refresh_repair_snapshot_source(
+            source_key=REPAIR_SNAPSHOT_SOURCE_PROJECTS,
+            app_token=REPAIR_SOURCE_APP_TOKEN,
+            table_id=REPAIR_MANAGEMENT_TABLE_ID,
+            loader=loader,
+        )
+
+        self.assertEqual(len(loader_calls), 1)
+        self.assertEqual(metas[0].field_type, 3)
+        self.assertEqual(meta_by_name["流程"].ui_type, "SingleSelect")
+        self.assertEqual(replacement["fields"][0]["field_type"], 3)
+
     def test_repair_search_requests_only_existing_legacy_fallback_fields(self):
         service = MaintenancePortalService()
         captured = []
@@ -9423,6 +9489,70 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertIn("window.addEventListener('focus', checkLiteAuthStatus)", html)
         self.assertIn("document.addEventListener('visibilitychange'", html)
 
+    def test_workbench_lite_ongoing_rows_hide_ids_and_normalize_status(self):
+        notice_specs = [
+            ("maintenance", "维保通告", "未命名维保通告", "开始"),
+            ("change", "变更通告", "未命名变更通告", "发送成功"),
+            ("repair", "设备检修", "未命名设备检修", "已上传"),
+            ("power", "下电通告", "未命名下电通告", "更新"),
+            ("polling", "设备轮巡", "未命名设备轮巡", "开始"),
+            ("adjust", "设备调整", "未命名设备调整", "发送成功"),
+        ]
+        items = []
+        for index, (work_type, notice_type, _label, status) in enumerate(notice_specs):
+            items.append(
+                {
+                    "active_item_id": f"local_active_internal_{index}",
+                    "target_record_id": f"rec_target_internal_{index}",
+                    "record_id": f"rec_target_internal_{index}",
+                    "work_type": work_type,
+                    "notice_type": notice_type,
+                    "status": status,
+                    "building": "E楼",
+                    "specialty": "暖通",
+                    "maintenance_cycle": "每月",
+                }
+            )
+        rendered = workbench_lite_module._ongoing_rows(
+            items,
+            scope="E",
+            work_type="all",
+            selected_id="",
+        )
+        visible_text = re.sub(r"<[^>]+>", "", rendered)
+
+        for index, (_work_type, _notice_type, label, _status) in enumerate(notice_specs):
+            self.assertIn(label, visible_text)
+            self.assertNotIn(f"local_active_internal_{index}", visible_text)
+            self.assertNotIn(f"rec_target_internal_{index}", visible_text)
+        self.assertNotIn("发送成功", visible_text)
+        self.assertNotIn("开始", visible_text)
+        self.assertEqual(visible_text.count("进行中"), len(notice_specs))
+
+    def test_workbench_lite_submission_success_restores_ongoing_business_status(self):
+        html = workbench_lite_module.render_workbench_lite(
+            payload={
+                "records": [],
+                "ongoing": [],
+                "daily_summary": {"stats": {}},
+                "record_type_counts": {},
+                "ongoing_type_counts": {},
+            },
+            session={"user": {"name": "测试用户"}},
+            scope="E",
+            work_type="maintenance",
+        )
+
+        self.assertIn("function setOngoingRowStatus(row, text, tone)", html)
+        self.assertIn("function ongoingDisplayTitle(draft)", html)
+        self.assertIn("const title = ongoingDisplayTitle(draft);", html)
+        self.assertIn("setOngoingRowStatus(row, '进行中', 'working');", html)
+        self.assertIn("setLiteStatus(successfulNoticeActionText(payload?.action));", html)
+        self.assertNotIn("setMetaChip(meta, status, 'ready');", html)
+        self.assertNotIn("setMetaChip(meta, String(message).slice", html)
+        self.assertNotIn("setMetaChip(meta, String(message || patch.message", html)
+        self.assertNotIn("status.textContent = ok ? '发送成功' : '发送失败';", html)
+
     def test_workbench_lite_repair_prefill_selects_only_its_source_record(self):
         from lan_bitable_template_portal.workbench_lite import render_workbench_lite
 
@@ -11020,6 +11150,50 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 )
                 self.assertEqual(changed, ["ou_directory_user"])
                 self.assertEqual(results[0]["added_scopes"], ["B", "C"])
+
+    def test_portal_auth_remove_permission_user_persists_and_protects_admin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            def fake_data_path(name):
+                return str(root / name)
+
+            with patch(
+                "lan_bitable_template_portal.portal_auth.get_data_file_path",
+                side_effect=fake_data_path,
+            ):
+                manager = PortalAuthManager()
+                manager.upsert_permission_user(
+                    open_id="ou_remove_me",
+                    name="待删除用户",
+                    scopes=["A"],
+                    updated_by="ou_admin",
+                )
+
+                payload, removed = manager.remove_permission_user(
+                    "ou_remove_me",
+                    updated_by="ou_admin",
+                )
+
+                self.assertTrue(removed)
+                self.assertNotIn(
+                    "ou_remove_me",
+                    {item["open_id"] for item in payload["users"]},
+                )
+                self.assertNotIn(
+                    "ou_remove_me",
+                    {
+                        item["open_id"]
+                        for item in manager.get_permissions_payload()["users"]
+                    },
+                )
+                locked = next(
+                    item
+                    for item in payload["users"]
+                    if item.get("locked")
+                )
+                with self.assertRaisesRegex(PortalError, "固定管理员不能删除"):
+                    manager.remove_permission_user(locked["open_id"])
 
     def test_permission_directory_extracts_position_buildings_and_specialties(self):
         person = MaintenancePortalService._permission_directory_person(

@@ -40,6 +40,7 @@ from clipflow_backend.runtime_helpers import (
 )
 from clipflow_backend.api_models import (
     APIModel,
+    AuthPermissionRemoveRequest,
     AuthPermissionsSaveRequest,
     ChangeTargetConfirmRequest,
     ChangeTargetLookupRequest,
@@ -4388,6 +4389,35 @@ class FastAPIPortalController:
                         "changed_count": len(changed_open_ids),
                         "selected_count": int(resolved.get("selected_count") or 0),
                     },
+                )
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.post("/api/auth/permissions/remove")
+        async def remove_permission_user(request: Request):
+            admin_response, session = self._require_admin_response(request)
+            if admin_response is not None:
+                return admin_response
+            try:
+                payload = (
+                    await self._read_model_request(
+                        request, AuthPermissionRemoveRequest
+                    )
+                ).to_payload()
+                open_id = str(payload.get("open_id") or "").strip()
+                actor = session.get("user") if isinstance(session.get("user"), dict) else {}
+                actor_open_id = str(actor.get("open_id") or "").strip()
+                if open_id and open_id == actor_open_id:
+                    raise PortalError("不能删除当前登录管理员自己的权限。")
+                permissions, removed = PortalRuntime.auth_manager.remove_permission_user(
+                    open_id,
+                    updated_by=actor_open_id,
+                )
+                self._clear_read_cache(("auth_status",))
+                return self._json_ok(
+                    request,
+                    session,
+                    {"permissions": permissions, "removed": removed},
                 )
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
