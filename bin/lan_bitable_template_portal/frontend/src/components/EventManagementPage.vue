@@ -36,7 +36,7 @@
         tone="warning"
         :text="`最近刷新失败，当前仍显示上一次成功数据：${lastFailedError}`"
       />
-      <EventStatsCards :cards="statCards" />
+      <EventStatsCards :cards="statCards" @select="openMetricRecords" />
 
       <div class="event-work-surface" :class="{ detail: showingDetails }">
         <EventBuildingOverview
@@ -51,8 +51,8 @@
           :detail-scope-label="detailScopeLabel"
           :scope-label="scopeLabel"
           :priority-events="priorityEvents"
-          :high-priority-count="highPriorityEvents.length"
-          :pending-count="pendingEventsCount"
+          :i2-or-higher-count="i2OrHigherEvents.length"
+          :under-repair-count="underRepairEvents.length"
           :events-count="events.length"
           :overview-stats="overviewStats"
           :allowed-count="allowedBuildingCodes.size"
@@ -114,6 +114,32 @@
         :scope-label="scopeLabel"
         @select="selectedEvent = $event || null"
       />
+    </div>
+
+    <div v-if="metricModalKey" class="event-metric-backdrop" @click.self="closeMetricRecords">
+      <section class="event-metric-dialog" role="dialog" aria-modal="true" :aria-label="metricModalTitle">
+        <header>
+          <div>
+            <span class="section-kicker">本月事件</span>
+            <h3>{{ metricModalTitle }}</h3>
+            <small>{{ metricFilteredRecords.length }} 条可查看记录</small>
+          </div>
+          <button type="button" class="drawer-close" @click="closeMetricRecords">关闭</button>
+        </header>
+        <MessageBanner v-if="metricErrorText" tone="failed" :text="metricErrorText" />
+        <div v-if="metricLoading" class="event-empty compact">
+          <strong>正在读取事件记录</strong>
+        </div>
+        <div v-else-if="!metricFilteredRecords.length" class="event-empty compact">
+          <strong>本月暂无对应记录</strong>
+        </div>
+        <EventVirtualList
+          v-else
+          :records="metricFilteredRecords"
+          :scope-label="metricModalScopeLabel"
+          @select="selectMetricEvent"
+        />
+      </section>
     </div>
 
     <div v-if="selectedEvent" class="event-drawer-backdrop" @click.self="selectedEvent = null">
@@ -221,6 +247,8 @@ import {
   buildEventBuildingCardFromStats as buildBuildingCardFromStats,
   eventBuildingCodesForItem as buildingCodesForItem,
   eventBuildingSortIndex as buildingSortIndex,
+  eventI2OrHigher,
+  eventI3Level,
   eventLevelTone as levelTone,
   eventMatchesBuilding,
   eventPriorityScore as priorityScore,
@@ -230,6 +258,7 @@ import {
   eventScopeText as scopeText,
   eventStatusTone as statusTone,
   eventTransferEnabled,
+  eventUnderRepair,
   formatEventEpoch as formatEpoch,
   isHighLevelEvent as isHighLevel,
   isTechnicalEventDisplayField as isTechnicalDisplayField,
@@ -283,6 +312,13 @@ const detailRequested = ref(initialDetailRequested);
 const selectedEvent = ref<LooseDict | null>(null);
 const selectedEventDetailTab = ref<"summary" | "timeline" | "fields">("summary");
 const eventTransferBusy = ref(false);
+type EventMetricKey = "repairing" | "i2plus" | "i3";
+const metricModalKey = ref<EventMetricKey | "">("");
+const metricSourceRecords = ref<LooseDict[]>([]);
+const metricRecordsMonth = ref("");
+const metricLoading = ref(false);
+const metricErrorText = ref("");
+let metricRequestVersion = 0;
 
 const scopeLabel = computed(() => {
   const normalized = normalizeScope(props.scope);
@@ -304,11 +340,8 @@ const lastRefreshCompactText = computed(() => {
   return `数据更新 ${date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false })}`;
 });
 
-const overviewPendingCount = computed(() => Number(overviewStats.value.pending || stats.value.pending || 0));
-const pendingEventsCount = computed(() => events.value.filter((item) => statusTone(item.status) === "recovered").length);
-const highPriorityEvents = computed(() => {
-  return events.value.filter((item) => isHighLevel(item));
-});
+const underRepairEvents = computed(() => events.value.filter((item) => eventUnderRepair(item)));
+const i2OrHigherEvents = computed(() => events.value.filter((item) => eventI2OrHigher(item)));
 const statCards = computed(() => [
   {
     key: "total",
@@ -320,40 +353,36 @@ const statCards = computed(() => [
     icon: "+",
   },
   {
-    key: "pending",
-    label: "挂起中事件",
-    value: overviewPendingCount.value,
+    key: "repairing",
+    label: "正在检修中",
+    value: Number(overviewStats.value.under_repair || stats.value.under_repair || underRepairEvents.value.length || 0),
     unit: "件",
-    badge: overviewPendingCount.value ? "需跟进" : "暂无挂起",
-    tone: "amber",
-    icon: "Ⅱ",
-  },
-  {
-    key: "high",
-    label: "重点事件",
-    value: Number(overviewStats.value.high_level || stats.value.high_level || highPriorityEvents.value.length || 0),
-    unit: "件",
-    badge: Number(overviewStats.value.high_level || stats.value.high_level || 0) ? "需优先处置" : "运行平稳",
-    tone: "rose",
-    icon: "!",
-  },
-  {
-    key: "ended",
-    label: "本月闭环",
-    value: Number(overviewStats.value.ended || stats.value.ended || 0),
-    unit: "件",
-    badge: `闭环率 ${closureRate.value}`,
+    badge: "查看检修中记录",
     tone: "emerald",
-    icon: "✓",
+    icon: "修",
+    clickable: true,
+  },
+  {
+    key: "i2plus",
+    label: "本月I2级及以上",
+    value: Number(overviewStats.value.i2_or_higher || stats.value.i2_or_higher || i2OrHigherEvents.value.length || 0),
+    unit: "件",
+    badge: "查看高等级记录",
+    tone: "amber",
+    icon: "!",
+    clickable: true,
+  },
+  {
+    key: "i3",
+    label: "本月I3级事件",
+    value: Number(overviewStats.value.i3 || stats.value.i3 || events.value.filter((item) => eventI3Level(item)).length || 0),
+    unit: "件",
+    badge: "查看I3记录",
+    tone: "rose",
+    icon: "I3",
+    clickable: true,
   },
 ]);
-
-const closureRate = computed(() => {
-  const total = Number(overviewStats.value.total || stats.value.total || events.value.length || 0);
-  if (!total) return "0%";
-  const ended = Number(overviewStats.value.ended || stats.value.ended || 0);
-  return `${Math.round((ended / total) * 1000) / 10}%`;
-});
 
 const allowedBuildingCodes = computed(() => {
   const values = props.scopeOptions.map((item) => normalizeScope(item.value)).filter(Boolean);
@@ -391,18 +420,25 @@ const buildingCards = computed<BuildingCard[]>(() => {
   return sortedCodes.map((code) => {
     const rows = events.value.filter((item) => eventMatchesBuilding(item, code, props.scope));
     const processing = rows.filter((item) => statusTone(item.status) === "processing").length;
-    const pending = rows.filter((item) => statusTone(item.status) === "recovered").length;
-    const ended = rows.filter((item) => statusTone(item.status) === "ended").length;
+    const underRepair = rows.filter((item) => eventUnderRepair(item)).length;
+    const i2OrHigher = rows.filter((item) => eventI2OrHigher(item)).length;
+    const i3 = rows.filter((item) => eventI3Level(item)).length;
     const high = rows.filter((item) => isHighLevel(item)).length;
-    const tone = high ? "critical" : pending ? "warning" : processing ? "active" : "stable";
-    const statusLabel = high ? `重点 ${high}` : pending ? `挂起 ${pending}` : processing ? "待处理" : "运行平稳";
+    const tone = i3 ? "critical" : i2OrHigher ? "warning" : underRepair ? "active" : "stable";
+    const statusLabel = i3
+      ? `I3 ${i3}`
+      : i2OrHigher
+        ? `I2级以上 ${i2OrHigher}`
+        : underRepair
+          ? `检修中 ${underRepair}`
+          : "运行平稳";
     return {
       code,
       label: scopeText(code),
       total: rows.length,
       processing,
-      pending,
-      ended,
+      underRepair,
+      i2OrHigher,
       high,
       tone,
       statusLabel,
@@ -435,6 +471,7 @@ const filteredEvents = computed(() => {
 
 const priorityEvents = computed(() => {
   return filteredEvents.value
+    .filter((item) => eventI2OrHigher(item) || eventUnderRepair(item))
     .slice()
     .sort((left, right) => {
       const leftScore = priorityScore(left);
@@ -474,6 +511,7 @@ const detailFields = computed(() => {
     { key: "source", label: "事件发现来源", value: item.source },
     { key: "status", label: "状态", value: item.status },
     { key: "transfer", label: "检修链路", value: eventRepairFlowLabel(item) },
+    { key: "repair_completion", label: "检修完成时间", value: item.repair_completion_time },
   ];
 });
 
@@ -485,6 +523,7 @@ const timelineItems = computed(() => {
     { label: "进展更新时间", value: item.progress_update },
     { label: "事件恢复时间", value: item.recover_time },
     { label: "事件结束时间", value: item.end_time },
+    { label: "检修完成时间", value: item.repair_completion_time },
   ];
 });
 
@@ -496,6 +535,105 @@ const visibleDisplayFields = computed(() => {
     .filter((item) => item.key && item.value && !isTechnicalDisplayField(item.key))
     .slice(0, 80);
 });
+
+const metricModalTitle = computed(() => {
+  if (metricModalKey.value === "repairing") return "正在检修中的事件";
+  if (metricModalKey.value === "i2plus") return "I2级及以上事件";
+  if (metricModalKey.value === "i3") return "I3级事件";
+  return "事件记录";
+});
+
+const metricModalScopeLabel = computed(() => (
+  showingDetails.value ? detailScopeLabel.value : "有权限楼栋"
+));
+
+const metricFilteredRecords = computed(() => {
+  if (metricModalKey.value === "repairing") {
+    return metricSourceRecords.value.filter((item) => eventUnderRepair(item));
+  }
+  if (metricModalKey.value === "i2plus") {
+    return metricSourceRecords.value.filter((item) => eventI2OrHigher(item));
+  }
+  if (metricModalKey.value === "i3") {
+    return metricSourceRecords.value.filter((item) => eventI3Level(item));
+  }
+  return [];
+});
+
+async function loadMetricSourceRecords(): Promise<void> {
+  const requestMonth = selectedMonth.value;
+  const requestVersion = ++metricRequestVersion;
+  if (showingDetails.value) {
+    metricSourceRecords.value = events.value.slice();
+    metricRecordsMonth.value = requestMonth;
+    return;
+  }
+  if (metricRecordsMonth.value === requestMonth && metricSourceRecords.value.length) return;
+  metricLoading.value = true;
+  metricErrorText.value = "";
+  try {
+    const scopeValues = props.scopeOptions
+      .map((item) => normalizeScope(item.value))
+      .filter(Boolean);
+    const requestScopes = scopeValues.includes("ALL")
+      ? ["ALL"]
+      : Array.from(allowedBuildingCodes.value);
+    if (!requestScopes.length) {
+      const fallback = normalizeScope(props.scope);
+      if (fallback) requestScopes.push(fallback);
+    }
+    const responses = await Promise.allSettled(
+      requestScopes.map(async (scope) => {
+        const params = new URLSearchParams({ scope, month: requestMonth });
+        return requestJson(`/api/events/monthly?${params.toString()}`);
+      }),
+    );
+    const uniqueRecords = new Map<string, LooseDict>();
+    let successCount = 0;
+    let firstError = "";
+    responses.forEach((response) => {
+      if (response.status === "rejected") {
+        if (!firstError) firstError = response.reason instanceof Error ? response.reason.message : String(response.reason || "");
+        return;
+      }
+      successCount += 1;
+      const rows = Array.isArray(response.value.records) ? response.value.records : [];
+      rows.forEach((item: LooseDict) => {
+        const key = eventRecordId(item) || `${item.title || ""}-${item.occurrence_time || ""}`;
+        if (key) uniqueRecords.set(key, item);
+      });
+    });
+    if (!successCount && firstError) throw new Error(firstError);
+    if (requestVersion !== metricRequestVersion || requestMonth !== selectedMonth.value) return;
+    metricSourceRecords.value = Array.from(uniqueRecords.values());
+    metricRecordsMonth.value = requestMonth;
+    if (firstError) metricErrorText.value = `部分楼栋读取失败：${firstError}`;
+  } finally {
+    if (requestVersion === metricRequestVersion) metricLoading.value = false;
+  }
+}
+
+async function openMetricRecords(key: string): Promise<void> {
+  if (!(["repairing", "i2plus", "i3"] as string[]).includes(key)) return;
+  metricModalKey.value = key as EventMetricKey;
+  metricErrorText.value = "";
+  try {
+    await loadMetricSourceRecords();
+  } catch (error: unknown) {
+    metricSourceRecords.value = [];
+    metricErrorText.value = error instanceof Error ? error.message : "事件记录读取失败。";
+  }
+}
+
+function closeMetricRecords(): void {
+  metricModalKey.value = "";
+  metricErrorText.value = "";
+}
+
+function selectMetricEvent(item: LooseDict | undefined): void {
+  selectedEvent.value = item || null;
+  closeMetricRecords();
+}
 
 function setEventTransferState(recordId: string): void {
   if (!recordId) return;
@@ -552,6 +690,7 @@ function openBuilding(code: string): void {
   detailScope.value = nextScope;
   setEventDetailUrlFlag(true);
   clearFilters();
+  closeMetricRecords();
   selectedEvent.value = null;
   if (nextScope && nextScope !== normalizeScope(props.scope)) {
     emit("switch-scope", nextScope, true);
@@ -565,6 +704,7 @@ function returnToOverview(): void {
   detailScope.value = "";
   setEventDetailUrlFlag(false);
   selectedEvent.value = null;
+  closeMetricRecords();
   clearFilters();
   events.value = [];
   stats.value = {};
@@ -660,6 +800,10 @@ async function refreshEvents(): Promise<void> {
     lastFailed.value = payload.last_failed && typeof payload.last_failed === "object" ? payload.last_failed : {};
     configMissing.value = Boolean(payload.config_missing);
     configError.value = String(payload.config_error || "");
+    metricSourceRecords.value = [];
+    metricRecordsMonth.value = "";
+    metricRequestVersion += 1;
+    metricLoading.value = false;
     emit("status", "事件已刷新，页面已更新。");
   } catch (error: unknown) {
     errorText.value = error instanceof Error ? error.message : "事件刷新失败。";
@@ -675,6 +819,11 @@ watch(
   () => [props.scope, selectedMonth.value],
   () => {
     selectedEvent.value = null;
+    closeMetricRecords();
+    metricSourceRecords.value = [];
+    metricRecordsMonth.value = "";
+    metricRequestVersion += 1;
+    metricLoading.value = false;
     buildingFilter.value = "";
     const normalizedScope = normalizeScope(props.scope);
     if (detailRequested.value && BUILDING_SCOPE_CODES.includes(normalizedScope)) {
@@ -1059,6 +1208,55 @@ onMounted(() => {
   font-size: 13px;
   font-weight: 800;
   line-height: 1.55;
+}
+
+.event-metric-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--cf-z-modal-backdrop, 800);
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  background: rgba(6, 21, 48, 0.34);
+  backdrop-filter: blur(3px);
+}
+
+.event-metric-dialog {
+  width: min(1180px, calc(100vw - 56px));
+  max-height: calc(100vh - 56px);
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 14px;
+  border: 1px solid #cfe0f5;
+  border-radius: 22px;
+  padding: 20px;
+  background: #f7fbff;
+  box-shadow: 0 28px 80px rgba(7, 37, 86, 0.28);
+}
+
+.event-metric-dialog header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.event-metric-dialog h3 {
+  margin: 6px 0 2px;
+  color: #071a39;
+  font-size: 22px;
+  font-weight: 950;
+}
+
+.event-metric-dialog header small {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.event-metric-dialog :deep(.event-virtual-list) {
+  height: min(68vh, 680px);
 }
 
 .event-drawer-backdrop {

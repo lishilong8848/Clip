@@ -22,6 +22,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 from .portal_auth import AUTH_COOKIE_NAME, PortalAuthManager
 from .portal_service import (
+    BUILDING_SCOPE_CODES,
     DEFAULT_APP_TOKEN,
     DEFAULT_TABLE_ID,
     MaintenancePortalService,
@@ -1713,6 +1714,46 @@ class PortalRuntime:
                 200,
                 {"ok": True, "data": self._with_auth_context(data, session)},
             )
+        if parsed.path == "/api/auth/permission-directory":
+            if not self._require_admin_json(session):
+                return
+            try:
+                qs = parse_qs(parsed.query)
+                data = self.service.get_permission_directory_people(
+                    force_refresh=(qs.get("refresh") or [""])[0]
+                    in {"1", "true", "True"},
+                    query=(qs.get("q") or [""])[0],
+                )
+                permissions = PortalRuntime.auth_manager.get_permissions_payload()
+                permission_by_open_id = {
+                    str(item.get("open_id") or "").strip(): item
+                    for item in permissions.get("users") or []
+                    if str(item.get("open_id") or "").strip()
+                    and item.get("enabled") is not False
+                }
+                for item in data.get("items") or []:
+                    current = permission_by_open_id.get(
+                        str(item.get("open_id") or "").strip(),
+                        {},
+                    )
+                    authorized_scopes = {
+                        str(scope or "").strip()
+                        for scope in current.get("scopes") or []
+                        if str(scope or "").strip()
+                    }
+                    item["authorized_scopes"] = [
+                        scope for scope in BUILDING_SCOPE_CODES if scope in authorized_scopes
+                    ]
+                    item["authorized_scope_labels"] = [
+                        PortalRuntime.auth_manager.scope_label(scope)
+                        for scope in item["authorized_scopes"]
+                    ]
+                return self._send_json(
+                    200,
+                    {"ok": True, "data": self._with_auth_context(data, session)},
+                )
+            except Exception as exc:
+                return self._send_json(500, {"ok": False, "error": str(exc)})
         if parsed.path == "/api/auth/permission-requests/current":
             user = session.get("user") if isinstance(session.get("user"), dict) else {}
             request = PortalRuntime.auth_manager.get_current_permission_request(
@@ -2702,6 +2743,54 @@ class PortalRuntime:
                 return self._send_json(
                     200,
                     {"ok": True, "data": self._with_auth_context(data, session)},
+                )
+            except (PortalError, ValueError, json.JSONDecodeError) as exc:
+                return self._send_json(400, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/auth/permission-directory/grant":
+            if not self._require_admin_json(session):
+                return
+            try:
+                payload = self._read_json_body()
+                resolved = self.service.resolve_permission_directory_grants(
+                    payload.get("record_ids") or [],
+                    payload.get("scopes") or [],
+                )
+                grants = resolved.get("grants") or []
+                if not grants:
+                    failed = resolved.get("failed") or []
+                    raise PortalError(
+                        str((failed[0] if failed else {}).get("error") or "没有可授权的人员")
+                    )
+                actor = session.get("user") if isinstance(session.get("user"), dict) else {}
+                data, changed_open_ids, items = (
+                    PortalRuntime.auth_manager.bulk_merge_permission_users(
+                        grants,
+                        updated_by=str(actor.get("open_id") or ""),
+                    )
+                )
+                if changed_open_ids:
+                    actor_name = str(actor.get("name") or actor.get("en_name") or "管理员")
+                    text = (
+                        "南通基地-运维灯塔工作台权限已更新。\n"
+                        f"操作人：{actor_name}\n"
+                        "请重新进入门户或刷新页面查看最新楼栋权限。"
+                    )
+                    threading.Thread(
+                        target=_send_text_to_open_ids_guarded,
+                        args=(text, changed_open_ids),
+                        name="LANPortalPermissionDirectoryNotify",
+                        daemon=True,
+                    ).start()
+                response = {
+                    "permissions": data,
+                    "items": items,
+                    "failed": resolved.get("failed") or [],
+                    "changed_count": len(changed_open_ids),
+                    "selected_count": int(resolved.get("selected_count") or 0),
+                }
+                return self._send_json(
+                    200,
+                    {"ok": True, "data": self._with_auth_context(response, session)},
                 )
             except (PortalError, ValueError, json.JSONDecodeError) as exc:
                 return self._send_json(400, {"ok": False, "error": str(exc)})
@@ -5578,25 +5667,35 @@ class PortalRuntime:
     @classmethod
     def _upsert_backend_active_notice(
         cls, prepared: dict, *, remote_record_id: str = "", job_id: str = ""
-    ) -> str:
+    ) -> int | str:
         event_payload = cls._prepared_to_qt_ui_payload(
             prepared,
             remote_record_id=remote_record_id,
         )
         notice_type = str(event_payload.get("notice_type") or "").strip()
         section = "event" if notice_type == "事件通告" else "other"
-        try:
-            cls.state_store.upsert_qt_active_item(
-                event_payload,
-                section=section,
-                sort_order=0,
-                origin=str(event_payload.get("origin") or "portal"),
-            )
-        except Exception as exc:
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                saved = cls.state_store.upsert_qt_active_item(
+                    event_payload,
+                    section=section,
+                    sort_order=0,
+                    origin=str(event_payload.get("origin") or "portal"),
+                )
+                if not saved:
+                    raise PortalError("进行中通告缺少可保存的本地条目ID。")
+                last_error = None
+                break
+            except Exception as exc:
+                last_error = exc
+                if attempt < 2:
+                    time.sleep(0.05 * (attempt + 1))
+        if last_error is not None:
             log_warning(
-                f"后端 active item 投影失败: job_id={job_id}, error={exc}"
+                f"后端 active item 投影失败: job_id={job_id}, error={last_error}"
             )
-            raise
+            raise last_error
         try:
             cls.clear_payload_cache()
             if hasattr(cls.service, "_touch_state_cache_version"):
@@ -5614,17 +5713,23 @@ class PortalRuntime:
             "origin": str(event_payload.get("origin") or "portal"),
             "payload": event_payload,
         }
-        return cls.state_store.enqueue_outbox_event(
-            "qt_action",
-            {
-                "kind": "active_upsert",
-                "job_id": str(job_id or event_payload.get("job_id") or ""),
-                "payload": {
-                    "item": projected_item,
-                    "source": "portal",
+        try:
+            return cls.state_store.enqueue_outbox_event(
+                "qt_action",
+                {
+                    "kind": "active_upsert",
+                    "job_id": str(job_id or event_payload.get("job_id") or ""),
+                    "payload": {
+                        "item": projected_item,
+                        "source": "portal",
+                    },
                 },
-            },
-        )
+            )
+        except Exception as exc:
+            # SQLite active state is already durable. Qt can restore it on the
+            # next poll/restart even if this transient notification enqueue fails.
+            log_warning(f"Qt active 通知投递失败: job_id={job_id}, error={exc}")
+            return ""
 
     @classmethod
     def _enqueue_active_delete_for_ended_notice(
@@ -6714,6 +6819,34 @@ class PortalRuntime:
                 )
                 if not paired_ok:
                     paired_warning = f"维保多维同步失败：{paired_message}"
+
+            action = str(prepared.get("action") or "").strip().lower()
+            resolved_remote_record_id = str(
+                remote_record_id or prepared.get("target_record_id") or ""
+            ).strip()
+            if action in {"start", "update"} and resolved_remote_record_id:
+                prepared["target_record_id"] = resolved_remote_record_id
+                if not str(prepared.get("active_item_id") or "").strip():
+                    prepared["active_item_id"] = resolved_remote_record_id
+
+            # The target write is already durable at this point. Persist the
+            # browser/Qt ongoing projection before any optional personal-message
+            # delivery so a messaging timeout cannot leave both interfaces stale.
+            qt_event_id: int | str = ""
+            projection_warning = ""
+            if action in {"start", "update"}:
+                try:
+                    qt_event_id = cls._upsert_backend_active_notice(
+                        prepared,
+                        remote_record_id=resolved_remote_record_id,
+                        job_id=job_id,
+                    )
+                except Exception as exc:
+                    projection_warning = f"界面进行中状态同步失败：{exc}"
+                    log_warning(
+                        f"通告远端已成功，但本地进行中状态同步失败: "
+                        f"job_id={job_id}, error={exc}"
+                    )
             if not prepared.get("skip_personal_message") and not prepared.get("message_sent"):
                 cls.service.mark_job(
                     job_id,
@@ -6721,9 +6854,16 @@ class PortalRuntime:
                     message_queue_position=0,
                     queue_position=0,
                 )
-                message_ok, message_result = cls.service.send_action_personal_message(
-                    prepared
-                )
+                try:
+                    message_ok, message_result = (
+                        cls.service.send_action_personal_message(prepared)
+                    )
+                except Exception as exc:
+                    message_ok, message_result = False, str(exc)
+                    log_warning(
+                        f"个人消息发送异常，远端写入和进行中状态继续保留: "
+                        f"job_id={job_id}, error={exc}"
+                    )
                 if message_ok:
                     cls.service.mark_job(
                         job_id,
@@ -6751,6 +6891,21 @@ class PortalRuntime:
                         message_queue_position=0,
                         queue_position=0,
                     )
+            current_job = cls.service.get_job(job_id) or {}
+            existing_message_warning = str(
+                current_job.get("message_warning") or ""
+            ).strip()
+            result_warnings = list(
+                dict.fromkeys(
+                    item
+                    for item in (
+                        existing_message_warning,
+                        paired_warning,
+                        projection_warning,
+                    )
+                    if item
+                )
+            )
             cls.service.mark_job(
                 job_id,
                 prepared=prepared,
@@ -6759,19 +6914,32 @@ class PortalRuntime:
                 paired_maintenance_target_record_id=str(
                     prepared.get("paired_maintenance_target_record_id") or ""
                 ),
+                qt_phase=(
+                    "outbox"
+                    if action in {"start", "update"}
+                    and not projection_warning
+                    and qt_event_id
+                    else "persisted"
+                    if action in {"start", "update"} and not projection_warning
+                    else "sync_failed"
+                    if projection_warning
+                    else str(current_job.get("qt_phase") or "")
+                ),
+                qt_event_id=qt_event_id,
+                message_warning="；".join(result_warnings),
             )
             cls.service.mark_action_upload_result(
                 job_id,
                 success=True,
                 message=(
-                    f"{result_message}；{paired_warning}"
-                    if paired_warning
+                    f"{result_message}；{'；'.join(result_warnings)}"
+                    if result_warnings
                     else result_message
                 ),
-                record_id=str(remote_record_id or ""),
+                record_id=resolved_remote_record_id,
                 active_item_id=str(prepared.get("active_item_id") or ""),
             )
-            if str(prepared.get("action") or "").strip().lower() == "end":
+            if action == "end":
                 try:
                     event_id = cls._enqueue_active_delete_for_ended_notice(
                         prepared,
@@ -6789,36 +6957,6 @@ class PortalRuntime:
                     log_warning(f"Qt 结束删除事件投递失败: job_id={job_id}, error={exc}")
                 try:
                     cls.state_store.mark_runtime_queue_item("qt_action", job_id, "done")
-                except Exception:
-                    pass
-                return
-            try:
-                event_id = cls._upsert_backend_active_notice(
-                    prepared,
-                    remote_record_id=remote_record_id,
-                    job_id=job_id,
-                )
-                cls.service.mark_job(
-                    job_id,
-                    qt_phase="outbox",
-                    qt_queue_position=0,
-                    qt_queue_size=0,
-                    qt_event_id=event_id,
-                )
-            except Exception as exc:
-                log_warning(f"Qt UI 事件投递失败: job_id={job_id}, error={exc}")
-                cls.service.mark_job(
-                    job_id,
-                    qt_phase="sync_failed",
-                    error=f"通告已上传，但界面同步失败：{exc}",
-                )
-                try:
-                    cls.state_store.mark_runtime_queue_item(
-                        "qt_action",
-                        job_id,
-                        "failed",
-                        error=str(exc),
-                    )
                 except Exception:
                     pass
                 return

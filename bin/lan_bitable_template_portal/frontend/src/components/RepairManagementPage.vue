@@ -1989,10 +1989,15 @@ async function deleteRecordNow(): Promise<void> {
   if (saving.value || !editingRecordId.value) return;
   saving.value = true;
   try {
+    const deletedRecordId = editingRecordId.value;
     const params = new URLSearchParams({ scope: props.scope || "ALL" });
-    const result = await requestJson(`/api/repair-management/records/${encodeURIComponent(editingRecordId.value)}?${params.toString()}`, {
+    const result = await requestJson(`/api/repair-management/records/${encodeURIComponent(deletedRecordId)}?${params.toString()}`, {
       method: "DELETE",
     });
+    records.value = records.value.filter(
+      (item) => String(item.record_id || "") !== deletedRecordId,
+    );
+    total.value = Math.max(0, total.value - 1);
     selectedRecord.value = null;
     editingRecordId.value = "";
     projectDrawerOpen.value = false;

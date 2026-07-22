@@ -3165,6 +3165,23 @@ def render_workbench_lite(
       'status', 'site_photo_count', 'site_photos', 'extra_images',
       'mop_status', 'zhihang_record_id', 'lan_zhihang_record_id', 'zhihang_involved'
     ]);
+    const noticeFormValueKeys = [
+      'notice_type', 'title', 'specialty', 'maintenance_cycle', 'level',
+      'start_time', 'end_time', 'location', 'content', 'reason', 'impact', 'progress',
+      'repair_device', 'repair_fault', 'fault_type', 'repair_mode', 'discovery',
+      'symptom', 'solution', 'spare_parts', 'cabinet', 'quantity', 'device',
+      'actual_action_time'
+    ];
+    function captureNoticeFormValues(form) {{
+      const values = {{}};
+      if (!form) return values;
+      for (const name of noticeFormValueKeys) {{
+        const field = form.elements.namedItem(name);
+        if (!field || typeof field.value === 'undefined') continue;
+        values[name] = String(field.value == null ? '' : field.value);
+      }}
+      return values;
+    }}
     function compactCommandPatch(patch) {{
       const compact = {{}};
       const source = patch || {{}};
@@ -5053,9 +5070,10 @@ def render_workbench_lite(
     }});
     function formPayload(form, submitter, actionOverride) {{
       const actualActionTime = ensureActualActionTime(form);
+      const formValues = captureNoticeFormValues(form);
       const fd = new FormData(form);
       const action = actionOverride || (submitter && submitter.value ? submitter.value : (form.dataset.action || 'start'));
-      const patch = Object.fromEntries(fd.entries());
+      const patch = Object.assign(Object.fromEntries(fd.entries()), formValues);
       const photos = sitePhotoPayload(form);
       const sourceRecordId = String(patch.source_record_id || '').trim();
       const repairManagementRecordId = String(
@@ -5580,14 +5598,15 @@ def render_workbench_lite(
         updateActionAvailability(form);
         return;
       }}
-      setLiteFormDirty(false);
-      clearLiteHtmlCache();
-      setFormSubmitBusy(form, true);
-      setLiteStatus('已提交，发送中');
       let payload = null;
       try {{
-        await nextBrowserTurn();
+        // Capture the exact visible values before yielding; a background patch may
+        // replace the drawer while the browser processes the next frame.
         payload = formPayload(form, submitter, submitAction);
+        setLiteFormDirty(false);
+        clearLiteHtmlCache();
+        setFormSubmitBusy(form, true);
+        setLiteStatus('已提交，发送中');
         setLiteStatus('正在提交');
         await nextBrowserTurn();
         const response = await fetch('/api/workbench-actions', {{

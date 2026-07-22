@@ -382,6 +382,8 @@ function openDatePicker(): void {
 input,
 textarea {
   width: 100%;
+  min-width: 0;
+  max-width: 100%;
   min-height: 36px;
   border: 1px solid #cbd8e8;
   border-radius: 8px;
@@ -396,6 +398,8 @@ textarea {
 
 .repair-date-control {
   position: relative;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .repair-percentage-control {

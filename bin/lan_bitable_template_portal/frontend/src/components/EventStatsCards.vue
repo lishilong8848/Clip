@@ -1,6 +1,15 @@
 <template>
   <div class="event-stats">
-    <article v-for="card in cards" :key="card.key" :class="card.tone">
+    <button
+      v-for="card in cards"
+      :key="card.key"
+      type="button"
+      class="event-stat-card"
+      :class="[card.tone, { clickable: card.clickable }]"
+      :disabled="!card.clickable"
+      :title="card.clickable ? `查看${card.label}记录` : card.label"
+      @click="card.clickable && $emit('select', card.key)"
+    >
       <span class="stat-icon">{{ card.icon }}</span>
       <div class="stat-main">
         <small>{{ card.label }}</small>
@@ -11,7 +20,7 @@
       <span class="stat-bars" aria-hidden="true">
         <i v-for="index in 6" :key="index"></i>
       </span>
-    </article>
+    </button>
   </div>
 </template>
 
@@ -25,7 +34,12 @@ defineProps<{
     unit: string;
     badge: string;
     tone: string;
+    clickable?: boolean;
   }>;
+}>();
+
+defineEmits<{
+  select: [key: string];
 }>();
 </script>
 
@@ -36,7 +50,7 @@ defineProps<{
   gap: 12px;
 }
 
-.event-stats article {
+.event-stat-card {
   position: relative;
   min-height: 78px;
   display: grid;
@@ -48,7 +62,28 @@ defineProps<{
   border-radius: 16px;
   padding: 12px 14px;
   background: #ffffff;
+  color: inherit;
+  font: inherit;
+  text-align: left;
   box-shadow: 0 16px 38px rgba(0, 47, 135, 0.08);
+}
+
+.event-stat-card:disabled {
+  opacity: 1;
+  cursor: default;
+}
+
+.event-stat-card.clickable {
+  cursor: pointer;
+  transition: transform 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.event-stat-card.clickable:hover,
+.event-stat-card.clickable:focus-visible {
+  transform: translateY(-2px);
+  border-color: #8ab9ff;
+  box-shadow: 0 20px 42px rgba(0, 86, 228, 0.14);
+  outline: none;
 }
 
 .stat-icon {
@@ -63,15 +98,15 @@ defineProps<{
   font-weight: 950;
 }
 
-.event-stats article.amber .stat-icon {
+.event-stat-card.amber .stat-icon {
   background: linear-gradient(135deg, #f59e0b, #fb923c);
 }
 
-.event-stats article.rose .stat-icon {
+.event-stat-card.rose .stat-icon {
   background: linear-gradient(135deg, #fb7185, #e11d48);
 }
 
-.event-stats article.emerald .stat-icon {
+.event-stat-card.emerald .stat-icon {
   background: linear-gradient(135deg, #22c55e, #059669);
 }
 
@@ -112,17 +147,17 @@ defineProps<{
   font-weight: 850;
 }
 
-.event-stats article.amber .stat-badge {
+.event-stat-card.amber .stat-badge {
   background: #fff7ed;
   color: #c2410c;
 }
 
-.event-stats article.rose .stat-badge {
+.event-stat-card.rose .stat-badge {
   background: #fff1f2;
   color: #be123c;
 }
 
-.event-stats article.emerald .stat-badge {
+.event-stat-card.emerald .stat-badge {
   background: #ecfdf5;
   color: #047857;
 }
@@ -149,15 +184,15 @@ defineProps<{
 .stat-bars i:nth-child(5) { height: 22px; opacity: 0.92; }
 .stat-bars i:nth-child(6) { height: 27px; }
 
-.event-stats article.amber .stat-bars i {
+.event-stat-card.amber .stat-bars i {
   background: #f59e0b;
 }
 
-.event-stats article.rose .stat-bars i {
+.event-stat-card.rose .stat-bars i {
   background: #e11d48;
 }
 
-.event-stats article.emerald .stat-bars i {
+.event-stat-card.emerald .stat-bars i {
   background: #059669;
 }
 

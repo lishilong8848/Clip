@@ -417,6 +417,84 @@ class PortalAuthManager:
             self._save_permissions_locked(payload)
         return self.get_permissions_payload()
 
+    def bulk_merge_permission_users(
+        self,
+        raw_users: Any,
+        *,
+        updated_by: str = "",
+    ) -> tuple[dict[str, Any], list[str], list[dict[str, Any]]]:
+        if not isinstance(raw_users, list):
+            raise PortalError("批量授权人员格式错误。")
+        if not raw_users:
+            raise PortalError("没有可授权的人员。")
+        if len(raw_users) > 300:
+            raise PortalError("单次授权人数不能超过 300 人。")
+
+        changed_open_ids: list[str] = []
+        results: list[dict[str, Any]] = []
+        with self._lock:
+            payload = self._load_permissions_locked()
+            users = payload.get("users") if isinstance(payload.get("users"), dict) else {}
+            payload["users"] = users
+            for raw in raw_users:
+                if not isinstance(raw, dict):
+                    continue
+                open_id = str(raw.get("open_id") or "").strip()
+                if not open_id or open_id == "__meta__":
+                    raise PortalError("批量授权人员缺少有效 open_id。")
+                incoming_scopes = self._scopes_from_raw(raw.get("scopes"))
+                if not incoming_scopes:
+                    raise PortalError(
+                        f"{str(raw.get('name') or open_id)} 未配置可授权楼栋。"
+                    )
+                existing = users.get(open_id) if isinstance(users.get(open_id), dict) else {}
+                existing_role = (
+                    "admin"
+                    if str(existing.get("role") or "").strip().lower() == "admin"
+                    else "building"
+                )
+                merged_scopes = (
+                    self._admin_scopes()
+                    if existing_role == "admin" or open_id in REQUIRED_ADMIN_USERS
+                    else self._scopes_from_raw(
+                        [*(existing.get("scopes") or []), *incoming_scopes]
+                    )
+                )
+                next_user = {
+                    "name": str(
+                        raw.get("name") or existing.get("name") or open_id
+                    ).strip()[:80]
+                    or open_id,
+                    "role": "admin" if open_id in REQUIRED_ADMIN_USERS else existing_role,
+                    "scopes": merged_scopes,
+                    "enabled": True,
+                }
+                if users.get(open_id) != next_user:
+                    users[open_id] = next_user
+                    changed_open_ids.append(open_id)
+                results.append(
+                    {
+                        "open_id": open_id,
+                        "name": next_user["name"],
+                        "scopes": list(next_user["scopes"]),
+                        "added_scopes": [
+                            scope
+                            for scope in incoming_scopes
+                            if scope not in self._scopes_from_raw(existing.get("scopes"))
+                        ],
+                    }
+                )
+            payload["updated_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            payload["updated_by"] = str(updated_by or "")
+            payload = self._ensure_required_admins_locked(payload)
+            self._save_permissions_locked(payload)
+
+        return (
+            self.get_permissions_payload(),
+            list(dict.fromkeys(changed_open_ids)),
+            results,
+        )
+
     def admin_open_ids(self) -> list[str]:
         with self._lock:
             payload = self._load_permissions_locked()

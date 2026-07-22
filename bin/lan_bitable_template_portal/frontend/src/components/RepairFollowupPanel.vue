@@ -105,6 +105,7 @@
                 <RepairFieldControl
                   v-else
                   :class="{ 'followup-progress-field': isProgressField(field) }"
+                  :data-field-name="String(field.field_name || '')"
                   :field="field"
                   :input-id="followupFieldInputId(field)"
                   :label="fieldLabel(field.field_name)"
@@ -262,6 +263,8 @@ const MODEL_FIELD_NAME = "设备型号";
 const REPAIR_PARTY_FIELD_NAME = "维修方";
 const SUPPLIER_FIELD_NAMES = new Set(["供应商名称", "供应商维修人员"]);
 const WORKER_FIELD_NAME = "随工人员（我方维修人员）";
+const DEVICE_PRODUCTION_DATE_FIELD_NAME = "设备生产日期";
+const DEFAULT_DEVICE_PRODUCTION_DATE = "2021-04-30T00:00";
 const fieldLabels: Record<string, string> = {
   "跟进项（如有）": "跟进项",
   "后续整改措施（如有）": "后续整改措施",
@@ -385,7 +388,14 @@ const selectedModelOptions = computed(() => {
 const hasDraftContent = computed(() => Boolean(
   cmdbRecordIds.value.length
   || workerPeople.value.length
-  || editableFields.value.some((field) => String(draft[String(field.field_name || "")] || "").trim()),
+  || editableFields.value.some((field) => {
+    const fieldName = String(field.field_name || "");
+    const value = String(draft[fieldName] || "").trim();
+    if (fieldName === DEVICE_PRODUCTION_DATE_FIELD_NAME) {
+      return Boolean(value && value !== DEFAULT_DEVICE_PRODUCTION_DATE);
+    }
+    return Boolean(value);
+  }),
 ));
 const primaryActionMode = computed<"create" | "save">(() => (
   editingRecordId.value && !followupDirty.value ? "create" : "save"
@@ -537,6 +547,15 @@ function clearDraft(): void {
   for (const field of editableFields.value) draft[String(field.field_name || "")] = "";
 }
 
+function applyNewFollowupDefaults(): void {
+  if (
+    Object.prototype.hasOwnProperty.call(draft, DEVICE_PRODUCTION_DATE_FIELD_NAME)
+    && !String(draft[DEVICE_PRODUCTION_DATE_FIELD_NAME] || "").trim()
+  ) {
+    draft[DEVICE_PRODUCTION_DATE_FIELD_NAME] = DEFAULT_DEVICE_PRODUCTION_DATE;
+  }
+}
+
 function setDirty(value: boolean): void {
   if (followupDirty.value === value) return;
   followupDirty.value = value;
@@ -605,6 +624,7 @@ function startCreate(): void {
   selectedRecord.value = null;
   cmdbRecordIds.value = [];
   clearDraft();
+  applyNewFollowupDefaults();
   setDirty(false);
 }
 
@@ -784,9 +804,11 @@ async function loadRecords(announce = false): Promise<void> {
       editingRecordId.value = "";
       selectedRecord.value = null;
       clearDraft();
+      applyNewFollowupDefaults();
       setDirty(false);
     } else {
       clearDraft();
+      if (creatingNewFollowup.value) applyNewFollowupDefaults();
     }
     if (announce) showMessage(records.value.length ? "跟进记录已刷新。" : "暂无跟进记录。", records.value.length ? "success" : "warning");
   } catch (error: unknown) {
@@ -985,30 +1007,23 @@ function confirmCmdb(recordIds: string[]): void {
   const selectedRecords = cmdbRecordIds.value.map((recordId) => (
     cmdbCandidates.value.find((item) => String(item.record_id || "") === recordId)
   )).filter(Boolean) as LooseDict[];
-  const categories = Array.from(new Set(
-    selectedRecords.map((item) => String(item.category || "").trim()).filter(Boolean),
-  ));
   const deviceNames = Array.from(new Set(
     selectedRecords.map((item) => String(item.title || "").trim()).filter(Boolean),
   ));
-  if (!String(draft[DEVICE_NAME_FIELD_NAME] || "").trim() && categories.length === 1) {
-    const category = categories[0];
-    const deviceNameField = fields.value.find(
-      (field) => String(field.field_name || "") === DEVICE_NAME_FIELD_NAME,
-    );
-    const options = Array.isArray(deviceNameField?.options) ? deviceNameField.options : [];
-    if (!options.length || options.includes(category)) {
-      draft[DEVICE_NAME_FIELD_NAME] = category;
-      dirtyFieldNames.add(DEVICE_NAME_FIELD_NAME);
-    } else {
-      showMessage(`设备分类“${category}”不是跟进表可选项，请手动选择设备名称。`, "warning");
-    }
-  } else if (!String(draft[DEVICE_NAME_FIELD_NAME] || "").trim() && categories.length > 1) {
-    showMessage("已选择不同分类的设备，请手动确认设备名称。", "warning");
-  }
-  if (!String(draft[DEVICE_NUMBER_FIELD_NAME] || "").trim() && deviceNames.length) {
-    draft[DEVICE_NUMBER_FIELD_NAME] = deviceNames.join("、");
+  if (deviceNames.length) {
+    const selectedDeviceNames = deviceNames.join("、");
+    draft[DEVICE_NAME_FIELD_NAME] = selectedDeviceNames;
+    dirtyFieldNames.add(DEVICE_NAME_FIELD_NAME);
+    draft[DEVICE_NUMBER_FIELD_NAME] = selectedDeviceNames;
     dirtyFieldNames.add(DEVICE_NUMBER_FIELD_NAME);
+  }
+  if (!selectedRecords.length && !cmdbRecordIds.value.length) {
+    draft[DEVICE_NAME_FIELD_NAME] = "";
+    dirtyFieldNames.add(DEVICE_NAME_FIELD_NAME);
+    draft[DEVICE_NUMBER_FIELD_NAME] = "";
+    dirtyFieldNames.add(DEVICE_NUMBER_FIELD_NAME);
+  } else if (!deviceNames.length && selectedRecords.length) {
+    showMessage("所选设备缺少设备名称，请手动填写。", "warning");
   }
   if (!selectedRecords.length && cmdbRecordIds.value.length) {
     showMessage(
@@ -1535,6 +1550,10 @@ onBeforeUnmount(() => {
   gap: 7px 10px;
 }
 
+.followup-field-grid > [data-field-name="设备生产日期"] {
+  grid-column: span 2;
+}
+
 .followup-field-grid > .followup-progress-field {
   grid-column: span 2;
   min-width: 320px;
@@ -1669,6 +1688,10 @@ onBeforeUnmount(() => {
 
   .followup-field-grid {
     grid-template-columns: 1fr;
+  }
+
+  .followup-field-grid > [data-field-name="设备生产日期"] {
+    grid-column: 1;
   }
 
   .followup-field-grid > .followup-progress-field {

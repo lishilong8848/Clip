@@ -2,12 +2,12 @@
   <aside v-if="detail" class="priority-panel">
     <div class="surface-head tight">
       <div>
-        <h3>{{ detailScopeLabel }}重点与挂起事件</h3>
+        <h3>{{ detailScopeLabel }}I2级以上与检修中事件</h3>
       </div>
     </div>
     <div class="priority-tabs">
-      <span>重点 {{ highPriorityCount }}</span>
-      <span>挂起 {{ pendingCount }}</span>
+      <span>I2级以上 {{ i2OrHigherCount }}</span>
+      <span>正在检修 {{ underRepairCount }}</span>
       <span>全部事件 {{ eventsCount }}</span>
     </div>
     <div v-if="priorityEvents.length" class="priority-list">
@@ -26,7 +26,7 @@
       </button>
     </div>
     <div v-else class="event-empty compact">
-      <strong>暂无重点或挂起事件</strong>
+      <strong>暂无I2级以上或正在检修事件</strong>
     </div>
   </aside>
 
@@ -46,12 +46,12 @@
         <strong>{{ Number(overviewStats.total || 0) }}</strong>
       </span>
       <span>
-        <small>挂起</small>
-        <strong>{{ Number(overviewStats.pending || 0) }}</strong>
+        <small>正在检修</small>
+        <strong>{{ Number(overviewStats.under_repair || 0) }}</strong>
       </span>
       <span>
-        <small>重点</small>
-        <strong>{{ Number(overviewStats.high_level || 0) }}</strong>
+        <small>I2级以上</small>
+        <strong>{{ Number(overviewStats.i2_or_higher || 0) }}</strong>
       </span>
     </div>
   </aside>
@@ -70,8 +70,8 @@ defineProps<{
   detailScopeLabel: string;
   scopeLabel: string;
   priorityEvents: LooseDict[];
-  highPriorityCount: number;
-  pendingCount: number;
+  i2OrHigherCount: number;
+  underRepairCount: number;
   eventsCount: number;
   overviewStats: LooseDict;
   allowedCount: number;

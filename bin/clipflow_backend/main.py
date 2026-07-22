@@ -63,6 +63,7 @@ from clipflow_backend.api_models import (
     NoticeUndoApplyRequest,
     NoticeWorkTypeOverrideRequest,
     OngoingDeleteRequest,
+    PermissionDirectoryGrantRequest,
     PermissionRequestBulkReviewRequest,
     PermissionRequestConfirm,
     PermissionRequestCreate,
@@ -119,6 +120,7 @@ from lan_bitable_template_portal.identity_utils import (
     normalize_notice_identity_payload,
 )
 from lan_bitable_template_portal.portal_service import (
+    BUILDING_SCOPE_CODES,
     CHANGE_SOURCE_APP_TOKEN,
     CHANGE_SOURCE_TABLE_ID,
     DEFAULT_APP_TOKEN,
@@ -3306,6 +3308,49 @@ class FastAPIPortalController:
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=500)
 
+        @app.get("/api/auth/permission-directory")
+        async def permission_directory(
+            request: Request,
+            q: str = "",
+            refresh: bool = False,
+        ):
+            admin_response, session = self._require_admin_response(request)
+            if admin_response is not None:
+                return admin_response
+            try:
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.get_permission_directory_people,
+                    force_refresh=bool(refresh),
+                    query=q,
+                )
+                permissions = PortalRuntime.auth_manager.get_permissions_payload()
+                permission_by_open_id = {
+                    str(item.get("open_id") or "").strip(): item
+                    for item in permissions.get("users") or []
+                    if str(item.get("open_id") or "").strip()
+                    and item.get("enabled") is not False
+                }
+                for item in data.get("items") or []:
+                    current = permission_by_open_id.get(
+                        str(item.get("open_id") or "").strip(),
+                        {},
+                    )
+                    authorized_scopes = {
+                        str(scope or "").strip()
+                        for scope in current.get("scopes") or []
+                        if str(scope or "").strip()
+                    }
+                    item["authorized_scopes"] = [
+                        scope for scope in BUILDING_SCOPE_CODES if scope in authorized_scopes
+                    ]
+                    item["authorized_scope_labels"] = [
+                        PortalRuntime.auth_manager.scope_label(scope)
+                        for scope in item["authorized_scopes"]
+                    ]
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=500)
+
         @app.get("/api/auth/permission-requests/current")
         async def current_permission_request(request: Request):
             session = self._current_session(request)
@@ -4288,6 +4333,62 @@ class FastAPIPortalController:
                     "recipients_count": len(changed_open_ids),
                 }
                 return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.post("/api/auth/permission-directory/grant")
+        async def grant_permission_directory(request: Request):
+            admin_response, session = self._require_admin_response(request)
+            if admin_response is not None:
+                return admin_response
+            try:
+                payload = (
+                    await self._read_model_request(
+                        request, PermissionDirectoryGrantRequest
+                    )
+                ).to_payload()
+                resolved = await asyncio.to_thread(
+                    PortalRuntime.service.resolve_permission_directory_grants,
+                    payload.get("record_ids") or [],
+                    payload.get("scopes") or [],
+                )
+                grants = resolved.get("grants") or []
+                if not grants:
+                    failed = resolved.get("failed") or []
+                    reason = str((failed[0] if failed else {}).get("error") or "没有可授权的人员")
+                    raise PortalError(reason)
+                actor = session.get("user") if isinstance(session.get("user"), dict) else {}
+                data, changed_open_ids, items = (
+                    PortalRuntime.auth_manager.bulk_merge_permission_users(
+                        grants,
+                        updated_by=str(actor.get("open_id") or ""),
+                    )
+                )
+                self._clear_read_cache(("auth_status",))
+                if changed_open_ids:
+                    actor_name = str(actor.get("name") or actor.get("en_name") or "管理员")
+                    text = (
+                        "南通基地-运维灯塔工作台权限已更新。\n"
+                        f"操作人：{actor_name}\n"
+                        "请重新进入门户或刷新页面查看最新楼栋权限。"
+                    )
+                    self._submit_background(
+                        "LANPortalPermissionDirectoryNotify",
+                        _send_text_to_open_ids_guarded,
+                        text,
+                        changed_open_ids,
+                    )
+                return self._json_ok(
+                    request,
+                    session,
+                    {
+                        "permissions": data,
+                        "items": items,
+                        "failed": resolved.get("failed") or [],
+                        "changed_count": len(changed_open_ids),
+                        "selected_count": int(resolved.get("selected_count") or 0),
+                    },
+                )
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
 

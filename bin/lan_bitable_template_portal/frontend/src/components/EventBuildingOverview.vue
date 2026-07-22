@@ -28,8 +28,8 @@
         <div class="building-card__numbers">
           <span><b>{{ card.total }}</b><small>本月</small></span>
           <span><b>{{ card.processing }}</b><small>处理中</small></span>
-          <span><b>{{ card.pending }}</b><small>挂起</small></span>
-          <span><b>{{ card.ended }}</b><small>已闭环</small></span>
+          <span><b>{{ card.underRepair }}</b><small>正在检修</small></span>
+          <span><b>{{ card.i2OrHigher }}</b><small>I2级以上</small></span>
         </div>
         <div class="building-card__action">{{ card.allowed ? "进入管理 ›" : "仅可查看态势" }}</div>
       </button>

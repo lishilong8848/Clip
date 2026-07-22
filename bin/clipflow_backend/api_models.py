@@ -147,6 +147,11 @@ class AuthPermissionsSaveRequest(APIModel):
     users: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class PermissionDirectoryGrantRequest(APIModel):
+    record_ids: list[str] = Field(default_factory=list)
+    scopes: list[str] = Field(default_factory=list)
+
+
 class GenerateTemplatesRequest(APIModel):
     scope: str = "ALL"
     drafts: list[dict[str, Any]] = Field(default_factory=list)

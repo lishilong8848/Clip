@@ -77,6 +77,14 @@
         :users="filteredPermissionUsers"
         :users-total="permissions.users.length"
         :user-scope-summary="permissionUserScopeSummary"
+        :directory-items="permissionDirectoryItems"
+        :directory-selected-ids="permissionDirectorySelectedIds"
+        :directory-scope-options="buildingScopes"
+        :directory-selected-scopes="permissionDirectorySelectedScopes"
+        :directory-loading="permissionDirectoryLoading"
+        :directory-granting="permissionDirectoryGranting"
+        :directory-loaded-at="permissionDirectoryLoadedAt"
+        :directory-error="permissionDirectoryError"
         @load-permissions="loadPermissions"
         @load-requests="loadPermissionRequests"
         @add-user="addPermissionUser"
@@ -90,6 +98,10 @@
         @reject="rejectPermissionRequest"
         @toggle-user-scope="toggleUserScope"
         @remove-user="removePermissionUser"
+        @load-directory="loadPermissionDirectory"
+        @grant-directory="grantPermissionDirectory"
+        @toggle-directory="togglePermissionDirectoryRecord"
+        @toggle-directory-scope="togglePermissionDirectoryScope"
       />
 
       <AdminHandoverPane
@@ -178,6 +190,13 @@ const permissionRejectReason = ref("");
 const permissionUserSearch = ref("");
 const permissionUserFilter = ref("all");
 const selectedRequestIds = reactive(new Set<string>());
+const permissionDirectoryItems = ref<Dict[]>([]);
+const permissionDirectorySelectedIds = reactive(new Set<string>());
+const permissionDirectorySelectedScopes = reactive(new Set<string>());
+const permissionDirectoryLoading = ref(false);
+const permissionDirectoryGranting = ref(false);
+const permissionDirectoryLoadedAt = ref("");
+const permissionDirectoryError = ref("");
 const permissionOriginalRoles = new Map<string, string>();
 const advancedDiagnosticsVisible = ref(false);
 const handoverLinks = reactive<Record<string, string>>({});
@@ -417,7 +436,10 @@ function selectAdminTab(next: AdminTabKey): void {
   }
   tab.value = next;
   if (next === "status") void loadStatus();
-  else if (next === "permissions") void loadPermissions();
+  else if (next === "permissions") {
+    void loadPermissions();
+    void loadPermissionDirectory(false);
+  }
   else if (next === "handover") void loadHandover();
   else if (next === "mop") void loadMopSettings();
 }
@@ -610,6 +632,82 @@ async function loadPermissions(): Promise<void> {
     message.value = error?.message || "权限加载失败";
   } finally {
     busy.value = false;
+  }
+}
+
+async function loadPermissionDirectory(force = false): Promise<void> {
+  if (permissionDirectoryLoading.value) return;
+  permissionDirectoryLoading.value = true;
+  permissionDirectoryError.value = "";
+  try {
+    const suffix = force ? "?refresh=true" : "";
+    const data = await api(`/api/auth/permission-directory${suffix}`);
+    const items = Array.isArray(data.items) ? data.items : [];
+    permissionDirectoryItems.value = items;
+    permissionDirectoryLoadedAt.value = String(data.loaded_at || "");
+    const validRecordIds = new Set(
+      items
+        .filter((item: Dict) => item.selectable)
+        .map((item: Dict) => String(item.record_id || "").trim())
+        .filter(Boolean),
+    );
+    for (const recordId of Array.from(permissionDirectorySelectedIds)) {
+      if (!validRecordIds.has(recordId)) permissionDirectorySelectedIds.delete(recordId);
+    }
+  } catch (error: any) {
+    permissionDirectoryError.value = error?.message || "人员权限表读取失败";
+  } finally {
+    permissionDirectoryLoading.value = false;
+  }
+}
+
+function togglePermissionDirectoryRecord(recordId: string, checked: boolean): void {
+  const normalized = String(recordId || "").trim();
+  if (!normalized) return;
+  if (checked) permissionDirectorySelectedIds.add(normalized);
+  else permissionDirectorySelectedIds.delete(normalized);
+}
+
+function togglePermissionDirectoryScope(scope: string, checked: boolean): void {
+  const normalized = String(scope || "").trim();
+  if (!buildingScopes.some((option) => option.value === normalized)) return;
+  if (checked) permissionDirectorySelectedScopes.add(normalized);
+  else permissionDirectorySelectedScopes.delete(normalized);
+}
+
+async function grantPermissionDirectory(): Promise<void> {
+  const recordIds = Array.from(permissionDirectorySelectedIds);
+  const scopes = Array.from(permissionDirectorySelectedScopes);
+  if (!recordIds.length || !scopes.length || permissionDirectoryGranting.value) return;
+  const scopeLabels = buildingScopes
+    .filter((option) => permissionDirectorySelectedScopes.has(option.value))
+    .map((option) => option.label);
+  const confirmed = await requestConfirm({
+    tone: "primary",
+    kicker: "批量授权",
+    title: `为 ${recordIds.length} 名人员添加楼栋权限`,
+    message: `本次授权：${scopeLabels.join("、")}。已有楼栋权限不会被移除。`,
+    details: ["离职人员、运维值班长、运维值班员不会出现在人员列表中"],
+    confirmLabel: "确认授权",
+    confirmClass: "blue",
+  });
+  if (!confirmed) return;
+  permissionDirectoryGranting.value = true;
+  permissionDirectoryError.value = "";
+  try {
+    const data = await api("/api/auth/permission-directory/grant", {
+      method: "POST",
+      body: JSON.stringify({ record_ids: recordIds, scopes }),
+    });
+    const changedCount = Number(data.changed_count || 0);
+    const failedCount = Array.isArray(data.failed) ? data.failed.length : 0;
+    message.value = `人员授权完成：更新 ${changedCount} 人${failedCount ? `，跳过 ${failedCount} 条` : ""}`;
+    permissionDirectorySelectedIds.clear();
+    await Promise.all([loadPermissions(), loadPermissionDirectory(false)]);
+  } catch (error: any) {
+    permissionDirectoryError.value = error?.message || "人员批量授权失败";
+  } finally {
+    permissionDirectoryGranting.value = false;
   }
 }
 

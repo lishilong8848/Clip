@@ -5,8 +5,8 @@ export type EventBuildingCard = {
   label: string;
   total: number;
   processing: number;
-  pending: number;
-  ended: number;
+  underRepair: number;
+  i2OrHigher: number;
   high: number;
   tone: string;
   statusLabel: string;
@@ -15,6 +15,7 @@ export type EventBuildingCard = {
 
 export const EVENT_BUILDING_SCOPE_CODES = ["110", "A", "B", "C", "D", "E", "H"];
 export const EVENT_BUILDING_ORDER = ["110", "A", "B", "C", "D", "E", "H", "CAMPUS", "ALL"];
+export const EVENT_I2_OR_HIGHER_LEVELS = new Set(["I2", "I1", "I3→I2（升级）", "I3→I1（升级）"]);
 
 export function isTechnicalEventDisplayField(key: string): boolean {
   const text = String(key || "").trim();
@@ -67,18 +68,25 @@ export function buildEventBuildingCardFromStats(
   const code = normalizeEventScope(String(item.code || item.scope || ""));
   const total = Number(item.total || 0);
   const processing = Number(item.processing || 0);
-  const pending = Number(item.pending || 0);
-  const ended = Number(item.ended || 0);
+  const underRepair = Number(item.under_repair || 0);
+  const i2OrHigher = Number(item.i2_or_higher || 0);
+  const i3 = Number(item.i3 || 0);
   const high = Number(item.high_level || item.high || 0);
-  const tone = high ? "critical" : pending ? "warning" : processing ? "active" : "stable";
-  const statusLabel = high ? `重点 ${high}` : pending ? `挂起 ${pending}` : processing ? "待处理" : "运行平稳";
+  const tone = i3 ? "critical" : i2OrHigher ? "warning" : underRepair ? "active" : "stable";
+  const statusLabel = i3
+    ? `I3 ${i3}`
+    : i2OrHigher
+      ? `I2级以上 ${i2OrHigher}`
+      : underRepair
+        ? `检修中 ${underRepair}`
+        : "运行平稳";
   return {
     code,
     label: String(item.label || eventScopeText(code)),
     total,
     processing,
-    pending,
-    ended,
+    underRepair,
+    i2OrHigher,
     high,
     tone,
     statusLabel,
@@ -135,6 +143,24 @@ export function eventRecordId(item: LooseDict | null | undefined): string {
 export function eventTransferEnabled(item: LooseDict | null | undefined): boolean {
   const text = String(item?.transfer_to_overhaul ?? "").trim().toLowerCase();
   return ["true", "1", "是", "已转", "已转检修", "yes", "y"].includes(text);
+}
+
+export function eventUnderRepair(item: LooseDict | null | undefined): boolean {
+  if (!item) return false;
+  if ("under_repair" in item) return Boolean(item.under_repair);
+  return eventTransferEnabled(item) && !String(item.repair_completion_time || "").trim();
+}
+
+export function eventI2OrHigher(item: LooseDict | null | undefined): boolean {
+  if (!item) return false;
+  if ("i2_or_higher" in item) return Boolean(item.i2_or_higher);
+  return EVENT_I2_OR_HIGHER_LEVELS.has(String(item.level || "").replace(/\s+/g, "").toUpperCase());
+}
+
+export function eventI3Level(item: LooseDict | null | undefined): boolean {
+  if (!item) return false;
+  if ("i3_level" in item) return Boolean(item.i3_level);
+  return String(item.level || "").replace(/\s+/g, "").toUpperCase() === "I3";
 }
 
 export function eventRepairFlowLabel(item: LooseDict | null | undefined): string {

@@ -382,6 +382,78 @@ class NoticeTemplateTests(unittest.TestCase):
     def test_all_notice_templates_use_unified_time_separator(self):
         self.assertEqual(NOTICE_TIME_SEPARATOR, "~")
 
+    def test_final_prepared_fields_are_the_single_text_source(self):
+        common = {
+            "status": "更新",
+            "title": "测试通告",
+            "start_time": "2026-07-22T09:30",
+            "end_time": "2026-07-22T18:30",
+            "building": "A楼",
+            "specialty": "电气",
+            "location": "A楼",
+            "content": "测试内容",
+            "reason": "测试原因",
+            "impact": "无影响",
+            "progress": "测试进度",
+            "text": "旧文本 2026-07-22 18:00",
+        }
+        cases = [
+            {**common, "work_type": WORK_TYPE_MAINTENANCE, "notice_type": "维保通告"},
+            {
+                **common,
+                "work_type": WORK_TYPE_CHANGE,
+                "notice_type": "变更通告",
+                "level": "I3",
+            },
+            {
+                **common,
+                "work_type": WORK_TYPE_REPAIR,
+                "notice_type": "设备检修",
+                "level": "低",
+                "fault_time": "2026-07-22T09:30",
+                "expected_time": "2026-07-22T18:30",
+                "repair_device": "测试设备",
+                "repair_fault": "测试故障",
+                "fault_type": "设备故障",
+                "repair_mode": "自维",
+                "discovery": "巡检发现",
+                "symptom": "测试现象",
+                "solution": "测试方案",
+                "spare_parts": "无",
+            },
+            {
+                **common,
+                "work_type": WORK_TYPE_POWER,
+                "notice_type": "上电通告",
+                "cabinet": "A-101",
+                "quantity": "2",
+            },
+            {
+                **common,
+                "work_type": WORK_TYPE_POLLING,
+                "notice_type": "设备轮巡",
+                "device": "测试设备",
+            },
+            {**common, "work_type": WORK_TYPE_ADJUST, "notice_type": "设备调整"},
+        ]
+        for prepared in cases:
+            with self.subTest(work_type=prepared["work_type"]):
+                synchronized = MaintenancePortalService._synchronize_prepared_notice_text(
+                    dict(prepared)
+                )
+                self.assertIn("18:30", synchronized["text"])
+                self.assertNotIn("18:00", synchronized["text"])
+                upload_payload = PortalRuntime._prepared_to_notice_payload(synchronized)
+                self.assertEqual(upload_payload.text, synchronized["text"])
+
+    def test_full_width_time_colon_does_not_lose_minutes(self):
+        self.assertEqual(
+            MaintenancePortalService._format_input_datetime(
+                "2026年7月22日18：30"
+            ),
+            "2026年7月22日18:30",
+        )
+
     def test_target_candidate_match_reason_is_readable(self):
         reason = MaintenancePortalService._target_candidate_match_reason(
             date_matched=True,

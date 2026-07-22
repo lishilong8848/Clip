@@ -55,6 +55,21 @@
       @reject="$emit('reject', $event)"
     />
 
+    <AdminPermissionDirectory
+      :items="directoryItems"
+      :selected-ids="directorySelectedIds"
+      :scope-options="directoryScopeOptions"
+      :selected-scopes="directorySelectedScopes"
+      :loading="directoryLoading"
+      :granting="directoryGranting"
+      :loaded-at="directoryLoadedAt"
+      :error="directoryError"
+      @refresh="$emit('load-directory', true)"
+      @grant="$emit('grant-directory')"
+      @toggle="(recordId, checked) => $emit('toggle-directory', recordId, checked)"
+      @toggle-scope="(scope, checked) => $emit('toggle-directory-scope', scope, checked)"
+    />
+
     <AdminPermissionUsers
       :search="userSearch"
       :filter="userFilter"
@@ -72,6 +87,7 @@
 
 <script setup lang="ts">
 import type { LooseDict, ScopeOption } from "../types";
+import AdminPermissionDirectory from "./AdminPermissionDirectory.vue";
 import AdminPermissionRequests from "./AdminPermissionRequests.vue";
 import AdminPermissionUsers from "./AdminPermissionUsers.vue";
 
@@ -97,6 +113,14 @@ defineProps<{
   users: LooseDict[];
   usersTotal: number;
   userScopeSummary: (user: LooseDict) => string;
+  directoryItems: LooseDict[];
+  directorySelectedIds: Set<string>;
+  directoryScopeOptions: ScopeOption[];
+  directorySelectedScopes: Set<string>;
+  directoryLoading: boolean;
+  directoryGranting: boolean;
+  directoryLoadedAt: string;
+  directoryError: string;
 }>();
 
 defineEmits<{
@@ -118,6 +142,10 @@ defineEmits<{
   reject: [item: LooseDict];
   "toggle-user-scope": [user: LooseDict, scope: string, checked: boolean];
   "remove-user": [user: LooseDict];
+  "load-directory": [force: boolean];
+  "grant-directory": [];
+  "toggle-directory": [recordId: string, checked: boolean];
+  "toggle-directory-scope": [scope: string, checked: boolean];
 }>();
 </script>
 
