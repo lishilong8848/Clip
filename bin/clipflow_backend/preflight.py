@@ -175,8 +175,11 @@ def build_backend_preflight_report(service: MaintenancePortalService) -> dict:
                     "事件描述",
                     "对应事件等级",
                     "对应来源",
-                    "设备检修关联",
+                    "设备检修关联-L",
                 ],
+                optional_aliases={
+                    "设备检修关联-L": ["设备检修关联"],
+                },
             ),
             _check_field_set(
                 service,

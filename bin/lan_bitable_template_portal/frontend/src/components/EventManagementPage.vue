@@ -53,7 +53,7 @@
           :priority-events="priorityEvents"
           :i2-or-higher-count="i2OrHigherEvents.length"
           :under-repair-count="underRepairEvents.length"
-          :events-count="events.length"
+          :events-count="detailEvents.length"
           :overview-stats="overviewStats"
           :allowed-count="allowedBuildingCodes.size"
           @select="selectedEvent = $event || null"
@@ -66,7 +66,7 @@
         <div>
           <span class="section-kicker">事件明细</span>
           <strong>{{ detailScopeLabel }}月度事件列表</strong>
-          <span>{{ filteredEvents.length }} / {{ events.length }} 条</span>
+          <span>{{ filteredEvents.length }} / {{ detailEvents.length }} 条</span>
         </div>
         <div class="event-list-tools">
           <input v-model="searchText" type="search" placeholder="搜索标题、告警描述、专业" aria-label="搜索事件" />
@@ -102,7 +102,7 @@
       <div v-if="loading" class="event-empty">
         <strong>正在读取事件数据</strong>
       </div>
-      <div v-else-if="!events.length" class="event-empty">
+      <div v-else-if="!detailEvents.length" class="event-empty">
         <strong>本月暂无事件</strong>
       </div>
       <div v-else-if="!filteredEvents.length" class="event-empty">
@@ -223,15 +223,11 @@
             </template>
           </dl>
         </section>
-        <a
-          v-if="selectedEvent.source_record_url"
-          class="source-link"
-          :href="selectedEvent.source_record_url"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          打开事件多维表
-        </a>
+        <footer class="event-drawer-footer">
+          <button type="button" class="btn primary" @click="openRepairManagementForScope">
+            进入检修管理
+          </button>
+        </footer>
       </aside>
     </div>
   </section>
@@ -327,6 +323,10 @@ const scopeLabel = computed(() => {
 const showingDetails = computed(() => Boolean(detailScope.value));
 const detailScopeLabel = computed(() => detailScope.value ? scopeText(detailScope.value) : "");
 const activeBuildingCode = computed(() => detailScope.value || "");
+const detailEvents = computed(() => {
+  if (!showingDetails.value || !detailScope.value) return events.value;
+  return events.value.filter((item) => eventMatchesBuilding(item, detailScope.value, props.scope));
+});
 
 const lastFailedError = computed(() => String(lastFailed.value?.error || "").trim());
 const lastRefreshText = computed(() => {
@@ -340,49 +340,60 @@ const lastRefreshCompactText = computed(() => {
   return `数据更新 ${date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false })}`;
 });
 
-const underRepairEvents = computed(() => events.value.filter((item) => eventUnderRepair(item)));
-const i2OrHigherEvents = computed(() => events.value.filter((item) => eventI2OrHigher(item)));
-const statCards = computed(() => [
-  {
-    key: "total",
-    label: "本月新增事件",
-    value: Number(overviewStats.value.total || stats.value.total || events.value.length || 0),
-    unit: "件",
-    badge: "月度总览",
-    tone: "blue",
-    icon: "+",
-  },
-  {
-    key: "repairing",
-    label: "正在检修中",
-    value: Number(overviewStats.value.under_repair || stats.value.under_repair || underRepairEvents.value.length || 0),
-    unit: "件",
-    badge: "查看检修中记录",
-    tone: "emerald",
-    icon: "修",
-    clickable: true,
-  },
-  {
-    key: "i2plus",
-    label: "本月I2级及以上",
-    value: Number(overviewStats.value.i2_or_higher || stats.value.i2_or_higher || i2OrHigherEvents.value.length || 0),
-    unit: "件",
-    badge: "查看高等级记录",
-    tone: "amber",
-    icon: "!",
-    clickable: true,
-  },
-  {
-    key: "i3",
-    label: "本月I3级事件",
-    value: Number(overviewStats.value.i3 || stats.value.i3 || events.value.filter((item) => eventI3Level(item)).length || 0),
-    unit: "件",
-    badge: "查看I3记录",
-    tone: "rose",
-    icon: "I3",
-    clickable: true,
-  },
-]);
+const underRepairEvents = computed(() => detailEvents.value.filter((item) => eventUnderRepair(item)));
+const i2OrHigherEvents = computed(() => detailEvents.value.filter((item) => eventI2OrHigher(item)));
+const statCards = computed(() => {
+  const currentStats = showingDetails.value ? stats.value : overviewStats.value;
+  const fallbackEvents = showingDetails.value ? detailEvents.value : events.value;
+  const total = Number(currentStats.total ?? fallbackEvents.length);
+  const underRepair = Number(currentStats.under_repair ?? underRepairEvents.value.length);
+  const i2OrHigher = Number(currentStats.i2_or_higher ?? i2OrHigherEvents.value.length);
+  const i3 = Number(
+    currentStats.i3
+    ?? detailEvents.value.filter((item) => eventI3Level(item)).length,
+  );
+  return [
+    {
+      key: "total",
+      label: "本月新增事件",
+      value: total,
+      unit: "件",
+      badge: "月度总览",
+      tone: "blue",
+      icon: "+",
+    },
+    {
+      key: "repairing",
+      label: "正在检修中",
+      value: underRepair,
+      unit: "件",
+      badge: "查看检修中记录",
+      tone: "emerald",
+      icon: "修",
+      clickable: true,
+    },
+    {
+      key: "i2plus",
+      label: "本月I2级及以上",
+      value: i2OrHigher,
+      unit: "件",
+      badge: "查看高等级记录",
+      tone: "amber",
+      icon: "!",
+      clickable: true,
+    },
+    {
+      key: "i3",
+      label: "本月I3级事件",
+      value: i3,
+      unit: "件",
+      badge: "查看I3记录",
+      tone: "rose",
+      icon: "I3",
+      clickable: true,
+    },
+  ];
+});
 
 const allowedBuildingCodes = computed(() => {
   const values = props.scopeOptions.map((item) => normalizeScope(item.value)).filter(Boolean);
@@ -450,7 +461,7 @@ const buildingCards = computed<BuildingCard[]>(() => {
 const filteredEvents = computed(() => {
   if (!showingDetails.value) return [];
   const query = searchText.value.trim().toLowerCase();
-  return events.value.filter((item) => {
+  return detailEvents.value.filter((item) => {
     if (buildingFilter.value && !eventMatchesBuilding(item, buildingFilter.value, props.scope)) return false;
     if (statusFilter.value && String(item.status || "") !== statusFilter.value) return false;
     if (levelFilter.value && String(item.level || "") !== levelFilter.value) return false;
@@ -482,10 +493,10 @@ const priorityEvents = computed(() => {
     })
     .slice(0, 6);
 });
-const statusOptions = computed(() => uniqueOptions(events.value.map((item) => item.status)));
-const levelOptions = computed(() => uniqueOptions(events.value.map((item) => item.level)));
-const sourceOptions = computed(() => uniqueOptions(events.value.map((item) => item.source)));
-const specialtyOptions = computed(() => uniqueOptions(events.value.map((item) => item.specialty)));
+const statusOptions = computed(() => uniqueOptions(detailEvents.value.map((item) => item.status)));
+const levelOptions = computed(() => uniqueOptions(detailEvents.value.map((item) => item.level)));
+const sourceOptions = computed(() => uniqueOptions(detailEvents.value.map((item) => item.source)));
+const specialtyOptions = computed(() => uniqueOptions(detailEvents.value.map((item) => item.specialty)));
 const activeFilterCount = computed(() => {
   return [searchText.value, buildingFilter.value, statusFilter.value, levelFilter.value, sourceFilter.value, specialtyFilter.value]
     .filter((value) => String(value || "").trim()).length;
@@ -564,7 +575,7 @@ async function loadMetricSourceRecords(): Promise<void> {
   const requestMonth = selectedMonth.value;
   const requestVersion = ++metricRequestVersion;
   if (showingDetails.value) {
-    metricSourceRecords.value = events.value.slice();
+    metricSourceRecords.value = detailEvents.value.slice();
     metricRecordsMonth.value = requestMonth;
     return;
   }
@@ -680,6 +691,12 @@ function openRepairManagementForSelectedEvent(): void {
   if (recordId) url.searchParams.set("from_event_record_id", recordId);
   const title = String(item.title || item.alarm_desc || "").trim();
   if (title) url.searchParams.set("event_title", title);
+  navigate(url);
+}
+
+function openRepairManagementForScope(): void {
+  const url = new URL("/repair-management", window.location.origin);
+  url.searchParams.set("scope", detailScope.value || props.scope || "ALL");
   navigate(url);
 }
 
@@ -1382,8 +1399,7 @@ onMounted(() => {
   box-shadow: 0 10px 20px rgba(30, 99, 255, 0.18);
 }
 
-.drawer-close,
-.source-link {
+.drawer-close {
   border: 1px solid #d8e5f7;
   border-radius: 14px;
   background: #fff;
@@ -1393,6 +1409,13 @@ onMounted(() => {
   font-weight: 950;
   text-decoration: none;
   cursor: pointer;
+}
+
+.event-drawer-footer {
+  display: flex;
+  justify-content: flex-end;
+  border-top: 1px solid #e1eaf5;
+  padding-top: 12px;
 }
 
 .detail-grid {

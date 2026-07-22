@@ -32,6 +32,7 @@ from lan_bitable_template_portal.portal_service import REPAIR_SOURCE_TABLE_ID  #
 from lan_bitable_template_portal.portal_service import REPAIR_MANAGEMENT_TABLE_ID  # noqa: E402
 from lan_bitable_template_portal.portal_service import REPAIR_MANAGEMENT_RETIRED_FIELD_NAMES  # noqa: E402
 from lan_bitable_template_portal.portal_service import REPAIR_MANAGEMENT_REPAIR_TABLE_ID  # noqa: E402
+from lan_bitable_template_portal.portal_service import REPAIR_MANAGEMENT_REPAIR_LINK_STORAGE_FIELD_NAME  # noqa: E402
 from lan_bitable_template_portal.portal_service import REPAIR_FOLLOWUP_TABLE_ID  # noqa: E402
 from lan_bitable_template_portal.portal_service import REPAIR_EQUIPMENT_CATALOG_TABLE_ID  # noqa: E402
 from lan_bitable_template_portal.portal_service import REPAIR_FOLLOWUP_CATALOG_MAX_RECORDS  # noqa: E402
@@ -730,6 +731,18 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                         ]
                     },
                 },
+                {
+                    "field_id": "fld_retired_repair_link",
+                    "field_name": "设备检修关联",
+                    "type": 21,
+                    "ui_type": "DuplexLink",
+                },
+                {
+                    "field_id": "fld_repair_link_l",
+                    "field_name": "设备检修关联-L",
+                    "type": 1,
+                    "ui_type": "Text",
+                },
             ]
         )
 
@@ -750,6 +763,12 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             ["未开始", "维修中", "维修完成"],
         )
         self.assertNotIn("流程-L", by_name)
+        self.assertEqual(
+            by_name["设备检修关联"].field_id,
+            "fld_repair_link_l",
+        )
+        self.assertEqual(by_name["设备检修关联"].field_type, 1)
+        self.assertNotIn("设备检修关联-L", by_name)
 
     def test_repair_suffix_record_read_prefers_writable_value_with_legacy_fallback(self):
         service = MaintenancePortalService()
@@ -760,6 +779,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "所属专业-L": "暖通",
                 "流程": "旧流程状态",
                 "流程-L": "维修中",
+                "设备检修关联": [{"record_id": "rec_retired_relation"}],
+                "设备检修关联-L": "rec_current_target",
             },
         )
         fallback = service._repair_logical_record_fields(
@@ -769,6 +790,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "所属专业-L": "",
                 "流程": "旧流程状态",
                 "流程-L": "",
+                "设备检修关联": [{"record_id": "rec_retired_relation"}],
+                "设备检修关联-L": "",
             },
         )
 
@@ -778,6 +801,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(preferred["流程"], "维修中")
         self.assertNotIn("流程", fallback)
         self.assertNotIn("流程-L", preferred)
+        self.assertEqual(preferred["设备检修关联"], "rec_current_target")
+        self.assertNotIn("设备检修关联", fallback)
         self.assertEqual(
             service._repair_logical_display_value(
                 REPAIR_MANAGEMENT_TABLE_ID,
@@ -793,7 +818,12 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
     def test_repair_record_skips_retired_fields_and_writes_active_suffix_fields(self):
         summary_fields = MaintenancePortalService._repair_physical_record_fields(
             REPAIR_MANAGEMENT_TABLE_ID,
-            {"维修名称": "测试维修", "所属专业": "电气", "流程": "处理中"},
+            {
+                "维修名称": "测试维修",
+                "所属专业": "电气",
+                "流程": "处理中",
+                "设备检修关联": "rec_repair_target",
+            },
         )
         followup_fields = MaintenancePortalService._repair_physical_record_fields(
             REPAIR_FOLLOWUP_TABLE_ID,
@@ -807,6 +837,11 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
         self.assertEqual(summary_fields["所属专业-L"], "电气")
         self.assertEqual(summary_fields["流程-L"], "处理中")
+        self.assertEqual(
+            summary_fields["设备检修关联-L"],
+            "rec_repair_target",
+        )
+        self.assertNotIn("设备检修关联", summary_fields)
         self.assertNotIn("流程", summary_fields)
         self.assertNotIn("维修名称", summary_fields)
         self.assertNotIn("维修名称-L", summary_fields)
@@ -832,12 +867,21 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         service._create_record_fields(
             app_token=REPAIR_SOURCE_APP_TOKEN,
             table_id=REPAIR_MANAGEMENT_TABLE_ID,
-            fields={"维修名称": "测试维修", "所属专业": "暖通", "流程": "处理中"},
+            fields={
+                "维修名称": "测试维修",
+                "所属专业": "暖通",
+                "流程": "处理中",
+                "设备检修关联": "rec_repair_target",
+            },
         )
 
         self.assertEqual(
             captured["fields"],
-            {"所属专业-L": "暖通", "流程-L": "处理中"},
+            {
+                "所属专业-L": "暖通",
+                "流程-L": "处理中",
+                "设备检修关联-L": "rec_repair_target",
+            },
         )
 
     def test_repair_snapshot_ignores_legacy_stage_workflow(self):
@@ -5569,8 +5613,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 {
                     "task_key": f"repair_link:{source_record_id}:{target_record_id}",
                     "status": "pending",
-                    "source_app_token": "source-app",
-                    "source_table_id": "source-table",
+                    "source_app_token": REPAIR_SOURCE_APP_TOKEN,
+                    "source_table_id": REPAIR_MANAGEMENT_TABLE_ID,
                     "source_record_id": source_record_id,
                     "sync_app_token": "source-app",
                     "sync_table_id": "sync-table",
@@ -5627,8 +5671,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 {
                     "task_key": f"repair_link:{source_record_id}:{target_record_id}",
                     "status": "pending",
-                    "source_app_token": "source-app",
-                    "source_table_id": "source-table",
+                    "source_app_token": REPAIR_SOURCE_APP_TOKEN,
+                    "source_table_id": REPAIR_MANAGEMENT_TABLE_ID,
                     "source_record_id": source_record_id,
                     "sync_app_token": "source-app",
                     "sync_table_id": "sync-table",
@@ -5666,7 +5710,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(len(updates), 1)
             self.assertEqual(
                 updates[0]["fields"],
-                {"设备检修关联": target_record_id},
+                {"设备检修关联-L": target_record_id},
             )
 
     def test_repair_link_task_claim_has_recoverable_lease(self):
@@ -6019,6 +6063,67 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             stored_status = service._state_store.get_document("notice_work_status", "A")
             self.assertEqual(stored_status["items"][0]["status"], "已结束")
             self.assertEqual(status_path.read_text(encoding="utf-8"), original)
+
+    def test_maintenance_memory_reuses_same_name_and_cycle_across_months(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            service._remember_draft_fields(
+                building="C楼",
+                maintenance_total="EA118机房C楼空气质量检测月度维护",
+                item_name="EA118机房C楼空气质量检测月度维护",
+                maintenance_cycle="月度",
+                location="C楼检测区域",
+                content="按月度计划开展空气质量检测",
+                reason="例行月度维护",
+                impact="对业务无影响",
+                extra_fields={
+                    "specialty": "暖通",
+                    "progress": "准备工作已完成，人员已就位",
+                },
+            )
+            next_month = _build_record(
+                "maintenance-next-month",
+                "C楼",
+                "空气质量检测月度维护",
+                "8月",
+                maintenance_cycle="每月",
+            )
+            next_month["display_fields"].update(
+                {
+                    "计划开始时间": "2026-08-18 09:30",
+                    "计划结束时间": "2026-08-18 18:30",
+                }
+            )
+
+            serialized = service._serialize_record(next_month)
+            memory = serialized["memory"]
+            draft = workbench_lite_module._draft_from_record(
+                serialized,
+                work_type="maintenance",
+            )
+
+            self.assertEqual(memory["location"], "C楼检测区域")
+            self.assertEqual(memory["content"], "按月度计划开展空气质量检测")
+            self.assertEqual(memory["specialty"], "暖通")
+            self.assertEqual(draft["progress"], "准备工作已完成，人员已就位")
+            self.assertEqual(draft["start_time"], f"{dt.date.today().isoformat()}T09:30")
+            self.assertEqual(draft["end_time"], f"{dt.date.today().isoformat()}T18:30")
+
+            different_cycle = _build_record(
+                "maintenance-next-quarter",
+                "C楼",
+                "空气质量检测月度维护",
+                "8月",
+                maintenance_cycle="每季",
+            )
+            self.assertFalse(
+                any(service._get_record_memory(different_cycle).get(key) for key in (
+                    "location",
+                    "content",
+                    "reason",
+                    "impact",
+                ))
+            )
 
     def test_current_month_source_record_reuses_month_independent_notice_memory(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -7140,6 +7245,12 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "计划开始时间": "2026-05-08 09:00",
                     "计划结束时间": "2026-05-08 18:00",
                     "维保周期": "每月",
+                    "专业": "暖通",
+                    "位置": "A-127冷站",
+                    "内容": "清洗过滤网",
+                    "原因": "月度维护",
+                    "影响": "无影响",
+                    "进度": "准备工作已完成",
                 },
             }
         ]
@@ -7156,8 +7267,72 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             )
         self.assertEqual(result["candidates"][0]["target_record_id"], "maint-target")
         self.assertEqual(result["candidates"][0]["notice_type"], "维保通告")
+        self.assertEqual(
+            result["candidates"][0]["form_fields"],
+            {
+                "title": "EA118机房A楼过滤网维护",
+                "building": "A楼",
+                "specialty": "暖通",
+                "maintenance_cycle": "每月",
+                "location": "A-127冷站",
+                "content": "清洗过滤网",
+                "reason": "月度维护",
+                "impact": "无影响",
+                "progress": "准备工作已完成",
+                "repair_device": "",
+                "repair_fault": "",
+                "fault_type": "",
+                "repair_mode": "",
+                "discovery": "",
+                "symptom": "",
+                "solution": "",
+                "spare_parts": "",
+                "device": "",
+                "cabinet": "",
+                "quantity": "",
+                "start_time": "2026-05-08T09:00",
+                "end_time": "2026-05-08T18:00",
+            },
+        )
         self.assertEqual(result["source_candidates"][0]["source_record_id"], "maint-source")
         self.assertEqual(result["source_candidates"][0]["source_app_token"], service.app_token)
+
+    def test_target_record_form_fields_cover_repair_editable_fields(self):
+        service = _TestMaintenancePortalService()
+        mapped = service._target_record_form_fields(
+            work_type="repair",
+            notice_type="设备检修",
+            target_record={
+                "display_fields": {
+                    "名称（标题）": "A楼UPS检修",
+                    "楼栋": "A楼",
+                    "专业": "电气",
+                    "位置": "A-245配电室",
+                    "紧急程度": "低",
+                    "发生故障时间": "2026-07-22 08:15",
+                    "期望完成时间": "2026-07-22 18:45",
+                    "维修设备": "A-245-UPS-01",
+                    "维修故障": "通讯中断",
+                    "故障类型": "设备故障",
+                    "维修方式": "自维",
+                    "影响范围": "无业务影响",
+                    "故障发现方式（来源）": "BMS系统",
+                    "故障现象": "通讯中断告警",
+                    "故障原因": "串口异常",
+                    "解决方案": "更换串口",
+                    "进度（完成情况）": "处理中",
+                }
+            },
+        )
+
+        self.assertEqual(mapped["title"], "A楼UPS检修")
+        self.assertEqual(mapped["level"], "低")
+        self.assertEqual(mapped["start_time"], "2026-07-22T18:45")
+        self.assertEqual(mapped["end_time"], "2026-07-22T08:15")
+        self.assertEqual(mapped["repair_device"], "A-245-UPS-01")
+        self.assertEqual(mapped["reason"], "串口异常")
+        self.assertEqual(mapped["symptom"], "通讯中断告警")
+        self.assertEqual(mapped["progress"], "处理中")
 
     def test_notice_target_candidates_support_repair_source_lookup(self):
         service = _TestMaintenancePortalService()
@@ -9491,6 +9666,11 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertIn("/api/auth/status?next=", html)
         self.assertIn("window.addEventListener('focus', checkLiteAuthStatus)", html)
         self.assertIn("document.addEventListener('visibilitychange'", html)
+        self.assertIn("<span>通告处理</span>", html)
+        self.assertIn("<span>计划通告列表</span>", html)
+        self.assertIn("<span>未结束通告</span>", html)
+        self.assertNotIn("任务收件箱", html)
+        self.assertNotIn("已开始未结束", html)
 
     def test_workbench_lite_ongoing_rows_hide_ids_and_normalize_status(self):
         notice_specs = [
@@ -10062,7 +10242,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     building="A楼",
                     title="A楼源表进行中检修",
                     started=True,
-                    target_record_id="target-r-source-ongoing",
+                    target_record_id="recTargetSourceOngoing",
                 )
             ]
             service._maintenance_loaded_once = True
@@ -10137,7 +10317,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(repair["source_progress"], "进行中")
             self.assertEqual(
                 repair["target_record_id"],
-                "target-r-source-ongoing",
+                "recTargetSourceOngoing",
             )
 
     def test_prepare_actions_reject_time_range_shorter_than_one_hour(self):
@@ -11893,6 +12073,26 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             expected,
         )
 
+    def test_new_repair_followup_applies_editable_equipment_defaults(self):
+        service = _TestMaintenancePortalService()
+        metas = [
+            FieldMeta("fld_parent", REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME, "Text", 1, False, {}, [], False),
+            FieldMeta("fld_date", "设备生产日期", "DateTime", 5, False, {}, [], False),
+            FieldMeta("fld_years", "设备使用年限", "Number", 2, False, {}, [], False),
+            FieldMeta("fld_capacity", "设备容量KW/AH", "Text", 1, False, {}, [], False),
+        ]
+        prepared, warnings = service._prepare_repair_followup_fields(
+            summary_record_id="rec_summary_defaults",
+            fields={},
+            summary_record={"display_fields": {}, "raw_fields": {}},
+            meta_by_name={meta.field_name: meta for meta in metas},
+        )
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(prepared["设备生产日期"], 1617120000000)
+        self.assertEqual(prepared["设备使用年限"], 4)
+        self.assertEqual(prepared["设备容量KW/AH"], "/")
+
     def test_repair_followup_duplicate_field_migration_is_disabled_for_active_table(self):
         service = _TestMaintenancePortalService()
 
@@ -12357,6 +12557,54 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertIn("/", qt_options)
 
         self.assertEqual(list(PORTAL_MAINTENANCE_CYCLE_OPTIONS), qt_options)
+
+    def test_qt_screenshot_confirm_enables_when_specialty_is_selected_last(self):
+        from PyQt6.QtWidgets import QApplication
+
+        app = QApplication.instance() or QApplication([])
+        dialog = ScreenshotConfirmDialog(theme="dark")
+        try:
+            for notice_type in (
+                "维保通告",
+                "变更通告",
+                "设备检修",
+                "设备调整",
+                "设备轮巡",
+                "上电通告",
+                "下电通告",
+                "事件通告",
+            ):
+                with self.subTest(notice_type=notice_type):
+                    data = {
+                        "notice_type": notice_type,
+                        "text": f"【{notice_type}】状态：开始\n【名称】EA118机房A楼测试通告",
+                        "buildings": ["A楼"],
+                    }
+                    if notice_type == "维保通告":
+                        data["maintenance_cycle"] = "每月"
+                    dialog.set_data(data, action_type="upload")
+                    if notice_type == "事件通告":
+                        dialog.event_level_combo.setCurrentIndex(1)
+                        dialog._on_event_level_selected(1)
+                        dialog.event_source_combo.setCurrentIndex(1)
+                        dialog._on_event_source_selected(1)
+                    dialog.time_input.setText("2026-07-22 10:30")
+
+                    self.assertFalse(dialog.btn_confirm.isEnabled())
+                    self.assertIn("专业", dialog.btn_confirm.toolTip())
+
+                    specialty_index = dialog.specialty_combo.findText("电气")
+                    self.assertGreater(specialty_index, 0)
+                    dialog.specialty_combo.setCurrentIndex(specialty_index)
+                    dialog._on_specialty_selected(specialty_index)
+                    app.processEvents()
+
+                    self.assertTrue(dialog.btn_confirm.isEnabled())
+                    self.assertEqual(dialog.btn_confirm.toolTip(), "")
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            app.processEvents()
 
     def test_outbox_events_are_leased_and_acknowledged(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -15078,7 +15326,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertNotIn("发送创建", html)
         self.assertIn('name="manual_binding_required" value="1"', html)
         self.assertIn('name="manual_binding_choice" value=""', html)
-        self.assertIn("绑定待发起事项", html)
+        self.assertIn("绑定计划通告", html)
         self.assertIn("不绑定", html)
 
     def test_workbench_source_ongoing_row_is_startable_until_active_item_exists(self):
@@ -15132,7 +15380,28 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertIn('data-action="start"', html)
         self.assertIn('data-source-record-id="repair-ongoing-source"', html)
         self.assertIn("该事项已结束，只保留查看状态，不可再次发起。", html)
-        self.assertNotIn("该事项已在“已开始未结束”中", html)
+        self.assertNotIn("该事项已在“未结束通告”中", html)
+
+    def test_workbench_source_terminal_status_beats_stale_processing_summary(self):
+        record = {
+            "source_progress": "已结束",
+            "source_status": "已结束",
+            "status": "处理中",
+            "work_summary": {"status": "处理中"},
+        }
+
+        self.assertEqual(workbench_lite_module._record_progress(record), "已结束")
+
+    def test_target_binding_fills_fields_without_overwriting_source_record_id(self):
+        source = (
+            BIN_DIR / "lan_bitable_template_portal" / "workbench_lite.py"
+        ).read_text(encoding="utf-8")
+        handler = source.split("async function confirmTargetCandidateBinding()", 1)[1]
+        handler = handler.split("function hydrateLitePreview()", 1)[0]
+
+        self.assertIn("applyTargetRecordFormFields(form, targetFormFields)", handler)
+        self.assertIn("setFormValue(form, 'target_record_id', targetRecordId)", handler)
+        self.assertNotIn("setFormValue(form, 'record_id', targetRecordId)", handler)
 
     def test_source_status_does_not_inherit_same_title_historical_work_status(self):
         service = _TestMaintenancePortalService()
@@ -15748,7 +16017,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             },
         }
 
-        with self.assertRaisesRegex(PortalError, "必须选择绑定待发起事项或不绑定"):
+        with self.assertRaisesRegex(PortalError, "必须选择绑定计划通告或不绑定"):
             service.expand_workbench_action_command(
                 base_payload,
                 scope="D",
@@ -16437,6 +16706,83 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             "历史已完成",
         )
 
+    def test_repair_management_scope_overview_uses_project_and_followup_state(self):
+        service = _TestMaintenancePortalService()
+        now_text = dt.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M")
+        projects = [
+            {
+                "record_id": "rec_e_pending",
+                "display_fields": {
+                    "维修名称": "E楼待检修",
+                    "所属数据中心/楼栋-使用": "南通E楼",
+                    "故障发生时间": now_text,
+                    "流程": "未开始",
+                },
+                "raw_fields": {},
+            },
+            {
+                "record_id": "rec_e_progress",
+                "display_fields": {
+                    "维修名称": "E楼进行中",
+                    "所属数据中心/楼栋-使用": "南通E楼",
+                    "故障发生时间": now_text,
+                    "流程": "维修中",
+                },
+                "raw_fields": {},
+            },
+            {
+                "record_id": "rec_a_completed",
+                "display_fields": {
+                    "维修名称": "A楼已完成",
+                    "所属数据中心/楼栋-使用": "南通A楼",
+                    "故障发生时间": now_text,
+                    "流程": "维修完成",
+                },
+                "raw_fields": {},
+            },
+        ]
+        followups = [
+            {
+                "record_id": "rec_followup_e",
+                "display_fields": {
+                    REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: "rec_e_progress",
+                    "维修进度": "40%",
+                },
+                "raw_fields": {
+                    REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: "rec_e_progress",
+                },
+            }
+        ]
+        service._load_repair_management_status_sources = (  # type: ignore[method-assign]
+            lambda **_kwargs: (projects, followups)
+        )
+
+        payload = service.get_repair_management_scope_overview(scopes=["E", "A"])
+
+        self.assertEqual(
+            payload["scopes"]["E"],
+            {
+                "scope": "E",
+                "pending": 1,
+                "in_progress": 1,
+                "year_total": 2,
+                "month_total": 2,
+            },
+        )
+        self.assertEqual(payload["scopes"]["A"]["pending"], 0)
+        self.assertEqual(payload["scopes"]["A"]["in_progress"], 0)
+        self.assertEqual(payload["scopes"]["A"]["year_total"], 1)
+        self.assertEqual(payload["scopes"]["A"]["month_total"], 1)
+        self.assertEqual(
+            payload["aggregate"],
+            {
+                "pending": 1,
+                "in_progress": 1,
+                "year_total": 3,
+                "month_total": 3,
+            },
+        )
+
     def test_repair_management_status_uses_event_alarm_and_sent_time(self):
         service = _TestMaintenancePortalService()
         service._load_repair_management_status_sources = (  # type: ignore[method-assign]
@@ -16944,7 +17290,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "更换备件数量": "2",
                     "维修进展描述": "人员已就位",
                 },
-                "raw_fields": {"设备检修关联": "rec_repair_source"},
+                "raw_fields": {
+                    REPAIR_MANAGEMENT_REPAIR_LINK_STORAGE_FIELD_NAME: "rec_repair_source"
+                },
             }
         )
 
@@ -17438,6 +17786,18 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(
             service._repair_target_record_id(
                 {
+                    "raw_fields": {
+                        "设备检修关联": "rec_retired_relation",
+                    },
+                    "display_fields": {},
+                }
+            ),
+            "",
+        )
+        self.assertEqual(
+            service._repair_target_record_id(
+                {
+                    "source_table_id": REPAIR_MANAGEMENT_TABLE_ID,
                     "raw_fields": {
                         "设备检修关联": "rec_repair_target_text",
                     },
@@ -19319,6 +19679,72 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 repair_record_ids=["rec_repair_1"],
             )
 
+    def test_repair_followup_prefill_ignores_missing_linked_repair_record(self):
+        service = _TestMaintenancePortalService()
+
+        def meta(name: str) -> FieldMeta:
+            return FieldMeta(f"fld_{name}", name, "Text", 1, False, {}, [], False)
+
+        metas = [
+            meta("故障维修原因"),
+            meta("维修进展描述"),
+            meta("后续整改措施"),
+        ]
+        meta_by_name = {item.field_name: item for item in metas}
+        parent_meta = meta(REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME)
+        followup = {
+            "record_id": "rec_followup_current",
+            "raw_fields": {
+                REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: "rec_summary",
+            },
+            "display_fields": {
+                "创建时间": "2026-07-22 15:00",
+                "维修进展描述": "已完成现场处理",
+                "后续整改措施（如有）": "下周复查",
+            },
+        }
+        service._load_repair_management_target_records = (  # type: ignore[method-assign]
+            lambda: ([], {}, [])
+        )
+        service._ensure_repair_followup_parent_id_field = (  # type: ignore[method-assign]
+            lambda: ([parent_meta], {parent_meta.field_name: parent_meta})
+        )
+        service._ensure_repair_management_record_in_scope = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: {"record_id": "rec_summary"}
+        )
+
+        def load_records_by_ids(**kwargs):
+            if kwargs.get("table_id") == REPAIR_MANAGEMENT_REPAIR_TABLE_ID:
+                raise PortalError(
+                    "飞书接口失败: code=1254043, msg=RecordIdNotFound"
+                )
+            return [followup]
+
+        service._load_table_records_by_ids = load_records_by_ids  # type: ignore[method-assign]
+
+        result = service._build_repair_management_prefill(
+            scope="E",
+            event_record_id="rec_event",
+            repair_record_ids=["rec_missing_repair"],
+            followup_record_ids=["rec_followup_current"],
+            month=None,
+            meta_by_name=meta_by_name,
+            allow_multiple_followups=True,
+            event_override={
+                "display_fields": {
+                    "告警描述": "空调高压告警",
+                    "机楼": "E楼",
+                }
+            },
+        )
+
+        self.assertEqual(result["fields"]["故障维修原因"], "空调高压告警")
+        self.assertEqual(result["fields"]["维修进展描述"], "已完成现场处理")
+        self.assertEqual(result["fields"]["后续整改措施"], "下周复查")
+        self.assertTrue(
+            any("原关联检修通告已不存在" in item for item in result["warnings"])
+        )
+
     def test_repair_followup_parent_does_not_fall_back_to_old_summary_link(self):
         old_only = {
             "raw_fields": {
@@ -19359,6 +19785,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             meta("当前维修进度", "Number", 2),
             meta("维修方案附件", "Number", 2),
             meta("维修进展描述"),
+            meta("后续整改措施"),
             meta("最新维修跟进时间", "DateTime", 5),
         ]
         meta_by_name = {item.field_name: item for item in metas}
@@ -19370,6 +19797,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "创建时间": "2026-07-10 11:00",
                     "维修进度": "0.5",
                     "维修进展描述": "处理中",
+                    "后续整改措施（如有）": "下周复查运行参数",
                     "更换备件名称": "未完成备件",
                     "更换备件数量": "5",
                     "故障维修总费用": "999",
@@ -19382,6 +19810,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "创建时间": "2026-07-10 10:00",
                     "维修进度": "1",
                     "维修进展描述": "已完成子项",
+                    "后续整改措施（如有）": "持续观察",
                     "更换备件名称": "完成备件",
                     "更换备件数量": "2",
                     "故障维修总费用": "100",
@@ -19440,6 +19869,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         )
         self.assertEqual(fields["当前维修进度"], 0.5)
         self.assertEqual(fields["维修进展描述"], "处理中")
+        self.assertEqual(fields["后续整改措施"], "下周复查运行参数")
         self.assertEqual(fields["更换备件名称"], "未完成备件")
         self.assertEqual(fields["更换备件数量"], 5)
         self.assertEqual(fields["故障维修总费用（跟进完成的维修项）"], 100)

@@ -1557,7 +1557,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await page.waitForSelector('text=选择楼栋进入检修通告管理', {{ timeout: 10000 }});
           const repairNoticeScopeCard = page.locator('article.scope-card').filter({{ hasText: 'A楼' }}).first();
           await repairNoticeScopeCard.getByRole('button', {{ name: '进入检修通告管理' }}).click();
-          await waitForTextOrDump(page, '待发起事项', 'repair-notice-entry');
+          await waitForTextOrDump(page, '计划通告列表', 'repair-notice-entry');
           if (!page.url().includes('work_type=repair')) {{
             throw new Error(`repair notice entry work_type mismatch: ${{page.url()}}`);
           }}
@@ -1567,9 +1567,9 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await page.waitForSelector('text=选择楼栋进入维护管理', {{ timeout: 10000 }});
           const scopeCard = page.locator('article.scope-card').filter({{ hasText: 'A楼' }}).first();
           await scopeCard.getByRole('button', {{ name: '进入维护管理' }}).click();
-          await waitForTextOrDump(page, '待发起事项', 'maintenance-entry');
+          await waitForTextOrDump(page, '计划通告列表', 'maintenance-entry');
           await waitForTextOrDump(page, '冷机月度巡检', 'maintenance-entry');
-          await waitForTextOrDump(page, '已开始未结束', 'maintenance-entry');
+          await waitForTextOrDump(page, '未结束通告', 'maintenance-entry');
           await waitForTextOrDump(page, 'A楼冷站过滤器维护000', 'maintenance-entry');
           const isLiteWorkbench = page.url().includes('/workbench-lite');
           if (isLiteWorkbench) {{
@@ -1838,7 +1838,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             await page.waitForSelector('text=已受理', {{ timeout: 10000 }});
             const probeStart = Date.now();
             const probe = await page.evaluate(() => ({{
-              hasWorkspace: document.body.innerText.includes('待发起事项') && document.body.innerText.includes('已开始未结束'),
+              hasWorkspace: document.body.innerText.includes('计划通告列表') && document.body.innerText.includes('未结束通告'),
               statusText: document.querySelector('#lite-job-status')?.textContent || '',
             }}));
             const probeMs = Date.now() - probeStart;
@@ -1870,7 +1870,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
               ok: true,
               title: pageTitle,
               mode: 'workbench-lite',
-              markers: ['飞书扫码登录', ...required, 'A楼轻量工作台', '待发起事项', '已开始未结束', 'VNET蓝白皮肤', 'worker提交不卡顿'],
+              markers: ['飞书扫码登录', ...required, 'A楼轻量工作台', '计划通告列表', '未结束通告', 'VNET蓝白皮肤', 'worker提交不卡顿'],
             }}));
             return;
           }}
@@ -1932,7 +1932,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await page.waitForSelector('text=选择楼栋进入维护管理', {{ timeout: 10000 }});
           const returnScopeCard = page.locator('article.scope-card').filter({{ hasText: 'A楼' }}).first();
           await returnScopeCard.getByRole('button', {{ name: '进入维护管理' }}).click();
-          await page.waitForSelector('text=待发起事项', {{ timeout: 10000 }});
+          await page.waitForSelector('text=计划通告列表', {{ timeout: 10000 }});
           await page.waitForSelector('text=A楼冷站过滤器维护000', {{ timeout: 10000 }});
           await assertHeaderSubtitle(page, 'A楼 · 通告工作台', 'workbench-after-return');
           const secondPage = await context.newPage();
@@ -1941,7 +1941,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             waitUntil: 'domcontentloaded',
             timeout: 20000,
           }});
-          await secondPage.waitForSelector('text=待发起事项', {{ timeout: 10000 }});
+          await secondPage.waitForSelector('text=计划通告列表', {{ timeout: 10000 }});
           const allSegment = secondPage.locator('.segmented button').filter({{ hasText: '全部' }});
           if (await allSegment.count() !== 1) throw new Error('all work type segment missing or ambiguous');
           const allSegmentClass = await allSegment.first().getAttribute('class');
@@ -1980,7 +1980,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             return {{
               status: document.querySelector('[role="status"]')?.textContent || '',
               buttonCount: buttons.length,
-              hasWorkbench: document.body.innerText.includes('待发起通告') && document.body.innerText.includes('已开始未结束'),
+              hasWorkbench: document.body.innerText.includes('待发起通告') && document.body.innerText.includes('未结束通告'),
             }};
           }});
           const probeMs = Date.now() - probeStart;
@@ -2066,7 +2066,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           console.log(JSON.stringify({{
             ok: true,
             title: pageTitle,
-            markers: ['飞书扫码登录', ...required, 'A楼工作台', '待发起事项', '已开始未结束', '多标签SSE降噪', 'VNET蓝白皮肤', '管理员工具', '历史通告记忆导入', '大列表不卡顿', 'worker提交不卡顿'],
+            markers: ['飞书扫码登录', ...required, 'A楼工作台', '计划通告列表', '未结束通告', '多标签SSE降噪', 'VNET蓝白皮肤', '管理员工具', '历史通告记忆导入', '大列表不卡顿', 'worker提交不卡顿'],
           }}));
         }})().catch(async err => {{
           console.error(String(err && err.stack || err));

@@ -931,8 +931,6 @@ function seedSelectedSourceLabels(displayFields: LooseDict): void {
   const repairLabel = relationDisplayText(
     displayFields["检修通告名称"]
     || displayFields["维修设备"],
-  ) || businessRelationLabel(
-    displayFields["设备检修关联"],
   );
   if (selectedRepairIds.value.length && repairLabel) {
     selectedRepairRecords.value = [{
@@ -1196,6 +1194,15 @@ function resetDraft(): void {
   for (const field of projectFormFields.value) {
     const name = String(field.field_name || "");
     const fieldType = Number(field.field_type || 0);
+    if (isCurrentProjectProgressField(field)) {
+      const progress = Number(selectedRecord.value?.progress_percent || 0);
+      fieldDraft[name] = String(
+        Number.isFinite(progress)
+          ? Math.max(0, Math.min(100, Math.round(progress)))
+          : 0,
+      );
+      continue;
+    }
     const prefersRaw = [2, 5, 15].includes(fieldType);
     const value = prefersRaw && Object.prototype.hasOwnProperty.call(rawFields, name)
       ? rawFields[name]

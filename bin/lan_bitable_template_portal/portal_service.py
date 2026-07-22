@@ -94,7 +94,6 @@ REPAIR_MANAGEMENT_RETIRED_FIELD_NAMES = frozenset(
         "辅助列-2个月内",
         "公式",
         "子项链接",
-        "后续整改措施",
         "值班账号",
         "消息推送人",
         "测试ing（勿动）",
@@ -119,8 +118,10 @@ REPAIR_MANAGEMENT_FORM_FIELD_NAMES = {
 REPAIR_MANAGEMENT_EVENT_LINK_FIELD_NAMES = (
     "关联事件单",
 )
+REPAIR_MANAGEMENT_REPAIR_LINK_FIELD_NAME = "设备检修关联"
+REPAIR_MANAGEMENT_REPAIR_LINK_STORAGE_FIELD_NAME = "设备检修关联-L"
 REPAIR_MANAGEMENT_REPAIR_LINK_FIELD_NAMES = (
-    "设备检修关联",
+    REPAIR_MANAGEMENT_REPAIR_LINK_FIELD_NAME,
 )
 REPAIR_MANAGEMENT_CUSTOM_MULTI_SELECT_FIELDS = {
     "对应来源",
@@ -231,6 +232,7 @@ REPAIR_MANAGEMENT_FOLLOWUP_AUTO_FIELD_NAMES = (
     "更换备件数量",
     "故障维修总费用（跟进完成的维修项）",
     "跟进项",
+    "后续整改措施",
     "最新维修跟进时间",
     "当前维修进度",
     "维修进展描述",
@@ -251,7 +253,9 @@ REPAIR_FOLLOWUP_MODEL_FIELD_NAME = "设备型号"
 REPAIR_FOLLOWUP_REPAIR_PARTY_FIELD_NAME = "维修方"
 REPAIR_FOLLOWUP_SUPPLIER_FIELD_NAME = "供应商名称"
 REPAIR_FOLLOWUP_SUPPLIER_PERSON_FIELD_NAME = "供应商维修人员"
-REPAIR_FOLLOWUP_DEFAULT_DEVICE_PRODUCTION_DATE = "2021-04-30T00:00"
+REPAIR_FOLLOWUP_DEFAULT_DEVICE_PRODUCTION_DATE = "2021-03-31T00:00"
+REPAIR_FOLLOWUP_DEFAULT_DEVICE_USAGE_YEARS = 4
+REPAIR_FOLLOWUP_DEFAULT_DEVICE_CAPACITY = "/"
 REPAIR_MANAGEMENT_WORKFLOW_FIELD_NAME = "流程"
 REPAIR_MANAGEMENT_WORKFLOW_STORAGE_FIELD_NAME = "流程-L"
 PERMISSION_DIRECTORY_APP_TOKEN = "F9lDbA5XKaLmyasoARRcZFpKnZd"
@@ -273,7 +277,10 @@ PERMISSION_DIRECTORY_EXCLUDED_POSITIONS = frozenset(
     {"运维值班长", "运维值班员"}
 )
 REPAIR_MANAGEMENT_NO_LEGACY_FALLBACK_FIELD_NAMES = frozenset(
-    {REPAIR_MANAGEMENT_WORKFLOW_FIELD_NAME}
+    {
+        REPAIR_MANAGEMENT_WORKFLOW_FIELD_NAME,
+        REPAIR_MANAGEMENT_REPAIR_LINK_FIELD_NAME,
+    }
 )
 
 # The original repair tables retain their Feishu relation/formula fields for
@@ -541,7 +548,7 @@ REPAIR_FOLLOWUP_SUMMARY_COPY_MAPPINGS: tuple[tuple[str, tuple[str, ...]], ...] =
         ),
     ),
 )
-REPAIR_LINK_FIELD_NAME = "设备检修关联"
+REPAIR_LINK_FIELD_NAME = REPAIR_MANAGEMENT_REPAIR_LINK_STORAGE_FIELD_NAME
 REPAIR_LINK_RETRY_SECONDS = 10 * 60
 REPAIR_LINK_RETRY_SLOW_SECONDS = 20 * 60
 REPAIR_LINK_FAST_RETRY_ATTEMPTS = 6
@@ -1574,6 +1581,16 @@ class MaintenancePortalService:
         raw_fields.update(dict(fields or {}))
         existing["display_fields"] = display_fields
         existing["raw_fields"] = raw_fields
+        if source_key == REPAIR_SNAPSHOT_SOURCE_PROJECTS:
+            existing.setdefault("source_app_token", REPAIR_SOURCE_APP_TOKEN)
+            existing.setdefault("source_table_id", REPAIR_MANAGEMENT_TABLE_ID)
+            existing.setdefault("work_type", WORK_TYPE_REPAIR)
+            existing.setdefault("notice_type", NOTICE_TYPE_REPAIR)
+        elif source_key == REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS:
+            existing.setdefault("source_app_token", REPAIR_SOURCE_APP_TOKEN)
+            existing.setdefault("source_table_id", REPAIR_FOLLOWUP_TABLE_ID)
+            existing.setdefault("work_type", WORK_TYPE_REPAIR)
+            existing.setdefault("notice_type", NOTICE_TYPE_REPAIR)
         existing.setdefault("created_time", str(int(time.time() * 1000)))
         existing["last_modified_time"] = str(int(time.time() * 1000))
         envelope = self._repair_snapshot_record_payload(
@@ -3924,9 +3941,18 @@ class MaintenancePortalService:
                 for name in available
             ):
                 warnings.append(f"维修项目必填字段不可写：{' / '.join(available)}")
-        for name in ("关联事件单", "设备检修关联", "维修跟进记录"):
+        for name in (
+            "关联事件单",
+            REPAIR_MANAGEMENT_REPAIR_LINK_FIELD_NAME,
+            "维修跟进记录",
+        ):
             if name not in meta_by_name:
-                warnings.append(f"维修项目表缺少来源追踪字段：{name}")
+                display_name = (
+                    REPAIR_MANAGEMENT_REPAIR_LINK_STORAGE_FIELD_NAME
+                    if name == REPAIR_MANAGEMENT_REPAIR_LINK_FIELD_NAME
+                    else name
+                )
+                warnings.append(f"维修项目表缺少来源追踪字段：{display_name}")
         workflow_meta = meta_by_name.get(REPAIR_MANAGEMENT_WORKFLOW_FIELD_NAME)
         if workflow_meta is None:
             warnings.append("维修项目表缺少下拉单选字段：流程-L")
@@ -5592,6 +5618,18 @@ class MaintenancePortalService:
             cleaned["设备生产日期"] = (
                 REPAIR_FOLLOWUP_DEFAULT_DEVICE_PRODUCTION_DATE
             )
+        if (
+            existing_record is None
+            and "设备使用年限" in meta_by_name
+            and cleaned.get("设备使用年限") in (None, "", [], {})
+        ):
+            cleaned["设备使用年限"] = REPAIR_FOLLOWUP_DEFAULT_DEVICE_USAGE_YEARS
+        if (
+            existing_record is None
+            and "设备容量KW/AH" in meta_by_name
+            and cleaned.get("设备容量KW/AH") in (None, "", [], {})
+        ):
+            cleaned["设备容量KW/AH"] = REPAIR_FOLLOWUP_DEFAULT_DEVICE_CAPACITY
 
         existing_display = (
             existing_record.get("display_fields")
@@ -5766,7 +5804,8 @@ class MaintenancePortalService:
         )
         raw_fields = summary.get("raw_fields") or {}
         event_ids = self._repair_management_record_ids(raw_fields.get("关联事件单"))
-        repair_ids = self._repair_management_record_ids(raw_fields.get("设备检修关联"))[:1]
+        repair_target_record_id = self._repair_target_record_id(summary)
+        repair_ids = [repair_target_record_id] if repair_target_record_id else []
         _followup_metas, _followup_meta_by_name, followup_records = (
             self._load_repair_followups_for_summary(summary_record_id, limit=500)
         )
@@ -6725,14 +6764,22 @@ class MaintenancePortalService:
             repair_app_token, repair_table_id = (
                 self._repair_management_repair_source_config()
             )
-            selected_repairs = self._load_table_records_by_ids(
-                app_token=repair_app_token,
-                table_id=repair_table_id,
-                meta_by_name=_repair_meta_by_name,
-                work_type=WORK_TYPE_REPAIR,
-                notice_type=NOTICE_TYPE_REPAIR,
-                record_ids=requested_repair_ids,
-            )
+            try:
+                selected_repairs = self._load_table_records_by_ids(
+                    app_token=repair_app_token,
+                    table_id=repair_table_id,
+                    meta_by_name=_repair_meta_by_name,
+                    work_type=WORK_TYPE_REPAIR,
+                    notice_type=NOTICE_TYPE_REPAIR,
+                    record_ids=requested_repair_ids,
+                )
+            except PortalError as exc:
+                if not self._repair_management_record_not_found_error(exc):
+                    raise
+                requested_repair_ids = []
+                warnings.append(
+                    "原关联检修通告已不存在，已保留维修单现有字段并继续同步跟进内容。"
+                )
             for record in selected_repairs:
                 if not self._repair_management_target_record_in_scope(record, scope):
                     raise PortalError("当前账号无权关联该楼栋设备检修记录。")
@@ -7072,6 +7119,7 @@ class MaintenancePortalService:
                 ),
                 ("设备容量KW/AH", "设备容量KW/AH"),
                 ("跟进项", "跟进项（如有）"),
+                ("后续整改措施", "后续整改措施（如有）"),
             )
             for target_name, source_name in text_mappings:
                 self._repair_management_prefill_put(
@@ -7368,11 +7416,6 @@ class MaintenancePortalService:
             else {}
         )
         target_record_id = self._repair_target_record_id(record)
-        if not target_record_id:
-            related_ids = self._repair_management_record_ids(
-                raw_fields.get("设备检修关联")
-            )[:1]
-            target_record_id = related_ids[0] if related_ids else ""
 
         fault_time = self._format_source_datetime(
             self._repair_first_field(
@@ -7520,13 +7563,15 @@ class MaintenancePortalService:
             else {}
         )
 
-        repair_link_meta = meta_by_name.get(REPAIR_LINK_FIELD_NAME)
+        repair_link_meta = meta_by_name.get(
+            REPAIR_MANAGEMENT_REPAIR_LINK_FIELD_NAME
+        )
         repair_link_deferred = self._repair_management_field_is_relation(
             repair_link_meta
         )
         desired: dict[str, Any] = {}
         if not repair_link_deferred:
-            desired[REPAIR_LINK_FIELD_NAME] = target_record_id
+            desired[REPAIR_MANAGEMENT_REPAIR_LINK_FIELD_NAME] = target_record_id
         title = str((prepared or {}).get("title") or "").strip()
         if title:
             desired["检修通告名称"] = title
@@ -8240,8 +8285,9 @@ class MaintenancePortalService:
         source_event_ids = self._repair_management_record_ids(
             raw_fields.get("关联事件单")
         )
-        source_repair_ids = self._repair_management_record_ids(
-            raw_fields.get("设备检修关联")
+        repair_target_record_id = self._repair_target_record_id(item)
+        source_repair_ids = (
+            [repair_target_record_id] if repair_target_record_id else []
         )
         display_fields = (
             dict(item.get("display_fields"))
@@ -9098,9 +9144,12 @@ class MaintenancePortalService:
             effective_event_id = existing_event_ids[0] if existing_event_ids else ""
         effective_repair_ids = list(source_repair_ids or [])
         if not replace_source_relations and not effective_repair_ids:
-            effective_repair_ids = self._repair_management_record_ids(
-                existing_raw.get("设备检修关联")
-            )[:1]
+            existing_repair_target_id = self._repair_target_record_id(existing)
+            effective_repair_ids = (
+                [existing_repair_target_id]
+                if existing_repair_target_id
+                else []
+            )
         cleaned = self._clean_repair_management_fields(
             fields,
             meta_by_name,
@@ -11944,12 +11993,24 @@ class MaintenancePortalService:
             if isinstance(record.get("display_fields"), dict)
             else {}
         )
-        for value in (
-            raw_fields.get("设备检修关联"),
-            raw_fields.get("设备检修关联-L"),
-            display_fields.get("设备检修关联"),
-            display_fields.get("设备检修关联-L"),
+        # Raw Feishu payloads use the writable text mirror. Normalized repair
+        # records expose that mirror under the logical business name, with the
+        # legacy relation explicitly disabled as a fallback.
+        values = [
+            raw_fields.get(REPAIR_MANAGEMENT_REPAIR_LINK_STORAGE_FIELD_NAME),
+            display_fields.get(REPAIR_MANAGEMENT_REPAIR_LINK_STORAGE_FIELD_NAME),
+        ]
+        if (
+            str(record.get("source_table_id") or "").strip()
+            == REPAIR_MANAGEMENT_TABLE_ID
         ):
+            values.extend(
+                (
+                    raw_fields.get(REPAIR_MANAGEMENT_REPAIR_LINK_FIELD_NAME),
+                    display_fields.get(REPAIR_MANAGEMENT_REPAIR_LINK_FIELD_NAME),
+                )
+            )
+        for value in values:
             record_ids = self._repair_management_record_ids(value)
             if record_ids:
                 return record_ids[0]
@@ -12190,6 +12251,26 @@ class MaintenancePortalService:
     @staticmethod
     def _normalize_memory_key(value: str) -> str:
         return re.sub(r"\s+", " ", str(value or "").strip()).lower()
+
+    @classmethod
+    def _normalize_memory_cycle(cls, value: Any) -> str:
+        text = re.sub(r"\s+", "", str(value or "").strip()).lower()
+        aliases = {
+            "月": "monthly",
+            "月度": "monthly",
+            "每月": "monthly",
+            "季": "quarterly",
+            "季度": "quarterly",
+            "每季": "quarterly",
+            "每季度": "quarterly",
+            "半年": "semiannual",
+            "半年度": "semiannual",
+            "每半年": "semiannual",
+            "年": "annual",
+            "年度": "annual",
+            "每年": "annual",
+        }
+        return aliases.get(text, cls._normalize_memory_key(text))
 
     @staticmethod
     def _safe_memory_filename(building: str) -> str:
@@ -13212,9 +13293,10 @@ class MaintenancePortalService:
                 ).strip()
                 source_record_id = str(task.get("source_record_id") or "").strip()
                 target_record_id = str(task.get("target_record_id") or "").strip()
-                link_field_name = str(
-                    task.get("link_field_name") or REPAIR_LINK_FIELD_NAME
-                ).strip()
+                # Existing queued tasks may contain the retired relation name.
+                # Always resolve the current logical mirror and let the normal
+                # patch path map it to 设备检修关联-L.
+                link_field_name = REPAIR_MANAGEMENT_REPAIR_LINK_FIELD_NAME
                 _source_metas, source_meta_by_name = self._load_table_fields(
                     app_token=source_app_token,
                     table_id=source_table_id,
@@ -13228,7 +13310,7 @@ class MaintenancePortalService:
                     raise PortalError(
                         f"维修项目表“{link_field_name}”必须为文本记录 ID 字段"
                     )
-                self._patch_record_fields_exact(
+                self._patch_record_fields(
                     app_token=source_app_token,
                     table_id=source_table_id,
                     record_id=source_record_id,
@@ -13358,6 +13440,133 @@ class MaintenancePortalService:
         if re.search(r"变更通告", text):
             return WORK_TYPE_CHANGE
         return WORK_TYPE_MAINTENANCE
+
+    def get_repair_management_scope_overview(
+        self,
+        *,
+        scopes: list[str] | tuple[str, ...] | set[str] | None = None,
+    ) -> dict[str, Any]:
+        """Return repair-project counts for the scope selection page.
+
+        The source tables are loaded once and every project is counted at most
+        once in the permission-wide aggregate, even when a project spans more
+        than one building.
+        """
+        normalized_scopes = list(
+            dict.fromkeys(
+                self._normalize_scope(scope)
+                for scope in (scopes or [option.get("value") for option in SCOPE_OPTIONS])
+                if str(scope or "").strip()
+            )
+        )
+        empty_stats = {
+            "pending": 0,
+            "in_progress": 0,
+            "year_total": 0,
+            "month_total": 0,
+        }
+        scope_stats = {
+            scope: {"scope": scope, **empty_stats}
+            for scope in normalized_scopes
+        }
+        aggregate = dict(empty_stats)
+        if not normalized_scopes:
+            return {"scopes": scope_stats, "aggregate": aggregate}
+
+        projects, followups = self._load_repair_management_status_sources()
+        followups_by_project: dict[str, list[dict[str, Any]]] = {}
+        for followup in followups:
+            for project_id in self._repair_followup_parent_ids(followup):
+                followups_by_project.setdefault(project_id, []).append(followup)
+
+        now = dt.datetime.now().astimezone()
+
+        def project_period(project: dict[str, Any]) -> tuple[bool, bool]:
+            display_fields = (
+                project.get("display_fields")
+                if isinstance(project.get("display_fields"), dict)
+                else {}
+            )
+            raw_fields = (
+                project.get("raw_fields")
+                if isinstance(project.get("raw_fields"), dict)
+                else {}
+            )
+            value = (
+                display_fields.get("故障发生时间")
+                or raw_fields.get("故障发生时间")
+                or display_fields.get("维修开始时间")
+                or raw_fields.get("维修开始时间")
+                or display_fields.get("创建日期")
+                or raw_fields.get("创建日期")
+                or project.get("created_time")
+            )
+            value_ms = self._repair_management_datetime_ms(value)
+            if value_ms is None:
+                return False, False
+            try:
+                value_date = dt.datetime.fromtimestamp(
+                    value_ms / 1000
+                ).astimezone()
+            except (OSError, OverflowError, TypeError, ValueError):
+                return False, False
+            in_year = value_date.year == now.year
+            return in_year, in_year and value_date.month == now.month
+
+        for project in projects:
+            project_id = str(project.get("record_id") or "").strip()
+            if not project_id:
+                continue
+            linked = followups_by_project.get(project_id, [])
+            latest_followup = (
+                max(linked, key=self._repair_followup_order_key)
+                if linked
+                else {}
+            )
+            latest_display = (
+                latest_followup.get("display_fields")
+                if isinstance(latest_followup.get("display_fields"), dict)
+                else {}
+            )
+            latest_raw = (
+                latest_followup.get("raw_fields")
+                if isinstance(latest_followup.get("raw_fields"), dict)
+                else {}
+            )
+            progress_value = latest_raw.get("维修进度")
+            if progress_value in (None, "", [], {}):
+                progress_value = latest_display.get("维修进度")
+            progress_percent = self._repair_followup_progress_percent(progress_value)
+            completed = self._repair_management_is_completed(project) or (
+                bool(linked)
+                and progress_percent is not None
+                and progress_percent >= 100
+            )
+            pending = not completed and not linked
+            in_progress = not completed and bool(linked)
+            in_year, in_month = project_period(project)
+
+            matched_any_scope = False
+            for scope in normalized_scopes:
+                if not self._repair_management_record_in_scope(project, scope):
+                    continue
+                matched_any_scope = True
+                current = scope_stats[scope]
+                current["pending"] += int(pending)
+                current["in_progress"] += int(in_progress)
+                current["year_total"] += int(in_year)
+                current["month_total"] += int(in_month)
+            if matched_any_scope:
+                aggregate["pending"] += int(pending)
+                aggregate["in_progress"] += int(in_progress)
+                aggregate["year_total"] += int(in_year)
+                aggregate["month_total"] += int(in_month)
+
+        return {
+            "scopes": scope_stats,
+            "aggregate": aggregate,
+            "updated_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+        }
 
     def get_scope_overview(
         self,
@@ -14041,7 +14250,38 @@ class MaintenancePortalService:
             items = payload.get("items") or {}
             item = items.get(key) or {}
             if not item and work_type == WORK_TYPE_MAINTENANCE:
-                item = items.get(self._normalize_memory_key(memory_name)) or {}
+                canonical_name = self._canonical_history_notice_title(
+                    memory_name,
+                    WORK_TYPE_MAINTENANCE,
+                )
+                canonical_cycle = self._normalize_memory_cycle(maintenance_cycle)
+                matches: list[dict[str, Any]] = []
+                for candidate_key, candidate in items.items():
+                    if not isinstance(candidate, dict):
+                        continue
+                    candidate_name = str(
+                        candidate.get("memory_name")
+                        or candidate.get("maintenance_total")
+                        or str(candidate_key).split("|cycle:", 1)[0]
+                    ).strip()
+                    if (
+                        self._canonical_history_notice_title(
+                            candidate_name,
+                            WORK_TYPE_MAINTENANCE,
+                        )
+                        != canonical_name
+                    ):
+                        continue
+                    if self._normalize_memory_cycle(
+                        candidate.get("maintenance_cycle")
+                    ) != canonical_cycle:
+                        continue
+                    matches.append(candidate)
+                if matches:
+                    item = max(
+                        matches,
+                        key=lambda candidate: str(candidate.get("updated_at") or ""),
+                    )
         if not isinstance(item, dict):
             return {}
         return {
@@ -14974,8 +15214,8 @@ class MaintenancePortalService:
                 else:
                     reason = "楼栋相同"
                 if source.get("work_type") == WORK_TYPE_MAINTENANCE:
-                    source_cycle = self._normalize_memory_key(str(source.get("maintenance_cycle") or ""))
-                    candidate_cycle = self._normalize_memory_key(str(candidate.get("maintenance_cycle") or ""))
+                    source_cycle = self._normalize_memory_cycle(source.get("maintenance_cycle"))
+                    candidate_cycle = self._normalize_memory_cycle(candidate.get("maintenance_cycle"))
                     if source_cycle and candidate_cycle and source_cycle == candidate_cycle:
                         score += 10
                         reason += "，周期一致"
@@ -16456,6 +16696,224 @@ class MaintenancePortalService:
         }
         return aliases.get(text.lower()) or aliases.get(text) or WORK_TYPE_MAINTENANCE
 
+    @classmethod
+    def _target_form_datetime_value(cls, value: Any) -> str:
+        text = cls._format_source_datetime(value).strip()
+        if not text:
+            return ""
+        normalized = (
+            text.replace("T", " ")
+            .replace("年", "-")
+            .replace("月", "-")
+            .replace("日", " ")
+            .replace("：", ":")
+            .replace("时", ":")
+            .replace("分", "")
+        )
+        match = re.search(
+            r"(\d{4})-(\d{1,2})-(\d{1,2})\D+(\d{1,2})(?::|\.)(\d{1,2})",
+            normalized,
+        )
+        if match:
+            return (
+                f"{match.group(1)}-{match.group(2).zfill(2)}-"
+                f"{match.group(3).zfill(2)}T{match.group(4).zfill(2)}:"
+                f"{match.group(5).zfill(2)}"
+            )
+        with suppress(ValueError):
+            parsed = dt.datetime.fromisoformat(normalized[:19].strip())
+            return parsed.strftime("%Y-%m-%dT%H:%M")
+        return ""
+
+    def _target_record_form_fields(
+        self,
+        *,
+        work_type: str,
+        notice_type: str,
+        target_record: dict[str, Any] | None,
+    ) -> dict[str, str]:
+        """Project a target-table record onto the editable notice form."""
+        work_type = self._normalize_notice_work_type_alias(work_type)
+        notice_type = str(
+            notice_type or self._notice_type_for_work_type(work_type)
+        ).strip()
+        fields = (
+            target_record.get("display_fields")
+            if isinstance(target_record, dict)
+            and isinstance(target_record.get("display_fields"), dict)
+            else {}
+        )
+        field_config = get_field_config(notice_type)
+
+        def field_value(
+            *logical_names: str,
+            fallback_names: tuple[str, ...] = (),
+        ) -> str:
+            physical_names = [
+                str(field_config.get(name) or "").strip()
+                for name in logical_names
+            ]
+            for field_name in [*physical_names, *fallback_names]:
+                if not field_name:
+                    continue
+                value = self._clean_source_text(fields.get(field_name))
+                if value:
+                    return value
+            return ""
+
+        title_logical_names = (
+            ("alarm_desc", "title", "name")
+            if work_type == WORK_TYPE_EVENT
+            else ("title", "name")
+        )
+        form_fields: dict[str, str] = {
+            "title": field_value(
+                *title_logical_names,
+                fallback_names=(
+                    "告警描述",
+                    "名称",
+                    "标题",
+                    "标题（名称）",
+                    "名称（标题）",
+                ),
+            ),
+            "building": field_value(
+                "building",
+                fallback_names=("楼栋", "机楼"),
+            ),
+            "specialty": field_value(
+                "specialty",
+                fallback_names=("专业", "所属专业"),
+            ),
+            "maintenance_cycle": field_value(
+                "maintenance_cycle",
+                fallback_names=("维保周期", "维护周期"),
+            ),
+            "location": field_value(
+                "location",
+                fallback_names=("位置", "地点"),
+            ),
+            "content": field_value("content", fallback_names=("内容",)),
+            "reason": field_value(
+                "reason",
+                fallback_names=("原因", "故障原因"),
+            ),
+            "impact": field_value(
+                "impact",
+                fallback_names=("影响", "影响范围"),
+            ),
+            "progress": field_value(
+                "progress",
+                fallback_names=("进度", "进度（完成情况）", "完成情况"),
+            ),
+            "repair_device": field_value(
+                "repair_device",
+                fallback_names=("维修设备",),
+            ),
+            "repair_fault": field_value(
+                "repair_fault",
+                fallback_names=("维修故障",),
+            ),
+            "fault_type": field_value(
+                "fault_type",
+                fallback_names=("故障类型",),
+            ),
+            "repair_mode": field_value(
+                "repair_mode",
+                fallback_names=("维修方式",),
+            ),
+            "discovery": field_value(
+                "discovery",
+                fallback_names=("故障发现方式", "故障发现方式（来源）"),
+            ),
+            "symptom": field_value(
+                "symptom",
+                fallback_names=("故障现象",),
+            ),
+            "solution": field_value(
+                "solution",
+                fallback_names=("解决方案",),
+            ),
+            "spare_parts": field_value(
+                fallback_names=("备件更换情况", "备件使用情况"),
+            ),
+            "device": field_value("device", fallback_names=("设备",)),
+            "cabinet": field_value("cabinet", fallback_names=("柜号",)),
+            "quantity": field_value(
+                "quantity",
+                fallback_names=("数量", "数量（个）"),
+            ),
+        }
+        if work_type == WORK_TYPE_CHANGE:
+            form_fields["level"] = field_value(
+                "level_ali",
+                "level_zhihang",
+                fallback_names=("等级", "变更等级", "阿里-变更等级", "智航-变更等级"),
+            )
+            start_value = field_value("start_time", fallback_names=("变更开始时间",))
+            end_value = field_value("end_time", fallback_names=("变更结束时间",))
+        elif work_type == WORK_TYPE_REPAIR:
+            form_fields["level"] = field_value(
+                "urgency",
+                fallback_names=("紧急程度",),
+            )
+            # The current repair form names these controls start/end, while their
+            # business labels are expected-completion/fault-discovery time.
+            start_value = field_value(
+                "expected_time",
+                fallback_names=("期望完成时间",),
+            )
+            end_value = field_value(
+                "fault_time",
+                fallback_names=("发生故障时间", "发现故障时间"),
+            )
+        elif work_type == WORK_TYPE_EVENT:
+            form_fields["level"] = field_value(
+                "level",
+                fallback_names=("事件等级",),
+            )
+            start_value = field_value(
+                "occurrence_time",
+                fallback_names=("事件发生时间",),
+            )
+            end_value = field_value(
+                "end_time",
+                "recover_time",
+                fallback_names=("事件结束时间", "事件恢复时间"),
+            )
+        elif work_type in {WORK_TYPE_POWER, WORK_TYPE_POLLING, WORK_TYPE_ADJUST}:
+            start_value = field_value(
+                "plan_start",
+                "actual_start",
+                fallback_names=("计划开始时间", "实际开始时间"),
+            )
+            end_value = field_value(
+                "plan_end",
+                "actual_end",
+                fallback_names=("计划结束时间", "实际结束时间"),
+            )
+        else:
+            start_value = field_value(
+                "plan_start",
+                "actual_start",
+                fallback_names=("计划开始时间", "实际开始时间"),
+            )
+            end_value = field_value(
+                "plan_end",
+                "actual_end",
+                fallback_names=("计划结束时间", "实际结束时间"),
+            )
+        form_fields["start_time"] = self._target_form_datetime_value(start_value)
+        form_fields["end_time"] = self._target_form_datetime_value(end_value)
+
+        if work_type == WORK_TYPE_POWER:
+            title = form_fields.get("title", "")
+            if "下电" in title:
+                form_fields["notice_type"] = NOTICE_TYPE_POWER_DOWN
+            elif "上电" in title:
+                form_fields["notice_type"] = NOTICE_TYPE_POWER_UP
+        return form_fields
+
     def validate_notice_identity_binding(
         self,
         *,
@@ -16554,6 +17012,11 @@ class MaintenancePortalService:
                     get_field_config(notice_type).get("status", "")
                 )
                 or ""
+            ),
+            "target_form_fields": self._target_record_form_fields(
+                work_type=work_type,
+                notice_type=notice_type,
+                target_record=target_record,
             ),
         }
 
@@ -16694,6 +17157,11 @@ class MaintenancePortalService:
             target_end = str(fields.get(field_config.get("end_time", "")) or "").strip()
             status = str(fields.get(status_field) or "").strip() if status_field else ""
             detail_fields = self._target_candidate_detail_fields(fields)
+            form_fields = self._target_record_form_fields(
+                work_type=WORK_TYPE_CHANGE,
+                notice_type=NOTICE_TYPE_CHANGE,
+                target_record=target,
+            )
             date_matched = bool(query_dates and target_dates and (query_dates & target_dates))
             match_reason = self._target_candidate_match_reason(
                 date_matched=date_matched,
@@ -16717,6 +17185,7 @@ class MaintenancePortalService:
                     "business_text_matched": business_match_count > 0,
                     "business_match_count": business_match_count,
                     "match_reason": match_reason,
+                    "form_fields": form_fields,
                     "fields": detail_fields,
                     "field_items": [
                         {"label": key, "value": value}
@@ -16915,6 +17384,11 @@ class MaintenancePortalService:
             if work_type == WORK_TYPE_EVENT:
                 status = self._event_status(fields)
             detail_fields = self._target_candidate_detail_fields(fields)
+            form_fields = self._target_record_form_fields(
+                work_type=work_type,
+                notice_type=notice_type,
+                target_record=target,
+            )
             date_matched = bool(query_dates and target_dates and (query_dates & target_dates))
             match_reason = self._target_candidate_match_reason(
                 date_matched=date_matched,
@@ -16940,6 +17414,7 @@ class MaintenancePortalService:
                     "business_text_matched": business_match_count > 0,
                     "business_match_count": business_match_count,
                     "match_reason": match_reason,
+                    "form_fields": form_fields,
                     "fields": detail_fields,
                     "field_items": [
                         {"label": key, "value": value}
@@ -18260,7 +18735,7 @@ class MaintenancePortalService:
     ) -> dict[str, Any]:
         source_record_id = str(source_record_id or "").strip()
         if not source_record_id:
-            raise PortalError("请选择要绑定的待发起事项。")
+            raise PortalError("请选择要绑定的计划通告。")
         items = self.list_bindable_source_items(
             scope=scope,
             work_type=work_type,
@@ -23925,7 +24400,7 @@ class MaintenancePortalService:
         ).strip()
         if manual and action == "start" and manual_binding_required:
             if manual_binding_choice not in {"bind", "unbound"}:
-                raise PortalError("纯手填通告必须选择绑定待发起事项或不绑定。")
+                raise PortalError("纯手填通告必须选择绑定计划通告或不绑定。")
             if manual_source_binding:
                 self.validate_manual_source_binding(
                     scope=scope,
@@ -25194,6 +25669,10 @@ class MaintenancePortalService:
                 reason=reason,
                 impact=impact,
                 maintenance_cycle=maintenance_cycle,
+                extra_fields={
+                    "specialty": specialty,
+                    "progress": progress,
+                },
             )
 
         text = self.build_notice_text(

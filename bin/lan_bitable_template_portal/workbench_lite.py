@@ -482,6 +482,13 @@ def _record_progress(record: dict[str, Any]) -> str:
         if isinstance(record.get("work_summary"), dict)
         else {}
     )
+    source_terminal_status = _first(
+        record.get("source_progress"),
+        record.get("source_status"),
+        record.get("status"),
+    )
+    if _record_disabled_reason(source_terminal_status):
+        return source_terminal_status
     return _first(
         work_summary.get("status"),
         record.get("source_progress"),
@@ -553,7 +560,7 @@ def _record_disabled_reason(
     if "未结束" not in text and any(flag in text for flag in ("已结束", "正常结束", "延期结束", "结束", "闭环", "已完成")):
         return "该事项已结束，只保留查看状态，不可再次发起。"
     if linked_ongoing and ("进行中" in text or "未结束" in text):
-        return "该事项已在“已开始未结束”中，请从右侧进行中列表处理。"
+        return "该事项已在“未结束通告”中，请从通告处理列表继续办理。"
     return ""
 
 
@@ -1228,7 +1235,7 @@ def _record_rows(
     ongoing_page: int = 1,
 ) -> str:
     if not records:
-        return "<div class=\"empty\">没有待发起事项</div>"
+        return "<div class=\"empty\">没有计划通告</div>"
     rows: list[str] = []
     for record in sorted(records, key=_record_sort_key):
         linked_ongoing = _linked_ongoing_for_source(record, ongoing_items)
@@ -1314,7 +1321,7 @@ def _ongoing_rows(
     filter_work_type = "" if work_type == ALL_WORK_TYPE else work_type
     filtered = [item for item in items if not filter_work_type or _item_work_type(item) == filter_work_type]
     if not filtered:
-        return "<div class=\"empty\">当前没有进行中通告</div>"
+        return "<div class=\"empty\">当前没有未结束通告</div>"
     rows: list[str] = []
     for item in filtered:
         active_id = str(item.get("active_item_id") or item.get("target_record_id") or item.get("record_id") or "")
@@ -1537,11 +1544,11 @@ def _manual_source_binding_panel() -> str:
           <input type="hidden" name="manual_binding_choice" value="">
           <input type="hidden" name="source_record_id" value="">
           <div class="manual-source-binding-head">
-            <strong>待发起事项关系</strong>
+            <strong>计划通告关联</strong>
             <span id="lite-manual-binding-status">请选择绑定方式</span>
           </div>
           <div class="manual-source-binding-actions">
-            <button class="btn ghost" type="button" data-manual-binding-mode="bind">绑定待发起事项</button>
+            <button class="btn ghost" type="button" data-manual-binding-mode="bind">绑定计划通告</button>
             <button class="btn ghost" type="button" data-manual-binding-mode="unbound">不绑定</button>
           </div>
         </section>
@@ -2097,7 +2104,7 @@ def render_workbench_lite(
         "repair_management_record_id": prefill_context_id,
     }
     pending_pager = _pagination_controls(
-        label="待发起事项",
+        label="计划通告列表",
         page_param="pending_page",
         page=pending_page_num,
         total_pages=pending_pages,
@@ -2106,7 +2113,7 @@ def render_workbench_lite(
         base_params={**pager_base, "ongoing_page": ongoing_page_num},
     )
     ongoing_pager = _pagination_controls(
-        label="进行中通告",
+        label="未结束通告",
         page_param="ongoing_page",
         page=ongoing_page_num,
         total_pages=ongoing_pages,
@@ -2610,21 +2617,21 @@ def render_workbench_lite(
     </section>
     <section class="workbench-guide" aria-label="通告办理步骤" hidden></section>
     <section class="workspace">
-      <aside class="task-inbox panel" aria-label="通告任务收件箱">
+      <aside class="task-inbox panel" aria-label="通告处理">
         <div class="inbox-head">
-          <h2 class="inbox-title"><span>任务收件箱</span></h2>
+          <h2 class="inbox-title"><span>通告处理</span></h2>
           <div class="inbox-summary" aria-label="任务数量">
-            <span>待发起 <b>{_e(current_pending_count)}</b></span>
-            <span>进行中 <b data-inbox-ongoing-count>{_e(current_ongoing_count)}</b></span>
+            <span>计划通告 <b>{_e(current_pending_count)}</b></span>
+            <span>未结束 <b data-inbox-ongoing-count>{_e(current_ongoing_count)}</b></span>
           </div>
         </div>
         <section class="inbox-section pending-inbox-panel">
-          <h3><span>待发起事项</span><b>{_e(current_pending_count)}</b></h3>
+          <h3><span>计划通告列表</span><b>{_e(current_pending_count)}</b></h3>
           <div class="list">{_record_rows(visible_records, ongoing_items=ongoing, scope=scope, work_type=view_work, month=selected_month, search=search, specialty=specialty, selected_id=selected_record_id, pending_page=pending_page_num, ongoing_page=ongoing_page_num)}</div>
           {pending_pager}
         </section>
         <section class="inbox-section ongoing-inbox-panel" data-ongoing-panel>
-          <h3><span>已开始未结束</span><b class="panel-count">{_e(current_ongoing_count)}</b></h3>
+          <h3><span>未结束通告</span><b class="panel-count">{_e(current_ongoing_count)}</b></h3>
           <div class="list">{_ongoing_rows(visible_ongoing, scope=scope, work_type=view_work, month=selected_month, selected_id=active_item_id, pending_page=pending_page_num, ongoing_page=ongoing_page_num)}</div>
           {ongoing_pager}
         </section>
@@ -2688,8 +2695,8 @@ def render_workbench_lite(
   <div class="end-check-backdrop" id="lite-manual-source-candidates" hidden>
     <section class="end-check-dialog target-candidate-dialog" role="dialog" aria-modal="true" aria-labelledby="lite-manual-source-title">
       <header class="end-check-head">
-        <span>待发起事项关系</span>
-        <strong id="lite-manual-source-title">选择要绑定的待发起事项</strong>
+        <span>计划通告关联</span>
+        <strong id="lite-manual-source-title">选择要绑定的计划通告</strong>
       </header>
       <div class="manual-source-tools">
         <input id="lite-manual-source-search" type="search" placeholder="搜索名称、楼栋或专业" autocomplete="off">
@@ -3339,6 +3346,34 @@ def render_workbench_lite(
       if (!field) return;
       field.value = value == null ? '' : String(value);
     }}
+    const TARGET_FORM_PROTECTED_FIELDS = new Set([
+      'scope', 'source_month', 'work_type', 'manual', 'manual_id',
+      'record_id', 'source_record_id', 'target_record_id', 'active_item_id',
+      'site_photo_count', 'mop_status', 'actual_action_time',
+    ]);
+    function applyTargetRecordFormFields(form, values) {{
+      if (!form || !values || typeof values !== 'object') return 0;
+      let changed = 0;
+      for (const [name, rawValue] of Object.entries(values)) {{
+        if (TARGET_FORM_PROTECTED_FIELDS.has(name)) continue;
+        const field = form.querySelector(`[name="${{CSS.escape(name)}}"]`);
+        if (!field) continue;
+        const value = rawValue == null ? '' : String(rawValue);
+        if (field instanceof HTMLSelectElement && value) {{
+          const optionExists = Array.from(field.options).some(option => option.value === value);
+          if (!optionExists) field.append(new Option(value, value));
+        }}
+        if (field.value === value) continue;
+        field.value = value;
+        changed += 1;
+      }}
+      const title = String(values.title || '').trim();
+      const heading = form.querySelector('.detail-head strong');
+      if (heading && title) heading.textContent = title;
+      updateNoticePreview(form);
+      updateActionAvailability(form);
+      return changed;
+    }}
     function setSourceLinkDisplay(form, sourceId, titleText) {{
       if (!form) return;
       const sourceField = form.querySelector('.source-link-field');
@@ -3663,9 +3698,9 @@ def render_workbench_lite(
     function manualBindingIssue(form) {{
       if (!form || previewValue(form, 'manual') !== '1' || previewValue(form, 'manual_binding_required') !== '1') return '';
       const choice = previewValue(form, 'manual_binding_choice');
-      if (!choice) return '请选择绑定待发起事项或不绑定';
-      if (choice === 'bind' && !previewValue(form, 'source_record_id')) return '请选择要绑定的待发起事项';
-      if (!['bind', 'unbound'].includes(choice)) return '待发起事项绑定方式无效';
+      if (!choice) return '请选择绑定计划通告或不绑定';
+      if (choice === 'bind' && !previewValue(form, 'source_record_id')) return '请选择要绑定的计划通告';
+      if (!['bind', 'unbound'].includes(choice)) return '计划通告绑定方式无效';
       return '';
     }}
     function parseLiteDateTime(value) {{
@@ -3812,8 +3847,8 @@ def render_workbench_lite(
       const status = document.getElementById('lite-manual-binding-status');
       if (status) {{
         status.textContent = normalized === 'bind'
-          ? (candidate?.title || '已绑定待发起事项')
-          : (normalized === 'unbound' ? '不绑定待发起事项' : '请选择绑定方式');
+          ? (candidate?.title || '已绑定计划通告')
+          : (normalized === 'unbound' ? '不绑定计划通告' : '请选择绑定方式');
         status.classList.toggle('ready', Boolean(normalized));
       }}
       setLiteFormDirty(true);
@@ -3829,7 +3864,7 @@ def render_workbench_lite(
       if (!liteManualSourceCandidates.length) {{
         const empty = document.createElement('div');
         empty.className = 'target-candidate-empty';
-        empty.textContent = '没有可绑定的待发起事项。已在右侧进行中和已结束事项不会出现在这里。';
+        empty.textContent = '没有可绑定的计划通告。未结束和已结束通告不会出现在这里。';
         list.replaceChildren(empty);
         return;
       }}
@@ -3839,7 +3874,7 @@ def render_workbench_lite(
         row.type = 'button';
         row.setAttribute('data-manual-source-index', String(index));
         const title = document.createElement('strong');
-        title.textContent = candidate.title || '未命名待发起事项';
+        title.textContent = candidate.title || '未命名计划通告';
         const meta = document.createElement('span');
         meta.textContent = [
           candidate.progress || '未开始',
@@ -3857,7 +3892,7 @@ def render_workbench_lite(
       if (!form || !list) return;
       const loading = document.createElement('div');
       loading.className = 'target-candidate-empty';
-      loading.textContent = '正在读取待发起事项...';
+      loading.textContent = '正在读取计划通告...';
       list.replaceChildren(loading);
       const url = new URL('/api/workbench/source-options', location.origin);
       url.searchParams.set('scope', previewValue(form, 'scope') || getCurrentScope());
@@ -3868,7 +3903,7 @@ def render_workbench_lite(
       const response = await fetch(url.pathname + url.search, {{ credentials: 'same-origin', cache: 'no-store' }});
       const data = await response.json().catch(() => ({{}}));
       if (handleLiteAuthRequired(response, data)) return;
-      if (!response.ok || data.ok === false) throw new Error(data.error || '读取待发起事项失败');
+      if (!response.ok || data.ok === false) throw new Error(data.error || '读取计划通告失败');
       renderManualSourceCandidates((data.data && data.data.items) || data.items || []);
     }}
     async function openManualSourceCandidates() {{
@@ -3882,7 +3917,7 @@ def render_workbench_lite(
         search?.focus();
       }} catch (error) {{
         closeManualSourceCandidates();
-        showLiteError(error && error.message ? error.message : '读取待发起事项失败');
+        showLiteError(error && error.message ? error.message : '读取计划通告失败');
       }}
     }}
     function selectManualSourceCandidate(index) {{
@@ -3899,7 +3934,7 @@ def render_workbench_lite(
       if (!candidate || !form) return;
       setManualBindingChoice(form, 'bind', candidate);
       closeManualSourceCandidates();
-      setLiteStatus('已绑定待发起事项');
+      setLiteStatus('已绑定计划通告');
     }}
     let liteRepairEventCandidates = [];
     let liteSelectedRepairEventIndex = -1;
@@ -4376,7 +4411,13 @@ def render_workbench_lite(
         const data = await response.json().catch(() => ({{}}));
         if (handleLiteAuthRequired(response, data)) return;
         if (!response.ok || data.ok === false) throw new Error(data.error || '绑定目标记录失败');
+        const result = data.data || data;
+        const targetFormFields = result.target_form_fields
+          || result.validation?.target_form_fields
+          || candidate.form_fields
+          || {{}};
         setFormValue(form, 'target_record_id', targetRecordId);
+        const appliedFieldCount = applyTargetRecordFormFields(form, targetFormFields);
         form.dataset.targetEnded = isEndedCandidate(candidate) ? '1' : '';
         const status = document.getElementById('lite-target-link-status');
         if (status) status.textContent = isEndedCandidate(candidate)
@@ -4387,9 +4428,9 @@ def render_workbench_lite(
         }} else {{
           setOngoingSubmitButtons(form);
         }}
-        setLiteFormDirty(false);
+        setLiteFormDirty(appliedFieldCount > 0);
         closeTargetCandidates();
-        setLiteStatus('目标多维关系已保存');
+        setLiteStatus(appliedFieldCount > 0 ? '已绑定目标记录并填入字段' : '目标多维关系已保存');
       }} catch (error) {{
         showLiteError(error && error.message ? error.message : '绑定目标记录失败');
       }} finally {{
@@ -4520,7 +4561,7 @@ def render_workbench_lite(
       updateNoticePreview(form);
       setLiteStatus(linkedOngoing
         ? '该事项已在进行中，可发送更新、结束或删除'
-        : '已选择待发起事项，可继续编辑后发送');
+        : '已选择计划通告，可继续编辑后发送');
       openNoticeDrawer(title, link);
       return true;
     }}
@@ -4530,7 +4571,7 @@ def render_workbench_lite(
       const workType = link.getAttribute('data-work-type') || '';
       if (workType && form.dataset.workType && workType !== form.dataset.workType) return false;
       const draft = draftFromRow(link);
-      const title = link.getAttribute('data-title') || draft.title || '进行中通告';
+      const title = link.getAttribute('data-title') || draft.title || '未结束通告';
       form.dataset.action = 'update';
       form.dataset.detailMode = 'ongoing';
       form.dataset.targetEnded = '';
@@ -4559,7 +4600,7 @@ def render_workbench_lite(
       resetSitePhotoState(form, Number(link.getAttribute('data-site-photo-count') || 0));
       setOngoingSubmitButtons(form);
       updateNoticePreview(form);
-      setLiteStatus('已选择进行中通告，可发送更新或结束');
+      setLiteStatus('已选择未结束通告，可发送更新或结束');
       openNoticeDrawer(title, link);
       return true;
     }}
@@ -4776,7 +4817,7 @@ def render_workbench_lite(
         if (mode === 'bind') await openManualSourceCandidates();
         else if (mode === 'unbound') {{
           setManualBindingChoice(form, 'unbound', null);
-          setLiteStatus('已选择不绑定待发起事项');
+          setLiteStatus('已选择不绑定计划通告');
         }}
         return;
       }}
@@ -5351,6 +5392,25 @@ def render_workbench_lite(
       row.setAttribute('data-disabled-reason', '已提交');
       row.querySelector('.row-status')?.replaceChildren(document.createTextNode('处理中'));
     }}
+    function markSourceRowCompleted(draft) {{
+      const sourceId = String(draft?.source_record_id || '').trim();
+      if (!sourceId) return;
+      const row = Array.from(document.querySelectorAll('.notice-row')).find(node =>
+        [node.getAttribute('data-source-record-id'), node.getAttribute('data-record-id')]
+          .map(value => String(value || '').trim())
+          .includes(sourceId)
+      );
+      if (!row) return;
+      row.classList.add('is-disabled');
+      row.setAttribute('aria-disabled', 'true');
+      row.setAttribute('data-disabled-reason', '该事项已结束，只保留查看状态，不可再次发起。');
+      row.setAttribute('title', '该事项已结束，只保留查看状态，不可再次发起。');
+      const status = row.querySelector('.row-status');
+      if (status) {{
+        status.className = 'row-status done';
+        status.textContent = '已结束';
+      }}
+    }}
     function applyOptimisticSubmission(form, action, payload) {{
       const draft = compactOptimisticDraft(Object.assign({{}}, payload.patch || {{}}));
       draft.action = action;
@@ -5393,7 +5453,7 @@ def render_workbench_lite(
         if (list && !list.querySelector('.ongoing-row')) {{
           const empty = document.createElement('div');
           empty.className = 'empty';
-          empty.textContent = '当前没有进行中通告';
+          empty.textContent = '当前没有未结束通告';
           list.replaceChildren(empty);
         }}
       }});
@@ -5408,6 +5468,7 @@ def render_workbench_lite(
       draft.record_id = payload?.record_id || draft.record_id || '';
       const row = findOngoingRowByDraft(draft);
       if (ok && draft.action === 'end') {{
+        markSourceRowCompleted(draft);
         removeOngoingRow(row);
         clearCompletedCurrentNotice(draft);
         return;
@@ -5425,7 +5486,7 @@ def render_workbench_lite(
       if (list && !list.querySelector('.ongoing-row')) {{
         const empty = document.createElement('div');
         empty.className = 'empty';
-        empty.textContent = '当前没有进行中通告';
+        empty.textContent = '当前没有未结束通告';
         list.replaceChildren(empty);
       }}
     }}
@@ -5468,6 +5529,7 @@ def render_workbench_lite(
       draft.target_record_id = patch.target_record_id || payload?.target_record_id || draft.target_record_id || '';
       draft.record_id = patch.record_id || draft.target_record_id || payload?.record_id || draft.record_id || '';
       if (ok && draft.action === 'end') {{
+        markSourceRowCompleted(draft);
         removeOngoingRow(findOngoingRowByDraft(draft));
         clearCompletedCurrentNotice(draft);
         return;
@@ -5698,7 +5760,7 @@ def render_workbench_lite(
         window.clearTimeout(liteManualSourceSearchTimer);
         liteManualSourceSearchTimer = window.setTimeout(() => {{
           loadManualSourceCandidates(event.target.value).catch(error => {{
-            showLiteError(error && error.message ? error.message : '搜索待发起事项失败');
+            showLiteError(error && error.message ? error.message : '搜索计划通告失败');
           }});
         }}, 260);
         return;

@@ -234,7 +234,7 @@ const isNumber = computed(() => fieldType.value === 2 || uiType.value === "numbe
 const isTextarea = computed(() => repairFieldUsesTextarea(props.field.field_name));
 const errorId = computed(() => `${props.inputId}-error`);
 const percentageValue = computed(() => {
-  const raw = Number(props.modelValue);
+  const raw = Number(String(props.modelValue ?? "").replace(/[％%]/g, "").trim());
   if (!Number.isFinite(raw)) return 0;
   const percentageNumber = raw <= 1 ? raw * 100 : raw;
   return Math.min(100, Math.max(0, Math.round(percentageNumber)));

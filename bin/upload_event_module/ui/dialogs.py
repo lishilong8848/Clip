@@ -6040,6 +6040,20 @@ class ScreenshotConfirmDialog(QDialog):
             self.selected_specialty
         )
 
+        missing_fields = []
+        if not time_valid:
+            missing_fields.append("响应时间")
+        if not buildings_valid:
+            missing_fields.append("楼栋")
+        if not level_valid:
+            missing_fields.append("事件等级")
+        if not source_valid:
+            missing_fields.append("事件来源")
+        if not cycle_valid:
+            missing_fields.append("维保周期")
+        if not specialty_valid:
+            missing_fields.append("专业")
+
         enable_btns = (
             time_valid
             and buildings_valid
@@ -6050,6 +6064,9 @@ class ScreenshotConfirmDialog(QDialog):
         )
 
         self.btn_confirm.setEnabled(enable_btns)
+        self.btn_confirm.setToolTip(
+            "" if enable_btns else f"请先填写：{'、'.join(missing_fields)}"
+        )
 
         screenshot_required = self._qt_notice_requires_screenshot()
         self.btn_skip.setEnabled(enable_btns and not screenshot_required)
@@ -8075,6 +8092,7 @@ class ScreenshotConfirmDialog(QDialog):
 
             self._patch_cache_fields({"specialty": None})
 
+            self._refresh_submit_state()
             self._notify_state_changed()
 
             return
@@ -8098,6 +8116,7 @@ class ScreenshotConfirmDialog(QDialog):
 
         self._patch_cache_fields({"specialty": self.selected_specialty or None})
 
+        self._refresh_submit_state()
         self._notify_state_changed()
 
 
@@ -8170,6 +8189,7 @@ class ScreenshotConfirmDialog(QDialog):
                 "level_locked": True,
             }
         )
+        self._refresh_submit_state()
         self._notify_state_changed()
 
 

@@ -3126,6 +3126,29 @@ class FastAPIPortalController:
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
 
+        @app.get("/api/repair-management/overview")
+        async def repair_management_overview(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                allowed_options = PortalRuntime.auth_manager.filter_scope_options(
+                    SCOPE_OPTIONS,
+                    session,
+                )
+                allowed_scopes = [
+                    str(option.get("value") or "").strip()
+                    for option in allowed_options
+                    if str(option.get("value") or "").strip()
+                ]
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.get_repair_management_scope_overview,
+                    scopes=allowed_scopes,
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
         @app.get("/api/repair-management/status")
         async def repair_management_status(request: Request):
             session = self._current_session(request)

@@ -264,7 +264,13 @@ const REPAIR_PARTY_FIELD_NAME = "维修方";
 const SUPPLIER_FIELD_NAMES = new Set(["供应商名称", "供应商维修人员"]);
 const WORKER_FIELD_NAME = "随工人员（我方维修人员）";
 const DEVICE_PRODUCTION_DATE_FIELD_NAME = "设备生产日期";
-const DEFAULT_DEVICE_PRODUCTION_DATE = "2021-04-30T00:00";
+const DEVICE_USAGE_YEARS_FIELD_NAME = "设备使用年限";
+const DEVICE_CAPACITY_FIELD_NAME = "设备容量KW/AH";
+const DEFAULT_FOLLOWUP_FIELD_VALUES: Record<string, string> = {
+  [DEVICE_PRODUCTION_DATE_FIELD_NAME]: "2021-03-31T00:00",
+  [DEVICE_USAGE_YEARS_FIELD_NAME]: "4",
+  [DEVICE_CAPACITY_FIELD_NAME]: "/",
+};
 const fieldLabels: Record<string, string> = {
   "跟进项（如有）": "跟进项",
   "后续整改措施（如有）": "后续整改措施",
@@ -391,8 +397,8 @@ const hasDraftContent = computed(() => Boolean(
   || editableFields.value.some((field) => {
     const fieldName = String(field.field_name || "");
     const value = String(draft[fieldName] || "").trim();
-    if (fieldName === DEVICE_PRODUCTION_DATE_FIELD_NAME) {
-      return Boolean(value && value !== DEFAULT_DEVICE_PRODUCTION_DATE);
+    if (Object.prototype.hasOwnProperty.call(DEFAULT_FOLLOWUP_FIELD_VALUES, fieldName)) {
+      return Boolean(value && value !== DEFAULT_FOLLOWUP_FIELD_VALUES[fieldName]);
     }
     return Boolean(value);
   }),
@@ -548,11 +554,13 @@ function clearDraft(): void {
 }
 
 function applyNewFollowupDefaults(): void {
-  if (
-    Object.prototype.hasOwnProperty.call(draft, DEVICE_PRODUCTION_DATE_FIELD_NAME)
-    && !String(draft[DEVICE_PRODUCTION_DATE_FIELD_NAME] || "").trim()
-  ) {
-    draft[DEVICE_PRODUCTION_DATE_FIELD_NAME] = DEFAULT_DEVICE_PRODUCTION_DATE;
+  for (const [fieldName, defaultValue] of Object.entries(DEFAULT_FOLLOWUP_FIELD_VALUES)) {
+    if (
+      Object.prototype.hasOwnProperty.call(draft, fieldName)
+      && !String(draft[fieldName] || "").trim()
+    ) {
+      draft[fieldName] = defaultValue;
+    }
   }
 }
 

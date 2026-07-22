@@ -68,22 +68,52 @@
           <span class="section-kicker">{{ activeConfig.kicker }}</span>
           <h2>{{ activeConfig.title }}</h2>
         </div>
-        <div v-if="activeMode !== 'tools'" class="scope-summary-strip" aria-label="当前模块楼栋统计">
-          <article>
-            <span class="summary-icon pending" aria-hidden="true"></span>
-            <small>总待发起</small>
-            <strong>{{ activeAggregate.pending }}</strong>
-          </article>
-          <article>
-            <span class="summary-icon ongoing" aria-hidden="true"></span>
-            <small>进行中</small>
-            <strong>{{ activeAggregate.ongoing }}</strong>
-          </article>
-          <article>
-            <span class="summary-icon coverage" aria-hidden="true"></span>
-            <small>覆盖对象</small>
-            <strong>{{ displayScopeOptions.length }}</strong>
-          </article>
+        <div
+          v-if="activeMode !== 'tools'"
+          class="scope-summary-strip"
+          :class="{ 'repair-metrics': activeMode === 'repair_management' }"
+          aria-label="当前模块楼栋统计"
+          :aria-busy="activeMode === 'repair_management' && repairOverviewLoading"
+        >
+          <template v-if="activeMode === 'repair_management'">
+            <article>
+              <span class="summary-icon pending" aria-hidden="true"></span>
+              <small>总待检修条</small>
+              <strong>{{ repairMetricValue(repairAggregate.pending) }}</strong>
+            </article>
+            <article>
+              <span class="summary-icon ongoing" aria-hidden="true"></span>
+              <small>进行中条</small>
+              <strong>{{ repairMetricValue(repairAggregate.inProgress) }}</strong>
+            </article>
+            <article>
+              <span class="summary-icon coverage" aria-hidden="true"></span>
+              <small>本年度总检修</small>
+              <strong>{{ repairMetricValue(repairAggregate.yearTotal) }}</strong>
+            </article>
+            <article>
+              <span class="summary-icon monthly" aria-hidden="true"></span>
+              <small>本月检修</small>
+              <strong>{{ repairMetricValue(repairAggregate.monthTotal) }}</strong>
+            </article>
+          </template>
+          <template v-else>
+            <article>
+              <span class="summary-icon pending" aria-hidden="true"></span>
+              <small>总待发起</small>
+              <strong>{{ activeAggregate.pending }}</strong>
+            </article>
+            <article>
+              <span class="summary-icon ongoing" aria-hidden="true"></span>
+              <small>进行中</small>
+              <strong>{{ activeAggregate.ongoing }}</strong>
+            </article>
+            <article>
+              <span class="summary-icon coverage" aria-hidden="true"></span>
+              <small>覆盖对象</small>
+              <strong>{{ displayScopeOptions.length }}</strong>
+            </article>
+          </template>
         </div>
       </header>
 
@@ -179,6 +209,7 @@
 
 <script setup lang="ts">
 import { computed, ref } from "vue";
+import { requestJson } from "../api/client";
 import {
   SCOPE_HOME_ENTRY_CONFIGS as entryConfigs,
   SCOPE_HOME_MODULE_CARDS as moduleCards,
@@ -221,6 +252,9 @@ const emit = defineEmits<{
 
 const activeMode = ref<EntryKey>("");
 const openingWorkbenchKey = ref("");
+const repairOverviewLoading = ref(false);
+const repairOverviewLoaded = ref(false);
+const repairOverview = ref<Dict>({});
 
 const enabledModuleCount = computed(() => moduleCards.filter((item) => !item.disabled).length);
 const activeConfig = computed(() => entryConfigs[activeMode.value || "tools"]);
@@ -254,6 +288,17 @@ const activeAggregate = computed(() => {
     },
     { pending: 0, ongoing: 0 },
   );
+});
+const repairAggregate = computed(() => {
+  const aggregate = repairOverview.value.aggregate && typeof repairOverview.value.aggregate === "object"
+    ? repairOverview.value.aggregate as Dict
+    : {};
+  return {
+    pending: Number(aggregate.pending || 0),
+    inProgress: Number(aggregate.in_progress || 0),
+    yearTotal: Number(aggregate.year_total || 0),
+    monthTotal: Number(aggregate.month_total || 0),
+  };
 });
 
 const broadcastWorkTypes = [
@@ -416,6 +461,24 @@ function selectEntry(key: EntryKey): void {
     return;
   }
   activeMode.value = key;
+  if (key === "repair_management") void loadRepairOverview();
+}
+
+async function loadRepairOverview(): Promise<void> {
+  if (repairOverviewLoading.value || repairOverviewLoaded.value) return;
+  repairOverviewLoading.value = true;
+  try {
+    repairOverview.value = await requestJson("/api/repair-management/overview");
+    repairOverviewLoaded.value = true;
+  } catch {
+    repairOverview.value = {};
+  } finally {
+    repairOverviewLoading.value = false;
+  }
+}
+
+function repairMetricValue(value: number): number | string {
+  return repairOverviewLoading.value && !repairOverviewLoaded.value ? "…" : value;
 }
 
 function selectModuleAction(action: ModuleAction, disabled?: boolean): void {
@@ -479,6 +542,16 @@ function eventScopeCounts(scope: string): { total: number; processing: number } 
 function scopeCounts(scope: string): { pending: number; ongoing: number } {
   const code = normalizeScopeValue(scope, "ALL");
   const item = props.overview[code] || {};
+  if (activeMode.value === "repair_management") {
+    const repairScopes = repairOverview.value.scopes && typeof repairOverview.value.scopes === "object"
+      ? repairOverview.value.scopes as Record<string, Dict>
+      : {};
+    const repairItem = repairScopes[code] || {};
+    return {
+      pending: Number(repairItem.pending || 0),
+      ongoing: Number(repairItem.in_progress || 0),
+    };
+  }
   if (activeMetricWorkType.value === "event") {
     return {
       pending: Number(item.event_total || item.total || 0),
@@ -495,12 +568,14 @@ function scopeCounts(scope: string): { pending: number; ongoing: number } {
 }
 
 function scopePrimaryMetricLabel(scope: string): string {
+  if (activeMode.value === "repair_management") return "待检修";
   if (activeMetricWorkType.value === "event") return "本月";
   if (activeMetricWorkType.value === "handover") return props.handoverLinks[normalizeScopeValue(scope, "")] ? "已配置" : "未配置";
   return "待发起";
 }
 
 function scopeSecondaryMetricLabel(_scope: string): string {
+  if (activeMode.value === "repair_management") return "进行中";
   if (activeMetricWorkType.value === "event") return "处理中";
   if (activeMetricWorkType.value === "handover") return "待配置";
   return "进行中";
@@ -1000,6 +1075,10 @@ function scopeSecondaryMetricLabel(_scope: string): string {
     inset 0 1px 0 rgba(255, 255, 255, 0.78);
 }
 
+.scope-summary-strip.repair-metrics {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 .scope-summary-strip article {
   min-width: 0;
   height: 100%;
@@ -1039,6 +1118,10 @@ function scopeSecondaryMetricLabel(_scope: string): string {
   border-radius: 15px;
   background: linear-gradient(135deg, #2a77ff, #0055d8);
   box-shadow: 0 12px 24px rgba(31, 101, 255, 0.18);
+}
+
+.summary-icon.monthly {
+  background: linear-gradient(135deg, #14b8a6, #059669);
 }
 
 .summary-icon::before {
