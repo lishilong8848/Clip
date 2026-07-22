@@ -1139,9 +1139,10 @@ class MainWindowUiMixin:
         log_info("================ 应用程序退出 ================")
         self._closing = True
         try:
-            remote_timer = getattr(self, "remote_update_timer", None)
-            if remote_timer and remote_timer.isActive():
-                remote_timer.stop()
+            for timer_name in ("remote_update_timer", "patch_check_timer"):
+                timer = getattr(self, timer_name, None)
+                if timer and timer.isActive():
+                    timer.stop()
         except Exception:
             pass
         try:
@@ -1166,9 +1167,10 @@ class MainWindowUiMixin:
         try:
             self._closing = True
             try:
-                remote_timer = getattr(self, "remote_update_timer", None)
-                if remote_timer and remote_timer.isActive():
-                    remote_timer.stop()
+                for timer_name in ("remote_update_timer", "patch_check_timer"):
+                    timer = getattr(self, timer_name, None)
+                    if timer and timer.isActive():
+                        timer.stop()
             except Exception:
                 pass
             try:

@@ -372,7 +372,7 @@ class ClipboardTool(
 
         self.timer = None
 
-        self.patch_check_timer = QTimer()
+        self.patch_check_timer = QTimer(self)
         self.connection_registry.connect(
             "patch_check_timer",
             self.patch_check_timer,

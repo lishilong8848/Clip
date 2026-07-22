@@ -9817,6 +9817,120 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             ui_source,
         )
 
+    def test_qt_update_check_button_is_disabled_when_remote_update_is_disabled(self):
+        class FakeButton:
+            def __init__(self):
+                self.enabled = True
+                self.text = ""
+                self.tooltip = ""
+
+            def setEnabled(self, value):
+                self.enabled = bool(value)
+
+            def setText(self, value):
+                self.text = value
+
+            def setToolTip(self, value):
+                self.tooltip = value
+
+        button = FakeButton()
+        window = SimpleNamespace(
+            check_update_btn=button,
+            _remote_update_busy=False,
+            _ui_update_in_progress=False,
+            _patch_apply_in_progress=False,
+        )
+
+        with patch.object(config_module.config, "remote_update_enabled", False):
+            PatchUpdateMixin._set_remote_update_check_button(window, False)
+
+        self.assertFalse(button.enabled)
+        self.assertEqual(button.text, "检查更新")
+        self.assertIn("已在设置中关闭", button.tooltip)
+
+    def test_qt_patch_button_keeps_busy_state_during_periodic_refresh(self):
+        class FakePatchButton:
+            def __init__(self):
+                self.enabled = True
+                self.text = "更新"
+
+            def isHidden(self):
+                return False
+
+            def setEnabled(self, value):
+                self.enabled = bool(value)
+
+            def setText(self, value):
+                self.text = value
+
+        downloading = SimpleNamespace(
+            patch_btn=FakePatchButton(),
+            _remote_update_busy=True,
+            _patch_apply_in_progress=False,
+        )
+        applying = SimpleNamespace(
+            patch_btn=FakePatchButton(),
+            _remote_update_busy=False,
+            _patch_apply_in_progress=True,
+        )
+
+        PatchUpdateMixin._refresh_patch_button(downloading)
+        PatchUpdateMixin._refresh_patch_button(applying)
+
+        self.assertFalse(downloading.patch_btn.enabled)
+        self.assertEqual(downloading.patch_btn.text, "下载中")
+        self.assertFalse(applying.patch_btn.enabled)
+        self.assertEqual(applying.patch_btn.text, "更新中")
+
+    def test_qt_update_worker_does_not_emit_after_window_closes(self):
+        fetch_calls = []
+        window = SimpleNamespace(
+            _closing=True,
+            _remote_patch_updater=SimpleNamespace(
+                fetch_manifest=lambda: fetch_calls.append(True)
+            ),
+        )
+
+        PatchUpdateMixin._remote_update_check_worker(window, manual=True)
+
+        self.assertEqual(fetch_calls, [])
+
+    def test_qt_delayed_update_check_does_nothing_after_window_closes(self):
+        status_values = []
+        window = SimpleNamespace(
+            _closing=True,
+            _remote_update_busy=False,
+            _remote_update_checking=False,
+            _set_remote_update_status=lambda value: status_values.append(value),
+            _set_remote_update_check_button=lambda _value=False: None,
+        )
+
+        PatchUpdateMixin._schedule_remote_update_check(window, manual=False)
+
+        self.assertFalse(window._remote_update_checking)
+        self.assertEqual(status_values, [])
+
+    def test_qt_update_clears_remote_manifest_already_satisfied_by_local_patch(self):
+        updater = SimpleNamespace(
+            has_newer_patch=lambda _local, _manifest: False,
+        )
+        window = SimpleNamespace(
+            _remote_patch_updater=updater,
+            _remote_ui_manifest={"target_patch_version": 12},
+            _remote_non_ui_manifest={"target_patch_version": 12},
+            _get_app_root_dir=lambda: Path("."),
+        )
+
+        with patch.object(
+            RemotePatchUpdater,
+            "load_local_build_meta",
+            return_value={"major_version": 1, "patch_version": 12},
+        ):
+            PatchUpdateMixin._discard_satisfied_remote_manifests(window)
+
+        self.assertIsNone(window._remote_ui_manifest)
+        self.assertIsNone(window._remote_non_ui_manifest)
+
     def test_workbench_lite_repair_prefill_selects_only_its_source_record(self):
         from lan_bitable_template_portal.workbench_lite import render_workbench_lite
 
@@ -19654,6 +19768,238 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         )
         self.assertIsNone(cleared["维修开始时间"])
         self.assertIsNone(cleared["维修结束时间"])
+
+    def test_repair_target_record_lookup_reuses_loaded_snapshot(self):
+        service = _TestMaintenancePortalService()
+        title_meta = FieldMeta(
+            "fld_title",
+            "名称（标题）",
+            "Text",
+            1,
+            False,
+            {},
+            [],
+            False,
+        )
+        cached_record = {
+            "record_id": "rec_repair_cached",
+            "display_fields": {"名称（标题）": "缓存检修通告"},
+            "raw_fields": {},
+        }
+        service._load_repair_management_target_records = (  # type: ignore[method-assign]
+            lambda **_kwargs: (
+                [title_meta],
+                {title_meta.field_name: title_meta},
+                [cached_record],
+            )
+        )
+        service._load_table_records_by_ids = (  # type: ignore[method-assign]
+            lambda **_kwargs: self.fail("cached record must not be fetched again")
+        )
+
+        _metas, _meta_by_name, records = (
+            service._load_repair_management_target_records_by_ids(
+                ["rec_repair_cached"]
+            )
+        )
+
+        self.assertEqual(records, [cached_record])
+
+    def test_repair_target_completed_status_is_explicit(self):
+        service = _TestMaintenancePortalService()
+
+        for status in ("结束", "已结束", "正常结束", "维修完成"):
+            with self.subTest(status=status):
+                self.assertTrue(
+                    service._repair_management_target_record_is_completed(
+                        {"display_fields": {"检修状态": status}}
+                    )
+                )
+        for status in ("", "开始", "更新", "进行中", "未结束"):
+            with self.subTest(status=status):
+                self.assertFalse(
+                    service._repair_management_target_record_is_completed(
+                        {"display_fields": {"检修状态": status}}
+                    )
+                )
+
+    def test_completed_repair_notice_syncs_followup_end_fields_and_progress(self):
+        service = _TestMaintenancePortalService()
+        metas = [
+            FieldMeta(
+                "fld_parent",
+                REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME,
+                "Text",
+                1,
+                False,
+                {},
+                [],
+                False,
+            ),
+            FieldMeta("fld_device", "设备名称", "Text", 1, False, {}, [], False),
+            FieldMeta("fld_start", "维修开始时间", "DateTime", 5, False, {}, [], False),
+            FieldMeta("fld_end", "维修结束时间", "DateTime", 5, False, {}, [], False),
+            FieldMeta("fld_end_alias", "结束时间", "DateTime", 5, False, {}, [], False),
+            FieldMeta("fld_progress", "维修进度", "Number", 2, False, {}, [], False),
+            FieldMeta("fld_detail", "维修进展描述", "Text", 1, False, {}, [], False),
+        ]
+        meta_by_name = {meta.field_name: meta for meta in metas}
+        followups = [
+            {
+                "record_id": "rec_followup_1",
+                "raw_fields": {
+                    REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: "rec_summary",
+                },
+                "display_fields": {"维修进展描述": "保留第一条进展"},
+            },
+            {
+                "record_id": "rec_followup_2",
+                "raw_fields": {
+                    REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: "rec_summary",
+                },
+                "display_fields": {"维修进展描述": "保留第二条进展"},
+            },
+        ]
+        patched: list[dict] = []
+        snapshots: list[dict] = []
+        service._ensure_repair_followup_parent_id_field = (  # type: ignore[method-assign]
+            lambda: (metas, meta_by_name)
+        )
+        service._ensure_repair_followup_select_options = (  # type: ignore[method-assign]
+            lambda _fields, source_meta_by_name, **_kwargs: (
+                list(source_meta_by_name.values()),
+                source_meta_by_name,
+            )
+        )
+        service._patch_record_fields = (  # type: ignore[method-assign]
+            lambda **kwargs: patched.append(kwargs) or {"code": 0}
+        )
+        service._upsert_repair_snapshot_fields = (  # type: ignore[method-assign]
+            lambda **kwargs: snapshots.append(kwargs)
+        )
+
+        result = service._sync_repair_followups_from_summary(
+            summary_record_id="rec_summary",
+            summary_record={
+                "raw_fields": {
+                    "维修开始时间": 1784707200000,
+                    "维修结束时间（2026）": 1784714400000,
+                },
+                "display_fields": {"设备名称": "A-101-UPS"},
+            },
+            completed=True,
+            linked_followups=followups,
+        )
+
+        self.assertEqual(result["synced_count"], 2)
+        self.assertEqual(len(patched), 2)
+        for update in patched:
+            fields = update["fields"]
+            self.assertEqual(fields["维修结束时间"], 1784714400000)
+            self.assertEqual(fields["结束时间"], 1784714400000)
+            self.assertEqual(fields["维修进度"], 1)
+            self.assertNotIn("设备名称", fields)
+            self.assertNotIn("维修进展描述", fields)
+        self.assertEqual(len(snapshots), 2)
+
+    def test_repair_project_save_marks_completed_notice_and_syncs_followups(self):
+        service = _TestMaintenancePortalService()
+        metas = [
+            FieldMeta("fld_title", "维修名称", "Text", 1, True, {}, [], False),
+            FieldMeta("fld_link", "设备检修关联", "Text", 1, False, {}, [], False),
+            FieldMeta(
+                "fld_end",
+                "维修结束时间（2026）",
+                "DateTime",
+                5,
+                False,
+                {},
+                [],
+                False,
+            ),
+            FieldMeta(
+                "fld_workflow",
+                "流程",
+                "SingleSelect",
+                3,
+                False,
+                {},
+                ["未开始", "维修中", "维修完成"],
+                False,
+            ),
+        ]
+        meta_by_name = {meta.field_name: meta for meta in metas}
+        existing = {
+            "record_id": "rec_summary",
+            "raw_fields": {"设备检修关联": "rec_repair"},
+            "display_fields": {"维修名称": "A楼测试维修单"},
+        }
+        linked_followup = {
+            "record_id": "rec_followup",
+            "raw_fields": {
+                REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: "rec_summary",
+            },
+            "display_fields": {"维修进度": "50%"},
+        }
+        sync_calls: list[dict] = []
+        workflow_calls: list[dict] = []
+        service._load_repair_management_project_records = (  # type: ignore[method-assign]
+            lambda **_kwargs: (metas, meta_by_name, [existing])
+        )
+        service._ensure_repair_management_record_in_scope = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: existing
+        )
+        service._load_repair_followups_for_summary = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: ([], {}, [linked_followup])
+        )
+        service._build_repair_management_prefill = (  # type: ignore[method-assign]
+            lambda **_kwargs: {
+                "fields": {
+                    "设备检修关联": "rec_repair",
+                    "维修结束时间（2026）": 1784714400000,
+                },
+                "repair_completed": True,
+                "warnings": [],
+            }
+        )
+        service._ensure_repair_followup_select_options = (  # type: ignore[method-assign]
+            lambda _fields, source_meta_by_name, **_kwargs: (
+                list(source_meta_by_name.values()),
+                source_meta_by_name,
+            )
+        )
+        service._patch_record_fields = (  # type: ignore[method-assign]
+            lambda **_kwargs: {"code": 0}
+        )
+        service._upsert_repair_snapshot_fields = (  # type: ignore[method-assign]
+            lambda **_kwargs: None
+        )
+        service._sync_repair_followups_from_summary = (  # type: ignore[method-assign]
+            lambda **kwargs: sync_calls.append(kwargs)
+            or {"synced_count": 1, "failed_count": 0, "warnings": []}
+        )
+        service._sync_repair_management_workflow = (  # type: ignore[method-assign]
+            lambda **kwargs: workflow_calls.append(kwargs) or (True, [])
+        )
+        service._invalidate_repair_management_status_cache = (  # type: ignore[method-assign]
+            lambda: None
+        )
+
+        result = service.update_repair_management_record(
+            "rec_summary",
+            {"维修名称": "A楼测试维修单"},
+            source_repair_ids=["rec_repair"],
+            replace_source_relations=True,
+            validate_required=False,
+        )
+
+        self.assertTrue(sync_calls[-1]["completed"])
+        self.assertEqual(
+            workflow_calls[-1]["workflow"],
+            "维修完成",
+        )
+        self.assertEqual(result["workflow"], "维修完成")
+        self.assertEqual(result["followup_synced_count"], 1)
 
     def test_repair_management_relations_reject_multiple_records(self):
         service = _TestMaintenancePortalService()

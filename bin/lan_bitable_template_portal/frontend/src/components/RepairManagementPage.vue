@@ -1538,20 +1538,41 @@ async function confirmRepairSelection(recordIds: string[]): Promise<void> {
     return;
   }
   const nextRepairIds = recordIds.map((item) => String(item || "").trim()).filter(Boolean).slice(0, 1);
-  const applied = await applyCombinedPrefill(true, {
-    eventRecordId: sourceEventId.value,
-    repairRecordIds: nextRepairIds,
-  });
-  if (!applied) return;
-  selectedRepairIds.value = nextRepairIds;
+  if (!nextRepairIds.length) return;
+  const previousRepairIds = selectedRepairIds.value.slice();
+  const previousRepairRecords = selectedRepairRecords.value.slice();
+  const previousRecommendedIds = repairRecommendedIds.value.slice();
+  const previousUnsavedState = hasUnsavedChanges.value;
+  const selectionProjectId = String(selectedRecord.value?.record_id || "").trim();
   const selectedIdSet = new Set(nextRepairIds);
+  selectedRepairIds.value = nextRepairIds;
   selectedRepairRecords.value = repairCandidates.value.filter(
     (item) => selectedIdSet.has(String(item.record_id || "").trim()),
   );
   repairRecommendedIds.value = [];
   activePicker.value = "";
   hasUnsavedChanges.value = true;
-  showMessage(`已关联 ${selectedRepairIds.value.length} 条设备检修通告。`, "success");
+  showMessage("已选择检修通告，正在填入关联字段。", "success");
+  const applied = await applyCombinedPrefill(true, {
+    eventRecordId: sourceEventId.value,
+    repairRecordIds: nextRepairIds,
+  });
+  if (!applied) {
+    const currentProjectId = String(selectedRecord.value?.record_id || "").trim();
+    const currentRepairIds = selectedRepairIds.value
+      .map((item) => String(item || "").trim())
+      .filter(Boolean);
+    const selectionStillCurrent = currentRepairIds.length === nextRepairIds.length
+      && currentRepairIds.every((item, index) => item === nextRepairIds[index]);
+    if (currentProjectId === selectionProjectId && selectionStillCurrent) {
+      selectedRepairIds.value = previousRepairIds;
+      selectedRepairRecords.value = previousRepairRecords;
+      repairRecommendedIds.value = previousRecommendedIds;
+      hasUnsavedChanges.value = previousUnsavedState;
+    }
+    return;
+  }
+  showMessage("检修通告已关联，字段已填入。", "success");
 }
 
 async function handleFollowupChanged(): Promise<void> {
@@ -1934,8 +1955,12 @@ async function saveRecord(): Promise<boolean> {
         body,
       });
       const warnings = Array.isArray(updated.warnings) ? updated.warnings.filter(Boolean) : [];
+      const syncedFollowupCount = Math.max(0, Number(updated.followup_synced_count || 0));
+      const savedText = syncedFollowupCount
+        ? `维修项目已保存，已同步 ${syncedFollowupCount} 条跟进记录。`
+        : "维修项目已保存。";
       showMessage(
-        warnings.length ? `维修项目已保存；${warnings.join("；")}` : "维修项目已保存。",
+        warnings.length ? `${savedText} ${warnings.join("；")}` : savedText,
         warnings.length ? "warning" : "success",
       );
     } else {

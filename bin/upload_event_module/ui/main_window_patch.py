@@ -68,6 +68,7 @@ class PatchUpdateMixin:
         data_dir = get_user_data_dir() / "remote_patch"
         self._remote_patch_updater = RemotePatchUpdater(root_dir, data_dir, manifest_url)
         self._set_remote_update_status("远程更新: 待检查")
+        self._set_remote_update_check_button(False)
 
         self.remote_update_timer = QTimer(self)
         self.remote_update_timer.timeout.connect(self._schedule_remote_update_check)
@@ -81,18 +82,22 @@ class PatchUpdateMixin:
         button = getattr(self, "check_update_btn", None)
         if button is None:
             return
+        remote_enabled = bool(getattr(config, "remote_update_enabled", True))
         busy = bool(
             getattr(self, "_remote_update_busy", False)
             or getattr(self, "_ui_update_in_progress", False)
             or getattr(self, "_patch_apply_in_progress", False)
         )
-        button.setEnabled(not checking and not busy)
+        button.setEnabled(remote_enabled and not checking and not busy)
         if checking:
             button.setText("检查中")
             button.setToolTip("正在后台检查最新版本")
         elif busy:
             button.setText("更新中")
             button.setToolTip("正在应用版本更新")
+        elif not remote_enabled:
+            button.setText("检查更新")
+            button.setToolTip("远程更新已在设置中关闭")
         else:
             button.setText("检查更新")
             button.setToolTip("立即检查是否有最新版本")
@@ -125,6 +130,8 @@ class PatchUpdateMixin:
 
     def _schedule_remote_update_check(self, manual: bool = False):
         manual = bool(manual)
+        if getattr(self, "_closing", False):
+            return
         if not bool(getattr(config, "remote_update_enabled", True)):
             self._set_remote_update_status("远程更新: 已禁用")
             self._set_remote_update_check_button(False)
@@ -154,13 +161,21 @@ class PatchUpdateMixin:
         self._remote_update_checking = True
         self._set_remote_update_status("远程更新: 检查中...")
         self._set_remote_update_check_button(True)
-        threading.Thread(
-            target=self._remote_update_check_worker,
-            args=(manual,),
-            daemon=True,
-        ).start()
+        try:
+            threading.Thread(
+                target=self._remote_update_check_worker,
+                args=(manual,),
+                daemon=True,
+            ).start()
+        except Exception as exc:
+            self._remote_update_checking = False
+            self._set_remote_update_status("远程更新: 检查失败")
+            self._set_remote_update_check_button(False)
+            log_warning(f"远程更新检查线程启动失败: {exc}")
 
     def _remote_update_check_worker(self, manual: bool = False):
+        if getattr(self, "_closing", False):
+            return
         status_text = "远程更新: 已是最新"
         ui_manifest = None
         non_ui_manifest = None
@@ -194,7 +209,12 @@ class PatchUpdateMixin:
             status_text = "远程更新: 检查失败"
             log_warning(f"远程更新检查失败(不影响程序启动): {exc}")
 
-        self.remote_update_checked.emit(status_text, ui_manifest, non_ui_manifest)
+        if getattr(self, "_closing", False):
+            return
+        try:
+            self.remote_update_checked.emit(status_text, ui_manifest, non_ui_manifest)
+        except RuntimeError as exc:
+            log_warning(f"远程更新检查结果已丢弃(窗口已关闭): {exc}")
 
     def _on_remote_update_checked(self, status_text: str, ui_manifest, non_ui_manifest):
         self._remote_update_checking = False
@@ -248,7 +268,12 @@ class PatchUpdateMixin:
             patch_dir = self._remote_patch_updater.prepare_remote_patch(manifest)
         except Exception as exc:
             error = str(exc)
-        self.remote_patch_downloaded.emit(manifest, patch_dir, error, auto_apply)
+        if getattr(self, "_closing", False):
+            return
+        try:
+            self.remote_patch_downloaded.emit(manifest, patch_dir, error, auto_apply)
+        except RuntimeError as exc:
+            log_warning(f"远程补丁下载结果已丢弃(窗口已关闭): {exc}")
 
     def _on_remote_patch_downloaded(
         self, manifest: dict, patch_dir: Path | None, error: str, auto_apply: bool
@@ -728,17 +753,31 @@ class PatchUpdateMixin:
         return max(candidates, key=lambda p: p.stat().st_mtime)
 
     def _refresh_patch_button(self):
+        if bool(
+            getattr(self, "_remote_update_busy", False)
+            or getattr(self, "_patch_apply_in_progress", False)
+        ):
+            if not self.patch_btn.isHidden():
+                self.patch_btn.setEnabled(False)
+                self.patch_btn.setText(
+                    "更新中"
+                    if getattr(self, "_patch_apply_in_progress", False)
+                    else "下载中"
+                )
+            return
         patch_dir = self._find_patch_dir()
         self._patch_dir = patch_dir
         if patch_dir:
             if self.patch_btn.isHidden():
                 self.patch_btn.show()
+            self.patch_btn.setEnabled(True)
             self.patch_btn.setToolTip(f"检测到补丁: {patch_dir.name}")
             self.patch_btn.setText("更新")
         else:
             remote_ui_manifest = getattr(self, "_remote_ui_manifest", None)
             if remote_ui_manifest:
                 self.patch_btn.show()
+                self.patch_btn.setEnabled(True)
                 version = (
                     remote_ui_manifest.get("target_display_version")
                     or remote_ui_manifest.get("target_version")
@@ -748,6 +787,25 @@ class PatchUpdateMixin:
                 self.patch_btn.setText("更新")
             elif not self.patch_btn.isHidden():
                 self.patch_btn.hide()
+
+    def _discard_satisfied_remote_manifests(self):
+        try:
+            local_meta = RemotePatchUpdater.load_local_build_meta(
+                self._get_app_root_dir()
+            )
+        except Exception:
+            return
+        for attr_name in ("_remote_ui_manifest", "_remote_non_ui_manifest"):
+            manifest = getattr(self, attr_name, None)
+            if not isinstance(manifest, dict) or not manifest:
+                continue
+            try:
+                if not self._remote_patch_updater.has_newer_patch(
+                    local_meta, manifest
+                ):
+                    setattr(self, attr_name, None)
+            except Exception:
+                continue
 
     def apply_patch_update(self):
         patch_dir = self._patch_dir or self._find_patch_dir()
@@ -1002,6 +1060,8 @@ class PatchUpdateMixin:
         self._remote_update_busy = False
         self._patch_apply_in_progress = False
         self._set_remote_update_check_button(False)
+        if success:
+            self._discard_satisfied_remote_manifests()
         self._refresh_patch_button()
         self._resume_clipboard_after_patch_update()
         if success:
