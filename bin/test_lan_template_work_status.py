@@ -11,6 +11,7 @@ import datetime as dt
 import ast
 import re
 import gc
+from types import SimpleNamespace
 from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
@@ -71,6 +72,7 @@ from upload_event_module.services.http_client import FeishuHttpClient  # noqa: E
 from upload_event_module.services.feishu_token_manager import (  # noqa: E402
     FeishuTokenManager,
 )
+from upload_event_module.services.remote_patch_updater import RemotePatchUpdater  # noqa: E402
 from upload_event_module.services.handlers.base import NoticePayload  # noqa: E402
 from upload_event_module.services.handlers.maintenance_notice import (  # noqa: E402
     MaintenanceNoticeHandler,
@@ -100,6 +102,7 @@ from upload_event_module.ui.dialogs import ScreenshotConfirmDialog  # noqa: E402
 from upload_event_module.ui.main_window_records import MainWindowRecordsMixin  # noqa: E402
 from upload_event_module.ui.main_window_workflow import MainWindowWorkflowMixin  # noqa: E402
 from upload_event_module.ui.main_window_ui import MainWindowUiMixin  # noqa: E402
+from upload_event_module.ui.main_window_patch import PatchUpdateMixin  # noqa: E402
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -9553,6 +9556,87 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertNotIn("setMetaChip(meta, String(message || patch.message", html)
         self.assertNotIn("status.textContent = ok ? '发送成功' : '发送失败';", html)
 
+    def test_qt_manual_update_check_exposes_update_without_auto_apply(self):
+        manifest = {
+            "target_patch_version": 12,
+            "target_display_version": "测试新版本",
+            "ui_changed": False,
+        }
+
+        class SignalRecorder:
+            def __init__(self):
+                self.calls = []
+
+            def emit(self, *args):
+                self.calls.append(args)
+
+        signal = SignalRecorder()
+        updater = SimpleNamespace(
+            manifest_url="",
+            fetch_manifest=lambda: manifest,
+            has_newer_patch=lambda _local, _remote: True,
+            is_ui_update=lambda _remote: False,
+        )
+        window = SimpleNamespace(
+            _remote_patch_updater=updater,
+            remote_update_checked=signal,
+            _get_app_root_dir=lambda: Path("."),
+        )
+
+        with patch.object(
+            RemotePatchUpdater,
+            "load_local_build_meta",
+            return_value={"major_version": 1, "patch_version": 11},
+        ):
+            PatchUpdateMixin._remote_update_check_worker(window, manual=True)
+
+        self.assertEqual(len(signal.calls), 1)
+        status, ui_manifest, non_ui_manifest = signal.calls[0]
+        self.assertIn("发现新版本", status)
+        self.assertIs(ui_manifest, manifest)
+        self.assertIsNone(non_ui_manifest)
+
+    def test_qt_update_check_clears_stale_remote_button_when_latest(self):
+        status_values = []
+        button_states = []
+        refresh_calls = []
+        window = SimpleNamespace(
+            _remote_update_checking=True,
+            _remote_update_busy=False,
+            _closing=False,
+            _remote_ui_manifest={"target_patch_version": 11},
+            _remote_non_ui_manifest={"target_patch_version": 11},
+            _set_remote_update_status=lambda value: status_values.append(value),
+            _set_remote_update_check_button=lambda value=False: button_states.append(value),
+            _refresh_patch_button=lambda: refresh_calls.append(True),
+        )
+
+        PatchUpdateMixin._on_remote_update_checked(
+            window,
+            "远程更新: 已是最新",
+            None,
+            None,
+        )
+
+        self.assertFalse(window._remote_update_checking)
+        self.assertIsNone(window._remote_ui_manifest)
+        self.assertIsNone(window._remote_non_ui_manifest)
+        self.assertEqual(status_values, ["远程更新: 已是最新"])
+        self.assertEqual(button_states, [False])
+        self.assertEqual(refresh_calls, [True])
+
+    def test_qt_update_check_button_uses_existing_theme_style(self):
+        ui_source = (
+            BIN_DIR / "upload_event_module" / "ui" / "main_window_ui.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('self.check_update_btn = QPushButton("检查更新")', ui_source)
+        self.assertIn('self.check_update_btn.setObjectName("NavBtn")', ui_source)
+        self.assertIn(
+            "self.check_update_btn.clicked.connect(self.check_remote_update_now)",
+            ui_source,
+        )
+
     def test_workbench_lite_repair_prefill_selects_only_its_source_record(self):
         from lan_bitable_template_portal.workbench_lite import render_workbench_lite
 
@@ -15881,7 +15965,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "record_id": "rec_repair_summary",
                     "display_fields": {
                         "维修名称": "测试维修项目",
-                        "当前维修进度": "65%",
+                        "当前维修进度": "99%",
                         "最新维修跟进时间": "2026-07-15 10:20",
                     },
                     "raw_fields": {
@@ -15898,16 +15982,18 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     {
                         "record_id": "rec_followup_1",
                         "raw_fields": {
-                            REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: "rec_repair_summary"
+                            REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: "rec_repair_summary",
+                            "维修进度": "20%",
                         },
-                        "display_fields": {},
+                        "display_fields": {"创建时间": "2026-07-15 09:20"},
                     },
                     {
                         "record_id": "rec_followup_2",
                         "raw_fields": {
-                            REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: "rec_repair_summary"
+                            REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: "rec_repair_summary",
+                            "维修进度": "65%",
                         },
-                        "display_fields": {},
+                        "display_fields": {"创建时间": "2026-07-15 10:20"},
                     },
                 ],
             )
@@ -15919,6 +16005,72 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(record["followup_count"], 2)
         self.assertEqual(record["progress_percent"], 65)
         self.assertEqual(record["latest_followup_time"], "2026-07-15 10:20")
+
+    def test_repair_management_record_payload_uses_flow_l_and_latest_followup(self):
+        service = _TestMaintenancePortalService()
+        workflow_meta = FieldMeta(
+            "fld_flow_l",
+            "流程-L",
+            "SingleSelect",
+            3,
+            False,
+            {"opt_in_progress": "维修中"},
+            ["维修中"],
+            False,
+        )
+        project = {
+            "record_id": "rec_repair_latest",
+            "display_fields": {
+                "维修名称": "最新跟进进度测试",
+                "当前维修进度": "100%",
+            },
+            "raw_fields": {"流程-L": "opt_in_progress"},
+        }
+        followups = [
+            {
+                "record_id": "rec_followup_new",
+                "created_time": "2026-07-22 11:00",
+                "raw_fields": {"维修进度": "45%"},
+                "display_fields": {},
+            },
+            {
+                "record_id": "rec_followup_old",
+                "created_time": "2026-07-22 10:00",
+                "raw_fields": {"维修进度": "80%"},
+                "display_fields": {},
+            },
+        ]
+
+        payload = service._repair_management_record_payload(
+            project,
+            meta_by_name={"流程-L": workflow_meta},
+            authoritative_followups=followups,
+        )
+
+        self.assertEqual(payload["workflow"], "维修中")
+        self.assertEqual(payload["followup_count"], 2)
+        self.assertEqual(payload["progress_percent"], 45)
+        self.assertEqual(payload["display_fields"]["当前维修进度"], "45%")
+
+    def test_repair_management_record_payload_without_followup_is_zero_percent(self):
+        service = _TestMaintenancePortalService()
+
+        payload = service._repair_management_record_payload(
+            {
+                "record_id": "rec_repair_no_followup",
+                "display_fields": {
+                    "维修名称": "无跟进项目",
+                    "当前维修进度": "100%",
+                },
+                "raw_fields": {"流程-L": "未开始"},
+            },
+            authoritative_followups=[],
+        )
+
+        self.assertEqual(payload["workflow"], "未开始")
+        self.assertEqual(payload["followup_count"], 0)
+        self.assertEqual(payload["progress_percent"], 0)
+        self.assertEqual(payload["display_fields"]["当前维修进度"], "0%")
 
     def test_repair_management_record_payload_formats_epoch_times(self):
         service = _TestMaintenancePortalService()

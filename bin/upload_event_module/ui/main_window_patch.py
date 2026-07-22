@@ -60,6 +60,7 @@ class PatchUpdateMixin:
         self._remote_non_ui_manifest = None
         self._remote_update_checking = False
         self._remote_update_busy = False
+        self._patch_apply_in_progress = False
         self._last_patch_source = "local"
         self._clipboard_paused_for_patch_update = False
         root_dir = self._get_app_root_dir()
@@ -75,6 +76,29 @@ class PatchUpdateMixin:
         )
         self.remote_update_timer.start(interval_seconds * 1000)
         QTimer.singleShot(20000, self._schedule_remote_update_check)
+
+    def _set_remote_update_check_button(self, checking: bool = False):
+        button = getattr(self, "check_update_btn", None)
+        if button is None:
+            return
+        busy = bool(
+            getattr(self, "_remote_update_busy", False)
+            or getattr(self, "_ui_update_in_progress", False)
+            or getattr(self, "_patch_apply_in_progress", False)
+        )
+        button.setEnabled(not checking and not busy)
+        if checking:
+            button.setText("检查中")
+            button.setToolTip("正在后台检查最新版本")
+        elif busy:
+            button.setText("更新中")
+            button.setToolTip("正在应用版本更新")
+        else:
+            button.setText("检查更新")
+            button.setToolTip("立即检查是否有最新版本")
+
+    def check_remote_update_now(self, _checked: bool = False):
+        self._schedule_remote_update_check(manual=True)
 
     def _set_remote_update_status(self, text: str):
         label = getattr(self, "remote_update_status_label", None)
@@ -99,14 +123,26 @@ class PatchUpdateMixin:
             return False
         return True
 
-    def _schedule_remote_update_check(self):
+    def _schedule_remote_update_check(self, manual: bool = False):
+        manual = bool(manual)
         if not bool(getattr(config, "remote_update_enabled", True)):
             self._set_remote_update_status("远程更新: 已禁用")
-            return
-        if self._remote_update_busy or self._remote_update_checking:
+            self._set_remote_update_check_button(False)
             return
         if (
-            self._remote_non_ui_manifest
+            self._remote_update_busy
+            or getattr(self, "_ui_update_in_progress", False)
+            or getattr(self, "_patch_apply_in_progress", False)
+        ):
+            self._set_remote_update_status("远程更新: 正在更新中")
+            self._set_remote_update_check_button(False)
+            return
+        if self._remote_update_checking:
+            self._set_remote_update_status("远程更新: 正在检查中...")
+            return
+        if (
+            not manual
+            and self._remote_non_ui_manifest
             and bool(getattr(config, "remote_update_auto_apply_non_ui", True))
             and self._can_apply_auto_non_ui_patch()
         ):
@@ -117,9 +153,14 @@ class PatchUpdateMixin:
 
         self._remote_update_checking = True
         self._set_remote_update_status("远程更新: 检查中...")
-        threading.Thread(target=self._remote_update_check_worker, daemon=True).start()
+        self._set_remote_update_check_button(True)
+        threading.Thread(
+            target=self._remote_update_check_worker,
+            args=(manual,),
+            daemon=True,
+        ).start()
 
-    def _remote_update_check_worker(self):
+    def _remote_update_check_worker(self, manual: bool = False):
         status_text = "远程更新: 已是最新"
         ui_manifest = None
         non_ui_manifest = None
@@ -138,6 +179,9 @@ class PatchUpdateMixin:
                     status_text = "远程更新: 本地版本未标记(跳过)"
                 elif not self._remote_patch_updater.has_newer_patch(local_meta, manifest):
                     status_text = "远程更新: 已是最新"
+                elif manual:
+                    ui_manifest = manifest
+                    status_text = "远程更新: 发现新版本，点击更新"
                 elif self._remote_patch_updater.is_ui_update(manifest):
                     ui_manifest = manifest
                     status_text = "远程更新: 发现可更新(UI需确认)"
@@ -158,7 +202,9 @@ class PatchUpdateMixin:
             return
         if ui_manifest:
             self._remote_ui_manifest = ui_manifest
+            self._remote_non_ui_manifest = None
         if non_ui_manifest:
+            self._remote_ui_manifest = None
             if self._find_patch_dir():
                 self._remote_non_ui_manifest = non_ui_manifest
                 status_text = "远程更新: 本地补丁优先，自动应用延后"
@@ -168,7 +214,11 @@ class PatchUpdateMixin:
             else:
                 self._remote_non_ui_manifest = non_ui_manifest
                 status_text = "远程更新: 待空闲后自动应用"
+        elif not ui_manifest and "失败" not in str(status_text or ""):
+            self._remote_ui_manifest = None
+            self._remote_non_ui_manifest = None
         self._set_remote_update_status(status_text)
+        self._set_remote_update_check_button(False)
         self._refresh_patch_button()
 
     def _start_remote_patch_apply(self, manifest: dict, auto_apply: bool):
@@ -181,6 +231,7 @@ class PatchUpdateMixin:
         self._pause_clipboard_for_patch_update()
         self._remote_update_busy = True
         self._set_remote_update_status("远程更新: 下载中...")
+        self._set_remote_update_check_button(False)
         if not auto_apply:
             self.patch_btn.setEnabled(False)
             self.patch_btn.setText("下载中")
@@ -203,6 +254,7 @@ class PatchUpdateMixin:
         self, manifest: dict, patch_dir: Path | None, error: str, auto_apply: bool
     ):
         self._remote_update_busy = False
+        self._set_remote_update_check_button(False)
         self.patch_btn.setEnabled(True)
         self.patch_btn.setText("更新")
         if error:
@@ -732,6 +784,8 @@ class PatchUpdateMixin:
             except Exception:
                 pass
         self._pause_clipboard_for_patch_update()
+        self._patch_apply_in_progress = True
+        self._set_remote_update_check_button(False)
         self.patch_btn.setEnabled(False)
         self.patch_btn.setText("更新中")
         self._show_update_overlay()
@@ -945,6 +999,9 @@ class PatchUpdateMixin:
     def _on_patch_update_finished(self, success: bool, message: str):
         self.patch_btn.setEnabled(True)
         self.patch_btn.setText("更新")
+        self._remote_update_busy = False
+        self._patch_apply_in_progress = False
+        self._set_remote_update_check_button(False)
         self._refresh_patch_button()
         self._resume_clipboard_after_patch_update()
         if success:

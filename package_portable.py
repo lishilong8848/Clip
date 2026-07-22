@@ -1374,7 +1374,16 @@ def _run_packaging_preflight_tests() -> None:
         PROJECT_ROOT / "package_portable.py",
     ]
 
-    py_targets = [path for path in py_targets if path.exists()]
+    # The Qt window is split across multiple mixin modules. Compile every UI
+    # module so a syntax error in an indirectly imported file cannot ship in a
+    # patch that passed preflight.
+    py_targets.extend(
+        sorted(
+            (PROJECT_ROOT / "bin" / "upload_event_module" / "ui").rglob("*.py")
+        )
+    )
+
+    py_targets = list(dict.fromkeys(path for path in py_targets if path.exists()))
 
     if py_targets:
         with tempfile.TemporaryDirectory(prefix="clipflow_pycompile_") as pycache_dir:

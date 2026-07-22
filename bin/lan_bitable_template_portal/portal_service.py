@@ -4983,10 +4983,32 @@ class MaintenancePortalService:
                     counts[normalized_id] = counts.get(normalized_id, 0) + 1
         return counts
 
-    def _repair_followup_counts_from_local_snapshot(
+    @classmethod
+    def _repair_followups_by_summary(
+        cls,
+        records: list[dict[str, Any]],
+        summary_record_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> dict[str, list[dict[str, Any]]]:
+        allowed_ids = {
+            str(value or "").strip()
+            for value in (summary_record_ids or [])
+            if str(value or "").strip()
+        }
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            for summary_id in set(cls._repair_followup_parent_ids(record)):
+                normalized_id = str(summary_id or "").strip()
+                if not normalized_id or (allowed_ids and normalized_id not in allowed_ids):
+                    continue
+                grouped.setdefault(normalized_id, []).append(record)
+        return grouped
+
+    def _repair_followups_by_summary_from_local_snapshot(
         self,
         summary_record_ids: list[str] | tuple[str, ...],
-    ) -> dict[str, int] | None:
+    ) -> dict[str, list[dict[str, Any]]] | None:
         normalized_ids = list(
             dict.fromkeys(
                 str(value or "").strip()
@@ -5001,17 +5023,37 @@ class MaintenancePortalService:
         )
         if not snapshot.get("exists"):
             return None
-        counts = self._repair_followup_counts_by_summary(
+        grouped = self._repair_followups_by_summary(
             [
                 item
                 for item in (snapshot.get("records") or [])
                 if isinstance(item, dict)
-            ]
+            ],
+            normalized_ids,
         )
         return {
-            summary_record_id: max(
-                0, int(counts.get(summary_record_id) or 0)
+            summary_record_id: list(grouped.get(summary_record_id) or [])
+            for summary_record_id in normalized_ids
+        }
+
+    def _repair_followup_counts_from_local_snapshot(
+        self,
+        summary_record_ids: list[str] | tuple[str, ...],
+    ) -> dict[str, int] | None:
+        normalized_ids = list(
+            dict.fromkeys(
+                str(value or "").strip()
+                for value in summary_record_ids
+                if str(value or "").strip()
             )
+        )
+        grouped = self._repair_followups_by_summary_from_local_snapshot(
+            normalized_ids
+        )
+        if grouped is None:
+            return None
+        return {
+            summary_record_id: len(grouped.get(summary_record_id) or [])
             for summary_record_id in normalized_ids
         }
 
@@ -8188,6 +8230,7 @@ class MaintenancePortalService:
         *,
         meta_by_name: dict[str, FieldMeta] | None = None,
         authoritative_followup_count: int | None = None,
+        authoritative_followups: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         raw_fields = (
             item.get("raw_fields")
@@ -8217,10 +8260,42 @@ class MaintenancePortalService:
             raw_fields.get("维修跟进记录")
             or display_fields.get("维修跟进记录")
         )
-        progress_value = raw_fields.get("当前维修进度")
-        if progress_value in (None, "", [], {}):
-            progress_value = display_fields.get("当前维修进度")
-        progress_percent = self._repair_followup_progress_percent(progress_value)
+        verified_followups = (
+            [item for item in authoritative_followups if isinstance(item, dict)]
+            if authoritative_followups is not None
+            else None
+        )
+        latest_followup: dict[str, Any] = {}
+        if verified_followups:
+            latest_followup = max(
+                verified_followups,
+                key=self._repair_followup_order_key,
+            )
+        if verified_followups is not None:
+            latest_raw_fields = (
+                latest_followup.get("raw_fields")
+                if isinstance(latest_followup.get("raw_fields"), dict)
+                else {}
+            )
+            latest_display_fields = (
+                latest_followup.get("display_fields")
+                if isinstance(latest_followup.get("display_fields"), dict)
+                else {}
+            )
+            progress_value = latest_raw_fields.get("维修进度")
+            if progress_value in (None, "", [], {}):
+                progress_value = latest_display_fields.get("维修进度")
+            progress_percent = self._repair_followup_progress_percent(progress_value)
+        else:
+            latest_raw_fields = {}
+            latest_display_fields = {}
+            progress_value = raw_fields.get("当前维修进度")
+            if progress_value in (None, "", [], {}):
+                progress_value = display_fields.get("当前维修进度")
+            progress_percent = self._repair_followup_progress_percent(progress_value)
+        normalized_progress_percent = round(progress_percent or 0)
+        if verified_followups is not None:
+            display_fields["当前维修进度"] = f"{normalized_progress_percent}%"
         created_time = self._format_source_datetime(
             item.get("created_time") or display_fields.get("创建日期")
         )
@@ -8229,9 +8304,21 @@ class MaintenancePortalService:
             or display_fields.get("最后修改时间")
             or created_time
         )
-        latest_followup_time = self._format_source_datetime(
-            display_fields.get("最新维修跟进时间")
-            or raw_fields.get("最新维修跟进时间")
+        if verified_followups is not None:
+            latest_followup_time = self._format_source_datetime(
+                latest_display_fields.get("创建时间")
+                or latest_raw_fields.get("创建时间")
+                or latest_followup.get("last_modified_time")
+                or latest_followup.get("created_time")
+            )
+        else:
+            latest_followup_time = self._format_source_datetime(
+                display_fields.get("最新维修跟进时间")
+                or raw_fields.get("最新维修跟进时间")
+            )
+        workflow = self._repair_management_workflow_text(
+            item,
+            meta_by_name=meta_by_name,
         )
         return {
             "record_id": str(item.get("record_id") or ""),
@@ -8239,20 +8326,20 @@ class MaintenancePortalService:
             "created_time": created_time,
             "last_modified_time": last_modified_time,
             "building_codes": self._repair_record_building_codes(item),
-            "workflow": self._repair_management_workflow_text(
-                item,
-                meta_by_name=meta_by_name,
-            ),
+            "workflow": workflow,
             "display_fields": display_fields,
             "raw_fields": raw_fields,
             "source_event_id": source_event_ids[0] if source_event_ids else "",
             "source_repair_ids": source_repair_ids[:1],
             "followup_count": (
+                len(verified_followups)
+                if verified_followups is not None
+                else
                 max(0, int(authoritative_followup_count))
                 if authoritative_followup_count is not None
                 else len(followup_ids)
             ),
-            "progress_percent": round(progress_percent or 0),
+            "progress_percent": normalized_progress_percent,
             "latest_followup_time": latest_followup_time,
         }
 
@@ -8321,30 +8408,29 @@ class MaintenancePortalService:
         if not self._repair_management_record_in_scope(record, scope):
             raise PortalError("当前账号无权查看该楼栋维修项目。")
         authoritative_followup_count: int | None = None
-        if self._repair_snapshots_enabled and not force_refresh:
-            self._schedule_repair_followup_snapshot_refresh_if_stale()
-            verified_counts = self._repair_followup_counts_from_local_snapshot(
-                [record_id]
+        authoritative_followups: list[dict[str, Any]] | None = None
+        try:
+            _followup_metas, _followup_meta_by_name, followups = (
+                self._load_repair_followup_snapshot(
+                    force_refresh=force_refresh
+                )
             )
-            if verified_counts is not None:
-                authoritative_followup_count = verified_counts.get(record_id, 0)
-        else:
-            try:
-                _followup_metas, _followup_meta_by_name, followups = (
-                    self._load_repair_followup_snapshot(
-                        force_refresh=force_refresh
-                    )
-                )
-                authoritative_followup_count = (
-                    self._repair_followup_counts_by_summary(followups).get(record_id)
-                )
-            except PortalError:
-                pass
+            authoritative_followups = list(
+                self._repair_followups_by_summary(
+                    followups,
+                    [record_id],
+                ).get(record_id)
+                or []
+            )
+            authoritative_followup_count = len(authoritative_followups)
+        except PortalError:
+            pass
         return {
             "record": self._repair_management_record_payload(
                 record,
                 meta_by_name=meta_by_name,
                 authoritative_followup_count=authoritative_followup_count,
+                authoritative_followups=authoritative_followups,
             ),
             "fields": [self._repair_management_field_payload(meta) for meta in metas],
             "schema_warnings": self._repair_management_schema_warnings(meta_by_name),
@@ -8379,22 +8465,47 @@ class MaintenancePortalService:
                 for item in (page.get("records") or [])
                 if isinstance(item, dict)
             ]
-            self._schedule_repair_followup_snapshot_refresh_if_stale()
             record_ids = [
                 str(item.get("record_id") or "").strip()
                 for item in page_records
                 if str(item.get("record_id") or "").strip()
             ]
-            followup_counts = (
-                self._repair_followup_counts_from_local_snapshot(record_ids)
-                or {}
-            )
+            followups_by_record: dict[str, list[dict[str, Any]]] | None = None
+            try:
+                _followup_metas, _followup_meta_by_name, followups = (
+                    self._load_repair_followup_snapshot(
+                        force_refresh=force_refresh
+                    )
+                )
+                followups_by_record = self._repair_followups_by_summary(
+                    followups,
+                    record_ids,
+                )
+            except PortalError:
+                pass
             payload_records = [
                 self._repair_management_record_payload(
                     item,
                     meta_by_name=meta_by_name,
-                    authoritative_followup_count=followup_counts.get(
-                        str(item.get("record_id") or "").strip()
+                    authoritative_followup_count=(
+                        len(
+                            (followups_by_record or {}).get(
+                                str(item.get("record_id") or "").strip()
+                            )
+                            or []
+                        )
+                        if followups_by_record is not None
+                        else None
+                    ),
+                    authoritative_followups=(
+                        list(
+                            (followups_by_record or {}).get(
+                                str(item.get("record_id") or "").strip()
+                            )
+                            or []
+                        )
+                        if followups_by_record is not None
+                        else None
                     ),
                 )
                 for item in page_records
@@ -8418,12 +8529,12 @@ class MaintenancePortalService:
         metas, meta_by_name, records = self._load_repair_management_project_records(
             force_refresh=force_refresh
         )
-        followup_counts: dict[str, int] | None = None
+        followups_by_record: dict[str, list[dict[str, Any]]] | None = None
         try:
             _followup_metas, _followup_meta_by_name, followups = (
                 self._load_repair_followup_snapshot(force_refresh=force_refresh)
             )
-            followup_counts = self._repair_followup_counts_by_summary(followups)
+            followups_by_record = self._repair_followups_by_summary(followups)
         except PortalError:
             pass
         records = [
@@ -8483,8 +8594,13 @@ class MaintenancePortalService:
                     item,
                     meta_by_name=meta_by_name,
                     authoritative_followup_count=(
-                        followup_counts.get(record_id, 0)
-                        if followup_counts is not None
+                        len((followups_by_record or {}).get(record_id) or [])
+                        if followups_by_record is not None
+                        else None
+                    ),
+                    authoritative_followups=(
+                        list((followups_by_record or {}).get(record_id) or [])
+                        if followups_by_record is not None
                         else None
                     ),
                 )

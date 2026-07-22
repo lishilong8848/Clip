@@ -129,6 +129,12 @@ class MainWindowUiMixin:
         self.patch_btn.clicked.connect(self.apply_patch_update)
         self.patch_btn.hide()
 
+        self.check_update_btn = QPushButton("检查更新")
+        self.check_update_btn.setObjectName("NavBtn")
+        self.check_update_btn.setFixedSize(76, 36)
+        self.check_update_btn.setToolTip("立即检查是否有最新版本")
+        self.check_update_btn.clicked.connect(self.check_remote_update_now)
+
         self.deleted_history_btn = QPushButton("历史删除")
         self.deleted_history_btn.setObjectName("NavBtn")
         self.deleted_history_btn.setFixedSize(80, 40)
@@ -163,6 +169,7 @@ class MainWindowUiMixin:
         self.minimize_btn.setToolTip("最小化")
         self.minimize_btn.clicked.connect(self.hide)
 
+        nav_layout.addWidget(self.check_update_btn)
         nav_layout.addWidget(self.patch_btn)
         nav_layout.addWidget(self.deleted_history_btn)
         nav_layout.addWidget(self.title_label, 1)
