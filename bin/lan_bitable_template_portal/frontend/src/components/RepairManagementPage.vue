@@ -782,8 +782,7 @@ function recordProgressPercent(record: LooseDict): number {
 }
 
 function repairRecordIsCompleted(record: LooseDict): boolean {
-  if (record.is_completed === true || record.read_only === true) return true;
-  return String(record.workflow || "").replace(/\s+/g, "") === "维修完成";
+  return record.is_completed === true || record.read_only === true;
 }
 
 function recordLatestTimeLabel(record: LooseDict): string {

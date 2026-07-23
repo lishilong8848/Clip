@@ -252,6 +252,11 @@ def _relation_record_ids(record: dict[str, Any], *names: str) -> list[str]:
         if isinstance(record.get("raw_fields"), dict)
         else {}
     )
+    display_fields = (
+        record.get("display_fields")
+        if isinstance(record.get("display_fields"), dict)
+        else {}
+    )
     result: list[str] = []
 
     def collect(value: Any) -> None:
@@ -289,6 +294,7 @@ def _relation_record_ids(record: dict[str, Any], *names: str) -> list[str]:
 
     for name in names:
         collect(raw_fields.get(name))
+        collect(display_fields.get(name))
     return result
 
 
@@ -412,6 +418,30 @@ def _maintenance_prefixed_title(record: dict[str, Any], raw_title: str) -> str:
     return title
 
 
+def _repair_title_candidate(value: Any) -> str:
+    if isinstance(value, dict):
+        for key in ("text", "name", "value", "title"):
+            text = _repair_title_candidate(value.get(key))
+            if text:
+                return text
+        return ""
+    if isinstance(value, (list, tuple, set)):
+        parts = [_repair_title_candidate(item) for item in value]
+        return "、".join(part for part in parts if part)
+    text = str(value or "").strip()
+    if not text or text in {"-", "--", "—", "暂无", "未填写", "None", "null"}:
+        return ""
+    if re.fullmatch(r"opt[A-Za-z0-9]{6,}", text):
+        return ""
+    if re.fullmatch(
+        r"EA118[_-]?C01机房(?:110站|[ABCDEH]楼)?检修(?:通告)?",
+        text,
+        flags=re.I,
+    ):
+        return ""
+    return text
+
+
 def _record_title(record: dict[str, Any]) -> str:
     work_type = _item_work_type(record)
     text = str(record.get("text") or "").strip()
@@ -428,12 +458,27 @@ def _record_title(record: dict[str, Any]) -> str:
             record.get("record_id"),
         )
     if work_type == "repair":
-        return _first(
-            record.get("title"),
-            _field(record, "检修通告名称", "维修名称", "标题"),
-            text_title,
-            record.get("record_id"),
+        fields = (
+            record.get("display_fields")
+            if isinstance(record.get("display_fields"), dict)
+            else {}
         )
+        for value in (
+            record.get("title"),
+            fields.get("检修通告名称"),
+            fields.get("名称（标题）"),
+            fields.get("检修概述"),
+            text_title,
+            fields.get("事件描述"),
+            fields.get("故障维修原因"),
+            fields.get("故障发生现象描述"),
+            fields.get("维修名称"),
+            fields.get("标题"),
+        ):
+            candidate = _repair_title_candidate(value)
+            if candidate:
+                return candidate
+        return str(record.get("record_id") or "").strip()
     title = _first(
         record.get("title"),
         _field(record, "维护总项", "名称", "标题", "手动标题"),
@@ -788,11 +833,27 @@ def _source_mode_chip(record: dict[str, Any], *, ongoing: bool = False) -> str:
     return ""
 
 
+def _repair_event_link_chip(record: dict[str, Any], work_type: str) -> str:
+    if work_type != "repair":
+        return ""
+    event_ids = _relation_record_ids(record, "关联事件单")
+    source_event_id = str(
+        record.get("source_event_id")
+        or record.get("related_event_record_id")
+        or ""
+    ).strip()
+    event_label = _field(record, "关联事件单")
+    if event_ids or source_event_id or event_label:
+        return _meta_chip("事件已关联", tone="success")
+    return ""
+
+
 def _record_extra_chips(record: dict[str, Any], work_type: str, *, ongoing: bool = False) -> list[str]:
     chips = [
         _maintenance_cycle_chip(record, work_type),
         _site_photo_chip(record, work_type),
         _mop_status_chip(record, work_type),
+        _repair_event_link_chip(record, work_type),
         _memory_status_chip(record),
         _source_mode_chip(record, ongoing=ongoing),
     ]
@@ -1272,6 +1333,14 @@ def _record_rows(
         )
         site_photo_count = _site_photo_count(row_source)
         mop_status = _mop_status_text(row_source, row_work_type)
+        extra_chips = _record_extra_chips(
+            row_source,
+            row_work_type,
+            ongoing=bool(linked_ongoing),
+        )
+        source_event_chip = _repair_event_link_chip(record, row_work_type)
+        if source_event_chip and source_event_chip not in extra_chips:
+            extra_chips.append(source_event_chip)
         linked_active_item_id = str((linked_ongoing or {}).get("active_item_id") or "")
         source_event_ids = _relation_record_ids(record, "关联事件单")
         source_event_id = str(
@@ -1309,7 +1378,7 @@ def _record_rows(
             f" data-title=\"{_e(title)}\""
         f" data-draft=\"{_e(_safe_draft_json_attr(draft))}\">"
             f"<span class=\"row-main\"><strong>{_e(title)}</strong>{_progress_badge(progress)}</span>"
-            f"{_row_meta(_record_building(row_source), _record_specialty(row_source), progress=progress, extra_chips=_record_extra_chips(row_source, row_work_type, ongoing=bool(linked_ongoing)))}"
+            f"{_row_meta(_record_building(row_source), _record_specialty(row_source), progress=progress, extra_chips=extra_chips)}"
             "</a>"
         )
     return "\n".join(rows)
@@ -3414,6 +3483,65 @@ def render_workbench_lite(
         select.value = normalized;
       }}
     }}
+    function applyIdentityBindingToInbox(form, result, fallbackTargetRecordId) {{
+      if (!form) return;
+      const sourceRecordId = String(
+        result?.source_record_id || previewValue(form, 'source_record_id') || ''
+      ).trim();
+      const targetRecordId = String(
+        result?.target_record_id || fallbackTargetRecordId || ''
+      ).trim();
+      const activeItemId = String(
+        result?.active_item_id || previewValue(form, 'active_item_id') || ''
+      ).trim();
+      if (sourceRecordId) {{
+        const sourceRow = Array.from(document.querySelectorAll('.notice-row')).find(row =>
+          [row.getAttribute('data-source-record-id'), row.getAttribute('data-record-id')]
+            .map(value => String(value || '').trim())
+            .includes(sourceRecordId)
+        );
+        if (sourceRow) {{
+          sourceRow.classList.remove('is-disabled');
+          sourceRow.setAttribute('aria-disabled', 'false');
+          sourceRow.setAttribute('data-disabled-reason', '');
+          sourceRow.setAttribute('data-linked-ongoing', '1');
+          sourceRow.setAttribute('data-action', 'update');
+          sourceRow.setAttribute('data-active-item-id', activeItemId);
+          sourceRow.setAttribute('data-target-record-id', targetRecordId);
+          setOngoingRowStatus(sourceRow, '进行中', 'working');
+        }}
+      }}
+      const ongoingRow = Array.from(document.querySelectorAll('.ongoing-row')).find(row => {{
+        const identities = [
+          row.getAttribute('data-active-item-id'),
+          row.getAttribute('data-target-record-id'),
+          row.getAttribute('data-record-id'),
+        ].map(value => String(value || '').trim()).filter(Boolean);
+        return (activeItemId && identities.includes(activeItemId))
+          || (targetRecordId && identities.includes(targetRecordId));
+      }});
+      if (ongoingRow) {{
+        ongoingRow.setAttribute('data-source-record-id', sourceRecordId);
+        if (targetRecordId) {{
+          ongoingRow.setAttribute('data-target-record-id', targetRecordId);
+          ongoingRow.setAttribute('data-record-id', targetRecordId);
+        }}
+      }}
+    }}
+    async function refreshTaskInboxAfterIdentityBinding() {{
+      clearLiteHtmlCache();
+      const scrollPositions = captureWorkspaceScroll();
+      const response = await fetch(location.pathname + location.search, {{
+        credentials: 'same-origin',
+        cache: 'no-store',
+      }});
+      const html = await response.text();
+      if (handleLiteAuthRequired(response, null, html)) return;
+      if (!response.ok) throw new Error('刷新通告处理状态失败');
+      const nextDoc = new DOMParser().parseFromString(html, 'text/html');
+      replaceFromDocument(nextDoc, '.task-inbox');
+      restoreWorkspaceScroll(scrollPositions);
+    }}
     let liteSitePhotos = [];
     let liteSitePhotoSignature = '';
     function sitePhotoSignature(form) {{
@@ -3861,6 +3989,12 @@ def render_workbench_lite(
       const sourceId = normalized === 'bind' ? String(candidate?.source_record_id || '').trim() : '';
       setFormValue(form, 'source_record_id', sourceId);
       setFormValue(form, 'record_id', sourceId);
+      const workType = previewValue(form, 'work_type') || form.dataset.workType || '';
+      setFormValue(
+        form,
+        'repair_management_record_id',
+        normalized === 'bind' && workType === 'repair' ? sourceId : ''
+      );
       const panel = form.querySelector('[data-manual-source-binding]');
       panel?.querySelectorAll('[data-manual-binding-mode]').forEach(button => {{
         button.classList.toggle('active', button.getAttribute('data-manual-binding-mode') === normalized);
@@ -3949,13 +4083,95 @@ def render_workbench_lite(
       const confirmButton = document.getElementById('lite-manual-source-confirm');
       if (confirmButton) confirmButton.disabled = liteSelectedManualSourceIndex < 0;
     }}
-    function confirmManualSourceCandidate() {{
+    const liteRepairNoticeDraftFields = [
+      'title', 'location', 'level', 'specialty', 'start_time', 'end_time',
+      'content', 'repair_device', 'repair_fault', 'fault_type', 'repair_mode',
+      'impact', 'discovery', 'symptom', 'reason', 'solution', 'spare_parts',
+      'progress'
+    ];
+    function applyRepairNoticeDraft(form, draft) {{
+      if (!form || !draft || typeof draft !== 'object') return 0;
+      let filledCount = 0;
+      for (const key of liteRepairNoticeDraftFields) {{
+        const value = normalizeRepairEventPrefillValue(key, draft[key]);
+        const field = form.querySelector(`[name="${{CSS.escape(key)}}"]`);
+        if (!field || String(field.value || '') === value) continue;
+        field.value = value;
+        filledCount += 1;
+      }}
+      return filledCount;
+    }}
+    async function confirmManualSourceCandidate() {{
       const candidate = liteManualSourceCandidates[liteSelectedManualSourceIndex];
       const form = document.getElementById('lite-notice-form');
       if (!candidate || !form) return;
-      setManualBindingChoice(form, 'bind', candidate);
-      closeManualSourceCandidates();
-      setLiteStatus('已绑定计划通告');
+      const workType = previewValue(form, 'work_type') || form.dataset.workType || '';
+      if (workType !== 'repair') {{
+        setManualBindingChoice(form, 'bind', candidate);
+        closeManualSourceCandidates();
+        setLiteStatus('已绑定计划通告');
+        return;
+      }}
+      const sourceRecordId = String(candidate.source_record_id || '').trim();
+      if (!sourceRecordId) {{
+        showLiteError('所选维修单缺少源记录 ID。');
+        return;
+      }}
+      const manualIdAtStart = previewValue(form, 'manual_id');
+      const confirmButton = document.getElementById('lite-manual-source-confirm');
+      setButtonBusy(confirmButton, true);
+      try {{
+        const url = new URL('/api/workbench/repair-event-prefill', location.origin);
+        url.searchParams.set(
+          'scope',
+          previewValue(form, 'scope') || getCurrentScope()
+        );
+        url.searchParams.set('repair_management_record_id', sourceRecordId);
+        const response = await fetch(url.pathname + url.search, {{
+          credentials: 'same-origin',
+          cache: 'no-store',
+        }});
+        const data = await response.json().catch(() => ({{}}));
+        if (handleLiteAuthRequired(response, data)) return;
+        if (!response.ok || data.ok === false) {{
+          throw new Error(data.error || '读取维修单字段失败');
+        }}
+        const activeForm = document.getElementById('lite-notice-form');
+        if (
+          activeForm !== form
+          || previewValue(form, 'manual_id') !== manualIdAtStart
+        ) {{
+          closeManualSourceCandidates();
+          setLiteStatus('当前通告已切换，未改写当前表单');
+          return;
+        }}
+        const result = data.data || data;
+        if (String(result.target_record_id || '').trim()) {{
+          throw new Error('所选维修单已关联检修通告，请从未结束通告中处理');
+        }}
+        const draft = result.draft && typeof result.draft === 'object'
+          ? result.draft
+          : {{}};
+        setManualBindingChoice(form, 'bind', candidate);
+        const filledCount = applyRepairNoticeDraft(form, draft);
+        setFormValue(
+          form,
+          'repair_management_record_id',
+          result.repair_management_record_id || sourceRecordId
+        );
+        setLiteFormDirty(true);
+        updateNoticePreview(form);
+        closeManualSourceCandidates();
+        setLiteStatus(
+          filledCount
+            ? `已绑定维修单并填入 ${{filledCount}} 项字段`
+            : '已绑定维修单'
+        );
+      }} catch (error) {{
+        showLiteError(error && error.message ? error.message : '绑定维修单失败');
+      }} finally {{
+        setButtonBusy(confirmButton, false);
+      }}
     }}
     let liteRepairEventCandidates = [];
     let liteSelectedRepairEventIndex = -1;
@@ -4172,24 +4388,9 @@ def render_workbench_lite(
         const result = data.data || data;
         const draft = result.draft && typeof result.draft === 'object' ? result.draft : {{}};
         const draftComplete = result.draft_complete === true;
-        const fillableKeys = [
-          'title', 'location', 'level', 'specialty', 'start_time', 'end_time',
-          'content', 'repair_device', 'repair_fault', 'fault_type', 'repair_mode',
-          'impact', 'discovery', 'symptom', 'reason', 'solution', 'spare_parts',
-          'progress'
-        ];
-        let filledCount = 0;
-        if (draftComplete) {{
-          for (const key of fillableKeys) {{
-            const value = normalizeRepairEventPrefillValue(key, draft[key]);
-            const field = form.querySelector(`[name="${{CSS.escape(key)}}"]`);
-            if (!field) continue;
-            if (String(field.value || '') !== value) {{
-              field.value = value;
-              filledCount += 1;
-            }}
-          }}
-        }}
+        const filledCount = draftComplete
+          ? applyRepairNoticeDraft(form, draft)
+          : 0;
         setFormValue(form, 'related_event_record_id', candidate.event_record_id || '');
         setFormValue(form, 'repair_management_record_id', sourceRecordIdAtStart);
         const status = document.getElementById('lite-repair-event-link-status');
@@ -4222,6 +4423,10 @@ def render_workbench_lite(
                 : `事件关联已保存，已更新 ${{filledCount}} 个字段`
             )
         );
+        refreshTaskInboxAfterIdentityBinding().catch(() => {{
+          const overlay = noticeDrawerOverlay();
+          if (overlay) overlay.dataset.detailNeedsReload = '1';
+        }});
       }} catch (error) {{
         if (controller.signal.aborted || requestSequence !== liteRepairEventPrefillSequence) {{
           return;
@@ -4439,6 +4644,7 @@ def render_workbench_lite(
           || {{}};
         setFormValue(form, 'target_record_id', targetRecordId);
         const appliedFieldCount = applyTargetRecordFormFields(form, targetFormFields);
+        applyIdentityBindingToInbox(form, result, targetRecordId);
         form.dataset.targetEnded = isEndedCandidate(candidate) ? '1' : '';
         const status = document.getElementById('lite-target-link-status');
         if (status) status.textContent = isEndedCandidate(candidate)
@@ -4452,6 +4658,10 @@ def render_workbench_lite(
         setLiteFormDirty(appliedFieldCount > 0);
         closeTargetCandidates();
         setLiteStatus(appliedFieldCount > 0 ? '已绑定目标记录并填入字段' : '目标多维关系已保存');
+        refreshTaskInboxAfterIdentityBinding().catch(() => {{
+          const overlay = noticeDrawerOverlay();
+          if (overlay) overlay.dataset.detailNeedsReload = '1';
+        }});
       }} catch (error) {{
         showLiteError(error && error.message ? error.message : '绑定目标记录失败');
       }} finally {{
@@ -4857,7 +5067,7 @@ def render_workbench_lite(
       const manualSourceConfirm = target.closest('#lite-manual-source-confirm');
       if (manualSourceConfirm) {{
         event.preventDefault();
-        confirmManualSourceCandidate();
+        await confirmManualSourceCandidate();
         return;
       }}
       const undoCancel = target.closest('#lite-undo-confirm-cancel');

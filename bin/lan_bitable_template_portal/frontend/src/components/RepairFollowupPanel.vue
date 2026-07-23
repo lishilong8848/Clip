@@ -96,6 +96,16 @@
             <header>
               <strong>{{ group.label }}</strong>
             </header>
+            <label v-if="group.key === 'execution'" class="spare-parts-toggle">
+              <input
+                type="checkbox"
+                :checked="involvesSpareParts"
+                :disabled="readOnly"
+                @change="onSparePartsToggle"
+              />
+              <span class="spare-parts-toggle-track" aria-hidden="true"><i /></span>
+              <span>是否涉及更换备件</span>
+            </label>
             <div class="followup-field-grid">
               <template v-for="field in group.fields" :key="field.field_name">
                 <RepairPeoplePicker
@@ -277,6 +287,7 @@ const WORKER_FIELD_NAME = "随工人员（我方维修人员）";
 const DEVICE_PRODUCTION_DATE_FIELD_NAME = "设备生产日期";
 const DEVICE_USAGE_YEARS_FIELD_NAME = "设备使用年限";
 const DEVICE_CAPACITY_FIELD_NAME = "设备容量KW/AH";
+const SPARE_PART_FIELD_NAMES = new Set(["更换备件名称", "更换备件数量"]);
 const DEFAULT_FOLLOWUP_FIELD_VALUES: Record<string, string> = {
   [DEVICE_PRODUCTION_DATE_FIELD_NAME]: "2021-03-31T00:00",
   [DEVICE_USAGE_YEARS_FIELD_NAME]: "4",
@@ -335,6 +346,7 @@ const cmdbCandidatesHaveMore = ref(false);
 const cmdbCandidateNote = ref("");
 const cmdbRecordIds = ref<string[]>([]);
 const workerPeople = ref<LooseDict[]>([]);
+const involvesSpareParts = ref(false);
 const brandModelOptions = ref<Record<string, string[]>>({});
 const total = ref(0);
 const page = ref(1);
@@ -365,7 +377,10 @@ const groupedFields = computed(() => {
   const groups = groupFields.map((group) => ({
     key: group.key,
     label: group.label,
-    fields: group.fields.map((name) => byName.get(name)).filter(Boolean) as LooseDict[],
+    fields: group.fields
+      .filter((name) => involvesSpareParts.value || !SPARE_PART_FIELD_NAMES.has(name))
+      .map((name) => byName.get(name))
+      .filter(Boolean) as LooseDict[],
   })).filter((group) => group.fields.length);
   return groups;
 });
@@ -562,6 +577,7 @@ function progressLabel(value: unknown): string {
 function clearDraft(): void {
   dirtyFieldNames.clear();
   workerPeople.value = [];
+  involvesSpareParts.value = false;
   for (const key of Object.keys(draft)) delete draft[key];
   for (const field of editableFields.value) draft[String(field.field_name || "")] = "";
 }
@@ -620,6 +636,20 @@ function updateWorkerPeople(value: LooseDict[]): void {
   if (props.readOnly) return;
   workerPeople.value = value;
   dirtyFieldNames.add(WORKER_FIELD_NAME);
+  markDirty();
+}
+
+function onSparePartsToggle(event: Event): void {
+  if (props.readOnly) return;
+  const checked = event.target instanceof HTMLInputElement && event.target.checked;
+  involvesSpareParts.value = checked;
+  if (!checked) {
+    for (const fieldName of SPARE_PART_FIELD_NAMES) {
+      if (!Object.prototype.hasOwnProperty.call(draft, fieldName)) continue;
+      draft[fieldName] = "";
+      dirtyFieldNames.add(fieldName);
+    }
+  }
   markDirty();
 }
 
@@ -684,6 +714,9 @@ function selectRecord(record: LooseDict): void {
       : Object.prototype.hasOwnProperty.call(display, name) ? display[name] : raw[name];
     draft[name] = repairDraftInputValue(field, value);
   }
+  involvesSpareParts.value = Array.from(SPARE_PART_FIELD_NAMES).some(
+    (fieldName) => Boolean(String(draft[fieldName] || "").trim()),
+  );
   if (String(draft[REPAIR_PARTY_FIELD_NAME] || "").trim() === "我方") {
     for (const supplierFieldName of SUPPLIER_FIELD_NAMES) {
       draft[supplierFieldName] = "";
@@ -853,6 +886,10 @@ function buildFields(): LooseDict {
   for (const field of editableFields.value) {
     const name = String(field.field_name || "");
     if (editingRecordId.value && !dirtyFieldNames.has(name)) continue;
+    if (SPARE_PART_FIELD_NAMES.has(name) && !involvesSpareParts.value) {
+      if (editingRecordId.value && dirtyFieldNames.has(name)) payload[name] = "";
+      continue;
+    }
     if (name === WORKER_FIELD_NAME) {
       if (workerPeople.value.length || editingRecordId.value) {
         payload[name] = workerPeople.value.map((person) => ({
@@ -1288,6 +1325,71 @@ onBeforeUnmount(() => {
 .followup-field-section > header span {
   color: #758aa1;
   font-size: 12px;
+}
+
+.spare-parts-toggle {
+  width: fit-content;
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #d3e0ef;
+  border-radius: 9px;
+  padding: 0 10px;
+  background: #f7faff;
+  color: #244464;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  user-select: none;
+}
+
+.spare-parts-toggle input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.spare-parts-toggle-track {
+  width: 30px;
+  height: 18px;
+  position: relative;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: #cbd7e6;
+  transition: background 140ms ease;
+}
+
+.spare-parts-toggle-track i {
+  width: 14px;
+  height: 14px;
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(20, 52, 88, 0.2);
+  transition: transform 140ms ease;
+}
+
+.spare-parts-toggle input:checked + .spare-parts-toggle-track {
+  background: #1f67dd;
+}
+
+.spare-parts-toggle input:checked + .spare-parts-toggle-track i {
+  transform: translateX(12px);
+}
+
+.spare-parts-toggle:focus-within {
+  border-color: #6fa3f5;
+  box-shadow: 0 0 0 3px rgba(30, 99, 255, 0.1);
+}
+
+.spare-parts-toggle:has(input:disabled) {
+  cursor: default;
+  opacity: 0.72;
 }
 
 .followup-field-grid {
