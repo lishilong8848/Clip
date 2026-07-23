@@ -2579,7 +2579,9 @@ class PortalRuntime:
                         },
                     },
                 )
-                data["qt_deleted"] = bool(result.get("active_item_id") or result.get("record_id"))
+                data["qt_deleted"] = bool(
+                    result.get("qt_removed") or result.get("already_absent")
+                )
                 data["qt_event_id"] = event_id
                 data["remote_deleted"] = False
                 return self._send_json(200, {"ok": True, "data": data})
@@ -6634,14 +6636,65 @@ class PortalRuntime:
                 active_item_id = str(identity.get("active_item_id") or "").strip()
         if not active_item_id and not target_record_id and not source_record_id:
             return {"ok": False, "message": "缺少本地移除所需的通告标识。"}
-        qt_removed = False
         try:
             qt_removed = cls.state_store.delete_qt_active_item(
                 active_item_id=active_item_id,
                 record_id=target_record_id,
             )
-        except Exception:
-            qt_removed = False
+        except Exception as exc:
+            return {
+                "ok": False,
+                "message": f"本地活动通告移除失败: {exc}",
+                "record_id": target_record_id,
+                "active_item_id": active_item_id,
+                "remote_deleted": False,
+            }
+        already_absent = False
+        if not qt_removed:
+            try:
+                matching_rows = []
+                for row in cls.state_store.list_qt_active_items():
+                    row_payload = (
+                        row.get("payload")
+                        if isinstance(row.get("payload"), dict)
+                        else {}
+                    )
+                    row_active_id = str(
+                        row.get("active_item_id")
+                        or row_payload.get("active_item_id")
+                        or ""
+                    ).strip()
+                    row_target_id = str(
+                        canonical_target_record_id(row_payload)
+                        or row.get("record_id")
+                        or ""
+                    ).strip()
+                    row_source_id = str(
+                        canonical_source_record_id(row_payload) or ""
+                    ).strip()
+                    if (
+                        (active_item_id and row_active_id == active_item_id)
+                        or (target_record_id and row_target_id == target_record_id)
+                        or (source_record_id and row_source_id == source_record_id)
+                    ):
+                        matching_rows.append(row)
+                if matching_rows:
+                    return {
+                        "ok": False,
+                        "message": "本地活动通告仍然存在，未执行移除显示。",
+                        "record_id": target_record_id,
+                        "active_item_id": active_item_id,
+                        "remote_deleted": False,
+                    }
+                already_absent = True
+            except Exception as exc:
+                return {
+                    "ok": False,
+                    "message": f"本地活动通告移除结果校验失败: {exc}",
+                    "record_id": target_record_id,
+                    "active_item_id": active_item_id,
+                    "remote_deleted": False,
+                }
         identity_removed = False
         try:
             identity_removed = cls.state_store.mark_notice_identity_deleted(
@@ -6658,6 +6711,7 @@ class PortalRuntime:
             "record_id": target_record_id,
             "active_item_id": active_item_id,
             "qt_removed": bool(qt_removed),
+            "already_absent": bool(already_absent),
             "identity_removed": bool(identity_removed),
             "remote_deleted": False,
         }

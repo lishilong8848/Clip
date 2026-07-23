@@ -38,6 +38,20 @@
             <input v-model.trim="searchText" type="search" placeholder="搜索维修项目" />
             <button v-if="searchText" type="button" class="search-clear" @click="clearSearch">清空</button>
           </div>
+          <div class="record-state-filter" role="tablist" aria-label="维修项目状态">
+            <button
+              v-for="option in recordStateOptions"
+              :key="option.value"
+              type="button"
+              role="tab"
+              :aria-selected="recordState === option.value"
+              :class="{ active: recordState === option.value }"
+              :disabled="loading"
+              @click="changeRecordState(option.value)"
+            >
+              {{ option.label }}
+            </button>
+          </div>
         </div>
         <div v-if="records.length" class="record-table-head" aria-hidden="true">
           <span>维修项目</span>
@@ -55,7 +69,10 @@
             v-else
             :key="record.record_id"
             class="record-row"
-            :class="{ active: selectedRecord?.record_id === record.record_id }"
+            :class="{
+              active: selectedRecord?.record_id === record.record_id,
+              completed: repairRecordIsCompleted(record),
+            }"
             role="button"
             tabindex="0"
             :aria-label="`打开维修项目：${record.title || '未命名维修项目'}`"
@@ -74,6 +91,7 @@
             </span>
             <span class="record-status-cell">
               <b class="workflow">{{ record.workflow || "流程未填写" }}</b>
+              <small v-if="repairRecordIsCompleted(record)">只读</small>
             </span>
             <button
               type="button"
@@ -122,7 +140,7 @@
         >
           <header class="project-drawer-head">
             <div class="project-drawer-title">
-              <span>{{ activeWorkspaceTab === "followups" ? "跟进记录" : editingRecordId ? "维修单信息" : "新建维修单" }}</span>
+              <span>{{ selectedRecordReadOnly ? "已完成 · 只读" : activeWorkspaceTab === "followups" ? "跟进记录" : editingRecordId ? "维修单信息" : "新建维修单" }}</span>
               <h3 id="repair-project-drawer-title">
                 {{ editingRecordId ? selectedRecordTitle : "填写维修项目" }}
               </h3>
@@ -195,7 +213,7 @@
               <div class="source-head-actions">
                 <span v-if="prefillLoading" class="source-loading">填入中</span>
                 <button type="button" class="btn quiet compact" @click="sourceExpanded = !sourceExpanded">
-                  {{ sourceExpanded ? "收起" : "更改事件检修关联" }}
+                  {{ sourceExpanded ? "收起" : selectedRecordReadOnly ? "查看关联" : "更改事件检修关联" }}
                 </button>
               </div>
             </header>
@@ -203,7 +221,7 @@
               <div class="source-relation-item">
                 <span class="relation-order">1</span>
                 <div><b>关联事件单</b><small>{{ selectedEventSummary }}</small></div>
-                <div class="relation-actions">
+                <div v-if="!selectedRecordReadOnly" class="relation-actions">
                   <button type="button" class="btn secondary" :disabled="prefillLoading" @click="openSourcePicker('event')">
                     {{ sourceEventId ? "重新选择" : "选择事件" }}
                   </button>
@@ -230,7 +248,7 @@
                     }}
                   </small>
                 </div>
-                <div class="relation-actions">
+                <div v-if="!selectedRecordReadOnly" class="relation-actions">
                   <button
                     type="button"
                     class="btn secondary"
@@ -275,6 +293,7 @@
                     :input-id="fieldInputId(field)"
                     :label="projectFieldLabel(field.field_name)"
                     :model-value="projectWorkerPeople"
+                    :disabled="selectedRecordReadOnly"
                     @update:model-value="updateProjectWorkerPeople"
                     @edited="markFieldDirty(field.field_name)"
                   />
@@ -286,7 +305,7 @@
                     :model-value="fieldDraft[field.field_name]"
                     :required="isRequiredField(field.field_name)"
                     :error="fieldValidationError(field.field_name)"
-                    :disabled="projectFieldIsSourceControlled(field) || isCurrentProjectProgressField(field)"
+                    :disabled="selectedRecordReadOnly || projectFieldIsSourceControlled(field) || isCurrentProjectProgressField(field)"
                     :percentage="isCurrentProjectProgressField(field)"
                     :wide="usesTextarea(field.field_name)"
                     compact
@@ -298,7 +317,7 @@
             </section>
           </div>
 
-          <footer class="editor-action-bar">
+          <footer v-if="!selectedRecordReadOnly" class="editor-action-bar">
             <div class="save-state" :class="projectSaveStateTone">
               <component :is="projectSaveStateIcon" :size="17" aria-hidden="true" />
               <span>{{ projectSaveStateText }}</span>
@@ -339,6 +358,10 @@
               </button>
             </div>
           </footer>
+          <div v-else class="completed-readonly-bar" role="status">
+            <LockKeyhole :size="16" aria-hidden="true" />
+            <span>维修已完成，仅供查看</span>
+          </div>
         </div>
 
         <RepairFollowupPanel
@@ -348,6 +371,7 @@
           :scope="scope"
           :summary-record-id="editingRecordId"
           :summary-title="selectedRecordTitle"
+          :read-only="selectedRecordReadOnly"
           @changed="handleFollowupChanged"
           @dirty-changed="followupHasUnsavedChanges = $event"
           @count-changed="updateSelectedFollowupCount"
@@ -420,6 +444,7 @@ import {
   ClipboardList,
   FilePlus2,
   LoaderCircle,
+  LockKeyhole,
   RefreshCw,
   RotateCcw,
   Save,
@@ -456,6 +481,7 @@ import VnetBackButton from "./VnetBackButton.vue";
 type PickerColumn = { key: string; label: string; width?: string; wrap?: boolean };
 type SourcePicker = "" | "event" | "repair";
 type WorkspaceTab = "project" | "followups";
+type RecordStateFilter = "all" | "active" | "completed";
 type ConfirmTone = "warning" | "danger" | "primary";
 type ProjectFieldGroupKey = "basic" | "execution" | "other";
 type PrefillSelection = { eventRecordId: string; repairRecordIds: string[] };
@@ -466,6 +492,11 @@ const REPAIR_SPECIALTY_OPTIONS = ["电气", "暖通", "消防", "弱电"];
 const PROJECT_WORKER_FIELD_NAME = "随工人员（或我方维修人员）";
 const CURRENT_PROJECT_PROGRESS_FIELD_NAME = "当前维修进度";
 const recordResponseCache = new Map<string, { expiresAt: number; payload: LooseDict }>();
+const recordStateOptions: Array<{ value: RecordStateFilter; label: string }> = [
+  { value: "all", label: "全部" },
+  { value: "active", label: "未完成" },
+  { value: "completed", label: "已完成" },
+];
 
 function clearRecordResponseCache(): void {
   recordResponseCache.clear();
@@ -550,6 +581,7 @@ const props = defineProps<{
 const loading = ref(false);
 const saving = ref(false);
 const searchText = ref("");
+const recordState = ref<RecordStateFilter>("all");
 const messageText = ref("");
 const messageTone = ref<"success" | "warning" | "failed">("success");
 const fields = ref<LooseDict[]>([]);
@@ -723,13 +755,20 @@ const saveDisabledReason = computed(() => {
 });
 
 const selectedRecordTitle = computed(() => selectedRecord.value?.title || "未命名维修项目");
+const selectedRecordReadOnly = computed(() => repairRecordIsCompleted(selectedRecord.value || {}));
 const selectedFollowupCount = computed(() => Math.max(
   0,
   Number(selectedRecord.value?.followup_count || 0),
 ));
 const recordPageCount = computed(() => Math.max(1, Math.ceil(total.value / RECORD_PAGE_SIZE)));
 const recordEmptyText = computed(() => (
-  searchText.value ? "没有匹配的维修项目" : "暂无进行中的维修项目"
+  searchText.value
+    ? "没有匹配的维修项目"
+    : recordState.value === "completed"
+      ? "暂无已完成维修项目"
+      : recordState.value === "active"
+        ? "暂无未完成维修项目"
+        : "暂无维修项目"
 ));
 
 function usesTextarea(fieldName: unknown): boolean {
@@ -740,6 +779,11 @@ function recordProgressPercent(record: LooseDict): number {
   const parsed = Number(record.progress_percent || 0);
   if (!Number.isFinite(parsed)) return 0;
   return Math.max(0, Math.min(100, Math.round(parsed)));
+}
+
+function repairRecordIsCompleted(record: LooseDict): boolean {
+  if (record.is_completed === true || record.read_only === true) return true;
+  return String(record.workflow || "").replace(/\s+/g, "") === "维修完成";
 }
 
 function recordLatestTimeLabel(record: LooseDict): string {
@@ -833,6 +877,7 @@ function projectPeopleFromValue(value: unknown): LooseDict[] {
 }
 
 function updateProjectWorkerPeople(value: LooseDict[]): void {
+  if (selectedRecordReadOnly.value) return;
   projectWorkerPeople.value = Array.isArray(value) ? value.slice() : [];
 }
 
@@ -931,7 +976,7 @@ function seedSelectedSourceLabels(displayFields: LooseDict): void {
   const repairLabel = relationDisplayText(
     displayFields["检修通告名称"]
     || displayFields["维修设备"],
-  );
+  ) || businessRelationLabel(displayFields["设备检修关联"]);
   if (selectedRepairIds.value.length && repairLabel) {
     selectedRepairRecords.value = [{
       record_id: selectedRepairIds.value[0],
@@ -941,6 +986,7 @@ function seedSelectedSourceLabels(displayFields: LooseDict): void {
 }
 
 function markFieldDirty(fieldName: unknown): void {
+  if (selectedRecordReadOnly.value) return;
   const name = String(fieldName || "").trim();
   if (!name) return;
   dirtyFieldNames.add(name);
@@ -951,6 +997,7 @@ function scopedQuery(): string {
   const params = new URLSearchParams({
     scope: props.scope || "ALL",
     q: searchText.value,
+    state: recordState.value,
     limit: String(RECORD_PAGE_SIZE),
     offset: String((recordPage.value - 1) * RECORD_PAGE_SIZE),
   });
@@ -961,6 +1008,28 @@ function scopedQuery(): string {
     params.set("focus_record_id", focusRecordId);
   }
   return params.toString();
+}
+
+function changeRecordState(nextState: RecordStateFilter): void {
+  if (nextState === recordState.value) return;
+  runWithUnsavedGuard(() => {
+    projectDrawerOpen.value = false;
+    followupPanelMounted.value = false;
+    followupHasUnsavedChanges.value = false;
+    creatingNewProject.value = false;
+    selectedRecord.value = null;
+    editingRecordId.value = "";
+    sourceEventId.value = "";
+    eventTitle.value = "";
+    selectedEvent.value = null;
+    selectedRepairIds.value = [];
+    selectedRepairRecords.value = [];
+    repairRecommendedIds.value = [];
+    recordState.value = nextState;
+    recordPage.value = 1;
+    resetDraft();
+    void loadRecords(false);
+  });
 }
 
 function currentMonthKey(): string {
@@ -1119,6 +1188,7 @@ function requestOpenRepairNoticeWorkbench(): void {
 }
 
 function requestResetDraft(): void {
+  if (selectedRecordReadOnly.value) return;
   if (!hasUnsavedChanges.value) {
     resetDraft();
     return;
@@ -1381,6 +1451,7 @@ async function applyEventPrefill(recordId: string, quiet = false): Promise<void>
 }
 
 async function openSourcePicker(picker: Exclude<SourcePicker, "">): Promise<void> {
+  if (selectedRecordReadOnly.value) return;
   if (picker === "repair" && !sourceEventId.value) {
     showMessage("请先选择关联事件单，再选择设备检修关联。", "warning");
     return;
@@ -1391,6 +1462,7 @@ async function openSourcePicker(picker: Exclude<SourcePicker, "">): Promise<void
 }
 
 async function confirmEventSelection(recordIds: string[], quiet = false): Promise<void> {
+  if (selectedRecordReadOnly.value) return;
   const recordId = String(recordIds[0] || "").trim();
   if (!recordId) return;
   const changed = recordId !== sourceEventId.value;
@@ -1489,6 +1561,7 @@ async function loadRepairCandidates(resetLimit = true): Promise<void> {
 }
 
 async function clearEventSelection(): Promise<void> {
+  if (selectedRecordReadOnly.value) return;
   const hadRepairSelection = selectedRepairIds.value.length > 0;
   prefillRequestVersion += 1;
   prefillAbortController?.abort();
@@ -1511,6 +1584,7 @@ async function clearEventSelection(): Promise<void> {
 }
 
 async function clearRepairSelection(): Promise<void> {
+  if (selectedRecordReadOnly.value) return;
   if (sourceEventId.value) {
     const applied = await applyCombinedPrefill(true, {
       eventRecordId: sourceEventId.value,
@@ -1532,6 +1606,7 @@ async function clearRepairSelection(): Promise<void> {
 }
 
 async function confirmRepairSelection(recordIds: string[]): Promise<void> {
+  if (selectedRecordReadOnly.value) return;
   if (!sourceEventId.value) {
     activePicker.value = "";
     showMessage("请先选择关联事件单，再选择设备检修关联。", "warning");
@@ -1925,6 +2000,10 @@ function writablePayload(): Record<string, unknown> {
 
 async function saveRecord(): Promise<boolean> {
   if (saving.value) return false;
+  if (selectedRecordReadOnly.value) {
+    showMessage("已完成维修项目不能修改。", "warning");
+    return false;
+  }
   validationAttempted.value = true;
   if (prefillLoading.value) {
     showMessage("关联字段正在填入，请稍后保存。", "warning");
@@ -2002,6 +2081,10 @@ async function saveRecord(): Promise<boolean> {
 
 function requestDeleteRecord(): void {
   if (!editingRecordId.value) return;
+  if (selectedRecordReadOnly.value) {
+    showMessage("已完成维修项目不能删除。", "warning");
+    return;
+  }
   openConfirmation(
     {
       tone: "danger",
@@ -2829,6 +2912,49 @@ onBeforeUnmount(() => {
   position: relative;
 }
 
+.record-state-filter {
+  width: fit-content;
+  max-width: 100%;
+  display: inline-grid !important;
+  grid-template-columns: repeat(3, minmax(76px, auto));
+  gap: 3px !important;
+  border: 1px solid #d5e2f3;
+  border-radius: 10px;
+  padding: 3px;
+  background: #f3f7fc;
+}
+
+.record-state-filter button {
+  min-height: 30px;
+  border: 0;
+  border-radius: 7px;
+  padding: 0 12px;
+  background: transparent;
+  color: #58718f;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.record-state-filter button:hover:not(:disabled),
+.record-state-filter button:focus-visible {
+  outline: 0;
+  background: #e7effa;
+  color: #1759b4;
+}
+
+.record-state-filter button.active {
+  background: #fff;
+  color: #0e58c9;
+  box-shadow: 0 2px 8px rgba(20, 75, 150, 0.12);
+}
+
+.record-state-filter button:disabled {
+  cursor: wait;
+  opacity: 0.66;
+}
+
 .record-search input {
   padding-right: 56px;
 }
@@ -3079,6 +3205,19 @@ onBeforeUnmount(() => {
   box-shadow: inset 3px 0 0 #1e63ff;
 }
 
+.record-row.completed {
+  border-color: #d9e1eb;
+  background: #f8fafc;
+}
+
+.record-row.completed:hover,
+.record-row.completed:focus-visible,
+.record-row.completed.active {
+  border-color: #9fb1c8;
+  background: #f2f5f9;
+  box-shadow: inset 3px 0 0 #71869f;
+}
+
 .record-project-cell {
   min-width: 0;
   display: grid;
@@ -3126,6 +3265,9 @@ onBeforeUnmount(() => {
 
 .record-status-cell {
   min-width: 0;
+  display: grid;
+  justify-items: start;
+  gap: 3px;
 }
 
 .record-status-cell .workflow {
@@ -3143,6 +3285,18 @@ onBeforeUnmount(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.record-status-cell small {
+  color: #768aa2;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.record-row.completed .record-status-cell .workflow {
+  border-color: #d5dee9;
+  background: #eef2f6;
+  color: #50657e;
 }
 
 .record-followup-button {
@@ -3419,6 +3573,21 @@ onBeforeUnmount(() => {
   background: rgba(255, 255, 255, 0.96);
   box-shadow: 0 10px 26px rgba(21, 67, 128, 0.13);
   backdrop-filter: blur(10px);
+}
+
+.completed-readonly-bar {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  margin-top: 4px;
+  border: 1px solid #d9e3ef;
+  border-radius: 10px;
+  background: #f5f8fb;
+  color: #536a84;
+  font-size: 12px;
+  font-weight: 750;
 }
 
 .project-workspace {

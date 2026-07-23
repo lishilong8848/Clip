@@ -11,6 +11,9 @@ if str(BIN_DIR) not in sys.path:
 from lan_bitable_template_portal.portal_service import (  # noqa: E402
     FieldMeta,
     MaintenancePortalService,
+    REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME,
+    REPAIR_FOLLOWUP_TABLE_ID,
+    REPAIR_MANAGEMENT_TABLE_ID,
 )
 from lan_bitable_template_portal.state_store import LanPortalStateStore  # noqa: E402
 
@@ -31,12 +34,31 @@ class RepairSnapshotCacheTests(unittest.TestCase):
                 [],
                 False,
             )
+            followup_parent_meta = FieldMeta(
+                "fld_parent_l",
+                REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME,
+                "Text",
+                1,
+                False,
+                {},
+                [],
+                False,
+            )
+            service._repair_followup_schema_ready = True
+            service._repair_management_progress_schema_ready = True
 
-            def load_fields(**_kwargs):
+            def load_fields(**kwargs):
+                if kwargs.get("table_id") == REPAIR_FOLLOWUP_TABLE_ID:
+                    return [followup_parent_meta], {
+                        followup_parent_meta.field_name: followup_parent_meta
+                    }
                 calls["fields"] += 1
                 return [title_meta], {title_meta.field_name: title_meta}
 
-            def load_records(**_kwargs):
+            def load_records(**kwargs):
+                if kwargs.get("table_id") == REPAIR_FOLLOWUP_TABLE_ID:
+                    return []
+                self.assertEqual(kwargs.get("table_id"), REPAIR_MANAGEMENT_TABLE_ID)
                 calls["records"] += 1
                 return [
                     {

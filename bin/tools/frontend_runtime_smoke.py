@@ -433,6 +433,7 @@ class _SmokePortalService:
         *,
         scope: str = "ALL",
         query: str = "",
+        state: str = "all",
         limit: int = 200,
         offset: int = 0,
         focus_record_id: str = "",
@@ -528,6 +529,33 @@ class _SmokePortalService:
             "records": page_records,
             "total": len(records),
             "returned": len(page_records),
+        }
+
+    def get_repair_management_scope_overview(self, *, scopes=None) -> dict:
+        requested = [
+            self._normalize_scope(scope)
+            for scope in (scopes or [item.get("value") for item in SCOPE_OPTIONS])
+            if str(scope or "").strip()
+        ]
+        scope_stats = {
+            scope: {
+                "scope": scope,
+                "pending": 1 if scope in {"A", "ALL"} else 0,
+                "in_progress": 1 if scope in {"A", "ALL"} else 0,
+                "year_total": 2 if scope in {"A", "ALL"} else 0,
+                "month_total": 2 if scope in {"A", "ALL"} else 0,
+            }
+            for scope in dict.fromkeys(requested)
+        }
+        return {
+            "scopes": scope_stats,
+            "aggregate": {
+                "pending": 1,
+                "in_progress": 1,
+                "year_total": 2,
+                "month_total": 2,
+            },
+            "updated_at": "2026-07-23 10:00:00",
         }
 
     def get_repair_management_record(
@@ -1432,7 +1460,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             throw new Error(`compact followup field is too tall: ${{Math.round(tallestCompactField)}}px`);
           }}
           await followupPanel.getByRole('button', {{ name: '选择设备', exact: true }}).click();
-          const cmdbDialog = page.getByRole('dialog', {{ name: '选择 CMDB 设备', exact: true }});
+          const cmdbDialog = page.getByRole('dialog', {{ name: '选择 CMDB 设备（可多选）', exact: true }});
           await cmdbDialog.waitFor({{ state: 'visible' }});
           await cmdbDialog.getByText('A-219-CRAH-01', {{ exact: true }}).waitFor({{ state: 'visible' }});
           const cmdbCheckboxes = cmdbDialog.locator('tbody input[type="checkbox"]');
@@ -1454,7 +1482,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             throw new Error(`CMDB multi-selection summary is incomplete: ${{selectedCmdbText}}`);
           }}
           await followupPanel.getByRole('button', {{ name: '重新选择', exact: true }}).click();
-          const clearCmdbDialog = page.getByRole('dialog', {{ name: '选择 CMDB 设备', exact: true }});
+          const clearCmdbDialog = page.getByRole('dialog', {{ name: '选择 CMDB 设备（可多选）', exact: true }});
           await clearCmdbDialog.locator('tbody tr').filter({{ hasText: 'A-219-CRAH-01' }}).click();
           await clearCmdbDialog.locator('tbody tr').filter({{ hasText: 'A-220-CRAH-02' }}).click();
           await clearCmdbDialog.getByRole('button', {{ name: '清空关联', exact: true }}).click();
@@ -2223,7 +2251,7 @@ def run_smoke(*, port: int = 18976, keep_server_seconds: float = 0.0) -> dict:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 env=env,
-                timeout=60,
+                timeout=120,
             )
         if completed.returncode != 0:
             raise RuntimeError(

@@ -81,7 +81,6 @@ REPAIR_MANAGEMENT_RETIRED_FIELD_NAMES = frozenset(
         "开始时间",
         "维修结束时间",
         "维修周期",
-        "CMDB唯一id",
         "是否有唯一id",
         "智航设备名称",
         "维修审批人",
@@ -216,6 +215,7 @@ REPAIR_MANAGEMENT_UNLINKED_REPAIR_EDITABLE_FIELD_NAMES = {
 }
 REPAIR_MANAGEMENT_FOLLOWUP_AUTO_FIELD_NAMES = (
     "维修跟进记录",
+    "CMDB唯一id",
     "设备名称",
     "设备编号",
     "设备品牌",
@@ -4718,6 +4718,105 @@ class MaintenancePortalService:
             force_refresh=force_refresh,
         )
 
+    def _resolve_repair_management_cmdb_unique_ids(
+        self,
+        record_ids: list[str] | tuple[str, ...],
+    ) -> tuple[list[str], list[str], list[str]]:
+        selected_record_ids = self._repair_management_record_ids(list(record_ids))
+        if not selected_record_ids:
+            return [], [], []
+
+        _metas, meta_by_name, cached_records = (
+            self._load_repair_management_cmdb_records()
+        )
+        records_by_id = {
+            str(record.get("record_id") or "").strip(): record
+            for record in cached_records
+            if str(record.get("record_id") or "").strip()
+        }
+        missing_record_ids: list[str] = []
+        for record_id in selected_record_ids:
+            if record_id in records_by_id:
+                continue
+            try:
+                records = self._load_table_records_by_ids(
+                    app_token=REPAIR_SOURCE_APP_TOKEN,
+                    table_id=REPAIR_CMDB_TABLE_ID,
+                    meta_by_name=meta_by_name,
+                    work_type=WORK_TYPE_REPAIR,
+                    notice_type=NOTICE_TYPE_REPAIR,
+                    record_ids=[record_id],
+                )
+            except PortalError as exc:
+                if self._repair_management_record_not_found_error(exc):
+                    missing_record_ids.append(record_id)
+                    continue
+                raise
+            if not records:
+                missing_record_ids.append(record_id)
+                continue
+            records_by_id[record_id] = records[0]
+
+        unique_ids: list[str] = []
+        records_without_unique_id: list[str] = []
+        for record_id in selected_record_ids:
+            record = records_by_id.get(record_id)
+            if record is None:
+                if record_id not in missing_record_ids:
+                    missing_record_ids.append(record_id)
+                continue
+            display_fields = (
+                record.get("display_fields")
+                if isinstance(record.get("display_fields"), dict)
+                else {}
+            )
+            raw_fields = (
+                record.get("raw_fields")
+                if isinstance(record.get("raw_fields"), dict)
+                else {}
+            )
+            unique_id = self._repair_management_plain_text(
+                display_fields.get("智航唯一ID")
+                or raw_fields.get("智航唯一ID")
+            )
+            if not unique_id:
+                records_without_unique_id.append(record_id)
+                continue
+            if unique_id not in unique_ids:
+                unique_ids.append(unique_id)
+        return unique_ids, missing_record_ids, records_without_unique_id
+
+    @staticmethod
+    def _repair_management_cmdb_summary_meta_is_writable(
+        meta: FieldMeta | None,
+    ) -> bool:
+        if meta is None:
+            return False
+        field_type = int(meta.field_type or 0)
+        ui_type = str(meta.ui_type or "").strip().lower()
+        return field_type in {1, 4} or "text" in ui_type or "multiselect" in ui_type
+
+    def _repair_management_cmdb_summary_meta(
+        self,
+        meta_by_name: dict[str, FieldMeta],
+    ) -> tuple[dict[str, FieldMeta], FieldMeta | None]:
+        current = meta_by_name.get("CMDB唯一id")
+        if self._repair_management_cmdb_summary_meta_is_writable(current):
+            return meta_by_name, current
+
+        # A stale project snapshot may only know the retained relation field.
+        # Re-read field metadata so values are never sent to that relation by mistake.
+        _metas, live_meta_by_name = self._load_table_fields(
+            app_token=REPAIR_SOURCE_APP_TOKEN,
+            table_id=REPAIR_MANAGEMENT_TABLE_ID,
+        )
+        live_meta = live_meta_by_name.get("CMDB唯一id")
+        if self._repair_management_cmdb_summary_meta_is_writable(live_meta):
+            merged = dict(meta_by_name)
+            merged["CMDB唯一id"] = live_meta
+            return merged, live_meta
+        return meta_by_name, live_meta or current
+
     def _repair_management_target_record_in_scope(
         self,
         record: dict[str, Any],
@@ -6084,6 +6183,72 @@ class MaintenancePortalService:
             auto_fields["维修跟进记录"] = (
                 ",".join(followup_ids) if followup_ids else None
             )
+        cmdb_record_ids: list[str] = []
+        for followup in linked_followups:
+            followup_raw = (
+                followup.get("raw_fields")
+                if isinstance(followup.get("raw_fields"), dict)
+                else {}
+            )
+            followup_display = (
+                followup.get("display_fields")
+                if isinstance(followup.get("display_fields"), dict)
+                else {}
+            )
+            value = followup_raw.get(REPAIR_FOLLOWUP_CMDB_FIELD_NAME)
+            if value in (None, "", [], {}):
+                value = followup_display.get(REPAIR_FOLLOWUP_CMDB_FIELD_NAME)
+            for cmdb_record_id in self._repair_management_record_ids(value):
+                if cmdb_record_id not in cmdb_record_ids:
+                    cmdb_record_ids.append(cmdb_record_id)
+
+        cmdb_sync_warnings: list[str] = []
+        cmdb_meta = meta_by_name.get("CMDB唯一id")
+        if cmdb_meta is not None or cmdb_record_ids:
+            meta_by_name, cmdb_meta = self._repair_management_cmdb_summary_meta(
+                meta_by_name
+            )
+        if cmdb_meta is not None:
+            cmdb_unique_ids: list[str] = []
+            missing_cmdb_records: list[str] = []
+            missing_unique_ids: list[str] = []
+            if cmdb_record_ids:
+                (
+                    cmdb_unique_ids,
+                    missing_cmdb_records,
+                    missing_unique_ids,
+                ) = self._resolve_repair_management_cmdb_unique_ids(
+                    cmdb_record_ids
+                )
+            cmdb_field_type = int(cmdb_meta.field_type or 0)
+            cmdb_ui_type = str(cmdb_meta.ui_type or "").strip().lower()
+            if cmdb_field_type == 4 or "multiselect" in cmdb_ui_type:
+                auto_fields["CMDB唯一id"] = cmdb_unique_ids or None
+            elif cmdb_field_type == 1 or "text" in cmdb_ui_type:
+                auto_fields["CMDB唯一id"] = (
+                    "、".join(cmdb_unique_ids) if cmdb_unique_ids else None
+                )
+            elif cmdb_record_ids:
+                raise PortalError(
+                    "维修项目表字段“CMDB唯一id-L”必须是文本或多选字段，"
+                    "否则无法保存多个智航唯一ID。"
+                )
+            else:
+                auto_fields["CMDB唯一id"] = None
+            if missing_cmdb_records:
+                cmdb_sync_warnings.append(
+                    f"已选的 {len(missing_cmdb_records)} 条 CMDB 记录已不存在，"
+                    "未写入 CMDB唯一id-L。"
+                )
+            if missing_unique_ids:
+                cmdb_sync_warnings.append(
+                    f"已选的 {len(missing_unique_ids)} 条 CMDB 记录未填写"
+                    "“智航唯一ID”，未写入 CMDB唯一id-L。"
+                )
+        elif cmdb_record_ids:
+            cmdb_sync_warnings.append(
+                "维修项目表缺少“CMDB唯一id-L”字段，已保留跟进记录中的 CMDB 选择。"
+            )
         for field_name in REPAIR_MANAGEMENT_FOLLOWUP_AUTO_FIELD_NAMES:
             if field_name in meta_by_name:
                 auto_fields.setdefault(field_name, None)
@@ -6143,6 +6308,7 @@ class MaintenancePortalService:
             dict.fromkeys(
                 [
                     *(auto.get("warnings") or []),
+                    *cmdb_sync_warnings,
                     *warnings,
                     *workflow_warnings,
                 ]
@@ -8590,6 +8756,10 @@ class MaintenancePortalService:
             item,
             meta_by_name=meta_by_name,
         )
+        is_completed = (
+            re.sub(r"\s+", "", workflow)
+            == REPAIR_MANAGEMENT_COMPLETED_WORKFLOW
+        )
         return {
             "record_id": str(item.get("record_id") or ""),
             "title": self._repair_management_title(item),
@@ -8597,6 +8767,8 @@ class MaintenancePortalService:
             "last_modified_time": last_modified_time,
             "building_codes": self._repair_record_building_codes(item),
             "workflow": workflow,
+            "is_completed": is_completed,
+            "read_only": is_completed,
             "display_fields": display_fields,
             "raw_fields": raw_fields,
             "source_event_id": source_event_ids[0] if source_event_ids else "",
@@ -8711,11 +8883,20 @@ class MaintenancePortalService:
         *,
         scope: str = "ALL",
         query: str = "",
+        state: str = "all",
         limit: int = 200,
         offset: int = 0,
         focus_record_id: str = "",
         force_refresh: bool = False,
     ) -> dict[str, Any]:
+        normalized_state = str(state or "all").strip().lower()
+        if normalized_state in {"active", "open", "in_progress", "unfinished"}:
+            normalized_state = "active"
+        elif normalized_state in {"completed", "closed", "done", "finished"}:
+            normalized_state = "completed"
+        else:
+            normalized_state = "all"
+
         snapshot_schema = self._repair_management_snapshot_schema(
             force_refresh=force_refresh
         )
@@ -8725,7 +8906,16 @@ class MaintenancePortalService:
                 REPAIR_SNAPSHOT_SOURCE_PROJECTS,
                 scope=self._normalize_scope(scope),
                 query=query,
-                excluded_statuses=[REPAIR_MANAGEMENT_COMPLETED_WORKFLOW],
+                included_statuses=(
+                    [REPAIR_MANAGEMENT_COMPLETED_WORKFLOW]
+                    if normalized_state == "completed"
+                    else None
+                ),
+                excluded_statuses=(
+                    [REPAIR_MANAGEMENT_COMPLETED_WORKFLOW]
+                    if normalized_state == "active"
+                    else None
+                ),
                 limit=limit,
                 offset=offset,
                 focus_record_id=focus_record_id,
@@ -8794,6 +8984,7 @@ class MaintenancePortalService:
                 "returned": len(payload_records),
                 "offset": int(page.get("offset") or 0),
                 "has_more": bool(page.get("has_more")),
+                "state": normalized_state,
             }
 
         metas, meta_by_name, records = self._load_repair_management_project_records(
@@ -8810,11 +9001,24 @@ class MaintenancePortalService:
         records = [
             item
             for item in records
-            if not self._repair_management_is_completed(
-                item,
-                meta_by_name=meta_by_name,
+            if self._repair_management_record_in_scope(item, scope)
+            and (
+                normalized_state == "all"
+                or (
+                    normalized_state == "completed"
+                    and self._repair_management_is_completed(
+                        item,
+                        meta_by_name=meta_by_name,
+                    )
+                )
+                or (
+                    normalized_state == "active"
+                    and not self._repair_management_is_completed(
+                        item,
+                        meta_by_name=meta_by_name,
+                    )
+                )
             )
-            and self._repair_management_record_in_scope(item, scope)
         ]
         query_text = str(query or "").strip().lower()
         if query_text:
@@ -8885,6 +9089,7 @@ class MaintenancePortalService:
             "returned": len(payload_records),
             "offset": page_offset,
             "has_more": page_offset + len(payload_records) < len(records),
+            "state": normalized_state,
         }
 
     @classmethod

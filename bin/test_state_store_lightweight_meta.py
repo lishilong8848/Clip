@@ -167,6 +167,14 @@ class StateStoreLightweightMetaTests(unittest.TestCase):
             self.assertEqual(searched["total"], 1)
             self.assertEqual(searched["records"][0]["record_id"], "rec_a_new")
 
+            completed = store.query_repair_snapshot_page(
+                "repair_projects",
+                scope="A",
+                included_statuses=["维修完成"],
+            )
+            self.assertEqual(completed["total"], 1)
+            self.assertEqual(completed["records"][0]["record_id"], "rec_a_done")
+
     def test_repair_snapshot_page_sorts_numeric_times_numerically(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = LanPortalStateStore(Path(tmp) / "state.sqlite3")

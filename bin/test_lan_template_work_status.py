@@ -823,6 +823,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "所属专业": "电气",
                 "流程": "处理中",
                 "设备检修关联": "rec_repair_target",
+                "CMDB唯一id": "ZH-CMDB-1、ZH-CMDB-2",
             },
         )
         followup_fields = MaintenancePortalService._repair_physical_record_fields(
@@ -840,6 +841,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(
             summary_fields["设备检修关联-L"],
             "rec_repair_target",
+        )
+        self.assertEqual(
+            summary_fields["CMDB唯一id-L"],
+            "ZH-CMDB-1、ZH-CMDB-2",
         )
         self.assertNotIn("设备检修关联", summary_fields)
         self.assertNotIn("流程", summary_fields)
@@ -5982,6 +5987,68 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(len(tasks), 1)
             self.assertEqual(tasks[0]["attempts"], 1)
             self.assertIn("飞书临时不可用", tasks[0]["last_error"])
+
+    def test_local_remove_active_item_never_deletes_remote_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            item = {
+                "active_item_id": "active-local-remove",
+                "record_id": "recv-local-remove",
+                "target_record_id": "recv-local-remove",
+                "notice_type": "维保通告",
+                "work_type": "maintenance",
+                "title": "A楼本地移除测试",
+                "building_codes": ["A"],
+                "status": "开始",
+                "text": "【维保通告】状态：开始\n【名称】A楼本地移除测试",
+            }
+            store.upsert_qt_active_item(item, section="other", origin="qt")
+            with patch.object(PortalRuntime, "state_store", store), patch(
+                "lan_bitable_template_portal.server.delete_bitable_record"
+            ) as remote_delete:
+                first = PortalRuntime.execute_local_remove_active_item(
+                    {"data_dict": item}
+                )
+                second = PortalRuntime.execute_local_remove_active_item(
+                    {"data_dict": item}
+                )
+
+            self.assertTrue(first["ok"])
+            self.assertTrue(first["qt_removed"])
+            self.assertFalse(first["remote_deleted"])
+            self.assertTrue(second["ok"])
+            self.assertTrue(second["already_absent"])
+            self.assertFalse(second["remote_deleted"])
+            self.assertEqual(store.list_qt_active_items(), [])
+            remote_delete.assert_not_called()
+
+    def test_local_remove_active_item_reports_sqlite_delete_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            item = {
+                "active_item_id": "active-local-remove-failure",
+                "record_id": "recv-local-remove-failure",
+                "target_record_id": "recv-local-remove-failure",
+                "notice_type": "维保通告",
+                "work_type": "maintenance",
+                "building_codes": ["A"],
+                "status": "开始",
+                "text": "【维保通告】状态：开始\n【名称】A楼本地移除失败测试",
+            }
+            store.upsert_qt_active_item(item, section="other", origin="qt")
+            with patch.object(PortalRuntime, "state_store", store), patch.object(
+                store,
+                "delete_qt_active_item",
+                side_effect=RuntimeError("sqlite locked"),
+            ):
+                result = PortalRuntime.execute_local_remove_active_item(
+                    {"data_dict": item}
+                )
+
+            self.assertFalse(result["ok"])
+            self.assertFalse(result["remote_deleted"])
+            self.assertIn("sqlite locked", result["message"])
+            self.assertEqual(len(store.list_qt_active_items()), 1)
 
     def test_server_get_ongoing_reads_qt_active_items_before_qt_callback(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -14477,6 +14544,77 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             with PortalRuntime.auth_manager._lock:
                 PortalRuntime.auth_manager._sessions = original_sessions
 
+    def test_fastapi_remove_local_updates_sqlite_and_qt_outbox_without_remote_delete(self):
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        original_service = PortalRuntime.service
+        original_state_store = PortalRuntime.state_store
+        original_sessions = dict(PortalRuntime.auth_manager._sessions)
+        temp_dir = tempfile.TemporaryDirectory()
+        store = LanPortalStateStore(Path(temp_dir.name) / "state.sqlite3")
+        PortalRuntime.state_store = store
+        PortalRuntime.service = _NativeFastAPIRouteService()
+        item = {
+            "active_item_id": "active-api-local-remove",
+            "record_id": "recv-api-local-remove",
+            "target_record_id": "recv-api-local-remove",
+            "notice_type": "维保通告",
+            "work_type": "maintenance",
+            "title": "A楼接口本地移除测试",
+            "building_codes": ["A"],
+            "status": "开始",
+            "text": "【维保通告】状态：开始\n【名称】A楼接口本地移除测试",
+        }
+        store.upsert_qt_active_item(item, section="other", origin="qt")
+        session_id = "local-remove-admin-session"
+        admin_open_id = PortalRuntime.auth_manager.admin_open_ids()[0]
+        with PortalRuntime.auth_manager._lock:
+            PortalRuntime.auth_manager._sessions[session_id] = {
+                "session_id": session_id,
+                "user": {"name": "测试管理员", "open_id": admin_open_id},
+                "role": "admin",
+                "allowed_scopes": ["ALL"],
+                "expires_at": time.time() + 3600,
+            }
+        client = TestClient(controller._build_app())
+        try:
+            headers = {"Cookie": f"{AUTH_COOKIE_NAME}={session_id}"}
+            with patch(
+                "lan_bitable_template_portal.server.delete_bitable_record"
+            ) as remote_delete:
+                response = client.post(
+                    "/api/ongoing-items/remove-local",
+                    headers=headers,
+                    json={
+                        "scope": "ALL",
+                        "active_item_id": item["active_item_id"],
+                        "target_record_id": item["target_record_id"],
+                        "record_id": item["record_id"],
+                        "work_type": item["work_type"],
+                        "notice_type": item["notice_type"],
+                    },
+                )
+
+            self.assertEqual(response.status_code, 200, response.text)
+            data = response.json()["data"]
+            self.assertTrue(data["qt_deleted"])
+            self.assertFalse(data["remote_deleted"])
+            self.assertEqual(store.list_qt_active_items(), [])
+            remote_delete.assert_not_called()
+
+            events = client.get("/api/qt/events?limit=1").json()["data"]["items"]
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["payload"]["kind"], "active_delete")
+            self.assertEqual(
+                events[0]["payload"]["payload"]["active_item_id"],
+                item["active_item_id"],
+            )
+        finally:
+            PortalRuntime.service = original_service
+            PortalRuntime.state_store = original_state_store
+            temp_dir.cleanup()
+            with PortalRuntime.auth_manager._lock:
+                PortalRuntime.auth_manager._sessions = original_sessions
+
     def test_fastapi_workbench_returns_current_qt_active_items(self):
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)
         original_service = PortalRuntime.service
@@ -16808,12 +16946,12 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         )
         self.assertEqual(payload["offset"], 2)
 
-    def test_repair_management_records_exclude_completed_workflow_before_pagination(self):
+    def test_repair_management_records_support_active_completed_and_all_states(self):
         service = _TestMaintenancePortalService()
         title_meta = FieldMeta("fld_title", "维修名称", "Text", 1, True, {}, [], False)
         workflow_meta = FieldMeta(
-            "fld_flow",
-            "流程",
+            "fld_flow_l",
+            "流程-L",
             "SingleSelect",
             3,
             False,
@@ -16832,30 +16970,50 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 {
                     "record_id": "rec_active_new",
                     "last_modified_time": "3",
-                    "display_fields": {"维修名称": "新项目", "流程": "维修进行中"},
+                    "display_fields": {"维修名称": "新项目", "流程-L": "维修中"},
                     "raw_fields": {},
                 },
                 {
                     "record_id": "rec_completed",
                     "last_modified_time": "2",
                     "display_fields": {"维修名称": "已完成项目"},
-                    "raw_fields": {"流程": "opt_completed"},
+                    "raw_fields": {"流程-L": "opt_completed"},
                 },
                 {
                     "record_id": "rec_active_old",
                     "last_modified_time": "1",
                     "display_fields": {"维修名称": "旧项目"},
-                    "raw_fields": {"流程": "待维修"},
+                    "raw_fields": {"流程-L": "未开始"},
                 },
             ]
         )
 
-        payload = service.get_repair_management_records(limit=1, offset=0)
+        all_payload = service.get_repair_management_records(limit=10, offset=0)
+        active_payload = service.get_repair_management_records(
+            state="active", limit=1, offset=0
+        )
+        completed_payload = service.get_repair_management_records(
+            state="completed", limit=10, offset=0
+        )
 
-        self.assertEqual(payload["total"], 2)
-        self.assertEqual([item["record_id"] for item in payload["records"]], ["rec_active_new"])
-        self.assertEqual(payload["records"][0]["workflow"], "维修进行中")
-        self.assertTrue(payload["has_more"])
+        self.assertEqual(all_payload["total"], 3)
+        self.assertEqual(all_payload["state"], "all")
+        self.assertEqual(active_payload["total"], 2)
+        self.assertEqual(
+            [item["record_id"] for item in active_payload["records"]],
+            ["rec_active_new"],
+        )
+        self.assertEqual(active_payload["records"][0]["workflow"], "维修中")
+        self.assertFalse(active_payload["records"][0]["read_only"])
+        self.assertTrue(active_payload["has_more"])
+        self.assertEqual(completed_payload["total"], 1)
+        self.assertEqual(completed_payload["state"], "completed")
+        self.assertEqual(
+            [item["record_id"] for item in completed_payload["records"]],
+            ["rec_completed"],
+        )
+        self.assertTrue(completed_payload["records"][0]["is_completed"])
+        self.assertTrue(completed_payload["records"][0]["read_only"])
 
     def test_repair_management_status_separates_active_and_completed_projects(self):
         service = _TestMaintenancePortalService()
@@ -20299,6 +20457,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
         metas = [
             meta("维修跟进记录"),
+            meta("CMDB唯一id"),
             meta("更换备件名称"),
             meta("更换备件数量", "Number", 2),
             meta("故障维修总费用（跟进完成的维修项）", "Number", 2),
@@ -20312,7 +20471,13 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         followups = [
             {
                 "record_id": "rec_followup_new",
-                "raw_fields": {REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: "rec_summary"},
+                "raw_fields": {
+                    REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: "rec_summary",
+                    REPAIR_FOLLOWUP_CMDB_FIELD_NAME: [
+                        "rec_cmdb_2",
+                        "rec_cmdb_1",
+                    ],
+                },
                 "display_fields": {
                     "创建时间": "2026-07-10 11:00",
                     "维修进度": "0.5",
@@ -20325,7 +20490,13 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             },
             {
                 "record_id": "rec_followup_done",
-                "raw_fields": {REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: "rec_summary"},
+                "raw_fields": {
+                    REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: "rec_summary",
+                    REPAIR_FOLLOWUP_CMDB_FIELD_NAME: [
+                        "rec_cmdb_1",
+                        "rec_cmdb_3",
+                    ],
+                },
                 "display_fields": {
                     "创建时间": "2026-07-10 10:00",
                     "维修进度": "1",
@@ -20363,6 +20534,26 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         service._ensure_repair_followup_parent_id_field = (  # type: ignore[method-assign]
             lambda: ([followup_parent], {followup_parent.field_name: followup_parent})
         )
+        cmdb_records = [
+            {
+                "record_id": "rec_cmdb_1",
+                "raw_fields": {},
+                "display_fields": {"智航唯一ID": "ZH-CMDB-1"},
+            },
+            {
+                "record_id": "rec_cmdb_2",
+                "raw_fields": {},
+                "display_fields": {"智航唯一ID": "ZH-CMDB-2"},
+            },
+            {
+                "record_id": "rec_cmdb_3",
+                "raw_fields": {},
+                "display_fields": {"智航唯一ID": "ZH-CMDB-3"},
+            },
+        ]
+        service._load_repair_management_cmdb_records = (  # type: ignore[method-assign]
+            lambda: ([], {}, cmdb_records)
+        )
         service._load_table_records_by_ids = (  # type: ignore[method-assign]
             lambda **kwargs: [
                 next(
@@ -20387,6 +20578,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             fields["维修跟进记录"],
             "rec_followup_new,rec_followup_done",
         )
+        self.assertEqual(
+            fields["CMDB唯一id"],
+            "ZH-CMDB-2、ZH-CMDB-1、ZH-CMDB-3",
+        )
         self.assertEqual(fields["当前维修进度"], 0.5)
         self.assertEqual(fields["维修进展描述"], "处理中")
         self.assertEqual(fields["后续整改措施"], "下周复查运行参数")
@@ -20394,6 +20589,72 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(fields["更换备件数量"], 5)
         self.assertEqual(fields["故障维修总费用（跟进完成的维修项）"], 100)
         self.assertNotIn("维修方案附件", fields)
+
+    def test_repair_management_cmdb_unique_ids_keep_order_and_skip_missing_values(self):
+        service = _TestMaintenancePortalService()
+        cmdb_records = [
+            {
+                "record_id": "rec_cmdb_1",
+                "raw_fields": {},
+                "display_fields": {"智航唯一ID": "ZH-CMDB-1"},
+            },
+            {
+                "record_id": "rec_cmdb_2",
+                "raw_fields": {"智航唯一ID": "ZH-CMDB-1"},
+                "display_fields": {},
+            },
+            {
+                "record_id": "rec_cmdb_3",
+                "raw_fields": {},
+                "display_fields": {},
+            },
+        ]
+        service._load_repair_management_cmdb_records = (  # type: ignore[method-assign]
+            lambda: ([], {}, cmdb_records)
+        )
+
+        unique_ids, missing_records, missing_unique_ids = (
+            service._resolve_repair_management_cmdb_unique_ids(
+                ["rec_cmdb_2", "rec_cmdb_1", "rec_cmdb_3"]
+            )
+        )
+
+        self.assertEqual(unique_ids, ["ZH-CMDB-1"])
+        self.assertEqual(missing_records, [])
+        self.assertEqual(missing_unique_ids, ["rec_cmdb_3"])
+
+    def test_repair_management_cmdb_meta_refreshes_stale_relation_snapshot(self):
+        service = _TestMaintenancePortalService()
+        stale_relation = FieldMeta(
+            "fld_cmdb_relation",
+            "CMDB唯一id",
+            "DuplexLink",
+            21,
+            False,
+            {},
+            [],
+            False,
+        )
+        writable_text = FieldMeta(
+            "fld_cmdb_text",
+            "CMDB唯一id",
+            "Text",
+            1,
+            False,
+            {},
+            [],
+            False,
+        )
+        service._load_table_fields = (  # type: ignore[method-assign]
+            lambda **_kwargs: ([writable_text], {"CMDB唯一id": writable_text})
+        )
+
+        refreshed, selected = service._repair_management_cmdb_summary_meta(
+            {"CMDB唯一id": stale_relation}
+        )
+
+        self.assertIs(selected, writable_text)
+        self.assertIs(refreshed["CMDB唯一id"], writable_text)
 
     def test_repair_management_sync_adds_missing_warranty_option(self):
         service = _TestMaintenancePortalService()
@@ -20421,9 +20682,20 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             ["未开始", "维修中", "维修完成"],
             False,
         )
+        cmdb_meta = FieldMeta(
+            "fld_cmdb_l",
+            "CMDB唯一id",
+            "Text",
+            1,
+            False,
+            {},
+            [],
+            False,
+        )
         meta_by_name = {
             warranty_meta.field_name: warranty_meta,
             workflow_meta.field_name: workflow_meta,
+            cmdb_meta.field_name: cmdb_meta,
         }
         captured: list[dict] = []
         ensured = {}
@@ -20469,6 +20741,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(ensured["table_id"], REPAIR_MANAGEMENT_TABLE_ID)
         self.assertEqual(ensured["context_label"], "维修项目")
         self.assertEqual(captured[0]["fields"]["是否质保期内"], "是")
+        self.assertIsNone(captured[0]["fields"]["CMDB唯一id"])
         self.assertEqual(captured[-1]["fields"], {"流程": "opt_pending"})
 
     def test_repair_followup_create_prefills_summary_and_multiple_cmdb_fields(self):
@@ -20550,6 +20823,110 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(prepared["设备编号"], "A-219-CRAH-01、A-220-CRAH-02")
         self.assertEqual(prepared["设备品牌"], "用户品牌")
         self.assertEqual(prepared["供应商名称"], "汇总供应商")
+
+    def test_repair_followup_update_accepts_multiple_cmdb_records(self):
+        service = _TestMaintenancePortalService()
+        metas = [
+            FieldMeta(
+                "fld_parent",
+                REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME,
+                "Text",
+                1,
+                False,
+                {},
+                [],
+                False,
+            ),
+            FieldMeta(
+                "fld_cmdb",
+                REPAIR_FOLLOWUP_CMDB_FIELD_NAME,
+                "DuplexLink",
+                21,
+                False,
+                {},
+                [],
+                False,
+            ),
+            FieldMeta("fld_name", "设备名称", "Text", 1, False, {}, [], False),
+            FieldMeta("fld_no", "设备编号", "Text", 1, False, {}, [], False),
+        ]
+        meta_by_name = {item.field_name: item for item in metas}
+        existing_followup = {
+            "record_id": "rec_followup",
+            "raw_fields": {
+                REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: "rec_summary",
+                REPAIR_FOLLOWUP_CMDB_FIELD_NAME: ["rec_cmdb_old"],
+            },
+            "display_fields": {},
+        }
+        cmdb_records = [
+            {
+                "record_id": "rec_cmdb_1",
+                "raw_fields": {},
+                "display_fields": {"设备名称": "A-UPS-01"},
+            },
+            {
+                "record_id": "rec_cmdb_2",
+                "raw_fields": {},
+                "display_fields": {"设备名称": "A-UPS-02"},
+            },
+        ]
+        captured: list[dict] = []
+        service._ensure_repair_followup_parent_id_field = (  # type: ignore[method-assign]
+            lambda: (metas, meta_by_name)
+        )
+
+        def load_records(**kwargs):
+            if kwargs.get("table_id") == REPAIR_FOLLOWUP_TABLE_ID:
+                return [existing_followup]
+            return [
+                record
+                for record_id in kwargs.get("record_ids") or []
+                for record in cmdb_records
+                if record["record_id"] == record_id
+            ]
+
+        service._load_table_records_by_ids = load_records  # type: ignore[method-assign]
+        service._ensure_repair_management_record_in_scope = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: {
+                "record_id": "rec_summary",
+                "raw_fields": {},
+                "display_fields": {},
+            }
+        )
+        service._load_repair_management_cmdb_records = (  # type: ignore[method-assign]
+            lambda: ([], {}, cmdb_records)
+        )
+        service._ensure_repair_followup_select_options = (  # type: ignore[method-assign]
+            lambda fields, source_meta_by_name, **_kwargs: (
+                list(source_meta_by_name.values()),
+                source_meta_by_name,
+            )
+        )
+        service._patch_record_fields = (  # type: ignore[method-assign]
+            lambda **kwargs: captured.append(kwargs) or {"code": 0}
+        )
+        service._upsert_repair_snapshot_fields = (  # type: ignore[method-assign]
+            lambda **_kwargs: None
+        )
+        service._sync_repair_management_from_followup = (  # type: ignore[method-assign]
+            lambda **_kwargs: []
+        )
+
+        result = service.update_repair_followup_record(
+            "rec_followup",
+            summary_record_id="rec_summary",
+            fields={},
+            cmdb_record_ids=["rec_cmdb_1", "rec_cmdb_2"],
+            scope="A",
+        )
+
+        self.assertFalse(result["summary_sync_pending"])
+        self.assertEqual(
+            captured[0]["fields"][REPAIR_FOLLOWUP_CMDB_FIELD_NAME],
+            ["rec_cmdb_1", "rec_cmdb_2"],
+        )
+        self.assertEqual(captured[0]["fields"]["设备名称"], "A-UPS-01、A-UPS-02")
 
     def test_repair_followup_internal_party_clears_supplier_fields(self):
         service = _TestMaintenancePortalService()

@@ -3620,6 +3620,7 @@ class LanPortalStateStore:
         *,
         scope: str = "ALL",
         query: str = "",
+        included_statuses: list[str] | tuple[str, ...] | None = None,
         excluded_statuses: list[str] | tuple[str, ...] | None = None,
         limit: int = 200,
         offset: int = 0,
@@ -3662,20 +3663,35 @@ class LanPortalStateStore:
             )
             params.append(normalized_scope)
 
-        normalized_statuses = list(
+        normalized_included_statuses = list(
+            dict.fromkeys(
+                re.sub(r"\s+", "", self._text(value))
+                for value in (included_statuses or [])
+                if self._text(value)
+            )
+        )
+        if normalized_included_statuses:
+            placeholders = ",".join("?" for _ in normalized_included_statuses)
+            clauses.append(
+                "REPLACE(REPLACE(REPLACE(TRIM(status), ' ', ''), "
+                f"CHAR(9), ''), CHAR(10), '') IN ({placeholders})"
+            )
+            params.extend(normalized_included_statuses)
+
+        normalized_excluded_statuses = list(
             dict.fromkeys(
                 re.sub(r"\s+", "", self._text(value))
                 for value in (excluded_statuses or [])
                 if self._text(value)
             )
         )
-        if normalized_statuses:
-            placeholders = ",".join("?" for _ in normalized_statuses)
+        if normalized_excluded_statuses:
+            placeholders = ",".join("?" for _ in normalized_excluded_statuses)
             clauses.append(
                 "REPLACE(REPLACE(REPLACE(TRIM(status), ' ', ''), "
                 f"CHAR(9), ''), CHAR(10), '') NOT IN ({placeholders})"
             )
-            params.extend(normalized_statuses)
+            params.extend(normalized_excluded_statuses)
 
         query_text = self._text(query).casefold()
         if query_text:

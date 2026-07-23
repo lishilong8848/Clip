@@ -3205,6 +3205,7 @@ class FastAPIPortalController:
                     PortalRuntime.service.get_repair_management_records,
                     scope=request.query_params.get("scope") or "ALL",
                     query=query,
+                    state=str(request.query_params.get("state") or "all"),
                     limit=limit,
                     offset=offset,
                     focus_record_id=str(
@@ -3893,7 +3894,10 @@ class FastAPIPortalController:
                         },
                     },
                 )
-                data["qt_deleted"] = bool(remove_result.get("active_item_id") or remove_result.get("record_id"))
+                data["qt_deleted"] = bool(
+                    remove_result.get("qt_removed")
+                    or remove_result.get("already_absent")
+                )
                 data["qt_event_id"] = event_id
                 data["remote_deleted"] = False
                 return self._json_ok(request, session, data)

@@ -1,10 +1,11 @@
 <template>
-  <section class="followup-panel" :class="{ embedded }">
+  <section class="followup-panel" :class="{ embedded, readonly: readOnly }">
     <header class="followup-head">
       <div class="followup-title">
         <strong>{{ summaryTitle || "尚未选择维修项目" }}</strong>
       </div>
       <div class="followup-head-actions">
+        <b v-if="readOnly" class="followup-readonly-badge">只读</b>
         <b class="followup-count">{{ total }} 条</b>
       </div>
     </header>
@@ -74,21 +75,23 @@
       </aside>
 
       <main class="followup-editor">
-        <div class="followup-editor-head">
+        <div v-if="readOnly && !editingRecordId" class="followup-empty">暂无跟进记录</div>
+
+        <div v-show="!readOnly || Boolean(editingRecordId)" class="followup-editor-head">
           <strong>{{ editingRecordId ? selectedRecord?.title || "编辑跟进" : "填写新跟进" }}</strong>
         </div>
 
-        <div class="cmdb-line">
+        <div v-show="!readOnly || Boolean(editingRecordId)" class="cmdb-line">
           <div>
-            <b>CMDB 设备</b>
+            <b>CMDB 设备（可多选）</b>
             <span>{{ selectedCmdbLabel }}</span>
           </div>
-          <button type="button" class="followup-button quiet" @click="openCmdbPicker">
+          <button v-if="!readOnly" type="button" class="followup-button quiet" @click="openCmdbPicker">
             {{ cmdbRecordIds.length ? "重新选择" : "选择设备" }}
           </button>
         </div>
 
-        <div class="followup-sections">
+        <div v-show="!readOnly || Boolean(editingRecordId)" class="followup-sections">
           <section v-for="group in groupedFields" :key="group.key" class="followup-field-section">
             <header>
               <strong>{{ group.label }}</strong>
@@ -100,6 +103,7 @@
                   :scope="scope"
                   :input-id="followupFieldInputId(field)"
                   :model-value="workerPeople"
+                  :disabled="readOnly"
                   @update:model-value="updateWorkerPeople"
                 />
                 <RepairFieldControl
@@ -114,7 +118,7 @@
                   :percentage="isProgressField(field)"
                   :select-options="selectOptionsForField(field)"
                   :allow-custom-select="isModelField(field)"
-                  :disabled="isFollowupFieldDisabled(field)"
+                  :disabled="readOnly || isFollowupFieldDisabled(field)"
                   :placeholder="fieldPlaceholder(field)"
                   :number-min="isProgressField(field) ? 0 : undefined"
                   :number-max="isProgressField(field) ? 1 : undefined"
@@ -127,7 +131,7 @@
           </section>
         </div>
 
-        <footer class="followup-action-bar">
+        <footer v-if="!readOnly" class="followup-action-bar">
           <div class="followup-save-state" :class="followupSaveStateTone">
             <component :is="followupSaveStateIcon" :size="17" aria-hidden="true" />
             <span>{{ followupSaveStateText }}</span>
@@ -156,6 +160,10 @@
             </button>
           </div>
         </footer>
+        <div v-else-if="editingRecordId" class="followup-readonly-bar">
+          <LockKeyhole :size="16" aria-hidden="true" />
+          <span>已完成项目的跟进记录仅供查看</span>
+        </div>
       </main>
     </div>
 
@@ -180,7 +188,7 @@
 
     <RecordPickerDialog
       :open="cmdbPickerOpen"
-      title="选择 CMDB 设备"
+      title="选择 CMDB 设备（可多选）"
       :records="cmdbCandidates"
       :columns="cmdbColumns"
       :selected-ids="cmdbRecordIds"
@@ -207,6 +215,7 @@ import {
   Check,
   CheckCircle2,
   LoaderCircle,
+  LockKeyhole,
   Plus,
   RefreshCw,
   Save,
@@ -238,8 +247,10 @@ const props = withDefaults(defineProps<{
   summaryRecordId: string;
   summaryTitle: string;
   embedded?: boolean;
+  readOnly?: boolean;
 }>(), {
   embedded: false,
+  readOnly: false,
 });
 
 const emit = defineEmits<{
@@ -412,12 +423,14 @@ const primaryActionLabel = computed(() => {
   return editingRecordId.value ? "更新跟进记录" : "新增跟进记录";
 });
 const primaryActionDisabled = computed(() => {
+  if (props.readOnly) return true;
   if (saving.value || !props.summaryRecordId) return true;
   if (primaryActionMode.value === "create") return false;
   if (editingRecordId.value) return !followupDirty.value;
   return !hasDraftContent.value;
 });
 const primaryActionDisabledReason = computed(() => {
+  if (props.readOnly) return "已完成项目仅供查看";
   if (saving.value) return "正在保存";
   if (!props.summaryRecordId) return "请先选择维修项目";
   if (primaryActionMode.value === "create") return "新增一条跟进记录";
@@ -575,6 +588,7 @@ function markDirty(): void {
 }
 
 function updateFollowupField(field: LooseDict, value: string): void {
+  if (props.readOnly) return;
   const fieldName = String(field.field_name || "");
   draft[fieldName] = value;
   dirtyFieldNames.add(fieldName);
@@ -603,6 +617,7 @@ function updateFollowupField(field: LooseDict, value: string): void {
 }
 
 function updateWorkerPeople(value: LooseDict[]): void {
+  if (props.readOnly) return;
   workerPeople.value = value;
   dirtyFieldNames.add(WORKER_FIELD_NAME);
   markDirty();
@@ -637,6 +652,7 @@ function startCreate(): void {
 }
 
 function requestStartCreate(): void {
+  if (props.readOnly) return;
   if (creatingNewFollowup.value && !editingRecordId.value) return;
   runWithDirtyGuard(startCreate);
 }
@@ -808,11 +824,11 @@ async function loadRecords(announce = false): Promise<void> {
     } else if (!creatingNewFollowup.value && records.value.length) {
       selectRecord(records.value[0]);
     } else if (!records.value.length) {
-      creatingNewFollowup.value = true;
+      creatingNewFollowup.value = !props.readOnly;
       editingRecordId.value = "";
       selectedRecord.value = null;
       clearDraft();
-      applyNewFollowupDefaults();
+      if (!props.readOnly) applyNewFollowupDefaults();
       setDirty(false);
     } else {
       clearDraft();
@@ -853,6 +869,7 @@ function buildFields(): LooseDict {
 }
 
 function handlePrimaryAction(): void {
+  if (props.readOnly) return;
   if (primaryActionMode.value === "create") {
     requestStartCreate();
     return;
@@ -861,6 +878,7 @@ function handlePrimaryAction(): void {
 }
 
 async function saveRecord(): Promise<void> {
+  if (props.readOnly) return;
   if (saving.value || !props.summaryRecordId) return;
   const wasEditing = Boolean(editingRecordId.value);
   if (wasEditing && !followupDirty.value) {
@@ -915,6 +933,7 @@ async function saveRecord(): Promise<void> {
 }
 
 function requestDeleteRecord(): void {
+  if (props.readOnly) return;
   if (saving.value || !editingRecordId.value || !props.summaryRecordId) return;
   deleteDialogOpen.value = true;
 }
@@ -1003,6 +1022,7 @@ async function loadCmdbCandidates(resetLimit = true): Promise<void> {
 }
 
 async function openCmdbPicker(): Promise<void> {
+  if (props.readOnly) return;
   cmdbPickerOpen.value = true;
   await loadCmdbCandidates(true);
 }
@@ -1058,6 +1078,19 @@ watch(
     void loadRecords(false);
   },
   { immediate: true, flush: "sync" },
+);
+
+watch(
+  () => props.readOnly,
+  (readOnly) => {
+    if (!readOnly) return;
+    cmdbPickerOpen.value = false;
+    deleteDialogOpen.value = false;
+    discardDialogOpen.value = false;
+    pendingDiscardAction = null;
+    creatingNewFollowup.value = false;
+    setDirty(false);
+  },
 );
 
 watch(followupQuery, () => {
@@ -1140,6 +1173,18 @@ onBeforeUnmount(() => {
   color: #087a69;
   font-size: 12px;
   white-space: nowrap;
+}
+
+.followup-readonly-badge {
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 0 9px;
+  background: #eef2f6;
+  color: #566c85;
+  font-size: 11px;
+  font-weight: 750;
 }
 
 .followup-pager {
@@ -1586,6 +1631,20 @@ onBeforeUnmount(() => {
   background: rgba(255, 255, 255, 0.96);
   box-shadow: 0 10px 26px rgba(21, 67, 128, 0.13);
   backdrop-filter: blur(10px);
+}
+
+.followup-readonly-bar {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid #d9e3ef;
+  border-radius: 10px;
+  background: #f5f8fb;
+  color: #536a84;
+  font-size: 12px;
+  font-weight: 750;
 }
 
 .followup-action-bar > div,

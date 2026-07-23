@@ -42,12 +42,13 @@ class _FakeRepairEventRouteService:
         self,
         scope: str = "ALL",
         query: str = "",
+        state: str = "all",
         limit: int = 200,
         offset: int = 0,
         focus_record_id: str = "",
         force_refresh: bool = False,
     ) -> dict:
-        self.calls.append(("list_repair", scope, query, limit, focus_record_id))
+        self.calls.append(("list_repair", scope, query, state, limit, focus_record_id))
         return {
             "records": [],
             "fields": [{"field_name": "维修名称", "readonly": False}],
@@ -331,7 +332,7 @@ class BackendApiModelTests(unittest.TestCase):
                     headers=headers,
                 )
                 listed = client.get(
-                    "/api/repair-management/records?scope=E&q=冷站&limit=3&focus_record_id=rec-focus",
+                    "/api/repair-management/records?scope=E&q=冷站&state=completed&limit=3&focus_record_id=rec-focus",
                     headers=headers,
                 )
                 repair_status = client.get(
@@ -454,7 +455,7 @@ class BackendApiModelTests(unittest.TestCase):
             self.assertEqual(
                 service.calls,
                 [
-                    ("list_repair", "E", "冷站", 3, "rec-focus"),
+                    ("list_repair", "E", "冷站", "completed", 3, "rec-focus"),
                     (
                         "repair_status",
                         "E",
