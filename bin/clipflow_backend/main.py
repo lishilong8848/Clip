@@ -5264,10 +5264,11 @@ class FastAPIPortalController:
             PortalRuntime.service.ensure_snapshot_loaded()
         except Exception:
             pass
-        try:
-            PortalRuntime.service.start_repair_snapshot_warmup_async()
-        except Exception:
-            pass
+        if not _mock_external_enabled():
+            try:
+                PortalRuntime.service.start_repair_maintenance_async()
+            except Exception:
+                pass
         try:
             PortalRuntime.service.resume_repair_link_tasks_async()
         except Exception:
@@ -7686,6 +7687,22 @@ class FastAPIPortalController:
         ):
             PortalRuntime.state_store.put_backend_runtime("token_status", payload)
 
+    def _run_scheduled_repair_sync(self) -> None:
+        if _mock_external_enabled():
+            return
+        try:
+            PortalRuntime.service.process_due_repair_sync_tasks(limit=20)
+        except Exception as exc:
+            log_warning(f"检修汇总同步重试失败: {exc}")
+
+    def _run_scheduled_repair_maintenance(self) -> None:
+        if _mock_external_enabled():
+            return
+        try:
+            PortalRuntime.service.start_repair_maintenance_async()
+        except Exception as exc:
+            log_warning(f"检修后台维护触发失败: {exc}")
+
     def _run_scheduled_sqlite_maintenance(self) -> None:
         try:
             pressure = PortalRuntime.runtime_pressure()
@@ -7842,6 +7859,24 @@ class FastAPIPortalController:
             "interval",
             minutes=10,
             id="feishu_token_refresh",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+        scheduler.add_job(
+            self._run_scheduled_repair_sync,
+            "interval",
+            minutes=1,
+            id="repair_summary_sync",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+        scheduler.add_job(
+            self._run_scheduled_repair_maintenance,
+            "interval",
+            hours=6,
+            id="repair_maintenance",
             replace_existing=True,
             max_instances=1,
             coalesce=True,

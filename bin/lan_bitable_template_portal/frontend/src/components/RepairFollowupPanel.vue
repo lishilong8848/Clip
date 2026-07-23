@@ -220,7 +220,7 @@
       :has-more="bindCandidatesHaveMore"
       :result-note="bindCandidateNote"
       :query="bindQuery"
-      search-placeholder="搜索跟进内容、设备、楼栋或专业"
+      search-placeholder="搜索维修简述、维修名称、维修单号、专业或来源"
       @update:query="bindQuery = $event"
       @search="loadBindCandidates(true)"
       @load-more="loadBindCandidates(false)"
@@ -310,12 +310,12 @@ const cmdbColumns = [
   { key: "building", label: "楼栋", width: "100px" },
 ];
 const bindCandidateColumns = [
-  { key: "title", label: "跟进内容", width: "320px", wrap: true },
-  { key: "device_name", label: "设备", width: "200px", wrap: true },
-  { key: "created_time", label: "时间", width: "150px" },
-  { key: "progress", label: "进度", width: "90px" },
-  { key: "building", label: "楼栋", width: "100px" },
-  { key: "specialty", label: "专业", width: "100px" },
+  { key: "repair_summary", label: "维修简述", width: "300px", wrap: true },
+  { key: "repair_name", label: "维修名称", width: "260px", wrap: true },
+  { key: "progress", label: "维修进度", width: "110px" },
+  { key: "repair_order_no", label: "维修单号", width: "160px" },
+  { key: "specialty", label: "所属专业", width: "120px" },
+  { key: "repair_source", label: "维修来源", width: "160px", wrap: true },
 ];
 
 const DEVICE_NAME_FIELD_NAME = "设备名称";

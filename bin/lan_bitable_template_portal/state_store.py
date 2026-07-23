@@ -8536,6 +8536,54 @@ class LanPortalStateStore:
                 ).fetchone()
         return self._repair_management_operation_payload(row, created=False)
 
+    def list_repair_management_operations(
+        self,
+        *,
+        operation_types: tuple[str, ...] | list[str] = (),
+        statuses: tuple[str, ...] | list[str] = (),
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        normalized_types = [
+            self._text(operation_type)
+            for operation_type in (operation_types or [])
+            if self._text(operation_type)
+        ]
+        normalized_statuses = [
+            self._text(status)
+            for status in (statuses or [])
+            if self._text(status)
+        ]
+        if not normalized_types or not normalized_statuses or not self.db_path.exists():
+            return []
+        limit = max(1, min(int(limit or 100), 500))
+        type_placeholders = ", ".join("?" for _ in normalized_types)
+        status_placeholders = ", ".join("?" for _ in normalized_statuses)
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                rows = conn.execute(
+                    f"""
+                    SELECT *
+                    FROM repair_management_operations
+                    WHERE operation_type IN ({type_placeholders})
+                      AND status IN ({status_placeholders})
+                    ORDER BY updated_at ASC
+                    LIMIT ?
+                    """,
+                    (*normalized_types, *normalized_statuses, limit),
+                ).fetchall()
+        return [
+            payload
+            for row in rows
+            if (
+                payload := self._repair_management_operation_payload(
+                    row,
+                    created=False,
+                )
+            )
+            is not None
+        ]
+
     def update_repair_management_operation(
         self,
         operation_id: str,
