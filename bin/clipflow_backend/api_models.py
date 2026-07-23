@@ -101,6 +101,15 @@ class RepairFollowupRecordRequest(APIModel):
     fields: dict[str, Any] = Field(default_factory=dict)
 
 
+class RepairFollowupBindRequest(APIModel):
+    scope: str = "ALL"
+    summary_record_id: str
+    followup_record_ids: list[str] = Field(default_factory=list, max_length=100)
+
+    class Config(APIModel.Config):
+        extra = "forbid"
+
+
 class EventTransferRepairRequest(APIModel):
     scope: str = "ALL"
     month: str = ""

@@ -17,6 +17,7 @@ from clipflow_backend.api_models import (  # noqa: E402
     PermissionRequestReviewRequest,
     RepairManagementPrefillRequest,
     RepairManagementRecordRequest,
+    RepairFollowupBindRequest,
     RepairFollowupRecordRequest,
     QtClipboardAckRequest,
     QtActiveItemsDeltaRequest,
@@ -230,6 +231,48 @@ class _FakeRepairEventRouteService:
         self.calls.append(("list_followups", scope, summary_record_id, query, limit))
         return {"records": [{"record_id": "rec-followup"}], "fields": [], "total": 1}
 
+    def list_repair_followup_bind_candidates(
+        self,
+        *,
+        summary_record_id: str,
+        scope: str = "ALL",
+        query: str = "",
+        limit: int = 200,
+        force_refresh: bool = False,
+    ) -> dict:
+        self.calls.append(
+            (
+                "followup_bind_candidates",
+                scope,
+                summary_record_id,
+                query,
+                limit,
+                force_refresh,
+            )
+        )
+        return {"records": [{"record_id": "rec-unbound"}], "total": 1}
+
+    def bind_repair_followup_records(
+        self,
+        *,
+        summary_record_id: str,
+        followup_record_ids: list[str],
+        scope: str = "ALL",
+    ) -> dict:
+        self.calls.append(
+            (
+                "bind_followups",
+                scope,
+                summary_record_id,
+                tuple(followup_record_ids),
+            )
+        )
+        return {
+            "summary_record_id": summary_record_id,
+            "bound_record_ids": list(followup_record_ids),
+            "bound_count": len(followup_record_ids),
+        }
+
     def create_repair_followup_record(
         self,
         *,
@@ -306,6 +349,8 @@ class BackendApiModelTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             parse_api_model(RepairFollowupRecordRequest, {"scope": "E"})
+        with self.assertRaises(ValueError):
+            parse_api_model(RepairFollowupBindRequest, {"scope": "E"})
 
     def test_repair_management_and_event_transfer_routes_are_native_and_authorized(self):
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)
@@ -390,6 +435,22 @@ class BackendApiModelTests(unittest.TestCase):
                     "/api/repair-management/followups?scope=E&summary_record_id=rec-summary&q=进展&limit=9",
                     headers=headers,
                 )
+                followup_bind_candidates = client.get(
+                    "/api/repair-management/followup-bind-candidates?scope=E&summary_record_id=rec-summary&q=UPS&limit=15&refresh=1",
+                    headers=headers,
+                )
+                followup_bound = client.post(
+                    "/api/repair-management/followups/bind",
+                    headers=headers,
+                    json={
+                        "scope": "E",
+                        "summary_record_id": "rec-summary",
+                        "followup_record_ids": [
+                            "rec-unbound-1",
+                            "rec-unbound-2",
+                        ],
+                    },
+                )
                 followup_created = client.post(
                     "/api/repair-management/followups",
                     headers=headers,
@@ -444,6 +505,8 @@ class BackendApiModelTests(unittest.TestCase):
                 cmdb_candidates,
                 followup_people,
                 followups,
+                followup_bind_candidates,
+                followup_bound,
                 followup_created,
                 followup_updated,
                 followup_deleted,
@@ -491,6 +554,20 @@ class BackendApiModelTests(unittest.TestCase):
                     ("cmdb_candidates", "E", "CRAH", 8),
                     ("followup_people", "E", "张宇", 7, False),
                     ("list_followups", "E", "rec-summary", "进展", 9),
+                    (
+                        "followup_bind_candidates",
+                        "E",
+                        "rec-summary",
+                        "UPS",
+                        15,
+                        True,
+                    ),
+                    (
+                        "bind_followups",
+                        "E",
+                        "rec-summary",
+                        ("rec-unbound-1", "rec-unbound-2"),
+                    ),
                     (
                         "create_followup",
                         "E",

@@ -72,6 +72,7 @@ from clipflow_backend.api_models import (
     RepairManagementPrefillRequest,
     RepairManagementRecordRequest,
     RepairNoticeEventBindRequest,
+    RepairFollowupBindRequest,
     RepairFollowupRecordRequest,
     QtClipboardAckRequest,
     QtClipboardEventRequest,
@@ -3029,6 +3030,60 @@ class FastAPIPortalController:
                         request.query_params.get("refresh") or ""
                     ).lower()
                     in {"1", "true", "yes"},
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.get("/api/repair-management/followup-bind-candidates")
+        async def repair_management_followup_bind_candidates(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_scope_or_error(
+                    session, request.query_params.get("scope") or "ALL"
+                )
+                try:
+                    limit = int(request.query_params.get("limit") or 200)
+                except ValueError:
+                    limit = 200
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.list_repair_followup_bind_candidates,
+                    summary_record_id=str(
+                        request.query_params.get("summary_record_id") or ""
+                    ),
+                    scope=scope,
+                    query=str(request.query_params.get("q") or ""),
+                    limit=limit,
+                    force_refresh=str(
+                        request.query_params.get("refresh") or ""
+                    ).lower()
+                    in {"1", "true", "yes"},
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.post("/api/repair-management/followups/bind")
+        async def repair_management_followup_bind(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                payload = (
+                    await self._read_model_request(request, RepairFollowupBindRequest)
+                ).to_payload()
+                scope = self._authorized_scope_or_error(
+                    session, payload.get("scope") or "ALL"
+                )
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.bind_repair_followup_records,
+                    summary_record_id=str(
+                        payload.get("summary_record_id") or ""
+                    ),
+                    followup_record_ids=payload.get("followup_record_ids") or [],
+                    scope=scope,
                 )
                 return self._json_ok(request, session, data)
             except Exception as exc:

@@ -127,6 +127,8 @@ REPAIR_MANAGEMENT_REPAIR_LINK_STORAGE_FIELD_NAME = "设备检修关联-L"
 REPAIR_MANAGEMENT_REPAIR_LINK_FIELD_NAMES = (
     REPAIR_MANAGEMENT_REPAIR_LINK_FIELD_NAME,
 )
+REPAIR_MANAGEMENT_FOLLOWUP_LINK_FIELD_NAME = "维修跟进记录"
+REPAIR_MANAGEMENT_FOLLOWUP_LINK_STORAGE_FIELD_NAME = "维修跟进记录-L"
 REPAIR_MANAGEMENT_CUSTOM_MULTI_SELECT_FIELDS = {
     "对应来源",
     "维修来源",
@@ -156,7 +158,7 @@ REPAIR_MANAGEMENT_PROTECTED_FIELD_NAMES = {
     "流程",
     "关联事件单",
     "设备检修关联",
-    "维修跟进记录",
+    REPAIR_MANAGEMENT_FOLLOWUP_LINK_FIELD_NAME,
     "CMDB唯一id",
     "是否有唯一id",
     "智航设备名称",
@@ -219,7 +221,7 @@ REPAIR_MANAGEMENT_UNLINKED_REPAIR_EDITABLE_FIELD_NAMES = {
     "随工人员（或我方维修人员）",
 }
 REPAIR_MANAGEMENT_FOLLOWUP_AUTO_FIELD_NAMES = (
-    "维修跟进记录",
+    REPAIR_MANAGEMENT_FOLLOWUP_LINK_FIELD_NAME,
     "CMDB唯一id",
     "设备名称",
     "设备编号",
@@ -294,7 +296,7 @@ REPAIR_MANAGEMENT_NO_LEGACY_FALLBACK_FIELD_NAMES = frozenset(
 REPAIR_MANAGEMENT_SUFFIX_FIELD_NAMES = frozenset(
     {
         "维修名称",
-        "维修跟进记录",
+        REPAIR_MANAGEMENT_FOLLOWUP_LINK_FIELD_NAME,
         "当前日期",
         "设备检修关联",
         "维修开始时间",
@@ -1068,6 +1070,7 @@ class MaintenancePortalService:
         self._repair_management_progress_schema_ready = False
         self._repair_followup_sync_locks_guard = threading.RLock()
         self._repair_followup_sync_locks: dict[str, threading.RLock] = {}
+        self._repair_followup_binding_lock = threading.RLock()
         self._repair_followup_backfill_lock = threading.RLock()
         self._repair_followup_catalog_cache_lock = threading.RLock()
         self._repair_followup_catalog_cache: dict[str, Any] | None = None
@@ -4077,13 +4080,17 @@ class MaintenancePortalService:
         for name in (
             "关联事件单",
             REPAIR_MANAGEMENT_REPAIR_LINK_FIELD_NAME,
-            "维修跟进记录",
+            REPAIR_MANAGEMENT_FOLLOWUP_LINK_FIELD_NAME,
         ):
             if name not in meta_by_name:
                 display_name = (
                     REPAIR_MANAGEMENT_REPAIR_LINK_STORAGE_FIELD_NAME
                     if name == REPAIR_MANAGEMENT_REPAIR_LINK_FIELD_NAME
-                    else name
+                    else (
+                        REPAIR_MANAGEMENT_FOLLOWUP_LINK_STORAGE_FIELD_NAME
+                        if name == REPAIR_MANAGEMENT_FOLLOWUP_LINK_FIELD_NAME
+                        else name
+                    )
                 )
                 warnings.append(f"维修项目表缺少来源追踪字段：{display_name}")
         workflow_meta = meta_by_name.get(REPAIR_MANAGEMENT_WORKFLOW_FIELD_NAME)
@@ -4169,6 +4176,45 @@ class MaintenancePortalService:
             if record_id.startswith("rec"):
                 result.append(record_id)
         return list(dict.fromkeys(result))
+
+    @classmethod
+    def _repair_management_followup_ids_from_record(
+        cls,
+        record: dict[str, Any],
+    ) -> list[str]:
+        for bucket_name in ("raw_fields", "display_fields"):
+            bucket = (
+                record.get(bucket_name)
+                if isinstance(record.get(bucket_name), dict)
+                else {}
+            )
+            for field_name in (
+                REPAIR_MANAGEMENT_FOLLOWUP_LINK_FIELD_NAME,
+                REPAIR_MANAGEMENT_FOLLOWUP_LINK_STORAGE_FIELD_NAME,
+            ):
+                record_ids = cls._repair_management_record_ids(
+                    bucket.get(field_name)
+                )
+                if record_ids:
+                    return record_ids
+        return []
+
+    @staticmethod
+    def _require_repair_management_followup_link_meta(
+        meta_by_name: dict[str, FieldMeta],
+    ) -> FieldMeta:
+        meta = meta_by_name.get(REPAIR_MANAGEMENT_FOLLOWUP_LINK_FIELD_NAME)
+        if meta is None:
+            raise PortalError(
+                "维修项目表缺少文本字段“维修跟进记录-L”，"
+                "无法持久化跟进记录 ID。"
+            )
+        if int(meta.field_type or 0) != 1:
+            raise PortalError(
+                "维修项目表字段“维修跟进记录-L”必须是文本字段，"
+                "无法持久化跟进记录 ID。"
+            )
+        return meta
 
     @staticmethod
     def _repair_management_relation_table_ids(value: Any) -> list[str]:
@@ -5306,6 +5352,44 @@ class MaintenancePortalService:
         )
 
     @classmethod
+    def _repair_followup_record_in_scope(
+        cls,
+        record: dict[str, Any],
+        scope: str,
+    ) -> bool:
+        normalized_scope = cls._normalize_scope(scope)
+        if normalized_scope == "ALL":
+            return True
+        raw_fields = (
+            record.get("raw_fields")
+            if isinstance(record.get("raw_fields"), dict)
+            else {}
+        )
+        display_fields = (
+            record.get("display_fields")
+            if isinstance(record.get("display_fields"), dict)
+            else {}
+        )
+        values: list[Any] = []
+        for field_name in (
+            "楼栋",
+            "区域",
+            "所属数据中心",
+            "维修名称",
+            "设备名称",
+        ):
+            values.extend(
+                (
+                    display_fields.get(field_name),
+                    raw_fields.get(field_name),
+                )
+            )
+        codes = cls._building_codes_from_value(
+            " ".join(cls._repair_management_plain_text(value) for value in values)
+        )
+        return not codes or cls._scope_matches_buildings(normalized_scope, codes)
+
+    @classmethod
     def _repair_followup_counts_by_summary(
         cls,
         records: list[dict[str, Any]],
@@ -5737,6 +5821,262 @@ class MaintenancePortalService:
             "has_more": page_offset + len(page_records) < len(selected),
             "brand_model_options": brand_model_options,
         }
+
+    def list_repair_followup_bind_candidates(
+        self,
+        *,
+        summary_record_id: str,
+        scope: str = "ALL",
+        query: str = "",
+        limit: int = 200,
+        force_refresh: bool = False,
+    ) -> dict[str, Any]:
+        summary_id = str(summary_record_id or "").strip()
+        if not summary_id:
+            raise PortalError("选择待绑定跟进记录前，请先选择维修项目。")
+        normalized_scope = self._normalize_scope(scope)
+        self._ensure_repair_management_record_in_scope(summary_id, normalized_scope)
+        _metas, _meta_by_name, records = self._load_repair_followup_snapshot(
+            force_refresh=force_refresh
+        )
+        query_text = str(query or "").strip().casefold()
+        candidates: list[dict[str, Any]] = []
+        for record in records:
+            record_id = str(record.get("record_id") or "").strip()
+            if not record_id or self._repair_followup_parent_ids(record):
+                continue
+            display_fields = (
+                record.get("display_fields")
+                if isinstance(record.get("display_fields"), dict)
+                else {}
+            )
+            raw_fields = (
+                record.get("raw_fields")
+                if isinstance(record.get("raw_fields"), dict)
+                else {}
+            )
+            if not self._repair_followup_record_in_scope(
+                record,
+                normalized_scope,
+            ):
+                continue
+            title = self._repair_management_plain_text(
+                display_fields.get("维修简述")
+                or display_fields.get("维修进展描述")
+                or display_fields.get(REPAIR_FOLLOWUP_DEVICE_NAME_FIELD_NAME)
+                or raw_fields.get("维修简述")
+                or raw_fields.get("维修进展描述")
+                or raw_fields.get(REPAIR_FOLLOWUP_DEVICE_NAME_FIELD_NAME)
+            ).strip() or "未命名跟进记录"
+            created_time = self._format_source_datetime(
+                display_fields.get("创建时间")
+                or raw_fields.get("创建时间")
+                or record.get("created_time")
+                or record.get("last_modified_time")
+            )
+            device_name = self._repair_management_plain_text(
+                display_fields.get(REPAIR_FOLLOWUP_DEVICE_NAME_FIELD_NAME)
+                or raw_fields.get(REPAIR_FOLLOWUP_DEVICE_NAME_FIELD_NAME)
+            ).strip()
+            progress_value = (
+                display_fields.get("维修进度")
+                or raw_fields.get("维修进度")
+            )
+            progress_percent = self._repair_followup_progress_percent(
+                progress_value
+            )
+            progress = (
+                f"{progress_percent:g}%"
+                if progress_percent is not None
+                else self._repair_management_plain_text(progress_value).strip()
+            )
+            building = self._repair_management_plain_text(
+                display_fields.get("楼栋")
+                or display_fields.get("区域")
+                or display_fields.get("所属数据中心")
+                or raw_fields.get("楼栋")
+                or raw_fields.get("区域")
+                or raw_fields.get("所属数据中心")
+            ).strip()
+            specialty = self._repair_management_plain_text(
+                display_fields.get("所属专业")
+                or raw_fields.get("所属专业")
+            ).strip()
+            haystack = "\n".join(
+                (
+                    title,
+                    device_name,
+                    created_time,
+                    building,
+                    specialty,
+                    self._repair_management_plain_text(
+                        display_fields.get("维修名称")
+                        or raw_fields.get("维修名称")
+                    ),
+                )
+            ).casefold()
+            if query_text and query_text not in haystack:
+                continue
+            candidates.append(
+                {
+                    "record_id": record_id,
+                    "title": title,
+                    "device_name": device_name,
+                    "created_time": created_time,
+                    "progress": progress,
+                    "building": building,
+                    "specialty": specialty,
+                    "selectable": True,
+                }
+            )
+        candidates.sort(
+            key=lambda item: (
+                str(item.get("created_time") or ""),
+                str(item.get("record_id") or ""),
+            ),
+            reverse=True,
+        )
+        max_limit = max(1, min(int(limit or 200), 500))
+        return {
+            "summary_record_id": summary_id,
+            "records": candidates[:max_limit],
+            "total": len(candidates),
+            "returned": min(len(candidates), max_limit),
+            "has_more": len(candidates) > max_limit,
+        }
+
+    def bind_repair_followup_records(
+        self,
+        *,
+        summary_record_id: str,
+        followup_record_ids: list[str] | tuple[str, ...],
+        scope: str = "ALL",
+    ) -> dict[str, Any]:
+        summary_id = str(summary_record_id or "").strip()
+        if not summary_id:
+            raise PortalError("绑定跟进记录缺少维修项目 ID。")
+        selected_ids = list(
+            dict.fromkeys(
+                str(record_id or "").strip()
+                for record_id in (followup_record_ids or [])
+                if str(record_id or "").strip()
+            )
+        )
+        if not selected_ids:
+            raise PortalError("请至少选择一条待绑定跟进记录。")
+        if len(selected_ids) > 100:
+            raise PortalError("一次最多绑定 100 条跟进记录。")
+        normalized_scope = self._normalize_scope(scope)
+        self._ensure_repair_management_record_in_scope(
+            summary_id,
+            normalized_scope,
+        )
+
+        with self._repair_followup_binding_lock:
+            _metas, meta_by_name = self._ensure_repair_followup_parent_id_field()
+            records = self._load_table_records_by_ids(
+                app_token=REPAIR_SOURCE_APP_TOKEN,
+                table_id=REPAIR_FOLLOWUP_TABLE_ID,
+                meta_by_name=meta_by_name,
+                work_type=WORK_TYPE_REPAIR,
+                notice_type=NOTICE_TYPE_REPAIR,
+                record_ids=selected_ids,
+            )
+            records_by_id = {
+                str(record.get("record_id") or "").strip(): record
+                for record in records
+                if str(record.get("record_id") or "").strip()
+            }
+            missing_ids = [
+                record_id
+                for record_id in selected_ids
+                if record_id not in records_by_id
+            ]
+            if missing_ids:
+                raise PortalError(
+                    "以下跟进记录已不存在，请刷新后重选："
+                    + "、".join(missing_ids[:5])
+                )
+
+            already_bound_ids: list[str] = []
+            for record_id in selected_ids:
+                record = records_by_id[record_id]
+                parent_ids = self._repair_followup_parent_ids(record)
+                if parent_ids and summary_id not in parent_ids:
+                    raise PortalError(
+                        f"跟进记录 {record_id} 已绑定其他维修单，已阻止重新绑定。"
+                    )
+                if not self._repair_followup_record_in_scope(
+                    record,
+                    normalized_scope,
+                ):
+                    raise PortalError(
+                        f"跟进记录 {record_id} 不属于当前楼栋，不能绑定。"
+                    )
+                if summary_id in parent_ids:
+                    already_bound_ids.append(record_id)
+
+            bound_ids: list[str] = []
+            failed: list[str] = []
+            for record_id in selected_ids:
+                if record_id in already_bound_ids:
+                    continue
+                try:
+                    self._patch_record_fields(
+                        app_token=REPAIR_SOURCE_APP_TOKEN,
+                        table_id=REPAIR_FOLLOWUP_TABLE_ID,
+                        record_id=record_id,
+                        fields={
+                            REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: summary_id
+                        },
+                    )
+                    self._upsert_repair_snapshot_fields(
+                        source_key=REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS,
+                        record_id=record_id,
+                        fields={
+                            REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: summary_id
+                        },
+                        parent_record_id=summary_id,
+                    )
+                    bound_ids.append(record_id)
+                except Exception as exc:
+                    failed.append(f"{record_id}: {exc}")
+
+            if not bound_ids and not already_bound_ids:
+                raise PortalError(
+                    "跟进记录绑定失败："
+                    + "；".join(failed[:3])
+                )
+
+            warnings: list[str] = []
+            summary_sync_pending = False
+            try:
+                warnings.extend(
+                    self._sync_repair_management_from_followup(
+                        summary_record_id=summary_id,
+                        scope=normalized_scope,
+                    )
+                )
+            except Exception as exc:
+                summary_sync_pending = True
+                warnings.append(
+                    f"跟进记录已绑定，维修项目汇总暂未同步：{exc}"
+                )
+            if failed:
+                warnings.append(
+                    f"{len(failed)} 条跟进记录绑定失败："
+                    + "；".join(failed[:3])
+                )
+            return {
+                "summary_record_id": summary_id,
+                "bound_record_ids": bound_ids,
+                "already_bound_record_ids": already_bound_ids,
+                "bound_count": len(bound_ids),
+                "already_bound_count": len(already_bound_ids),
+                "failed_count": len(failed),
+                "warnings": list(dict.fromkeys(warnings)),
+                "summary_sync_pending": summary_sync_pending,
+            }
 
     @classmethod
     def _repair_followup_summary_copy_fields(
@@ -6277,11 +6617,14 @@ class MaintenancePortalService:
             key=self._repair_followup_order_key,
             reverse=True,
         )
-        followup_ids = [
-            str(record.get("record_id") or "").strip()
-            for record in linked_followups
-            if str(record.get("record_id") or "").strip()
-        ]
+        followup_ids = list(
+            dict.fromkeys(
+                str(record.get("record_id") or "").strip()
+                for record in linked_followups
+                if str(record.get("record_id") or "").strip()
+            )
+        )
+        self._require_repair_management_followup_link_meta(meta_by_name)
         auto = self._build_repair_management_prefill(
             scope=scope,
             event_record_id=event_ids[0] if event_ids else "",
@@ -6292,10 +6635,9 @@ class MaintenancePortalService:
             allow_multiple_followups=True,
         )
         auto_fields = dict(auto.get("fields") or {})
-        if "维修跟进记录" in meta_by_name:
-            auto_fields["维修跟进记录"] = (
-                ",".join(followup_ids) if followup_ids else None
-            )
+        auto_fields[REPAIR_MANAGEMENT_FOLLOWUP_LINK_FIELD_NAME] = (
+            ",".join(followup_ids) if followup_ids else None
+        )
         cmdb_record_ids: list[str] = []
         for followup in linked_followups:
             followup_raw = (
@@ -6833,6 +7175,7 @@ class MaintenancePortalService:
             }
             summary_by_order: dict[str, list[dict[str, Any]]] = {}
             summary_by_name: dict[str, list[dict[str, Any]]] = {}
+            summaries_by_followup_id: dict[str, list[dict[str, Any]]] = {}
             for summary in summaries:
                 display = summary.get("display_fields") or {}
                 raw = summary.get("raw_fields") or {}
@@ -6846,6 +7189,12 @@ class MaintenancePortalService:
                     summary_by_order.setdefault(order_key, []).append(summary)
                 if name_key:
                     summary_by_name.setdefault(name_key, []).append(summary)
+                for followup_id in self._repair_management_followup_ids_from_record(
+                    summary
+                ):
+                    summaries_by_followup_id.setdefault(followup_id, []).append(
+                        summary
+                    )
 
             updated = 0
             unchanged = 0
@@ -6861,6 +7210,13 @@ class MaintenancePortalService:
                 summary: dict[str, Any] | None = None
                 if len(parent_ids) == 1:
                     summary = summary_by_id.get(parent_ids[0])
+                if summary is None:
+                    backlink_candidates = summaries_by_followup_id.get(
+                        record_id,
+                        [],
+                    )
+                    if len(backlink_candidates) == 1:
+                        summary = backlink_candidates[0]
                 if summary is None:
                     order_key = self._repair_followup_match_key(
                         display.get("维修单号") or raw.get("维修单号")
@@ -6933,14 +7289,20 @@ class MaintenancePortalService:
                     warnings.append(f"{record_id}: {exc}")
 
             backlink_updates = 0
-            backlink_meta = summary_meta_by_name.get("维修跟进记录")
-            if backlink_meta is not None and int(backlink_meta.field_type or 0) == 1:
-                for summary_id, record_ids in linked_by_summary.items():
-                    normalized_ids = list(dict.fromkeys(record_ids))
-                    summary = summary_by_id[summary_id]
-                    current_ids = self._repair_management_record_ids(
-                        (summary.get("raw_fields") or {}).get("维修跟进记录")
-                        or (summary.get("display_fields") or {}).get("维修跟进记录")
+            try:
+                self._require_repair_management_followup_link_meta(
+                    summary_meta_by_name
+                )
+            except PortalError as exc:
+                failed += 1
+                warnings.append(str(exc))
+            else:
+                for summary_id, summary in summary_by_id.items():
+                    normalized_ids = list(
+                        dict.fromkeys(linked_by_summary.get(summary_id, []))
+                    )
+                    current_ids = self._repair_management_followup_ids_from_record(
+                        summary
                     )
                     if current_ids == normalized_ids:
                         continue
@@ -6950,7 +7312,18 @@ class MaintenancePortalService:
                             table_id=REPAIR_MANAGEMENT_TABLE_ID,
                             record_id=summary_id,
                             fields={
-                                "维修跟进记录": (
+                                REPAIR_MANAGEMENT_FOLLOWUP_LINK_FIELD_NAME: (
+                                    ",".join(normalized_ids)
+                                    if normalized_ids
+                                    else None
+                                )
+                            },
+                        )
+                        self._upsert_repair_snapshot_fields(
+                            source_key=REPAIR_SNAPSHOT_SOURCE_PROJECTS,
+                            record_id=summary_id,
+                            fields={
+                                REPAIR_MANAGEMENT_FOLLOWUP_LINK_FIELD_NAME: (
                                     ",".join(normalized_ids)
                                     if normalized_ids
                                     else None
@@ -7585,6 +7958,18 @@ class MaintenancePortalService:
                     value = fallback.get(field_name)
                 return value
 
+            def all_unique_text(field_name: str) -> str:
+                values: list[Any] = []
+                for raw_fields, display_fields in zip(
+                    followup_raw_fields,
+                    followup_display_fields,
+                ):
+                    value = display_fields.get(field_name)
+                    if value in (None, "", [], {}):
+                        value = raw_fields.get(field_name)
+                    values.append(value)
+                return self._repair_management_unique_text(values)
+
             latest_progress_percent = self._repair_followup_progress_percent(
                 latest_value("维修进度", prefer_raw=True)
             )
@@ -7613,11 +7998,21 @@ class MaintenancePortalService:
                     overwrite=True,
                 )
 
-            text_mappings = (
+            for target_name, source_name in (
                 ("设备名称", REPAIR_FOLLOWUP_DEVICE_NAME_FIELD_NAME),
                 ("设备编号", REPAIR_FOLLOWUP_DEVICE_NUMBER_FIELD_NAME),
                 ("设备品牌", REPAIR_FOLLOWUP_BRAND_FIELD_NAME),
                 ("设备型号", REPAIR_FOLLOWUP_MODEL_FIELD_NAME),
+            ):
+                self._repair_management_prefill_put(
+                    result,
+                    meta_by_name,
+                    target_name,
+                    all_unique_text(source_name),
+                    overwrite=True,
+                )
+
+            text_mappings = (
                 ("供应商名称", REPAIR_FOLLOWUP_SUPPLIER_FIELD_NAME),
                 (
                     "供应商维修人员",
@@ -8082,6 +8477,9 @@ class MaintenancePortalService:
         title = str((prepared or {}).get("title") or "").strip()
         if title:
             desired["检修通告名称"] = title
+        progress = str((prepared or {}).get("progress") or "").strip()
+        if progress:
+            desired["维修进展描述"] = progress
 
         action_time = self._action_response_time(prepared)
         existing_start = (

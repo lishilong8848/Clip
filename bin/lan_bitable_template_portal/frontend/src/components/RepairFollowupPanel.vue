@@ -5,6 +5,17 @@
         <strong>{{ summaryTitle || "尚未选择维修项目" }}</strong>
       </div>
       <div class="followup-head-actions">
+        <button
+          v-if="summaryRecordId"
+          type="button"
+          class="followup-button quiet compact followup-bind-button"
+          :disabled="bindLoading || binding"
+          title="选择未绑定的历史跟进记录"
+          @click="openFollowupBindPicker"
+        >
+          <Link2 :size="15" aria-hidden="true" />
+          <span>{{ binding ? "绑定中" : "绑定已有" }}</span>
+        </button>
         <b v-if="readOnly" class="followup-readonly-badge">只读</b>
         <b class="followup-count">{{ total }} 条</b>
       </div>
@@ -197,6 +208,27 @@
     />
 
     <RecordPickerDialog
+      :open="bindPickerOpen"
+      title="绑定已有跟进记录"
+      kicker="未绑定记录"
+      :records="bindCandidates"
+      :columns="bindCandidateColumns"
+      :selected-ids="bindSelectedIds"
+      :multiple="true"
+      :allow-empty="false"
+      :loading="bindLoading || binding"
+      :has-more="bindCandidatesHaveMore"
+      :result-note="bindCandidateNote"
+      :query="bindQuery"
+      search-placeholder="搜索跟进内容、设备、楼栋或专业"
+      @update:query="bindQuery = $event"
+      @search="loadBindCandidates(true)"
+      @load-more="loadBindCandidates(false)"
+      @close="closeFollowupBindPicker"
+      @confirm="confirmFollowupBinding"
+    />
+
+    <RecordPickerDialog
       :open="cmdbPickerOpen"
       title="选择 CMDB 设备（可多选）"
       :records="cmdbCandidates"
@@ -225,6 +257,7 @@ import {
   Check,
   CheckCircle2,
   LoaderCircle,
+  Link2,
   LockKeyhole,
   Plus,
   RefreshCw,
@@ -276,6 +309,14 @@ const cmdbColumns = [
   { key: "category", label: "分类名称", width: "160px" },
   { key: "building", label: "楼栋", width: "100px" },
 ];
+const bindCandidateColumns = [
+  { key: "title", label: "跟进内容", width: "320px", wrap: true },
+  { key: "device_name", label: "设备", width: "200px", wrap: true },
+  { key: "created_time", label: "时间", width: "150px" },
+  { key: "progress", label: "进度", width: "90px" },
+  { key: "building", label: "楼栋", width: "100px" },
+  { key: "specialty", label: "专业", width: "100px" },
+];
 
 const DEVICE_NAME_FIELD_NAME = "设备名称";
 const DEVICE_NUMBER_FIELD_NAME = "设备编号";
@@ -326,6 +367,8 @@ const visibleFollowupFieldNames = new Set(
 );
 const CMDB_CANDIDATE_BATCH_SIZE = 200;
 const CMDB_CANDIDATE_MAX_LIMIT = 1_000;
+const FOLLOWUP_BIND_BATCH_SIZE = 200;
+const FOLLOWUP_BIND_MAX_LIMIT = 500;
 
 const loading = ref(false);
 const saving = ref(false);
@@ -345,6 +388,15 @@ const cmdbCandidateLimit = ref(CMDB_CANDIDATE_BATCH_SIZE);
 const cmdbCandidatesHaveMore = ref(false);
 const cmdbCandidateNote = ref("");
 const cmdbRecordIds = ref<string[]>([]);
+const bindPickerOpen = ref(false);
+const bindLoading = ref(false);
+const binding = ref(false);
+const bindQuery = ref("");
+const bindCandidates = ref<LooseDict[]>([]);
+const bindSelectedIds = ref<string[]>([]);
+const bindCandidateLimit = ref(FOLLOWUP_BIND_BATCH_SIZE);
+const bindCandidatesHaveMore = ref(false);
+const bindCandidateNote = ref("");
 const workerPeople = ref<LooseDict[]>([]);
 const involvesSpareParts = ref(false);
 const brandModelOptions = ref<Record<string, string[]>>({});
@@ -361,10 +413,12 @@ const PAGE_SIZE = 20;
 let pendingDiscardAction: null | (() => void) = null;
 let recordsRequestVersion = 0;
 let cmdbRequestVersion = 0;
+let bindRequestVersion = 0;
 let queryTimer: ReturnType<typeof setTimeout> | undefined;
 let skipNextQueryReload = false;
 let recordsAbortController: AbortController | null = null;
 let cmdbAbortController: AbortController | null = null;
+let bindAbortController: AbortController | null = null;
 
 const editableFields = computed(() => fields.value.filter((field) => (
   field.editable
@@ -735,21 +789,33 @@ function requestSelectRecord(record: LooseDict): void {
 function resetForParent(): void {
   recordsRequestVersion += 1;
   cmdbRequestVersion += 1;
+  bindRequestVersion += 1;
   recordsAbortController?.abort();
   recordsAbortController = null;
   cmdbAbortController?.abort();
   cmdbAbortController = null;
+  bindAbortController?.abort();
+  bindAbortController = null;
   if (queryTimer) {
     clearTimeout(queryTimer);
     queryTimer = undefined;
   }
   loading.value = false;
   cmdbLoading.value = false;
+  bindLoading.value = false;
+  binding.value = false;
   records.value = [];
   fields.value = [];
   brandModelOptions.value = {};
   total.value = 0;
   cmdbPickerOpen.value = false;
+  bindPickerOpen.value = false;
+  bindQuery.value = "";
+  bindCandidates.value = [];
+  bindSelectedIds.value = [];
+  bindCandidateLimit.value = FOLLOWUP_BIND_BATCH_SIZE;
+  bindCandidatesHaveMore.value = false;
+  bindCandidateNote.value = "";
   deleteDialogOpen.value = false;
   discardDialogOpen.value = false;
   pendingDiscardAction = null;
@@ -1058,6 +1124,144 @@ async function loadCmdbCandidates(resetLimit = true): Promise<void> {
   }
 }
 
+async function loadBindCandidates(resetLimit = true): Promise<void> {
+  if (!props.summaryRecordId) return;
+  const previousCount = bindCandidates.value.length;
+  if (resetLimit) {
+    bindCandidateLimit.value = FOLLOWUP_BIND_BATCH_SIZE;
+    bindCandidateNote.value = "";
+  } else if (bindCandidateLimit.value < FOLLOWUP_BIND_MAX_LIMIT) {
+    bindCandidateLimit.value = Math.min(
+      FOLLOWUP_BIND_MAX_LIMIT,
+      bindCandidateLimit.value + FOLLOWUP_BIND_BATCH_SIZE,
+    );
+  } else {
+    bindCandidatesHaveMore.value = false;
+    return;
+  }
+  const requestedLimit = bindCandidateLimit.value;
+  const requestVersion = ++bindRequestVersion;
+  const summaryRecordId = props.summaryRecordId;
+  bindAbortController?.abort();
+  const abortController = new AbortController();
+  bindAbortController = abortController;
+  bindLoading.value = true;
+  try {
+    const params = new URLSearchParams({
+      scope: props.scope || "ALL",
+      summary_record_id: summaryRecordId,
+      q: bindQuery.value,
+      limit: String(requestedLimit),
+    });
+    const payload = await requestJson(
+      `/api/repair-management/followup-bind-candidates?${params.toString()}`,
+      { signal: abortController.signal },
+    );
+    if (
+      requestVersion !== bindRequestVersion
+      || summaryRecordId !== props.summaryRecordId
+    ) return;
+    bindCandidates.value = Array.isArray(payload.records) ? payload.records : [];
+    const loadedMore = bindCandidates.value.length > previousCount;
+    const moreAvailable = candidateHasMore(
+      payload,
+      bindCandidates.value.length,
+      requestedLimit,
+    );
+    const reachedVisibleLimit = moreAvailable
+      && (
+        requestedLimit >= FOLLOWUP_BIND_MAX_LIMIT
+        || (!resetLimit && !loadedMore)
+      );
+    bindCandidatesHaveMore.value = moreAvailable && !reachedVisibleLimit;
+    bindCandidateNote.value = reachedVisibleLimit
+      ? "候选较多，请输入关键词缩小范围。"
+      : `共 ${Number(payload.total || bindCandidates.value.length)} 条未绑定记录`;
+  } catch (error: unknown) {
+    if (abortController.signal.aborted) return;
+    if (requestVersion !== bindRequestVersion) return;
+    showMessage(
+      error instanceof Error ? error.message : "未绑定跟进记录读取失败。",
+      "failed",
+    );
+  } finally {
+    if (bindAbortController === abortController) bindAbortController = null;
+    if (requestVersion === bindRequestVersion) bindLoading.value = false;
+  }
+}
+
+async function openFollowupBindPicker(): Promise<void> {
+  if (!props.summaryRecordId || binding.value) return;
+  bindQuery.value = "";
+  bindSelectedIds.value = [];
+  bindPickerOpen.value = true;
+  await loadBindCandidates(true);
+}
+
+function closeFollowupBindPicker(): void {
+  if (binding.value) return;
+  bindRequestVersion += 1;
+  bindAbortController?.abort();
+  bindAbortController = null;
+  bindPickerOpen.value = false;
+  bindLoading.value = false;
+  bindSelectedIds.value = [];
+}
+
+async function confirmFollowupBinding(recordIds: string[]): Promise<void> {
+  if (binding.value || !props.summaryRecordId) return;
+  const selectedIds = Array.from(new Set(
+    recordIds.map((item) => String(item || "").trim()).filter(Boolean),
+  ));
+  if (!selectedIds.length) return;
+  bindSelectedIds.value = selectedIds;
+  binding.value = true;
+  try {
+    const payload = await requestJson(
+      "/api/repair-management/followups/bind",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          scope: props.scope || "ALL",
+          summary_record_id: props.summaryRecordId,
+          followup_record_ids: selectedIds,
+        }),
+      },
+    );
+    const boundCount = Math.max(0, Number(payload.bound_count || 0));
+    const alreadyBoundCount = Math.max(
+      0,
+      Number(payload.already_bound_count || 0),
+    );
+    const warnings = Array.isArray(payload.warnings)
+      ? payload.warnings
+        .map((item: unknown) => String(item || "").trim())
+        .filter(Boolean)
+      : [];
+    bindPickerOpen.value = false;
+    bindSelectedIds.value = [];
+    clearRepairFollowupCache(props.summaryRecordId);
+    await loadRecords(false);
+    emit("changed");
+    const resultText = boundCount
+      ? `已绑定 ${boundCount} 条跟进记录。`
+      : alreadyBoundCount
+        ? "所选跟进记录已绑定当前维修单。"
+        : "跟进记录绑定完成。";
+    showMessage(
+      warnings.length ? `${resultText}${warnings.join("；")}` : resultText,
+      warnings.length ? "warning" : "success",
+    );
+  } catch (error: unknown) {
+    showMessage(
+      error instanceof Error ? error.message : "跟进记录绑定失败。",
+      "failed",
+    );
+  } finally {
+    binding.value = false;
+  }
+}
+
 async function openCmdbPicker(): Promise<void> {
   if (props.readOnly) return;
   cmdbPickerOpen.value = true;
@@ -1145,10 +1349,13 @@ watch(followupQuery, () => {
 onBeforeUnmount(() => {
   recordsRequestVersion += 1;
   cmdbRequestVersion += 1;
+  bindRequestVersion += 1;
   recordsAbortController?.abort();
   recordsAbortController = null;
   cmdbAbortController?.abort();
   cmdbAbortController = null;
+  bindAbortController?.abort();
+  bindAbortController = null;
   if (queryTimer) clearTimeout(queryTimer);
 });
 </script>
@@ -1222,6 +1429,13 @@ onBeforeUnmount(() => {
   color: #566c85;
   font-size: 11px;
   font-weight: 750;
+}
+
+.followup-bind-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
 }
 
 .followup-pager {

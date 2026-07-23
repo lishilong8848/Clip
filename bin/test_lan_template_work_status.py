@@ -838,7 +838,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "所属专业": "电气",
                 "流程": "维修中",
                 "设备检修关联": "rec_repair_target",
+                "维修跟进记录": "rec_followup_1,rec_followup_2",
                 "CMDB唯一id": "ZH-CMDB-1、ZH-CMDB-2",
+                "检修通告名称": "EA118机房A楼UPS检修",
+                "维修进展描述": "检修完成，设备运行正常",
             },
         )
         followup_fields = MaintenancePortalService._repair_physical_record_fields(
@@ -858,8 +861,20 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             "rec_repair_target",
         )
         self.assertEqual(
+            summary_fields["维修跟进记录-L"],
+            "rec_followup_1,rec_followup_2",
+        )
+        self.assertEqual(
             summary_fields["CMDB唯一id-L"],
             "ZH-CMDB-1、ZH-CMDB-2",
+        )
+        self.assertEqual(
+            summary_fields["检修通告名称-L"],
+            "EA118机房A楼UPS检修",
+        )
+        self.assertEqual(
+            summary_fields["维修进展描述-L"],
+            "检修完成，设备运行正常",
         )
         self.assertNotIn("设备检修关联", summary_fields)
         self.assertNotIn("流程", summary_fields)
@@ -18734,6 +18749,16 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             metas = [
                 FieldMeta("fld_link", "设备检修关联", "Text", 1, False, {}, [], False),
                 FieldMeta("fld_title", "检修通告名称", "Text", 1, False, {}, [], False),
+                FieldMeta(
+                    "fld_notice_progress",
+                    "维修进展描述",
+                    "Text",
+                    1,
+                    False,
+                    {},
+                    [],
+                    False,
+                ),
                 FieldMeta("fld_start", "维修开始时间", "DateTime", 5, False, {}, [], False),
                 FieldMeta(
                     "fld_end",
@@ -18810,6 +18835,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "source_record_id": "rec_repair_summary",
                 "source_table_id": REPAIR_MANAGEMENT_TABLE_ID,
                 "title": "EA118机房E楼精密空调检修",
+                "progress": "人员已就位，准备开始检修",
                 "response_time": "2026-07-18 09:15",
             }
 
@@ -18830,6 +18856,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "EA118机房E楼精密空调检修",
             )
             self.assertEqual(
+                start_fields["维修进展描述"],
+                "人员已就位，准备开始检修",
+            )
+            self.assertEqual(
                 start_fields["维修开始时间"],
                 MaintenancePortalService._repair_management_datetime_ms(
                     "2026-07-18 09:15"
@@ -18846,7 +18876,11 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 )
             }
             service.sync_repair_management_notice_action(
-                {**prepared, "response_time": "2026-07-18 10:30"},
+                {
+                    **prepared,
+                    "progress": "设备检查中，已完成一半",
+                    "response_time": "2026-07-18 10:30",
+                },
                 action="update",
                 target_record_id="rec_repair_target",
             )
@@ -18857,12 +18891,20 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             )
             self.assertEqual(
                 set(update_fields),
-                {"设备检修关联", "检修通告名称"},
+                {"设备检修关联", "检修通告名称", "维修进展描述"},
+            )
+            self.assertEqual(
+                update_fields["维修进展描述"],
+                "设备检查中，已完成一半",
             )
 
             captured.clear()
             service.sync_repair_management_notice_action(
-                {**prepared, "response_time": "2026-07-18 11:45"},
+                {
+                    **prepared,
+                    "progress": "检修完成，设备运行正常",
+                    "response_time": "2026-07-18 11:45",
+                },
                 action="end",
                 target_record_id="rec_repair_target",
             )
@@ -18879,6 +18921,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             )
             self.assertNotIn("维修开始时间", end_fields)
             self.assertNotIn("当前维修进度", end_fields)
+            self.assertEqual(
+                end_fields["维修进展描述"],
+                "检修完成，设备运行正常",
+            )
             self.assertEqual(workflow_updates[-1]["fields"], {"流程": "维修完成"})
             self.assertGreaterEqual(len(snapshots), 5)
 
@@ -21118,6 +21164,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         metas = [
             meta("维修跟进记录"),
             meta("CMDB唯一id"),
+            meta("设备名称"),
+            meta("设备编号"),
+            meta("设备品牌"),
+            meta("设备型号"),
             meta("更换备件名称"),
             meta("更换备件数量", "Number", 2),
             meta("故障维修总费用（跟进完成的维修项）", "Number", 2),
@@ -21141,6 +21191,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "display_fields": {
                     "创建时间": "2026-07-10 11:00",
                     "维修进度": "0.5",
+                    "设备名称": "A-UPS-02",
+                    "设备编号": "A-UPS-02",
+                    "设备品牌": "南都",
+                    "设备型号": "6-GFM-150HR",
                     "维修进展描述": "处理中",
                     "后续整改措施（如有）": "下周复查运行参数",
                     "更换备件名称": "未完成备件",
@@ -21160,6 +21214,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "display_fields": {
                     "创建时间": "2026-07-10 10:00",
                     "维修进度": "1",
+                    "设备名称": "A-UPS-01",
+                    "设备编号": "A-UPS-01",
+                    "设备品牌": "南都",
+                    "设备型号": "6-GFM-140HR",
                     "维修进展描述": "已完成子项",
                     "后续整改措施（如有）": "持续观察",
                     "更换备件名称": "完成备件",
@@ -21242,6 +21300,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             fields["CMDB唯一id"],
             "ZH-CMDB-2、ZH-CMDB-1、ZH-CMDB-3",
         )
+        self.assertEqual(fields["设备名称"], "A-UPS-02、A-UPS-01")
+        self.assertEqual(fields["设备编号"], "A-UPS-02、A-UPS-01")
+        self.assertEqual(fields["设备品牌"], "南都")
+        self.assertEqual(fields["设备型号"], "6-GFM-150HR、6-GFM-140HR")
         self.assertEqual(fields["当前维修进度"], 0.5)
         self.assertEqual(fields["维修进展描述"], "处理中")
         self.assertEqual(fields["后续整改措施"], "下周复查运行参数")
@@ -21249,6 +21311,174 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(fields["更换备件数量"], 5)
         self.assertEqual(fields["故障维修总费用（跟进完成的维修项）"], 100)
         self.assertNotIn("维修方案附件", fields)
+
+    def test_repair_followup_bind_candidates_only_include_unbound_scope_records(self):
+        service = _TestMaintenancePortalService()
+        service._ensure_repair_management_record_in_scope = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: {"record_id": "rec_summary"}
+        )
+        service._load_repair_followup_snapshot = (  # type: ignore[method-assign]
+            lambda **_kwargs: (
+                [],
+                {},
+                [
+                    {
+                        "record_id": "rec_unbound_e",
+                        "raw_fields": {},
+                        "display_fields": {
+                            "维修进展描述": "E楼UPS检查",
+                            "设备名称": "E-UPS-01",
+                            "楼栋": "E楼",
+                            "所属专业": "电气",
+                            "维修进度": 0.5,
+                            "创建时间": "2026-07-20 10:00",
+                        },
+                    },
+                    {
+                        "record_id": "rec_unbound_a",
+                        "raw_fields": {},
+                        "display_fields": {
+                            "维修进展描述": "A楼UPS检查",
+                            "楼栋": "A楼",
+                        },
+                    },
+                    {
+                        "record_id": "rec_bound_e",
+                        "raw_fields": {
+                            REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: "rec_other"
+                        },
+                        "display_fields": {
+                            "维修进展描述": "已绑定记录",
+                            "楼栋": "E楼",
+                        },
+                    },
+                ],
+            )
+        )
+
+        payload = service.list_repair_followup_bind_candidates(
+            summary_record_id="rec_summary",
+            scope="E",
+            query="UPS",
+        )
+
+        self.assertEqual(payload["total"], 1)
+        self.assertEqual(
+            [item["record_id"] for item in payload["records"]],
+            ["rec_unbound_e"],
+        )
+        self.assertEqual(payload["records"][0]["progress"], "50%")
+
+    def test_repair_followup_manual_bind_writes_parent_and_syncs_summary(self):
+        service = _TestMaintenancePortalService()
+        parent_meta = FieldMeta(
+            "fld_parent",
+            REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME,
+            "Text",
+            1,
+            False,
+            {},
+            [],
+            False,
+        )
+        service._ensure_repair_management_record_in_scope = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: {"record_id": "rec_summary"}
+        )
+        service._ensure_repair_followup_parent_id_field = (  # type: ignore[method-assign]
+            lambda: ([parent_meta], {parent_meta.field_name: parent_meta})
+        )
+        service._load_table_records_by_ids = (  # type: ignore[method-assign]
+            lambda **_kwargs: [
+                {
+                    "record_id": "rec_unbound",
+                    "raw_fields": {},
+                    "display_fields": {"楼栋": "E楼"},
+                },
+                {
+                    "record_id": "rec_current",
+                    "raw_fields": {
+                        REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: "rec_summary"
+                    },
+                    "display_fields": {"楼栋": "E楼"},
+                },
+            ]
+        )
+        patches: list[dict] = []
+        snapshots: list[dict] = []
+        sync_calls: list[tuple[str, str]] = []
+        service._patch_record_fields = (  # type: ignore[method-assign]
+            lambda **kwargs: patches.append(kwargs) or {"code": 0}
+        )
+        service._upsert_repair_snapshot_fields = (  # type: ignore[method-assign]
+            lambda **kwargs: snapshots.append(kwargs)
+        )
+        service._sync_repair_management_from_followup = (  # type: ignore[method-assign]
+            lambda **kwargs: sync_calls.append(
+                (
+                    str(kwargs.get("summary_record_id") or ""),
+                    str(kwargs.get("scope") or ""),
+                )
+            )
+            or []
+        )
+
+        result = service.bind_repair_followup_records(
+            summary_record_id="rec_summary",
+            followup_record_ids=["rec_unbound", "rec_current", "rec_unbound"],
+            scope="E",
+        )
+
+        self.assertEqual(result["bound_record_ids"], ["rec_unbound"])
+        self.assertEqual(result["already_bound_record_ids"], ["rec_current"])
+        self.assertEqual(len(patches), 1)
+        self.assertEqual(
+            patches[0]["fields"],
+            {REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: "rec_summary"},
+        )
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual(sync_calls, [("rec_summary", "E")])
+
+    def test_repair_followup_manual_bind_rejects_record_owned_by_other_summary(self):
+        service = _TestMaintenancePortalService()
+        parent_meta = FieldMeta(
+            "fld_parent",
+            REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME,
+            "Text",
+            1,
+            False,
+            {},
+            [],
+            False,
+        )
+        service._ensure_repair_management_record_in_scope = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: {"record_id": "rec_summary"}
+        )
+        service._ensure_repair_followup_parent_id_field = (  # type: ignore[method-assign]
+            lambda: ([parent_meta], {parent_meta.field_name: parent_meta})
+        )
+        service._load_table_records_by_ids = (  # type: ignore[method-assign]
+            lambda **_kwargs: [
+                {
+                    "record_id": "rec_owned",
+                    "raw_fields": {
+                        REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: "rec_other"
+                    },
+                    "display_fields": {"楼栋": "E楼"},
+                }
+            ]
+        )
+        patches: list[dict] = []
+        service._patch_record_fields = (  # type: ignore[method-assign]
+            lambda **kwargs: patches.append(kwargs) or {"code": 0}
+        )
+
+        with self.assertRaisesRegex(PortalError, "已绑定其他维修单"):
+            service.bind_repair_followup_records(
+                summary_record_id="rec_summary",
+                followup_record_ids=["rec_owned"],
+                scope="E",
+            )
+        self.assertEqual(patches, [])
 
     def test_repair_management_cmdb_unique_ids_keep_order_and_skip_missing_values(self):
         service = _TestMaintenancePortalService()
@@ -21352,10 +21582,21 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             [],
             False,
         )
+        followup_link_meta = FieldMeta(
+            "fld_followup_links_l",
+            "维修跟进记录",
+            "Text",
+            1,
+            False,
+            {},
+            [],
+            False,
+        )
         meta_by_name = {
             warranty_meta.field_name: warranty_meta,
             workflow_meta.field_name: workflow_meta,
             cmdb_meta.field_name: cmdb_meta,
+            followup_link_meta.field_name: followup_link_meta,
         }
         captured: list[dict] = []
         ensured = {}
@@ -21363,7 +21604,11 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             lambda *_args, **_kwargs: {"record_id": "rec_summary", "raw_fields": {}}
         )
         service._load_repair_management_project_records = (  # type: ignore[method-assign]
-            lambda **_kwargs: ([warranty_meta, workflow_meta], meta_by_name, [])
+            lambda **_kwargs: (
+                [warranty_meta, workflow_meta, cmdb_meta, followup_link_meta],
+                meta_by_name,
+                [],
+            )
         )
         service._load_repair_followups_for_summary = (  # type: ignore[method-assign]
             lambda *_args, **_kwargs: ([], {}, [])
@@ -21694,7 +21939,19 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "record_id": "rec_summary",
                 "display_fields": {"维修名称": "A楼测试维修", "维修单号": "WX-001"},
                 "raw_fields": {"维修名称": "A楼测试维修", "维修单号": "WX-001"},
-            }
+            },
+            {
+                "record_id": "rec_summary_stale",
+                "display_fields": {
+                    "维修名称": "B楼已删除跟进的维修",
+                    "维修单号": "WX-002",
+                },
+                "raw_fields": {
+                    "维修名称": "B楼已删除跟进的维修",
+                    "维修单号": "WX-002",
+                    "维修跟进记录": "rec_deleted_followup",
+                },
+            },
         ]
         followups = [
             {
@@ -21737,15 +21994,25 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             item for item in patches if item["table_id"] == REPAIR_FOLLOWUP_TABLE_ID
         )
         summary_patch = next(
-            item for item in patches if item["table_id"] == REPAIR_MANAGEMENT_TABLE_ID
+            item
+            for item in patches
+            if item["table_id"] == REPAIR_MANAGEMENT_TABLE_ID
+            and item["record_id"] == "rec_summary"
+        )
+        stale_summary_patch = next(
+            item
+            for item in patches
+            if item["table_id"] == REPAIR_MANAGEMENT_TABLE_ID
+            and item["record_id"] == "rec_summary_stale"
         )
         self.assertEqual(
             followup_patch["fields"][REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME],
             "rec_summary",
         )
         self.assertEqual(summary_patch["fields"]["维修跟进记录"], "rec_followup")
+        self.assertIsNone(stale_summary_patch["fields"]["维修跟进记录"])
         self.assertEqual(result["updated"], 1)
-        self.assertEqual(result["backlink_updates"], 1)
+        self.assertEqual(result["backlink_updates"], 2)
         self.assertEqual(persisted[0][0], REPAIR_FOLLOWUP_BACKFILL_RUNTIME_KEY)
 
     def test_repair_followup_select_options_are_added_before_record_write(self):
