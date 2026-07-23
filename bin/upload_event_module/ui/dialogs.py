@@ -2301,6 +2301,7 @@ class ScreenshotConfirmDialog(QDialog):
         self.recover_selected = False
 
         self.transfer_to_overhaul_selected = False
+        self.transfer_to_overhaul_explicit = False
 
         self.notice_type = ""
 
@@ -2880,6 +2881,9 @@ class ScreenshotConfirmDialog(QDialog):
             self._on_transfer_overhaul_toggled
 
         )
+        self.transfer_overhaul_checkbox.clicked.connect(
+            self._on_transfer_overhaul_user_clicked
+        )
 
 
 
@@ -3423,6 +3427,12 @@ class ScreenshotConfirmDialog(QDialog):
 
                 saved_transfer = False
 
+            self.transfer_to_overhaul_explicit = bool(
+                (self.data_dict or {}).get("_transfer_to_overhaul_explicit")
+                if isinstance(self.data_dict, dict)
+                and "_transfer_to_overhaul_explicit" in self.data_dict
+                else cache_state.get("_transfer_to_overhaul_explicit")
+            )
             self.transfer_to_overhaul_selected = saved_transfer
 
             self.transfer_overhaul_checkbox.setChecked(saved_transfer)
@@ -3439,6 +3449,7 @@ class ScreenshotConfirmDialog(QDialog):
 
         else:
             self.transfer_to_overhaul_selected = False
+            self.transfer_to_overhaul_explicit = False
             self.transfer_overhaul_checkbox.setChecked(False)
 
         if self.enable_change_level_select:
@@ -4349,6 +4360,15 @@ class ScreenshotConfirmDialog(QDialog):
 
         self._notify_state_changed()
 
+    def _on_transfer_overhaul_user_clicked(self, _checked=False):
+        self.transfer_to_overhaul_explicit = True
+        self._update_data_dict_field(
+            "_transfer_to_overhaul_explicit",
+            True,
+            remove_when_empty=False,
+        )
+        self._patch_cache_fields({"_transfer_to_overhaul_explicit": True})
+
 
 
     def _update_recover_visibility(self):
@@ -4364,6 +4384,7 @@ class ScreenshotConfirmDialog(QDialog):
                 self.recover_btn.setChecked(False)
 
             self.transfer_to_overhaul_selected = False
+            self.transfer_to_overhaul_explicit = False
 
             if hasattr(self, "transfer_overhaul_checkbox"):
 
@@ -4372,6 +4393,7 @@ class ScreenshotConfirmDialog(QDialog):
             if isinstance(self.data_dict, dict):
 
                 self.data_dict.pop("transfer_to_overhaul", None)
+                self.data_dict.pop("_transfer_to_overhaul_explicit", None)
 
             return
 
@@ -8491,6 +8513,14 @@ class ScreenshotConfirmDialog(QDialog):
             )
 
             patch["transfer_to_overhaul"] = transfer_to_overhaul
+            self._update_data_dict_field(
+                "_transfer_to_overhaul_explicit",
+                bool(self.transfer_to_overhaul_explicit),
+                remove_when_empty=False,
+            )
+            patch["_transfer_to_overhaul_explicit"] = bool(
+                self.transfer_to_overhaul_explicit
+            )
 
 
 

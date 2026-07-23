@@ -175,9 +175,9 @@ class PortalRuntime:
     event_repair_worker_thread: threading.Thread | None = None
     event_repair_worker_stop = False
     event_repair_queue_channel = "event_repair_project"
-    # Event closure is authoritative. Repair-project creation is a separate,
-    # best-effort action and must not keep retrying after it fails.
-    event_repair_max_attempts = 1
+    # Event closure is authoritative. Repair-project creation remains isolated
+    # from it, but transient Feishu/cache failures must be retried durably.
+    event_repair_max_attempts = 5
     repair_refresh_lock = threading.RLock()
     repair_refresh_inflight = False
     repair_refresh_event = threading.Event()
@@ -3231,6 +3231,13 @@ class PortalRuntime:
             worker = cls.event_repair_worker_thread
             if worker and worker.is_alive():
                 return
+            try:
+                cls.state_store.requeue_failed_outbox_events(
+                    cls.event_repair_queue_channel,
+                    max_attempts=cls.event_repair_max_attempts,
+                )
+            except Exception as exc:
+                log_warning(f"恢复待创建的转检修维修单任务失败: {exc}")
             cls.event_repair_worker_stop = False
             cls.event_repair_queue_event.clear()
             cls.event_repair_worker_thread = threading.Thread(
@@ -3341,12 +3348,15 @@ class PortalRuntime:
                 max_attempts=cls.event_repair_max_attempts,
             ) or {}
             status = str(marked.get("status") or "failed")
+            attempts = max(1, int(marked.get("attempts") or 1))
+            retry_after = min(30.0, float(2 ** min(attempts, 5)))
             cls.state_store.append_event_async(
                 "event_repair_project_result",
                 {
                     "event_id": event_id,
                     "event_record_id": event_record_id,
                     "status": status,
+                    "attempts": attempts,
                     "error": str(exc),
                 },
             )
@@ -3359,20 +3369,46 @@ class PortalRuntime:
                 "status": status,
                 "event_id": event_id,
                 "event_record_id": event_record_id,
+                "attempts": attempts,
+                "retry_after": retry_after if status == "pending" else 0.0,
                 "error": str(exc),
             }
 
     @classmethod
     def _event_repair_worker_loop(cls) -> None:
+        next_wait = 1.0
         while True:
-            cls.event_repair_queue_event.wait(timeout=1.0)
+            cls.event_repair_queue_event.wait(timeout=next_wait)
             cls.event_repair_queue_event.clear()
             with cls.event_repair_queue_lock:
                 if cls.event_repair_worker_stop:
                     return
             result = cls._process_event_repair_queue_once()
+            if result.get("status") == "pending":
+                next_wait = max(1.0, float(result.get("retry_after") or 1.0))
+            else:
+                next_wait = 1.0
             if result.get("processed") and result.get("status") != "pending":
                 cls.event_repair_queue_event.set()
+
+    @classmethod
+    def _effective_event_transfer_to_overhaul(
+        cls,
+        data: dict[str, Any] | None,
+        remote_fields: dict[str, Any] | None,
+    ) -> bool:
+        current = dict(data or {})
+        remote = dict(remote_fields or {})
+        local_value = MaintenancePortalService._truthy_flag(
+            current.get("transfer_to_overhaul")
+        )
+        if MaintenancePortalService._truthy_flag(
+            current.get("_transfer_to_overhaul_explicit")
+        ):
+            return local_value
+        return local_value or MaintenancePortalService._truthy_flag(
+            remote.get(EVENT_NOTICE_FIELDS["transfer_to_overhaul"])
+        )
 
     @classmethod
     def ensure_message_workers(cls) -> None:
@@ -6029,6 +6065,18 @@ class PortalRuntime:
                 uploaded_site_photo_count,
             )
 
+        if notice_type == "事件通告" and action_type in {"update", "end"}:
+            prequery_fields = (
+                prequery_result.get("fields")
+                if isinstance(prequery_result, dict)
+                and isinstance(prequery_result.get("fields"), dict)
+                else {}
+            )
+            data["transfer_to_overhaul"] = cls._effective_event_transfer_to_overhaul(
+                data,
+                prequery_fields,
+            )
+
         notice_payload = cls._prepared_to_notice_payload(data)
         notice_payload.file_tokens = file_tokens or None
         notice_payload.extra_file_tokens = extra_file_tokens or None
@@ -6275,16 +6323,9 @@ class PortalRuntime:
         repair_project_queued = False
         repair_project_warning = ""
         if success and action_type == "end" and notice_type == "事件通告":
-            if "transfer_to_overhaul" in data:
-                transfer_requested = MaintenancePortalService._truthy_flag(
-                    data.get("transfer_to_overhaul")
-                )
-            else:
-                transfer_requested = MaintenancePortalService._truthy_flag(
-                    remote_fields_for_action.get(
-                        EVENT_NOTICE_FIELDS["transfer_to_overhaul"]
-                    )
-                )
+            transfer_requested = MaintenancePortalService._truthy_flag(
+                data.get("transfer_to_overhaul")
+            )
             if transfer_requested:
                 scope_value: Any = data.get("scope")
                 if not str(scope_value or "").strip():

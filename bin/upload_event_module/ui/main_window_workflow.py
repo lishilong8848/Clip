@@ -1177,10 +1177,25 @@ class MainWindowWorkflowMixin:
                     "specialty": request.get("specialty"),
                     "level": dialog_level,
                     "event_source": request.get("event_source"),
-                    "transfer_to_overhaul": (
-                        payload_data.get("transfer_to_overhaul")
+                    **(
+                        {
+                            "transfer_to_overhaul": payload_data.get(
+                                "transfer_to_overhaul"
+                            )
+                        }
                         if isinstance(payload_data, dict)
-                        else None
+                        and "transfer_to_overhaul" in payload_data
+                        else {}
+                    ),
+                    **(
+                        {
+                            "_transfer_to_overhaul_explicit": payload_data.get(
+                                "_transfer_to_overhaul_explicit"
+                            )
+                        }
+                        if isinstance(payload_data, dict)
+                        and "_transfer_to_overhaul_explicit" in payload_data
+                        else {}
                     ),
                 },
             )
@@ -2275,7 +2290,24 @@ class MainWindowWorkflowMixin:
                 "level": dialog_level,
                 "maintenance_cycle": data_dict.get("maintenance_cycle"),
                 "event_source": event_source,
-                "transfer_to_overhaul": data_dict.get("transfer_to_overhaul"),
+                **(
+                    {
+                        "transfer_to_overhaul": data_dict.get(
+                            "transfer_to_overhaul"
+                        )
+                    }
+                    if "transfer_to_overhaul" in data_dict
+                    else {}
+                ),
+                **(
+                    {
+                        "_transfer_to_overhaul_explicit": data_dict.get(
+                            "_transfer_to_overhaul_explicit"
+                        )
+                    }
+                    if "_transfer_to_overhaul_explicit" in data_dict
+                    else {}
+                ),
             },
         )
         specialty = str(resolved_fields.get("specialty") or "").strip()

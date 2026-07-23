@@ -8394,6 +8394,7 @@ class LanPortalStateStore:
         scope: str,
         payload_hash: str,
         summary_record_id: str = "",
+        restart_failed: bool = False,
     ) -> dict[str, Any]:
         operation_id = self._text(operation_id)
         operation_type = self._text(operation_type)
@@ -8442,20 +8443,29 @@ class LanPortalStateStore:
                     conn.rollback()
                     raise ValueError("operation_id already belongs to another operation")
                 stored_payload_hash = self._text(payload.get("payload_hash"))
+                can_restart_failed_operation = (
+                    payload.get("status") == "failed"
+                    and not self._text(payload.get("record_id"))
+                    and (
+                        bool(restart_failed)
+                        or (
+                            normalized_payload_hash
+                            and stored_payload_hash
+                            and normalized_payload_hash != stored_payload_hash
+                        )
+                    )
+                )
                 if (
                     normalized_payload_hash
                     and stored_payload_hash
                     and normalized_payload_hash != stored_payload_hash
                 ):
-                    can_restart_failed_operation = (
-                        payload.get("status") == "failed"
-                        and not self._text(payload.get("record_id"))
-                    )
                     if not can_restart_failed_operation:
                         conn.rollback()
                         raise ValueError(
                             "operation_id payload does not match the original request"
                         )
+                if can_restart_failed_operation:
                     conn.execute(
                         """
                         UPDATE repair_management_operations
@@ -8484,6 +8494,31 @@ class LanPortalStateStore:
                     return restarted or {}
                 conn.commit()
                 return payload
+
+    def requeue_failed_outbox_events(
+        self,
+        channel: str,
+        *,
+        max_attempts: int,
+    ) -> int:
+        channel = self._text(channel)
+        if not channel:
+            return 0
+        max_attempts = max(1, int(max_attempts or 1))
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                cursor = conn.execute(
+                    """
+                    UPDATE event_outbox
+                    SET status = 'pending', updated_at = ?
+                    WHERE channel = ? AND status = 'failed' AND attempts < ?
+                    """,
+                    (now, channel, max_attempts),
+                )
+                conn.commit()
+                return max(0, int(cursor.rowcount or 0))
 
     def get_repair_management_operation(
         self,

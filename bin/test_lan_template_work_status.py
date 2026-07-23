@@ -815,13 +815,28 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             "历史维修名称",
         )
 
+    def test_repair_snapshot_marks_valid_end_time_as_completed(self):
+        payload = MaintenancePortalService._repair_snapshot_record_payload(
+            {
+                "record_id": "rec_repair_stale_flow",
+                "display_fields": {
+                    "维修名称": "已有结束时间的维修项目",
+                    "流程": "维修中",
+                    "维修结束时间（2026）": "2026-07-20 17:39",
+                },
+                "raw_fields": {},
+            }
+        )
+
+        self.assertEqual(payload["status"], "维修完成")
+
     def test_repair_record_skips_retired_fields_and_writes_active_suffix_fields(self):
         summary_fields = MaintenancePortalService._repair_physical_record_fields(
             REPAIR_MANAGEMENT_TABLE_ID,
             {
                 "维修名称": "测试维修",
                 "所属专业": "电气",
-                "流程": "处理中",
+                "流程": "维修中",
                 "设备检修关联": "rec_repair_target",
                 "CMDB唯一id": "ZH-CMDB-1、ZH-CMDB-2",
             },
@@ -837,7 +852,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         )
 
         self.assertEqual(summary_fields["所属专业-L"], "电气")
-        self.assertEqual(summary_fields["流程-L"], "处理中")
+        self.assertEqual(summary_fields["流程-L"], "维修中")
         self.assertEqual(
             summary_fields["设备检修关联-L"],
             "rec_repair_target",
@@ -875,7 +890,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             fields={
                 "维修名称": "测试维修",
                 "所属专业": "暖通",
-                "流程": "处理中",
+                "流程": "维修中",
                 "设备检修关联": "rec_repair_target",
             },
         )
@@ -884,7 +899,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             captured["fields"],
             {
                 "所属专业-L": "暖通",
-                "流程-L": "处理中",
+                "流程-L": "维修中",
                 "设备检修关联-L": "rec_repair_target",
             },
         )
@@ -1774,6 +1789,29 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertTrue(restarted["created"])
             self.assertEqual(restarted["status"], "started")
             self.assertEqual(restarted["payload_hash"], "failed-hash-2")
+
+            failed_same_payload = store.begin_repair_management_operation(
+                "repair-project-op-3",
+                operation_type="project_create",
+                scope="E",
+                payload_hash="failed-same-hash",
+            )
+            self.assertTrue(failed_same_payload["created"])
+            store.update_repair_management_operation(
+                "repair-project-op-3",
+                status="failed",
+                error="transient write failure",
+            )
+            restarted_same_payload = store.begin_repair_management_operation(
+                "repair-project-op-3",
+                operation_type="project_create",
+                scope="E",
+                payload_hash="failed-same-hash",
+                restart_failed=True,
+            )
+            self.assertTrue(restarted_same_payload["created"])
+            self.assertEqual(restarted_same_payload["status"], "started")
+            self.assertEqual(restarted_same_payload["last_error"], "")
             self.assertTrue(store.schema_health()["ok"])
 
     def test_lan_portal_state_store_dedupes_ongoing_snapshot_by_notice_identity(self):
@@ -2657,15 +2695,20 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             "active_item_id": "active-event-transfer-cancel",
             "notice_type": "事件通告",
             "transfer_to_overhaul": True,
+            "_transfer_to_overhaul_explicit": True,
         }
 
         resolved = harness._resolve_upload_fields_from_cache(
             data,
-            {"transfer_to_overhaul": False},
+            {
+                "transfer_to_overhaul": False,
+                "_transfer_to_overhaul_explicit": True,
+            },
         )
 
         self.assertFalse(resolved["transfer_to_overhaul"])
         self.assertFalse(data["transfer_to_overhaul"])
+        self.assertTrue(data["_transfer_to_overhaul_explicit"])
         self.assertFalse(harness.cache_store.fields["transfer_to_overhaul"])
 
     def test_qt_upload_field_resolver_only_clears_saved_fields_when_explicit(self):
@@ -3265,6 +3308,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "event_source": "BMS",
                     "level": "I3",
                     "transfer_to_overhaul": False,
+                    "_transfer_to_overhaul_explicit": True,
                 },
                 "screenshot_upload_id": screenshot["upload_id"],
             }
@@ -3380,7 +3424,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(result["repair_record_id"], "rec-repair-after-restart")
         self.assertEqual([item["id"] for item in done], [event_id])
 
-    def test_event_repair_queue_failure_is_isolated_and_marked_failed(self):
+    def test_event_repair_queue_failure_is_isolated_and_retried(self):
         previous_store = PortalRuntime.state_store
         with tempfile.TemporaryDirectory() as tmp:
             store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
@@ -3402,18 +3446,104 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     side_effect=PortalError("维修单字段配置不完整"),
                 ):
                     result = PortalRuntime._process_event_repair_queue_once()
-                failed = store.list_outbox_events(
+                pending = store.list_outbox_events(
                     PortalRuntime.event_repair_queue_channel,
-                    status="failed",
+                    status="pending",
                 )
             finally:
                 store.shutdown_write_worker(timeout=2.0)
                 PortalRuntime.state_store = previous_store
 
-        self.assertEqual(result["status"], "failed")
-        self.assertEqual(len(failed), 1)
-        self.assertEqual(failed[0]["attempts"], 1)
-        self.assertIn("维修单字段配置不完整", failed[0]["last_error"])
+        self.assertEqual(result["status"], "pending")
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["attempts"], 1)
+        self.assertIn("维修单字段配置不完整", pending[0]["last_error"])
+
+    def test_event_repair_queue_transient_failure_then_succeeds(self):
+        previous_store = PortalRuntime.state_store
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            PortalRuntime.state_store = store
+            event_id = store.enqueue_outbox_event(
+                PortalRuntime.event_repair_queue_channel,
+                {
+                    "event_record_id": "rec-event-repair-retry",
+                    "notice_data": {"notice_type": "事件通告"},
+                    "remote_fields": {"是否转检修": True},
+                    "scope": "E",
+                    "source_month": "2026-07",
+                },
+            )
+            try:
+                with patch.object(
+                    PortalRuntime.service,
+                    "ensure_repair_management_record_for_event_notice",
+                    side_effect=[
+                        PortalError("Data not ready, please try again later"),
+                        {
+                            "record_id": "rec-repair-after-retry",
+                            "created": True,
+                        },
+                    ],
+                ):
+                    first = PortalRuntime._process_event_repair_queue_once()
+                    second = PortalRuntime._process_event_repair_queue_once()
+                done = store.list_outbox_events(
+                    PortalRuntime.event_repair_queue_channel,
+                    status="done",
+                )
+            finally:
+                store.shutdown_write_worker(timeout=2.0)
+                PortalRuntime.state_store = previous_store
+
+        self.assertEqual(first["status"], "pending")
+        self.assertEqual(second["status"], "success")
+        self.assertEqual(second["repair_record_id"], "rec-repair-after-retry")
+        self.assertEqual([item["id"] for item in done], [event_id])
+
+    def test_event_repair_queue_requeues_old_failed_task_after_update(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            event_id = store.enqueue_outbox_event(
+                PortalRuntime.event_repair_queue_channel,
+                {"event_record_id": "rec-event-old-failed"},
+            )
+            marked = store.mark_outbox_event(
+                event_id,
+                "pending",
+                error="old one-shot failure",
+                max_attempts=1,
+            )
+            self.assertEqual(marked["status"], "failed")
+
+            requeued = store.requeue_failed_outbox_events(
+                PortalRuntime.event_repair_queue_channel,
+                max_attempts=PortalRuntime.event_repair_max_attempts,
+            )
+            pending = store.list_outbox_events(
+                PortalRuntime.event_repair_queue_channel,
+                status="pending",
+            )
+
+        self.assertEqual(requeued, 1)
+        self.assertEqual([item["id"] for item in pending], [event_id])
+
+    def test_event_transfer_uses_remote_true_unless_user_explicitly_cancels(self):
+        self.assertTrue(
+            PortalRuntime._effective_event_transfer_to_overhaul(
+                {"transfer_to_overhaul": False},
+                {"是否转检修": True},
+            )
+        )
+        self.assertFalse(
+            PortalRuntime._effective_event_transfer_to_overhaul(
+                {
+                    "transfer_to_overhaul": False,
+                    "_transfer_to_overhaul_explicit": True,
+                },
+                {"是否转检修": True},
+            )
+        )
 
     def test_backend_source_start_reuses_existing_target_record(self):
         old_store = PortalRuntime.state_store
@@ -16767,6 +16897,27 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(payload["progress_percent"], 0)
         self.assertEqual(payload["display_fields"]["当前维修进度"], "0%")
 
+    def test_repair_management_record_payload_uses_end_time_as_completed_workflow(self):
+        service = _TestMaintenancePortalService()
+
+        payload = service._repair_management_record_payload(
+            {
+                "record_id": "rec_repair_stale_workflow",
+                "display_fields": {
+                    "维修名称": "已有结束时间的维修项目",
+                    "流程": "维修中",
+                    "维修结束时间（2026）": "2026-07-20 17:39",
+                },
+                "raw_fields": {"流程": "维修中"},
+            },
+            authoritative_followups=[],
+        )
+
+        self.assertEqual(payload["workflow"], "维修完成")
+        self.assertTrue(payload["is_completed"])
+        self.assertTrue(payload["read_only"])
+        self.assertEqual(payload["progress_percent"], 0)
+
     def test_repair_management_record_payload_formats_epoch_times(self):
         service = _TestMaintenancePortalService()
         created = dt.datetime(2026, 7, 16, 8, 30)
@@ -18401,7 +18552,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(workflow_updates[-1]["fields"], {"流程": "维修完成"})
             self.assertEqual(len(snapshots), 5)
 
-    def test_repair_workflow_requires_end_time_and_complete_followup(self):
+    def test_repair_workflow_uses_end_time_as_completion_boundary(self):
         resolver = MaintenancePortalService._repair_management_workflow_for_state
 
         self.assertEqual(
@@ -18429,16 +18580,25 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 has_followup=True,
                 latest_progress_percent=99,
             ),
-            "维修中",
+            "维修完成",
         )
         self.assertEqual(
             resolver(
                 start_value="2026-07-18 09:15",
                 end_value="2026-07-18 11:45",
+                has_followup=False,
+                latest_progress_percent=None,
+            ),
+            "维修完成",
+        )
+        self.assertEqual(
+            resolver(
+                start_value="2026-07-18 09:15",
+                end_value="",
                 has_followup=True,
                 latest_progress_percent=100,
             ),
-            "维修完成",
+            "维修中",
         )
 
     def test_repair_workflow_failure_does_not_rollback_saved_project_data(self):
@@ -18466,6 +18626,87 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertFalse(synced)
         self.assertEqual(len(warnings), 1)
         self.assertIn("流程暂未更新为“维修中”", warnings[0])
+
+    def test_repair_workflow_sync_writes_option_name_instead_of_option_id(self):
+        service = _TestMaintenancePortalService()
+        workflow_meta = FieldMeta(
+            "fld_workflow_l",
+            "流程",
+            "SingleSelect",
+            3,
+            False,
+            {
+                "optM9yUqVh": "未开始",
+                "opt2XYkVwu": "维修中",
+                "opta7eQbpQ": "维修完成",
+            },
+            ["未开始", "维修中", "维修完成"],
+            False,
+        )
+        captured: list[dict] = []
+        service._patch_record_fields = (  # type: ignore[method-assign]
+            lambda **kwargs: captured.append(kwargs) or {"code": 0}
+        )
+        service._upsert_repair_snapshot_fields = (  # type: ignore[method-assign]
+            lambda **_kwargs: None
+        )
+
+        synced, warnings = service._sync_repair_management_workflow(
+            record_id="rec_summary_chinese_workflow",
+            workflow="维修完成",
+            meta_by_name={"流程": workflow_meta},
+        )
+
+        self.assertTrue(synced)
+        self.assertEqual(warnings, [])
+        self.assertEqual(captured[-1]["fields"], {"流程": "维修完成"})
+
+    def test_repair_workflow_sync_repairs_option_id_saved_as_option_name(self):
+        service = _TestMaintenancePortalService()
+        workflow_meta = FieldMeta(
+            "fld_workflow_l",
+            "流程",
+            "SingleSelect",
+            3,
+            False,
+            {
+                "opta7eQbpQ": "维修完成",
+                "opt_bad_name": "opta7eQbpQ",
+            },
+            ["维修完成", "opta7eQbpQ"],
+            False,
+        )
+        captured: list[dict] = []
+        service._patch_record_fields = (  # type: ignore[method-assign]
+            lambda **kwargs: captured.append(kwargs) or {"code": 0}
+        )
+        service._upsert_repair_snapshot_fields = (  # type: ignore[method-assign]
+            lambda **_kwargs: None
+        )
+
+        synced, warnings = service._sync_repair_management_workflow(
+            record_id="rec_summary_bad_option_name",
+            workflow="维修完成",
+            meta_by_name={"流程": workflow_meta},
+            current_record={
+                "raw_fields": {"流程": "opta7eQbpQ"},
+                "display_fields": {"流程": "opta7eQbpQ"},
+            },
+        )
+
+        self.assertTrue(synced)
+        self.assertEqual(warnings, [])
+        self.assertEqual(captured[-1]["fields"], {"流程": "维修完成"})
+
+    def test_repair_workflow_write_boundary_rejects_option_ids(self):
+        with self.assertRaisesRegex(
+            PortalError,
+            "流程-L.*只能写入",
+        ):
+            MaintenancePortalService._repair_physical_record_fields(
+                REPAIR_MANAGEMENT_TABLE_ID,
+                {"流程": "opta7eQbpQ"},
+            )
 
     def test_event_stats_use_repair_checkbox_completion_and_exact_levels(self):
         records = [
@@ -18829,6 +19070,87 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(captured["record_id"], "rec_repair_1")
         self.assertEqual(captured["fields"], {"故障维修原因": "测试原因"})
         self.assertEqual(result["field_count"], 1)
+
+    def test_repair_management_unlinked_update_syncs_workflow_from_end_time(self):
+        service = _TestMaintenancePortalService()
+        reason = FieldMeta(
+            "fld_reason",
+            "故障维修原因",
+            "Text",
+            1,
+            False,
+            {},
+            [],
+            False,
+        )
+        workflow = FieldMeta(
+            "fld_workflow_l",
+            "流程",
+            "SingleSelect",
+            3,
+            False,
+            {
+                "opt_pending": "未开始",
+                "opt_running": "维修中",
+                "opt_done": "维修完成",
+            },
+            ["未开始", "维修中", "维修完成"],
+            False,
+        )
+        end_time = FieldMeta(
+            "fld_end",
+            "维修结束时间（2026）",
+            "DateTime",
+            5,
+            False,
+            {},
+            [],
+            False,
+        )
+        metas = [reason, workflow, end_time]
+        meta_by_name = {item.field_name: item for item in metas}
+        existing = {
+            "record_id": "rec_unlinked_finished",
+            "display_fields": {"流程": "维修中"},
+            "raw_fields": {
+                "流程": "维修中",
+                "维修结束时间（2026）": (
+                    MaintenancePortalService._repair_management_datetime_ms(
+                        "2026-07-20 17:39"
+                    )
+                ),
+            },
+        }
+        patch_calls: list[dict] = []
+        service._load_repair_management_project_records = (  # type: ignore[method-assign]
+            lambda **_kwargs: (metas, meta_by_name, [existing])
+        )
+        service._ensure_repair_management_record_in_scope = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: existing
+        )
+        service._load_repair_followups_for_summary = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: ([], {}, [])
+        )
+        service._patch_record_fields = (  # type: ignore[method-assign]
+            lambda **kwargs: patch_calls.append(dict(kwargs["fields"])) or {"code": 0}
+        )
+        service._upsert_repair_snapshot_fields = (  # type: ignore[method-assign]
+            lambda **_kwargs: None
+        )
+        service._repair_management_fields_in_scope = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: True
+        )
+
+        result = service.update_repair_management_record(
+            "rec_unlinked_finished",
+            {"故障维修原因": "已处理完成"},
+            validate_required=False,
+        )
+
+        self.assertEqual(patch_calls[0], {"故障维修原因": "已处理完成"})
+        self.assertEqual(patch_calls[-1], {"流程": "维修完成"})
+        self.assertEqual(result["workflow"], "维修完成")
+        self.assertTrue(result["workflow_synced"])
 
     def test_repair_management_update_cannot_clear_required_field(self):
         service = _TestMaintenancePortalService()
@@ -20742,7 +21064,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(ensured["context_label"], "维修项目")
         self.assertEqual(captured[0]["fields"]["是否质保期内"], "是")
         self.assertIsNone(captured[0]["fields"]["CMDB唯一id"])
-        self.assertEqual(captured[-1]["fields"], {"流程": "opt_pending"})
+        self.assertEqual(captured[-1]["fields"], {"流程": "未开始"})
 
     def test_repair_followup_create_prefills_summary_and_multiple_cmdb_fields(self):
         service = _TestMaintenancePortalService()

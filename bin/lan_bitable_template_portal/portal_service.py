@@ -65,6 +65,11 @@ REPAIR_MANAGEMENT_TABLE_ID = REPAIR_SOURCE_TABLE_ID
 REPAIR_MANAGEMENT_NOT_STARTED_WORKFLOW = "未开始"
 REPAIR_MANAGEMENT_IN_PROGRESS_WORKFLOW = "维修中"
 REPAIR_MANAGEMENT_COMPLETED_WORKFLOW = "维修完成"
+REPAIR_MANAGEMENT_WORKFLOW_OPTIONS = (
+    REPAIR_MANAGEMENT_NOT_STARTED_WORKFLOW,
+    REPAIR_MANAGEMENT_IN_PROGRESS_WORKFLOW,
+    REPAIR_MANAGEMENT_COMPLETED_WORKFLOW,
+)
 EVENT_REPAIR_COMPLETION_FIELD_NAME = "检修完成时间"
 EVENT_I2_OR_HIGHER_LEVELS = frozenset(
     {
@@ -1265,6 +1270,13 @@ class MaintenancePortalService:
             or display_fields.get("最终状态")
             or ""
         ).strip()
+        repair_end_value = (
+            raw_fields.get("维修结束时间（2026）")
+            if raw_fields.get("维修结束时间（2026）") not in (None, "", [], {})
+            else display_fields.get("维修结束时间（2026）")
+        )
+        if cls._repair_management_datetime_ms(repair_end_value) is not None:
+            status = REPAIR_MANAGEMENT_COMPLETED_WORKFLOW
         building_value = cls._repair_management_plain_text(
             display_fields.get("所属数据中心/楼栋-使用")
             or display_fields.get("楼栋")
@@ -2989,6 +3001,23 @@ class MaintenancePortalService:
         }
         for name, value in fields.items():
             logical_name = str(name or "").strip()
+            if (
+                str(table_id or "").strip() == REPAIR_MANAGEMENT_TABLE_ID
+                and logical_name
+                in {
+                    REPAIR_MANAGEMENT_WORKFLOW_FIELD_NAME,
+                    REPAIR_MANAGEMENT_WORKFLOW_STORAGE_FIELD_NAME,
+                }
+                and value not in (None, "")
+            ):
+                workflow_value = cls._repair_management_plain_text(value).strip()
+                if workflow_value not in REPAIR_MANAGEMENT_WORKFLOW_OPTIONS:
+                    raise PortalError(
+                        "维修项目表字段“流程-L”只能写入"
+                        "“未开始 / 维修中 / 维修完成”，"
+                        f"已阻止写入无效值“{workflow_value or value}”。"
+                    )
+                value = workflow_value
             retired_logical_name = (
                 logical_name[:-2]
                 if logical_name.endswith("-L")
@@ -3873,6 +3902,25 @@ class MaintenancePortalService:
         return ""
 
     @classmethod
+    def _repair_management_workflow_storage_text(
+        cls,
+        record: dict[str, Any],
+    ) -> str:
+        """Return the option name stored on the record without resolving option IDs."""
+        for field_container_name in ("display_fields", "raw_fields"):
+            fields = record.get(field_container_name)
+            if not isinstance(fields, dict):
+                continue
+            for field_name in (
+                REPAIR_MANAGEMENT_WORKFLOW_STORAGE_FIELD_NAME,
+                REPAIR_MANAGEMENT_WORKFLOW_FIELD_NAME,
+            ):
+                value = cls._repair_management_plain_text(fields.get(field_name)).strip()
+                if value:
+                    return value
+        return ""
+
+    @classmethod
     def _repair_management_is_completed(
         cls,
         record: dict[str, Any],
@@ -3886,7 +3934,17 @@ class MaintenancePortalService:
                 meta_by_name=meta_by_name,
             ),
         )
-        return workflow == REPAIR_MANAGEMENT_COMPLETED_WORKFLOW
+        if workflow == REPAIR_MANAGEMENT_COMPLETED_WORKFLOW:
+            return True
+        for field_container_name in ("raw_fields", "display_fields"):
+            fields = record.get(field_container_name)
+            if not isinstance(fields, dict):
+                continue
+            if cls._repair_management_datetime_ms(
+                fields.get("维修结束时间（2026）")
+            ) is not None:
+                return True
+        return False
 
     @classmethod
     def _clean_repair_management_fields(
@@ -3976,11 +4034,7 @@ class MaintenancePortalService:
         else:
             missing_workflow_options = [
                 option
-                for option in (
-                    REPAIR_MANAGEMENT_NOT_STARTED_WORKFLOW,
-                    REPAIR_MANAGEMENT_IN_PROGRESS_WORKFLOW,
-                    REPAIR_MANAGEMENT_COMPLETED_WORKFLOW,
-                )
+                for option in REPAIR_MANAGEMENT_WORKFLOW_OPTIONS
                 if option not in workflow_meta.option_names
             ]
             if missing_workflow_options:
@@ -8110,14 +8164,9 @@ class MaintenancePortalService:
     ) -> str:
         has_start = cls._repair_management_datetime_ms(start_value) is not None
         has_end = cls._repair_management_datetime_ms(end_value) is not None
-        if (
-            has_end
-            and has_followup
-            and latest_progress_percent is not None
-            and latest_progress_percent >= 100.0
-        ):
+        if has_end:
             return REPAIR_MANAGEMENT_COMPLETED_WORKFLOW
-        if has_start or has_end:
+        if has_start:
             return REPAIR_MANAGEMENT_IN_PROGRESS_WORKFLOW
         return REPAIR_MANAGEMENT_NOT_STARTED_WORKFLOW
 
@@ -8139,23 +8188,24 @@ class MaintenancePortalService:
             workflow_meta.ui_type or ""
         ).strip().lower():
             return False, ["维修项目表字段“流程-L”不是下拉单选，流程未更新。"]
-        if current_record and self._repair_management_workflow_text(
-            current_record,
-            meta_by_name=meta_by_name,
-        ) == workflow:
+        if workflow not in REPAIR_MANAGEMENT_WORKFLOW_OPTIONS:
+            return False, [
+                "维修项目流程只能是“未开始 / 维修中 / 维修完成”，"
+                f"已阻止写入“{workflow}”。"
+            ]
+        if (
+            current_record
+            and self._repair_management_workflow_storage_text(current_record)
+            == workflow
+        ):
             return True, []
 
-        write_value: Any = workflow
-        for option_id, option_name in (workflow_meta.options_map or {}).items():
-            if str(option_name or "").strip() == workflow:
-                write_value = option_id
-                break
         try:
             self._patch_record_fields(
                 app_token=REPAIR_SOURCE_APP_TOKEN,
                 table_id=REPAIR_MANAGEMENT_TABLE_ID,
                 record_id=record_id,
-                fields={REPAIR_MANAGEMENT_WORKFLOW_FIELD_NAME: write_value},
+                fields={REPAIR_MANAGEMENT_WORKFLOW_FIELD_NAME: workflow},
             )
             self._upsert_repair_snapshot_fields(
                 source_key=REPAIR_SNAPSHOT_SOURCE_PROJECTS,
@@ -8756,10 +8806,12 @@ class MaintenancePortalService:
             item,
             meta_by_name=meta_by_name,
         )
-        is_completed = (
-            re.sub(r"\s+", "", workflow)
-            == REPAIR_MANAGEMENT_COMPLETED_WORKFLOW
+        is_completed = self._repair_management_is_completed(
+            item,
+            meta_by_name=meta_by_name,
         )
+        if is_completed:
+            workflow = REPAIR_MANAGEMENT_COMPLETED_WORKFLOW
         return {
             "record_id": str(item.get("record_id") or ""),
             "title": self._repair_management_title(item),
@@ -9272,6 +9324,7 @@ class MaintenancePortalService:
             scope=scope,
             source_event_record=event_record,
             sync_event_transfer_status=False,
+            retry_failed_operation=True,
         )
         response["created"] = not bool(response.get("idempotent_replay"))
         return response
@@ -9287,6 +9340,7 @@ class MaintenancePortalService:
         scope: str = "ALL",
         source_event_record: dict[str, Any] | None = None,
         sync_event_transfer_status: bool = True,
+        retry_failed_operation: bool = False,
     ) -> dict[str, Any]:
         metas, meta_by_name, _records = (
             self._load_repair_management_project_records()
@@ -9376,6 +9430,7 @@ class MaintenancePortalService:
                     operation_type="project_create",
                     scope=self._normalize_scope(scope),
                     payload_hash=payload_hash,
+                    restart_failed=retry_failed_operation,
                 )
             except ValueError as exc:
                 raise PortalError(f"维修项目操作标识冲突：{exc}") from exc
@@ -9441,6 +9496,25 @@ class MaintenancePortalService:
             ).strip()
             if not record_id:
                 raise PortalError("检修记录已提交，但未返回记录 ID。")
+            if stable_operation_id:
+                self._state_store.update_repair_management_operation(
+                    stable_operation_id,
+                    status="remote_written",
+                    record_id=record_id,
+                    result={
+                        "record_id": record_id,
+                        "fields": prepared,
+                        "warnings": list(
+                            dict.fromkeys(
+                                [
+                                    *(auto.get("warnings") or []),
+                                    *write_warnings,
+                                ]
+                            )
+                        ),
+                    },
+                    error="",
+                )
             self._upsert_repair_snapshot_fields(
                 source_key=REPAIR_SNAPSHOT_SOURCE_PROJECTS,
                 record_id=record_id,
@@ -9719,40 +9793,40 @@ class MaintenancePortalService:
         workflow = ""
         workflow_synced = False
         workflow_warnings: list[str] = []
+        updated_summary = self._repair_management_record_with_fields(
+            existing,
+            prepared,
+        )
+        repair_completed = bool(auto.get("repair_completed"))
         if effective_repair_ids:
-            updated_summary = self._repair_management_record_with_fields(
-                existing,
-                prepared,
-            )
-            repair_completed = bool(auto.get("repair_completed"))
             followup_sync = self._sync_repair_followups_from_summary(
                 summary_record_id=summary_id,
                 summary_record=updated_summary,
                 completed=repair_completed,
                 linked_followups=linked_followups,
             )
-            if repair_completed:
-                workflow = REPAIR_MANAGEMENT_COMPLETED_WORKFLOW
-            else:
-                has_followup, latest_progress_percent = (
-                    self._repair_management_latest_followup_progress(
-                        linked_followups
-                    )
-                )
-                workflow = self._repair_management_workflow_for_state(
-                    start_value=effective_fields.get("维修开始时间"),
-                    end_value=effective_fields.get("维修结束时间（2026）"),
-                    has_followup=has_followup,
-                    latest_progress_percent=latest_progress_percent,
-                )
-            workflow_synced, workflow_warnings = (
-                self._sync_repair_management_workflow(
-                    record_id=summary_id,
-                    workflow=workflow,
-                    meta_by_name=meta_by_name,
-                    current_record=existing,
+        if repair_completed:
+            workflow = REPAIR_MANAGEMENT_COMPLETED_WORKFLOW
+        else:
+            has_followup, latest_progress_percent = (
+                self._repair_management_latest_followup_progress(
+                    linked_followups
                 )
             )
+            workflow = self._repair_management_workflow_for_state(
+                start_value=effective_fields.get("维修开始时间"),
+                end_value=effective_fields.get("维修结束时间（2026）"),
+                has_followup=has_followup,
+                latest_progress_percent=latest_progress_percent,
+            )
+        workflow_synced, workflow_warnings = (
+            self._sync_repair_management_workflow(
+                record_id=summary_id,
+                workflow=workflow,
+                meta_by_name=meta_by_name,
+                current_record=existing,
+            )
+        )
         self._invalidate_repair_management_status_cache()
         return {
             "record_id": summary_id,

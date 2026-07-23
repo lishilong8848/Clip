@@ -1287,6 +1287,7 @@ class MainWindowRecordsMixin:
             "event_identity_key",
             "event_match_fields",
             "transfer_to_overhaul",
+            "_transfer_to_overhaul_explicit",
             "last_remote_write_at",
             "site_photo_count",
             "extra_image_count",
@@ -3434,6 +3435,7 @@ class MainWindowRecordsMixin:
                 "routing_error",
                 "event_source",
                 "transfer_to_overhaul",
+                "_transfer_to_overhaul_explicit",
             ],
         )
         existing_buildings = self._normalize_buildings_value(data_dict.get("buildings"))
@@ -3547,6 +3549,10 @@ class MainWindowRecordsMixin:
             data_dict["transfer_to_overhaul"] = bool(
                 cache_fields.get("transfer_to_overhaul")
             )
+        if "_transfer_to_overhaul_explicit" in cache_fields:
+            data_dict["_transfer_to_overhaul_explicit"] = bool(
+                cache_fields.get("_transfer_to_overhaul_explicit")
+            )
         if callable(ensure_identity):
             return ensure_identity(data_dict)
         return data_dict
@@ -3573,6 +3579,10 @@ class MainWindowRecordsMixin:
             )
         if not isinstance(data_dict, dict):
             return resolved
+        transfer_to_overhaul_explicit = bool(
+            data_dict.get("_transfer_to_overhaul_explicit")
+            or dialog_fields.get("_transfer_to_overhaul_explicit")
+        )
 
         specialty_cleared = bool(
             data_dict.get("_upload_specialty_cleared")
@@ -3611,6 +3621,7 @@ class MainWindowRecordsMixin:
                     "level_locked",
                     "event_source",
                     "transfer_to_overhaul",
+                    "_transfer_to_overhaul_explicit",
                 ],
             )
             patch = {}
@@ -3630,6 +3641,8 @@ class MainWindowRecordsMixin:
                 patch["event_source"] = resolved["event_source"]
             if resolved["transfer_to_overhaul"] is not None:
                 patch["transfer_to_overhaul"] = resolved["transfer_to_overhaul"]
+            if transfer_to_overhaul_explicit:
+                patch["_transfer_to_overhaul_explicit"] = True
             if patch:
                 self.cache_store.patch_record_fields(
                     record_id=record_id,
@@ -3647,6 +3660,7 @@ class MainWindowRecordsMixin:
                         "level_locked",
                         "event_source",
                         "transfer_to_overhaul",
+                        "_transfer_to_overhaul_explicit",
                     ],
                 )
             if not resolved["buildings"] and "buildings" in cache_fields:
@@ -3690,6 +3704,10 @@ class MainWindowRecordsMixin:
                 resolved["transfer_to_overhaul"] = bool(
                     cache_fields.get("transfer_to_overhaul")
                 )
+            if "_transfer_to_overhaul_explicit" in cache_fields:
+                transfer_to_overhaul_explicit = bool(
+                    cache_fields.get("_transfer_to_overhaul_explicit")
+                )
         else:
             # 缓存主键缺失时只使用当前条目自身字段，避免跨条目串值。
             resolved["buildings"] = existing_buildings
@@ -3723,6 +3741,8 @@ class MainWindowRecordsMixin:
             data_dict["_upload_maintenance_cycle_cleared"] = True
         if resolved["transfer_to_overhaul"] is not None:
             data_dict["transfer_to_overhaul"] = bool(resolved["transfer_to_overhaul"])
+        if transfer_to_overhaul_explicit:
+            data_dict["_transfer_to_overhaul_explicit"] = True
 
         return resolved
 
