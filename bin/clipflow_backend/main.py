@@ -489,9 +489,9 @@ class FastAPIPortalController:
                     or "ALL"
                 )
                 scope = self._authorized_scope_or_error(session, requested_scope)
-                work_type = str(request.query_params.get("work_type") or "maintenance").strip()
+                work_type = str(request.query_params.get("work_type") or "all").strip()
                 if work_type != "all" and work_type not in NOTICE_TYPE_BY_WORK_TYPE:
-                    work_type = "maintenance"
+                    work_type = "all"
                 month = str(
                     request.query_params.get("month")
                     or _current_month_label()
@@ -6699,6 +6699,7 @@ class FastAPIPortalController:
     @staticmethod
     def _get_ongoing(scope: str) -> list[dict]:
         active_rows: list[dict] = []
+        active_rows_loaded = False
         active_qt_identity_keys: set[str] = set()
         deleted_qt_identity_keys: set[str] = set()
 
@@ -6756,8 +6757,9 @@ class FastAPIPortalController:
                 return
             if _item_is_ended(item):
                 return
-            if _item_deleted_in_qt_store(item):
-                return
+            # A live qt_active_items row is authoritative. Historical deleted rows
+            # may share the same business text and must never suppress a newer live
+            # row; deleted identity keys are only used by the legacy snapshot fallback.
             if not PortalRuntime.service._scope_matches_item(scope, item):
                 return
             qt_projected_items.append(normalize_notice_identity_payload(dict(item)))
@@ -6766,6 +6768,7 @@ class FastAPIPortalController:
             active_rows = PortalRuntime.state_store.list_qt_active_items(
                 include_deleted=True
             )
+            active_rows_loaded = True
             for active_item in active_rows:
                 if not isinstance(active_item, dict):
                     continue
@@ -6787,7 +6790,12 @@ class FastAPIPortalController:
 
         qt_projected_items: list[dict] = []
         try:
-            for active_item in active_rows or PortalRuntime.state_store.list_qt_active_items():
+            if not active_rows_loaded:
+                active_rows = PortalRuntime.state_store.list_qt_active_items(
+                    include_deleted=True
+                )
+                active_rows_loaded = True
+            for active_item in active_rows:
                 if active_item.get("deleted_at") is not None:
                     continue
                 payload = _row_payload(active_item)
@@ -6810,11 +6818,11 @@ class FastAPIPortalController:
                 item.setdefault("origin", active_item.get("origin"))
                 if not item.get("title") and info.get("title"):
                     item["title"] = info.get("title")
-                if not item.get("work_type"):
-                    notice_type = str(item.get("notice_type") or "").strip()
-                    mapped_work_type = WORK_TYPE_BY_NOTICE_TYPE.get(notice_type)
-                    if mapped_work_type:
-                        item["work_type"] = mapped_work_type
+                notice_type = str(item.get("notice_type") or "").strip()
+                mapped_work_type = WORK_TYPE_BY_NOTICE_TYPE.get(notice_type)
+                if mapped_work_type:
+                    item["work_type"] = mapped_work_type
+                    item["lan_work_type"] = mapped_work_type
                 try:
                     identity = PortalRuntime.state_store.resolve_notice_identity(
                         work_type=str(item.get("work_type") or ""),
@@ -6838,10 +6846,14 @@ class FastAPIPortalController:
                     item["binding_status"] = "bound"
                 else:
                     item["binding_status"] = "needs_binding"
-                if not isinstance(item.get("building_codes"), list):
+                if not isinstance(item.get("building_codes"), list) or not item.get(
+                    "building_codes"
+                ):
                     building_text = " ".join(
                         str(value or "")
                         for value in (
+                            item.get("scope"),
+                            item.get("building_code"),
                             item.get("building"),
                             item.get("location"),
                             item.get("title"),
@@ -6852,7 +6864,7 @@ class FastAPIPortalController:
                         PortalRuntime.service._building_codes_from_value(building_text)
                     )
                 _append(item)
-            if active_rows:
+            if active_rows_loaded:
                 PortalRuntime.last_ongoing_error = ""
                 return qt_projected_items
         except Exception as exc:

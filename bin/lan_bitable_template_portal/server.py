@@ -2867,14 +2867,16 @@ class PortalRuntime:
             info = extract_event_info(text) or {}
             return str(info.get("status") or "").strip() == "结束"
 
-        def _qt_active_payloads(*, include_deleted: bool = False) -> list[dict]:
+        def _qt_active_payloads(
+            *, include_deleted: bool = False
+        ) -> tuple[list[dict], bool]:
             payloads: list[dict] = []
             try:
                 rows = PortalRuntime.state_store.list_qt_active_items(
                     include_deleted=include_deleted
                 )
             except Exception:
-                return payloads
+                return payloads, False
             for row in rows:
                 if not isinstance(row, dict):
                     continue
@@ -2888,9 +2890,12 @@ class PortalRuntime:
                 if row.get("deleted_at") is not None:
                     copied["_qt_deleted_at"] = row.get("deleted_at")
                 payloads.append(copied)
-            return payloads
+            return payloads, True
 
-        def _deleted_identity_keys(active_items: list[dict] | None = None) -> set[str]:
+        def _deleted_identity_keys(
+            active_items: list[dict] | None = None,
+            all_items: list[dict] | None = None,
+        ) -> set[str]:
             active_keys: set[str] = set()
             for item in active_items or []:
                 try:
@@ -2898,7 +2903,7 @@ class PortalRuntime:
                 except Exception:
                     continue
             keys: set[str] = set()
-            for item in _qt_active_payloads(include_deleted=True):
+            for item in all_items or []:
                 if item.get("_qt_deleted_at") is None:
                     continue
                 try:
@@ -2928,12 +2933,13 @@ class PortalRuntime:
             ]
 
         try:
-            snapshot = PortalRuntime.state_store.get_ongoing_snapshot()
-            active_items = _qt_active_payloads()
-            deleted_keys = _deleted_identity_keys(active_items)
-            if active_items:
+            active_items, active_items_loaded = _qt_active_payloads()
+            all_items, _ = _qt_active_payloads(include_deleted=True)
+            deleted_keys = _deleted_identity_keys(active_items, all_items)
+            if active_items_loaded:
                 PortalRuntime.last_ongoing_error = ""
                 return _filter_items(active_items, deleted_keys)
+            snapshot = PortalRuntime.state_store.get_ongoing_snapshot()
             if snapshot.get("exists"):
                 PortalRuntime.last_ongoing_error = ""
                 return _filter_items(snapshot.get("items", []), deleted_keys)

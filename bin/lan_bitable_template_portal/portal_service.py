@@ -11837,10 +11837,28 @@ class MaintenancePortalService:
         codes = item.get("building_codes")
         if not isinstance(codes, list):
             codes = []
+        codes = cls._clean_building_codes(codes)
+        item_scope = cls._normalize_scope(
+            item.get("scope") or item.get("building_code") or ""
+        )
+        if not codes and item_scope in BUILDING_SCOPE_CODES:
+            codes = [item_scope]
+        if not codes and item_scope == "CAMPUS":
+            return cls._normalize_scope(scope) in {"ALL", "CAMPUS"}
         if not codes and str(item.get("building_code") or "").strip().upper() == "CAMPUS":
             codes = cls._building_codes_from_value(item.get("building"))
         if not codes:
-            codes = cls._building_codes_from_value(item.get("building"))
+            codes = cls._building_codes_from_value(
+                " ".join(
+                    str(value or "")
+                    for value in (
+                        item.get("building"),
+                        item.get("location"),
+                        item.get("title"),
+                        item.get("text"),
+                    )
+                )
+            )
         return cls._scope_matches_buildings(scope, codes)
 
     @classmethod
@@ -13690,6 +13708,7 @@ class MaintenancePortalService:
             WORK_TYPE_POWER: 0,
             WORK_TYPE_POLLING: 0,
             WORK_TYPE_ADJUST: 0,
+            WORK_TYPE_EVENT: 0,
         }
         for item in items or []:
             work_type = MaintenancePortalService._item_work_type(item)
@@ -13701,6 +13720,10 @@ class MaintenancePortalService:
     @staticmethod
     def _item_work_type(item: dict[str, Any] | None) -> str:
         item = item if isinstance(item, dict) else {}
+        notice_type = str(item.get("notice_type") or "").strip()
+        mapped = WORK_TYPE_BY_NOTICE_TYPE.get(notice_type, "")
+        if mapped:
+            return mapped
         work_type = str(item.get("work_type") or item.get("lan_work_type") or "").strip()
         if work_type in {
             WORK_TYPE_MAINTENANCE,
@@ -13709,12 +13732,9 @@ class MaintenancePortalService:
             WORK_TYPE_POWER,
             WORK_TYPE_POLLING,
             WORK_TYPE_ADJUST,
+            WORK_TYPE_EVENT,
         }:
             return work_type
-        notice_type = str(item.get("notice_type") or "").strip()
-        mapped = WORK_TYPE_BY_NOTICE_TYPE.get(notice_type, "")
-        if mapped:
-            return mapped
         text = "\n".join(
             str(item.get(key) or "").strip()
             for key in ("text", "content", "title", "name")
@@ -13730,6 +13750,8 @@ class MaintenancePortalService:
             return WORK_TYPE_REPAIR
         if re.search(r"变更通告", text):
             return WORK_TYPE_CHANGE
+        if re.search(r"事件通告", text):
+            return WORK_TYPE_EVENT
         return WORK_TYPE_MAINTENANCE
 
     def get_repair_management_scope_overview(
@@ -14704,6 +14726,8 @@ class MaintenancePortalService:
         cls, text: str, sections: dict[str, str]
     ) -> str:
         raw = str(text or "")
+        if "【事件通告】" in raw:
+            return WORK_TYPE_EVENT
         if "【设备检修】" in raw or cls._notice_section_value(
             sections, ["维修设备", "维修故障", "故障现象", "解决方案"]
         ):

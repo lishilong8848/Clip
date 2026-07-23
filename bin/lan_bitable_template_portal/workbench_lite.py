@@ -44,7 +44,10 @@ WORK_TYPE_BY_NOTICE_TYPE: dict[str, str] = {
     "轮巡通告": "polling",
     "设备调整": "adjust",
     "调整通告": "adjust",
+    "事件通告": "event",
 }
+
+ITEM_WORK_TYPE_LABELS: dict[str, str] = {**WORK_TYPE_LABELS, "event": "事件"}
 
 POWER_NOTICE_TYPES = ("上电通告", "下电通告")
 SPECIALTY_OPTIONS = ("电气", "暖通", "消防", "弱电")
@@ -311,13 +314,15 @@ def _view_work_type(value: Any) -> str:
 
 def _item_work_type(item: dict[str, Any] | None) -> str:
     item = item if isinstance(item, dict) else {}
-    work = _work_type(item.get("work_type") or item.get("lan_work_type"))
-    if str(item.get("work_type") or item.get("lan_work_type") or "").strip() in WORK_TYPE_LABELS:
-        return work
     notice_type = str(item.get("notice_type") or "").strip()
     mapped = WORK_TYPE_BY_NOTICE_TYPE.get(notice_type)
     if mapped:
         return mapped
+    raw_work = str(
+        item.get("work_type") or item.get("lan_work_type") or ""
+    ).strip()
+    if raw_work in ITEM_WORK_TYPE_LABELS:
+        return raw_work
     text = "\n".join(
         str(item.get(key) or "").strip()
         for key in ("text", "content", "title", "name")
@@ -333,6 +338,8 @@ def _item_work_type(item: dict[str, Any] | None) -> str:
         return "repair"
     if re.search(r"变更通告", text):
         return "change"
+    if re.search(r"事件通告", text):
+        return "event"
     return "maintenance"
 
 
@@ -1326,15 +1333,22 @@ def _ongoing_rows(
     for item in filtered:
         active_id = str(item.get("active_item_id") or item.get("target_record_id") or item.get("record_id") or "")
         row_work_type = _item_work_type(item)
-        url = _query_url(
-            "/workbench-lite",
-            scope=scope,
-            work_type=work_type,
-            month=month,
-            active_item_id=active_id,
-            pending_page=pending_page,
-            ongoing_page=ongoing_page,
-        )
+        direct_navigation = row_work_type == "event"
+        if direct_navigation:
+            event_scope = _record_building_code(item) or scope
+            url = _query_url(
+                "/", scope=event_scope, mode="events", detail="1"
+            )
+        else:
+            url = _query_url(
+                "/workbench-lite",
+                scope=scope,
+                work_type=work_type,
+                month=month,
+                active_item_id=active_id,
+                pending_page=pending_page,
+                ongoing_page=ongoing_page,
+            )
         active = " active" if active_id == selected_id else ""
         title = _record_display_title(item)
         draft = _draft_from_record(item, work_type=row_work_type)
@@ -1349,6 +1363,7 @@ def _ongoing_rows(
         f"<a class=\"ongoing-row{active}{needs_site_class}{needs_mop_class}\" href=\"{_e(url)}\" title=\"{_e(title)}\""
         f" aria-current=\"{'true' if active else 'false'}\""
         f" data-row-kind=\"ongoing\""
+        f" data-direct-navigation=\"{'1' if direct_navigation else ''}\""
         f" data-work-type=\"{_e(row_work_type)}\""
         f" data-active-item-id=\"{_e(str(item.get('active_item_id') or ''))}\""
         f" data-record-id=\"{_e(str(item.get('record_id') or ''))}\""
@@ -2037,7 +2052,13 @@ def render_workbench_lite(
         for key in WORK_TYPE_LABELS
     }
     record_counts[ALL_WORK_TYPE] = sum(record_counts.get(key, 0) for key in WORK_TYPE_LABELS)
-    ongoing_counts[ALL_WORK_TYPE] = sum(ongoing_counts.get(key, 0) for key in WORK_TYPE_LABELS)
+    ongoing_counts[ALL_WORK_TYPE] = (
+        sum(ongoing_counts.get(key, 0) for key in WORK_TYPE_LABELS)
+        + _to_int(
+            payload_ongoing_counts.get("event"),
+            fallback_ongoing_counts.get("event", 0),
+        )
+    )
     records_pagination = (
         payload.get("records_pagination")
         if isinstance(payload.get("records_pagination"), dict)
@@ -4870,6 +4891,12 @@ def render_workbench_lite(
       const navLink = target.closest('.notice-row,.ongoing-row,.type-tab,.manual-menu a,.page-btn[href]');
       if (navLink) {{
         event.preventDefault();
+        if (navLink.getAttribute('data-direct-navigation') === '1') {{
+          if (!(await confirmDiscardLiteChanges())) return;
+          setLiteFormDirty(false);
+          window.location.assign(navLink.href);
+          return;
+        }}
         if (navLink.matches('.ongoing-row.optimistic')) {{
           setLiteStatus('该通告正在同步，完成后可继续处理');
           return;

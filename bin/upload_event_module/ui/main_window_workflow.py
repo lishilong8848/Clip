@@ -2596,16 +2596,25 @@ class MainWindowWorkflowMixin:
         if item_ref and not self._is_valid_list_item(item_ref):
             item_ref = None
             list_widget = None
+        data = self._mark_notice_content_dirty(data)
         if not item_ref:
-            item_ref, _ = self.add_active_item(data, insert_top=True, skip_cache=True)
+            # Ending is optimistic: the active row is removed before the backend
+            # finishes. A failed end must reactivate the SQLite row as well as the
+            # Qt model, otherwise the browser can no longer see this notice.
+            item_ref, _ = self.add_active_item(data, insert_top=True)
             list_widget = item_ref.listWidget() if item_ref else None
         if item_ref and list_widget:
-            data = self._mark_notice_content_dirty(data)
-            item_ref.setData(Qt.ItemDataRole.UserRole, data)
+            committed = self._commit_active_record(
+                data,
+                refresh_detail=True,
+                rebuild_widget=False,
+                list_widget=list_widget,
+                item=item_ref,
+            )
             self._rebuild_active_item_widget(
                 list_widget,
                 item_ref,
-                data,
+                committed or data,
                 force_status="end",
                 upload_in_progress=False,
                 pending_upload_hash=None,
@@ -2613,7 +2622,6 @@ class MainWindowWorkflowMixin:
             )
         self.pending_action_record_ids.discard(record_id)
         self.pending_action_types.pop(record_id, None)
-        self.request_active_cache_save()
 
     def _replace_record_id_everywhere(
         self, old_record_id: str, new_record_id: str

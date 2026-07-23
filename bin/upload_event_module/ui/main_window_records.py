@@ -2009,6 +2009,10 @@ class MainWindowRecordsMixin:
                 if item is survivor_item:
                     continue
                 self._cleanup_payload_for_data(data)
+                # Reconciliation must update the canonical SQLite source as well
+                # as the Qt model. Removing only the widget leaves an extra row for
+                # the browser's ongoing projection.
+                self._delete_active_cache_record(data)
                 self._remove_active_item_widget_only(list_widget, item)
                 changed = True
             self._set_routing_state(

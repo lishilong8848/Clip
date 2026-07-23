@@ -4950,6 +4950,157 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             finally:
                 PortalRuntime.state_store = previous_store
 
+    def test_backend_ongoing_keeps_live_qt_item_when_deleted_row_has_same_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            previous_store = PortalRuntime.state_store
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            PortalRuntime.state_store = store
+            try:
+                text = (
+                    "【事件通告】状态：新增\n"
+                    "【标题】EA118机房B楼重复告警测试\n"
+                    "【来源】BMS系统\n"
+                    "【时间】2026-07-23 08:30:00\n"
+                    "【概述】B楼重复告警测试\n"
+                    "【进展】值班工程师已前往现场"
+                )
+                deleted_item = {
+                    "active_item_id": "active-deleted-same-text",
+                    "record_id": "local_deleted_same_text",
+                    "notice_type": "事件通告",
+                    "work_type": "maintenance",
+                    "title": "EA118机房B楼重复告警测试",
+                    "building_codes": ["B"],
+                    "status": "新增",
+                    "text": text,
+                }
+                store.upsert_qt_active_item(
+                    deleted_item, section="event", origin="qt"
+                )
+                store.delete_qt_active_item(
+                    active_item_id=deleted_item["active_item_id"],
+                    record_id=deleted_item["record_id"],
+                )
+                live_item = {
+                    "active_item_id": "active-live-same-text",
+                    "record_id": "local_live_same_text",
+                    "notice_type": "事件通告",
+                    "work_type": "maintenance",
+                    "building_codes": ["B"],
+                    "status": "新增",
+                    "text": text,
+                }
+                store.upsert_qt_active_item(live_item, section="event", origin="qt")
+
+                ongoing = FastAPIPortalController._get_ongoing("B")
+
+                self.assertEqual(len(ongoing), 1)
+                self.assertEqual(ongoing[0]["active_item_id"], "active-live-same-text")
+                self.assertEqual(ongoing[0]["work_type"], "event")
+            finally:
+                PortalRuntime.state_store = previous_store
+
+    def test_backend_ongoing_uses_explicit_scope_when_building_codes_are_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            previous_store = PortalRuntime.state_store
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            PortalRuntime.state_store = store
+            try:
+                store.upsert_qt_active_item(
+                    {
+                        "active_item_id": "active-explicit-scope-d",
+                        "record_id": "local_explicit_scope_d",
+                        "notice_type": "维保通告",
+                        "work_type": "maintenance",
+                        "scope": "D",
+                        "building_codes": [],
+                        "status": "开始",
+                        "text": "【维保通告】状态：开始\n【名称】测试维护通告",
+                    },
+                    section="other",
+                    origin="qt",
+                )
+
+                self.assertEqual(
+                    len(FastAPIPortalController._get_ongoing("D")), 1
+                )
+                self.assertEqual(FastAPIPortalController._get_ongoing("A"), [])
+            finally:
+                PortalRuntime.state_store = previous_store
+
+    def test_workbench_lite_defaults_to_all_notice_types(self):
+        main_text = (BIN_DIR / "clipflow_backend" / "main.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            'request.query_params.get("work_type") or "all"', main_text
+        )
+        self.assertIn(
+            'if work_type != "all" and work_type not in NOTICE_TYPE_BY_WORK_TYPE',
+            main_text,
+        )
+
+    def test_event_ongoing_is_visible_only_in_all_and_opens_event_management(self):
+        from lan_bitable_template_portal.workbench_lite import _ongoing_rows
+
+        item = {
+            "active_item_id": "active-event-b",
+            "record_id": "recv_event_b",
+            "notice_type": "事件通告",
+            "work_type": "event",
+            "scope": "B",
+            "building_codes": ["B"],
+            "status": "新增",
+            "title": "EA118机房B楼测试事件",
+            "text": "【事件通告】状态：新增\n【标题】EA118机房B楼测试事件",
+        }
+
+        all_rows = _ongoing_rows(
+            [item],
+            scope="B",
+            work_type="all",
+            month="2026-07",
+            selected_id="",
+            pending_page=1,
+            ongoing_page=1,
+        )
+        maintenance_rows = _ongoing_rows(
+            [item],
+            scope="B",
+            work_type="maintenance",
+            month="2026-07",
+            selected_id="",
+            pending_page=1,
+            ongoing_page=1,
+        )
+
+        self.assertIn('data-work-type="event"', all_rows)
+        self.assertIn('data-direct-navigation="1"', all_rows)
+        self.assertIn('mode=events', all_rows)
+        self.assertEqual(maintenance_rows, '<div class="empty">当前没有未结束通告</div>')
+
+    def test_qt_failed_end_rollback_persists_the_restored_active_item(self):
+        workflow_text = (
+            BIN_DIR / "upload_event_module" / "ui" / "main_window_workflow.py"
+        ).read_text(encoding="utf-8")
+        rollback_block = workflow_text.split("    def _rollback_end(", 1)[1].split(
+            "    def _replace_record_id_everywhere(", 1
+        )[0]
+        self.assertNotIn("skip_cache=True", rollback_block)
+        self.assertIn("self._commit_active_record(", rollback_block)
+
+    def test_qt_route_reconciliation_removes_discarded_row_from_sqlite(self):
+        records_text = (
+            BIN_DIR / "upload_event_module" / "ui" / "main_window_records.py"
+        ).read_text(encoding="utf-8")
+        reconcile_block = records_text.split(
+            "    def _reconcile_active_route_duplicates(", 1
+        )[1].split(
+            "    @staticmethod\n    def _normalize_today_in_progress_state", 1
+        )[0]
+        self.assertIn("self._delete_active_cache_record(data)", reconcile_block)
+        self.assertIn("self._remove_active_item_widget_only", reconcile_block)
+
     def test_backend_ongoing_filters_deleted_qt_item_from_stale_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
             previous_store = PortalRuntime.state_store
@@ -5112,7 +5263,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             finally:
                 PortalRuntime.state_store = previous_store
 
-    def test_backend_ongoing_filters_ended_item_from_stale_snapshot(self):
+    def test_backend_ongoing_does_not_restore_stale_snapshot_when_qt_store_is_empty(self):
         with tempfile.TemporaryDirectory() as tmp:
             previous_store = PortalRuntime.state_store
             PortalRuntime.state_store = LanPortalStateStore(
@@ -5147,8 +5298,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 controller = FastAPIPortalController()
                 ongoing = controller._get_ongoing("D")
 
-                self.assertEqual(len(ongoing), 1)
-                self.assertEqual(ongoing[0]["active_item_id"], "active-running-change")
+                self.assertEqual(ongoing, [])
             finally:
                 PortalRuntime.state_store = previous_store
 
@@ -5833,29 +5983,28 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(tasks[0]["attempts"], 1)
             self.assertIn("飞书临时不可用", tasks[0]["last_error"])
 
-    def test_server_get_ongoing_reads_sqlite_before_qt_callback(self):
+    def test_server_get_ongoing_reads_qt_active_items_before_qt_callback(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
-            store.replace_ongoing_items(
-                [
-                    {
-                        "active_item_id": "active-a",
-                        "work_type": "maintenance",
-                        "notice_type": "维保通告",
-                        "title": "A楼维保",
-                        "building": "A楼",
-                        "building_codes": ["A"],
-                    },
-                    {
-                        "active_item_id": "active-b",
-                        "work_type": "maintenance",
-                        "notice_type": "维保通告",
-                        "title": "B楼维保",
-                        "building": "B楼",
-                        "building_codes": ["B"],
-                    },
-                ]
-            )
+            for item in (
+                {
+                    "active_item_id": "active-a",
+                    "work_type": "maintenance",
+                    "notice_type": "维保通告",
+                    "title": "A楼维保",
+                    "building": "A楼",
+                    "building_codes": ["A"],
+                },
+                {
+                    "active_item_id": "active-b",
+                    "work_type": "maintenance",
+                    "notice_type": "维保通告",
+                    "title": "B楼维保",
+                    "building": "B楼",
+                    "building_codes": ["B"],
+                },
+            ):
+                store.upsert_qt_active_item(item, section="other", origin="qt")
 
             def unexpected_callback(scope):
                 raise AssertionError(f"Qt callback should not be called: {scope}")
@@ -5875,28 +6024,27 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
     def test_server_get_ongoing_filters_ended_items(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
-            store.replace_ongoing_items(
-                [
-                    {
-                        "active_item_id": "active-ended",
-                        "work_type": "change",
-                        "notice_type": "变更通告",
-                        "title": "A楼已结束变更",
-                        "building": "A楼",
-                        "building_codes": ["A"],
-                        "text": "【变更通告】状态:结束【名称】A楼已结束变更",
-                    },
-                    {
-                        "active_item_id": "active-running",
-                        "work_type": "change",
-                        "notice_type": "变更通告",
-                        "title": "A楼进行中变更",
-                        "building": "A楼",
-                        "building_codes": ["A"],
-                        "text": "【变更通告】状态:更新【名称】A楼进行中变更",
-                    },
-                ]
-            )
+            for item in (
+                {
+                    "active_item_id": "active-ended",
+                    "work_type": "change",
+                    "notice_type": "变更通告",
+                    "title": "A楼已结束变更",
+                    "building": "A楼",
+                    "building_codes": ["A"],
+                    "text": "【变更通告】状态:结束【名称】A楼已结束变更",
+                },
+                {
+                    "active_item_id": "active-running",
+                    "work_type": "change",
+                    "notice_type": "变更通告",
+                    "title": "A楼进行中变更",
+                    "building": "A楼",
+                    "building_codes": ["A"],
+                    "text": "【变更通告】状态:更新【名称】A楼进行中变更",
+                },
+            ):
+                store.upsert_qt_active_item(item, section="other", origin="qt")
 
             dummy = type(
                 "_DummyPortalRuntime",
@@ -5909,6 +6057,32 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 result = PortalRuntime._get_ongoing(dummy, "A")
 
             self.assertEqual([item["active_item_id"] for item in result], ["active-running"])
+
+    def test_server_get_ongoing_keeps_empty_qt_store_authoritative(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
+            store.replace_ongoing_items(
+                [
+                    {
+                        "active_item_id": "stale-snapshot-item",
+                        "work_type": "maintenance",
+                        "notice_type": "维保通告",
+                        "title": "A楼旧快照维保",
+                        "building_codes": ["A"],
+                    }
+                ]
+            )
+            dummy = type(
+                "_DummyPortalRuntime",
+                (),
+                {"service": _TestMaintenancePortalService()},
+            )()
+            with patch.object(PortalRuntime, "state_store", store), patch.object(
+                PortalRuntime, "ongoing_callback", None
+            ):
+                result = PortalRuntime._get_ongoing(dummy, "A")
+
+            self.assertEqual(result, [])
 
     def test_append_events_import_legacy_jsonl_once(self):
         with tempfile.TemporaryDirectory() as tmp:
