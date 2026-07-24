@@ -425,6 +425,7 @@ const bindCandidateNote = ref("");
 const workerPeople = ref<LooseDict[]>([]);
 const involvesSpareParts = ref(false);
 const brandModelOptions = ref<Record<string, string[]>>({});
+const deviceBrandModelOptions = ref<Record<string, Record<string, string[]>>>({});
 const total = ref(0);
 const page = ref(1);
 const deleteDialogOpen = ref(false);
@@ -489,13 +490,22 @@ const timelineRecords = computed(() => {
   if (!editingRecordOutsideResults.value || !selectedRecord.value) return records.value;
   return [selectedRecord.value, ...records.value];
 });
+const selectedDeviceCatalog = computed(() => (
+  resolveDeviceCatalog(String(draft[DEVICE_NAME_FIELD_NAME] || ""))
+));
 const selectedBrand = computed(() => String(draft[BRAND_FIELD_NAME] || "").trim());
+const selectedBrandOptions = computed(() => (
+  Object.keys(selectedDeviceCatalog.value.brandModels)
+));
 const isInternalRepairParty = computed(() => (
   String(draft[REPAIR_PARTY_FIELD_NAME] || "").trim() === "我方"
 ));
 const selectedModelOptions = computed(() => {
   if (!selectedBrand.value) return [];
-  const values = brandModelOptions.value[selectedBrand.value];
+  const source = selectedDeviceCatalog.value.matched
+    ? selectedDeviceCatalog.value.brandModels
+    : brandModelOptions.value;
+  const values = source[selectedBrand.value];
   return Array.isArray(values) ? values : [];
 });
 const hasDraftContent = computed(() => Boolean(
@@ -581,6 +591,10 @@ function isModelField(field: LooseDict): boolean {
   return String(field.field_name || "") === MODEL_FIELD_NAME;
 }
 
+function isBrandField(field: LooseDict): boolean {
+  return String(field.field_name || "") === BRAND_FIELD_NAME;
+}
+
 function isWorkerField(field: LooseDict): boolean {
   return String(field.field_name || "") === WORKER_FIELD_NAME;
 }
@@ -620,7 +634,87 @@ function normalizeWorkerPeople(value: unknown): LooseDict[] {
   return result;
 }
 
+function splitDeviceNames(value: unknown): string[] {
+  return Array.from(new Set(
+    String(value || "")
+      .split(/[、,，;；\r\n]+/)
+      .map((item) => item.trim())
+      .filter(Boolean),
+  ));
+}
+
+function normalizedCatalogKey(value: unknown): string {
+  return String(value || "").replace(/\s+/g, "").toLocaleLowerCase();
+}
+
+function resolveDeviceCatalog(value: unknown): {
+  matched: boolean;
+  brandModels: Record<string, string[]>;
+} {
+  const deviceNames = splitDeviceNames(value);
+  if (!deviceNames.length) return { matched: false, brandModels: {} };
+  const catalogEntries = Object.entries(deviceBrandModelOptions.value);
+  const merged: Record<string, string[]> = {};
+  let matched = false;
+  for (const deviceName of deviceNames) {
+    const direct = deviceBrandModelOptions.value[deviceName];
+    const brandModels = direct || catalogEntries.find(
+      ([catalogName]) => normalizedCatalogKey(catalogName) === normalizedCatalogKey(deviceName),
+    )?.[1];
+    if (!brandModels || typeof brandModels !== "object") continue;
+    matched = true;
+    for (const [brand, models] of Object.entries(brandModels)) {
+      if (!Array.isArray(models)) continue;
+      const mergedModels = merged[brand] || [];
+      for (const model of models) {
+        const normalizedModel = String(model || "").trim();
+        if (normalizedModel && !mergedModels.includes(normalizedModel)) {
+          mergedModels.push(normalizedModel);
+        }
+      }
+      if (mergedModels.length) merged[brand] = mergedModels;
+    }
+  }
+  return { matched, brandModels: merged };
+}
+
+function modelsForBrand(brand: unknown, deviceValue: unknown): string[] {
+  const normalizedBrand = String(brand || "").trim();
+  if (!normalizedBrand) return [];
+  const deviceCatalog = resolveDeviceCatalog(deviceValue);
+  const source = deviceCatalog.matched
+    ? deviceCatalog.brandModels
+    : brandModelOptions.value;
+  const models = source[normalizedBrand];
+  return Array.isArray(models) ? models : [];
+}
+
+function reconcileDeviceBrandModelSelection(deviceValue: unknown): void {
+  const deviceCatalog = resolveDeviceCatalog(deviceValue);
+  if (!deviceCatalog.matched) return;
+  const currentBrand = String(draft[BRAND_FIELD_NAME] || "").trim();
+  if (currentBrand && !Object.prototype.hasOwnProperty.call(
+    deviceCatalog.brandModels,
+    currentBrand,
+  )) {
+    draft[BRAND_FIELD_NAME] = "";
+    draft[MODEL_FIELD_NAME] = "";
+    dirtyFieldNames.add(BRAND_FIELD_NAME);
+    dirtyFieldNames.add(MODEL_FIELD_NAME);
+    return;
+  }
+  const currentModel = String(draft[MODEL_FIELD_NAME] || "").trim();
+  const allowedModels = modelsForBrand(currentBrand, deviceValue);
+  if (currentModel && !allowedModels.includes(currentModel)) {
+    draft[MODEL_FIELD_NAME] = "";
+    dirtyFieldNames.add(MODEL_FIELD_NAME);
+  }
+}
+
 function selectOptionsForField(field: LooseDict): string[] | null {
+  if (isBrandField(field) && selectedDeviceCatalog.value.matched) {
+    return selectedBrandOptions.value;
+  }
   return isModelField(field) ? selectedModelOptions.value : null;
 }
 
@@ -696,8 +790,14 @@ function updateFollowupField(field: LooseDict, value: string): void {
     draft[DEVICE_NUMBER_FIELD_NAME] = String(value || "").trim();
     dirtyFieldNames.add(DEVICE_NUMBER_FIELD_NAME);
   }
+  if (fieldName === DEVICE_NAME_FIELD_NAME) {
+    reconcileDeviceBrandModelSelection(value);
+  }
   if (fieldName === BRAND_FIELD_NAME) {
-    const allowedModels = brandModelOptions.value[value] || [];
+    const allowedModels = modelsForBrand(
+      value,
+      draft[DEVICE_NAME_FIELD_NAME],
+    );
     const currentModel = String(draft[MODEL_FIELD_NAME] || "").trim();
     if (currentModel && !allowedModels.includes(currentModel)) {
       draft[MODEL_FIELD_NAME] = "";
@@ -842,6 +942,7 @@ function resetForParent(): void {
   records.value = [];
   fields.value = [];
   brandModelOptions.value = {};
+  deviceBrandModelOptions.value = {};
   total.value = 0;
   cmdbPickerOpen.value = false;
   bindPickerOpen.value = false;
@@ -931,6 +1032,12 @@ async function loadRecords(announce = false, silent = false): Promise<void> {
     fields.value = Array.isArray(payload.fields) ? payload.fields : [];
     brandModelOptions.value = payload.brand_model_options && typeof payload.brand_model_options === "object"
       ? payload.brand_model_options as Record<string, string[]>
+      : {};
+    deviceBrandModelOptions.value = (
+      payload.device_brand_model_options
+      && typeof payload.device_brand_model_options === "object"
+    )
+      ? payload.device_brand_model_options as Record<string, Record<string, string[]>>
       : {};
     total.value = Number(payload.total || records.value.length || 0);
     emit("count-changed", total.value);
@@ -1498,6 +1605,7 @@ function confirmCmdb(recordIds: string[]): void {
     dirtyFieldNames.add(DEVICE_NAME_FIELD_NAME);
     draft[DEVICE_NUMBER_FIELD_NAME] = selectedDeviceNames;
     dirtyFieldNames.add(DEVICE_NUMBER_FIELD_NAME);
+    reconcileDeviceBrandModelSelection(selectedDeviceNames);
   }
   if (!selectedRecords.length && !cmdbRecordIds.value.length) {
     draft[DEVICE_NAME_FIELD_NAME] = "";

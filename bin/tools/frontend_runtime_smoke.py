@@ -907,7 +907,7 @@ class _SmokePortalService:
         return {
             "summary_record_id": summary_record_id,
             "fields": [
-                {"field_name": "设备名称", "field_type": 3, "ui_type": "SingleSelect", "options": ["精密空调"], "editable": True},
+                {"field_name": "设备名称", "field_type": 3, "ui_type": "SingleSelect", "options": ["精密空调", "蓄电池"], "editable": True},
                 {"field_name": "设备编号", "field_type": 1, "ui_type": "Text", "options": [], "editable": True},
                 {"field_name": "设备品牌", "field_type": 3, "ui_type": "SingleSelect", "options": ["双登", "康明斯", "圣阳"], "editable": True},
                 {"field_name": "设备型号", "field_type": 3, "ui_type": "SingleSelect", "options": ["GFMHR-1250W", "C2500 D5A", "SP12-100", "SP12-200"], "editable": True},
@@ -925,6 +925,14 @@ class _SmokePortalService:
                 "双登": ["GFMHR-1250W"],
                 "康明斯": ["C2500 D5A"],
                 "圣阳": ["SP12-100", "SP12-200"],
+            },
+            "device_brand_model_options": {
+                "精密空调": {
+                    "双登": ["GFMHR-1250W"],
+                },
+                "蓄电池": {
+                    "圣阳": ["SP12-100", "SP12-200"],
+                },
             },
         }
 
@@ -1459,6 +1467,16 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           if (tallestCompactField > 60) {{
             throw new Error(`compact followup field is too tall: ${{Math.round(tallestCompactField)}}px`);
           }}
+          const followupDevice = followupPanel.getByRole('combobox', {{ name: '设备名称', exact: true }});
+          const scopedBrand = followupPanel.getByRole('combobox', {{ name: '设备品牌', exact: true }});
+          await followupDevice.click({{ force: true }});
+          await page.getByRole('option', {{ name: '精密空调', exact: true }}).click();
+          await scopedBrand.click({{ force: true }});
+          await page.getByRole('option', {{ name: '双登', exact: true }}).waitFor({{ state: 'visible' }});
+          if (await page.getByRole('option', {{ name: '圣阳', exact: true }}).count()) {{
+            throw new Error('followup brand options were not filtered by selected device name');
+          }}
+          await page.getByRole('option', {{ name: '双登', exact: true }}).click();
           await followupPanel.getByRole('button', {{ name: '选择设备', exact: true }}).click();
           const cmdbDialog = page.getByRole('dialog', {{ name: '选择 CMDB 设备（可多选）', exact: true }});
           await cmdbDialog.waitFor({{ state: 'visible' }});

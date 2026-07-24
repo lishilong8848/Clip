@@ -37,6 +37,7 @@ from lan_bitable_template_portal.portal_service import REPAIR_FOLLOWUP_TABLE_ID 
 from lan_bitable_template_portal.portal_service import REPAIR_EQUIPMENT_CATALOG_TABLE_ID  # noqa: E402
 from lan_bitable_template_portal.portal_service import REPAIR_FOLLOWUP_CATALOG_MAX_RECORDS  # noqa: E402
 from lan_bitable_template_portal.portal_service import REPAIR_FOLLOWUP_CATALOG_RUNTIME_KEY  # noqa: E402
+from lan_bitable_template_portal.portal_service import REPAIR_FOLLOWUP_CATALOG_VERSION  # noqa: E402
 from lan_bitable_template_portal.portal_service import REPAIR_FOLLOWUP_BACKFILL_RUNTIME_KEY  # noqa: E402
 from lan_bitable_template_portal.portal_service import REPAIR_CMDB_TABLE_ID  # noqa: E402
 from lan_bitable_template_portal.portal_service import REPAIR_CMDB_SNAPSHOT_MAX_RECORDS  # noqa: E402
@@ -23124,8 +23125,93 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(result["品牌A"], ["A-100", "A-200"])
         self.assertEqual(result["品牌B"], ["B-100"])
 
+    def test_repair_followup_brand_model_options_are_scoped_by_device(self):
+        device = FieldMeta(
+            "fld_device",
+            "设备名称",
+            "SingleSelect",
+            3,
+            False,
+            {"opt_ups": "三相UPS", "opt_battery": "蓄电池"},
+            ["三相UPS", "蓄电池"],
+            False,
+        )
+        brand = FieldMeta(
+            "fld_brand",
+            "设备品牌",
+            "SingleSelect",
+            3,
+            False,
+            {"opt_a": "品牌A", "opt_b": "品牌B"},
+            ["品牌A", "品牌B"],
+            False,
+        )
+        model = FieldMeta(
+            "fld_model",
+            "设备型号",
+            "SingleSelect",
+            3,
+            False,
+            {
+                "opt_a1": "A-UPS",
+                "opt_a2": "A-BATTERY",
+                "opt_b1": "B-BATTERY",
+            },
+            ["A-UPS", "A-BATTERY", "B-BATTERY"],
+            False,
+        )
+        records = [
+            {
+                "display_fields": {
+                    "设备名称": "三相UPS",
+                    "设备品牌": "品牌A",
+                    "设备型号": "A-UPS",
+                }
+            },
+            {
+                "display_fields": {
+                    "设备名称": "蓄电池",
+                    "设备品牌": "品牌A",
+                    "设备型号": "A-BATTERY",
+                }
+            },
+            {
+                "display_fields": {
+                    "设备名称": "蓄电池",
+                    "设备品牌": "品牌B",
+                    "设备型号": "B-BATTERY",
+                }
+            },
+        ]
+
+        result = MaintenancePortalService._repair_followup_device_brand_model_options(
+            records=records,
+            summary_record=None,
+            meta_by_name={
+                device.field_name: device,
+                brand.field_name: brand,
+                model.field_name: model,
+            },
+        )
+
+        self.assertEqual(result["三相UPS"], {"品牌A": ["A-UPS"]})
+        self.assertEqual(
+            result["蓄电池"],
+            {"品牌A": ["A-BATTERY"], "品牌B": ["B-BATTERY"]},
+        )
+
     def test_repair_followup_brand_model_catalog_reads_all_records_once(self):
         service = _TestMaintenancePortalService()
+        catalog_device = FieldMeta(
+            "fld_catalog_device",
+            "设备类型",
+            "SingleSelect",
+            3,
+            False,
+            {},
+            ["蓄电池", "柴油发电机"],
+            False,
+        )
         catalog_brand = FieldMeta(
             "fld_catalog_brand",
             "设备品牌",
@@ -23152,16 +23238,17 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         def fake_search(**kwargs):
             calls.append(kwargs)
             return [
-                {"display_fields": {"设备品牌": "圣阳", "设备型号": "SP12-100"}},
-                {"display_fields": {"设备品牌": "双登", "设备型号": "GFMHR-1250W"}},
-                {"display_fields": {"设备品牌": "圣阳", "设备型号": "SP12-200"}},
-                {"display_fields": {"设备品牌": "南都", "设备型号": "6-GFM-150HR"}},
+                {"display_fields": {"设备类型": "蓄电池", "设备品牌": "圣阳", "设备型号": "SP12-100"}},
+                {"display_fields": {"设备类型": "蓄电池", "设备品牌": "双登", "设备型号": "GFMHR-1250W"}},
+                {"display_fields": {"设备类型": "蓄电池", "设备品牌": "圣阳", "设备型号": "SP12-200"}},
+                {"display_fields": {"设备类型": "蓄电池", "设备品牌": "南都", "设备型号": "6-GFM-150HR"}},
             ]
 
         service._load_table_fields = (  # type: ignore[method-assign]
             lambda **_kwargs: (
-                [catalog_brand, catalog_model],
+                [catalog_device, catalog_brand, catalog_model],
                 {
+                    catalog_device.field_name: catalog_device,
                     catalog_brand.field_name: catalog_brand,
                     catalog_model.field_name: catalog_model,
                 },
@@ -23184,15 +23271,25 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0]["table_id"], REPAIR_EQUIPMENT_CATALOG_TABLE_ID)
         self.assertEqual(calls[0]["limit"], REPAIR_FOLLOWUP_CATALOG_MAX_RECORDS)
+        self.assertIn("设备类型", calls[0]["field_names"])
         self.assertEqual(persisted[0][0], REPAIR_FOLLOWUP_CATALOG_RUNTIME_KEY)
+        self.assertEqual(persisted[0][1]["version"], REPAIR_FOLLOWUP_CATALOG_VERSION)
         self.assertEqual(persisted[0][1]["record_count"], 4)
+        self.assertEqual(
+            persisted[0][1]["device_mapping"]["蓄电池"]["圣阳"],
+            ["SP12-100", "SP12-200"],
+        )
 
     def test_repair_followup_brand_model_catalog_uses_fresh_sqlite_snapshot(self):
         service = _TestMaintenancePortalService()
         service._state_store.get_backend_runtime = (  # type: ignore[method-assign]
             lambda key: {
+                "version": REPAIR_FOLLOWUP_CATALOG_VERSION,
                 "refreshed_at": time.time(),
                 "mapping": {"南都": ["6-GFM-150HR", "GFM-360E"]},
+                "device_mapping": {
+                    "蓄电池": {"南都": ["6-GFM-150HR", "GFM-360E"]}
+                },
             }
             if key == REPAIR_FOLLOWUP_CATALOG_RUNTIME_KEY
             else None
@@ -23207,6 +23304,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         result = service._load_repair_followup_brand_model_catalog({})
 
         self.assertEqual(result["南都"], ["6-GFM-150HR", "GFM-360E"])
+        self.assertEqual(
+            service._repair_followup_device_catalog_from_cache()["蓄电池"]["南都"],
+            ["6-GFM-150HR", "GFM-360E"],
+        )
 
     def test_repair_followup_create_recovers_single_select_conversion_failure(self):
         service = _TestMaintenancePortalService()

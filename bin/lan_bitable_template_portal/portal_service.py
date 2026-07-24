@@ -384,7 +384,9 @@ REPAIR_FOLLOWUP_SUFFIX_FIELD_NAMES = frozenset(
 )
 REPAIR_EQUIPMENT_CATALOG_BRAND_FIELD_NAME = "设备品牌"
 REPAIR_EQUIPMENT_CATALOG_MODEL_FIELD_NAME = "设备型号"
+REPAIR_EQUIPMENT_CATALOG_DEVICE_FIELD_NAME = "设备类型"
 REPAIR_FOLLOWUP_CATALOG_RUNTIME_KEY = "repair_equipment_brand_model_catalog"
+REPAIR_FOLLOWUP_CATALOG_VERSION = 2
 REPAIR_FOLLOWUP_CATALOG_CACHE_TTL_SECONDS = 24 * 60 * 60
 REPAIR_FOLLOWUP_CATALOG_MAX_RECORDS = 5000
 REPAIR_SNAPSHOT_SOURCE_PROJECTS = "repair_projects"
@@ -5437,6 +5439,99 @@ class MaintenancePortalService:
         }
 
     @classmethod
+    def _repair_followup_device_brand_model_options(
+        cls,
+        *,
+        records: list[dict[str, Any]],
+        summary_record: dict[str, Any] | None,
+        meta_by_name: dict[str, FieldMeta],
+    ) -> dict[str, dict[str, list[str]]]:
+        device_meta = meta_by_name.get(REPAIR_FOLLOWUP_DEVICE_NAME_FIELD_NAME)
+        brand_meta = meta_by_name.get(REPAIR_FOLLOWUP_BRAND_FIELD_NAME)
+        model_meta = meta_by_name.get(REPAIR_FOLLOWUP_MODEL_FIELD_NAME)
+        if device_meta is None or brand_meta is None or model_meta is None:
+            return {}
+
+        mapped: dict[str, dict[str, list[str]]] = {}
+
+        def add_pair(
+            device_value: Any,
+            brand_value: Any,
+            model_value: Any,
+        ) -> None:
+            device = cls._repair_management_option_name(device_meta, device_value)
+            brand = cls._repair_management_option_name(brand_meta, brand_value)
+            model = cls._repair_management_option_name(model_meta, model_value)
+            if not device or not brand or not model:
+                return
+            models = mapped.setdefault(device, {}).setdefault(brand, [])
+            if model not in models:
+                models.append(model)
+
+        for record in records:
+            display = (
+                record.get("display_fields")
+                if isinstance(record.get("display_fields"), dict)
+                else {}
+            )
+            raw = (
+                record.get("raw_fields")
+                if isinstance(record.get("raw_fields"), dict)
+                else {}
+            )
+            add_pair(
+                display.get(REPAIR_FOLLOWUP_DEVICE_NAME_FIELD_NAME)
+                or raw.get(REPAIR_FOLLOWUP_DEVICE_NAME_FIELD_NAME),
+                display.get(REPAIR_FOLLOWUP_BRAND_FIELD_NAME)
+                or raw.get(REPAIR_FOLLOWUP_BRAND_FIELD_NAME),
+                display.get(REPAIR_FOLLOWUP_MODEL_FIELD_NAME)
+                or raw.get(REPAIR_FOLLOWUP_MODEL_FIELD_NAME),
+            )
+
+        if isinstance(summary_record, dict):
+            display = (
+                summary_record.get("display_fields")
+                if isinstance(summary_record.get("display_fields"), dict)
+                else {}
+            )
+            raw = (
+                summary_record.get("raw_fields")
+                if isinstance(summary_record.get("raw_fields"), dict)
+                else {}
+            )
+            add_pair(
+                display.get("设备名称") or raw.get("设备名称"),
+                display.get("设备品牌") or raw.get("设备品牌"),
+                display.get("设备型号") or raw.get("设备型号"),
+            )
+
+        device_order = {
+            name: index for index, name in enumerate(device_meta.option_names)
+        }
+        brand_order = {
+            name: index for index, name in enumerate(brand_meta.option_names)
+        }
+        model_order = {
+            name: index for index, name in enumerate(model_meta.option_names)
+        }
+        return {
+            device: {
+                brand: sorted(
+                    models,
+                    key=lambda item: (model_order.get(item, 10**9), item),
+                )
+                for brand, models in sorted(
+                    brand_models.items(),
+                    key=lambda item: (brand_order.get(item[0], 10**9), item[0]),
+                )
+            }
+            for device, brand_models in sorted(
+                mapped.items(),
+                key=lambda item: (device_order.get(item[0], 10**9), item[0]),
+            )
+        }
+
+    @classmethod
     def _repair_equipment_catalog_brand_model_options(
         cls,
         records: list[dict[str, Any]],
@@ -5468,6 +5563,42 @@ class MaintenancePortalService:
                 models.append(model)
         return mapped
 
+    @classmethod
+    def _repair_equipment_catalog_device_brand_model_options(
+        cls,
+        records: list[dict[str, Any]],
+    ) -> dict[str, dict[str, list[str]]]:
+        mapped: dict[str, dict[str, list[str]]] = {}
+        for record in records:
+            display = (
+                record.get("display_fields")
+                if isinstance(record.get("display_fields"), dict)
+                else {}
+            )
+            raw = (
+                record.get("raw_fields")
+                if isinstance(record.get("raw_fields"), dict)
+                else {}
+            )
+            device = cls._repair_management_plain_text(
+                display.get(REPAIR_EQUIPMENT_CATALOG_DEVICE_FIELD_NAME)
+                or raw.get(REPAIR_EQUIPMENT_CATALOG_DEVICE_FIELD_NAME)
+            )
+            brand = cls._repair_management_plain_text(
+                display.get(REPAIR_EQUIPMENT_CATALOG_BRAND_FIELD_NAME)
+                or raw.get(REPAIR_EQUIPMENT_CATALOG_BRAND_FIELD_NAME)
+            )
+            model = cls._repair_management_plain_text(
+                display.get(REPAIR_EQUIPMENT_CATALOG_MODEL_FIELD_NAME)
+                or raw.get(REPAIR_EQUIPMENT_CATALOG_MODEL_FIELD_NAME)
+            )
+            if not device or not brand or not model:
+                continue
+            models = mapped.setdefault(device, {}).setdefault(brand, [])
+            if model not in models:
+                models.append(model)
+        return mapped
+
     @staticmethod
     def _normalize_repair_catalog_mapping(value: Any) -> dict[str, list[str]]:
         if not isinstance(value, dict):
@@ -5488,6 +5619,34 @@ class MaintenancePortalService:
                 normalized[brand] = models
         return normalized
 
+    @classmethod
+    def _normalize_repair_device_catalog_mapping(
+        cls,
+        value: Any,
+    ) -> dict[str, dict[str, list[str]]]:
+        if not isinstance(value, dict):
+            return {}
+        normalized: dict[str, dict[str, list[str]]] = {}
+        for device_value, brand_models in value.items():
+            device = str(device_value or "").strip()
+            if not device:
+                continue
+            mapped = cls._normalize_repair_catalog_mapping(brand_models)
+            if mapped:
+                normalized[device] = mapped
+        return normalized
+
+    def _repair_followup_device_catalog_from_cache(
+        self,
+    ) -> dict[str, dict[str, list[str]]]:
+        with self._repair_followup_catalog_cache_lock:
+            cached = self._repair_followup_catalog_cache
+            if not isinstance(cached, dict):
+                return {}
+            return self._normalize_repair_device_catalog_mapping(
+                cached.get("device_mapping")
+            )
+
     def _load_repair_followup_brand_model_catalog(
         self,
         meta_by_name: dict[str, FieldMeta],
@@ -5501,6 +5660,8 @@ class MaintenancePortalService:
             if (
                 not force_refresh
                 and isinstance(cached, dict)
+                and int(cached.get("version") or 0)
+                >= REPAIR_FOLLOWUP_CATALOG_VERSION
                 and now - float(cached.get("refreshed_at") or 0)
                 <= REPAIR_FOLLOWUP_CATALOG_CACHE_TTL_SECONDS
             ):
@@ -5512,17 +5673,26 @@ class MaintenancePortalService:
             persisted_mapping = self._normalize_repair_catalog_mapping(
                 persisted.get("mapping")
             )
+            persisted_device_mapping = (
+                self._normalize_repair_device_catalog_mapping(
+                    persisted.get("device_mapping")
+                )
+            )
             persisted_at = float(
                 persisted.get("refreshed_at") or persisted.get("updated_at") or 0
             )
             if (
                 not force_refresh
                 and persisted_mapping
+                and int(persisted.get("version") or 0)
+                >= REPAIR_FOLLOWUP_CATALOG_VERSION
                 and now - persisted_at <= REPAIR_FOLLOWUP_CATALOG_CACHE_TTL_SECONDS
             ):
                 self._repair_followup_catalog_cache = {
+                    "version": REPAIR_FOLLOWUP_CATALOG_VERSION,
                     "refreshed_at": persisted_at,
                     "mapping": persisted_mapping,
+                    "device_mapping": persisted_device_mapping,
                 }
                 return persisted_mapping
 
@@ -5534,6 +5704,7 @@ class MaintenancePortalService:
                 missing_fields = [
                     field_name
                     for field_name in (
+                        REPAIR_EQUIPMENT_CATALOG_DEVICE_FIELD_NAME,
                         REPAIR_EQUIPMENT_CATALOG_BRAND_FIELD_NAME,
                         REPAIR_EQUIPMENT_CATALOG_MODEL_FIELD_NAME,
                     )
@@ -5550,36 +5721,47 @@ class MaintenancePortalService:
                     work_type=WORK_TYPE_REPAIR,
                     notice_type=NOTICE_TYPE_REPAIR,
                     field_names=(
+                        REPAIR_EQUIPMENT_CATALOG_DEVICE_FIELD_NAME,
                         REPAIR_EQUIPMENT_CATALOG_BRAND_FIELD_NAME,
                         REPAIR_EQUIPMENT_CATALOG_MODEL_FIELD_NAME,
                     ),
                     limit=REPAIR_FOLLOWUP_CATALOG_MAX_RECORDS,
                 )
                 mapping = self._repair_equipment_catalog_brand_model_options(records)
+                device_mapping = (
+                    self._repair_equipment_catalog_device_brand_model_options(records)
+                )
                 if not mapping:
                     raise PortalError("设备目录没有可用的品牌型号数据。")
             except Exception:
                 if persisted_mapping:
                     self._repair_followup_catalog_cache = {
-                        "refreshed_at": persisted_at,
+                        "version": REPAIR_FOLLOWUP_CATALOG_VERSION,
+                        "refreshed_at": now,
                         "mapping": persisted_mapping,
+                        "device_mapping": persisted_device_mapping,
                     }
                     return persisted_mapping
                 raise
 
             self._repair_followup_catalog_cache = {
+                "version": REPAIR_FOLLOWUP_CATALOG_VERSION,
                 "refreshed_at": now,
                 "mapping": mapping,
+                "device_mapping": device_mapping,
             }
             self._state_store.put_backend_runtime(
                 REPAIR_FOLLOWUP_CATALOG_RUNTIME_KEY,
                 {
+                    "version": REPAIR_FOLLOWUP_CATALOG_VERSION,
                     "source_app_token": REPAIR_SOURCE_APP_TOKEN,
                     "source_table_id": REPAIR_EQUIPMENT_CATALOG_TABLE_ID,
                     "refreshed_at": now,
                     "record_count": len(records),
                     "brand_count": len(mapping),
+                    "device_count": len(device_mapping),
                     "mapping": mapping,
+                    "device_mapping": device_mapping,
                 },
             )
             return mapping
@@ -6114,17 +6296,36 @@ class MaintenancePortalService:
             summary_record=summary_record,
             meta_by_name=meta_by_name,
         )
+        current_device_mapping = self._repair_followup_device_brand_model_options(
+            records=records,
+            summary_record=summary_record,
+            meta_by_name=meta_by_name,
+        )
         try:
-            brand_model_options = self._load_repair_followup_brand_model_catalog(
+            catalog_mapping = self._load_repair_followup_brand_model_catalog(
                 meta_by_name
             )
         except PortalError:
-            brand_model_options = {}
+            catalog_mapping = {}
+        brand_model_options = {
+            brand: list(models)
+            for brand, models in catalog_mapping.items()
+        }
+        device_brand_model_options = (
+            self._repair_followup_device_catalog_from_cache()
+        )
         for brand, models in current_mapping.items():
             merged_models = brand_model_options.setdefault(brand, [])
             for model in models:
                 if model not in merged_models:
                     merged_models.append(model)
+        for device, brand_models in current_device_mapping.items():
+            merged_brand_models = device_brand_model_options.setdefault(device, {})
+            for brand, models in brand_models.items():
+                merged_models = merged_brand_models.setdefault(brand, [])
+                for model in models:
+                    if model not in merged_models:
+                        merged_models.append(model)
         field_payloads = [self._repair_followup_field_payload(meta) for meta in metas]
         for field_payload in field_payloads:
             if field_payload.get("field_name") != REPAIR_FOLLOWUP_BRAND_FIELD_NAME:
@@ -6148,6 +6349,7 @@ class MaintenancePortalService:
             "offset": page_offset,
             "has_more": page_offset + len(page_records) < len(selected),
             "brand_model_options": brand_model_options,
+            "device_brand_model_options": device_brand_model_options,
         }
 
     def list_repair_followup_bind_candidates(
