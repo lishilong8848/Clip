@@ -49,7 +49,23 @@
           >
             <RefreshCw :size="17" :class="{ spinning: loading }" aria-hidden="true" />
           </button>
+          <div
+            v-if="$slots['toolbar-actions']"
+            class="record-picker-toolbar-actions"
+          >
+            <slot name="toolbar-actions" />
+          </div>
         </form>
+
+        <div
+          class="record-picker-status"
+          :class="[`is-${statusTone}`, { 'is-empty': !statusMessage }]"
+          :role="statusTone === 'error' ? 'alert' : 'status'"
+          :aria-hidden="statusMessage ? undefined : 'true'"
+          aria-live="polite"
+        >
+          {{ statusMessage }}
+        </div>
 
         <div class="record-picker-table-wrap">
           <table class="record-picker-table">
@@ -179,6 +195,8 @@ const props = withDefaults(defineProps<{
   loading?: boolean;
   hasMore?: boolean;
   resultNote?: string;
+  statusMessage?: string;
+  statusTone?: "info" | "success" | "warning" | "error";
   query?: string;
   searchPlaceholder?: string;
 }>(), {
@@ -189,6 +207,8 @@ const props = withDefaults(defineProps<{
   loading: false,
   hasMore: false,
   resultNote: "",
+  statusMessage: "",
+  statusTone: "info",
   query: "",
   searchPlaceholder: "输入关键词搜索",
 });
@@ -368,7 +388,7 @@ onBeforeUnmount(() => {
   height: min(900px, calc(100vh - 28px));
   margin: 0 auto;
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
   overflow: hidden;
   border: 1px solid #cdddf1;
   border-radius: 16px;
@@ -419,6 +439,52 @@ onBeforeUnmount(() => {
   padding-block: 10px;
   background: #f8fbff;
   border-bottom: 1px solid #e4ecf6;
+}
+
+.record-picker-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.record-picker-status {
+  padding: 9px 20px;
+  border-bottom: 1px solid transparent;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.record-picker-status.is-empty {
+  min-height: 0;
+  overflow: hidden;
+  border: 0;
+  padding: 0;
+}
+
+.record-picker-status.is-info {
+  border-color: #cfe0f5;
+  background: #eef6ff;
+  color: #245c96;
+}
+
+.record-picker-status.is-success {
+  border-color: #bfe7d5;
+  background: #edf9f4;
+  color: #087555;
+}
+
+.record-picker-status.is-warning {
+  border-color: #f0d6a8;
+  background: #fff8eb;
+  color: #8a5a16;
+}
+
+.record-picker-status.is-error {
+  border-color: #efc0c7;
+  background: #fff1f3;
+  color: #a22a3b;
 }
 
 .record-picker-toolbar label {

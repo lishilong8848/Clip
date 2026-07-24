@@ -636,6 +636,7 @@ const confirmDialog = reactive({
 });
 let pendingConfirmAction: null | (() => void | Promise<void>) = null;
 let searchTimer: ReturnType<typeof setTimeout> | undefined;
+let postSaveRefreshTimer: ReturnType<typeof setTimeout> | undefined;
 let skipNextSearchReload = false;
 let recordsRequestVersion = 0;
 let eventRequestVersion = 0;
@@ -1882,7 +1883,7 @@ function changeRecordPage(delta: number): void {
   });
 }
 
-async function loadRecords(announce = false): Promise<void> {
+async function loadRecords(announce = false, silent = false): Promise<void> {
   const requestVersion = ++recordsRequestVersion;
   recordsAbortController?.abort();
   const abortController = new AbortController();
@@ -1940,7 +1941,7 @@ async function loadRecords(announce = false): Promise<void> {
     if (recordPage.value > maxPage) {
       recordPage.value = maxPage;
       loading.value = false;
-      await loadRecords(announce);
+      await loadRecords(announce, silent);
       return;
     }
     if (editingRecordId.value) {
@@ -1966,7 +1967,9 @@ async function loadRecords(announce = false): Promise<void> {
   } catch (error: unknown) {
     if (abortController.signal.aborted) return;
     if (requestVersion !== recordsRequestVersion) return;
-    showMessage(error instanceof Error ? error.message : "维修项目读取失败。", "failed");
+    if (!silent) {
+      showMessage(error instanceof Error ? error.message : "维修项目读取失败。", "failed");
+    }
   } finally {
     if (recordsAbortController === abortController) recordsAbortController = null;
     if (requestVersion === recordsRequestVersion) loading.value = false;
@@ -1995,6 +1998,67 @@ function writablePayload(): Record<string, unknown> {
     result[name] = parseDraftValue(value, field);
   }
   return result;
+}
+
+function applySavedProjectRecord(recordId: string, savedFields: LooseDict): void {
+  const normalizedRecordId = String(recordId || "").trim();
+  if (!normalizedRecordId) return;
+  const existing = (
+    selectedRecord.value
+    && String(selectedRecord.value.record_id || "").trim() === normalizedRecordId
+  )
+    ? selectedRecord.value
+    : records.value.find(
+      (item) => String(item.record_id || "").trim() === normalizedRecordId,
+    ) || {};
+  const rawFields = {
+    ...(existing.raw_fields && typeof existing.raw_fields === "object" ? existing.raw_fields : {}),
+    ...savedFields,
+  };
+  const displayFields = {
+    ...(existing.display_fields && typeof existing.display_fields === "object" ? existing.display_fields : {}),
+    ...savedFields,
+  };
+  const savedRecord: LooseDict = {
+    ...existing,
+    record_id: normalizedRecordId,
+    title: String(
+      savedFields["维修名称"]
+      || existing.title
+      || displayFields["维修名称"]
+      || "未命名维修项目",
+    ),
+    raw_fields: rawFields,
+    display_fields: displayFields,
+    source_event_id: sourceEventId.value,
+    source_repair_ids: selectedRepairIds.value.slice(),
+    followup_count: Math.max(0, Number(existing.followup_count || 0)),
+  };
+  const existingIndex = records.value.findIndex(
+    (item) => String(item.record_id || "").trim() === normalizedRecordId,
+  );
+  if (existingIndex >= 0) {
+    records.value = records.value.map((item, index) => (
+      index === existingIndex ? savedRecord : item
+    ));
+  } else {
+    records.value = [savedRecord, ...records.value];
+    total.value = Math.max(records.value.length, total.value + 1);
+  }
+  editingRecordId.value = normalizedRecordId;
+  selectedRecord.value = savedRecord;
+  creatingNewProject.value = false;
+  pendingRecordFocusId.value = normalizedRecordId;
+  resetDraft();
+}
+
+function refreshProjectsAfterSave(): void {
+  clearRecordResponseCache();
+  if (postSaveRefreshTimer) window.clearTimeout(postSaveRefreshTimer);
+  postSaveRefreshTimer = window.setTimeout(() => {
+    postSaveRefreshTimer = undefined;
+    void loadRecords(false, true);
+  }, 300);
 }
 
 async function saveRecord(): Promise<boolean> {
@@ -2027,16 +2091,20 @@ async function saveRecord(): Promise<boolean> {
       source_month: currentMonthKey(),
       fields: writablePayload(),
     });
+    let savedPayload: LooseDict;
     if (editingRecordId.value) {
       const updated = await requestJson(`/api/repair-management/records/${encodeURIComponent(editingRecordId.value)}`, {
         method: "PUT",
         body,
       });
+      savedPayload = updated;
       const warnings = Array.isArray(updated.warnings) ? updated.warnings.filter(Boolean) : [];
       const syncedFollowupCount = Math.max(0, Number(updated.followup_synced_count || 0));
-      const savedText = syncedFollowupCount
-        ? `维修项目已保存，已同步 ${syncedFollowupCount} 条跟进记录。`
-        : "维修项目已保存。";
+      const savedText = updated.followup_sync_pending
+        ? "维修项目已保存，跟进记录正在后台同步。"
+        : syncedFollowupCount
+          ? `维修项目已保存，已同步 ${syncedFollowupCount} 条跟进记录。`
+          : "维修项目已保存。";
       showMessage(
         warnings.length ? `${savedText} ${warnings.join("；")}` : savedText,
         warnings.length ? "warning" : "success",
@@ -2046,9 +2114,8 @@ async function saveRecord(): Promise<boolean> {
         method: "POST",
         body,
       });
+      savedPayload = created;
       editingRecordId.value = String(created.record_id || "");
-      pendingRecordFocusId.value = editingRecordId.value;
-      creatingNewProject.value = false;
       createOperationId.value = "";
       const warnings = Array.isArray(created.warnings) ? created.warnings.filter(Boolean) : [];
       showMessage(
@@ -2056,19 +2123,16 @@ async function saveRecord(): Promise<boolean> {
         warnings.length ? "warning" : "success",
       );
     }
-    dirtyFieldNames.clear();
-    hasUnsavedChanges.value = false;
-    validationAttempted.value = false;
+    applySavedProjectRecord(
+      String(savedPayload.record_id || editingRecordId.value || ""),
+      savedPayload.fields && typeof savedPayload.fields === "object"
+        ? savedPayload.fields
+        : {},
+    );
     sourceExpanded.value = false;
     recordPage.value = 1;
-    clearRecordResponseCache();
-    await loadRecords(false);
     invalidateRepairStatus();
-    const current = records.value.find((item) => String(item.record_id || "") === editingRecordId.value);
-    if (current) {
-      selectedRecord.value = current;
-      resetDraft();
-    }
+    refreshProjectsAfterSave();
     return true;
   } catch (error: unknown) {
     showMessage(error instanceof Error ? error.message : "保存失败。", "failed");
@@ -2232,6 +2296,10 @@ onActivated(() => {
 });
 
 onDeactivated(() => {
+  if (postSaveRefreshTimer) {
+    clearTimeout(postSaveRefreshTimer);
+    postSaveRefreshTimer = undefined;
+  }
   projectDrawerOpen.value = false;
   followupPanelMounted.value = false;
   activeWorkspaceTab.value = "project";
@@ -2263,6 +2331,10 @@ onMounted(() => {
 onBeforeUnmount(() => {
   document.body.style.overflow = bodyOverflowBeforeDrawer;
   if (searchTimer) clearTimeout(searchTimer);
+  if (postSaveRefreshTimer) {
+    clearTimeout(postSaveRefreshTimer);
+    postSaveRefreshTimer = undefined;
+  }
   recordsAbortController?.abort();
   eventAbortController?.abort();
   repairAbortController?.abort();

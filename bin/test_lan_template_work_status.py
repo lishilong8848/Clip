@@ -39,9 +39,12 @@ from lan_bitable_template_portal.portal_service import REPAIR_FOLLOWUP_CATALOG_M
 from lan_bitable_template_portal.portal_service import REPAIR_FOLLOWUP_CATALOG_RUNTIME_KEY  # noqa: E402
 from lan_bitable_template_portal.portal_service import REPAIR_FOLLOWUP_BACKFILL_RUNTIME_KEY  # noqa: E402
 from lan_bitable_template_portal.portal_service import REPAIR_CMDB_TABLE_ID  # noqa: E402
+from lan_bitable_template_portal.portal_service import REPAIR_CMDB_SNAPSHOT_MAX_RECORDS  # noqa: E402
+from lan_bitable_template_portal.portal_service import REPAIR_CMDB_SNAPSHOT_VERSION  # noqa: E402
 from lan_bitable_template_portal.portal_service import REPAIR_FOLLOWUP_CMDB_FIELD_NAME  # noqa: E402
 from lan_bitable_template_portal.portal_service import REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME  # noqa: E402
 from lan_bitable_template_portal.portal_service import REPAIR_TARGET_SUMMARY_ID_FIELD_NAME  # noqa: E402
+from lan_bitable_template_portal.portal_service import REPAIR_SNAPSHOT_SOURCE_CMDB  # noqa: E402
 from lan_bitable_template_portal.portal_service import REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS  # noqa: E402
 from lan_bitable_template_portal.portal_service import REPAIR_SNAPSHOT_SOURCE_PROJECTS  # noqa: E402
 from lan_bitable_template_portal.portal_service import WORK_TYPE_CHANGE  # noqa: E402
@@ -16010,6 +16013,155 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(action, "start")
         self.assertEqual(draft.get("start_time"), "2026-06-24T09:30")
         self.assertEqual(draft.get("end_time"), "2026-06-24T18:30")
+        self.assertEqual(draft.get("work_type"), "polling")
+
+    def test_workbench_lite_paste_headers_keep_all_notice_types_consistent(self):
+        cases = (
+            ("维保通告", "maintenance"),
+            ("变更通告", "change"),
+            ("设备检修", "repair"),
+            ("上电通告", "power"),
+            ("下电通告", "power"),
+            ("设备轮巡", "polling"),
+            ("设备调整", "adjust"),
+        )
+        for heading, expected_work_type in cases:
+            with self.subTest(heading=heading):
+                work_type, action, draft = parse_pasted_notice_to_draft(
+                    f"【{heading}】状态：开始\n"
+                    "【名称】EA118机房A楼测试通告\n"
+                    "【时间】2026-07-24 09:30~2026-07-24 18:30",
+                    fallback_work_type="maintenance",
+                )
+
+                self.assertEqual(work_type, expected_work_type)
+                self.assertEqual(action, "start")
+                self.assertEqual(draft.get("work_type"), expected_work_type)
+                self.assertEqual(draft.get("notice_type"), heading)
+
+    def test_workbench_lite_paste_unknown_header_keeps_selected_notice_type(self):
+        for selected_work_type in (
+            "maintenance",
+            "change",
+            "repair",
+            "power",
+            "polling",
+            "adjust",
+        ):
+            with self.subTest(selected_work_type=selected_work_type):
+                work_type, _action, draft = parse_pasted_notice_to_draft(
+                    "【自定义通告】状态：开始\n"
+                    "【名称】用户编辑后的测试文本",
+                    fallback_work_type=selected_work_type,
+                )
+
+                self.assertEqual(work_type, selected_work_type)
+                self.assertEqual(draft.get("work_type"), selected_work_type)
+
+    def test_workbench_lite_paste_explicit_header_overrides_selected_type(self):
+        work_type, _action, draft = parse_pasted_notice_to_draft(
+            "【变更通告】状态：更新\n【名称】测试变更",
+            fallback_work_type="maintenance",
+        )
+
+        self.assertEqual(work_type, "change")
+        self.assertEqual(draft.get("work_type"), "change")
+        self.assertEqual(draft.get("notice_type"), "变更通告")
+
+        detail_html = workbench_lite_module._detail_form(
+            record=None,
+            ongoing_item=None,
+            scope="A",
+            work_type=work_type,
+            manual=True,
+            parsed_draft=draft,
+            parsed_action="update",
+        )
+        self.assertIn('data-work-type="change"', detail_html)
+        self.assertIn('name="work_type" value="change"', detail_html)
+        self.assertIn('name="notice_type" value="变更通告"', detail_html)
+
+    def test_repair_cmdb_remote_snapshot_reads_more_than_first_page(self):
+        service = _TestMaintenancePortalService()
+        captured = {}
+        service._load_table_fields = lambda **_kwargs: ([], {})  # type: ignore[method-assign]
+
+        def search_records(**kwargs):
+            captured.update(kwargs)
+            return []
+
+        service._search_table_records = search_records  # type: ignore[method-assign]
+
+        service._load_repair_management_cmdb_records_remote(force_refresh=True)
+
+        self.assertEqual(
+            captured.get("limit"),
+            REPAIR_CMDB_SNAPSHOT_MAX_RECORDS,
+        )
+        self.assertGreater(REPAIR_CMDB_SNAPSHOT_MAX_RECORDS, 10_000)
+
+    def test_repair_cmdb_candidates_search_full_snapshot_by_name_and_category(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            service._repair_snapshots_enabled = True
+            raw_records = []
+            for index in range(1_205):
+                title = f"普通设备-{index}"
+                category = "普通分类"
+                if index == 1_204:
+                    title = "末页精密空调设备"
+                    category = "稀有制冷分类"
+                raw_records.append(
+                    {
+                        "record_id": f"rec_cmdb_{index:05d}",
+                        "display_fields": {
+                            "智航唯一ID": f"ZH-{index:05d}",
+                            "设备名称": title,
+                            "分类名称": category,
+                            "位置": f"E-{index:05d}",
+                            "楼栋": "E楼",
+                        },
+                        "raw_fields": {},
+                    }
+                )
+            service._state_store.replace_repair_snapshot(
+                REPAIR_SNAPSHOT_SOURCE_CMDB,
+                records=[
+                    service._repair_snapshot_record_payload(record)
+                    for record in raw_records
+                ],
+                app_token=REPAIR_SOURCE_APP_TOKEN,
+                table_id=REPAIR_CMDB_TABLE_ID,
+                meta={
+                    "source_key": REPAIR_SNAPSHOT_SOURCE_CMDB,
+                    "catalog_version": REPAIR_CMDB_SNAPSHOT_VERSION,
+                },
+            )
+            service._load_repair_management_cmdb_records = (  # type: ignore[method-assign]
+                lambda **_kwargs: self.fail("current snapshot must not reload remotely")
+            )
+
+            by_name = service.list_repair_management_cmdb_candidates(
+                scope="E",
+                query="末页精密空调",
+                limit=50,
+            )
+            by_category = service.list_repair_management_cmdb_candidates(
+                scope="E",
+                query="稀有制冷分类",
+                limit=50,
+            )
+
+            self.assertEqual(by_name["total"], 1)
+            self.assertEqual(
+                by_name["records"][0]["record_id"],
+                "rec_cmdb_01204",
+            )
+            self.assertEqual(by_category["total"], 1)
+            self.assertEqual(
+                by_category["records"][0]["category"],
+                "稀有制冷分类",
+            )
 
     def test_notice_command_latest_form_values_override_ongoing_values(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -18177,6 +18329,73 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             )
             self.assertEqual(calls, {"create": 1, "sync": 2})
 
+    def test_repair_followup_runtime_create_returns_before_summary_sync(self):
+        service = _TestMaintenancePortalService(enable_repair_snapshots=True)
+        summary = {
+            "record_id": "rec-runtime-summary",
+            "raw_fields": {},
+            "display_fields": {},
+        }
+        progress_meta = FieldMeta(
+            "fld_progress",
+            "维修进展描述",
+            "Text",
+            1,
+            False,
+            {},
+            [],
+            False,
+        )
+        scheduled: list[tuple[str, dict]] = []
+        service._ensure_repair_management_record_in_scope = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: summary
+        )
+        service.get_repair_followup_records = (  # type: ignore[method-assign]
+            lambda **_kwargs: {"total": 0}
+        )
+        service._ensure_repair_followup_parent_id_field = (  # type: ignore[method-assign]
+            lambda: ([progress_meta], {progress_meta.field_name: progress_meta})
+        )
+        service._prepare_repair_followup_fields = (  # type: ignore[method-assign]
+            lambda **_kwargs: ({"维修进展描述": "处理中"}, [])
+        )
+        service._ensure_repair_followup_select_options = (  # type: ignore[method-assign]
+            lambda prepared, meta_by_name: ([progress_meta], meta_by_name)
+        )
+        service._create_repair_followup_fields = (  # type: ignore[method-assign]
+            lambda fields, _meta_by_name: (
+                {"data": {"record": {"record_id": "rec-runtime-followup"}}},
+                dict(fields),
+                [],
+            )
+        )
+        service._upsert_repair_snapshot_fields = (  # type: ignore[method-assign]
+            lambda **_kwargs: None
+        )
+        service._schedule_repair_sync_task = (  # type: ignore[method-assign]
+            lambda operation_type, **kwargs: (
+                scheduled.append((operation_type, dict(kwargs)))
+                or "repair-sync:runtime"
+            )
+        )
+        service._sync_repair_management_from_followup = (  # type: ignore[method-assign]
+            lambda **_kwargs: self.fail(
+                "运行时新增跟进不应同步等待维修项目汇总"
+            )
+        )
+
+        result = service.create_repair_followup_record(
+            summary_record_id="rec-runtime-summary",
+            fields={"维修进展描述": "处理中"},
+            scope="E",
+        )
+
+        self.assertEqual(result["record_id"], "rec-runtime-followup")
+        self.assertTrue(result["summary_sync_pending"])
+        self.assertEqual(len(scheduled), 1)
+        self.assertEqual(scheduled[0][0], "followup_summary_sync")
+        self.assertTrue(scheduled[0][1]["run_immediately"])
+
     def test_repair_followup_records_support_offset_pagination(self):
         service = _TestMaintenancePortalService()
         meta = FieldMeta("fld_progress", "维修进展描述", "Text", 1, False, {}, [], False)
@@ -19935,6 +20154,87 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             "rec-followup",
         )
         self.assertEqual(result["followup_synced_count"], 1)
+
+    def test_repair_management_runtime_update_defers_followup_copy(self):
+        service = _TestMaintenancePortalService(enable_repair_snapshots=True)
+        start = FieldMeta(
+            "fld_start",
+            "维修开始时间",
+            "Text",
+            1,
+            False,
+            {},
+            [],
+            False,
+        )
+        metas = [start]
+        meta_by_name = {start.field_name: start}
+        existing = {
+            "record_id": "rec-runtime-summary",
+            "display_fields": {},
+            "raw_fields": {},
+        }
+        linked_followup = {
+            "record_id": "rec-runtime-followup",
+            "display_fields": {},
+            "raw_fields": {
+                REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: "rec-runtime-summary"
+            },
+        }
+        scheduled: list[tuple[str, dict]] = []
+        service._load_repair_management_project_records = (  # type: ignore[method-assign]
+            lambda **_kwargs: (metas, meta_by_name, [existing])
+        )
+        service._ensure_repair_management_record_in_scope = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: existing
+        )
+        service._load_repair_followups_for_summary = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: ([], {}, [linked_followup])
+        )
+        service._build_repair_management_prefill = (  # type: ignore[method-assign]
+            lambda **_kwargs: {"fields": {}, "warnings": []}
+        )
+        service._ensure_repair_followup_select_options = (  # type: ignore[method-assign]
+            lambda _fields, current_meta, **_kwargs: (
+                list(current_meta.values()),
+                current_meta,
+            )
+        )
+        service._patch_record_fields = (  # type: ignore[method-assign]
+            lambda **_kwargs: {"code": 0}
+        )
+        service._upsert_repair_snapshot_fields = (  # type: ignore[method-assign]
+            lambda **_kwargs: None
+        )
+        service._repair_management_fields_in_scope = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: True
+        )
+        service._schedule_repair_sync_task = (  # type: ignore[method-assign]
+            lambda operation_type, **kwargs: (
+                scheduled.append((operation_type, dict(kwargs)))
+                or "repair-sync:runtime"
+            )
+        )
+        service._sync_repair_followups_from_summary = (  # type: ignore[method-assign]
+            lambda **_kwargs: self.fail(
+                "运行时维修单保存不应同步等待跟进记录复制"
+            )
+        )
+        service._sync_repair_management_workflow = (  # type: ignore[method-assign]
+            lambda **_kwargs: (False, [])
+        )
+
+        result = service.update_repair_management_record(
+            "rec-runtime-summary",
+            {"维修开始时间": "2026-07-24 09:00"},
+            validate_required=False,
+        )
+
+        self.assertTrue(result["followup_sync_pending"])
+        self.assertEqual(result["followup_synced_count"], 0)
+        self.assertEqual(len(scheduled), 1)
+        self.assertEqual(scheduled[0][0], "summary_followup_copy_sync")
+        self.assertTrue(scheduled[0][1]["run_immediately"])
 
     def test_repair_management_update_cannot_clear_required_field(self):
         service = _TestMaintenancePortalService()
@@ -22249,6 +22549,92 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             ["rec_cmdb_1", "rec_cmdb_2"],
         )
         self.assertEqual(captured[0]["fields"]["设备名称"], "A-UPS-01、A-UPS-02")
+
+    def test_repair_followup_runtime_update_defers_summary_sync(self):
+        service = _TestMaintenancePortalService(enable_repair_snapshots=True)
+        parent_meta = FieldMeta(
+            "fld_parent",
+            REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME,
+            "Text",
+            1,
+            False,
+            {},
+            [],
+            False,
+        )
+        progress_meta = FieldMeta(
+            "fld_progress",
+            "维修进展描述",
+            "Text",
+            1,
+            False,
+            {},
+            [],
+            False,
+        )
+        metas = [parent_meta, progress_meta]
+        meta_by_name = {item.field_name: item for item in metas}
+        existing = {
+            "record_id": "rec-runtime-followup",
+            "raw_fields": {
+                REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: "rec-runtime-summary",
+            },
+            "display_fields": {},
+        }
+        summary = {
+            "record_id": "rec-runtime-summary",
+            "raw_fields": {},
+            "display_fields": {},
+        }
+        scheduled: list[tuple[str, dict]] = []
+        service._ensure_repair_followup_parent_id_field = (  # type: ignore[method-assign]
+            lambda: (metas, meta_by_name)
+        )
+        service._load_table_records_by_ids = (  # type: ignore[method-assign]
+            lambda **_kwargs: [existing]
+        )
+        service._ensure_repair_management_record_in_scope = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: summary
+        )
+        service._prepare_repair_followup_fields = (  # type: ignore[method-assign]
+            lambda **_kwargs: ({"维修进展描述": "已完成检查"}, [])
+        )
+        service._ensure_repair_followup_select_options = (  # type: ignore[method-assign]
+            lambda _fields, current_meta, **_kwargs: (
+                list(current_meta.values()),
+                current_meta,
+            )
+        )
+        service._patch_record_fields = (  # type: ignore[method-assign]
+            lambda **_kwargs: {"code": 0}
+        )
+        service._upsert_repair_snapshot_fields = (  # type: ignore[method-assign]
+            lambda **_kwargs: None
+        )
+        service._schedule_repair_sync_task = (  # type: ignore[method-assign]
+            lambda operation_type, **kwargs: (
+                scheduled.append((operation_type, dict(kwargs)))
+                or "repair-sync:runtime"
+            )
+        )
+        service._sync_repair_management_from_followup = (  # type: ignore[method-assign]
+            lambda **_kwargs: self.fail(
+                "运行时跟进保存不应同步等待维修项目汇总"
+            )
+        )
+
+        result = service.update_repair_followup_record(
+            "rec-runtime-followup",
+            summary_record_id="rec-runtime-summary",
+            fields={"维修进展描述": "已完成检查"},
+            scope="A",
+        )
+
+        self.assertTrue(result["summary_sync_pending"])
+        self.assertEqual(result["fields"]["维修进展描述"], "已完成检查")
+        self.assertEqual(len(scheduled), 1)
+        self.assertEqual(scheduled[0][0], "followup_summary_sync")
+        self.assertTrue(scheduled[0][1]["run_immediately"])
 
     def test_repair_followup_internal_party_clears_supplier_fields(self):
         service = _TestMaintenancePortalService()

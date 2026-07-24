@@ -649,7 +649,8 @@ class FastAPIPortalController:
                 self._ensure_source_snapshot_background()
                 checked_scope = self._authorized_scope_or_error(session, scope or "ALL")
                 parsed_work_type, parsed_action, parsed_draft = parse_pasted_notice_to_draft(
-                    paste_text
+                    paste_text,
+                    fallback_work_type=work_type,
                 )
                 if parsed_work_type not in NOTICE_TYPE_BY_WORK_TYPE:
                     parsed_work_type = str(work_type or "maintenance")
@@ -2966,9 +2967,38 @@ class FastAPIPortalController:
                     query=str(request.query_params.get("q") or ""),
                     limit=limit,
                 )
+                data["can_force_refresh"] = PortalRuntime.auth_manager.is_admin(session)
                 return self._json_ok(request, session, data)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
+
+        @app.get("/api/repair-management/cmdb-cache/status")
+        async def repair_management_cmdb_cache_status(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.repair_management_cmdb_cache_status
+                )
+                data["can_force_refresh"] = PortalRuntime.auth_manager.is_admin(session)
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=500)
+
+        @app.post("/api/repair-management/cmdb-cache/refresh")
+        async def repair_management_cmdb_cache_refresh(request: Request):
+            admin_response, session = self._require_admin_response(request)
+            if admin_response is not None:
+                return admin_response
+            try:
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.start_repair_management_cmdb_cache_refresh
+                )
+                data["can_force_refresh"] = True
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=500)
 
         @app.get("/api/repair-management/people")
         async def repair_management_people(request: Request):

@@ -203,6 +203,27 @@ class _FakeRepairEventRouteService:
         self.calls.append(("cmdb_candidates", scope, query, limit))
         return {"records": [{"record_id": "rec-cmdb"}], "total": 1}
 
+    def repair_management_cmdb_cache_status(self) -> dict:
+        self.calls.append(("cmdb_cache_status",))
+        return {
+            "table_id": "tblJTRguSUij2RUM",
+            "status": "ready",
+            "ready": True,
+            "refreshing": False,
+            "record_count": 123,
+        }
+
+    def start_repair_management_cmdb_cache_refresh(self) -> dict:
+        self.calls.append(("cmdb_cache_refresh",))
+        return {
+            "table_id": "tblJTRguSUij2RUM",
+            "status": "refreshing",
+            "ready": True,
+            "refreshing": True,
+            "record_count": 123,
+            "started": True,
+        }
+
     def list_repair_followup_people(
         self,
         *,
@@ -427,6 +448,14 @@ class BackendApiModelTests(unittest.TestCase):
                     "/api/repair-management/cmdb-candidates?scope=E&q=CRAH&limit=8",
                     headers=headers,
                 )
+                cmdb_cache_status = client.get(
+                    "/api/repair-management/cmdb-cache/status",
+                    headers=headers,
+                )
+                cmdb_cache_refresh = client.post(
+                    "/api/repair-management/cmdb-cache/refresh",
+                    headers=headers,
+                )
                 followup_people = client.get(
                     "/api/repair-management/people?scope=E&q=张宇&limit=7",
                     headers=headers,
@@ -503,6 +532,8 @@ class BackendApiModelTests(unittest.TestCase):
                 repair_prefill,
                 repair_candidates,
                 cmdb_candidates,
+                cmdb_cache_status,
+                cmdb_cache_refresh,
                 followup_people,
                 followups,
                 followup_bind_candidates,
@@ -552,6 +583,8 @@ class BackendApiModelTests(unittest.TestCase):
                     ("repair_prefill", "E", "rec-event", "2026-06"),
                     ("repair_candidates", "E", "rec-event", "2026-06", "压缩机", 6),
                     ("cmdb_candidates", "E", "CRAH", 8),
+                    ("cmdb_cache_status",),
+                    ("cmdb_cache_refresh",),
                     ("followup_people", "E", "张宇", 7, False),
                     ("list_followups", "E", "rec-summary", "进展", 9),
                     (

@@ -1013,7 +1013,17 @@ def _split_notice_time_range(text: str) -> tuple[str, str]:
     return _to_datetime_local(value), ""
 
 
-def _pasted_work_type(text: str, sections: dict[str, str]) -> str:
+def _pasted_work_type(
+    text: str,
+    sections: dict[str, str],
+    *,
+    fallback_work_type: str = "",
+) -> str:
+    notice_type = _pasted_notice_type(text)
+    mapped_work_type = WORK_TYPE_BY_NOTICE_TYPE.get(notice_type, "")
+    if mapped_work_type in WORK_TYPE_LABELS:
+        return mapped_work_type
+
     title_text = "\n".join(
         item for item in [
             _section_value(sections, "名称", "标题", "通告名称", "维修名称"),
@@ -1035,6 +1045,9 @@ def _pasted_work_type(text: str, sections: dict[str, str]) -> str:
             return "adjust"
         if "变更通告" in source:
             return "change"
+    normalized_fallback = str(fallback_work_type or "").strip()
+    if normalized_fallback in WORK_TYPE_LABELS:
+        return normalized_fallback
     return "maintenance"
 
 
@@ -1048,9 +1061,17 @@ def _pasted_action(text: str) -> str:
     return "start"
 
 
-def parse_pasted_notice_to_draft(text: str) -> tuple[str, str, dict[str, str]]:
+def parse_pasted_notice_to_draft(
+    text: str,
+    *,
+    fallback_work_type: str = "",
+) -> tuple[str, str, dict[str, str]]:
     sections = _parse_notice_sections(text)
-    work = _pasted_work_type(text, sections)
+    work = _pasted_work_type(
+        text,
+        sections,
+        fallback_work_type=fallback_work_type,
+    )
     action = _pasted_action(text)
     notice_type = _pasted_notice_type(text)
     time_value = _section_value(sections, "时间")
@@ -1059,6 +1080,7 @@ def parse_pasted_notice_to_draft(text: str) -> tuple[str, str, dict[str, str]]:
         start_time = _to_datetime_local(_section_value(sections, "期望完成时间"))
         end_time = _to_datetime_local(_section_value(sections, "发现故障时间"))
     draft = {
+        "work_type": work,
         "title": _section_value(sections, "名称", "标题", "通告名称", "维修名称"),
         "level": _section_value(sections, "等级", "紧急程度"),
         "start_time": start_time,

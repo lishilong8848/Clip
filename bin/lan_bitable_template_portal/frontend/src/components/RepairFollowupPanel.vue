@@ -239,14 +239,34 @@
       :loading="cmdbLoading"
       :has-more="cmdbCandidatesHaveMore"
       :result-note="cmdbCandidateNote"
+      :status-message="cmdbPickerMessage"
+      :status-tone="cmdbPickerMessageTone"
       :query="cmdbQuery"
-      search-placeholder="搜索设备名称、唯一ID、分类或位置"
+      search-placeholder="搜索设备名称或分类名称"
       @update:query="cmdbQuery = $event"
       @search="loadCmdbCandidates(true)"
       @load-more="loadCmdbCandidates(false)"
-      @close="cmdbPickerOpen = false"
+      @close="closeCmdbPicker"
       @confirm="confirmCmdb"
-    />
+    >
+      <template #toolbar-actions>
+        <button
+          v-if="cmdbCanForceRefresh"
+          type="button"
+          class="cmdb-cache-download"
+          :disabled="cmdbCacheRefreshing"
+          :title="cmdbCacheRefreshing ? '正在从多维表重新下载' : '从 CMDB 多维表重新下载全部记录到本地'"
+          @click="refreshCmdbLocalCache"
+        >
+          <CloudDownload
+            :size="16"
+            :class="{ spinning: cmdbCacheRefreshing }"
+            aria-hidden="true"
+          />
+          <span>{{ cmdbCacheRefreshing ? "正在下载" : "重新下载到本地" }}</span>
+        </button>
+      </template>
+    </RecordPickerDialog>
   </section>
 </template>
 
@@ -256,6 +276,7 @@ import {
   AlertCircle,
   Check,
   CheckCircle2,
+  CloudDownload,
   LoaderCircle,
   Link2,
   LockKeyhole,
@@ -366,7 +387,7 @@ const visibleFollowupFieldNames = new Set(
   groupFields.flatMap((group) => group.fields),
 );
 const CMDB_CANDIDATE_BATCH_SIZE = 200;
-const CMDB_CANDIDATE_MAX_LIMIT = 1_000;
+const CMDB_CANDIDATE_MAX_LIMIT = 500;
 const FOLLOWUP_BIND_BATCH_SIZE = 200;
 const FOLLOWUP_BIND_MAX_LIMIT = 500;
 
@@ -387,6 +408,10 @@ const cmdbCandidates = ref<LooseDict[]>([]);
 const cmdbCandidateLimit = ref(CMDB_CANDIDATE_BATCH_SIZE);
 const cmdbCandidatesHaveMore = ref(false);
 const cmdbCandidateNote = ref("");
+const cmdbPickerMessage = ref("");
+const cmdbPickerMessageTone = ref<"info" | "success" | "warning" | "error">("info");
+const cmdbCanForceRefresh = ref(false);
+const cmdbCacheRefreshing = ref(false);
 const cmdbRecordIds = ref<string[]>([]);
 const bindPickerOpen = ref(false);
 const bindLoading = ref(false);
@@ -419,6 +444,8 @@ let skipNextQueryReload = false;
 let recordsAbortController: AbortController | null = null;
 let cmdbAbortController: AbortController | null = null;
 let bindAbortController: AbortController | null = null;
+let cmdbCachePollTimer: ReturnType<typeof setTimeout> | undefined;
+let postSaveRefreshTimer: ReturnType<typeof setTimeout> | undefined;
 
 const editableFields = computed(() => fields.value.filter((field) => (
   field.editable
@@ -787,6 +814,10 @@ function requestSelectRecord(record: LooseDict): void {
 }
 
 function resetForParent(): void {
+  if (postSaveRefreshTimer) {
+    clearTimeout(postSaveRefreshTimer);
+    postSaveRefreshTimer = undefined;
+  }
   recordsRequestVersion += 1;
   cmdbRequestVersion += 1;
   bindRequestVersion += 1;
@@ -794,6 +825,10 @@ function resetForParent(): void {
   recordsAbortController = null;
   cmdbAbortController?.abort();
   cmdbAbortController = null;
+  stopCmdbCachePolling();
+  cmdbCacheRefreshing.value = false;
+  cmdbPickerMessage.value = "";
+  cmdbPickerMessageTone.value = "info";
   bindAbortController?.abort();
   bindAbortController = null;
   if (queryTimer) {
@@ -850,7 +885,7 @@ function requestRefresh(): void {
   });
 }
 
-async function loadRecords(announce = false): Promise<void> {
+async function loadRecords(announce = false, silent = false): Promise<void> {
   if (!props.summaryRecordId) {
     records.value = [];
     fields.value = [];
@@ -906,7 +941,7 @@ async function loadRecords(announce = false): Promise<void> {
     if (page.value > maxPage) {
       page.value = maxPage;
       loading.value = false;
-      await loadRecords(announce);
+      await loadRecords(announce, silent);
       return;
     }
     if (editingRecordId.value) {
@@ -940,7 +975,9 @@ async function loadRecords(announce = false): Promise<void> {
       || summaryRecordId !== props.summaryRecordId
       || scope !== (props.scope || "ALL")
     ) return;
-    showMessage(error instanceof Error ? error.message : "维修跟进读取失败。", "failed");
+    if (!silent) {
+      showMessage(error instanceof Error ? error.message : "维修跟进读取失败。", "failed");
+    }
   } finally {
     if (recordsAbortController === abortController) recordsAbortController = null;
     if (requestVersion === recordsRequestVersion) loading.value = false;
@@ -969,6 +1006,63 @@ function buildFields(): LooseDict {
     payload[name] = parseRepairDraftValue(value, field);
   }
   return payload;
+}
+
+function applySavedFollowupRecord(recordId: string, savedFields: LooseDict): void {
+  const normalizedRecordId = String(recordId || "").trim();
+  if (!normalizedRecordId) return;
+  const existing = (
+    selectedRecord.value
+    && String(selectedRecord.value.record_id || "").trim() === normalizedRecordId
+  )
+    ? selectedRecord.value
+    : records.value.find(
+      (item) => String(item.record_id || "").trim() === normalizedRecordId,
+    ) || {};
+  const rawFields = {
+    ...(existing.raw_fields && typeof existing.raw_fields === "object" ? existing.raw_fields : {}),
+    ...savedFields,
+  };
+  const displayFields = {
+    ...(existing.display_fields && typeof existing.display_fields === "object" ? existing.display_fields : {}),
+    ...savedFields,
+  };
+  const savedRecord: LooseDict = {
+    ...existing,
+    record_id: normalizedRecordId,
+    title: String(
+      savedFields["维修进展描述"]
+      || savedFields["维修简述"]
+      || existing.title
+      || displayFields["维修进展描述"]
+      || "维修跟进记录",
+    ),
+    raw_fields: rawFields,
+    display_fields: displayFields,
+    cmdb_record_ids: cmdbRecordIds.value.slice(),
+  };
+  const existingIndex = records.value.findIndex(
+    (item) => String(item.record_id || "").trim() === normalizedRecordId,
+  );
+  if (existingIndex >= 0) {
+    records.value = records.value.map((item, index) => (
+      index === existingIndex ? savedRecord : item
+    ));
+  } else {
+    records.value = [savedRecord, ...records.value];
+    total.value = Math.max(records.value.length, total.value + 1);
+    emit("count-changed", total.value);
+  }
+  selectRecord(savedRecord);
+}
+
+function refreshFollowupsAfterSave(): void {
+  clearRepairFollowupCache(props.summaryRecordId);
+  if (postSaveRefreshTimer) window.clearTimeout(postSaveRefreshTimer);
+  postSaveRefreshTimer = window.setTimeout(() => {
+    postSaveRefreshTimer = undefined;
+    void loadRecords(false, true);
+  }, 300);
 }
 
 function handlePrimaryAction(): void {
@@ -1011,22 +1105,24 @@ async function saveRecord(): Promise<void> {
         })
       : await requestJson("/api/repair-management/followups", { method: "POST", body });
     editingRecordId.value = String(payload.record_id || editingRecordId.value || "");
-    if (!wasEditing) {
-      createOperationId.value = "";
-      followupFocusRecordId.value = editingRecordId.value;
-    }
-    setDirty(false);
+    createOperationId.value = "";
     if (!wasEditing) page.value = 1;
     const warnings = Array.isArray(payload.warnings)
       ? payload.warnings.map((item: unknown) => String(item || "").trim()).filter(Boolean)
       : [];
-    const successText = wasEditing ? "维修跟进记录已更新。" : "维修跟进记录已新增。";
+    const successText = `${wasEditing ? "维修跟进记录已更新。" : "维修跟进记录已新增。"}${
+      payload.summary_sync_pending ? " 维修项目汇总正在后台同步。" : ""
+    }`;
     showMessage(
       warnings.length ? `${successText}${warnings.join("；")}` : successText,
       warnings.length ? "warning" : "success",
     );
-    clearRepairFollowupCache(props.summaryRecordId);
-    await loadRecords(false);
+    applySavedFollowupRecord(
+      editingRecordId.value,
+      payload.fields && typeof payload.fields === "object" ? payload.fields : {},
+    );
+    followupFocusRecordId.value = editingRecordId.value;
+    refreshFollowupsAfterSave();
     emit("changed");
   } catch (error: unknown) {
     showMessage(error instanceof Error ? error.message : "维修跟进保存失败。", "failed");
@@ -1070,6 +1166,109 @@ async function deleteRecordNow(): Promise<void> {
   }
 }
 
+function stopCmdbCachePolling(): void {
+  if (!cmdbCachePollTimer) return;
+  clearTimeout(cmdbCachePollTimer);
+  cmdbCachePollTimer = undefined;
+}
+
+function scheduleCmdbCachePoll(): void {
+  if (!cmdbCacheRefreshing.value || cmdbCachePollTimer) return;
+  cmdbCachePollTimer = setTimeout(() => {
+    cmdbCachePollTimer = undefined;
+    void pollCmdbCacheStatus();
+  }, 1500);
+}
+
+function applyCmdbCacheStatus(cache: LooseDict, canForceRefresh?: unknown): void {
+  if (typeof canForceRefresh === "boolean") {
+    cmdbCanForceRefresh.value = canForceRefresh;
+  } else if (typeof cache.can_force_refresh === "boolean") {
+    cmdbCanForceRefresh.value = cache.can_force_refresh;
+  }
+  const status = String(cache.status || "").trim().toLowerCase();
+  const ready = cache.ready === true;
+  const refreshing = cache.refreshing === true || status === "refreshing";
+  cmdbCacheRefreshing.value = refreshing;
+  if (refreshing) {
+    cmdbPickerMessage.value = String(
+      cache.message || "CMDB 本地数据正在后台下载，完成后会自动显示。",
+    );
+    cmdbPickerMessageTone.value = "info";
+    scheduleCmdbCachePoll();
+    return;
+  }
+  stopCmdbCachePolling();
+  if (status === "failed") {
+    cmdbPickerMessage.value = String(
+      cache.message || cache.error || "CMDB 本地数据下载失败。",
+    );
+    cmdbPickerMessageTone.value = "error";
+    return;
+  }
+  if (!ready) {
+    cmdbPickerMessage.value = cmdbCanForceRefresh.value
+      ? "CMDB 本地数据尚未下载，请点击右上角“重新下载到本地”。"
+      : "CMDB 本地数据尚未准备好，请联系管理员重新下载。";
+    cmdbPickerMessageTone.value = "warning";
+    return;
+  }
+  cmdbPickerMessage.value = "";
+  cmdbPickerMessageTone.value = "info";
+}
+
+async function pollCmdbCacheStatus(): Promise<void> {
+  try {
+    const payload = await requestJson("/api/repair-management/cmdb-cache/status");
+    applyCmdbCacheStatus(payload);
+    if (cmdbCacheRefreshing.value) return;
+    if (payload.ready === true && cmdbPickerOpen.value) {
+      await loadCmdbCandidates(true);
+      const recordCount = Number(payload.record_count || 0);
+      cmdbPickerMessage.value = recordCount > 0
+        ? `CMDB 已重新下载到本地，共 ${recordCount} 条记录。`
+        : "CMDB 已重新下载到本地。";
+      cmdbPickerMessageTone.value = "success";
+    }
+  } catch (error: unknown) {
+    cmdbCacheRefreshing.value = false;
+    stopCmdbCachePolling();
+    cmdbPickerMessage.value = error instanceof Error
+      ? error.message
+      : "CMDB 下载状态读取失败。";
+    cmdbPickerMessageTone.value = "error";
+  }
+}
+
+async function refreshCmdbLocalCache(): Promise<void> {
+  if (!cmdbCanForceRefresh.value || cmdbCacheRefreshing.value) return;
+  stopCmdbCachePolling();
+  cmdbCacheRefreshing.value = true;
+  cmdbPickerMessage.value = "正在从 CMDB 多维表下载全部记录到本地。";
+  cmdbPickerMessageTone.value = "info";
+  try {
+    const payload = await requestJson(
+      "/api/repair-management/cmdb-cache/refresh",
+      { method: "POST" },
+    );
+    applyCmdbCacheStatus(payload);
+    if (!cmdbCacheRefreshing.value && payload.ready === true) {
+      await loadCmdbCandidates(true);
+      const recordCount = Number(payload.record_count || 0);
+      cmdbPickerMessage.value = recordCount > 0
+        ? `CMDB 已重新下载到本地，共 ${recordCount} 条记录。`
+        : "CMDB 已重新下载到本地。";
+      cmdbPickerMessageTone.value = "success";
+    }
+  } catch (error: unknown) {
+    cmdbCacheRefreshing.value = false;
+    cmdbPickerMessage.value = error instanceof Error
+      ? error.message
+      : "CMDB 重新下载失败。";
+    cmdbPickerMessageTone.value = "error";
+  }
+}
+
 async function loadCmdbCandidates(resetLimit = true): Promise<void> {
   const previousCount = cmdbCandidates.value.length;
   if (resetLimit) {
@@ -1102,6 +1301,10 @@ async function loadCmdbCandidates(resetLimit = true): Promise<void> {
     );
     if (requestVersion !== cmdbRequestVersion) return;
     cmdbCandidates.value = Array.isArray(payload.records) ? payload.records : [];
+    applyCmdbCacheStatus(
+      payload.cache && typeof payload.cache === "object" ? payload.cache : {},
+      payload.can_force_refresh,
+    );
     const loadedMore = cmdbCandidates.value.length > previousCount;
     const moreAvailable = candidateHasMore(
       payload,
@@ -1113,11 +1316,16 @@ async function loadCmdbCandidates(resetLimit = true): Promise<void> {
     cmdbCandidatesHaveMore.value = moreAvailable && !reachedVisibleLimit;
     cmdbCandidateNote.value = reachedVisibleLimit
       ? "候选较多，当前已到显示上限，请输入关键词缩小范围。"
+      : Number(payload.cache?.record_count || 0) > 0
+      ? `本地缓存 ${Number(payload.cache.record_count)} 条`
       : "";
   } catch (error: unknown) {
     if (abortController.signal.aborted) return;
     if (requestVersion !== cmdbRequestVersion) return;
-    showMessage(error instanceof Error ? error.message : "CMDB 设备读取失败。", "failed");
+    cmdbPickerMessage.value = error instanceof Error
+      ? error.message
+      : "CMDB 设备读取失败。";
+    cmdbPickerMessageTone.value = "error";
   } finally {
     if (cmdbAbortController === abortController) cmdbAbortController = null;
     if (requestVersion === cmdbRequestVersion) cmdbLoading.value = false;
@@ -1268,11 +1476,16 @@ async function openCmdbPicker(): Promise<void> {
   await loadCmdbCandidates(true);
 }
 
+function closeCmdbPicker(): void {
+  cmdbPickerOpen.value = false;
+  stopCmdbCachePolling();
+}
+
 function confirmCmdb(recordIds: string[]): void {
   cmdbRecordIds.value = Array.from(new Set(
     recordIds.map((item) => String(item || "").trim()).filter(Boolean),
   ));
-  cmdbPickerOpen.value = false;
+  closeCmdbPicker();
   const selectedRecords = cmdbRecordIds.value.map((recordId) => (
     cmdbCandidates.value.find((item) => String(item.record_id || "") === recordId)
   )).filter(Boolean) as LooseDict[];
@@ -1354,9 +1567,14 @@ onBeforeUnmount(() => {
   recordsAbortController = null;
   cmdbAbortController?.abort();
   cmdbAbortController = null;
+  stopCmdbCachePolling();
   bindAbortController?.abort();
   bindAbortController = null;
   if (queryTimer) clearTimeout(queryTimer);
+  if (postSaveRefreshTimer) {
+    clearTimeout(postSaveRefreshTimer);
+    postSaveRefreshTimer = undefined;
+  }
 });
 </script>
 
@@ -2009,6 +2227,34 @@ onBeforeUnmount(() => {
 .followup-button.icon-button {
   width: 40px;
   padding: 0;
+}
+
+.cmdb-cache-download {
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid #176de0;
+  border-radius: 10px;
+  padding: 0 13px;
+  background: #edf5ff;
+  color: #1459b5;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 800;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.cmdb-cache-download:hover:not(:disabled) {
+  border-color: #0e5bc9;
+  background: #deecff;
+}
+
+.cmdb-cache-download:disabled {
+  cursor: wait;
+  opacity: 0.68;
 }
 
 .spinning {

@@ -392,6 +392,8 @@ REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS = "repair_followups"
 REPAIR_SNAPSHOT_SOURCE_EVENTS = "repair_events"
 REPAIR_SNAPSHOT_SOURCE_NOTICES = "repair_notices"
 REPAIR_SNAPSHOT_SOURCE_CMDB = "repair_cmdb"
+REPAIR_CMDB_SNAPSHOT_VERSION = 2
+REPAIR_CMDB_SNAPSHOT_MAX_RECORDS = 100_000
 REPAIR_SNAPSHOT_TTL_SECONDS = {
     REPAIR_SNAPSHOT_SOURCE_PROJECTS: 2 * 60,
     REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS: 2 * 60,
@@ -1051,6 +1053,9 @@ class MaintenancePortalService:
         self.app_token = str(app_token or DEFAULT_APP_TOKEN).strip()
         self.table_id = str(table_id or DEFAULT_TABLE_ID).strip()
         self._http_client = FeishuHttpClient()
+        # Keep interactive record mutations independent from long-running
+        # snapshot/catalog reads. FeishuHttpClient serializes calls per client.
+        self._write_http_client = FeishuHttpClient(retries=1)
         self._field_meta_list: list[FieldMeta] = []
         self._field_meta_by_name: dict[str, FieldMeta] = {}
         self._records: list[dict[str, Any]] = []
@@ -1076,6 +1081,7 @@ class MaintenancePortalService:
         self._repair_management_record_locks_guard = threading.RLock()
         self._repair_management_record_locks: dict[str, threading.RLock] = {}
         self._repair_snapshots_enabled = bool(enable_repair_snapshots)
+        self._repair_secondary_sync_deferred = bool(enable_repair_snapshots)
         self._repair_snapshot_locks_guard = threading.RLock()
         self._repair_snapshot_locks: dict[str, threading.Lock] = {}
         self._repair_snapshot_refreshing: set[str] = set()
@@ -1437,8 +1443,16 @@ class MaintenancePortalService:
         with lock:
             current_meta = self._state_store.get_repair_snapshot_meta(source_key)
             refreshed_at = float(current_meta.get("refreshed_at") or 0)
+            current_snapshot_version = int(
+                (current_meta.get("meta") or {}).get("catalog_version") or 0
+            )
+            current_snapshot_is_compatible = (
+                source_key != REPAIR_SNAPSHOT_SOURCE_CMDB
+                or current_snapshot_version == REPAIR_CMDB_SNAPSHOT_VERSION
+            )
             if (
                 not force_refresh
+                and current_snapshot_is_compatible
                 and refreshed_at > 0
                 and time.time() - refreshed_at <= ttl
             ):
@@ -1471,7 +1485,14 @@ class MaintenancePortalService:
                     fields=[
                         self._repair_snapshot_field_payload(meta) for meta in metas
                     ],
-                    meta={"source_key": source_key},
+                    meta={
+                        "source_key": source_key,
+                        **(
+                            {"catalog_version": REPAIR_CMDB_SNAPSHOT_VERSION}
+                            if source_key == REPAIR_SNAPSHOT_SOURCE_CMDB
+                            else {}
+                        ),
+                    },
                 )
                 return metas, {meta.field_name: meta for meta in metas}, records
             except Exception as exc:
@@ -1497,10 +1518,11 @@ class MaintenancePortalService:
         table_id: str,
         loader: Callable[[], tuple[list[FieldMeta], list[dict[str, Any]]]],
         parent_field_name: str = "",
-    ) -> None:
+        force_refresh: bool = False,
+    ) -> bool:
         with self._repair_snapshot_locks_guard:
             if source_key in self._repair_snapshot_refreshing:
-                return
+                return False
             self._repair_snapshot_refreshing.add(source_key)
 
         def run() -> None:
@@ -1511,7 +1533,11 @@ class MaintenancePortalService:
                     table_id=table_id,
                     loader=loader,
                     parent_field_name=parent_field_name,
+                    force_refresh=force_refresh,
                 )
+                if source_key == REPAIR_SNAPSHOT_SOURCE_CMDB:
+                    with self._repair_management_cmdb_cache_lock:
+                        self._repair_management_cmdb_cache = {}
                 self._invalidate_repair_management_status_cache()
             except Exception:
                 pass
@@ -1524,6 +1550,7 @@ class MaintenancePortalService:
             name=f"RepairSnapshot-{source_key}",
             daemon=True,
         ).start()
+        return True
 
     def _load_repair_snapshot_source(
         self,
@@ -1549,6 +1576,14 @@ class MaintenancePortalService:
         if self._repair_snapshot_requires_workflow_refresh(snapshot, table_id):
             # Never serve a cached Feishu Stage value as the repair status. A
             # fresh snapshot will project the writable single-select 流程-L.
+            snapshot = {}
+        if (
+            source_key == REPAIR_SNAPSHOT_SOURCE_CMDB
+            and int((snapshot.get("meta") or {}).get("catalog_version") or 0)
+            != REPAIR_CMDB_SNAPSHOT_VERSION
+        ):
+            # Earlier builds cached only the first 500 CMDB rows. Force one
+            # complete refresh so searches cover the whole catalog.
             snapshot = {}
         now = time.time()
         refreshed_at = float(snapshot.get("refreshed_at") or 0)
@@ -1728,6 +1763,9 @@ class MaintenancePortalService:
                         )
                         if int(source_meta.get("record_count") or 0) > 0:
                             continue
+                    if source_key == REPAIR_SNAPSHOT_SOURCE_CMDB:
+                        self.start_repair_management_cmdb_cache_refresh()
+                        continue
                     with suppress(Exception):
                         loader()
                     time.sleep(0.5)
@@ -1785,9 +1823,10 @@ class MaintenancePortalService:
         headers: dict[str, str],
         params: dict[str, Any] | None = None,
         json_payload: Any = None,
+        http_client: FeishuHttpClient | None = None,
     ) -> dict[str, Any]:
         try:
-            return self._http_client.request_json(
+            return (http_client or self._http_client).request_json(
                 method,
                 url,
                 headers=headers,
@@ -1899,6 +1938,7 @@ class MaintenancePortalService:
                 context="飞书记录更新",
                 headers={**self._auth_headers(), "Content-Type": "application/json"},
                 json_payload={"fields": fields},
+                http_client=self._write_http_client,
             )
 
         payload = do_update()
@@ -2869,6 +2909,7 @@ class MaintenancePortalService:
                 context="飞书记录创建",
                 headers={**self._auth_headers(), "Content-Type": "application/json"},
                 json_payload={"fields": fields},
+                http_client=self._write_http_client,
             )
 
         payload = do_create()
@@ -2909,6 +2950,7 @@ class MaintenancePortalService:
                 url,
                 context="飞书记录删除",
                 headers=self._auth_headers(),
+                http_client=self._write_http_client,
             )
 
         payload = do_delete()
@@ -4962,7 +5004,7 @@ class MaintenancePortalService:
                 work_type=WORK_TYPE_REPAIR,
                 notice_type=NOTICE_TYPE_REPAIR,
                 field_names=("智航唯一ID", "设备名称", "分类名称", "位置", "楼栋"),
-                limit=500,
+                limit=REPAIR_CMDB_SNAPSHOT_MAX_RECORDS,
             )
             self._repair_management_cmdb_cache = {
                 "loaded_at": time.monotonic(),
@@ -4993,6 +5035,100 @@ class MaintenancePortalService:
             loader=load_remote,
             force_refresh=force_refresh,
         )
+
+    def repair_management_cmdb_cache_status(self) -> dict[str, Any]:
+        snapshot_meta = self._state_store.get_repair_snapshot_meta(
+            REPAIR_SNAPSHOT_SOURCE_CMDB
+        )
+        with self._repair_snapshot_locks_guard:
+            refreshing = REPAIR_SNAPSHOT_SOURCE_CMDB in self._repair_snapshot_refreshing
+        same_source = (
+            str(snapshot_meta.get("app_token") or "").strip()
+            == REPAIR_SOURCE_APP_TOKEN
+            and str(snapshot_meta.get("table_id") or "").strip()
+            == REPAIR_CMDB_TABLE_ID
+        )
+        compatible = (
+            same_source
+            and int(
+                (snapshot_meta.get("meta") or {}).get("catalog_version") or 0
+            )
+            == REPAIR_CMDB_SNAPSHOT_VERSION
+        )
+        ready = bool(snapshot_meta.get("exists")) and compatible
+        failed = str(snapshot_meta.get("status") or "") == "failed"
+        status = (
+            "refreshing"
+            if refreshing
+            else "failed"
+            if failed
+            else "ready"
+            if ready
+            else "empty"
+        )
+        error = str(snapshot_meta.get("error") or "").strip() if failed else ""
+        if refreshing and not ready:
+            message = "CMDB 本地数据正在后台下载，完成后会自动显示。"
+        elif failed and ready:
+            message = (
+                f"最近一次 CMDB 下载失败，当前显示上次成功数据：{error}"
+                if error
+                else "最近一次 CMDB 下载失败，当前显示上次成功数据。"
+            )
+        elif failed:
+            message = (
+                f"CMDB 本地数据下载失败：{error}"
+                if error
+                else "CMDB 本地数据下载失败。"
+            )
+        elif not ready:
+            message = "CMDB 本地数据尚未下载。"
+        else:
+            message = ""
+        return {
+            "source_key": REPAIR_SNAPSHOT_SOURCE_CMDB,
+            "table_id": REPAIR_CMDB_TABLE_ID,
+            "status": status,
+            "ready": ready,
+            "refreshing": refreshing,
+            "record_count": (
+                int(snapshot_meta.get("record_count") or 0) if same_source else 0
+            ),
+            "refreshed_at": (
+                float(snapshot_meta.get("refreshed_at") or 0) if same_source else 0.0
+            ),
+            "error": error,
+            "message": message,
+            "catalog_version": (
+                int((snapshot_meta.get("meta") or {}).get("catalog_version") or 0)
+                if same_source
+                else 0
+            ),
+        }
+
+    def start_repair_management_cmdb_cache_refresh(self) -> dict[str, Any]:
+        def refresh_cmdb_snapshot() -> tuple[
+            list[FieldMeta],
+            list[dict[str, Any]],
+        ]:
+            metas, _meta_by_name, records = (
+                self._load_repair_management_cmdb_records_remote(
+                    force_refresh=True
+                )
+            )
+            return metas, records
+
+        started = self._schedule_repair_snapshot_refresh(
+            source_key=REPAIR_SNAPSHOT_SOURCE_CMDB,
+            app_token=REPAIR_SOURCE_APP_TOKEN,
+            table_id=REPAIR_CMDB_TABLE_ID,
+            loader=refresh_cmdb_snapshot,
+            force_refresh=True,
+        )
+        return {
+            **self.repair_management_cmdb_cache_status(),
+            "started": started,
+        }
 
     def _resolve_repair_management_cmdb_unique_ids(
         self,
@@ -5740,9 +5876,84 @@ class MaintenancePortalService:
         query: str = "",
         limit: int = 160,
     ) -> dict[str, Any]:
-        _metas, _meta_by_name, records = self._load_repair_management_cmdb_records()
         normalized_scope = self._normalize_scope(scope)
         query_text = str(query or "").strip().lower()
+        max_limit = max(1, min(int(limit or 160), 500))
+
+        if self._repair_snapshots_enabled:
+            snapshot_meta = self._state_store.get_repair_snapshot_meta(
+                REPAIR_SNAPSHOT_SOURCE_CMDB
+            )
+            snapshot_is_current = (
+                bool(snapshot_meta.get("exists"))
+                and str(snapshot_meta.get("app_token") or "").strip()
+                == REPAIR_SOURCE_APP_TOKEN
+                and str(snapshot_meta.get("table_id") or "").strip()
+                == REPAIR_CMDB_TABLE_ID
+                and int(
+                    (snapshot_meta.get("meta") or {}).get("catalog_version") or 0
+                )
+                == REPAIR_CMDB_SNAPSHOT_VERSION
+            )
+            recent_refresh_failure = (
+                str(snapshot_meta.get("status") or "") == "failed"
+                and time.time() - float(snapshot_meta.get("updated_at") or 0)
+                < REPAIR_SNAPSHOT_FAILURE_BACKOFF_SECONDS
+            )
+            if not snapshot_is_current and not recent_refresh_failure:
+                self.start_repair_management_cmdb_cache_refresh()
+            elif snapshot_is_current:
+                refreshed_at = float(snapshot_meta.get("refreshed_at") or 0)
+                ttl = float(
+                    REPAIR_SNAPSHOT_TTL_SECONDS.get(REPAIR_SNAPSHOT_SOURCE_CMDB)
+                    or 24 * 60 * 60
+                )
+                if refreshed_at <= 0 or time.time() - refreshed_at > ttl:
+                    self.start_repair_management_cmdb_cache_refresh()
+
+            snapshot_meta = self._state_store.get_repair_snapshot_meta(
+                REPAIR_SNAPSHOT_SOURCE_CMDB
+            )
+            same_source = (
+                bool(snapshot_meta.get("exists"))
+                and str(snapshot_meta.get("app_token") or "").strip()
+                == REPAIR_SOURCE_APP_TOKEN
+                and str(snapshot_meta.get("table_id") or "").strip()
+                == REPAIR_CMDB_TABLE_ID
+            )
+            if same_source:
+                page = self._state_store.query_repair_snapshot_page(
+                    REPAIR_SNAPSHOT_SOURCE_CMDB,
+                    scope=normalized_scope,
+                    query=query_text,
+                    limit=max_limit,
+                )
+                records = [
+                    item
+                    for item in (page.get("records") or [])
+                    if isinstance(item, dict)
+                ]
+                total = int(page.get("total") or 0)
+            else:
+                records = []
+                total = 0
+            cache_status = self.repair_management_cmdb_cache_status()
+        else:
+            _metas, _meta_by_name, records = (
+                self._load_repair_management_cmdb_records()
+            )
+            total = 0
+            cache_status = {
+                "table_id": REPAIR_CMDB_TABLE_ID,
+                "status": "direct",
+                "ready": True,
+                "refreshing": False,
+                "record_count": len(records),
+                "refreshed_at": 0.0,
+                "error": "",
+                "message": "",
+            }
+
         candidates: list[dict[str, Any]] = []
         for record in records:
             fields = record.get("display_fields") or {}
@@ -5769,12 +5980,15 @@ class MaintenancePortalService:
                     "building": building,
                 }
             )
-        max_limit = max(1, min(int(limit or 160), 500))
+        if not self._repair_snapshots_enabled:
+            total = len(candidates)
         return {
             "scope": normalized_scope,
             "records": candidates[:max_limit],
-            "total": len(candidates),
+            "total": total,
             "returned": min(len(candidates), max_limit),
+            "has_more": total > max_limit,
+            "cache": cache_status,
         }
 
     def list_repair_followup_people(
@@ -6984,6 +7198,29 @@ class MaintenancePortalService:
                     existing_result["idempotent_replay"] = True
                     return existing_result
                 if existing_record_id:
+                    if self._repair_secondary_sync_deferred:
+                        task_id = self._schedule_repair_sync_task(
+                            "followup_summary_sync",
+                            summary_record_id=summary_id,
+                            scope=scope,
+                            run_immediately=True,
+                        )
+                        if task_id:
+                            existing_result.update(
+                                {
+                                    "record_id": existing_record_id,
+                                    "summary_record_id": summary_id,
+                                    "summary_sync_pending": True,
+                                    "idempotent_replay": True,
+                                }
+                            )
+                            self._state_store.update_repair_management_operation(
+                                stable_operation_id,
+                                status="sync_pending",
+                                result=existing_result,
+                                error="",
+                            )
+                            return existing_result
                     replay_warnings = [
                         warning
                         for warning in (existing_result.get("warnings") or [])
@@ -7083,6 +7320,23 @@ class MaintenancePortalService:
                 result=response,
                 error="",
             )
+        if self._repair_secondary_sync_deferred:
+            task_id = self._schedule_repair_sync_task(
+                "followup_summary_sync",
+                summary_record_id=summary_id,
+                scope=scope,
+                run_immediately=True,
+            )
+            if task_id:
+                response["summary_sync_pending"] = True
+                if stable_operation_id:
+                    self._state_store.update_repair_management_operation(
+                        stable_operation_id,
+                        status="sync_pending",
+                        result=response,
+                        error="",
+                    )
+                return response
         try:
             sync_warnings = self._sync_repair_management_from_followup(
                 summary_record_id=summary_id,
@@ -7173,6 +7427,21 @@ class MaintenancePortalService:
             fields=prepared,
             parent_record_id=summary_id,
         )
+        if self._repair_secondary_sync_deferred:
+            task_id = self._schedule_repair_sync_task(
+                "followup_summary_sync",
+                summary_record_id=summary_id,
+                scope=scope,
+                run_immediately=True,
+            )
+            if task_id:
+                return {
+                    "record_id": str(record_id or "").strip(),
+                    "summary_record_id": summary_id,
+                    "fields": prepared,
+                    "warnings": list(dict.fromkeys(warnings)),
+                    "summary_sync_pending": True,
+                }
         summary_sync_pending = False
         try:
             sync_warnings = self._sync_repair_management_from_followup(
@@ -7556,6 +7825,7 @@ class MaintenancePortalService:
         task_payload: dict[str, Any] | None = None,
         error: str = "",
         target_record_id: str = "",
+        run_immediately: bool = False,
     ) -> str:
         try:
             return self._schedule_repair_sync_task_unchecked(
@@ -7565,6 +7835,7 @@ class MaintenancePortalService:
                 task_payload=task_payload,
                 error=error,
                 target_record_id=target_record_id,
+                run_immediately=run_immediately,
             )
         except Exception as exc:
             logging.warning(
@@ -7584,6 +7855,7 @@ class MaintenancePortalService:
         task_payload: dict[str, Any] | None = None,
         error: str = "",
         target_record_id: str = "",
+        run_immediately: bool = False,
     ) -> str:
         operation_type = str(operation_type or "").strip()
         summary_id = str(summary_record_id or "").strip()
@@ -7637,7 +7909,7 @@ class MaintenancePortalService:
         result = {
             "task_payload": normalized_task_payload,
             "attempts": 0,
-            "available_at": now + REPAIR_SYNC_FAST_RETRY_SECONDS,
+            "available_at": now if run_immediately else now + REPAIR_SYNC_FAST_RETRY_SECONDS,
             "scheduled_at": now,
         }
         self._state_store.update_repair_management_operation(
@@ -7647,6 +7919,8 @@ class MaintenancePortalService:
             result=result,
             error=str(error or ""),
         )
+        if run_immediately:
+            self._process_repair_sync_tasks_async()
         return operation_id
 
     def _execute_repair_sync_task(
@@ -11135,6 +11409,7 @@ class MaintenancePortalService:
             "failed_count": 0,
             "warnings": [],
         }
+        followup_sync_pending = False
         workflow = ""
         workflow_synced = False
         workflow_warnings: list[str] = []
@@ -11143,26 +11418,41 @@ class MaintenancePortalService:
             prepared,
         )
         if linked_followups:
-            followup_sync = self._sync_repair_followups_from_summary(
-                summary_record_id=summary_id,
-                summary_record=updated_summary,
-                linked_followups=linked_followups,
-            )
+            if self._repair_secondary_sync_deferred:
+                followup_sync_pending = bool(
+                    self._schedule_repair_sync_task(
+                        "summary_followup_copy_sync",
+                        summary_record_id=summary_id,
+                        scope=scope,
+                        run_immediately=True,
+                    )
+                )
+            if not followup_sync_pending:
+                followup_sync = self._sync_repair_followups_from_summary(
+                    summary_record_id=summary_id,
+                    summary_record=updated_summary,
+                    linked_followups=linked_followups,
+                )
             if (
-                int(followup_sync.get("failed_count") or 0) > 0
-                or self._repair_sync_warnings_require_retry(
-                    list(followup_sync.get("warnings") or [])
+                not followup_sync_pending
+                and (
+                    int(followup_sync.get("failed_count") or 0) > 0
+                    or self._repair_sync_warnings_require_retry(
+                        list(followup_sync.get("warnings") or [])
+                    )
                 )
             ):
-                self._schedule_repair_sync_task(
-                    "summary_followup_copy_sync",
-                    summary_record_id=summary_id,
-                    scope=scope,
-                    error="；".join(
-                        str(item or "").strip()
-                        for item in (followup_sync.get("warnings") or [])
-                        if str(item or "").strip()
-                    ),
+                followup_sync_pending = bool(
+                    self._schedule_repair_sync_task(
+                        "summary_followup_copy_sync",
+                        summary_record_id=summary_id,
+                        scope=scope,
+                        error="；".join(
+                            str(item or "").strip()
+                            for item in (followup_sync.get("warnings") or [])
+                            if str(item or "").strip()
+                        ),
+                    )
                 )
         has_followup, latest_progress_percent = (
             self._repair_management_latest_followup_progress(
@@ -11195,6 +11485,7 @@ class MaintenancePortalService:
             "followup_sync_failed_count": int(
                 followup_sync.get("failed_count") or 0
             ),
+            "followup_sync_pending": followup_sync_pending,
             "warnings": list(
                 dict.fromkeys(
                     [
