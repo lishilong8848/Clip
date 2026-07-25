@@ -57,6 +57,30 @@ BINDABLE_TARGET_WORK_TYPES = {"maintenance", "change", "repair", "power", "polli
 BUILDING_SCOPE_CODES = ("110", "A", "B", "C", "D", "E", "H")
 PENDING_PAGE_SIZE = 24
 ONGOING_PAGE_SIZE = 18
+LITE_FRAGMENT_NAMES = (
+    "subtitle",
+    "summary",
+    "toolbar",
+    "workspace",
+    "detail",
+)
+
+
+def extract_workbench_lite_fragments(html_text: str) -> dict[str, str]:
+    source = str(html_text or "")
+    fragments: dict[str, str] = {}
+    for name in LITE_FRAGMENT_NAMES:
+        start = f"<!--LITE_FRAGMENT:{name}:START-->"
+        end = f"<!--LITE_FRAGMENT:{name}:END-->"
+        start_index = source.find(start)
+        if start_index < 0:
+            continue
+        content_start = start_index + len(start)
+        end_index = source.find(end, content_start)
+        if end_index < 0:
+            continue
+        fragments[name] = source[content_start:end_index].strip()
+    return fragments
 REQUIRED_UPLOAD_FIELDS_BY_WORK_TYPE: dict[str, set[str]] = {
     "maintenance": {"title", "start_time", "end_time", "location", "content", "reason", "impact", "progress", "specialty", "maintenance_cycle"},
     "change": {"title", "level", "start_time", "end_time", "location", "content", "reason", "impact", "progress", "specialty"},
@@ -2677,7 +2701,7 @@ def render_workbench_lite(
   <header class="topbar">
     <div class="brand">
       <div class="logo brand-logo">世纪互联<br>VNET</div>
-      <div><h1>南通基地-运维灯塔工作台</h1><p id="lite-workbench-subtitle">{_e(WORK_TYPE_FILTER_LABELS.get(view_work, '通告'))} · 工作台</p></div>
+      <div><h1>南通基地-运维灯塔工作台</h1><!--LITE_FRAGMENT:subtitle:START--><p id="lite-workbench-subtitle">{_e(WORK_TYPE_FILTER_LABELS.get(view_work, '通告'))} · 工作台</p><!--LITE_FRAGMENT:subtitle:END--></div>
     </div>
     <nav class="top-actions">
       <label class="scope-switch"><b class="scope-icon" aria-hidden="true">楼</b><span>当前楼栋</span><select class="scope-select" id="lite-scope-select" aria-label="切换楼栋">{scope_select}</select></label>
@@ -2687,13 +2711,13 @@ def render_workbench_lite(
     </nav>
   </header>
   <main class="shell">
-    <section class="summary">
+    <!--LITE_FRAGMENT:summary:START--><section class="summary">
       <article><strong>已发起</strong><b>{_e(stats.get('started') or 0)}</b></article>
       <article><strong>有更新</strong><b>{_e(stats.get('updated') or 0)}</b></article>
       <article><strong>已结束</strong><b>{_e(stats.get('ended') or 0)}</b></article>
       <article><strong>进行中</strong><b>{_e(len(ongoing))}</b></article>
-    </section>
-    <section class="toolbar">
+    </section><!--LITE_FRAGMENT:summary:END-->
+    <!--LITE_FRAGMENT:toolbar:START--><section class="toolbar">
       <div class="type-tabs">{type_tabs}</div>
       <div class="manual-picker" id="manual-picker">
         <button class="btn ghost" id="manual-open" type="button" aria-expanded="false" aria-controls="manual-menu">纯手填</button>
@@ -2726,9 +2750,9 @@ def render_workbench_lite(
         </select>
         <button class="btn primary" type="submit">筛选</button>
       </form>
-    </section>
+    </section><!--LITE_FRAGMENT:toolbar:END-->
     <section class="workbench-guide" aria-label="通告办理步骤" hidden></section>
-    <section class="workspace">
+    <!--LITE_FRAGMENT:workspace:START--><section class="workspace">
       <aside class="task-inbox panel" aria-label="通告处理">
         <div class="inbox-head">
           <h2 class="inbox-title"><span>通告处理</span></h2>
@@ -2748,9 +2772,9 @@ def render_workbench_lite(
           {ongoing_pager}
         </section>
         <details class="rail-fold attention"{' open' if attention_count else ''}><summary>待处理问题 <b class="panel-count">{_e(attention_count)}</b></summary><section class="rail-panel attention"><h2>待处理问题</h2><div class="attention-list">{attention_html}</div></section></details>
-        <details class="rail-fold undo"><summary>近三天可回退 <b class="panel-count">{_e(undo_count)}</b></summary><section class="rail-panel undo"><h2>近三天可回退</h2><div class="undo-panel-list">{undo_html}</div></section></details>
+        <details class="rail-fold undo" id="lite-undo-fold" data-loaded="{'1' if undo_items else '0'}"><summary>近三天可回退 <b class="panel-count">{_e(undo_count)}</b></summary><section class="rail-panel undo"><h2>近三天可回退</h2><div class="undo-panel-list">{undo_html}</div></section></details>
       </aside>
-      <div class="notice-detail-overlay{' open' if detail_drawer_open else ''}" id="lite-notice-detail-overlay" data-open-on-load="{'1' if detail_drawer_open else '0'}" aria-hidden="{'false' if detail_drawer_open else 'true'}">
+      <!--LITE_FRAGMENT:detail:START--><div class="notice-detail-overlay{' open' if detail_drawer_open else ''}" id="lite-notice-detail-overlay" data-open-on-load="{'1' if detail_drawer_open else '0'}" aria-hidden="{'false' if detail_drawer_open else 'true'}">
         <section class="panel detail-panel notice-detail-drawer" id="detail-panel" role="dialog" aria-modal="true" aria-labelledby="lite-notice-drawer-title" tabindex="-1">
           <header class="notice-drawer-head">
             <div class="notice-drawer-title">
@@ -2775,8 +2799,8 @@ def render_workbench_lite(
             {_detail_form(record=selected_record, ongoing_item=selected_ongoing, scope=scope, work_type=detail_work, manual=manual or bool(parsed_draft), source_month=selected_month, parsed_draft=parsed_draft, parsed_action=parsed_action, source_link_options=source_options, is_admin=is_admin_session, prefill_draft=prefill_draft, prefill_source_record_id=prefill_source_record_id, prefill_target_record_id=prefill_target_record_id, prefill_action=prefill_action, prefill_context_id=prefill_context_id)}
           </div>
         </section>
-      </div>
-    </section>
+      </div><!--LITE_FRAGMENT:detail:END-->
+    </section><!--LITE_FRAGMENT:workspace:END-->
   </main>
   <div class="end-check-backdrop" id="lite-end-check" hidden>
     <section class="end-check-dialog" role="dialog" aria-modal="true" aria-labelledby="lite-end-check-title">
@@ -3219,38 +3243,74 @@ def render_workbench_lite(
       if (isManual) url.searchParams.set('manual', '1');
       return url.pathname + url.search;
     }}
-    const liteHtmlCache = window.__clipflowLiteHtmlCache || (window.__clipflowLiteHtmlCache = new Map());
-    const liteHtmlCacheTtlMs = 25000;
     let liteNavigateController = null;
-    function liteCacheKey(url) {{
+    let liteNavigationGeneration = 0;
+    function liteTargetUrl(url) {{
       try {{
-        const parsed = new URL(url, location.origin);
-        return parsed.pathname + parsed.search;
+        return new URL(url, location.origin);
       }} catch {{
-        return String(url || '');
+        return new URL('/workbench-lite', location.origin);
       }}
     }}
-    function getLiteHtmlCache(url) {{
-      const item = liteHtmlCache.get(liteCacheKey(url));
-      if (!item || Date.now() - Number(item.at || 0) > liteHtmlCacheTtlMs) return '';
-      return String(item.html || '');
+    function liteFragmentUrl(url, detailOnly) {{
+      const targetUrl = liteTargetUrl(url);
+      const apiUrl = new URL(
+        detailOnly ? '/api/workbench/lite-detail' : '/api/workbench/lite-fragment',
+        location.origin,
+      );
+      targetUrl.searchParams.forEach((value, key) => apiUrl.searchParams.append(key, value));
+      return apiUrl.pathname + apiUrl.search;
     }}
-    function setLiteHtmlCache(url, html) {{
-      if (!html) return;
-      liteHtmlCache.set(liteCacheKey(url), {{ at: Date.now(), html: String(html) }});
-      if (liteHtmlCache.size > 12) {{
-        const keys = Array.from(liteHtmlCache.keys());
-        for (const key of keys.slice(0, liteHtmlCache.size - 12)) liteHtmlCache.delete(key);
+    function fragmentElement(htmlText) {{
+      const template = document.createElement('template');
+      template.innerHTML = String(htmlText || '').trim();
+      return template.content.firstElementChild;
+    }}
+    function syncLiteTopbar(url) {{
+      const targetUrl = liteTargetUrl(url);
+      const nextScope = targetUrl.searchParams.get('scope') || '';
+      const scopeSelect = document.getElementById('lite-scope-select');
+      if (scopeSelect && nextScope && Array.from(scopeSelect.options).some(option => option.value === nextScope)) {{
+        scopeSelect.value = nextScope;
       }}
+      const mopLink = document.querySelector('.top-actions a[href^="/engineer/mop"]');
+      if (mopLink && nextScope) mopLink.href = '/engineer/mop?scope=' + encodeURIComponent(nextScope);
+    }}
+    function applyLiteFragments(data, fallbackUrl, push, detailOnly) {{
+      const fragments = data && typeof data.fragments === 'object' ? data.fragments : {{}};
+      const replacements = detailOnly
+        ? [['#lite-notice-detail-overlay', fragments.detail]]
+        : [
+          ['#lite-workbench-subtitle', fragments.subtitle],
+          ['.summary', fragments.summary],
+          ['.toolbar', fragments.toolbar],
+          ['.workspace', fragments.workspace],
+        ];
+      const prepared = replacements.map(([selector, htmlText]) => ({{
+        selector,
+        current: document.querySelector(selector),
+        next: fragmentElement(htmlText),
+      }}));
+      if (prepared.some(item => !item.current || !item.next)) {{
+        throw new Error(detailOnly ? '通告详情返回不完整' : '工作台局部页面返回不完整');
+      }}
+      for (const item of prepared) {{
+        item.current.replaceWith(item.next);
+      }}
+      const canonicalUrl = String(data?.canonical_url || fallbackUrl || '');
+      if (push && canonicalUrl) history.pushState({{ lite: true }}, '', canonicalUrl);
+      syncLiteTopbar(canonicalUrl || fallbackUrl);
+      requestAnimationFrame(hydrateLitePreview);
     }}
     function clearLiteHtmlCache() {{
-      liteHtmlCache.clear();
+      // Workbench navigation intentionally avoids visible stale HTML caches.
     }}
     function parseJsonAttr(node, attrName) {{
       try {{ return JSON.parse(node.getAttribute(attrName) || '{{}}'); }}
       catch {{ return {{}}; }}
     }}
     const liteDraftCache = window.__clipflowLiteDraftCache || (window.__clipflowLiteDraftCache = new Map());
+    const liteDraftCacheMaxEntries = 240;
     const liteDraftDomKeys = [
       'action', 'operation_id', 'active_item_id', 'source_record_id', 'target_record_id', 'record_id',
       'repair_management_record_id',
@@ -3285,7 +3345,15 @@ def render_workbench_lite(
     }}
     function rememberLiteDraft(draft) {{
       const key = draftCacheKey(draft || {{}});
-      if (key) liteDraftCache.set(key, Object.assign({{}}, draft || {{}}));
+      if (key) {{
+        liteDraftCache.delete(key);
+        liteDraftCache.set(key, Object.assign({{}}, draft || {{}}));
+        while (liteDraftCache.size > liteDraftCacheMaxEntries) {{
+          const oldestKey = liteDraftCache.keys().next().value;
+          if (!oldestKey) break;
+          liteDraftCache.delete(oldestKey);
+        }}
+      }}
       return key;
     }}
     function setSafeDraftAttr(row, draft) {{
@@ -3553,15 +3621,11 @@ def render_workbench_lite(
     async function refreshTaskInboxAfterIdentityBinding() {{
       clearLiteHtmlCache();
       const scrollPositions = captureWorkspaceScroll();
-      const response = await fetch(location.pathname + location.search, {{
-        credentials: 'same-origin',
-        cache: 'no-store',
+      await navigateLite(location.pathname + location.search, {{
+        push: false,
+        label: '正在更新关联状态...',
+        workspaceSwitch: true,
       }});
-      const html = await response.text();
-      if (handleLiteAuthRequired(response, null, html)) return;
-      if (!response.ok) throw new Error('刷新通告处理状态失败');
-      const nextDoc = new DOMParser().parseFromString(html, 'text/html');
-      replaceFromDocument(nextDoc, '.task-inbox');
       restoreWorkspaceScroll(scrollPositions);
     }}
     let liteSitePhotos = [];
@@ -4462,6 +4526,66 @@ def render_workbench_lite(
       }}
     }}
     let pendingUndoButton = null;
+    function undoRowFromItem(item) {{
+      const button = document.createElement('button');
+      button.className = 'undo-row';
+      button.type = 'button';
+      button.setAttribute('data-undo-id', String(item.undo_id || ''));
+      button.setAttribute('data-undo-title', String(item.title || item.undo_label || '可回退通告'));
+      button.setAttribute('data-undo-action', String(item.undo_label || item.undo_action_type || '回退'));
+      button.setAttribute('data-undo-time', String(item.undo_created_at || ''));
+      const title = document.createElement('strong');
+      title.textContent = String(item.title || item.undo_label || '可回退通告');
+      const action = document.createElement('span');
+      action.textContent = String(item.undo_label || item.undo_action_type || '回退');
+      button.append(title, action);
+      return button;
+    }}
+    async function loadUndoItems(fold) {{
+      if (!fold || fold.dataset.loaded === '1' || fold.dataset.loading === '1') return;
+      fold.dataset.loading = '1';
+      const list = fold.querySelector('.undo-panel-list');
+      if (list) list.innerHTML = '<div class="empty compact">正在读取...</div>';
+      try {{
+        const params = new URLSearchParams({{
+          scope: getCurrentScope(),
+          since_seconds: String(3 * 24 * 60 * 60),
+        }});
+        const response = await fetch('/api/notice-undo/available?' + params.toString(), {{
+          credentials: 'same-origin',
+          headers: {{ 'Accept': 'application/json' }},
+        }});
+        const payload = await response.json().catch(() => ({{}}));
+        if (handleLiteAuthRequired(response, payload)) return;
+        if (!response.ok || payload.ok === false) {{
+          throw new Error(payload.error || '读取可回退通告失败');
+        }}
+        const data = payload.data && typeof payload.data === 'object' ? payload.data : payload;
+        const items = Array.isArray(data.items) ? data.items.slice(0, 12) : [];
+        if (list) {{
+          list.replaceChildren(
+            ...(items.length
+              ? items.map(undoRowFromItem)
+              : [Object.assign(document.createElement('div'), {{
+                  className: 'empty compact',
+                  textContent: '近三天暂无可回退通告',
+                }})])
+          );
+        }}
+        const count = fold.querySelector('summary .panel-count');
+        if (count) count.textContent = String(items.length);
+        fold.dataset.loaded = '1';
+      }} catch (error) {{
+        if (list) {{
+          const failure = document.createElement('div');
+          failure.className = 'empty compact';
+          failure.textContent = error && error.message ? error.message : '读取失败，请重新展开';
+          list.replaceChildren(failure);
+        }}
+      }} finally {{
+        delete fold.dataset.loading;
+      }}
+    }}
     function closeUndoConfirm() {{
       const modal = document.getElementById('lite-undo-confirm');
       if (modal) modal.hidden = true;
@@ -4859,52 +4983,116 @@ def render_workbench_lite(
     }}
     async function navigateLite(url, options = {{}}) {{
       const useWorkspaceSwitch = Boolean(options.workspaceSwitch);
-      const useCache = Boolean(options.useCache);
+      const selectors = Array.isArray(options.selectors) ? options.selectors : [];
+      const detailOnly = Boolean(options.detailOnly) || selectors.includes('#detail-panel');
+      const generation = ++liteNavigationGeneration;
       setPanelLoading(true);
       if (useWorkspaceSwitch) setWorkspaceSwitching(true, options.loadingText || options.label || '正在加载通告');
       setLiteStatus(options.label || '正在切换...');
       const scrollPositions = options.preserveWorkspaceScroll ? captureWorkspaceScroll() : null;
-      let pushedWithCache = false;
       try {{
-        if (useCache) {{
-          const cachedHtml = getLiteHtmlCache(url);
-          if (cachedHtml) {{
-            applyLiteHtml(cachedHtml, url, options.push !== false, options.selectors);
-            pushedWithCache = options.push !== false;
-            if (useWorkspaceSwitch) setWorkspaceSwitching(false);
-            setLiteStatus('已切换，正在校准最新数据...');
-          }}
-        }}
         if (liteNavigateController) liteNavigateController.abort();
         liteNavigateController = new AbortController();
-        const response = await fetch(url, {{
+        const response = await fetch(liteFragmentUrl(url, detailOnly), {{
           credentials: 'same-origin',
           signal: liteNavigateController.signal,
+          headers: {{ 'Accept': 'application/json' }},
         }});
-        const html = await response.text();
-        if (handleLiteAuthRequired(response, null, html)) return;
-        if (!response.ok) throw new Error(html || '页面加载失败');
-        if (useCache) setLiteHtmlCache(url, html);
-        applyLiteHtml(html, url, !pushedWithCache && options.push !== false, options.selectors);
+        const payload = await response.json().catch(() => ({{}}));
+        if (handleLiteAuthRequired(response, payload)) return;
+        if (!response.ok || payload.ok === false) {{
+          throw new Error(payload.error || '页面加载失败');
+        }}
+        if (generation !== liteNavigationGeneration) return;
+        const data = payload.data && typeof payload.data === 'object'
+          ? payload.data
+          : payload;
+        applyLiteFragments(data, url, options.push !== false, detailOnly);
         if (options.preserveWorkspaceScroll) restoreWorkspaceScroll(scrollPositions);
       }} catch (error) {{
         if (error && error.name === 'AbortError') return;
         throw error;
       }} finally {{
-        setPanelLoading(false);
-        if (useWorkspaceSwitch) setWorkspaceSwitching(false);
+        if (generation === liteNavigationGeneration) {{
+          setPanelLoading(false);
+          if (useWorkspaceSwitch) setWorkspaceSwitching(false);
+        }}
       }}
     }}
     async function refreshCurrentLite(label, selectors) {{
       await navigateLite(location.href, {{ push: false, label: label || '正在刷新...', selectors, preserveWorkspaceScroll: true }});
     }}
-    async function liteFetchThenRefresh(url, label) {{
+    function waitLiteRefresh(delayMs) {{
+      return new Promise((resolve) => window.setTimeout(resolve, delayMs));
+    }}
+    async function fetchLiteRefreshJson(url, timeoutMs) {{
+      const controller = new AbortController();
+      const timer = window.setTimeout(() => controller.abort(), timeoutMs || 15000);
+      try {{
+        const response = await fetch(url, {{
+          credentials: 'same-origin',
+          signal: controller.signal,
+        }});
+        const payload = await response.json().catch(() => ({{}}));
+        if (handleLiteAuthRequired(response, payload)) return null;
+        if (!response.ok || payload.ok === false) {{
+          throw new Error(payload.error || '刷新请求失败');
+        }}
+        return payload.data && typeof payload.data === 'object'
+          ? payload.data
+          : payload;
+      }} catch (error) {{
+        if (error && error.name === 'AbortError') {{
+          throw new Error('刷新请求超时，后台可能仍在处理，请稍后再试。');
+        }}
+        throw error;
+      }} finally {{
+        window.clearTimeout(timer);
+      }}
+    }}
+    async function liteFetchThenRefresh(url, label, kind) {{
       clearLiteHtmlCache();
       setLiteStatus(label + '中...');
-      const response = await fetch(url, {{ credentials: 'same-origin' }});
-      const data = await response.json().catch(() => ({{}}));
-      if (handleLiteAuthRequired(response, data)) return;
-      if (!response.ok || data.ok === false) throw new Error(data.error || label + '失败');
+      const startData = await fetchLiteRefreshJson(url, 15000);
+      if (!startData) return;
+      const inflightKey = kind + '_refresh_inflight';
+      const reusedKey = kind + '_refresh_reused';
+      const refreshedAtKey = kind + '_refreshed_at';
+      const alreadyComplete = startData.mock_external === true || (
+        startData[inflightKey] === false
+        && (startData[reusedKey] === true || startData[refreshedAtKey])
+      );
+      let refreshComplete = alreadyComplete;
+      if (!alreadyComplete) {{
+        const deadline = Date.now() + 180000;
+        let delayMs = 650;
+        while (Date.now() < deadline) {{
+          await waitLiteRefresh(delayMs);
+          const statusParams = new URLSearchParams({{
+            kind: kind,
+            scope: getCurrentScope(),
+          }});
+          const statusData = await fetchLiteRefreshJson(
+            '/api/source-refresh-status?' + statusParams.toString(),
+            15000,
+          );
+          if (!statusData) return;
+          if (statusData.status === 'success') {{
+            refreshComplete = true;
+            break;
+          }}
+          if (statusData.status === 'failed') {{
+            throw new Error(statusData.error || label + '失败');
+          }}
+          delayMs = Math.min(2500, Math.round(delayMs * 1.25));
+          if (Date.now() >= deadline) {{
+            throw new Error('后台刷新等待超时，当前仍显示上次成功数据；可稍后再试。');
+          }}
+        }}
+      }}
+      if (!refreshComplete) {{
+        throw new Error('后台刷新等待超时，当前仍显示上次成功数据；可稍后再试。');
+      }}
       await refreshCurrentLite(label + '完成，正在更新页面...');
     }}
     async function applyCurrentMaintenanceWorkTypeOverride(button, targetWorkType) {{
@@ -5174,8 +5362,8 @@ def render_workbench_lite(
             loadingText: isTypeTab ? '正在加载通告' : '正在打开通告',
             selectors,
             preserveWorkspaceScroll: isRow,
-            workspaceSwitch: isTypeTab,
-            useCache: isTypeTab
+            workspaceSwitch: !isRow,
+            detailOnly: isRow
           }});
           if (isRow) {{
             document.querySelectorAll(rowGroupSelector).forEach(node => {{
@@ -5210,7 +5398,7 @@ def render_workbench_lite(
         setLiteFormDirty(false);
         setButtonBusy(repairButton, true);
         setPickerOpen('refresh-picker', 'refresh-open', false);
-        try {{ await liteFetchThenRefresh('/api/repair-refresh?scope=' + encodeURIComponent(getCurrentScope()), '刷新检修'); }}
+        try {{ await liteFetchThenRefresh('/api/repair-refresh?scope=' + encodeURIComponent(getCurrentScope()), '刷新检修', 'repair'); }}
         catch (error) {{ showLiteError(error && error.message ? error.message : '刷新检修失败'); }}
         finally {{ setButtonBusy(repairButton, false); }}
         return;
@@ -5221,7 +5409,7 @@ def render_workbench_lite(
         setLiteFormDirty(false);
         setButtonBusy(changeButton, true);
         setPickerOpen('refresh-picker', 'refresh-open', false);
-        try {{ await liteFetchThenRefresh('/api/change-refresh?scope=' + encodeURIComponent(getCurrentScope()), '刷新变更'); }}
+        try {{ await liteFetchThenRefresh('/api/change-refresh?scope=' + encodeURIComponent(getCurrentScope()), '刷新变更', 'change'); }}
         catch (error) {{ showLiteError(error && error.message ? error.message : '刷新变更失败'); }}
         finally {{ setButtonBusy(changeButton, false); }}
         return;
@@ -5293,6 +5481,12 @@ def render_workbench_lite(
       }}
       return field.value;
     }}
+    document.addEventListener('toggle', (event) => {{
+      const fold = event.target instanceof Element
+        ? event.target.closest('#lite-undo-fold')
+        : null;
+      if (fold && fold.open) loadUndoItems(fold);
+    }}, true);
     document.addEventListener('change', async (event) => {{
       if (event.target && event.target.id === 'lite-month-select') {{
         if (!(await confirmDiscardLiteChanges())) {{
@@ -5317,6 +5511,7 @@ def render_workbench_lite(
           await navigateLite(url, {{
             label: '正在切换月份...',
             selectors: ['.status', '.summary', '.toolbar', '.workbench-guide', '.workspace'],
+            workspaceSwitch: true,
           }});
         }} catch (error) {{
           location.href = url;
@@ -5336,7 +5531,7 @@ def render_workbench_lite(
         params.delete('active_item_id');
         params.delete('manual');
         const url = '/workbench-lite?' + params.toString();
-        try {{ await navigateLite(url, {{ label: '正在切换楼栋...', selectors: ['.topbar', '.status', '.summary', '.toolbar', '.workbench-guide', '.workspace'] }}); }}
+        try {{ await navigateLite(url, {{ label: '正在切换楼栋...', selectors: ['.status', '.summary', '.toolbar', '.workbench-guide', '.workspace'], workspaceSwitch: true }}); }}
         catch (error) {{ location.href = url; }}
         return;
       }}
@@ -5406,7 +5601,11 @@ def render_workbench_lite(
       }}
     }});
     window.addEventListener('popstate', () => {{
-      navigateLite(location.href, {{ push: false, label: '正在恢复页面...' }}).catch(() => {{
+      navigateLite(location.href, {{
+        push: false,
+        label: '正在恢复页面...',
+        workspaceSwitch: true,
+      }}).catch(() => {{
         setLiteStatus('页面状态恢复失败，请点击刷新本页');
       }});
     }});
@@ -5886,7 +6085,6 @@ def render_workbench_lite(
             const message = job.error || job.upload_message || job.message_error || '发送失败';
             applyJobPatch(job.frontend_patch, payload, false, message);
             showLiteError(message);
-            setLiteStatus('发送失败：' + message);
             setLiteStatus('发送失败：' + friendlyLiteMessage(message));
             return true;
           }}
@@ -5945,7 +6143,7 @@ def render_workbench_lite(
         if (!(await confirmDiscardLiteChanges())) return;
         setLiteFormDirty(false);
         const url = filterForm.action + '?' + new URLSearchParams(new FormData(filterForm)).toString();
-        try {{ await navigateLite(url, {{ label: '正在筛选...' }}); }}
+        try {{ await navigateLite(url, {{ label: '正在筛选...', workspaceSwitch: true }}); }}
         catch (error) {{ location.href = url; }}
         return;
       }}
@@ -5990,7 +6188,6 @@ def render_workbench_lite(
         setLiteFormDirty(false);
         clearLiteHtmlCache();
         setFormSubmitBusy(form, true);
-        setLiteStatus('已提交，发送中');
         setLiteStatus('正在提交');
         await nextBrowserTurn();
         const response = await fetch('/api/workbench-actions', {{

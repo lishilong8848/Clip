@@ -29,6 +29,7 @@ from .state_store import DEFAULT_STATE_DB_NAME, LanPortalStateStore
 
 
 AUTH_COOKIE_NAME = "lan_portal_session"
+AUTH_RETRY_COOKIE_NAME = "lan_portal_auth_retry"
 AUTH_SESSION_TTL_SECONDS = 12 * 60 * 60
 AUTH_STATE_TTL_SECONDS = 10 * 60
 AUTH_MAX_PENDING_STATES = 200
@@ -41,6 +42,12 @@ REQUIRED_ADMIN_USERS = {
     LI_SHILONG_OPEN_ID: "李世龙",
     MA_JINYU_OPEN_ID: "马进宇",
 }
+
+
+class PortalAuthStateError(PortalError):
+    def __init__(self, message: str, *, next_path: str = "/") -> None:
+        super().__init__(message)
+        self.next_path = str(next_path or "/")
 
 
 class _LazyTokenManager:
@@ -77,6 +84,7 @@ class PortalAuthManager:
         self._lock = threading.RLock()
         self._sessions: dict[str, dict[str, Any]] = {}
         self._states: dict[str, dict[str, Any]] = {}
+        self._last_persistent_cleanup = 0.0
         self._permission_path = Path(get_data_file_path("lan_portal_auth.json"))
         self._permission_path.parent.mkdir(parents=True, exist_ok=True)
         self._state_store = LanPortalStateStore(
@@ -97,6 +105,22 @@ class PortalAuthManager:
     @staticmethod
     def clear_cookie_header() -> str:
         return f"{AUTH_COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"
+
+    @staticmethod
+    def auth_retry_cookie_header(*, active: bool) -> str:
+        if active:
+            return (
+                f"{AUTH_RETRY_COOKIE_NAME}=1; Path=/; Max-Age=120; "
+                "HttpOnly; SameSite=Lax"
+            )
+        return (
+            f"{AUTH_RETRY_COOKIE_NAME}=; Path=/; Max-Age=0; "
+            "HttpOnly; SameSite=Lax"
+        )
+
+    @staticmethod
+    def _secret_hash(value: str) -> str:
+        return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()
 
     @staticmethod
     def _normalize_next_path(next_path: str) -> str:
@@ -239,6 +263,13 @@ class PortalAuthManager:
                 self._states.pop(state, None)
         self._trim_by_expiry_locked(self._sessions, AUTH_MAX_SESSIONS)
         self._trim_by_expiry_locked(self._states, AUTH_MAX_PENDING_STATES)
+        if now - float(self._last_persistent_cleanup or 0) >= 60:
+            self._state_store.cleanup_auth_runtime(
+                now=now,
+                max_states=AUTH_MAX_PENDING_STATES,
+                max_sessions=AUTH_MAX_SESSIONS,
+            )
+            self._last_persistent_cleanup = now
 
     def _scopes_from_raw(self, raw_scopes: Any) -> list[str]:
         scopes = raw_scopes if isinstance(raw_scopes, list) else []
@@ -292,6 +323,16 @@ class PortalAuthManager:
                 return "building"
             role = str((user_cfg or {}).get("role") or "").strip().lower()
             return "admin" if role == "admin" else "building"
+
+    def _open_id_explicitly_disabled(self, open_id: str) -> bool:
+        open_id = str(open_id or "").strip()
+        if not open_id:
+            return False
+        with self._lock:
+            payload = self._load_permissions_locked()
+            users = payload.get("users") or {}
+            user_cfg = users.get(open_id) if isinstance(users, dict) else None
+            return isinstance(user_cfg, dict) and user_cfg.get("enabled") is False
 
     def get_permissions_payload(self) -> dict[str, Any]:
         with self._lock:
@@ -964,14 +1005,22 @@ class PortalAuthManager:
             raise PortalError("未配置飞书 App ID 或 App Secret，无法启用扫码登录。")
         state = secrets.token_urlsafe(24)
         now = time.time()
+        normalized_next = self._normalize_next_path(next_path)
+        expires_at = now + AUTH_STATE_TTL_SECONDS
         with self._lock:
             self._cleanup_expired_locked(now)
             self._states[state] = {
                 "redirect_uri": redirect_uri,
-                "next": self._normalize_next_path(next_path),
-                "expires_at": now + AUTH_STATE_TTL_SECONDS,
+                "next": normalized_next,
+                "expires_at": expires_at,
             }
             self._trim_by_expiry_locked(self._states, AUTH_MAX_PENDING_STATES)
+            self._state_store.put_auth_oauth_state(
+                self._secret_hash(state),
+                redirect_uri=redirect_uri,
+                next_path=normalized_next,
+                expires_at=expires_at,
+            )
         params = {
             "app_id": str(config.app_id or "").strip(),
             "redirect_uri": redirect_uri,
@@ -986,13 +1035,23 @@ class PortalAuthManager:
         state = str(state or "").strip()
         if not code or not state:
             raise PortalError("飞书登录回调缺少 code 或 state。")
+        now = time.time()
         with self._lock:
-            self._cleanup_expired_locked()
-            state_payload = self._states.pop(state, None)
+            self._cleanup_expired_locked(now)
+            self._states.pop(state, None)
+            state_payload = self._state_store.consume_auth_oauth_state(
+                self._secret_hash(state),
+                now=now,
+            )
         if not state_payload:
-            raise PortalError("登录状态已失效，请重新扫码。")
-        if time.time() > float(state_payload.get("expires_at") or 0):
-            raise PortalError("登录状态已过期，请重新扫码。")
+            raise PortalAuthStateError("登录状态已失效，请重新扫码。")
+        if bool(state_payload.get("expired")):
+            raise PortalAuthStateError(
+                "登录状态已过期，请重新扫码。",
+                next_path=self._normalize_next_path(
+                    str(state_payload.get("next") or "/")
+                ),
+            )
         expected_redirect = str(state_payload.get("redirect_uri") or "")
         if expected_redirect and expected_redirect != redirect_uri:
             raise PortalError("登录回调地址与发起地址不一致。")
@@ -1006,17 +1065,21 @@ class PortalAuthManager:
         session_id = secrets.token_urlsafe(32)
         now = time.time()
         session = {
-            "session_id": session_id,
             "user": user,
             "role": role,
             "allowed_scopes": allowed_scopes,
             "created_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "created_at_ts": now,
             "expires_at": now + AUTH_SESSION_TTL_SECONDS,
         }
         with self._lock:
             self._cleanup_expired_locked(now)
             self._sessions[session_id] = session
             self._trim_by_expiry_locked(self._sessions, AUTH_MAX_SESSIONS)
+            self._state_store.put_auth_session(
+                self._secret_hash(session_id),
+                session,
+            )
         return session_id, self._normalize_next_path(str(state_payload.get("next") or "/"))
 
     def get_session(self, session_id: str) -> dict[str, Any] | None:
@@ -1024,23 +1087,60 @@ class PortalAuthManager:
         if not session_id:
             return None
         with self._lock:
-            self._cleanup_expired_locked()
+            now = time.time()
+            self._cleanup_expired_locked(now)
             session = self._sessions.get(session_id)
             if not session:
-                return None
-            if time.time() > float(session.get("expires_at") or 0):
+                session = self._state_store.get_auth_session(
+                    self._secret_hash(session_id),
+                    now=now,
+                )
+                if not session:
+                    return None
+                session["_last_persisted_touch_at"] = now
+                self._sessions[session_id] = session
+            if now > float(session.get("expires_at") or 0):
                 self._sessions.pop(session_id, None)
+                self._state_store.revoke_auth_session(self._secret_hash(session_id))
                 return None
             open_id = str((session.get("user") or {}).get("open_id") or "").strip()
             if open_id:
+                if self._open_id_explicitly_disabled(open_id):
+                    self._sessions.pop(session_id, None)
+                    self._state_store.revoke_auth_session(
+                        self._secret_hash(session_id)
+                    )
+                    return None
                 session["allowed_scopes"] = self.scopes_for_open_id(open_id)
                 session["role"] = self.role_for_open_id(open_id)
-            session["expires_at"] = time.time() + AUTH_SESSION_TTL_SECONDS
-            return copy.deepcopy(session)
+            session["expires_at"] = now + AUTH_SESSION_TTL_SECONDS
+            if now - float(session.get("_last_persisted_touch_at") or 0) >= 300:
+                session["_last_persisted_touch_at"] = now
+                persisted = {
+                    key: value
+                    for key, value in session.items()
+                    if not str(key).startswith("_")
+                }
+                self._state_store.touch_auth_session(
+                    self._secret_hash(session_id),
+                    persisted,
+                )
+            return copy.deepcopy(
+                {
+                    key: value
+                    for key, value in session.items()
+                    if not str(key).startswith("_")
+                }
+            )
 
     def clear_session(self, session_id: str) -> None:
+        session_id = str(session_id or "").strip()
         with self._lock:
-            self._sessions.pop(str(session_id or "").strip(), None)
+            self._sessions.pop(session_id, None)
+            if session_id:
+                self._state_store.revoke_auth_session(
+                    self._secret_hash(session_id)
+                )
 
     def _get_app_access_token(self) -> str:
         try:

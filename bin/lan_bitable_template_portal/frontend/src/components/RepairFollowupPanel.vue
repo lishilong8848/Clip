@@ -41,12 +41,12 @@
           <button
             type="button"
             class="followup-button quiet icon-button"
-            :disabled="loading"
+            :disabled="loading || sourceRefreshing"
             title="刷新跟进记录"
             aria-label="刷新跟进记录"
             @click="requestRefresh"
           >
-            <RefreshCw :size="16" :class="{ spinning: loading }" aria-hidden="true" />
+            <RefreshCw :size="16" :class="{ spinning: sourceRefreshing }" aria-hidden="true" />
           </button>
         </div>
         <div class="followup-timeline-list" role="listbox" aria-label="选择跟进记录">
@@ -286,7 +286,7 @@ import {
   Search,
   Trash2,
 } from "lucide-vue-next";
-import { requestJson } from "../api/client";
+import { refreshRemoteSourceAndWait, requestJson } from "../api/client";
 import {
   createRepairOperationId,
   parseRepairDraftValue,
@@ -312,13 +312,16 @@ const props = withDefaults(defineProps<{
   summaryTitle: string;
   embedded?: boolean;
   readOnly?: boolean;
+  refreshVersion?: number;
 }>(), {
   embedded: false,
   readOnly: false,
+  refreshVersion: 0,
 });
 
 const emit = defineEmits<{
   changed: [];
+  "source-refreshed": [];
   "dirty-changed": [value: boolean];
   "count-changed": [value: number];
 }>();
@@ -392,6 +395,7 @@ const FOLLOWUP_BIND_BATCH_SIZE = 200;
 const FOLLOWUP_BIND_MAX_LIMIT = 500;
 
 const loading = ref(false);
+const sourceRefreshing = ref(false);
 const saving = ref(false);
 const records = ref<LooseDict[]>([]);
 const fields = ref<LooseDict[]>([]);
@@ -443,6 +447,7 @@ let bindRequestVersion = 0;
 let queryTimer: ReturnType<typeof setTimeout> | undefined;
 let skipNextQueryReload = false;
 let recordsAbortController: AbortController | null = null;
+let sourceRefreshAbortController: AbortController | null = null;
 let cmdbAbortController: AbortController | null = null;
 let bindAbortController: AbortController | null = null;
 let cmdbCachePollTimer: ReturnType<typeof setTimeout> | undefined;
@@ -982,8 +987,48 @@ function requestChangePage(delta: number): void {
 function requestRefresh(): void {
   runWithDirtyGuard(() => {
     setDirty(false);
-    void loadRecords(true);
+    void refreshRepairSource();
   });
+}
+
+async function refreshRepairSource(): Promise<void> {
+  if (sourceRefreshing.value) return;
+  sourceRefreshAbortController?.abort();
+  const abortController = new AbortController();
+  sourceRefreshAbortController = abortController;
+  sourceRefreshing.value = true;
+  showMessage("正在从多维表刷新维修项目和跟进记录。", "warning");
+  try {
+    const scope = props.scope || "ALL";
+    const params = new URLSearchParams({ scope });
+    const result = await refreshRemoteSourceAndWait(
+      "repair",
+      `/api/repair-refresh?${params.toString()}`,
+      { scope, signal: abortController.signal },
+    );
+    clearRepairFollowupCache();
+    page.value = 1;
+    await loadRecords(false, true);
+    emit("source-refreshed");
+    const warning = String(result.repair_refresh_warning || "").trim();
+    showMessage(
+      warning ? `跟进记录已刷新；${warning}` : "维修项目和跟进记录已刷新。",
+      warning ? "warning" : "success",
+    );
+  } catch (error: unknown) {
+    if (abortController.signal.aborted) return;
+    showMessage(
+      error instanceof Error
+        ? error.message
+        : "跟进记录刷新失败，当前仍显示上次成功数据。",
+      "failed",
+    );
+  } finally {
+    if (sourceRefreshAbortController === abortController) {
+      sourceRefreshAbortController = null;
+    }
+    sourceRefreshing.value = false;
+  }
 }
 
 async function loadRecords(announce = false, silent = false): Promise<void> {
@@ -1012,9 +1057,8 @@ async function loadRecords(announce = false, silent = false): Promise<void> {
     if (followupFocusRecordId.value) {
       params.set("focus_record_id", followupFocusRecordId.value);
     }
-    if (announce) params.set("refresh", "1");
     const requestUrl = `/api/repair-management/followups?${params.toString()}`;
-    const cacheKey = requestUrl.replace(/([?&])refresh=1(?:&|$)/, "$1").replace(/[?&]$/, "");
+    const cacheKey = requestUrl;
     const cached = getRepairFollowupCache(cacheKey);
     let payload: LooseDict;
     if (!announce && cached) {
@@ -1655,6 +1699,16 @@ watch(
   },
 );
 
+watch(
+  () => props.refreshVersion,
+  (value, oldValue) => {
+    if (!value || value === oldValue || !props.summaryRecordId) return;
+    clearRepairFollowupCache();
+    page.value = 1;
+    void loadRecords(false, true);
+  },
+);
+
 watch(followupQuery, () => {
   if (skipNextQueryReload) {
     skipNextQueryReload = false;
@@ -1673,6 +1727,8 @@ onBeforeUnmount(() => {
   bindRequestVersion += 1;
   recordsAbortController?.abort();
   recordsAbortController = null;
+  sourceRefreshAbortController?.abort();
+  sourceRefreshAbortController = null;
   cmdbAbortController?.abort();
   cmdbAbortController = null;
   stopCmdbCachePolling();

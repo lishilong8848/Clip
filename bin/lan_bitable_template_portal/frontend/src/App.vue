@@ -489,7 +489,13 @@ function prefetchWorkbench(scope: string, workType = "maintenance"): Promise<voi
   const url = new URL("/api/workbench", window.location.origin);
   url.searchParams.set("scope", normalizedScope);
   url.searchParams.set("work_type", normalizedWorkType);
-  url.searchParams.set("sections", "records,ongoing,stats,zhihang");
+  url.searchParams.set(
+    "sections",
+    normalizedWorkType === "change" || normalizedWorkType === "all"
+      ? "records,ongoing,stats,zhihang"
+      : "records,ongoing,stats",
+  );
+  url.searchParams.set("month", `${new Date().getMonth() + 1}月`);
   url.searchParams.set("records_page", "1");
   url.searchParams.set("records_page_size", "24");
   url.searchParams.set("ongoing_page", "1");
@@ -508,7 +514,7 @@ function prefetchWorkbench(scope: string, workType = "maintenance"): Promise<voi
   return task;
 }
 
-async function enterScope(scope: string, workType = "maintenance"): Promise<void> {
+function enterScope(scope: string, workType = "maintenance"): void {
   if (workbenchOpening.value) return;
   const normalizedScope = normalizeScopeValue(scope);
   const normalizedWorkType = workType || "maintenance";
@@ -525,11 +531,6 @@ async function enterScope(scope: string, workType = "maintenance"): Promise<void
   };
   workbenchOpeningText.value = `正在进入${labelMap[normalizedWorkType] || "通告管理"}`;
   workbenchOpening.value = true;
-  await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
-  await Promise.race([
-    prefetchWorkbench(normalizedScope, normalizedWorkType),
-    new Promise<void>((resolve) => window.setTimeout(resolve, 12000)),
-  ]);
   navigateHard(url);
 }
 

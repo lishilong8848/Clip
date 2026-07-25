@@ -8,9 +8,9 @@
           <h2>检修状态</h2>
         </div>
       </div>
-      <button type="button" class="refresh-button" :disabled="loading" @click="refreshStatus">
-        <RefreshCw :size="16" :class="{ spinning: loading }" aria-hidden="true" />
-        <span>{{ loading && !records.length ? "读取中" : "刷新" }}</span>
+      <button type="button" class="refresh-button" :disabled="loading || refreshingSources" @click="refreshStatus">
+        <RefreshCw :size="16" :class="{ spinning: refreshingSources }" aria-hidden="true" />
+        <span>{{ refreshingSources ? "刷新中" : "刷新" }}</span>
       </button>
     </header>
 
@@ -86,7 +86,7 @@
             <strong :title="String(record.title || '')">{{ record.title || "未命名维修项目" }}</strong>
             <span>
               <b v-if="record.specialty">{{ record.specialty }}</b>
-              <i v-if="record.event_sent_time">{{ formatTime(record.event_sent_time) }}</i>
+              <i v-if="record.fault_time">{{ formatTime(record.fault_time) }}</i>
               <i v-if="record.location">{{ record.location }}</i>
               <i
                 v-if="record.event_relation_stale"
@@ -148,7 +148,7 @@ import {
   Search,
   X,
 } from "lucide-vue-next";
-import { requestJson } from "../api/client";
+import { refreshRemoteSourceAndWait, requestJson } from "../api/client";
 import { navigate } from "../navigation";
 import { REPAIR_STATUS_INVALIDATED_EVENT } from "../repairStatusState";
 import type { LooseDict } from "../types";
@@ -168,6 +168,7 @@ const records = ref<LooseDict[]>([]);
 const total = ref(0);
 const page = ref(1);
 const loading = ref(false);
+const refreshingSources = ref(false);
 const searchText = ref("");
 const message = ref("");
 const messageTone = ref<"success" | "warning" | "failed">("success");
@@ -187,6 +188,7 @@ let searchTimer: ReturnType<typeof setTimeout> | undefined;
 let requestVersion = 0;
 let statusStale = false;
 let statusAbortController: AbortController | null = null;
+let sourceRefreshAbortController: AbortController | null = null;
 const responseCache = new Map<string, { payload: LooseDict; cachedAt: number }>();
 
 const pageCount = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)));
@@ -254,7 +256,39 @@ function changePage(delta: number): void {
 }
 
 async function refreshStatus(): Promise<void> {
-  await loadStatus(true);
+  if (refreshingSources.value) return;
+  sourceRefreshAbortController?.abort();
+  const abortController = new AbortController();
+  sourceRefreshAbortController = abortController;
+  refreshingSources.value = true;
+  message.value = "正在从多维表刷新维修项目和跟进记录。";
+  messageTone.value = "warning";
+  try {
+    const scope = props.scope || "ALL";
+    const params = new URLSearchParams({ scope });
+    const result = await refreshRemoteSourceAndWait(
+      "repair",
+      `/api/repair-refresh?${params.toString()}`,
+      { scope, signal: abortController.signal },
+    );
+    responseCache.clear();
+    statusStale = true;
+    await loadStatus(true);
+    const warning = String(result.repair_refresh_warning || "").trim();
+    message.value = warning ? `检修状态已刷新；${warning}` : "检修状态已刷新。";
+    messageTone.value = warning ? "warning" : "success";
+  } catch (error: unknown) {
+    if (abortController.signal.aborted) return;
+    message.value = error instanceof Error
+      ? error.message
+      : "检修状态刷新失败，当前仍显示上次成功数据。";
+    messageTone.value = "failed";
+  } finally {
+    if (sourceRefreshAbortController === abortController) {
+      sourceRefreshAbortController = null;
+    }
+    refreshingSources.value = false;
+  }
 }
 
 async function loadStatus(forceRefresh = false): Promise<void> {
@@ -286,7 +320,6 @@ async function loadStatus(forceRefresh = false): Promise<void> {
   loading.value = true;
   message.value = "";
   try {
-    if (forceRefresh) params.set("refresh", "1");
     const payload = await requestJson(
       `/api/repair-management/status?${params.toString()}`,
       { signal: abortController.signal },
@@ -389,6 +422,7 @@ onActivated(() => {
 onBeforeUnmount(() => {
   if (searchTimer) clearTimeout(searchTimer);
   statusAbortController?.abort();
+  sourceRefreshAbortController?.abort();
   window.removeEventListener(REPAIR_STATUS_INVALIDATED_EVENT, markStatusStale);
 });
 </script>

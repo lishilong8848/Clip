@@ -10,9 +10,9 @@
           <Activity :size="16" aria-hidden="true" />
           <span>检修状态</span>
         </button>
-        <button type="button" class="btn secondary" :disabled="loading" @click="loadRecords(true)">
-          <RefreshCw :size="16" :class="{ spinning: loading }" aria-hidden="true" />
-          <span>{{ loading && !records.length ? "读取中" : "刷新" }}</span>
+        <button type="button" class="btn secondary" :disabled="loading || refreshingSources" @click="refreshRepairSources">
+          <RefreshCw :size="16" :class="{ spinning: refreshingSources }" aria-hidden="true" />
+          <span>{{ refreshingSources ? "刷新中" : "刷新" }}</span>
         </button>
         <button type="button" class="btn primary" @click="requestStartCreate">
           <FilePlus2 :size="16" aria-hidden="true" />
@@ -142,7 +142,7 @@
             <div class="project-drawer-title">
               <span>{{ selectedRecordReadOnly ? "已完成 · 只读" : activeWorkspaceTab === "followups" ? "跟进记录" : editingRecordId ? "维修单信息" : "新建维修单" }}</span>
               <h3 id="repair-project-drawer-title">
-                {{ editingRecordId ? selectedRecordTitle : "填写维修项目" }}
+                {{ editingRecordId ? selectedRecordHeaderTitle : "填写维修项目" }}
               </h3>
             </div>
             <div class="project-drawer-head-actions">
@@ -372,7 +372,9 @@
           :summary-record-id="editingRecordId"
           :summary-title="selectedRecordTitle"
           :read-only="selectedRecordReadOnly"
+          :refresh-version="repairSourceRefreshVersion"
           @changed="handleFollowupChanged"
+          @source-refreshed="handleRepairSourceRefreshed"
           @dirty-changed="followupHasUnsavedChanges = $event"
           @count-changed="updateSelectedFollowupCount"
         />
@@ -452,7 +454,7 @@ import {
   Wrench,
   X,
 } from "lucide-vue-next";
-import { requestJson } from "../api/client";
+import { refreshRemoteSourceAndWait, requestJson } from "../api/client";
 import { navigate, navigateHard } from "../navigation";
 import { invalidateRepairStatus } from "../repairStatusState";
 import {
@@ -465,6 +467,7 @@ import {
   repairFieldUsesTextarea,
   repairDisplayTime,
   repairRecordBuildingLabel as recordBuildingLabel,
+  repairRecordHeaderTitle,
   repairRecordSpecialtyLabel as recordSpecialtyLabel,
   repairRecordTimeLabel as recordTimeLabel,
   sortedRepairFields as sortedFields,
@@ -579,6 +582,8 @@ const props = defineProps<{
 }>();
 
 const loading = ref(false);
+const refreshingSources = ref(false);
+const repairSourceRefreshVersion = ref(0);
 const saving = ref(false);
 const searchText = ref("");
 const recordState = ref<RecordStateFilter>("all");
@@ -645,6 +650,7 @@ let prefillRequestVersion = 0;
 let recordDetailRequestVersion = 0;
 let activationCount = 0;
 let recordsAbortController: AbortController | null = null;
+let sourceRefreshAbortController: AbortController | null = null;
 let eventAbortController: AbortController | null = null;
 let repairAbortController: AbortController | null = null;
 let prefillAbortController: AbortController | null = null;
@@ -756,6 +762,7 @@ const saveDisabledReason = computed(() => {
 });
 
 const selectedRecordTitle = computed(() => selectedRecord.value?.title || "未命名维修项目");
+const selectedRecordHeaderTitle = computed(() => repairRecordHeaderTitle(selectedRecord.value || {}));
 const selectedRecordReadOnly = computed(() => repairRecordIsCompleted(selectedRecord.value || {}));
 const selectedFollowupCount = computed(() => Math.max(
   0,
@@ -1697,6 +1704,12 @@ async function handleFollowupChanged(): Promise<void> {
   }
 }
 
+async function handleRepairSourceRefreshed(): Promise<void> {
+  invalidateRepairStatus();
+  clearRecordResponseCache();
+  await loadRecords(false, true);
+}
+
 async function applyCombinedPrefill(
   quiet = false,
   selection?: PrefillSelection,
@@ -1883,6 +1896,49 @@ function changeRecordPage(delta: number): void {
   });
 }
 
+async function refreshRepairSources(): Promise<void> {
+  if (refreshingSources.value) return;
+  sourceRefreshAbortController?.abort();
+  const abortController = new AbortController();
+  sourceRefreshAbortController = abortController;
+  refreshingSources.value = true;
+  showMessage("正在从多维表刷新维修项目和跟进记录。", "warning");
+  try {
+    const scope = props.scope || "ALL";
+    const params = new URLSearchParams({ scope });
+    const result = await refreshRemoteSourceAndWait(
+      "repair",
+      `/api/repair-refresh?${params.toString()}`,
+      { scope, signal: abortController.signal },
+    );
+    clearRecordResponseCache();
+    repairSourceRefreshVersion.value += 1;
+    invalidateRepairStatus();
+    if (!editingRecordId.value) recordPage.value = 1;
+    await loadRecords(false, true);
+    const warning = String(result.repair_refresh_warning || "").trim();
+    showMessage(
+      warning
+        ? `维修项目已刷新；${warning}`
+        : "维修项目、跟进记录和检修通告列表已同步。",
+      warning ? "warning" : "success",
+    );
+  } catch (error: unknown) {
+    if (abortController.signal.aborted) return;
+    showMessage(
+      error instanceof Error
+        ? error.message
+        : "维修项目刷新失败，当前仍显示上次成功数据。",
+      "failed",
+    );
+  } finally {
+    if (sourceRefreshAbortController === abortController) {
+      sourceRefreshAbortController = null;
+    }
+    refreshingSources.value = false;
+  }
+}
+
 async function loadRecords(announce = false, silent = false): Promise<void> {
   const requestVersion = ++recordsRequestVersion;
   recordsAbortController?.abort();
@@ -1891,9 +1947,8 @@ async function loadRecords(announce = false, silent = false): Promise<void> {
   loading.value = true;
   try {
     const query = new URLSearchParams(scopedQuery());
-    if (announce) query.set("refresh", "1");
     const requestUrl = `/api/repair-management/records?${query.toString()}`;
-    const cacheKey = requestUrl.replace(/([?&])refresh=1(?:&|$)/, "$1").replace(/[?&]$/, "");
+    const cacheKey = requestUrl;
     const cached = recordResponseCache.get(cacheKey);
     let payload: LooseDict;
     if (!announce && cached && cached.expiresAt > Date.now()) {
@@ -2336,6 +2391,7 @@ onBeforeUnmount(() => {
     postSaveRefreshTimer = undefined;
   }
   recordsAbortController?.abort();
+  sourceRefreshAbortController?.abort();
   eventAbortController?.abort();
   repairAbortController?.abort();
   prefillAbortController?.abort();

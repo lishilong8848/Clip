@@ -32,6 +32,7 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
     (23, "signature_crypto_migrations"),
     (24, "repair_management_operations"),
     (25, "repair_data_snapshots"),
+    (26, "persistent_portal_auth"),
 )
 
 

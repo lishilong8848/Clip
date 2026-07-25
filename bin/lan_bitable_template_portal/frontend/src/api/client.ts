@@ -160,6 +160,93 @@ export async function requestJson(
   return Object.prototype.hasOwnProperty.call(payload, "data") ? payload.data : payload;
 }
 
+export type RemoteSourceRefreshKind = "repair" | "change" | "event";
+
+type RemoteSourceRefreshOptions = {
+  scope?: string;
+  month?: string;
+  signal?: AbortSignal | null;
+  maxWaitMs?: number;
+  onProgress?: (status: Dict) => void;
+};
+
+function waitWithSignal(delayMs: number, signal?: AbortSignal | null): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new ApiError("请求已取消。"));
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      signal?.removeEventListener("abort", abort);
+      resolve();
+    }, delayMs);
+    const abort = () => {
+      window.clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+      reject(new ApiError("请求已取消。"));
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+  });
+}
+
+export async function refreshRemoteSourceAndWait(
+  kind: RemoteSourceRefreshKind,
+  startPath: string,
+  options: RemoteSourceRefreshOptions = {},
+): Promise<Dict> {
+  const startPayload = await requestJson(
+    startPath,
+    { method: kind === "event" ? "POST" : "GET", signal: options.signal || undefined },
+  );
+  options.onProgress?.(startPayload);
+  if (startPayload.mock_external === true) return startPayload;
+
+  const inflightKey = `${kind}_refresh_inflight`;
+  if (
+    startPayload[inflightKey] === false
+    && (
+      startPayload[`${kind}_refresh_reused`] === true
+      || startPayload[`${kind}_refreshed_at`]
+    )
+  ) {
+    return startPayload;
+  }
+  if (
+    kind === "event"
+    && options.month
+    && startPayload.event_refresh_month
+    && String(startPayload.event_refresh_month) !== String(options.month)
+  ) {
+    throw new ApiError("其他月份的事件数据正在刷新，请稍后再试。");
+  }
+
+  const deadline = Date.now() + Math.max(15_000, options.maxWaitMs ?? 180_000);
+  let delayMs = 650;
+  while (Date.now() < deadline) {
+    await waitWithSignal(delayMs, options.signal);
+    const params = new URLSearchParams({
+      kind,
+      scope: options.scope || "ALL",
+    });
+    if (options.month) params.set("month", options.month);
+    const status = await requestJson(
+      `/api/source-refresh-status?${params.toString()}`,
+      { signal: options.signal || undefined },
+    );
+    options.onProgress?.(status);
+    if (status.status === "success") {
+      return status.result && typeof status.result === "object"
+        ? { ...status.result, ...status }
+        : status;
+    }
+    if (status.status === "failed") {
+      throw new ApiError(String(status.error || "远端数据刷新失败。"));
+    }
+    delayMs = Math.min(2_500, Math.round(delayMs * 1.25));
+  }
+  throw new ApiError("后台刷新等待超时，当前仍显示上次成功数据；可稍后再试。");
+}
+
 export async function requestBinaryJson(
   path: string,
   body: BodyInit,

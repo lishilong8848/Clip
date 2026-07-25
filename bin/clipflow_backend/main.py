@@ -111,10 +111,15 @@ from lan_bitable_template_portal.server import (
 from lan_bitable_template_portal.workbench_lite import (
     ONGOING_PAGE_SIZE,
     PENDING_PAGE_SIZE,
+    extract_workbench_lite_fragments,
     parse_pasted_notice_to_draft,
     render_workbench_lite,
 )
-from lan_bitable_template_portal.portal_auth import AUTH_COOKIE_NAME
+from lan_bitable_template_portal.portal_auth import (
+    AUTH_COOKIE_NAME,
+    AUTH_RETRY_COOKIE_NAME,
+    PortalAuthStateError,
+)
 from lan_bitable_template_portal.identity_utils import (
     canonical_source_record_id,
     canonical_target_record_id,
@@ -159,6 +164,24 @@ except Exception:
 
 
 MAX_SITE_PHOTO_BYTES = 8 * 1024 * 1024
+BACKEND_INSTANCE_ID = uuid.uuid4().hex
+BACKEND_STARTED_AT = time.time()
+BACKEND_RUNTIME_ROOT = Path(__file__).resolve().parents[1]
+BACKEND_RUNTIME_ROOT_HASH = hashlib.sha256(
+    os.path.normcase(os.fspath(BACKEND_RUNTIME_ROOT)).encode("utf-8")
+).hexdigest()[:20]
+BACKEND_BUILD_VERSION = str(
+    os.environ.get("CLIPFLOW_BUILD_VERSION")
+    or os.environ.get("CLIPFLOW_PATCH_VERSION")
+    or ""
+).strip()
+if not BACKEND_BUILD_VERSION:
+    try:
+        BACKEND_BUILD_VERSION = "source-" + hashlib.sha256(
+            Path(__file__).read_bytes()
+        ).hexdigest()[:16]
+    except OSError:
+        BACKEND_BUILD_VERSION = "development"
 MAX_NOTICE_ATTACHMENT_PENDING_BYTES = int(
     _env_float(
         "CLIPFLOW_NOTICE_ATTACHMENT_PENDING_MAX_BYTES",
@@ -528,7 +551,11 @@ class FastAPIPortalController:
                 }
                 ongoing = self._get_ongoing(scope)
                 self._reconcile_orphan_started_items(scope, ongoing)
-                sections = ("records", "ongoing", "stats", "zhihang")
+                sections = (
+                    ("records", "ongoing", "stats", "zhihang")
+                    if work_type in {"all", "change"}
+                    else ("records", "ongoing", "stats")
+                )
                 open_id = str((session.get("user") or {}).get("open_id") or "")
                 payload_task = asyncio.to_thread(
                     self._cached_service_payload,
@@ -561,12 +588,8 @@ class FastAPIPortalController:
                         ongoing_page_size=ONGOING_PAGE_SIZE,
                     ),
                 )
-                undo_task = asyncio.to_thread(
-                    PortalRuntime.service.list_available_notice_undos,
-                    scope=scope,
-                    since_seconds=3 * 24 * 60 * 60,
-                )
-                payload, notice_undos = await asyncio.gather(payload_task, undo_task)
+                payload = await payload_task
+                notice_undos: list[dict[str, Any]] = []
                 prefill_source_record = repair_notice_prefill.get("source_record")
                 if (
                     isinstance(payload, dict)
@@ -634,6 +657,85 @@ class FastAPIPortalController:
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)
 
+        async def _workbench_lite_fragment_response(
+            request: Request,
+            *,
+            detail_only: bool = False,
+        ) -> JSONResponse:
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            started = time.perf_counter()
+            page_response = await workbench_lite_page(request)
+            if int(getattr(page_response, "status_code", 500) or 500) != 200:
+                message = "工作台加载失败"
+                raw_body = bytes(getattr(page_response, "body", b"") or b"")
+                if raw_body:
+                    with suppress(Exception):
+                        message = raw_body.decode("utf-8", errors="ignore") or message
+                return JSONResponse(
+                    {"ok": False, "error": message},
+                    status_code=int(getattr(page_response, "status_code", 500) or 500),
+                )
+            html_body = bytes(getattr(page_response, "body", b"") or b"").decode(
+                "utf-8",
+                errors="ignore",
+            )
+            fragments = extract_workbench_lite_fragments(html_body)
+            if detail_only:
+                fragments = {
+                    "detail": str(fragments.get("detail") or ""),
+                }
+            required = ("detail",) if detail_only else (
+                "subtitle",
+                "summary",
+                "toolbar",
+                "workspace",
+            )
+            missing = [name for name in required if not fragments.get(name)]
+            if missing:
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "error": "工作台局部页面生成不完整: " + "、".join(missing),
+                    },
+                    status_code=500,
+                )
+            canonical_params = [
+                (key, value)
+                for key, value in request.query_params.multi_items()
+                if key not in {"fragment", "prefetch"}
+            ]
+            canonical_url = "/workbench-lite"
+            if canonical_params:
+                canonical_url += "?" + urlencode(canonical_params, doseq=True)
+            elapsed_ms = round((time.perf_counter() - started) * 1000.0, 2)
+            return self._json_response(
+                request,
+                session,
+                {
+                    "ok": True,
+                    "data": {
+                        "canonical_url": canonical_url,
+                        "payload_version": int(time.time() * 1000),
+                        "fragments": fragments,
+                        "elapsed_ms": elapsed_ms,
+                    },
+                },
+                status_code=200,
+            )
+
+        @app.get("/api/workbench/lite-fragment")
+        async def workbench_lite_fragment(request: Request):
+            return await _workbench_lite_fragment_response(request)
+
+        @app.get("/api/workbench/lite-detail")
+        async def workbench_lite_detail(request: Request):
+            return await _workbench_lite_fragment_response(
+                request,
+                detail_only=True,
+            )
+
         @app.post("/workbench-lite/parse")
         async def workbench_lite_parse_page(
             request: Request,
@@ -674,11 +776,7 @@ class FastAPIPortalController:
                     SCOPE_OPTIONS,
                     session,
                 )
-                notice_undos = await asyncio.to_thread(
-                    PortalRuntime.service.list_available_notice_undos,
-                    scope=checked_scope,
-                    since_seconds=3 * 24 * 60 * 60,
-                )
+                notice_undos: list[dict[str, Any]] = []
                 html_body = render_workbench_lite(
                     payload=payload if isinstance(payload, dict) else {},
                     session=session,
@@ -742,25 +840,7 @@ class FastAPIPortalController:
 
         @app.get("/api/auth/feishu/callback")
         async def auth_callback(request: Request):
-            code = str(request.query_params.get("code") or "")
-            state = str(request.query_params.get("state") or "")
-            redirect_uri = f"{self._request_base_url(request)}/api/auth/feishu/callback"
-            try:
-                session_id, next_path = PortalRuntime.auth_manager.complete_login(
-                    code=code,
-                    state=state,
-                    redirect_uri=redirect_uri,
-                )
-            except PortalError as exc:
-                return self._html_message(400, "飞书登录失败", str(exc))
-            self._clear_read_cache(("auth_status",))
-            return Response(
-                status_code=302,
-                headers={
-                    "Location": next_path,
-                    "Set-Cookie": PortalRuntime.auth_manager.cookie_header(session_id),
-                },
-            )
+            return self._complete_oauth_callback_response(request)
 
         @app.get("/api/auth/logout")
         async def auth_logout_get(request: Request):
@@ -796,8 +876,19 @@ class FastAPIPortalController:
             request.state.cache_miss = True
             payload = {
                 "ok": True,
+                "service": "clipflow_backend",
+                "instance_id": BACKEND_INSTANCE_ID,
+                "pid": os.getpid(),
+                "started_at": BACKEND_STARTED_AT,
+                "runtime_root_hash": BACKEND_RUNTIME_ROOT_HASH,
+                "build_version": BACKEND_BUILD_VERSION,
                 "data": {
                     "service": "clipflow_backend",
+                    "instance_id": BACKEND_INSTANCE_ID,
+                    "pid": os.getpid(),
+                    "started_at": BACKEND_STARTED_AT,
+                    "runtime_root_hash": BACKEND_RUNTIME_ROOT_HASH,
+                    "build_version": BACKEND_BUILD_VERSION,
                     "backend": "fastapi",
                     "mock_external": _mock_external_enabled(),
                     "external_guard": _external_guard_status(),
@@ -1278,7 +1369,7 @@ class FastAPIPortalController:
             )
             session_id = str(request.cookies.get(AUTH_COOKIE_NAME) or "")
             cache_key = ("auth_status", session_id, next_path)
-            cached = self._read_cache_get(cache_key, ttl=2.0, stale_ttl=10.0)
+            cached = self._read_cache_get(cache_key, ttl=2.0, stale_ttl=0.0)
             if cached is not None:
                 request.state.cache_hit = True
                 return cached
@@ -1291,7 +1382,7 @@ class FastAPIPortalController:
                     redirect_uri=f"{self._request_base_url(request)}/api/auth/feishu/callback",
                 ),
             }
-            self._read_cache_put(cache_key, payload, ttl=2.0, stale_ttl=10.0)
+            self._read_cache_put(cache_key, payload, ttl=2.0, stale_ttl=0.0)
             return self._json_response(request, session, payload)
 
         @app.get("/api/jobs/recent")
@@ -2680,23 +2771,11 @@ class FastAPIPortalController:
             if session is None:
                 return self._auth_required_response()
             try:
-                scope = self._authorized_scope_or_error(
+                self._authorized_scope_or_error(
                     session, request.query_params.get("scope") or "ALL"
                 )
-                refresh_result = await asyncio.to_thread(
-                    PortalRuntime._refresh_repair_source_singleflight
-                )
-                self._clear_read_cache()
-                ongoing = self._get_ongoing(scope)
-                self._reconcile_orphan_started_items(scope, ongoing)
-                data = await asyncio.to_thread(
-                    PortalRuntime.service.get_bootstrap,
-                    scope=scope,
-                    ongoing_items=ongoing,
-                )
-                data.update(refresh_result)
-                data["repair_source_refreshed"] = True
-                return self._json_ok(request, session, data)
+                refresh_result = PortalRuntime.request_repair_source_refresh()
+                return self._json_ok(request, session, refresh_result)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)
 
@@ -2706,25 +2785,32 @@ class FastAPIPortalController:
             if session is None:
                 return self._auth_required_response()
             try:
-                scope = self._authorized_scope_or_error(
+                self._authorized_scope_or_error(
                     session, request.query_params.get("scope") or "ALL"
                 )
-                refresh_result = await asyncio.to_thread(
-                    PortalRuntime.request_change_source_refresh
-                )
-                self._clear_read_cache()
-                ongoing = self._get_ongoing(scope)
-                self._reconcile_orphan_started_items(scope, ongoing)
-                data = await asyncio.to_thread(
-                    PortalRuntime.service.get_bootstrap,
-                    scope=scope,
-                    ongoing_items=ongoing,
-                )
-                data.update(refresh_result)
-                data["change_source_refreshed"] = True
-                return self._json_ok(request, session, data)
+                refresh_result = PortalRuntime.start_change_source_refresh()
+                return self._json_ok(request, session, refresh_result)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)
+
+        @app.get("/api/source-refresh-status")
+        async def source_refresh_status(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                self._authorized_scope_or_error(
+                    session, request.query_params.get("scope") or "ALL"
+                )
+                data = PortalRuntime.source_refresh_status(
+                    str(request.query_params.get("kind") or ""),
+                    month=str(request.query_params.get("month") or ""),
+                )
+                if str(data.get("status") or "") in {"success", "failed"}:
+                    self._clear_read_cache()
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
 
         @app.get("/api/events/monthly")
         async def events_monthly(request: Request):
@@ -2770,18 +2856,9 @@ class FastAPIPortalController:
                     session, request.query_params.get("scope") or "ALL"
                 )
                 month = str(request.query_params.get("month") or "").strip()
-                refresh_result = await asyncio.to_thread(
-                    PortalRuntime.request_event_month_refresh,
-                    month,
-                )
-                data = await asyncio.to_thread(
-                    PortalRuntime.service.get_event_monthly_snapshot,
-                    scope=scope,
-                    month=month,
-                )
-                data.update(refresh_result)
-                data["event_source_refreshed"] = True
-                return self._json_ok(request, session, data)
+                refresh_result = PortalRuntime.start_event_month_refresh(month)
+                refresh_result["scope"] = scope
+                return self._json_ok(request, session, refresh_result)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)
 
@@ -5333,6 +5410,25 @@ class FastAPIPortalController:
             PortalRuntime.repair_refresh_last_result = {}
             PortalRuntime.repair_refresh_last_error = ""
             PortalRuntime.repair_refresh_last_finished = 0.0
+            PortalRuntime.repair_refresh_started_at = 0.0
+            PortalRuntime.repair_refresh_completed_at = 0.0
+        with PortalRuntime.change_refresh_lock:
+            PortalRuntime.change_refresh_inflight = False
+            PortalRuntime.change_refresh_event = threading.Event()
+            PortalRuntime.change_refresh_last_result = {}
+            PortalRuntime.change_refresh_last_error = ""
+            PortalRuntime.change_refresh_last_finished = 0.0
+            PortalRuntime.change_refresh_started_at = 0.0
+            PortalRuntime.change_refresh_completed_at = 0.0
+        with PortalRuntime.event_refresh_lock:
+            PortalRuntime.event_refresh_inflight = False
+            PortalRuntime.event_refresh_event = threading.Event()
+            PortalRuntime.event_refresh_last_result = {}
+            PortalRuntime.event_refresh_last_error = ""
+            PortalRuntime.event_refresh_last_finished = 0.0
+            PortalRuntime.event_refresh_started_at = 0.0
+            PortalRuntime.event_refresh_completed_at = 0.0
+            PortalRuntime.event_refresh_last_month = ""
         with PortalRuntime.action_queue_lock:
             PortalRuntime.action_worker_stop = False
             PortalRuntime.action_queue_event.clear()
@@ -6185,6 +6281,19 @@ class FastAPIPortalController:
             sanitized = f"/?{urlencode(sanitized_params, doseq=True)}"
         if self._current_session(request) is not None:
             return Response(status_code=302, headers={"Location": sanitized})
+        return self._complete_oauth_callback_response(
+            request,
+            fallback_next=sanitized,
+        )
+
+    def _complete_oauth_callback_response(
+        self,
+        request: Request,
+        *,
+        fallback_next: str = "/",
+    ) -> Response:
+        code = str(request.query_params.get("code") or "")
+        state = str(request.query_params.get("state") or "")
         redirect_uri = f"{self._request_base_url(request)}/api/auth/feishu/callback"
         try:
             session_id, next_path = PortalRuntime.auth_manager.complete_login(
@@ -6192,16 +6301,78 @@ class FastAPIPortalController:
                 state=state,
                 redirect_uri=redirect_uri,
             )
+        except PortalAuthStateError as exc:
+            already_retried = (
+                str(request.cookies.get(AUTH_RETRY_COOKIE_NAME) or "").strip() == "1"
+            )
+            if not already_retried:
+                try:
+                    login_url = PortalRuntime.auth_manager.start_login(
+                        redirect_uri=redirect_uri,
+                        next_path=exc.next_path or fallback_next,
+                    )
+                except PortalError as retry_exc:
+                    return self._auth_failure_page(str(retry_exc))
+                response = Response(
+                    status_code=302,
+                    headers={"Location": login_url},
+                )
+                response.headers.append(
+                    "Set-Cookie",
+                    PortalRuntime.auth_manager.auth_retry_cookie_header(active=True),
+                )
+                return response
+            return self._auth_failure_page(str(exc))
         except PortalError as exc:
-            return self._html_message(400, "飞书登录失败", str(exc))
+            return self._auth_failure_page(str(exc))
         self._clear_read_cache(("auth_status",))
-        return Response(
+        response = Response(
             status_code=302,
-            headers={
-                "Location": next_path or sanitized,
-                "Set-Cookie": PortalRuntime.auth_manager.cookie_header(session_id),
-            },
+            headers={"Location": next_path or fallback_next},
         )
+        response.headers.append(
+            "Set-Cookie",
+            PortalRuntime.auth_manager.cookie_header(session_id),
+        )
+        response.headers.append(
+            "Set-Cookie",
+            PortalRuntime.auth_manager.auth_retry_cookie_header(active=False),
+        )
+        return response
+
+    @staticmethod
+    def _auth_failure_page(message: str) -> Response:
+        import html
+
+        safe_message = html.escape(str(message or "飞书授权未完成。"))
+        body = f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>飞书登录未完成</title>
+  <style>
+    *{{box-sizing:border-box}}body{{margin:0;min-height:100vh;display:grid;place-items:center;
+    padding:24px;font-family:"Microsoft YaHei",Arial,sans-serif;color:#0c244d;
+    background:#eef5ff}}main{{width:min(480px,100%);border:1px solid #d8e5f7;border-radius:18px;
+    padding:28px;background:#fff;box-shadow:0 22px 55px rgba(15,73,153,.15)}}h1{{margin:0;
+    font-size:22px}}p{{margin:14px 0 22px;color:#5b6f8b;line-height:1.7}}a{{display:inline-flex;
+    min-height:42px;align-items:center;justify-content:center;border-radius:12px;padding:0 18px;
+    color:#fff;background:#155fff;text-decoration:none;font-weight:800}}
+  </style>
+</head>
+<body><main><h1>飞书登录未完成</h1><p>{safe_message}</p>
+<a href="/api/auth/login?next=%2F">重新登录</a></main></body></html>"""
+        response = Response(
+            content=body.encode("utf-8"),
+            status_code=400,
+            headers={"Content-Type": "text/html; charset=utf-8"},
+        )
+        response.headers.append(
+            "Set-Cookie",
+            PortalAuthManager.auth_retry_cookie_header(active=False),
+        )
+        return response
 
     def _require_admin_response(self, request: Request) -> tuple[JSONResponse | None, dict]:
         session = self._current_session(request)
@@ -8202,6 +8373,11 @@ class FastAPIPortalController:
             PortalRuntime.enqueue_initial_message_or_upload_job(job_id)
 
         bound_port = find_available_port(self.host, self.preferred_port)
+        if int(bound_port) != int(self.preferred_port):
+            raise RuntimeError(
+                f"固定端口 {self.preferred_port} 已被占用，"
+                "不会自动切换到其他端口。请关闭旧实例后重试。"
+            )
         self.bound_port = bound_port
         self._app = self._build_app()
         config = uvicorn.Config(

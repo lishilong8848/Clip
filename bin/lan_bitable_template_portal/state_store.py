@@ -55,7 +55,7 @@ class LanPortalStateStore:
     are migration inputs only and are never deleted or overwritten here.
     """
 
-    SCHEMA_VERSION = 25
+    SCHEMA_VERSION = 26
     _schema_process_lock = threading.RLock()
     _schema_ready_paths: set[str] = set()
     SOURCE_SCOPE_TABLES = {
@@ -83,6 +83,8 @@ class LanPortalStateStore:
         "meta",
         "settings",
         "auth_permissions",
+        "auth_oauth_states",
+        "auth_sessions",
         "permission_requests",
         "handover_links",
         "runtime_task_queue",
@@ -113,6 +115,8 @@ class LanPortalStateStore:
     ]
     REQUIRED_INDEXES = [
         "idx_runtime_task_queue_status",
+        "idx_auth_oauth_states_expiry",
+        "idx_auth_sessions_expiry",
         "idx_qt_active_items_record_id",
         "idx_source_snapshot_manifest_status_time",
         "idx_source_snapshot_records_scope_order",
@@ -625,6 +629,46 @@ class LanPortalStateStore:
                 payload_json TEXT NOT NULL,
                 updated_at REAL NOT NULL
             )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS auth_oauth_states (
+                state_hash TEXT PRIMARY KEY,
+                redirect_uri TEXT NOT NULL,
+                next_path TEXT NOT NULL,
+                expires_at REAL NOT NULL,
+                consumed_at REAL,
+                payload_json TEXT NOT NULL,
+                created_at REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_auth_oauth_states_expiry
+            ON auth_oauth_states(expires_at, consumed_at)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS auth_sessions (
+                session_hash TEXT PRIMARY KEY,
+                user_json TEXT NOT NULL,
+                role TEXT NOT NULL,
+                allowed_scopes_json TEXT NOT NULL,
+                expires_at REAL NOT NULL,
+                last_seen_at REAL NOT NULL,
+                revoked_at REAL,
+                payload_json TEXT NOT NULL,
+                created_at REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_auth_sessions_expiry
+            ON auth_sessions(expires_at, revoked_at)
             """
         )
         conn.execute(
@@ -7509,6 +7553,295 @@ class LanPortalStateStore:
                 )
                 conn.commit()
                 return int(cursor.rowcount or 0)
+
+    def put_auth_oauth_state(
+        self,
+        state_hash: str,
+        *,
+        redirect_uri: str,
+        next_path: str,
+        expires_at: float,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        state_hash = self._text(state_hash)
+        if not state_hash:
+            raise ValueError("state_hash is required")
+        now = time.time()
+        state_payload = dict(payload or {})
+        state_payload.update(
+            {
+                "redirect_uri": self._text(redirect_uri),
+                "next": self._text(next_path) or "/",
+                "expires_at": float(expires_at or 0),
+            }
+        )
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO auth_oauth_states(
+                        state_hash, redirect_uri, next_path, expires_at,
+                        consumed_at, payload_json, created_at
+                    ) VALUES (?, ?, ?, ?, NULL, ?, ?)
+                    """,
+                    (
+                        state_hash,
+                        self._text(redirect_uri),
+                        self._text(next_path) or "/",
+                        float(expires_at or 0),
+                        self._json(state_payload),
+                        now,
+                    ),
+                )
+                conn.commit()
+
+    def consume_auth_oauth_state(
+        self,
+        state_hash: str,
+        *,
+        now: float | None = None,
+    ) -> dict[str, Any] | None:
+        state_hash = self._text(state_hash)
+        if not state_hash or not self.db_path.exists():
+            return None
+        now_value = float(now if now is not None else time.time())
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    """
+                    SELECT redirect_uri, next_path, expires_at, consumed_at,
+                           payload_json, created_at
+                    FROM auth_oauth_states
+                    WHERE state_hash = ?
+                    """,
+                    (state_hash,),
+                ).fetchone()
+                if row is None or row["consumed_at"] is not None:
+                    conn.rollback()
+                    return None
+                cursor = conn.execute(
+                    """
+                    UPDATE auth_oauth_states
+                    SET consumed_at = ?
+                    WHERE state_hash = ? AND consumed_at IS NULL
+                    """,
+                    (now_value, state_hash),
+                )
+                if int(cursor.rowcount or 0) != 1:
+                    conn.rollback()
+                    return None
+                conn.commit()
+        payload = self._loads(str(row["payload_json"] or ""), {})
+        result = dict(payload) if isinstance(payload, dict) else {}
+        result.setdefault("redirect_uri", str(row["redirect_uri"] or ""))
+        result.setdefault("next", str(row["next_path"] or "/"))
+        result["expires_at"] = float(row["expires_at"] or 0)
+        result["created_at"] = float(row["created_at"] or 0)
+        result["expired"] = now_value > float(row["expires_at"] or 0)
+        return result
+
+    def put_auth_session(
+        self,
+        session_hash: str,
+        payload: dict[str, Any],
+    ) -> None:
+        session_hash = self._text(session_hash)
+        if not session_hash:
+            raise ValueError("session_hash is required")
+        session = dict(payload or {})
+        user = session.get("user") if isinstance(session.get("user"), dict) else {}
+        scopes = (
+            session.get("allowed_scopes")
+            if isinstance(session.get("allowed_scopes"), list)
+            else []
+        )
+        now = time.time()
+        created_at_value = session.get("created_at_ts")
+        try:
+            created_at = float(created_at_value or now)
+        except (TypeError, ValueError):
+            created_at = now
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO auth_sessions(
+                        session_hash, user_json, role, allowed_scopes_json,
+                        expires_at, last_seen_at, revoked_at, payload_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)
+                    """,
+                    (
+                        session_hash,
+                        self._json(user),
+                        self._text(session.get("role")) or "building",
+                        self._json(scopes),
+                        float(session.get("expires_at") or 0),
+                        now,
+                        self._json(session),
+                        created_at,
+                    ),
+                )
+                conn.commit()
+
+    def get_auth_session(
+        self,
+        session_hash: str,
+        *,
+        now: float | None = None,
+    ) -> dict[str, Any] | None:
+        session_hash = self._text(session_hash)
+        if not session_hash or not self.db_path.exists():
+            return None
+        now_value = float(now if now is not None else time.time())
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    """
+                    SELECT user_json, role, allowed_scopes_json, expires_at,
+                           last_seen_at, revoked_at, payload_json, created_at
+                    FROM auth_sessions
+                    WHERE session_hash = ?
+                    """,
+                    (session_hash,),
+                ).fetchone()
+                if (
+                    row is None
+                    or row["revoked_at"] is not None
+                    or now_value > float(row["expires_at"] or 0)
+                ):
+                    if row is not None:
+                        conn.execute(
+                            "DELETE FROM auth_sessions WHERE session_hash = ?",
+                            (session_hash,),
+                        )
+                        conn.commit()
+                    return None
+        payload = self._loads(str(row["payload_json"] or ""), {})
+        session = dict(payload) if isinstance(payload, dict) else {}
+        user = self._loads(str(row["user_json"] or ""), {})
+        scopes = self._loads(str(row["allowed_scopes_json"] or "[]"), [])
+        session["user"] = user if isinstance(user, dict) else {}
+        session["role"] = str(row["role"] or "building")
+        session["allowed_scopes"] = scopes if isinstance(scopes, list) else []
+        session["expires_at"] = float(row["expires_at"] or 0)
+        session["created_at_ts"] = float(row["created_at"] or 0)
+        return session
+
+    def touch_auth_session(
+        self,
+        session_hash: str,
+        payload: dict[str, Any],
+    ) -> bool:
+        session_hash = self._text(session_hash)
+        if not session_hash or not self.db_path.exists():
+            return False
+        session = dict(payload or {})
+        user = session.get("user") if isinstance(session.get("user"), dict) else {}
+        scopes = (
+            session.get("allowed_scopes")
+            if isinstance(session.get("allowed_scopes"), list)
+            else []
+        )
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                cursor = conn.execute(
+                    """
+                    UPDATE auth_sessions
+                    SET user_json = ?, role = ?, allowed_scopes_json = ?,
+                        expires_at = ?, last_seen_at = ?, payload_json = ?
+                    WHERE session_hash = ? AND revoked_at IS NULL
+                    """,
+                    (
+                        self._json(user),
+                        self._text(session.get("role")) or "building",
+                        self._json(scopes),
+                        float(session.get("expires_at") or 0),
+                        now,
+                        self._json(session),
+                        session_hash,
+                    ),
+                )
+                conn.commit()
+                return int(cursor.rowcount or 0) > 0
+
+    def revoke_auth_session(self, session_hash: str) -> None:
+        session_hash = self._text(session_hash)
+        if not session_hash or not self.db_path.exists():
+            return
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute(
+                    """
+                    UPDATE auth_sessions
+                    SET revoked_at = ?, expires_at = 0
+                    WHERE session_hash = ?
+                    """,
+                    (time.time(), session_hash),
+                )
+                conn.commit()
+
+    def cleanup_auth_runtime(
+        self,
+        *,
+        now: float | None = None,
+        max_states: int = 200,
+        max_sessions: int = 500,
+    ) -> dict[str, int]:
+        if not self.db_path.exists():
+            return {"states": 0, "sessions": 0}
+        now_value = float(now if now is not None else time.time())
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                state_cursor = conn.execute(
+                    """
+                    DELETE FROM auth_oauth_states
+                    WHERE expires_at < ? OR (consumed_at IS NOT NULL AND consumed_at < ?)
+                    """,
+                    (now_value - 3600, now_value - 3600),
+                )
+                session_cursor = conn.execute(
+                    """
+                    DELETE FROM auth_sessions
+                    WHERE expires_at < ? OR revoked_at IS NOT NULL
+                    """,
+                    (now_value,),
+                )
+                conn.execute(
+                    """
+                    DELETE FROM auth_oauth_states
+                    WHERE state_hash IN (
+                        SELECT state_hash FROM auth_oauth_states
+                        ORDER BY created_at DESC
+                        LIMIT -1 OFFSET ?
+                    )
+                    """,
+                    (max(1, int(max_states or 200)),),
+                )
+                conn.execute(
+                    """
+                    DELETE FROM auth_sessions
+                    WHERE session_hash IN (
+                        SELECT session_hash FROM auth_sessions
+                        ORDER BY last_seen_at DESC
+                        LIMIT -1 OFFSET ?
+                    )
+                    """,
+                    (max(1, int(max_sessions or 500)),),
+                )
+                conn.commit()
+                return {
+                    "states": int(state_cursor.rowcount or 0),
+                    "sessions": int(session_cursor.rowcount or 0),
+                }
 
     def get_auth_permissions(self) -> dict[str, Any] | None:
         if not self.db_path.exists():

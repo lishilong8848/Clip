@@ -423,8 +423,7 @@ const filteredPermissionUsers = computed(() => {
 
 watch(() => props.open, (open) => {
   if (open) {
-    void loadStatus();
-    void loadPermissionRequests(false);
+    selectAdminTab(tab.value);
   }
 });
 

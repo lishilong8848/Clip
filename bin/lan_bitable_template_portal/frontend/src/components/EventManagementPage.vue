@@ -234,8 +234,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
-import { requestJson } from "../api/client";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { refreshRemoteSourceAndWait, requestJson } from "../api/client";
 import {
   EVENT_BUILDING_SCOPE_CODES as BUILDING_SCOPE_CODES,
   EVENT_BUILDING_ORDER as BUILDING_ORDER,
@@ -286,6 +286,9 @@ const emit = defineEmits<{
 const selectedMonth = ref(new Date().toISOString().slice(0, 7));
 const loading = ref(false);
 const refreshing = ref(false);
+let sourceRefreshAbortController: AbortController | null = null;
+let eventLoadAbortController: AbortController | null = null;
+let eventLoadVersion = 0;
 const errorText = ref("");
 const events = ref<LooseDict[]>([]);
 const stats = ref<LooseDict>({});
@@ -703,6 +706,7 @@ function openRepairManagementForScope(): void {
 function openBuilding(code: string): void {
   const nextScope = normalizeScope(code);
   if (!allowedBuildingCodes.value.has(nextScope)) return;
+  cancelEventRefreshWait();
   detailRequested.value = true;
   detailScope.value = nextScope;
   setEventDetailUrlFlag(true);
@@ -717,6 +721,7 @@ function openBuilding(code: string): void {
 }
 
 function returnToOverview(): void {
+  cancelEventRefreshWait();
   detailRequested.value = false;
   detailScope.value = "";
   setEventDetailUrlFlag(false);
@@ -747,17 +752,35 @@ function clearFilters(): void {
   specialtyFilter.value = "";
 }
 
+function cancelEventRefreshWait(): void {
+  const controller = sourceRefreshAbortController;
+  if (!controller) return;
+  sourceRefreshAbortController = null;
+  controller.abort();
+  refreshing.value = false;
+  emit("refreshing", false);
+}
+
 async function loadEvents(): Promise<void> {
   if (!props.scope) return;
+  const loadVersion = ++eventLoadVersion;
+  eventLoadAbortController?.abort();
+  const abortController = new AbortController();
+  eventLoadAbortController = abortController;
   loading.value = true;
   errorText.value = "";
   try {
-    await loadEventOverview().catch(() => {
-      overviewStats.value = {};
-      overviewBuildingStats.value = [];
+    const requestedDetailScope = detailScope.value;
+    const overviewTask = loadEventOverview(abortController.signal, loadVersion).catch((error) => {
+      if (abortController.signal.aborted) throw error;
+      if (!requestedDetailScope) throw error;
     });
-    if (detailScope.value) {
-      await loadMonthlyEvents(detailScope.value);
+    const monthlyTask = requestedDetailScope
+      ? loadMonthlyEvents(requestedDetailScope, abortController.signal, loadVersion)
+      : Promise.resolve();
+    await Promise.all([overviewTask, monthlyTask]);
+    if (loadVersion !== eventLoadVersion || abortController.signal.aborted) return;
+    if (requestedDetailScope) {
       emit("status", events.value.length ? `${detailScopeLabel.value}事件数据已就绪` : `${detailScopeLabel.value}本月暂无事件`);
     } else {
       events.value = [];
@@ -766,16 +789,25 @@ async function loadEvents(): Promise<void> {
       emit("status", "事件态势已就绪");
     }
   } catch (error: unknown) {
+    if (abortController.signal.aborted || loadVersion !== eventLoadVersion) return;
     errorText.value = error instanceof Error ? error.message : "事件数据读取失败。";
     emit("status", errorText.value);
   } finally {
-    loading.value = false;
+    if (eventLoadAbortController === abortController) {
+      eventLoadAbortController = null;
+    }
+    if (loadVersion === eventLoadVersion) loading.value = false;
   }
 }
 
-async function loadMonthlyEvents(scope: string): Promise<void> {
+async function loadMonthlyEvents(
+  scope: string,
+  signal?: AbortSignal,
+  loadVersion = eventLoadVersion,
+): Promise<void> {
   const params = new URLSearchParams({ scope, month: selectedMonth.value });
-  const payload = await requestJson(`/api/events/monthly?${params.toString()}`);
+  const payload = await requestJson(`/api/events/monthly?${params.toString()}`, { signal });
+  if (loadVersion !== eventLoadVersion || signal?.aborted) return;
   events.value = Array.isArray(payload.records) ? payload.records : [];
   stats.value = payload.stats && typeof payload.stats === "object" ? payload.stats : {};
   lastRefreshedAt.value = Number(payload.last_refreshed_at || lastRefreshedAt.value || 0);
@@ -784,9 +816,13 @@ async function loadMonthlyEvents(scope: string): Promise<void> {
   configError.value = String(payload.config_error || "");
 }
 
-async function loadEventOverview(): Promise<void> {
+async function loadEventOverview(
+  signal?: AbortSignal,
+  loadVersion = eventLoadVersion,
+): Promise<void> {
   const params = new URLSearchParams({ month: selectedMonth.value });
-  const payload = await requestJson(`/api/events/overview?${params.toString()}`);
+  const payload = await requestJson(`/api/events/overview?${params.toString()}`, { signal });
+  if (loadVersion !== eventLoadVersion || signal?.aborted) return;
   overviewStats.value = payload.stats && typeof payload.stats === "object" ? payload.stats : {};
   overviewBuildingStats.value = Array.isArray(payload.building_stats) ? payload.building_stats : [];
   lastRefreshedAt.value = Number(payload.last_refreshed_at || lastRefreshedAt.value || 0);
@@ -796,7 +832,10 @@ async function loadEventOverview(): Promise<void> {
 }
 
 async function refreshEvents(): Promise<void> {
-  if (!props.scope) return;
+  if (!props.scope || refreshing.value) return;
+  sourceRefreshAbortController?.abort();
+  const abortController = new AbortController();
+  sourceRefreshAbortController = abortController;
   refreshing.value = true;
   emit("refreshing", true);
   emit("status", "正在刷新事件。");
@@ -804,37 +843,40 @@ async function refreshEvents(): Promise<void> {
   try {
     const refreshScope = detailScope.value || props.scope;
     const params = new URLSearchParams({ scope: refreshScope, month: selectedMonth.value });
-    const payload = await requestJson(`/api/events/refresh?${params.toString()}`, { method: "POST" });
-    await loadEventOverview().catch(() => null);
-    if (detailScope.value) {
-      events.value = Array.isArray(payload.records) ? payload.records : events.value;
-      stats.value = payload.stats && typeof payload.stats === "object" ? payload.stats : stats.value;
-    } else {
-      events.value = [];
-      stats.value = {};
-    }
-    lastRefreshedAt.value = Number(payload.last_refreshed_at || payload.updated_at || lastRefreshedAt.value || 0);
-    lastFailed.value = payload.last_failed && typeof payload.last_failed === "object" ? payload.last_failed : {};
-    configMissing.value = Boolean(payload.config_missing);
-    configError.value = String(payload.config_error || "");
+    await refreshRemoteSourceAndWait(
+      "event",
+      `/api/events/refresh?${params.toString()}`,
+      {
+        scope: refreshScope,
+        month: selectedMonth.value,
+        signal: abortController.signal,
+      },
+    );
+    await loadEvents();
     metricSourceRecords.value = [];
     metricRecordsMonth.value = "";
     metricRequestVersion += 1;
     metricLoading.value = false;
     emit("status", "事件已刷新，页面已更新。");
   } catch (error: unknown) {
-    errorText.value = error instanceof Error ? error.message : "事件刷新失败。";
-    emit("status", `事件刷新失败：${errorText.value}`);
-    await loadEvents();
+    if (abortController.signal.aborted) return;
+    const failureMessage = error instanceof Error ? error.message : "事件刷新失败。";
+    await loadEvents().catch(() => undefined);
+    errorText.value = failureMessage;
+    emit("status", `事件刷新失败：${failureMessage}`);
   } finally {
-    refreshing.value = false;
-    emit("refreshing", false);
+    if (sourceRefreshAbortController === abortController) {
+      sourceRefreshAbortController = null;
+      refreshing.value = false;
+      emit("refreshing", false);
+    }
   }
 }
 
 watch(
   () => [props.scope, selectedMonth.value],
   () => {
+    cancelEventRefreshWait();
     selectedEvent.value = null;
     closeMetricRecords();
     metricSourceRecords.value = [];
@@ -874,6 +916,12 @@ watch(
 
 onMounted(() => {
   void loadEvents();
+});
+
+onBeforeUnmount(() => {
+  cancelEventRefreshWait();
+  eventLoadAbortController?.abort();
+  eventLoadAbortController = null;
 });
 </script>
 

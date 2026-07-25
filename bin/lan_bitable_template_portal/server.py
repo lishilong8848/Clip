@@ -184,6 +184,8 @@ class PortalRuntime:
     repair_refresh_last_result: dict = {}
     repair_refresh_last_error = ""
     repair_refresh_last_finished = 0.0
+    repair_refresh_started_at = 0.0
+    repair_refresh_completed_at = 0.0
     repair_refresh_reuse_window_s = 10.0
     change_refresh_lock = threading.RLock()
     change_refresh_inflight = False
@@ -191,6 +193,8 @@ class PortalRuntime:
     change_refresh_last_result: dict = {}
     change_refresh_last_error = ""
     change_refresh_last_finished = 0.0
+    change_refresh_started_at = 0.0
+    change_refresh_completed_at = 0.0
     change_refresh_reuse_window_s = 10.0
     event_refresh_lock = threading.RLock()
     event_refresh_inflight = False
@@ -198,6 +202,8 @@ class PortalRuntime:
     event_refresh_last_result: dict = {}
     event_refresh_last_error = ""
     event_refresh_last_finished = 0.0
+    event_refresh_started_at = 0.0
+    event_refresh_completed_at = 0.0
     event_refresh_last_month = ""
     event_refresh_reuse_window_s = 10.0
     qt_action_interval_ms = 250
@@ -997,6 +1003,8 @@ class PortalRuntime:
                 cls.repair_refresh_event = event
                 cls.repair_refresh_inflight = True
                 cls.repair_refresh_last_error = ""
+                cls.repair_refresh_started_at = time.time()
+                cls.repair_refresh_completed_at = 0.0
                 owner = True
 
         if not owner:
@@ -1022,12 +1030,14 @@ class PortalRuntime:
                 cls.repair_refresh_last_result = copy.deepcopy(result)
                 cls.repair_refresh_last_error = ""
                 cls.repair_refresh_last_finished = time.monotonic()
+                cls.repair_refresh_completed_at = time.time()
             return result
         except Exception as exc:
             error = str(exc)
             with cls.repair_refresh_lock:
                 cls.repair_refresh_last_error = error
                 cls.repair_refresh_last_finished = time.monotonic()
+                cls.repair_refresh_completed_at = time.time()
             if isinstance(exc, PortalError):
                 raise
             raise PortalError(error) from exc
@@ -1068,6 +1078,8 @@ class PortalRuntime:
             cls.repair_refresh_event = event
             cls.repair_refresh_inflight = True
             cls.repair_refresh_last_error = ""
+            cls.repair_refresh_started_at = time.time()
+            cls.repair_refresh_completed_at = 0.0
 
         def _worker() -> None:
             try:
@@ -1081,11 +1093,13 @@ class PortalRuntime:
                     cls.repair_refresh_last_result = copy.deepcopy(result)
                     cls.repair_refresh_last_error = ""
                     cls.repair_refresh_last_finished = time.monotonic()
+                    cls.repair_refresh_completed_at = time.time()
             except Exception as exc:
                 error = str(exc)
                 with cls.repair_refresh_lock:
                     cls.repair_refresh_last_error = error
                     cls.repair_refresh_last_finished = time.monotonic()
+                    cls.repair_refresh_completed_at = time.time()
                 logging.warning("检修源表后台刷新失败: %s", error)
             finally:
                 with cls.repair_refresh_lock:
@@ -1102,6 +1116,7 @@ class PortalRuntime:
             with cls.repair_refresh_lock:
                 cls.repair_refresh_inflight = False
                 cls.repair_refresh_last_error = str(exc)
+                cls.repair_refresh_completed_at = time.time()
                 event.set()
             raise PortalError(f"检修源表刷新启动失败: {exc}") from exc
         return {
@@ -1140,6 +1155,8 @@ class PortalRuntime:
                 cls.change_refresh_event = event
                 cls.change_refresh_inflight = True
                 cls.change_refresh_last_error = ""
+                cls.change_refresh_started_at = time.time()
+                cls.change_refresh_completed_at = 0.0
                 owner = True
 
         if not owner:
@@ -1169,12 +1186,14 @@ class PortalRuntime:
                 cls.change_refresh_last_result = copy.deepcopy(result)
                 cls.change_refresh_last_error = ""
                 cls.change_refresh_last_finished = time.monotonic()
+                cls.change_refresh_completed_at = time.time()
             return result
         except Exception as exc:
             error = str(exc)
             with cls.change_refresh_lock:
                 cls.change_refresh_last_error = error
                 cls.change_refresh_last_finished = time.monotonic()
+                cls.change_refresh_completed_at = time.time()
             if isinstance(exc, PortalError):
                 raise
             raise PortalError(error) from exc
@@ -1216,6 +1235,8 @@ class PortalRuntime:
                 cls.event_refresh_inflight = True
                 cls.event_refresh_last_error = ""
                 cls.event_refresh_last_month = month_key
+                cls.event_refresh_started_at = time.time()
+                cls.event_refresh_completed_at = 0.0
                 owner = True
 
         if not owner:
@@ -1245,6 +1266,7 @@ class PortalRuntime:
                 cls.event_refresh_last_error = ""
                 cls.event_refresh_last_finished = time.monotonic()
                 cls.event_refresh_last_month = month_key
+                cls.event_refresh_completed_at = time.time()
             return result
         except Exception as exc:
             error = str(exc)
@@ -1252,6 +1274,7 @@ class PortalRuntime:
                 cls.event_refresh_last_error = error
                 cls.event_refresh_last_finished = time.monotonic()
                 cls.event_refresh_last_month = month_key
+                cls.event_refresh_completed_at = time.time()
             if isinstance(exc, PortalError):
                 raise
             raise PortalError(error) from exc
@@ -1259,6 +1282,257 @@ class PortalRuntime:
             with cls.event_refresh_lock:
                 cls.event_refresh_inflight = False
                 event.set()
+
+    @classmethod
+    def start_change_source_refresh(cls) -> dict:
+        """Start change source refresh in the background and return immediately."""
+        if os.environ.get("CLIPFLOW_BACKEND_MOCK_EXTERNAL") == "1":
+            return {
+                "change_refresh_started": False,
+                "change_refresh_inflight": False,
+                "change_refresh_reused": False,
+                "mock_external": True,
+            }
+        now = time.monotonic()
+        with cls.change_refresh_lock:
+            if (
+                cls.change_refresh_last_result
+                and now - float(cls.change_refresh_last_finished or 0)
+                <= float(cls.change_refresh_reuse_window_s)
+            ):
+                result = copy.deepcopy(cls.change_refresh_last_result)
+                result.update(
+                    {
+                        "change_refresh_started": False,
+                        "change_refresh_inflight": False,
+                        "change_refresh_reused": True,
+                    }
+                )
+                return result
+            if cls.change_refresh_inflight:
+                return {
+                    "change_refresh_started": False,
+                    "change_refresh_inflight": True,
+                    "change_refresh_reused": True,
+                }
+            event = threading.Event()
+            cls.change_refresh_event = event
+            cls.change_refresh_inflight = True
+            cls.change_refresh_last_error = ""
+            cls.change_refresh_started_at = time.time()
+            cls.change_refresh_completed_at = 0.0
+
+        def _worker() -> None:
+            try:
+                result = cls.service.refresh_change_source()
+                if not isinstance(result, dict):
+                    result = {}
+                result = copy.deepcopy(result)
+                result.update(
+                    {
+                        "change_refresh_started": True,
+                        "change_refresh_inflight": False,
+                        "change_refresh_reused": False,
+                    }
+                )
+                cls.clear_payload_cache()
+                with cls.change_refresh_lock:
+                    cls.change_refresh_last_result = copy.deepcopy(result)
+                    cls.change_refresh_last_error = ""
+                    cls.change_refresh_last_finished = time.monotonic()
+                    cls.change_refresh_completed_at = time.time()
+            except Exception as exc:
+                error = str(exc)
+                with cls.change_refresh_lock:
+                    cls.change_refresh_last_error = error
+                    cls.change_refresh_last_finished = time.monotonic()
+                    cls.change_refresh_completed_at = time.time()
+                logging.warning("变更源表后台刷新失败: %s", error)
+            finally:
+                with cls.change_refresh_lock:
+                    cls.change_refresh_inflight = False
+                    event.set()
+
+        try:
+            threading.Thread(
+                target=_worker,
+                name="LANChangeRefresh",
+                daemon=True,
+            ).start()
+        except Exception as exc:
+            with cls.change_refresh_lock:
+                cls.change_refresh_inflight = False
+                cls.change_refresh_last_error = str(exc)
+                cls.change_refresh_completed_at = time.time()
+                event.set()
+            raise PortalError(f"变更源表刷新启动失败: {exc}") from exc
+        return {
+            "change_refresh_started": True,
+            "change_refresh_inflight": True,
+            "change_refresh_reused": False,
+        }
+
+    @classmethod
+    def start_event_month_refresh(cls, month: str = "") -> dict:
+        """Start event source refresh in the background and return immediately."""
+        if os.environ.get("CLIPFLOW_BACKEND_MOCK_EXTERNAL") == "1":
+            return {
+                "event_refresh_started": False,
+                "event_refresh_inflight": False,
+                "event_refresh_reused": False,
+                "mock_external": True,
+            }
+        month_key = MaintenancePortalService._normalize_event_month(month)
+        now = time.monotonic()
+        with cls.event_refresh_lock:
+            if (
+                cls.event_refresh_last_result
+                and cls.event_refresh_last_month == month_key
+                and now - float(cls.event_refresh_last_finished or 0)
+                <= float(cls.event_refresh_reuse_window_s)
+            ):
+                result = copy.deepcopy(cls.event_refresh_last_result)
+                result.update(
+                    {
+                        "event_refresh_started": False,
+                        "event_refresh_inflight": False,
+                        "event_refresh_reused": True,
+                        "event_refresh_month": month_key,
+                    }
+                )
+                return result
+            if cls.event_refresh_inflight:
+                return {
+                    "event_refresh_started": False,
+                    "event_refresh_inflight": True,
+                    "event_refresh_reused": True,
+                    "event_refresh_month": cls.event_refresh_last_month,
+                }
+            event = threading.Event()
+            cls.event_refresh_event = event
+            cls.event_refresh_inflight = True
+            cls.event_refresh_last_error = ""
+            cls.event_refresh_last_month = month_key
+            cls.event_refresh_started_at = time.time()
+            cls.event_refresh_completed_at = 0.0
+
+        def _worker() -> None:
+            try:
+                result = cls.service.refresh_event_month_snapshot(month_key)
+                if not isinstance(result, dict):
+                    result = {}
+                result = copy.deepcopy(result)
+                result.update(
+                    {
+                        "event_refresh_started": True,
+                        "event_refresh_inflight": False,
+                        "event_refresh_reused": False,
+                        "event_refresh_month": month_key,
+                    }
+                )
+                cls.clear_payload_cache()
+                with cls.event_refresh_lock:
+                    cls.event_refresh_last_result = copy.deepcopy(result)
+                    cls.event_refresh_last_error = ""
+                    cls.event_refresh_last_finished = time.monotonic()
+                    cls.event_refresh_last_month = month_key
+                    cls.event_refresh_completed_at = time.time()
+            except Exception as exc:
+                error = str(exc)
+                with cls.event_refresh_lock:
+                    cls.event_refresh_last_error = error
+                    cls.event_refresh_last_finished = time.monotonic()
+                    cls.event_refresh_last_month = month_key
+                    cls.event_refresh_completed_at = time.time()
+                logging.warning("事件表后台刷新失败: %s", error)
+            finally:
+                with cls.event_refresh_lock:
+                    cls.event_refresh_inflight = False
+                    event.set()
+
+        try:
+            threading.Thread(
+                target=_worker,
+                name="LANEventRefresh",
+                daemon=True,
+            ).start()
+        except Exception as exc:
+            with cls.event_refresh_lock:
+                cls.event_refresh_inflight = False
+                cls.event_refresh_last_error = str(exc)
+                cls.event_refresh_completed_at = time.time()
+                event.set()
+            raise PortalError(f"事件表刷新启动失败: {exc}") from exc
+        return {
+            "event_refresh_started": True,
+            "event_refresh_inflight": True,
+            "event_refresh_reused": False,
+            "event_refresh_month": month_key,
+        }
+
+    @classmethod
+    def source_refresh_status(cls, kind: str, *, month: str = "") -> dict:
+        """Return a lightweight terminal/running state for remote source refreshes."""
+        normalized_kind = str(kind or "").strip().lower()
+        if normalized_kind == "repair":
+            lock = cls.repair_refresh_lock
+            with lock:
+                inflight = bool(cls.repair_refresh_inflight)
+                result = copy.deepcopy(cls.repair_refresh_last_result)
+                error = str(cls.repair_refresh_last_error or "")
+                started_at = float(cls.repair_refresh_started_at or 0)
+                completed_at = float(cls.repair_refresh_completed_at or 0)
+        elif normalized_kind == "change":
+            lock = cls.change_refresh_lock
+            with lock:
+                inflight = bool(cls.change_refresh_inflight)
+                result = copy.deepcopy(cls.change_refresh_last_result)
+                error = str(cls.change_refresh_last_error or "")
+                started_at = float(cls.change_refresh_started_at or 0)
+                completed_at = float(cls.change_refresh_completed_at or 0)
+        elif normalized_kind == "event":
+            month_key = MaintenancePortalService._normalize_event_month(month)
+            lock = cls.event_refresh_lock
+            with lock:
+                inflight = bool(cls.event_refresh_inflight)
+                current_month = str(cls.event_refresh_last_month or "")
+                same_month = current_month == month_key
+                result = (
+                    copy.deepcopy(cls.event_refresh_last_result)
+                    if same_month
+                    else {}
+                )
+                error = str(cls.event_refresh_last_error or "") if same_month else ""
+                started_at = float(cls.event_refresh_started_at or 0) if same_month else 0.0
+                completed_at = (
+                    float(cls.event_refresh_completed_at or 0) if same_month else 0.0
+                )
+                if inflight and not same_month:
+                    result = {"event_refresh_month": current_month}
+        else:
+            raise PortalError("不支持的刷新类型。")
+
+        if inflight:
+            status = "refreshing"
+        elif error:
+            status = "failed"
+        elif result or completed_at > 0:
+            status = "success"
+        else:
+            status = "idle"
+        payload = {
+            "refresh_kind": normalized_kind,
+            "status": status,
+            "inflight": inflight,
+            "error": error,
+            "started_at": started_at,
+            "completed_at": completed_at,
+            "result": result,
+        }
+        payload.update(result)
+        payload[f"{normalized_kind}_refresh_inflight"] = inflight
+        payload[f"{normalized_kind}_refresh_error"] = error
+        return payload
 
     def _reconcile_orphan_started_items(
         self, scope: str, ongoing: list[dict] | None, *, force: bool = False
@@ -1916,17 +2190,10 @@ class PortalRuntime:
         if parsed.path == "/api/repair-refresh":
             qs = parse_qs(parsed.query)
             try:
-                scope = self._authorized_scope_or_error(
+                self._authorized_scope_or_error(
                     session, (qs.get("scope") or ["ALL"])[0]
                 )
-                refresh_result = PortalRuntime._refresh_repair_source_singleflight()
-                ongoing = self._get_ongoing(scope)
-                self._reconcile_orphan_started_items(scope, ongoing)
-                data = self.service.get_bootstrap(
-                    scope=scope, ongoing_items=ongoing
-                )
-                data.update(refresh_result)
-                data["repair_source_refreshed"] = True
+                data = PortalRuntime.request_repair_source_refresh()
                 return self._send_json(
                     200,
                     {
@@ -1941,17 +2208,10 @@ class PortalRuntime:
         if parsed.path == "/api/change-refresh":
             qs = parse_qs(parsed.query)
             try:
-                scope = self._authorized_scope_or_error(
+                self._authorized_scope_or_error(
                     session, (qs.get("scope") or ["ALL"])[0]
                 )
-                refresh_result = PortalRuntime.request_change_source_refresh()
-                ongoing = self._get_ongoing(scope)
-                self._reconcile_orphan_started_items(scope, ongoing)
-                data = self.service.get_bootstrap(
-                    scope=scope, ongoing_items=ongoing
-                )
-                data.update(refresh_result)
-                data["change_source_refreshed"] = True
+                data = PortalRuntime.start_change_source_refresh()
                 return self._send_json(
                     200,
                     {
@@ -1963,6 +2223,27 @@ class PortalRuntime:
                 )
             except PortalError as exc:
                 return self._send_json(403, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/source-refresh-status":
+            qs = parse_qs(parsed.query)
+            try:
+                self._authorized_scope_or_error(
+                    session, (qs.get("scope") or ["ALL"])[0]
+                )
+                data = PortalRuntime.source_refresh_status(
+                    (qs.get("kind") or [""])[0],
+                    month=(qs.get("month") or [""])[0],
+                )
+                return self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "data": self._with_auth_context(
+                            self._with_runtime_warnings(data), session
+                        ),
+                    },
+                )
+            except PortalError as exc:
+                return self._send_json(400, {"ok": False, "error": str(exc)})
         if parsed.path.startswith("/api/jobs/"):
             job_id = parsed.path.rsplit("/", 1)[-1].strip()
             job = self.service.get_job(job_id)
@@ -2022,13 +2303,8 @@ class PortalRuntime:
                     session, (qs.get("scope") or ["ALL"])[0]
                 )
                 month = (qs.get("month") or [""])[0]
-                refresh_result = PortalRuntime.request_event_month_refresh(month)
-                data = PortalRuntime.service.get_event_monthly_snapshot(
-                    scope=scope,
-                    month=month,
-                )
-                data.update(refresh_result)
-                data["event_source_refreshed"] = True
+                data = PortalRuntime.start_event_month_refresh(month)
+                data["scope"] = scope
                 return self._send_json(
                     200,
                     {"ok": True, "data": self._with_auth_context(data, session)},

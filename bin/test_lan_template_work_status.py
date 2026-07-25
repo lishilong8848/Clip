@@ -13751,6 +13751,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             first = PortalRuntime.request_repair_source_refresh()
             self.assertTrue(first["repair_refresh_started"])
             self.assertTrue(service.entered.wait(timeout=2))
+            running = PortalRuntime.source_refresh_status("repair")
+            self.assertEqual(running["status"], "refreshing")
+            self.assertTrue(running["repair_refresh_inflight"])
             second = PortalRuntime.request_repair_source_refresh()
             self.assertFalse(second["repair_refresh_started"])
             self.assertTrue(second["repair_refresh_inflight"])
@@ -13764,6 +13767,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             with PortalRuntime.repair_refresh_lock:
                 self.assertFalse(PortalRuntime.repair_refresh_inflight)
                 self.assertEqual(PortalRuntime.repair_refresh_last_result["repair_count"], 3)
+            completed = PortalRuntime.source_refresh_status("repair")
+            self.assertEqual(completed["status"], "success")
+            self.assertEqual(completed["repair_count"], 3)
             self.assertEqual(service.calls, 1)
         finally:
             service.release.set()
@@ -13774,6 +13780,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 PortalRuntime.repair_refresh_last_result = {}
                 PortalRuntime.repair_refresh_last_error = ""
                 PortalRuntime.repair_refresh_last_finished = 0.0
+                PortalRuntime.repair_refresh_started_at = 0.0
+                PortalRuntime.repair_refresh_completed_at = 0.0
 
     def test_change_source_refresh_request_is_blocking_singleflight(self):
         class _SlowChangeRefreshService:
@@ -13840,6 +13848,69 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 PortalRuntime.change_refresh_last_error = ""
                 PortalRuntime.change_refresh_last_finished = 0.0
 
+    def test_change_source_refresh_request_is_background_singleflight(self):
+        class _SlowChangeRefreshService:
+            _load_warnings: list[str] = []
+
+            def __init__(self):
+                self.calls = 0
+                self.entered = threading.Event()
+                self.release = threading.Event()
+
+            def refresh_change_source(self):
+                self.calls += 1
+                self.entered.set()
+                self.release.wait(timeout=5)
+                return {
+                    "change_count": 4,
+                    "change_refreshed_at": "17:02",
+                }
+
+        original_service = PortalRuntime.service
+        service = _SlowChangeRefreshService()
+        with PortalRuntime.change_refresh_lock:
+            PortalRuntime.change_refresh_inflight = False
+            PortalRuntime.change_refresh_event = threading.Event()
+            PortalRuntime.change_refresh_last_result = {}
+            PortalRuntime.change_refresh_last_error = ""
+            PortalRuntime.change_refresh_last_finished = 0.0
+            PortalRuntime.change_refresh_started_at = 0.0
+            PortalRuntime.change_refresh_completed_at = 0.0
+        PortalRuntime.service = service
+        try:
+            first = PortalRuntime.start_change_source_refresh()
+            self.assertTrue(first["change_refresh_started"])
+            self.assertTrue(service.entered.wait(timeout=2))
+            self.assertEqual(
+                PortalRuntime.source_refresh_status("change")["status"],
+                "refreshing",
+            )
+            second = PortalRuntime.start_change_source_refresh()
+            self.assertFalse(second["change_refresh_started"])
+            self.assertTrue(second["change_refresh_inflight"])
+            service.release.set()
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                with PortalRuntime.change_refresh_lock:
+                    if not PortalRuntime.change_refresh_inflight:
+                        break
+                time.sleep(0.02)
+            completed = PortalRuntime.source_refresh_status("change")
+            self.assertEqual(completed["status"], "success")
+            self.assertEqual(completed["change_count"], 4)
+            self.assertEqual(service.calls, 1)
+        finally:
+            service.release.set()
+            PortalRuntime.service = original_service
+            with PortalRuntime.change_refresh_lock:
+                PortalRuntime.change_refresh_inflight = False
+                PortalRuntime.change_refresh_event = threading.Event()
+                PortalRuntime.change_refresh_last_result = {}
+                PortalRuntime.change_refresh_last_error = ""
+                PortalRuntime.change_refresh_last_finished = 0.0
+                PortalRuntime.change_refresh_started_at = 0.0
+                PortalRuntime.change_refresh_completed_at = 0.0
+
     def test_refresh_change_source_preserves_other_snapshot_records(self):
         class _ChangeRefreshService(MaintenancePortalService):
             def _load_change_fields(self):
@@ -13891,6 +13962,62 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertIn("r-old", record_ids)
             self.assertIn("c-new", record_ids)
             self.assertIn("z-new", zhihang_ids)
+
+    def test_refresh_repair_source_updates_projects_followups_and_workbench_snapshot(self):
+        class _RepairRefreshService(_TestMaintenancePortalService):
+            def _load_repair_management_project_records_remote(self):
+                return [], [
+                    _build_repair_record("r-new", building="A楼"),
+                ]
+
+            def _load_repair_followup_records_remote(self):
+                return [], [
+                    {
+                        "record_id": "followup-new",
+                        "raw_fields": {"维修汇总记录ID-L": "r-new"},
+                        "display_fields": {"维修汇总记录ID-L": "r-new"},
+                    }
+                ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp), _RepairRefreshService)
+            service._maintenance_loaded_once = True
+            service._repair_snapshots_enabled = True
+
+            result = service.refresh_repair_source()
+
+            project_snapshot = service._state_store.get_repair_snapshot(
+                REPAIR_SNAPSHOT_SOURCE_PROJECTS
+            )
+            followup_snapshot = service._state_store.get_repair_snapshot(
+                REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS
+            )
+            workbench_snapshot = service._state_store.get_source_scope_snapshot("ALL")
+            workbench_record_ids = {
+                str(item.get("record_id") or "")
+                for item in workbench_snapshot.get("records") or []
+            }
+            project_listing = service.get_repair_management_records(
+                scope="ALL",
+                state="all",
+            )
+            project_listing_ids = {
+                str(item.get("record_id") or "")
+                for item in project_listing.get("records") or []
+            }
+
+            self.assertEqual(result["repair_project_count"], 1)
+            self.assertEqual(result["repair_followup_count"], 1)
+            self.assertEqual(
+                [item["record_id"] for item in project_snapshot["records"]],
+                ["r-new"],
+            )
+            self.assertEqual(
+                [item["record_id"] for item in followup_snapshot["records"]],
+                ["followup-new"],
+            )
+            self.assertIn("r-new", workbench_record_ids)
+            self.assertIn("r-new", project_listing_ids)
 
     def test_change_source_month_window_accepts_plan_date_aliases(self):
         service = MaintenancePortalService()
@@ -14915,7 +15042,11 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 or refresh.json()["data"].get("source_refresh_inflight")
                 or refresh.json()["data"].get("source_refresh_reused")
             )
-            self.assertTrue(repair_refresh.json()["data"]["repair_source_refreshed"])
+            self.assertTrue(
+                repair_refresh.json()["data"].get("repair_refresh_started")
+                or repair_refresh.json()["data"].get("repair_refresh_inflight")
+                or repair_refresh.json()["data"].get("repair_refresh_reused")
+            )
 
             notices = []
             PortalRuntime.notice_callback = lambda payload: notices.append(payload)
@@ -18089,7 +18220,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             },
         )
 
-    def test_repair_management_status_uses_event_alarm_and_sent_time(self):
+    def test_repair_management_status_uses_event_alarm_and_occurrence_time(self):
         service = _TestMaintenancePortalService()
         service._load_repair_management_status_sources = (  # type: ignore[method-assign]
             lambda **_kwargs: (
@@ -18116,7 +18247,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                         "display_fields": {
                             "事件简述": "内部事件简述",
                             "告警描述": "E楼冷机高压告警",
+                            "事件发生时间": "2026-07-14 08:45",
                             "事件进展响应时间": "2026-07-14 09:30",
+                            "创建时间": "2026-07-14 09:10",
                             "机楼": "E楼",
                         },
                         "raw_fields": {},
@@ -18129,8 +18262,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
         self.assertEqual(payload["records"][0]["title"], "E楼冷机高压告警")
         self.assertEqual(
-            payload["records"][0]["event_sent_time"],
-            "2026-07-14 09:30",
+            payload["records"][0]["fault_time"],
+            "2026-07-14 08:45",
         )
         self.assertEqual(
             payload["records"][0]["repair_title"],
@@ -18170,7 +18303,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "record_id": "rec_project",
                 "source_event_id": "rec_archived_event",
                 "title": "维修单中保存的告警描述",
-                "event_sent_time": "2026-07-14 09:30",
+                "fault_time": "2026-07-14 08:45",
             }
         ]
 
@@ -20310,6 +20443,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         meta_by_name = {meta.field_name: meta for meta in metas}
         service._load_table_fields = (  # type: ignore[method-assign]
             lambda **_kwargs: (metas, meta_by_name)
+        )
+        service._load_repair_management_project_records = (  # type: ignore[method-assign]
+            lambda **_kwargs: (metas, meta_by_name, [])
         )
         service._ensure_repair_management_record_in_scope = (  # type: ignore[method-assign]
             lambda *_args, **_kwargs: {

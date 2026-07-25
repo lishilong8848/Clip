@@ -2,6 +2,8 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 
 BIN_DIR = Path(__file__).resolve().parent
@@ -75,6 +77,70 @@ class BackendProcessControllerTests(unittest.TestCase):
     def test_snapshot_callback_is_low_frequency_fallback_by_default(self):
         controller = BackendProcessPortalController()
         self.assertGreaterEqual(controller._snapshot_interval_s, 300)
+
+    def test_backend_uses_only_the_fixed_port(self):
+        controller = BackendProcessPortalController(port=18766)
+        self.assertEqual(controller._candidate_ports(), [18766])
+
+    def test_health_requires_matching_backend_runtime(self):
+        controller = BackendProcessPortalController(port=18766)
+        self.assertFalse(controller._health_matches_runtime({"ok": True}))
+        self.assertFalse(
+            controller._health_matches_runtime(
+                {
+                    "ok": True,
+                    "service": "clipflow_backend",
+                    "runtime_root_hash": "different-runtime",
+                }
+            )
+        )
+        self.assertFalse(
+            controller._health_matches_runtime(
+                {
+                    "ok": True,
+                    "service": "clipflow_backend",
+                    "runtime_root_hash": controller._runtime_root_hash,
+                    "build_version": "different-build",
+                }
+            )
+        )
+        self.assertTrue(
+            controller._health_matches_runtime(
+                {
+                    "ok": True,
+                    "service": "clipflow_backend",
+                    "runtime_root_hash": controller._runtime_root_hash,
+                    "build_version": controller._build_version,
+                }
+            )
+        )
+
+    def test_port_owner_summary_reports_pid_and_process(self):
+        netstat = SimpleNamespace(
+            stdout=(
+                "  TCP    0.0.0.0:18766    0.0.0.0:0    LISTENING    4321\n"
+            )
+        )
+        tasklist = SimpleNamespace(
+            stdout='"python.exe","4321","Console","1","20,000 K"\n'
+        )
+        with patch(
+            "clipflow_backend.process_controller.subprocess.run",
+            side_effect=[netstat, tasklist],
+        ):
+            summary = BackendProcessPortalController._port_owner_summary(18766)
+        if os.name == "nt":
+            self.assertEqual(summary, "PID=4321，进程=python.exe")
+        else:
+            self.assertEqual(summary, "")
+
+    def test_local_interface_probe_rejects_unassigned_address(self):
+        self.assertTrue(
+            BackendProcessPortalController._host_is_local_interface("127.0.0.1")
+        )
+        self.assertFalse(
+            BackendProcessPortalController._host_is_local_interface("203.0.113.254")
+        )
 
     def test_qt_command_strips_legacy_inline_image_fields(self):
         controller = BackendProcessPortalController()

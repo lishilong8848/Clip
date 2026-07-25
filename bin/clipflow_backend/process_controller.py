@@ -121,12 +121,22 @@ class BackendProcessPortalController:
             minimum=15,
             maximum=180,
         )
-        self._port_retry_count = _env_int(
-            "CLIPFLOW_BACKEND_PORT_RETRY_COUNT",
-            8,
-            minimum=0,
-            maximum=50,
-        )
+        self._runtime_root = Path(__file__).resolve().parents[1]
+        self._runtime_root_hash = hashlib.sha256(
+            os.path.normcase(os.fspath(self._runtime_root)).encode("utf-8")
+        ).hexdigest()[:20]
+        self._build_version = str(
+            os.environ.get("CLIPFLOW_BUILD_VERSION")
+            or os.environ.get("CLIPFLOW_PATCH_VERSION")
+            or ""
+        ).strip()
+        if not self._build_version:
+            try:
+                self._build_version = "source-" + hashlib.sha256(
+                    Path(__file__).with_name("main.py").read_bytes()
+                ).hexdigest()[:16]
+            except OSError:
+                self._build_version = "development"
 
     @classmethod
     def _strip_inline_image_command_fields(cls, value: Any) -> Any:
@@ -236,12 +246,34 @@ class BackendProcessPortalController:
         base = f"HTTP Error {status}: {reason}".strip()
         return f"{base}，响应={detail}" if detail else base
 
-    def _health_ok(self) -> bool:
+    def _health_payload(self) -> dict[str, Any] | None:
         try:
             result = self._request_json("GET", "/api/health", timeout=1.2)
-            return bool(result.get("ok"))
+            return result if bool(result.get("ok")) else None
         except Exception:
+            return None
+
+    def _health_matches_runtime(self, payload: dict[str, Any] | None) -> bool:
+        if not isinstance(payload, dict):
             return False
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        service = str(payload.get("service") or data.get("service") or "").strip()
+        runtime_hash = str(
+            payload.get("runtime_root_hash") or data.get("runtime_root_hash") or ""
+        ).strip()
+        build_version = str(
+            payload.get("build_version") or data.get("build_version") or ""
+        ).strip()
+        return (
+            service == "clipflow_backend"
+            and bool(runtime_hash)
+            and runtime_hash == self._runtime_root_hash
+            and bool(build_version)
+            and build_version == self._build_version
+        )
+
+    def _health_ok(self) -> bool:
+        return self._health_matches_runtime(self._health_payload())
 
     @staticmethod
     def _backend_log_path() -> Path:
@@ -303,31 +335,95 @@ class BackendProcessPortalController:
             return False, str(exc)
 
     @staticmethod
+    def _host_is_local_interface(host: str) -> bool:
+        bind_host = str(host or DEFAULT_HOST).strip() or DEFAULT_HOST
+        if bind_host in {"0.0.0.0", "::", "127.0.0.1", "localhost"}:
+            return True
+        family = socket.AF_INET6 if ":" in bind_host else socket.AF_INET
+        try:
+            with socket.socket(family, socket.SOCK_STREAM) as sock:
+                sock.bind((bind_host, 0))
+            return True
+        except OSError:
+            return False
+
+    @staticmethod
+    def _port_owner_summary(port: int) -> str:
+        if os.name != "nt":
+            return ""
+        try:
+            result = subprocess.run(
+                ["netstat", "-ano", "-p", "TCP"],
+                capture_output=True,
+                text=True,
+                errors="ignore",
+                timeout=3,
+                check=False,
+            )
+        except Exception:
+            return ""
+        owner_pid = ""
+        for raw_line in str(result.stdout or "").splitlines():
+            parts = raw_line.split()
+            if len(parts) < 5 or parts[0].upper() != "TCP":
+                continue
+            local_address = str(parts[1] or "")
+            local_port = local_address.rsplit(":", 1)[-1].strip()
+            state = str(parts[-2] or "").upper()
+            pid = str(parts[-1] or "").strip()
+            if local_port == str(int(port)) and "LISTEN" in state and pid.isdigit():
+                owner_pid = pid
+                break
+        if not owner_pid:
+            return ""
+        process_name = ""
+        try:
+            task = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {owner_pid}", "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                errors="ignore",
+                timeout=3,
+                check=False,
+            )
+            first_line = next(
+                (
+                    line.strip()
+                    for line in str(task.stdout or "").splitlines()
+                    if line.strip() and not line.lstrip().startswith("INFO:")
+                ),
+                "",
+            )
+            if first_line.startswith('"'):
+                process_name = first_line.split('","', 1)[0].strip('"')
+        except Exception:
+            process_name = ""
+        return (
+            f"PID={owner_pid}，进程={process_name}"
+            if process_name
+            else f"PID={owner_pid}"
+        )
+
+    @staticmethod
     def _is_specific_bind_host(host: str) -> bool:
         text = str(host or "").strip()
         return bool(text and text not in {"0.0.0.0", "::", "127.0.0.1", "localhost"})
 
     def _candidate_ports(self) -> list[int]:
-        start = max(1, int(self.preferred_port or DEFAULT_PORT))
-        ports: list[int] = []
-        for offset in range(0, max(0, self._port_retry_count) + 1):
-            port = start + offset
-            if port <= 65535:
-                ports.append(port)
-        return ports
+        return [max(1, int(self.preferred_port or DEFAULT_PORT))]
 
     def _shutdown_existing_backend(self) -> bool:
         try:
             self._request_json("POST", "/api/backend/shutdown", timeout=2.0)
         except Exception as exc:
-            log_warning(f"关闭旧后端失败，将尝试继续复用: {exc}")
+            log_warning(f"关闭旧后端失败: {exc}")
             return False
         deadline = time.monotonic() + 8.0
         while time.monotonic() < deadline:
             if not self._health_ok():
                 return True
             time.sleep(0.25)
-        log_warning("旧后端关闭超时，将尝试继续复用。")
+        log_warning("旧后端关闭超时。")
         return False
 
     def get_qt_shell_bootstrap(self) -> dict[str, Any]:
@@ -389,15 +485,40 @@ class BackendProcessPortalController:
         return Path(sys.executable)
 
     def start(self) -> str:
-        if self._health_ok():
+        self.bound_port = self.preferred_port
+        configured_host = self.host
+        if (
+            self._is_specific_bind_host(configured_host)
+            and not self._host_is_local_interface(configured_host)
+        ):
+            log_warning(
+                f"配置的局域网监听 IP {configured_host} 不属于本机，"
+                f"已改用 {DEFAULT_HOST} 监听。签名链接仍按签名链接局域网地址生成。"
+            )
+            self.host = DEFAULT_HOST
+        existing_health = self._health_payload()
+        if existing_health and not self._health_matches_runtime(existing_health):
+            data = (
+                existing_health.get("data")
+                if isinstance(existing_health.get("data"), dict)
+                else {}
+            )
+            existing_pid = existing_health.get("pid") or data.get("pid") or "未知"
+            owner = self._port_owner_summary(self.preferred_port)
+            owner_text = owner or f"PID={existing_pid}"
+            raise RuntimeError(
+                f"固定端口 {self.preferred_port} 已被其他或旧版后端占用"
+                f"（{owner_text}）。请关闭旧实例后重试。"
+            )
+        if existing_health:
             if os.environ.get("CLIPFLOW_REUSE_EXISTING_BACKEND") != "1":
                 if self._shutdown_existing_backend():
                     time.sleep(0.2)
                 else:
-                    self._owns_process = False
-                    self._stop_event.clear()
-                    self._ensure_bridge_threads()
-                    return self.get_url()
+                    raise RuntimeError(
+                        f"固定端口 {self.preferred_port} 上的旧后端无法安全关闭，"
+                        "请关闭旧实例后重试。"
+                    )
             else:
                 self._owns_process = False
                 self._stop_event.clear()
@@ -437,10 +558,12 @@ class BackendProcessPortalController:
                     return self.get_url()
                 available, bind_error = self._port_is_available(self.host, self.bound_port)
                 if not available:
+                    owner = self._port_owner_summary(self.bound_port)
                     message = (
                         f"监听 {self.host}:{self.bound_port} 不可用"
                         + (f"({bind_error})" if bind_error else "")
-                        + "，尝试下一个地址或端口。"
+                        + (f"，{owner}" if owner else "")
+                        + "。固定端口不允许自动切换，请关闭占用该端口的旧实例。"
                     )
                     errors.append(message)
                     log_warning(message)

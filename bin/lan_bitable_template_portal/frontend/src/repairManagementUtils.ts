@@ -261,3 +261,24 @@ export function repairRecordTimeLabel(record: LooseDict): string {
   const time = fields["故障发生时间"] || fields["维修开始时间"] || fields["维修结束时间"] || record.last_modified_time;
   return repairDisplayTime(time) || "时间未填";
 }
+
+export function repairRecordHeaderTitle(record: LooseDict): string {
+  const fallbackTitle = repairFieldValueToText(record.title).trim() || "未命名维修项目";
+  const sourceEventId = String(record.source_event_id || "").trim();
+  if (!sourceEventId) return fallbackTitle;
+
+  const fields = record.display_fields || {};
+  const building = repairRecordBuildingLabel(record);
+  const faultTime = repairDisplayTime(fields["故障发生时间"] || record.fault_time);
+  const alarmDescription = repairFieldValueToText(
+    fields["故障维修原因"]
+    || fields["故障发生现象描述"]
+    || fallbackTitle,
+  ).trim();
+  const parts = [
+    building === "楼栋未填" ? "" : building,
+    faultTime,
+    alarmDescription,
+  ].filter(Boolean);
+  return parts.length >= 2 ? parts.join("—") : fallbackTitle;
+}

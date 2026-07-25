@@ -9,7 +9,7 @@
       :scope-options="scopeOptions"
       :loading="loading"
       :preview-loading="previewLoading"
-      @refresh="loadPage"
+      @refresh="loadPage(true)"
     />
 
     <div v-if="checking" class="notice-box" role="status" aria-live="polite">正在检查登录状态...</div>
@@ -551,6 +551,8 @@ let signatureSearchTimer: ReturnType<typeof setTimeout> | null = null;
 let externalSignatureSearchTimer: ReturnType<typeof setTimeout> | null = null;
 let signatureSearchRequestSeq = 0;
 let externalSignatureSearchRequestSeq = 0;
+let mopPageLoadAbortController: AbortController | null = null;
+let mopPageLoadVersion = 0;
 const temporarySignaturePolling = useGuardedPolling(() => loadTemporarySignatures({ silent: true }), 5000);
 const formalSignaturePolling = useGuardedPolling(() => refreshSelectedFormalSignatures(), 8000);
 
@@ -2589,7 +2591,7 @@ async function loadTemporarySignatures(options: { silent?: boolean } = {}): Prom
 }
 
 function temporarySignaturePollNeeded(): boolean {
-  return temporarySignatures.value.some((item) => (
+  return previewMode.value && temporarySignatures.value.some((item) => (
     String(item.source || "") !== "external"
     && !hiddenOtherSignatureKeys.value.includes(signaturePersonKey(item))
     && String(item.status || "") !== "failed"
@@ -2698,7 +2700,7 @@ function selectedPendingFormalSignaturePeople(): Dict[] {
 }
 
 function formalSignaturePollNeeded(): boolean {
-  return selectedPendingFormalSignaturePeople().length > 0;
+  return previewMode.value && selectedPendingFormalSignaturePeople().length > 0;
 }
 
 async function refreshSelectedFormalSignatures(): Promise<void> {
@@ -2882,13 +2884,26 @@ function preferredNoticeKeyFromRoute(): string {
   return "";
 }
 
-async function loadPage(): Promise<void> {
+async function loadPage(force = false): Promise<void> {
   if (!props.loggedIn) return;
+  const loadVersion = ++mopPageLoadVersion;
+  mopPageLoadAbortController?.abort();
+  const abortController = new AbortController();
+  mopPageLoadAbortController = abortController;
   loading.value = true;
   message.value = "";
   messageType.value = "";
   try {
-    const data = await fetchEngineerMopBootstrap(scope.value);
+    const requestedScope = scope.value;
+    const data = await fetchEngineerMopBootstrap(requestedScope, {
+      force,
+      signal: abortController.signal,
+    });
+    if (
+      abortController.signal.aborted
+      || loadVersion !== mopPageLoadVersion
+      || requestedScope !== scope.value
+    ) return;
     currentAuthUser.value = (data.auth?.user || data.user || {}) as Dict;
     notices.value = Array.isArray(data.notices) ? data.notices : [];
     mopCandidates.value = Array.isArray(data.mop_candidates) ? data.mop_candidates : [];
@@ -2908,10 +2923,14 @@ async function loadPage(): Promise<void> {
     void loadSignaturePeople({ silent: true });
     void loadTemporarySignatures({ silent: true });
   } catch (error) {
+    if (abortController.signal.aborted || loadVersion !== mopPageLoadVersion) return;
     message.value = error instanceof Error ? error.message : "加载工程师 MOP 数据失败";
     messageType.value = "failed";
   } finally {
-    loading.value = false;
+    if (mopPageLoadAbortController === abortController) {
+      mopPageLoadAbortController = null;
+    }
+    if (loadVersion === mopPageLoadVersion) loading.value = false;
   }
 }
 
@@ -3113,6 +3132,11 @@ watch(activeSheetName, () => {
   closeMopTransientUi();
 });
 
+watch(previewMode, () => {
+  updateTemporarySignaturePolling();
+  updateFormalSignaturePolling();
+});
+
 onMounted(() => {
   ensureSignatureCanvasObserver();
   window.addEventListener("scroll", scheduleActiveMopCellOverlayPosition, true);
@@ -3131,6 +3155,8 @@ onBeforeUnmount(() => {
   }
   temporarySignaturePolling.stop();
   formalSignaturePolling.stop();
+  mopPageLoadAbortController?.abort();
+  mopPageLoadAbortController = null;
   window.removeEventListener("scroll", scheduleActiveMopCellOverlayPosition, true);
   window.removeEventListener("resize", scheduleActiveMopCellOverlayPosition);
   if (activeMopCellOverlayFrame) {

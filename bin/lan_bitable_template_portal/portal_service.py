@@ -4960,11 +4960,6 @@ class MaintenancePortalService:
             "occurrence_time": cls._repair_management_plain_text(
                 fields.get("事件发生时间")
             ),
-            "sent_time": cls._repair_management_plain_text(
-                fields.get("事件进展响应时间")
-                or fields.get("创建时间")
-                or fields.get("事件发生时间")
-            ),
             "progress_update": cls._repair_management_plain_text(
                 fields.get("最后更新时间") or fields.get("进展更新时间") or ""
             ),
@@ -10099,10 +10094,9 @@ class MaintenancePortalService:
                 item["title"] = str(
                     event.get("alarm_desc") or event.get("title") or item.get("title") or ""
                 ).strip()
-                item["event_sent_time"] = str(
-                    event.get("sent_time")
-                    or event.get("occurrence_time")
-                    or item.get("event_sent_time")
+                item["fault_time"] = str(
+                    event.get("occurrence_time")
+                    or item.get("fault_time")
                     or ""
                 ).strip()
                 item["event_title"] = str(event.get("title") or "").strip()
@@ -10239,10 +10233,6 @@ class MaintenancePortalService:
                     "title": fallback_title,
                     "repair_title": self._repair_management_title(project),
                     "source_event_id": source_event_ids[0] if source_event_ids else "",
-                    "event_sent_time": self._repair_management_plain_text(
-                        project_fields.get("事件进展响应时间")
-                        or project_fields.get("故障发生时间")
-                    ),
                     "building": self._building_label_from_codes(building_codes),
                     "building_codes": building_codes,
                     "specialty": self._repair_management_plain_text(
@@ -11083,10 +11073,6 @@ class MaintenancePortalService:
             "source": source,
             "status": "已结束",
             "occurrence_time": occurrence_time,
-            "sent_time": first_value(
-                remote.get(EVENT_NOTICE_FIELDS["response_time"]),
-                occurrence_time,
-            ),
             "fault_reason": fault_reason,
             "fault_phenomenon": fault_phenomenon,
             "transfer_to_overhaul": True,
@@ -12064,7 +12050,7 @@ class MaintenancePortalService:
                 self._touch_state_cache_version()
 
     def refresh_repair_source(self) -> dict[str, Any]:
-        """Refresh only the repair source table and rewrite SQLite snapshots."""
+        """Refresh repair projects once and publish both workbench snapshots."""
         with self._refresh_lock:
             if not (
                 self._maintenance_loaded_once
@@ -12077,25 +12063,79 @@ class MaintenancePortalService:
                 str(item)
                 for item in (self._load_warnings or [])
                 if not str(item or "").startswith("检修源表同步失败")
+                and not str(item or "").startswith("维修跟进表同步失败")
             ]
             try:
-                self._load_repair_fields()
-                self._load_repair_records()
+                metas, _meta_by_name, project_records = (
+                    self._load_repair_management_project_records(
+                        force_refresh=True,
+                    )
+                )
+                if self._repair_snapshots_enabled:
+                    project_snapshot_meta = self._state_store.get_repair_snapshot_meta(
+                        REPAIR_SNAPSHOT_SOURCE_PROJECTS
+                    )
+                    if str(project_snapshot_meta.get("status") or "") == "failed":
+                        raise PortalError(
+                            str(project_snapshot_meta.get("error") or "")
+                            or "检修源表刷新失败，当前仍保留上次成功数据。"
+                        )
             except Exception as exc:
                 warning = self._source_sync_warning("检修源表", exc)
                 if warning not in warnings:
                     warnings.append(warning)
                 self._load_warnings = warnings
                 raise PortalError(warning) from exc
+
+            self._repair_field_meta_list = list(metas)
+            self._repair_field_meta_by_name = {
+                meta.field_name: meta for meta in self._repair_field_meta_list
+            }
+            self._repair_records = [
+                dict(item)
+                for item in project_records
+                if isinstance(item, dict)
+                and self._source_record_matches_month_window(item)
+            ]
+            self._repair_loaded_once = True
+
+            followup_count = 0
+            followup_warning = ""
+            try:
+                _followup_metas, _followup_meta_by_name, followups = (
+                    self._load_repair_followup_snapshot(force_refresh=True)
+                )
+                if self._repair_snapshots_enabled:
+                    followup_snapshot_meta = self._state_store.get_repair_snapshot_meta(
+                        REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS
+                    )
+                    if str(followup_snapshot_meta.get("status") or "") == "failed":
+                        followup_warning = self._source_sync_warning(
+                            "维修跟进表",
+                            str(followup_snapshot_meta.get("error") or "")
+                            or "刷新失败，当前仍显示上次成功数据。",
+                        )
+                followup_count = len(followups)
+            except Exception as exc:
+                followup_warning = self._source_sync_warning("维修跟进表", exc)
+            if followup_warning and followup_warning not in warnings:
+                warnings.append(followup_warning)
+
             now = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             self._last_loaded_at = now
             self._last_loaded_ts = time.time()
             self._load_warnings = warnings
             self._save_source_scope_snapshots()
+            self._invalidate_repair_management_target_cache()
+            self._invalidate_repair_management_status_cache()
+            self._invalidate_repair_followup_catalog_cache()
             self._touch_state_cache_version()
             return {
                 "repair_refreshed_at": now,
                 "repair_count": len(self._repair_records),
+                "repair_project_count": len(project_records),
+                "repair_followup_count": followup_count,
+                "repair_refresh_warning": followup_warning,
             }
 
     def refresh_change_source(self) -> dict[str, Any]:
@@ -12527,7 +12567,6 @@ class MaintenancePortalService:
                 "source": source,
                 "status": "已转检修",
                 "occurrence_time": occurrence_time,
-                "sent_time": occurrence_time,
                 "fault_reason": alarm_desc,
                 "fault_phenomenon": fault_phenomenon,
                 "transfer_to_overhaul": True,
