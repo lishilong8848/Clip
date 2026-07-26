@@ -33,6 +33,8 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
     (24, "repair_management_operations"),
     (25, "repair_data_snapshots"),
     (26, "persistent_portal_auth"),
+    (27, "repair_status_index_and_change_stream"),
+    (28, "repair_completed_at_and_business_audit"),
 )
 
 

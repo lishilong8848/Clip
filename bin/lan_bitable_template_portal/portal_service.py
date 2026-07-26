@@ -49,6 +49,11 @@ from .signature_crypto import (
     SignatureCryptoManager,
     encrypted_signature_file_name,
 )
+from .repair_status_index import (
+    build_repair_status_source_signature,
+    repair_completed_at_seconds,
+)
+from .operation_audit import finish_business_audit
 
 
 DEFAULT_APP_TOKEN = "HU38bc1vnamMK9sCeOgclUvXnFc"
@@ -442,11 +447,17 @@ REPAIR_SYNC_OPERATION_TYPES = (
     "followup_summary_sync",
     "summary_followup_copy_sync",
     "notice_summary_sync",
+    "event_transfer_sync",
+    "project_delete",
 )
 REPAIR_SYNC_MAX_ATTEMPTS = 12
 REPAIR_SYNC_FAST_RETRY_SECONDS = 60
 REPAIR_SYNC_SLOW_RETRY_SECONDS = 15 * 60
 REPAIR_SYNC_PROCESSING_LEASE_SECONDS = 5 * 60
+REPAIR_SYNC_COMPLETED_RETENTION_SECONDS = 30 * 24 * 60 * 60
+REPAIR_SYNC_FAILED_RETENTION_SECONDS = 90 * 24 * 60 * 60
+REPAIR_CHANGE_LOG_RETENTION_SECONDS = 7 * 24 * 60 * 60
+REPAIR_INTEGRITY_CACHE_SECONDS = 30
 REPAIR_FOLLOWUP_WRITABLE_FIELD_NAMES = {
     "是否本维修单第一次提交跟进记录",
     REPAIR_FOLLOWUP_DEVICE_NAME_FIELD_NAME,
@@ -1013,6 +1024,10 @@ class PortalError(RuntimeError):
     pass
 
 
+class PortalConflictError(PortalError):
+    status_code = 409
+
+
 @dataclass
 class FieldMeta:
     field_id: str
@@ -1055,6 +1070,10 @@ class MaintenancePortalService:
         self.app_token = str(app_token or DEFAULT_APP_TOKEN).strip()
         self.table_id = str(table_id or DEFAULT_TABLE_ID).strip()
         self._http_client = FeishuHttpClient()
+        # Event snapshots can scan many pages. Keep them independent from
+        # maintenance, repair, and CMDB reads because each client serializes
+        # requests while reusing its TLS connection.
+        self._event_http_client = FeishuHttpClient()
         # Keep interactive record mutations independent from long-running
         # snapshot/catalog reads. FeishuHttpClient serializes calls per client.
         self._write_http_client = FeishuHttpClient(retries=1)
@@ -1087,6 +1106,9 @@ class MaintenancePortalService:
         self._repair_snapshot_locks_guard = threading.RLock()
         self._repair_snapshot_locks: dict[str, threading.Lock] = {}
         self._repair_snapshot_refreshing: set[str] = set()
+        self._repair_project_status_index_lock = threading.RLock()
+        self._repair_integrity_cache_lock = threading.RLock()
+        self._repair_integrity_cache: dict[str, dict[str, Any]] = {}
         self._repair_followup_schema_lock = threading.RLock()
         self._repair_followup_schema_ready = False
         self._repair_management_progress_schema_ready = False
@@ -1254,6 +1276,151 @@ class MaintenancePortalService:
                 self._repair_management_record_locks[record_key] = lock
             return lock
 
+    @staticmethod
+    def _repair_record_version(record: dict[str, Any] | None) -> str:
+        if not isinstance(record, dict):
+            return ""
+        raw_fields = (
+            record.get("raw_fields")
+            if isinstance(record.get("raw_fields"), dict)
+            else record.get("display_fields")
+            if isinstance(record.get("display_fields"), dict)
+            else {}
+        )
+        seed = {
+            "record_id": str(record.get("record_id") or ""),
+            "last_modified_time": str(record.get("last_modified_time") or ""),
+            "fields": raw_fields,
+        }
+        encoded = json.dumps(
+            seed,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()[:32]
+
+    def _repair_snapshot_record_version(
+        self,
+        source_key: str,
+        record_id: str,
+    ) -> str:
+        snapshot = self._state_store.get_repair_snapshot(
+            source_key,
+            record_ids=[str(record_id or "").strip()],
+        )
+        record = next(
+            (
+                item
+                for item in (snapshot.get("records") or [])
+                if isinstance(item, dict)
+            ),
+            None,
+        )
+        return self._repair_record_version(record)
+
+    def _assert_repair_record_version(
+        self,
+        record: dict[str, Any] | None,
+        expected_version: str,
+    ) -> None:
+        expected = str(expected_version or "").strip()
+        if not expected:
+            return
+        current = self._repair_record_version(record)
+        if current and hmac.compare_digest(current, expected):
+            return
+        raise PortalConflictError(
+            "该记录已被其他用户修改，请重新读取最新内容后再保存。"
+        )
+
+    @staticmethod
+    def _repair_operation_payload_hash(payload: dict[str, Any]) -> str:
+        return hashlib.sha256(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+
+    def _begin_repair_mutation_operation(
+        self,
+        operation_id: str,
+        *,
+        operation_type: str,
+        scope: str,
+        summary_record_id: str,
+        payload: dict[str, Any],
+        busy_message: str,
+    ) -> tuple[str, dict[str, Any] | None]:
+        stable_operation_id = str(operation_id or "").strip()
+        if not stable_operation_id:
+            return "", None
+        try:
+            operation = self._state_store.begin_repair_management_operation(
+                stable_operation_id,
+                operation_type=operation_type,
+                scope=self._normalize_scope(scope),
+                payload_hash=self._repair_operation_payload_hash(payload),
+                summary_record_id=str(summary_record_id or "").strip(),
+                restart_failed=True,
+            )
+        except ValueError as exc:
+            raise PortalError(f"维修操作标识冲突：{exc}") from exc
+        if operation.get("created"):
+            return stable_operation_id, None
+        existing_result = (
+            dict(operation.get("result") or {})
+            if isinstance(operation.get("result"), dict)
+            else {}
+        )
+        status = str(operation.get("status") or "").strip()
+        if status == "completed":
+            existing_result["idempotent_replay"] = True
+            return stable_operation_id, existing_result
+        if status in {"started", "processing"}:
+            raise PortalError(busy_message)
+        if status in {"remote_written", "sync_pending"} and existing_result:
+            existing_result["idempotent_replay"] = True
+            return stable_operation_id, existing_result
+        raise PortalError("上一次维修保存结果未确认，请刷新后重试。")
+
+    def _finish_repair_mutation_operation(
+        self,
+        operation_id: str,
+        *,
+        result: dict[str, Any],
+        record_id: str,
+        summary_record_id: str,
+    ) -> None:
+        if not operation_id:
+            return
+        self._state_store.update_repair_management_operation(
+            operation_id,
+            status="completed",
+            record_id=str(record_id or "").strip(),
+            summary_record_id=str(summary_record_id or "").strip(),
+            result=dict(result or {}),
+            error="",
+        )
+
+    def _fail_repair_mutation_operation(
+        self,
+        operation_id: str,
+        exc: Exception,
+    ) -> None:
+        if not operation_id:
+            return
+        self._state_store.update_repair_management_operation(
+            operation_id,
+            status="failed",
+            error=str(exc),
+        )
+
     @classmethod
     def _repair_snapshot_record_payload(
         cls,
@@ -1400,6 +1567,253 @@ class MaintenancePortalService:
             records = normalized_records
         return metas, {meta.field_name: meta for meta in metas}, records
 
+    def _repair_project_status_source_signature(self) -> str:
+        source_state = []
+        for source_key in (
+            REPAIR_SNAPSHOT_SOURCE_PROJECTS,
+            REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS,
+        ):
+            meta = self._state_store.get_repair_snapshot_meta(source_key)
+            source_state.append(
+                {
+                    "source_key": source_key,
+                    "table_id": str(meta.get("table_id") or ""),
+                    "status": str(meta.get("status") or ""),
+                    "record_count": int(meta.get("record_count") or 0),
+                    "updated_at": float(meta.get("updated_at") or 0),
+                }
+            )
+        return build_repair_status_source_signature(source_state)
+
+    def _repair_project_status_index_row(
+        self,
+        record: dict[str, Any],
+        *,
+        meta_by_name: dict[str, FieldMeta],
+        followups: list[dict[str, Any]],
+        state_verified: bool,
+    ) -> dict[str, Any]:
+        record_payload = self._repair_management_record_payload(
+            record,
+            meta_by_name=meta_by_name,
+            authoritative_followup_count=len(followups),
+            authoritative_followups=followups,
+            followup_state_verified=state_verified,
+            summary_only=True,
+        )
+        latest_followup_sort_time = 0.0
+        valid_followups = [
+            item for item in followups if isinstance(item, dict)
+        ]
+        if valid_followups:
+            latest_key = max(
+                self._repair_followup_order_key(item)
+                for item in valid_followups
+            )
+            latest_followup_sort_time = max(
+                float(latest_key[0] or 0),
+                float(latest_key[1] or 0),
+            ) / 1000.0
+        is_completed = bool(record_payload.get("is_completed"))
+        return {
+            "record_id": str(record.get("record_id") or "").strip(),
+            "state": (
+                "completed"
+                if is_completed
+                else "active"
+            ),
+            "workflow": str(record_payload.get("workflow") or ""),
+            "followup_count": max(
+                0, int(record_payload.get("followup_count") or 0)
+            ),
+            "progress_percent": max(
+                0, min(100, int(record_payload.get("progress_percent") or 0))
+            ),
+            "latest_followup_time": str(
+                record_payload.get("latest_followup_time") or ""
+            ),
+            "latest_followup_sort_time": latest_followup_sort_time,
+            "completed_at": repair_completed_at_seconds(
+                record,
+                is_completed=is_completed,
+                parse_datetime_ms=self._repair_management_datetime_ms,
+            ),
+            "state_verified": bool(state_verified),
+        }
+
+    def _rebuild_repair_project_status_index(
+        self,
+        record_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> dict[str, Any]:
+        if not self._repair_snapshots_enabled:
+            return {"status": "disabled", "record_count": 0}
+        normalized_ids = list(
+            dict.fromkeys(
+                str(value or "").strip()
+                for value in (record_ids or [])
+                if str(value or "").strip()
+            )
+        )
+        with self._repair_project_status_index_lock:
+            project_snapshot = self._state_store.get_repair_snapshot(
+                REPAIR_SNAPSHOT_SOURCE_PROJECTS,
+                **({"record_ids": normalized_ids} if normalized_ids else {}),
+            )
+            _project_metas, project_meta_by_name, projects = (
+                self._repair_snapshot_from_local(project_snapshot)
+            )
+            project_ids = [
+                str(item.get("record_id") or "").strip()
+                for item in projects
+                if str(item.get("record_id") or "").strip()
+            ]
+            followup_meta = self._state_store.get_repair_snapshot_meta(
+                REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS
+            )
+            followup_state_verified = bool(followup_meta.get("exists"))
+            grouped_followups = (
+                self._state_store.repair_snapshot_records_by_parents(
+                    REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS,
+                    project_ids,
+                )
+                if project_ids and followup_state_verified
+                else {}
+            )
+            rows = [
+                self._repair_project_status_index_row(
+                    project,
+                    meta_by_name=project_meta_by_name,
+                    followups=list(
+                        grouped_followups.get(
+                            str(project.get("record_id") or "").strip()
+                        )
+                        or []
+                    ),
+                    state_verified=followup_state_verified,
+                )
+                for project in projects
+                if str(project.get("record_id") or "").strip()
+            ]
+            source_signature = self._repair_project_status_source_signature()
+            if normalized_ids:
+                found_ids = {
+                    str(item.get("record_id") or "").strip() for item in rows
+                }
+                for item in rows:
+                    self._state_store.upsert_repair_project_status_index(
+                        item,
+                        source_signature=source_signature,
+                    )
+                for missing_id in set(normalized_ids) - found_ids:
+                    self._state_store.delete_repair_project_status_index(
+                        missing_id,
+                        source_signature=source_signature,
+                    )
+            else:
+                self._state_store.replace_repair_project_status_index(
+                    rows,
+                    source_signature=source_signature,
+                )
+            return {
+                "status": "ready",
+                "record_count": len(rows),
+                "partial": bool(normalized_ids),
+                "state_verified": followup_state_verified,
+                "source_signature": source_signature,
+            }
+
+    def _ensure_repair_project_status_index(
+        self,
+        *,
+        force_refresh: bool = False,
+    ) -> dict[str, Any]:
+        if not self._repair_snapshots_enabled:
+            return {"status": "disabled", "record_count": 0}
+        followup_meta = self._state_store.get_repair_snapshot_meta(
+            REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS
+        )
+        if force_refresh or not followup_meta.get("exists"):
+            self._load_repair_followup_snapshot(force_refresh=force_refresh)
+        expected_signature = self._repair_project_status_source_signature()
+        project_meta = self._state_store.get_repair_snapshot_meta(
+            REPAIR_SNAPSHOT_SOURCE_PROJECTS
+        )
+        index_meta = self._state_store.repair_project_status_index_meta()
+        if (
+            str(index_meta.get("source_signature") or "")
+            == expected_signature
+            and int(index_meta.get("record_count") or 0)
+            == int(project_meta.get("record_count") or 0)
+        ):
+            return {"status": "ready", **index_meta}
+        return self._rebuild_repair_project_status_index()
+
+    def _invalidate_repair_integrity_cache(self) -> None:
+        with self._repair_integrity_cache_lock:
+            self._repair_integrity_cache.clear()
+
+    def _emit_repair_management_change(
+        self,
+        *,
+        entity_type: str,
+        action: str,
+        record_id: str = "",
+        summary_record_id: str = "",
+        scope_codes: list[str] | tuple[str, ...] | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> int:
+        self._invalidate_repair_integrity_cache()
+        return self._state_store.append_repair_management_change(
+            entity_type=entity_type,
+            action=action,
+            record_id=record_id,
+            summary_record_id=summary_record_id,
+            scope_codes=scope_codes,
+            payload=payload,
+        )
+
+    def _repair_management_local_project_patch(
+        self,
+        summary_record_id: str,
+    ) -> dict[str, Any]:
+        summary_id = str(summary_record_id or "").strip()
+        if not summary_id or not self._repair_snapshots_enabled:
+            return {}
+        project_snapshot = self._state_store.get_repair_snapshot(
+            REPAIR_SNAPSHOT_SOURCE_PROJECTS,
+            record_ids=[summary_id],
+        )
+        _metas, meta_by_name, projects = self._repair_snapshot_from_local(
+            project_snapshot
+        )
+        project = next(
+            (
+                item
+                for item in projects
+                if str(item.get("record_id") or "").strip() == summary_id
+            ),
+            None,
+        )
+        if project is None:
+            return {}
+        grouped_followups = self._state_store.repair_snapshot_records_by_parents(
+            REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS,
+            [summary_id],
+        )
+        followups = [
+            item
+            for item in (grouped_followups.get(summary_id) or [])
+            if isinstance(item, dict)
+        ]
+        return self._repair_management_record_payload(
+            project,
+            meta_by_name=meta_by_name,
+            authoritative_followup_count=len(followups),
+            authoritative_followups=followups,
+            followup_state_verified=True,
+            summary_only=True,
+        )
+
     @staticmethod
     def _repair_snapshot_requires_workflow_refresh(
         snapshot: dict[str, Any],
@@ -1496,6 +1910,25 @@ class MaintenancePortalService:
                         ),
                     },
                 )
+                if source_key in {
+                    REPAIR_SNAPSHOT_SOURCE_PROJECTS,
+                    REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS,
+                }:
+                    with suppress(Exception):
+                        self._rebuild_repair_project_status_index()
+                    with suppress(Exception):
+                        self._emit_repair_management_change(
+                            entity_type=(
+                                "project"
+                                if source_key == REPAIR_SNAPSHOT_SOURCE_PROJECTS
+                                else "followup"
+                            ),
+                            action="refresh",
+                            payload={
+                                "source_key": source_key,
+                                "record_count": len(records),
+                            },
+                        )
                 return metas, {meta.field_name: meta for meta in metas}, records
             except Exception as exc:
                 self._state_store.mark_repair_snapshot_failed(source_key, str(exc))
@@ -1662,6 +2095,16 @@ class MaintenancePortalService:
             ),
             {},
         )
+        record_existed = bool(existing)
+        previous_parent = ""
+        if source_key == REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS:
+            previous_envelope = self._repair_snapshot_record_payload(
+                existing,
+                parent_field_name=REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME,
+            )
+            previous_parent = str(
+                previous_envelope.get("parent_record_id") or ""
+            ).strip()
         existing["record_id"] = normalized_record_id
         display_fields = (
             dict(existing.get("display_fields") or {})
@@ -1711,11 +2154,147 @@ class MaintenancePortalService:
             search_text=str(envelope.get("search_text") or ""),
             sort_time=float(envelope.get("sort_time") or 0),
         )
+        if source_key in {
+            REPAIR_SNAPSHOT_SOURCE_PROJECTS,
+            REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS,
+        }:
+            summary_record_id = (
+                normalized_record_id
+                if source_key == REPAIR_SNAPSHOT_SOURCE_PROJECTS
+                else str(
+                    effective_parent
+                    or envelope.get("parent_record_id")
+                    or previous_parent
+                    or ""
+                ).strip()
+            )
+            affected_summary_ids = list(
+                dict.fromkeys(
+                    value
+                    for value in (
+                        summary_record_id,
+                        previous_parent
+                        if source_key == REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS
+                        else "",
+                    )
+                    if value
+                )
+            )
+            with suppress(Exception):
+                if affected_summary_ids:
+                    self._rebuild_repair_project_status_index(
+                        affected_summary_ids
+                    )
+            scope_codes = list(envelope.get("scope_codes") or [])
+            if not scope_codes and summary_record_id:
+                summary_snapshot = self._state_store.get_repair_snapshot(
+                    REPAIR_SNAPSHOT_SOURCE_PROJECTS,
+                    record_ids=[summary_record_id],
+                )
+                summary_record = next(
+                    (
+                        item
+                        for item in (summary_snapshot.get("records") or [])
+                        if isinstance(item, dict)
+                    ),
+                    {},
+                )
+                if summary_record:
+                    scope_codes = list(
+                        self._repair_snapshot_record_payload(
+                            summary_record
+                        ).get("scope_codes")
+                        or []
+                    )
+            with suppress(Exception):
+                change_payload: dict[str, Any] = {
+                    "changed_fields": sorted(str(name) for name in fields),
+                    "created": not record_existed,
+                }
+                project_patch = self._repair_management_local_project_patch(
+                    summary_record_id
+                )
+                if project_patch:
+                    change_payload["record_patch"] = project_patch
+                self._emit_repair_management_change(
+                    entity_type=(
+                        "project"
+                        if source_key == REPAIR_SNAPSHOT_SOURCE_PROJECTS
+                        else "followup"
+                    ),
+                    action="upsert",
+                    record_id=normalized_record_id,
+                    summary_record_id=summary_record_id,
+                    scope_codes=scope_codes,
+                    payload=change_payload,
+                )
 
     def _delete_repair_snapshot_item(self, source_key: str, record_id: str) -> None:
         if not self._repair_snapshots_enabled:
             return
-        self._state_store.delete_repair_snapshot_record(source_key, record_id)
+        normalized_record_id = str(record_id or "").strip()
+        existing_snapshot = self._state_store.get_repair_snapshot(
+            source_key,
+            record_ids=[normalized_record_id],
+        )
+        existing_record = next(
+            (
+                item
+                for item in (existing_snapshot.get("records") or [])
+                if isinstance(item, dict)
+            ),
+            {},
+        )
+        existing_envelope = self._repair_snapshot_record_payload(
+            existing_record,
+            parent_field_name=(
+                REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME
+                if source_key == REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS
+                else ""
+            ),
+        )
+        summary_record_id = (
+            normalized_record_id
+            if source_key == REPAIR_SNAPSHOT_SOURCE_PROJECTS
+            else str(existing_envelope.get("parent_record_id") or "").strip()
+        )
+        deleted = self._state_store.delete_repair_snapshot_record(
+            source_key,
+            normalized_record_id,
+        )
+        if not deleted:
+            return
+        with suppress(Exception):
+            if source_key == REPAIR_SNAPSHOT_SOURCE_PROJECTS:
+                self._state_store.delete_repair_project_status_index(
+                    normalized_record_id,
+                    source_signature=self._repair_project_status_source_signature(),
+                )
+            elif summary_record_id:
+                self._rebuild_repair_project_status_index([summary_record_id])
+        with suppress(Exception):
+            change_payload: dict[str, Any] = {}
+            if (
+                source_key == REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS
+                and summary_record_id
+            ):
+                project_patch = self._repair_management_local_project_patch(
+                    summary_record_id
+                )
+                if project_patch:
+                    change_payload["record_patch"] = project_patch
+            self._emit_repair_management_change(
+                entity_type=(
+                    "project"
+                    if source_key == REPAIR_SNAPSHOT_SOURCE_PROJECTS
+                    else "followup"
+                ),
+                action="delete",
+                record_id=normalized_record_id,
+                summary_record_id=summary_record_id,
+                scope_codes=list(existing_envelope.get("scope_codes") or []),
+                payload=change_payload,
+            )
 
     def start_repair_snapshot_warmup_async(self, *, delay_seconds: float = 8.0) -> None:
         if not self._repair_snapshots_enabled:
@@ -1845,6 +2424,7 @@ class MaintenancePortalService:
         params: dict[str, Any] | None = None,
         app_token: str | None = None,
         table_id: str | None = None,
+        http_client: FeishuHttpClient | None = None,
     ) -> dict[str, Any]:
         app_token = str(app_token or self.app_token or DEFAULT_APP_TOKEN).strip()
         table_id = str(table_id or self.table_id or DEFAULT_TABLE_ID).strip()
@@ -1862,6 +2442,7 @@ class MaintenancePortalService:
                 context="飞书接口",
                 headers=self._auth_headers(),
                 params=params or {},
+                http_client=http_client,
             )
 
         payload: dict[str, Any] = {}
@@ -2995,6 +3576,7 @@ class MaintenancePortalService:
         *,
         app_token: str | None = None,
         table_id: str | None = None,
+        http_client: FeishuHttpClient | None = None,
     ) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         page_token = ""
@@ -3002,12 +3584,14 @@ class MaintenancePortalService:
             params: dict[str, Any] = {"page_size": 500}
             if page_token:
                 params["page_token"] = page_token
-            payload = self._request_json(
-                "fields",
-                params=params,
-                app_token=app_token,
-                table_id=table_id,
-            )
+            request_kwargs: dict[str, Any] = {
+                "params": params,
+                "app_token": app_token,
+                "table_id": table_id,
+            }
+            if http_client is not None:
+                request_kwargs["http_client"] = http_client
+            payload = self._request_json("fields", **request_kwargs)
             data = payload.get("data", {})
             items.extend(
                 item for item in (data.get("items") or []) if isinstance(item, dict)
@@ -3490,6 +4074,7 @@ class MaintenancePortalService:
         work_type: str,
         notice_type: str,
         view_id: str = "",
+        http_client: FeishuHttpClient | None = None,
     ) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
         page_token = ""
@@ -3499,12 +4084,14 @@ class MaintenancePortalService:
                 params["view_id"] = view_id
             if page_token:
                 params["page_token"] = page_token
-            payload = self._request_json(
-                "records",
-                params=params,
-                app_token=app_token,
-                table_id=table_id,
-            )
+            request_kwargs: dict[str, Any] = {
+                "params": params,
+                "app_token": app_token,
+                "table_id": table_id,
+            }
+            if http_client is not None:
+                request_kwargs["http_client"] = http_client
+            payload = self._request_json("records", **request_kwargs)
             data = payload.get("data", {})
             for item in data.get("items") or []:
                 records.append(
@@ -5948,17 +6535,16 @@ class MaintenancePortalService:
         if not summary_id:
             raise PortalError("读取维修跟进记录缺少维修项目记录。")
         if self._repair_snapshots_enabled:
-            metas, meta_by_name, records = self._load_repair_followup_snapshot(
+            metas, meta_by_name, grouped = self._load_repair_followups_for_summaries(
+                [summary_id],
                 force_refresh=force_refresh
             )
             return (
                 metas,
                 meta_by_name,
-                [
-                    record
-                    for record in records
-                    if summary_id in self._repair_followup_parent_ids(record)
-                ][: max(1, min(int(limit or 200), 500))],
+                list(grouped.get(summary_id) or [])[
+                    : max(1, min(int(limit or 200), 500))
+                ],
             )
         metas, meta_by_name = self._ensure_repair_followup_parent_id_field()
         records = self._search_table_records(
@@ -6009,6 +6595,95 @@ class MaintenancePortalService:
             parent_field_name=REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME,
             force_refresh=force_refresh,
         )
+
+    def _repair_followup_snapshot_schema(
+        self,
+        *,
+        force_refresh: bool = False,
+    ) -> tuple[list[FieldMeta], dict[str, FieldMeta]] | None:
+        if not self._repair_snapshots_enabled:
+            return None
+        snapshot_meta = self._state_store.get_repair_snapshot_meta(
+            REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS
+        )
+        source_matches = (
+            str(snapshot_meta.get("app_token") or "").strip()
+            == REPAIR_SOURCE_APP_TOKEN
+            and str(snapshot_meta.get("table_id") or "").strip()
+            == REPAIR_FOLLOWUP_TABLE_ID
+        )
+        if force_refresh or not snapshot_meta.get("exists") or not source_matches:
+            metas, _meta_by_name, _records = self._load_repair_followup_snapshot(
+                force_refresh=True,
+            )
+            return metas, {meta.field_name: meta for meta in metas}
+
+        field_payloads = [
+            item
+            for item in (snapshot_meta.get("fields") or [])
+            if isinstance(item, dict)
+        ]
+        metas = [self._repair_snapshot_field_meta(item) for item in field_payloads]
+        meta_by_name = {meta.field_name: meta for meta in metas}
+        now = time.time()
+        refreshed_at = float(snapshot_meta.get("refreshed_at") or 0)
+        ttl = float(
+            REPAIR_SNAPSHOT_TTL_SECONDS.get(REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS)
+            or 120
+        )
+        stale = refreshed_at <= 0 or now - refreshed_at > ttl
+        in_failure_backoff = (
+            str(snapshot_meta.get("status") or "") == "failed"
+            and now - float(snapshot_meta.get("updated_at") or 0)
+            < REPAIR_SNAPSHOT_FAILURE_BACKOFF_SECONDS
+        )
+        if stale and not in_failure_backoff:
+            self._schedule_repair_snapshot_refresh(
+                source_key=REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS,
+                app_token=REPAIR_SOURCE_APP_TOKEN,
+                table_id=REPAIR_FOLLOWUP_TABLE_ID,
+                loader=self._load_repair_followup_records_remote,
+                parent_field_name=REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME,
+            )
+        return metas, meta_by_name
+
+    def _load_repair_followups_for_summaries(
+        self,
+        summary_record_ids: list[str] | tuple[str, ...],
+        *,
+        force_refresh: bool = False,
+    ) -> tuple[
+        list[FieldMeta],
+        dict[str, FieldMeta],
+        dict[str, list[dict[str, Any]]],
+    ]:
+        summary_ids = list(
+            dict.fromkeys(
+                str(value or "").strip()
+                for value in summary_record_ids
+                if str(value or "").strip()
+            )
+        )
+        if not summary_ids:
+            return [], {}, {}
+        snapshot_schema = self._repair_followup_snapshot_schema(
+            force_refresh=force_refresh,
+        )
+        if snapshot_schema is None:
+            metas, meta_by_name, records = self._load_repair_followup_snapshot(
+                force_refresh=force_refresh,
+            )
+            return (
+                metas,
+                meta_by_name,
+                self._repair_followups_by_summary(records, summary_ids),
+            )
+        metas, meta_by_name = snapshot_schema
+        grouped = self._state_store.repair_snapshot_records_by_parents(
+            REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS,
+            summary_ids,
+        )
+        return metas, meta_by_name, grouped
 
     def _schedule_repair_followup_snapshot_refresh_if_stale(self) -> None:
         if not self._repair_snapshots_enabled:
@@ -6250,6 +6925,7 @@ class MaintenancePortalService:
             selected.append(
                 {
                     "record_id": str(record.get("record_id") or ""),
+                    "record_version": self._repair_record_version(record),
                     "title": str(
                         self._repair_management_plain_text(fields.get("维修简述"))
                         or self._repair_management_plain_text(fields.get("维修进展描述"))
@@ -6491,6 +7167,23 @@ class MaintenancePortalService:
         }
 
     def bind_repair_followup_records(
+        self,
+        *,
+        summary_record_id: str,
+        followup_record_ids: list[str] | tuple[str, ...],
+        scope: str = "ALL",
+    ) -> dict[str, Any]:
+        summary_id = str(summary_record_id or "").strip()
+        if not summary_id:
+            raise PortalError("绑定跟进记录缺少维修项目 ID。")
+        with self._repair_management_record_lock(summary_id):
+            return self._bind_repair_followup_records_unlocked(
+                summary_record_id=summary_id,
+                followup_record_ids=followup_record_ids,
+                scope=scope,
+            )
+
+    def _bind_repair_followup_records_unlocked(
         self,
         *,
         summary_record_id: str,
@@ -7332,6 +8025,27 @@ class MaintenancePortalService:
         scope: str = "ALL",
     ) -> dict[str, Any]:
         summary_id = str(summary_record_id or "").strip()
+        if not summary_id:
+            raise PortalError("缺少维修项目记录 ID。")
+        with self._repair_management_record_lock(summary_id):
+            return self._create_repair_followup_record_unlocked(
+                summary_record_id=summary_id,
+                fields=fields,
+                cmdb_record_ids=cmdb_record_ids,
+                operation_id=operation_id,
+                scope=scope,
+            )
+
+    def _create_repair_followup_record_unlocked(
+        self,
+        *,
+        summary_record_id: str,
+        fields: dict[str, Any],
+        cmdb_record_ids: list[str] | tuple[str, ...] | None = None,
+        operation_id: str = "",
+        scope: str = "ALL",
+    ) -> dict[str, Any]:
+        summary_id = str(summary_record_id or "").strip()
         summary = self._ensure_repair_management_record_in_scope(summary_id, scope)
         existing = self.get_repair_followup_records(
             summary_record_id=summary_id,
@@ -7505,6 +8219,10 @@ class MaintenancePortalService:
             "record_id": record_id,
             "summary_record_id": summary_id,
             "fields": prepared,
+            "record_version": self._repair_snapshot_record_version(
+                REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS,
+                record_id,
+            ),
             "warnings": list(dict.fromkeys([*warnings, *create_warnings])),
             "summary_sync_pending": False,
         }
@@ -7582,9 +8300,76 @@ class MaintenancePortalService:
         summary_record_id: str,
         fields: dict[str, Any],
         cmdb_record_ids: list[str] | tuple[str, ...] | None = None,
+        operation_id: str = "",
+        expected_version: str = "",
         scope: str = "ALL",
     ) -> dict[str, Any]:
         summary_id = str(summary_record_id or "").strip()
+        if not summary_id:
+            raise PortalError("缺少维修项目记录 ID。")
+        with self._repair_management_record_lock(summary_id):
+            stable_operation_id, replay = self._begin_repair_mutation_operation(
+                operation_id,
+                operation_type="followup_update",
+                scope=scope,
+                summary_record_id=summary_id,
+                payload={
+                    "record_id": str(record_id or "").strip(),
+                    "summary_record_id": summary_id,
+                    "scope": self._normalize_scope(scope),
+                    "fields": dict(fields or {}),
+                    "cmdb_record_ids": list(cmdb_record_ids or []),
+                    "expected_version": str(expected_version or "").strip(),
+                },
+                busy_message="该维修跟进正在保存，请稍后刷新，勿重复提交。",
+            )
+            if replay is not None:
+                return replay
+            try:
+                result = self._update_repair_followup_record_unlocked(
+                    record_id,
+                    summary_record_id=summary_id,
+                    fields=fields,
+                    cmdb_record_ids=cmdb_record_ids,
+                    expected_version=expected_version,
+                    scope=scope,
+                )
+            except Exception as exc:
+                self._fail_repair_mutation_operation(stable_operation_id, exc)
+                raise
+            self._finish_repair_mutation_operation(
+                stable_operation_id,
+                result=result,
+                record_id=str(record_id or "").strip(),
+                summary_record_id=summary_id,
+            )
+            return result
+
+    def _update_repair_followup_record_unlocked(
+        self,
+        record_id: str,
+        *,
+        summary_record_id: str,
+        fields: dict[str, Any],
+        cmdb_record_ids: list[str] | tuple[str, ...] | None = None,
+        expected_version: str = "",
+        scope: str = "ALL",
+    ) -> dict[str, Any]:
+        summary_id = str(summary_record_id or "").strip()
+        local_snapshot = self._state_store.get_repair_snapshot(
+            REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS,
+            record_ids=[record_id],
+        )
+        local_record = next(
+            (
+                item
+                for item in (local_snapshot.get("records") or [])
+                if isinstance(item, dict)
+            ),
+            None,
+        )
+        if local_record is not None:
+            self._assert_repair_record_version(local_record, expected_version)
         _metas, meta_by_name = self._ensure_repair_followup_parent_id_field()
         records = self._load_table_records_by_ids(
             app_token=REPAIR_SOURCE_APP_TOKEN,
@@ -7597,6 +8382,8 @@ class MaintenancePortalService:
         if not records:
             raise PortalError("该维修跟进记录已不存在，请刷新后重试。")
         existing = records[0]
+        if local_record is None:
+            self._assert_repair_record_version(existing, expected_version)
         if summary_id not in self._repair_followup_parent_ids(existing):
             raise PortalError("该维修跟进记录不属于当前检修单。")
         summary = self._ensure_repair_management_record_in_scope(summary_id, scope)
@@ -7659,6 +8446,10 @@ class MaintenancePortalService:
             "record_id": str(record_id or "").strip(),
             "summary_record_id": summary_id,
             "fields": prepared,
+            "record_version": self._repair_snapshot_record_version(
+                REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS,
+                record_id,
+            ),
             "warnings": list(dict.fromkeys([*warnings, *sync_warnings])),
             "summary_sync_pending": summary_sync_pending,
         }
@@ -7668,9 +8459,73 @@ class MaintenancePortalService:
         record_id: str,
         *,
         summary_record_id: str,
+        operation_id: str = "",
+        expected_version: str = "",
         scope: str = "ALL",
     ) -> dict[str, Any]:
         summary_id = str(summary_record_id or "").strip()
+        if not summary_id:
+            raise PortalError("缺少维修项目记录 ID。")
+        with self._repair_management_record_lock(summary_id):
+            stable_operation_id, replay = self._begin_repair_mutation_operation(
+                operation_id,
+                operation_type="followup_delete",
+                scope=scope,
+                summary_record_id=summary_id,
+                payload={
+                    "record_id": str(record_id or "").strip(),
+                    "summary_record_id": summary_id,
+                    "scope": self._normalize_scope(scope),
+                    "expected_version": str(expected_version or "").strip(),
+                },
+                busy_message="该维修跟进正在删除，请稍后刷新，勿重复提交。",
+            )
+            if replay is not None:
+                return replay
+            try:
+                result = self._delete_repair_followup_record_unlocked(
+                    record_id,
+                    summary_record_id=summary_id,
+                    expected_version=expected_version,
+                    scope=scope,
+                )
+            except Exception as exc:
+                self._fail_repair_mutation_operation(stable_operation_id, exc)
+                raise
+            self._finish_repair_mutation_operation(
+                stable_operation_id,
+                result=result,
+                record_id=str(record_id or "").strip(),
+                summary_record_id=summary_id,
+            )
+            return result
+
+    def _delete_repair_followup_record_unlocked(
+        self,
+        record_id: str,
+        *,
+        summary_record_id: str,
+        expected_version: str = "",
+        scope: str = "ALL",
+    ) -> dict[str, Any]:
+        summary_id = str(summary_record_id or "").strip()
+        normalized_record_id = str(record_id or "").strip()
+        if not normalized_record_id:
+            raise PortalError("缺少维修跟进记录 ID。")
+        local_snapshot = self._state_store.get_repair_snapshot(
+            REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS,
+            record_ids=[normalized_record_id],
+        )
+        local_record = next(
+            (
+                item
+                for item in (local_snapshot.get("records") or [])
+                if isinstance(item, dict)
+            ),
+            None,
+        )
+        if local_record is not None:
+            self._assert_repair_record_version(local_record, expected_version)
         _metas, meta_by_name = self._ensure_repair_followup_parent_id_field()
         records = self._load_table_records_by_ids(
             app_token=REPAIR_SOURCE_APP_TOKEN,
@@ -7678,21 +8533,23 @@ class MaintenancePortalService:
             meta_by_name=meta_by_name,
             work_type=WORK_TYPE_REPAIR,
             notice_type=NOTICE_TYPE_REPAIR,
-            record_ids=[record_id],
+            record_ids=[normalized_record_id],
         )
         if not records:
             raise PortalError("该维修跟进记录已不存在，请刷新后重试。")
+        if local_record is None:
+            self._assert_repair_record_version(records[0], expected_version)
         if summary_id not in self._repair_followup_parent_ids(records[0]):
             raise PortalError("该维修跟进记录不属于当前检修单。")
         self._ensure_repair_management_record_in_scope(summary_id, scope)
         self._delete_record_fields(
             app_token=REPAIR_SOURCE_APP_TOKEN,
             table_id=REPAIR_FOLLOWUP_TABLE_ID,
-            record_id=record_id,
+            record_id=normalized_record_id,
         )
         self._delete_repair_snapshot_item(
             REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS,
-            record_id,
+            normalized_record_id,
         )
         summary_sync_pending = False
         try:
@@ -7710,7 +8567,7 @@ class MaintenancePortalService:
                 error=str(exc),
             )
         return {
-            "record_id": str(record_id or "").strip(),
+            "record_id": normalized_record_id,
             "summary_record_id": summary_id,
             "deleted": True,
             "warnings": warnings,
@@ -8201,6 +9058,48 @@ class MaintenancePortalService:
             if self._repair_sync_warnings_require_retry(warnings):
                 raise PortalError("；".join(warnings))
             return warnings
+        if operation_type == "event_transfer_sync":
+            event_record_id = str(
+                task_payload.get("event_record_id") or ""
+            ).strip()
+            if not event_record_id.startswith("rec"):
+                raise PortalError("事件转检修补写任务缺少有效的事件记录 ID。")
+            self.mark_event_transferred_to_repair(
+                record_id=event_record_id,
+                month=str(task_payload.get("month") or ""),
+                refresh_snapshot=False,
+            )
+            project_operation_id = str(
+                task_payload.get("project_create_operation_id") or ""
+            ).strip()
+            if project_operation_id:
+                project_operation = (
+                    self._state_store.get_repair_management_operation(
+                        project_operation_id
+                    )
+                    or {}
+                )
+                project_result = (
+                    dict(project_operation.get("result") or {})
+                    if isinstance(project_operation.get("result"), dict)
+                    else {}
+                )
+                project_result["event_transfer_sync_pending"] = False
+                project_result["warnings"] = [
+                    warning
+                    for warning in (project_result.get("warnings") or [])
+                    if "事件转检修状态暂未同步" not in str(warning)
+                ]
+                self._state_store.update_repair_management_operation(
+                    project_operation_id,
+                    status="completed",
+                    result=project_result,
+                    error="",
+                )
+            return []
+        if operation_type == "project_delete":
+            self._execute_repair_project_delete_task(operation)
+            return []
         raise PortalError(f"未知维修同步任务：{operation_type}")
 
     def process_due_repair_sync_tasks(self, *, limit: int = 20) -> dict[str, int]:
@@ -8252,12 +9151,16 @@ class MaintenancePortalService:
             )
             stats["checked"] += 1
             try:
-                warnings = self._execute_repair_sync_task(
-                    {
-                        **operation,
-                        "result": processing_result,
-                    }
-                )
+                summary_id = str(
+                    operation.get("summary_record_id") or ""
+                ).strip()
+                with self._repair_management_record_lock(summary_id):
+                    warnings = self._execute_repair_sync_task(
+                        {
+                            **operation,
+                            "result": processing_result,
+                        }
+                    )
             except Exception as exc:
                 latest = self._state_store.get_repair_management_operation(
                     operation_id
@@ -8277,7 +9180,8 @@ class MaintenancePortalService:
                         operation_id,
                         status="failed",
                         result={
-                            **processing_result,
+                            **latest_result,
+                            "attempts": attempts,
                             "finished_at": time.time(),
                         },
                         error=str(exc),
@@ -8293,7 +9197,8 @@ class MaintenancePortalService:
                         operation_id,
                         status="sync_pending",
                         result={
-                            **processing_result,
+                            **latest_result,
+                            "attempts": attempts,
                             "available_at": time.time() + delay,
                         },
                         error=str(exc),
@@ -8323,7 +9228,8 @@ class MaintenancePortalService:
                 operation_id,
                 status="completed",
                 result={
-                    **processing_result,
+                    **latest_result,
+                    "attempts": attempts,
                     "warnings": list(dict.fromkeys(warnings)),
                     "finished_at": time.time(),
                     "available_at": 0,
@@ -8397,6 +9303,726 @@ class MaintenancePortalService:
             self._process_repair_sync_tasks_async()
         return resumable_count
 
+    def get_repair_management_sync_status(
+        self,
+        summary_record_id: str,
+        *,
+        scope: str = "ALL",
+    ) -> dict[str, Any]:
+        summary_id = str(summary_record_id or "").strip()
+        if not summary_id:
+            raise PortalError("缺少维修项目记录 ID。")
+        self._ensure_repair_management_record_in_scope(summary_id, scope)
+        operations = self._state_store.list_repair_management_operations(
+            operation_types=REPAIR_SYNC_OPERATION_TYPES,
+            statuses=(
+                "started",
+                "remote_written",
+                "sync_pending",
+                "processing",
+                "completed",
+                "failed",
+            ),
+            limit=500,
+        )
+        type_labels = {
+            "followup_summary_sync": "跟进汇总",
+            "summary_followup_copy_sync": "维修单字段同步",
+            "notice_summary_sync": "检修通告同步",
+            "event_transfer_sync": "事件转检修同步",
+            "project_delete": "删除同步",
+        }
+        selected = [
+            operation
+            for operation in operations
+            if str(operation.get("summary_record_id") or "").strip() == summary_id
+        ]
+        selected.sort(
+            key=lambda item: float(item.get("updated_at") or 0),
+            reverse=True,
+        )
+        visible = [
+            {
+                "operation_id": str(item.get("operation_id") or ""),
+                "type": str(item.get("operation_type") or ""),
+                "label": type_labels.get(
+                    str(item.get("operation_type") or ""),
+                    "后台同步",
+                ),
+                "status": str(item.get("status") or ""),
+                "error": str(item.get("last_error") or "")[:500],
+                "updated_at": float(item.get("updated_at") or 0),
+                "attempts": int(
+                    (item.get("result") or {}).get("attempts") or 0
+                )
+                if isinstance(item.get("result"), dict)
+                else 0,
+            }
+            for item in selected
+        ]
+        failed = [item for item in visible if item["status"] == "failed"]
+        pending = [
+            item
+            for item in visible
+            if item["status"]
+            in {"started", "remote_written", "sync_pending", "processing"}
+        ]
+        if failed:
+            status = "failed"
+        elif pending:
+            status = "pending"
+        elif visible:
+            status = "completed"
+        else:
+            status = "idle"
+        return {
+            "summary_record_id": summary_id,
+            "status": status,
+            "pending_count": len(pending),
+            "failed_count": len(failed),
+            "operations": [*failed, *pending][:20],
+        }
+
+    def retry_repair_management_sync(
+        self,
+        summary_record_id: str,
+        *,
+        operation_id: str = "",
+        scope: str = "ALL",
+    ) -> dict[str, Any]:
+        summary_id = str(summary_record_id or "").strip()
+        if not summary_id:
+            raise PortalError("缺少维修项目记录 ID。")
+        with self._repair_management_record_lock(summary_id):
+            self._ensure_repair_management_record_in_scope(summary_id, scope)
+            requested_id = str(operation_id or "").strip()
+            operations = self._state_store.list_repair_management_operations(
+                operation_types=REPAIR_SYNC_OPERATION_TYPES,
+                statuses=("failed", "sync_pending"),
+                limit=500,
+            )
+            candidates = [
+                item
+                for item in operations
+                if str(item.get("summary_record_id") or "").strip() == summary_id
+                and str(item.get("operation_type") or "") != "project_delete"
+                and (
+                    not requested_id
+                    or str(item.get("operation_id") or "") == requested_id
+                )
+            ]
+            if not candidates:
+                raise PortalError("当前维修单没有可重试的同步任务。")
+            now = time.time()
+            retried = 0
+            for item in candidates:
+                item_id = str(item.get("operation_id") or "").strip()
+                if not item_id:
+                    continue
+                result = (
+                    dict(item.get("result") or {})
+                    if isinstance(item.get("result"), dict)
+                    else {}
+                )
+                result.update(
+                    {
+                        "attempts": 0,
+                        "available_at": now,
+                        "scheduled_at": now,
+                        "manual_retry_at": now,
+                    }
+                )
+                if self._state_store.update_repair_management_operation(
+                    item_id,
+                    status="sync_pending",
+                    result=result,
+                    error="",
+                ):
+                    retried += 1
+            if not retried:
+                raise PortalError("同步任务未能重新入队，请稍后再试。")
+            self._process_repair_sync_tasks_async()
+        return {
+            "summary_record_id": summary_id,
+            "retried": retried,
+            "status": "pending",
+        }
+
+    def _repair_operation_visible_in_scope(
+        self,
+        operation: dict[str, Any],
+        scope: str,
+    ) -> bool:
+        normalized_scope = self._normalize_scope(scope)
+        operation_scope = self._normalize_scope(
+            str(operation.get("scope") or "ALL")
+        )
+        if normalized_scope == "ALL":
+            return True
+        if operation_scope == "ALL":
+            return False
+        return normalized_scope == operation_scope
+
+    @staticmethod
+    def _repair_sync_operation_visible_payload(
+        item: dict[str, Any],
+    ) -> dict[str, Any]:
+        type_labels = {
+            "followup_summary_sync": "跟进汇总",
+            "summary_followup_copy_sync": "维修单字段同步",
+            "notice_summary_sync": "检修通告同步",
+            "event_transfer_sync": "事件转检修同步",
+            "project_delete": "删除同步",
+        }
+        operation_type = str(item.get("operation_type") or "")
+        return {
+            "operation_id": str(item.get("operation_id") or ""),
+            "type": operation_type,
+            "label": type_labels.get(operation_type, "后台同步"),
+            "scope": str(item.get("scope") or ""),
+            "status": str(item.get("status") or ""),
+            "summary_record_id": str(item.get("summary_record_id") or ""),
+            "record_id": str(item.get("record_id") or ""),
+            "error": str(item.get("last_error") or "")[:500],
+            "updated_at": float(item.get("updated_at") or 0),
+        }
+
+    def get_repair_management_global_sync_status(
+        self,
+        *,
+        scope: str = "ALL",
+    ) -> dict[str, Any]:
+        operations = self._state_store.list_repair_management_operations(
+            operation_types=REPAIR_SYNC_OPERATION_TYPES,
+            statuses=(
+                "started",
+                "remote_written",
+                "sync_pending",
+                "processing",
+                "failed",
+            ),
+            limit=2000,
+        )
+        visible = [
+            self._repair_sync_operation_visible_payload(item)
+            for item in operations
+            if self._repair_operation_visible_in_scope(item, scope)
+        ]
+        visible.sort(
+            key=lambda item: float(item.get("updated_at") or 0),
+            reverse=True,
+        )
+        failed = [item for item in visible if item["status"] == "failed"]
+        pending = [
+            item
+            for item in visible
+            if item["status"]
+            in {"started", "remote_written", "sync_pending", "processing"}
+        ]
+        return {
+            "scope": self._normalize_scope(scope),
+            "status": "failed" if failed else "pending" if pending else "ready",
+            "failed_count": len(failed),
+            "pending_count": len(pending),
+            "operations": [*failed[:20], *pending[:20]][:30],
+            "checked_at": time.time(),
+        }
+
+    def retry_all_repair_management_sync(
+        self,
+        *,
+        scope: str = "ALL",
+    ) -> dict[str, Any]:
+        operations = self._state_store.list_repair_management_operations(
+            operation_types=REPAIR_SYNC_OPERATION_TYPES,
+            statuses=("failed",),
+            limit=2000,
+        )
+        now = time.time()
+        retried = 0
+        skipped = 0
+        for item in operations:
+            if not self._repair_operation_visible_in_scope(item, scope):
+                continue
+            if str(item.get("operation_type") or "") == "project_delete":
+                skipped += 1
+                continue
+            operation_id = str(item.get("operation_id") or "").strip()
+            if not operation_id:
+                continue
+            result = (
+                dict(item.get("result") or {})
+                if isinstance(item.get("result"), dict)
+                else {}
+            )
+            result.update(
+                {
+                    "attempts": 0,
+                    "available_at": now,
+                    "scheduled_at": now,
+                    "manual_retry_at": now,
+                }
+            )
+            if self._state_store.update_repair_management_operation(
+                operation_id,
+                status="sync_pending",
+                result=result,
+                error="",
+            ):
+                retried += 1
+        if retried:
+            self._process_repair_sync_tasks_async()
+        return {
+            "scope": self._normalize_scope(scope),
+            "retried": retried,
+            "skipped_delete_tasks": skipped,
+            "status": "pending" if retried else "ready",
+        }
+
+    def get_repair_management_integrity(
+        self,
+        *,
+        scope: str = "ALL",
+        force_refresh: bool = False,
+    ) -> dict[str, Any]:
+        normalized_scope = self._normalize_scope(scope)
+        now = time.monotonic()
+        with self._repair_integrity_cache_lock:
+            cached = self._repair_integrity_cache.get(normalized_scope)
+            if (
+                not force_refresh
+                and isinstance(cached, dict)
+                and now - float(cached.get("_loaded_at") or 0)
+                <= REPAIR_INTEGRITY_CACHE_SECONDS
+            ):
+                return {
+                    key: value
+                    for key, value in cached.items()
+                    if key != "_loaded_at"
+                }
+
+        project_snapshot = self._state_store.get_repair_snapshot(
+            REPAIR_SNAPSHOT_SOURCE_PROJECTS
+        )
+        followup_snapshot = self._state_store.get_repair_snapshot(
+            REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS
+        )
+        projects = [
+            item
+            for item in (project_snapshot.get("records") or [])
+            if isinstance(item, dict)
+            and self._repair_management_record_in_scope(item, normalized_scope)
+        ]
+        all_project_ids = {
+            str(item.get("record_id") or "").strip()
+            for item in (project_snapshot.get("records") or [])
+            if isinstance(item, dict)
+            and str(item.get("record_id") or "").strip()
+        }
+        scoped_project_ids = {
+            str(item.get("record_id") or "").strip()
+            for item in projects
+            if str(item.get("record_id") or "").strip()
+        }
+        project_backlinks = {
+            str(project.get("record_id") or "").strip(): set(
+                self._repair_management_followup_ids_from_record(project)
+            )
+            for project in projects
+            if str(project.get("record_id") or "").strip()
+        }
+        actual_by_parent: dict[str, set[str]] = {
+            project_id: set() for project_id in scoped_project_ids
+        }
+        orphan_followups: list[dict[str, Any]] = []
+        for followup in (followup_snapshot.get("records") or []):
+            if not isinstance(followup, dict):
+                continue
+            followup_id = str(followup.get("record_id") or "").strip()
+            parent_ids = self._repair_followup_parent_ids(followup)
+            parent_id = parent_ids[0] if len(parent_ids) == 1 else ""
+            if parent_id in scoped_project_ids:
+                if followup_id:
+                    actual_by_parent.setdefault(parent_id, set()).add(followup_id)
+                continue
+            if normalized_scope == "ALL" and (
+                not parent_id or parent_id not in all_project_ids
+            ):
+                orphan_followups.append(
+                    {
+                        "type": "orphan_followup",
+                        "record_id": followup_id,
+                        "summary_record_id": parent_id,
+                        "message": (
+                            "跟进记录未绑定维修单"
+                            if not parent_id
+                            else "跟进记录绑定的维修单不存在"
+                        ),
+                    }
+                )
+
+        issues: list[dict[str, Any]] = []
+        for project_id in sorted(scoped_project_ids):
+            stored = project_backlinks.get(project_id, set())
+            actual = actual_by_parent.get(project_id, set())
+            missing_backlinks = sorted(actual - stored)
+            stale_backlinks = sorted(stored - actual)
+            if missing_backlinks or stale_backlinks:
+                issues.append(
+                    {
+                        "type": "project_followup_mismatch",
+                        "record_id": project_id,
+                        "summary_record_id": project_id,
+                        "missing_followup_ids": missing_backlinks,
+                        "stale_followup_ids": stale_backlinks,
+                        "message": "维修单与跟进记录 ID 对应关系不一致",
+                    }
+                )
+        issues.extend(orphan_followups)
+        payload = {
+            "scope": normalized_scope,
+            "status": "warning" if issues else "ready",
+            "issue_count": len(issues),
+            "project_issue_count": sum(
+                1
+                for item in issues
+                if item.get("type") == "project_followup_mismatch"
+            ),
+            "orphan_followup_count": sum(
+                1 for item in issues if item.get("type") == "orphan_followup"
+            ),
+            "project_count": len(projects),
+            "followup_snapshot_ready": bool(followup_snapshot.get("exists")),
+            "issues": issues[:50],
+            "checked_at": time.time(),
+        }
+        with self._repair_integrity_cache_lock:
+            self._repair_integrity_cache[normalized_scope] = {
+                **payload,
+                "_loaded_at": now,
+            }
+        return payload
+
+    def repair_repair_management_integrity(
+        self,
+        *,
+        scope: str = "ALL",
+    ) -> dict[str, Any]:
+        before = self.get_repair_management_integrity(
+            scope=scope,
+            force_refresh=True,
+        )
+        backfill = self.backfill_repair_followup_records(force=True)
+        self._load_repair_management_project_records(force_refresh=True)
+        self._load_repair_followup_snapshot(force_refresh=True)
+        self._rebuild_repair_project_status_index()
+        self._invalidate_repair_integrity_cache()
+        after = self.get_repair_management_integrity(
+            scope=scope,
+            force_refresh=True,
+        )
+        return {
+            "scope": self._normalize_scope(scope),
+            "before_issue_count": int(before.get("issue_count") or 0),
+            "after_issue_count": int(after.get("issue_count") or 0),
+            "backfill": backfill,
+            "integrity": after,
+        }
+
+    def get_repair_management_health(
+        self,
+        *,
+        scope: str = "ALL",
+        include_integrity: bool = True,
+    ) -> dict[str, Any]:
+        sync = self.get_repair_management_global_sync_status(scope=scope)
+        integrity = (
+            self.get_repair_management_integrity(scope=scope)
+            if include_integrity
+            else {
+                "scope": self._normalize_scope(scope),
+                "status": "not_checked",
+                "issue_count": 0,
+            }
+        )
+        return {
+            "scope": self._normalize_scope(scope),
+            "status": (
+                "failed"
+                if int(sync.get("failed_count") or 0)
+                else "warning"
+                if int(integrity.get("issue_count") or 0)
+                else "pending"
+                if int(sync.get("pending_count") or 0)
+                else "ready"
+            ),
+            "sync": sync,
+            "integrity": integrity,
+            "change_cursor": (
+                self._state_store.latest_repair_management_change_id()
+            ),
+            "checked_at": time.time(),
+        }
+
+    def check_repair_management_integration(
+        self,
+        *,
+        scope: str = "ALL",
+    ) -> dict[str, Any]:
+        normalized_scope = self._normalize_scope(scope)
+        project_metas, project_meta_by_name, projects = (
+            self._load_repair_management_project_records(force_refresh=True)
+        )
+        followup_metas, _followup_meta_by_name, followups = (
+            self._load_repair_followup_snapshot(force_refresh=True)
+        )
+        project_field_names = {
+            str(meta.field_name or "").strip()
+            for meta in project_metas
+            if str(meta.field_name or "").strip()
+        }
+        followup_field_names = {
+            str(meta.field_name or "").strip()
+            for meta in followup_metas
+            if str(meta.field_name or "").strip()
+        }
+        required_project_groups = {
+            "维修名称": {"维修名称"},
+            "流程状态": {
+                REPAIR_MANAGEMENT_WORKFLOW_STORAGE_FIELD_NAME,
+                REPAIR_MANAGEMENT_WORKFLOW_FIELD_NAME,
+            },
+        }
+        required_followup_groups = {
+            "维修汇总记录ID": {REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME},
+            "维修进度": {"维修进度"},
+        }
+        missing_project = [
+            label
+            for label, candidates in required_project_groups.items()
+            if not project_field_names.intersection(candidates)
+        ]
+        followup_link_meta = (
+            project_meta_by_name.get(REPAIR_MANAGEMENT_FOLLOWUP_LINK_FIELD_NAME)
+            or project_meta_by_name.get(
+                REPAIR_MANAGEMENT_FOLLOWUP_LINK_STORAGE_FIELD_NAME
+            )
+        )
+        if (
+            followup_link_meta is None
+            or int(followup_link_meta.field_type or 0) != 1
+        ):
+            missing_project.append("跟进记录ID")
+        missing_followup = [
+            label
+            for label, candidates in required_followup_groups.items()
+            if not followup_field_names.intersection(candidates)
+        ]
+        scoped_projects = [
+            item
+            for item in projects
+            if isinstance(item, dict)
+            and self._repair_management_record_in_scope(item, normalized_scope)
+        ]
+        scoped_project_ids = {
+            str(item.get("record_id") or "").strip()
+            for item in scoped_projects
+            if str(item.get("record_id") or "").strip()
+        }
+        scoped_followups = [
+            item
+            for item in followups
+            if isinstance(item, dict)
+            and bool(
+                scoped_project_ids.intersection(
+                    self._repair_followup_parent_ids(item)
+                )
+            )
+        ]
+        warnings = [
+            *(
+                [f"维修项目表缺少：{'、'.join(missing_project)}"]
+                if missing_project
+                else []
+            ),
+            *(
+                [f"跟进记录表缺少：{'、'.join(missing_followup)}"]
+                if missing_followup
+                else []
+            ),
+        ]
+        return {
+            "scope": normalized_scope,
+            "status": "warning" if warnings else "ready",
+            "read_verified": True,
+            "remote_write_performed": False,
+            "project_table_id": REPAIR_MANAGEMENT_TABLE_ID,
+            "followup_table_id": REPAIR_FOLLOWUP_TABLE_ID,
+            "project_record_count": len(scoped_projects),
+            "followup_record_count": len(scoped_followups),
+            "project_field_count": len(project_field_names),
+            "followup_field_count": len(followup_field_names),
+            "missing_project_fields": missing_project,
+            "missing_followup_fields": missing_followup,
+            "warnings": warnings,
+            "checked_at": time.time(),
+        }
+
+    def reconcile_repair_management_remote(
+        self,
+        *,
+        scope: str = "ALL",
+    ) -> dict[str, Any]:
+        normalized_scope = self._normalize_scope(scope)
+        before_projects_snapshot = self._state_store.get_repair_snapshot(
+            REPAIR_SNAPSHOT_SOURCE_PROJECTS
+        )
+        before_followups_snapshot = self._state_store.get_repair_snapshot(
+            REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS
+        )
+        before_projects = {
+            str(item.get("record_id") or "").strip(): item
+            for item in (before_projects_snapshot.get("records") or [])
+            if isinstance(item, dict)
+            and str(item.get("record_id") or "").strip()
+            and self._repair_management_record_in_scope(item, normalized_scope)
+        }
+        before_project_ids = set(before_projects)
+        before_followups = {
+            str(item.get("record_id") or "").strip(): item
+            for item in (before_followups_snapshot.get("records") or [])
+            if isinstance(item, dict)
+            and str(item.get("record_id") or "").strip()
+            and bool(
+                before_project_ids.intersection(
+                    self._repair_followup_parent_ids(item)
+                )
+            )
+        }
+
+        integration = self.check_repair_management_integration(
+            scope=normalized_scope
+        )
+
+        after_projects_snapshot = self._state_store.get_repair_snapshot(
+            REPAIR_SNAPSHOT_SOURCE_PROJECTS
+        )
+        after_followups_snapshot = self._state_store.get_repair_snapshot(
+            REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS
+        )
+        after_projects = {
+            str(item.get("record_id") or "").strip(): item
+            for item in (after_projects_snapshot.get("records") or [])
+            if isinstance(item, dict)
+            and str(item.get("record_id") or "").strip()
+            and self._repair_management_record_in_scope(item, normalized_scope)
+        }
+        after_project_ids = set(after_projects)
+        scoped_parent_ids = before_project_ids | after_project_ids
+        after_followups = {
+            str(item.get("record_id") or "").strip(): item
+            for item in (after_followups_snapshot.get("records") or [])
+            if isinstance(item, dict)
+            and str(item.get("record_id") or "").strip()
+            and bool(
+                scoped_parent_ids.intersection(
+                    self._repair_followup_parent_ids(item)
+                )
+            )
+        }
+
+        def changed_ids(
+            before: dict[str, dict[str, Any]],
+            after: dict[str, dict[str, Any]],
+        ) -> list[str]:
+            return sorted(
+                record_id
+                for record_id in set(before).intersection(after)
+                if self._repair_record_version(before[record_id])
+                != self._repair_record_version(after[record_id])
+            )
+
+        project_added = sorted(after_project_ids - before_project_ids)
+        project_removed = sorted(before_project_ids - after_project_ids)
+        project_changed = changed_ids(before_projects, after_projects)
+        followup_added = sorted(set(after_followups) - set(before_followups))
+        followup_removed = sorted(set(before_followups) - set(after_followups))
+        followup_changed = changed_ids(before_followups, after_followups)
+        changed_count = sum(
+            len(items)
+            for items in (
+                project_added,
+                project_removed,
+                project_changed,
+                followup_added,
+                followup_removed,
+                followup_changed,
+            )
+        )
+        return {
+            "scope": normalized_scope,
+            "status": (
+                "warning"
+                if integration.get("status") == "warning"
+                else "reconciled"
+                if changed_count
+                else "ready"
+            ),
+            "changed_count": changed_count,
+            "project": {
+                "added": len(project_added),
+                "removed": len(project_removed),
+                "changed": len(project_changed),
+                "sample_record_ids": (
+                    project_added + project_removed + project_changed
+                )[:20],
+            },
+            "followup": {
+                "added": len(followup_added),
+                "removed": len(followup_removed),
+                "changed": len(followup_changed),
+                "sample_record_ids": (
+                    followup_added + followup_removed + followup_changed
+                )[:20],
+            },
+            "integration": integration,
+            "remote_write_performed": False,
+            "checked_at": time.time(),
+        }
+
+    def list_repair_management_failures(
+        self,
+        *,
+        scope: str = "ALL",
+    ) -> dict[str, Any]:
+        status = self.get_repair_management_global_sync_status(scope=scope)
+        operations = [
+            item
+            for item in (status.get("operations") or [])
+            if isinstance(item, dict)
+        ]
+        return {
+            "scope": self._normalize_scope(scope),
+            "status": str(status.get("status") or "ready"),
+            "failed_count": int(status.get("failed_count") or 0),
+            "pending_count": int(status.get("pending_count") or 0),
+            "items": operations,
+            "checked_at": time.time(),
+        }
+
+    def list_repair_management_changes(
+        self,
+        *,
+        scope: str = "ALL",
+        after_id: int = 0,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        return self._state_store.list_repair_management_changes(
+            scope=self._normalize_scope(scope),
+            after_id=after_id,
+            limit=limit,
+        )
+
     def run_repair_maintenance(self) -> dict[str, Any]:
         schema: dict[str, Any]
         backfill: dict[str, Any] = {"status": "skipped"}
@@ -8414,10 +10040,23 @@ class MaintenancePortalService:
                 logging.warning("维修跟进旧记录自动补绑失败: %s", exc)
         resumed = self.resume_repair_sync_tasks_async()
         self.start_repair_snapshot_warmup_async()
+        now = time.time()
+        cleanup = {
+            "operations": self._state_store.cleanup_repair_management_operations(
+                completed_before=(
+                    now - REPAIR_SYNC_COMPLETED_RETENTION_SECONDS
+                ),
+                failed_before=now - REPAIR_SYNC_FAILED_RETENTION_SECONDS,
+            ),
+            "changes": self._state_store.cleanup_repair_management_changes(
+                before=now - REPAIR_CHANGE_LOG_RETENTION_SECONDS,
+            ),
+        }
         result = {
             "schema": schema,
             "backfill": backfill,
             "resumed_sync_tasks": resumed,
+            "cleanup": cleanup,
         }
         if schema_error is not None:
             raise PortalError(str(schema_error))
@@ -9381,9 +11020,23 @@ class MaintenancePortalService:
         record_id = str(record_id or "").strip()
         if not record_id:
             raise PortalError("缺少维修项目 ID。")
-        _metas, loaded_meta_by_name, records = (
-            self._load_repair_management_project_records()
-        )
+        records: list[dict[str, Any]]
+        snapshot_schema = self._repair_management_snapshot_schema()
+        if snapshot_schema is not None:
+            _metas, loaded_meta_by_name = snapshot_schema
+            snapshot = self._state_store.get_repair_snapshot(
+                REPAIR_SNAPSHOT_SOURCE_PROJECTS,
+                record_ids=[record_id],
+            )
+            records = [
+                item
+                for item in (snapshot.get("records") or [])
+                if isinstance(item, dict)
+            ]
+        else:
+            _metas, loaded_meta_by_name, records = (
+                self._load_repair_management_project_records()
+            )
         if meta_by_name is None:
             meta_by_name = loaded_meta_by_name
         for record in records:
@@ -9514,6 +11167,7 @@ class MaintenancePortalService:
         *,
         target_record_id: str,
         summary_record_id: str,
+        write: bool = True,
     ) -> dict[str, Any]:
         target_id = str(target_record_id or "").strip()
         summary_id = str(summary_record_id or "").strip()
@@ -9579,6 +11233,14 @@ class MaintenancePortalService:
                     "未覆盖维修汇总记录ID。"
                 ),
             }
+        if not write:
+            return {
+                "synced": False,
+                "skipped": False,
+                "already_synced": False,
+                "pending_write": True,
+                "warning": "",
+            }
 
         fields = {REPAIR_TARGET_SUMMARY_ID_FIELD_NAME: summary_id}
         self._patch_record_fields_exact(
@@ -9602,6 +11264,41 @@ class MaintenancePortalService:
         }
 
     def sync_repair_management_notice_action(
+        self,
+        prepared: dict[str, Any],
+        *,
+        action: str,
+        target_record_id: str,
+    ) -> dict[str, Any]:
+        summary_id = str(
+            (prepared or {}).get("repair_management_record_id")
+            or canonical_source_record_id(prepared)
+            or ""
+        ).strip()
+        if not summary_id.startswith("rec"):
+            return self._sync_repair_management_notice_action_unlocked(
+                prepared,
+                action=action,
+                target_record_id=target_record_id,
+            )
+        with self._repair_management_record_lock(summary_id):
+            target_id = str(target_record_id or "").strip()
+            if target_id.startswith("rec"):
+                with self._repair_management_record_lock(
+                    f"repair-target:{target_id}"
+                ):
+                    return self._sync_repair_management_notice_action_unlocked(
+                        prepared,
+                        action=action,
+                        target_record_id=target_id,
+                    )
+            return self._sync_repair_management_notice_action_unlocked(
+                prepared,
+                action=action,
+                target_record_id=target_record_id,
+            )
+
+    def _sync_repair_management_notice_action_unlocked(
         self,
         prepared: dict[str, Any],
         *,
@@ -9640,6 +11337,22 @@ class MaintenancePortalService:
         _metas, meta_by_name, _records = (
             self._load_repair_management_project_records()
         )
+        try:
+            target_summary_sync = self._sync_repair_target_summary_id(
+                target_record_id=target_record_id,
+                summary_record_id=repair_management_record_id,
+                write=False,
+            )
+        except Exception as exc:
+            raise PortalError(f"检修目标记录关联预检失败：{exc}") from exc
+        target_summary_warning = str(
+            target_summary_sync.get("warning") or ""
+        ).strip()
+        if bool(target_summary_sync.get("conflict")):
+            raise PortalError(
+                target_summary_warning
+                or "检修目标记录已关联其他维修单，请重新选择目标记录。"
+            )
         raw_fields = (
             existing.get("raw_fields")
             if isinstance(existing.get("raw_fields"), dict)
@@ -9709,23 +11422,18 @@ class MaintenancePortalService:
             record_id=repair_management_record_id,
             fields=coerced,
         )
-        target_summary_sync: dict[str, Any] = {
-            "synced": False,
-            "skipped": True,
-            "warning": "",
-        }
         try:
             target_summary_sync = self._sync_repair_target_summary_id(
                 target_record_id=target_record_id,
                 summary_record_id=repair_management_record_id,
             )
-            target_summary_warning = str(
-                target_summary_sync.get("warning") or ""
-            ).strip()
-            if target_summary_warning:
-                warnings.append(target_summary_warning)
         except Exception as exc:
-            warnings.append(f"检修目标表维修单ID暂未同步：{exc}")
+            raise PortalError(f"检修目标记录关联写入失败：{exc}") from exc
+        target_summary_warning = str(
+            target_summary_sync.get("warning") or ""
+        ).strip()
+        if target_summary_warning:
+            warnings.append(target_summary_warning)
         updated_record = self._repair_management_record_with_fields(
             existing,
             coerced,
@@ -10427,6 +12135,7 @@ class MaintenancePortalService:
         authoritative_followup_count: int | None = None,
         authoritative_followups: list[dict[str, Any]] | None = None,
         followup_state_verified: bool = True,
+        summary_only: bool = False,
     ) -> dict[str, Any]:
         raw_fields = (
             item.get("raw_fields")
@@ -10554,15 +12263,17 @@ class MaintenancePortalService:
         if self._repair_management_is_legacy_completed(item):
             normalized_progress_percent = 100
             display_fields["当前维修进度"] = "100%"
-        return {
+        payload = {
             "record_id": str(item.get("record_id") or ""),
+            "record_version": self._repair_record_version(item),
             "title": self._repair_management_title(item),
             "created_time": created_time,
             "last_modified_time": last_modified_time,
             "building_codes": self._repair_record_building_codes(item),
             "workflow": workflow,
             "is_completed": is_completed,
-            "read_only": is_completed,
+            "read_only": is_completed or not bool(followup_state_verified),
+            "state_locked": not bool(followup_state_verified),
             "followup_state_verified": bool(followup_state_verified),
             "display_fields": display_fields,
             "raw_fields": raw_fields,
@@ -10579,6 +12290,33 @@ class MaintenancePortalService:
             "progress_percent": normalized_progress_percent,
             "latest_followup_time": latest_followup_time,
         }
+        if summary_only:
+            summary_field_names = {
+                "维修名称",
+                "名称（标题）",
+                "故障发生时间",
+                "维修开始时间",
+                "维修结束时间（2026）",
+                "所属专业",
+                "专业",
+                "专业（推送消息用）",
+                "楼栋",
+                "所属数据中心/楼栋-使用",
+                "所属数据中心/楼栋（关联CMDB唯一ID关联,DE不选）",
+                "关联事件单",
+                "故障维修原因",
+                "故障发生现象描述",
+            }
+            payload["display_fields"] = {
+                name: value
+                for name, value in display_fields.items()
+                if name in summary_field_names
+            }
+            payload.pop("raw_fields", None)
+            payload["summary_only"] = True
+        else:
+            payload["summary_only"] = False
+        return payload
 
     def get_repair_management_record(
         self,
@@ -10649,18 +12387,13 @@ class MaintenancePortalService:
         followup_state_verified = True
         followup_state_warning = ""
         try:
-            _followup_metas, _followup_meta_by_name, followups = (
-                self._load_repair_followup_snapshot(
-                    force_refresh=force_refresh
+            _followup_metas, _followup_meta_by_name, grouped_followups = (
+                self._load_repair_followups_for_summaries(
+                    [record_id],
+                    force_refresh=force_refresh,
                 )
             )
-            authoritative_followups = list(
-                self._repair_followups_by_summary(
-                    followups,
-                    [record_id],
-                ).get(record_id)
-                or []
-            )
+            authoritative_followups = list(grouped_followups.get(record_id) or [])
             authoritative_followup_count = len(authoritative_followups)
         except PortalError as exc:
             # Completion is safety-sensitive. Never trust stale backlink/progress
@@ -10690,10 +12423,12 @@ class MaintenancePortalService:
         scope: str = "ALL",
         query: str = "",
         state: str = "all",
+        period: str = "all",
         limit: int = 200,
         offset: int = 0,
         focus_record_id: str = "",
         force_refresh: bool = False,
+        summary_only: bool = False,
     ) -> dict[str, Any]:
         normalized_state = str(state or "all").strip().lower()
         if normalized_state in {"active", "open", "in_progress", "unfinished"}:
@@ -10708,36 +12443,36 @@ class MaintenancePortalService:
         )
         if snapshot_schema is not None:
             metas, meta_by_name = snapshot_schema
-            page_records: list[dict[str, Any]] = []
-            snapshot_offset = max(0, int(offset or 0)) if normalized_state == "all" else 0
-            snapshot_total = 0
-            snapshot_page_offset = snapshot_offset
-            while True:
+            if normalized_state == "all":
                 snapshot_page = self._state_store.query_repair_snapshot_page(
                     REPAIR_SNAPSHOT_SOURCE_PROJECTS,
                     scope=self._normalize_scope(scope),
                     query=query,
-                    limit=limit if normalized_state == "all" else 500,
-                    offset=snapshot_offset,
-                    focus_record_id=(
-                        focus_record_id if normalized_state == "all" else ""
-                    ),
+                    limit=limit,
+                    offset=max(0, int(offset or 0)),
+                    focus_record_id=focus_record_id,
                 )
-                snapshot_total = int(snapshot_page.get("total") or 0)
-                snapshot_page_offset = int(
-                    snapshot_page.get("offset") or snapshot_offset
+            else:
+                self._ensure_repair_project_status_index(
+                    force_refresh=force_refresh
                 )
-                current_records = [
-                    item
-                    for item in (snapshot_page.get("records") or [])
-                    if isinstance(item, dict)
-                ]
-                page_records.extend(current_records)
-                if normalized_state == "all":
-                    break
-                if not snapshot_page.get("has_more") or not current_records:
-                    break
-                snapshot_offset += len(current_records)
+                snapshot_page = (
+                    self._state_store.query_repair_project_status_page(
+                        REPAIR_SNAPSHOT_SOURCE_PROJECTS,
+                        scope=self._normalize_scope(scope),
+                        query=query,
+                        state=normalized_state,
+                        period=period,
+                        limit=limit,
+                        offset=max(0, int(offset or 0)),
+                        focus_record_id=focus_record_id,
+                    )
+                )
+            page_records = [
+                item
+                for item in (snapshot_page.get("records") or [])
+                if isinstance(item, dict)
+            ]
             record_ids = [
                 str(item.get("record_id") or "").strip()
                 for item in page_records
@@ -10747,15 +12482,15 @@ class MaintenancePortalService:
             followup_state_verified = True
             followup_state_warning = ""
             try:
-                _followup_metas, _followup_meta_by_name, followups = (
-                    self._load_repair_followup_snapshot(
-                        force_refresh=force_refresh
+                _followup_metas, _followup_meta_by_name, grouped_followups = (
+                    self._load_repair_followups_for_summaries(
+                        record_ids,
+                        force_refresh=(
+                            force_refresh if normalized_state == "all" else False
+                        ),
                     )
                 )
-                followups_by_record = self._repair_followups_by_summary(
-                    followups,
-                    record_ids,
-                )
+                followups_by_record = grouped_followups
             except PortalError as exc:
                 followups_by_record = {}
                 followup_state_verified = False
@@ -10785,40 +12520,13 @@ class MaintenancePortalService:
                         else None
                     ),
                     followup_state_verified=followup_state_verified,
+                    summary_only=summary_only,
                 )
                 for item in page_records
             ]
-            if normalized_state == "all":
-                page_payload_records = payload_records
-                page_offset = snapshot_page_offset
-                total_records = snapshot_total
-            elif normalized_state == "completed":
-                payload_records = [
-                    item for item in payload_records if item.get("is_completed")
-                ]
-            else:
-                payload_records = [
-                    item for item in payload_records if not item.get("is_completed")
-                ]
-            if normalized_state != "all":
-                max_limit = max(1, min(int(limit or 200), 500))
-                page_offset = max(0, int(offset or 0))
-                focus_id = str(focus_record_id or "").strip()
-                if focus_id:
-                    focus_index = next(
-                        (
-                            index
-                            for index, item in enumerate(payload_records)
-                            if str(item.get("record_id") or "").strip() == focus_id
-                        ),
-                        -1,
-                    )
-                    if focus_index >= 0:
-                        page_offset = (focus_index // max_limit) * max_limit
-                page_payload_records = payload_records[
-                    page_offset : page_offset + max_limit
-                ]
-                total_records = len(payload_records)
+            page_payload_records = payload_records
+            page_offset = int(snapshot_page.get("offset") or 0)
+            total_records = int(snapshot_page.get("total") or 0)
             return {
                 "app_token": REPAIR_SOURCE_APP_TOKEN,
                 "table_id": REPAIR_MANAGEMENT_TABLE_ID,
@@ -10833,9 +12541,9 @@ class MaintenancePortalService:
                 "total": total_records,
                 "returned": len(page_payload_records),
                 "offset": page_offset,
-                "has_more": page_offset + len(page_payload_records)
-                < total_records,
+                "has_more": bool(snapshot_page.get("has_more")),
                 "state": normalized_state,
+                "period": str(period or "all").strip().lower() or "all",
             }
 
         metas, meta_by_name, records = self._load_repair_management_project_records(
@@ -10845,10 +12553,17 @@ class MaintenancePortalService:
         followup_state_verified = True
         followup_state_warning = ""
         try:
-            _followup_metas, _followup_meta_by_name, followups = (
-                self._load_repair_followup_snapshot(force_refresh=force_refresh)
+            record_ids = [
+                str(item.get("record_id") or "").strip()
+                for item in records
+                if str(item.get("record_id") or "").strip()
+            ]
+            _followup_metas, _followup_meta_by_name, followups_by_record = (
+                self._load_repair_followups_for_summaries(
+                    record_ids,
+                    force_refresh=force_refresh,
+                )
             )
-            followups_by_record = self._repair_followups_by_summary(followups)
         except PortalError as exc:
             followups_by_record = {}
             followup_state_verified = False
@@ -10883,6 +12598,57 @@ class MaintenancePortalService:
                 )
             )
         ]
+        normalized_period = str(period or "all").strip().lower()
+        if normalized_state == "completed" and normalized_period in {
+            "today",
+            "week",
+            "month",
+        }:
+            now_dt = dt.datetime.now()
+            if normalized_period == "today":
+                cutoff_dt = now_dt.replace(
+                    hour=0,
+                    minute=0,
+                    second=0,
+                    microsecond=0,
+                )
+            elif normalized_period == "week":
+                cutoff_dt = (
+                    now_dt - dt.timedelta(days=now_dt.weekday())
+                ).replace(hour=0, minute=0, second=0, microsecond=0)
+            else:
+                cutoff_dt = now_dt.replace(
+                    day=1,
+                    hour=0,
+                    minute=0,
+                    second=0,
+                    microsecond=0,
+                )
+
+            def completed_after_cutoff(item: dict[str, Any]) -> bool:
+                display_fields = (
+                    item.get("display_fields")
+                    if isinstance(item.get("display_fields"), dict)
+                    else {}
+                )
+                raw_fields = (
+                    item.get("raw_fields")
+                    if isinstance(item.get("raw_fields"), dict)
+                    else {}
+                )
+                value = (
+                    raw_fields.get("维修结束时间（2026）")
+                    or display_fields.get("维修结束时间（2026）")
+                    or item.get("last_modified_time")
+                    or item.get("created_time")
+                    or ""
+                )
+                parsed = self._parse_notice_datetime(
+                    self._repair_management_plain_text(value)
+                )
+                return parsed is not None and parsed >= cutoff_dt
+
+            records = [item for item in records if completed_after_cutoff(item)]
         query_text = str(query or "").strip().lower()
         if query_text:
             records = [
@@ -10941,6 +12707,7 @@ class MaintenancePortalService:
                         else None
                     ),
                     followup_state_verified=followup_state_verified,
+                    summary_only=summary_only,
                 )
             )
         return {
@@ -10957,6 +12724,7 @@ class MaintenancePortalService:
             "offset": page_offset,
             "has_more": page_offset + len(payload_records) < len(records),
             "state": normalized_state,
+            "period": normalized_period,
         }
 
     @classmethod
@@ -11287,6 +13055,19 @@ class MaintenancePortalService:
                         result=existing_result,
                         error=event_warning,
                     )
+                    if event_warning:
+                        self._schedule_repair_sync_task(
+                            "event_transfer_sync",
+                            summary_record_id=existing_record_id,
+                            scope=scope,
+                            task_payload={
+                                "event_record_id": str(source_event_id or "").strip(),
+                                "month": str(source_month or ""),
+                                "project_create_operation_id": stable_operation_id,
+                            },
+                            error=event_warning,
+                            run_immediately=True,
+                        )
                     return existing_result
                 if operation.get("status") == "started":
                     raise PortalError("该维修项目正在后台创建，请稍后刷新，勿重复提交。")
@@ -11354,6 +13135,10 @@ class MaintenancePortalService:
         response = {
             "record_id": record_id,
             "fields": prepared,
+            "record_version": self._repair_snapshot_record_version(
+                REPAIR_SNAPSHOT_SOURCE_PROJECTS,
+                record_id,
+            ),
             "field_count": len(prepared),
             "workflow": workflow,
             "workflow_synced": workflow_synced,
@@ -11410,6 +13195,23 @@ class MaintenancePortalService:
                     else ""
                 ),
             )
+        if response["event_transfer_sync_pending"]:
+            self._schedule_repair_sync_task(
+                "event_transfer_sync",
+                summary_record_id=record_id,
+                scope=scope,
+                task_payload={
+                    "event_record_id": str(source_event_id or "").strip(),
+                    "month": str(source_month or ""),
+                    "project_create_operation_id": stable_operation_id,
+                },
+                error=(
+                    response["warnings"][-1]
+                    if response.get("warnings")
+                    else "事件转检修状态暂未同步"
+                ),
+                run_immediately=True,
+            )
         return response
 
     def update_repair_management_record(
@@ -11421,20 +13223,55 @@ class MaintenancePortalService:
         source_repair_ids: list[str] | tuple[str, ...] | None = None,
         replace_source_relations: bool = False,
         source_month: str | None = None,
+        operation_id: str = "",
+        expected_version: str = "",
         scope: str = "ALL",
         validate_required: bool = True,
     ) -> dict[str, Any]:
         with self._repair_management_record_lock(record_id):
-            return self._update_repair_management_record_unlocked(
-                record_id,
-                fields,
-                source_event_id=source_event_id,
-                source_repair_ids=source_repair_ids,
-                replace_source_relations=replace_source_relations,
-                source_month=source_month,
+            summary_id = str(record_id or "").strip()
+            stable_operation_id, replay = self._begin_repair_mutation_operation(
+                operation_id,
+                operation_type="project_update",
                 scope=scope,
-                validate_required=validate_required,
+                summary_record_id=summary_id,
+                payload={
+                    "record_id": summary_id,
+                    "scope": self._normalize_scope(scope),
+                    "fields": dict(fields or {}),
+                    "source_event_id": str(source_event_id or "").strip(),
+                    "source_repair_ids": list(source_repair_ids or []),
+                    "replace_source_relations": bool(replace_source_relations),
+                    "source_month": str(source_month or "").strip(),
+                    "expected_version": str(expected_version or "").strip(),
+                    "validate_required": bool(validate_required),
+                },
+                busy_message="该维修项目正在保存，请稍后刷新，勿重复提交。",
             )
+            if replay is not None:
+                return replay
+            try:
+                result = self._update_repair_management_record_unlocked(
+                    record_id,
+                    fields,
+                    source_event_id=source_event_id,
+                    source_repair_ids=source_repair_ids,
+                    replace_source_relations=replace_source_relations,
+                    source_month=source_month,
+                    expected_version=expected_version,
+                    scope=scope,
+                    validate_required=validate_required,
+                )
+            except Exception as exc:
+                self._fail_repair_mutation_operation(stable_operation_id, exc)
+                raise
+            self._finish_repair_mutation_operation(
+                stable_operation_id,
+                result=result,
+                record_id=summary_id,
+                summary_record_id=summary_id,
+            )
+            return result
 
     def _update_repair_management_record_unlocked(
         self,
@@ -11445,17 +13282,23 @@ class MaintenancePortalService:
         source_repair_ids: list[str] | tuple[str, ...] | None = None,
         replace_source_relations: bool = False,
         source_month: str | None = None,
+        expected_version: str = "",
         scope: str = "ALL",
         validate_required: bool = True,
     ) -> dict[str, Any]:
-        _metas, meta_by_name, _records = (
-            self._load_repair_management_project_records()
-        )
+        snapshot_schema = self._repair_management_snapshot_schema()
+        if snapshot_schema is not None:
+            _metas, meta_by_name = snapshot_schema
+        else:
+            _metas, meta_by_name, _records = (
+                self._load_repair_management_project_records()
+            )
         existing = self._ensure_repair_management_record_in_scope(
             record_id,
             scope,
             meta_by_name=meta_by_name,
         )
+        self._assert_repair_record_version(existing, expected_version)
         existing_raw = existing.get("raw_fields") if isinstance((existing or {}).get("raw_fields"), dict) else {}
         summary_id = str(record_id or "").strip()
         effective_event_id = str(source_event_id or "").strip()
@@ -11666,6 +13509,10 @@ class MaintenancePortalService:
         return {
             "record_id": summary_id,
             "fields": prepared,
+            "record_version": self._repair_snapshot_record_version(
+                REPAIR_SNAPSHOT_SOURCE_PROJECTS,
+                summary_id,
+            ),
             "field_count": len(prepared),
             "workflow": workflow,
             "workflow_synced": workflow_synced,
@@ -11692,6 +13539,21 @@ class MaintenancePortalService:
         *,
         scope: str = "ALL",
     ) -> dict[str, Any]:
+        summary_id = str(record_id or "").strip()
+        if not summary_id:
+            raise PortalError("缺少维修项目记录 ID。")
+        with self._repair_management_record_lock(summary_id):
+            return self._delete_repair_management_record_unlocked(
+                summary_id,
+                scope=scope,
+            )
+
+    def _delete_repair_management_record_unlocked(
+        self,
+        record_id: str,
+        *,
+        scope: str = "ALL",
+    ) -> dict[str, Any]:
         _metas, meta_by_name, _records = (
             self._load_repair_management_project_records()
         )
@@ -11711,8 +13573,195 @@ class MaintenancePortalService:
                 if str(item.get("record_id") or "").strip()
             )
         )
-        deleted_followup_ids: list[str] = []
+        operation_id = self._repair_sync_operation_id(
+            "project_delete",
+            summary_id,
+        )
+        existing_operation = (
+            self._state_store.get_repair_management_operation(operation_id)
+            or {}
+        )
+        existing_result = (
+            dict(existing_operation.get("result") or {})
+            if isinstance(existing_operation.get("result"), dict)
+            else {}
+        )
+        if (
+            str(existing_operation.get("status") or "") == "completed"
+            and bool(existing_result.get("deleted"))
+        ):
+            return existing_result
+        existing_task_payload = (
+            dict(existing_result.get("task_payload") or {})
+            if isinstance(existing_result.get("task_payload"), dict)
+            else {}
+        )
+        followup_ids = list(
+            dict.fromkeys(
+                [
+                    *(
+                        str(item or "").strip()
+                        for item in (
+                            existing_task_payload.get("followup_record_ids") or []
+                        )
+                        if str(item or "").strip()
+                    ),
+                    *followup_ids,
+                ]
+            )
+        )
+        task_payload = {
+            **existing_task_payload,
+            "followup_record_ids": followup_ids,
+            "deleted_followup_ids": list(
+                dict.fromkeys(
+                    str(item or "").strip()
+                    for item in (
+                        existing_task_payload.get("deleted_followup_ids") or []
+                    )
+                    if str(item or "").strip()
+                )
+            ),
+        }
+        if not existing_operation:
+            self._schedule_repair_sync_task_unchecked(
+                "project_delete",
+                summary_record_id=summary_id,
+                scope=scope,
+                task_payload=task_payload,
+            )
+            existing_operation = (
+                self._state_store.get_repair_management_operation(operation_id)
+                or {}
+            )
+            existing_result = (
+                dict(existing_operation.get("result") or {})
+                if isinstance(existing_operation.get("result"), dict)
+                else {}
+            )
+        operation_result = {
+            **existing_result,
+            "task_payload": task_payload,
+            "started_at": time.time(),
+            "available_at": 0,
+        }
+        self._state_store.update_repair_management_operation(
+            operation_id,
+            status="processing",
+            summary_record_id=summary_id,
+            result=operation_result,
+            error="",
+        )
+        try:
+            self._execute_repair_project_delete_task(
+                {
+                    **existing_operation,
+                    "operation_id": operation_id,
+                    "operation_type": "project_delete",
+                    "summary_record_id": summary_id,
+                    "scope": self._normalize_scope(scope),
+                    "result": operation_result,
+                }
+            )
+        except Exception as exc:
+            latest_operation = (
+                self._state_store.get_repair_management_operation(operation_id)
+                or {}
+            )
+            latest_result = (
+                dict(latest_operation.get("result") or {})
+                if isinstance(latest_operation.get("result"), dict)
+                else operation_result
+            )
+            self._state_store.update_repair_management_operation(
+                operation_id,
+                status="sync_pending",
+                summary_record_id=summary_id,
+                result={
+                    **latest_result,
+                    "available_at": time.time() + REPAIR_SYNC_FAST_RETRY_SECONDS,
+                },
+                error=str(exc),
+            )
+            self._process_repair_sync_tasks_async()
+            raise PortalError(f"{exc}；系统将在后台自动重试删除。") from exc
+        latest_operation = (
+            self._state_store.get_repair_management_operation(operation_id)
+            or {}
+        )
+        latest_result = (
+            dict(latest_operation.get("result") or {})
+            if isinstance(latest_operation.get("result"), dict)
+            else {}
+        )
+        response = {
+            **latest_result,
+            "record_id": summary_id,
+            "deleted": True,
+            "available_at": 0,
+            "finished_at": time.time(),
+        }
+        self._state_store.update_repair_management_operation(
+            operation_id,
+            status="completed",
+            summary_record_id=summary_id,
+            result=response,
+            error="",
+        )
+        return response
+
+    def _execute_repair_project_delete_task(
+        self,
+        operation: dict[str, Any],
+    ) -> dict[str, Any]:
+        operation_id = str(operation.get("operation_id") or "").strip()
+        summary_id = str(operation.get("summary_record_id") or "").strip()
+        if not operation_id or not summary_id.startswith("rec"):
+            raise PortalError("维修项目删除任务缺少有效记录 ID。")
+        result = (
+            dict(operation.get("result") or {})
+            if isinstance(operation.get("result"), dict)
+            else {}
+        )
+        task_payload = (
+            dict(result.get("task_payload") or {})
+            if isinstance(result.get("task_payload"), dict)
+            else {}
+        )
+        followup_ids = list(
+            dict.fromkeys(
+                str(item or "").strip()
+                for item in (task_payload.get("followup_record_ids") or [])
+                if str(item or "").strip()
+            )
+        )
+        deleted_followup_ids = list(
+            dict.fromkeys(
+                str(item or "").strip()
+                for item in (task_payload.get("deleted_followup_ids") or [])
+                if str(item or "").strip()
+            )
+        )
+
+        def persist_progress() -> None:
+            task_payload["followup_record_ids"] = followup_ids
+            task_payload["deleted_followup_ids"] = deleted_followup_ids
+            self._state_store.update_repair_management_operation(
+                operation_id,
+                status="processing",
+                summary_record_id=summary_id,
+                result={
+                    **result,
+                    "task_payload": task_payload,
+                    "deleted_followup_count": len(deleted_followup_ids),
+                    "deleted_followup_ids": list(deleted_followup_ids),
+                },
+                error="",
+            )
+
         for followup_id in followup_ids:
+            if followup_id in deleted_followup_ids:
+                continue
             try:
                 self._delete_record_fields(
                     app_token=REPAIR_SOURCE_APP_TOKEN,
@@ -11721,15 +13770,17 @@ class MaintenancePortalService:
                 )
             except Exception as exc:
                 if not self._repair_management_record_not_found_error(exc):
+                    persist_progress()
                     raise PortalError(
                         f"已删除 {len(deleted_followup_ids)}/{len(followup_ids)} 条跟进记录，"
-                        f"维修项目尚未删除；请重试。失败原因：{exc}"
+                        f"维修项目尚未删除。失败原因：{exc}"
                     ) from exc
             self._delete_repair_snapshot_item(
                 REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS,
                 followup_id,
             )
             deleted_followup_ids.append(followup_id)
+            persist_progress()
         try:
             self._delete_record_fields(
                 app_token=REPAIR_SOURCE_APP_TOKEN,
@@ -11738,21 +13789,32 @@ class MaintenancePortalService:
             )
         except Exception as exc:
             if not self._repair_management_record_not_found_error(exc):
+                persist_progress()
                 raise PortalError(
-                    f"已删除 {len(deleted_followup_ids)} 条跟进记录，但维修项目删除失败；"
-                    f"请重试。失败原因：{exc}"
+                    f"已删除 {len(deleted_followup_ids)} 条跟进记录，"
+                    f"但维修项目删除失败。失败原因：{exc}"
                 ) from exc
         self._delete_repair_snapshot_item(
             REPAIR_SNAPSHOT_SOURCE_PROJECTS,
             summary_id,
         )
         self._invalidate_repair_management_status_cache()
-        return {
+        response = {
+            **result,
+            "task_payload": task_payload,
             "record_id": summary_id,
             "deleted": True,
             "deleted_followup_count": len(deleted_followup_ids),
-            "deleted_followup_ids": deleted_followup_ids,
+            "deleted_followup_ids": list(deleted_followup_ids),
         }
+        self._state_store.update_repair_management_operation(
+            operation_id,
+            status="processing",
+            summary_record_id=summary_id,
+            result=response,
+            error="",
+        )
+        return response
 
     def mark_event_transferred_to_repair(
         self,
@@ -12208,6 +14270,7 @@ class MaintenancePortalService:
             self._load_raw_table_fields(
                 app_token=app_token,
                 table_id=table_id,
+                http_client=self._event_http_client,
             )
         )
         return metas, {meta.field_name: meta for meta in metas}
@@ -12394,6 +14457,7 @@ class MaintenancePortalService:
                 meta_by_name=meta_by_name,
                 work_type=WORK_TYPE_EVENT,
                 notice_type=NOTICE_TYPE_EVENT,
+                http_client=self._event_http_client,
             )
             snapshot_records: list[dict[str, Any]] = []
             for item in all_records:
@@ -15435,13 +17499,46 @@ class MaintenancePortalService:
             patch["message_failed_continue"] = True
         if active_item_id:
             patch["active_item_id"] = str(active_item_id or "")
+        audit_id = str(job.get("business_audit_id") or "").strip()
+        if audit_id:
+            request_payload = (
+                job.get("request") if isinstance(job.get("request"), dict) else {}
+            )
+            finish_business_audit(
+                self._state_store,
+                audit_id,
+                success=success,
+                result={
+                    "record_id": str(record_id or ""),
+                    "target_record_id": str(record_id or ""),
+                    "active_item_id": str(active_item_id or ""),
+                    "message_sent": bool(job.get("message_sent")),
+                    "message_warning": message_warning,
+                    "work_type": request_payload.get("work_type"),
+                    "notice_type": request_payload.get("notice_type"),
+                    "phase": phase,
+                },
+                error="" if success else str(message or "上传失败"),
+                error_stage="" if success else "remote_write",
+                remote_written=success,
+                message_sent=bool(job.get("message_sent")),
+            )
         if success:
-            self.mark_job(job_id, _persist=False, **patch)
+            self.mark_job(
+                job_id,
+                _persist=False,
+                _skip_audit_finish=True,
+                **patch,
+            )
             self._record_successful_action(job_id, record_id=record_id, active_item_id=active_item_id)
             with self._jobs_lock:
                 self._compact_completed_job_locked(job_id)
         else:
-            self.mark_job(job_id, **patch)
+            self.mark_job(
+                job_id,
+                _skip_audit_finish=True,
+                **patch,
+            )
 
     def _record_successful_action(
         self, job_id: str, *, record_id: str = "", active_item_id: str = ""
@@ -27514,6 +29611,7 @@ class MaintenancePortalService:
             "upload_release_at": float(job.get("upload_release_at") or 0),
             "request": self._compact_job_request(job.get("request") or {}),
             "operation_id": str(job.get("operation_id") or ""),
+            "business_audit_id": str(job.get("business_audit_id") or ""),
             "target_key": str(job.get("target_key") or ""),
             "depends_on_job_id": str(job.get("depends_on_job_id") or ""),
             "depends_on_phase": "",
@@ -27579,6 +29677,7 @@ class MaintenancePortalService:
             "upload_release_at": float(job.get("upload_release_at") or 0),
             "request": self._compact_job_request(job.get("request") or {}),
             "operation_id": str(job.get("operation_id") or ""),
+            "business_audit_id": str(job.get("business_audit_id") or ""),
             "target_key": str(job.get("target_key") or ""),
             "depends_on_job_id": str(job.get("depends_on_job_id") or ""),
             "depends_on_phase": str(job.get("depends_on_phase") or ""),
@@ -27647,6 +29746,8 @@ class MaintenancePortalService:
         if not job_id:
             return
         persist = bool(patch.pop("_persist", True))
+        skip_audit_finish = bool(patch.pop("_skip_audit_finish", False))
+        failed_audit_job: dict[str, Any] | None = None
         with self._jobs_lock:
             job = self._jobs.get(job_id)
             if not job:
@@ -27688,10 +29789,57 @@ class MaintenancePortalService:
                 return
             job.update(patch)
             job["updated_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+            if (
+                str(job.get("phase") or "") == "failed"
+                and not skip_audit_finish
+            ):
+                failed_audit_job = copy.deepcopy(job)
             if persist:
                 self._persist_action_job_locked(job)
                 if str(job.get("phase") or "") == "failed":
                     self._compact_failed_job_locked(job_id)
+        if failed_audit_job:
+            audit_id = str(
+                failed_audit_job.get("business_audit_id") or ""
+            ).strip()
+            if audit_id:
+                request_payload = (
+                    failed_audit_job.get("request")
+                    if isinstance(failed_audit_job.get("request"), dict)
+                    else {}
+                )
+                finish_business_audit(
+                    self._state_store,
+                    audit_id,
+                    success=False,
+                    result={
+                        "active_item_id": str(
+                            failed_audit_job.get("active_item_id") or ""
+                        ),
+                        "source_record_id": str(
+                            request_payload.get("source_record_id") or ""
+                        ),
+                        "target_record_id": str(
+                            failed_audit_job.get("target_record_id")
+                            or request_payload.get("target_record_id")
+                            or ""
+                        ),
+                        "message_sent": bool(
+                            failed_audit_job.get("message_sent")
+                        ),
+                        "message_warning": str(
+                            failed_audit_job.get("message_warning") or ""
+                        ),
+                        "work_type": request_payload.get("work_type"),
+                        "notice_type": request_payload.get("notice_type"),
+                        "phase": "failed",
+                    },
+                    error=str(failed_audit_job.get("error") or "任务失败"),
+                    error_stage=str(
+                        failed_audit_job.get("error_category") or "job"
+                    ),
+                    message_sent=bool(failed_audit_job.get("message_sent")),
+                )
 
     @staticmethod
     def _action_message_signature(prepared: dict[str, Any]) -> str:

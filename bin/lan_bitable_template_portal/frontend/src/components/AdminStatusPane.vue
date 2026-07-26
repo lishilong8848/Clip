@@ -214,13 +214,36 @@
         </article>
       </div>
     </section>
+    <section v-if="operationAuditItems.length" class="diagnostic-section">
+      <div class="section-title">
+        <strong>业务操作审计</strong>
+        <span>通告、事件、MOP、维修单与跟进</span>
+      </div>
+      <div class="job-list">
+        <article v-for="item in operationAuditItems" :key="item.audit_id" class="job-row">
+          <div class="job-main">
+            <strong>{{ auditDomainLabel(item.domain) }} · {{ auditActionLabel(item.action) }}</strong>
+            <span>
+              {{ item.scope || "全局" }} · {{ auditStatusLabel(item.status) }} ·
+              {{ formatMaybeTime(item.updated_at) }}
+            </span>
+            <p v-if="item.error" class="danger-text">{{ item.error }}</p>
+            <p v-else-if="item.warning" class="warning-text">{{ item.warning }}</p>
+          </div>
+          <div class="audit-result">
+            <b>{{ auditResultLabel(item) }}</b>
+            <span v-if="item.message_sent">消息已发送</span>
+          </div>
+        </article>
+      </div>
+    </section>
     <section v-if="statusWarnings.length" class="warning-list">
       <strong>需要关注</strong>
       <p v-for="item in statusWarnings" :key="item">{{ item }}</p>
     </section>
     <details class="raw-diagnostic">
       <summary>查看详细诊断数据</summary>
-      <pre>{{ pretty({ stats, perf, queues, consistency, noticeDiagnostic, recentJobs }) }}</pre>
+      <pre>{{ pretty({ stats, perf, queues, consistency, noticeDiagnostic, recentJobs, operationAudits }) }}</pre>
     </details>
   </section>
 </template>
@@ -239,6 +262,7 @@ const props = defineProps<{
   noticeDiagnostic: Dict;
   noticeDiagnosticLoading?: boolean;
   recentJobs: Dict;
+  operationAudits: Dict;
   busy?: boolean;
 }>();
 
@@ -316,6 +340,62 @@ const recentJobItems = computed(() => {
   const items = props.recentJobs?.items;
   return Array.isArray(items) ? items.slice(0, 20) : [];
 });
+
+const operationAuditItems = computed(() => {
+  const items = props.operationAudits?.items;
+  return Array.isArray(items) ? items.slice(0, 30) : [];
+});
+
+function auditDomainLabel(value: unknown): string {
+  return ({
+    notice: "通告",
+    event: "事件",
+    mop: "MOP",
+    repair: "维修",
+  } as Record<string, string>)[String(value || "")] || "业务";
+}
+
+function auditActionLabel(value: unknown): string {
+  const key = String(value || "");
+  const labels: Record<string, string> = {
+    start: "发送开始",
+    update: "发送更新",
+    end: "发送结束",
+    qt_upload: "Qt 上传",
+    qt_update: "Qt 更新",
+    qt_end: "Qt 结束",
+    qt_upload_replace: "Qt 归档",
+    write_signatures: "签名写入",
+    upload_signed: "上传已签名 MOP",
+    create_project: "新增维修单",
+    update_project: "修改维修单",
+    delete_project: "删除维修单",
+    create_followup: "新增跟进",
+    update_followup: "修改跟进",
+    delete_followup: "删除跟进",
+    bind_followups: "绑定跟进",
+  };
+  return labels[key] || key || "操作";
+}
+
+function auditStatusLabel(value: unknown): string {
+  return ({
+    started: "处理中",
+    success: "成功",
+    failed: "失败",
+    cancelled: "已取消",
+    completed: "已完成",
+  } as Record<string, string>)[String(value || "")] || String(value || "未知");
+}
+
+function auditResultLabel(item: Dict): string {
+  const status = String(item.status || "");
+  if (status === "started") return "正在执行";
+  if (String(item.domain || "") === "mop" && String(item.action || "") === "write_signatures") {
+    return status === "success" ? "本地文件已生成" : "本地文件未生成";
+  }
+  return item.remote_written ? "多维已写入" : "未写入多维";
+}
 
 const sqliteMaintenanceText = computed(() => {
   const item = props.stats.sqlite_maintenance || {};
@@ -804,6 +884,25 @@ function pretty(value: unknown): string {
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.audit-result {
+  display: grid;
+  flex: 0 0 auto;
+  gap: 3px;
+  justify-items: end;
+  color: #64748b;
+  font-size: 11px;
+}
+
+.audit-result b {
+  color: #1d4ed8;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.warning-text {
+  color: #92400e;
 }
 
 .warning-list {

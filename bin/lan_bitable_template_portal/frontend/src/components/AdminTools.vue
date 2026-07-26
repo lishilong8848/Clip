@@ -42,6 +42,7 @@
         :notice-diagnostic="noticeDiagnostic"
         :notice-diagnostic-loading="noticeDiagnosticLoading"
         :recent-jobs="recentJobs"
+        :operation-audits="operationAudits"
         :busy="busy"
         @refresh="loadStatus"
         @run-notice-diagnostic="runNoticeDiagnostic"
@@ -182,6 +183,7 @@ const noticeDiagnosticQuery = ref("");
 const noticeDiagnostic = ref<Dict>({});
 const noticeDiagnosticLoading = ref(false);
 const recentJobs = ref<Dict>({});
+const operationAudits = ref<Dict>({});
 const permissions = reactive<{ users: Dict[]; scope_options: Dict[] }>({ users: [], scope_options: [] });
 const permissionRequests = ref<Dict[]>([]);
 const permissionRequestStatus = ref("pending");
@@ -463,18 +465,28 @@ async function loadStatus(): Promise<void> {
   message.value = "";
   busy.value = true;
   try {
-    const [statsData, perfData, queuesData, consistencyData, jobsData] = await Promise.all([
+    let auditLoadWarning = "";
+    const auditRequest = api("/api/backend/operation-audits?limit=30").catch(
+      (error: any) => {
+        auditLoadWarning = error?.message || "业务操作审计加载失败";
+        return { items: [] };
+      },
+    );
+    const [statsData, perfData, queuesData, consistencyData, jobsData, auditsData] = await Promise.all([
       api("/api/backend/stats"),
       api("/api/backend/perf"),
       api("/api/backend/queues"),
       api("/api/backend/consistency?scope=ALL"),
       api("/api/jobs/recent?limit=20"),
+      auditRequest,
     ]);
     stats.value = statsData;
     perf.value = perfData;
     queues.value = queuesData;
     consistency.value = consistencyData;
     recentJobs.value = jobsData;
+    operationAudits.value = auditsData;
+    if (auditLoadWarning) message.value = auditLoadWarning;
   } catch (error: any) {
     message.value = error?.message || "状态加载失败";
   } finally {

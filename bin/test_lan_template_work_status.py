@@ -1702,6 +1702,37 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
         self.assertEqual(payload["code"], 99991663)
 
+    def test_feishu_http_client_rebuilds_pool_after_transport_timeout(self):
+        calls = []
+
+        def handler(request):
+            calls.append(str(request.url))
+            if len(calls) == 1:
+                raise httpx.ConnectTimeout("TLS handshake timeout", request=request)
+            return httpx.Response(200, json={"code": 0}, request=request)
+
+        class _TrackingClient(FeishuHttpClient):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self.reset_count = 0
+
+            def _reset_after_transport_error(self):
+                self.reset_count += 1
+                super()._reset_after_transport_error()
+
+        client = _TrackingClient(
+            transport=httpx.MockTransport(handler),
+            retries=1,
+        )
+        try:
+            payload = client.request_json("GET", "https://open.feishu.cn/mock")
+        finally:
+            client.close()
+
+        self.assertEqual(payload["code"], 0)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(client.reset_count, 1)
+
     def test_portal_service_request_uses_unified_http_client_by_default(self):
         service = MaintenancePortalService()
         captured = {}
@@ -2000,6 +2031,56 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertNotEqual(start_id, end_id)
             self.assertTrue(start_id.endswith(":start"))
             self.assertTrue(end_id.endswith(":end"))
+
+    def test_repair_event_transfer_sync_task_retries_and_completes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = _TestMaintenancePortalService()
+            service._state_store = LanPortalStateStore(  # type: ignore[assignment]
+                Path(tmp) / "lan_portal_state.sqlite3"
+            )
+            operation_id = service._schedule_repair_sync_task(
+                "event_transfer_sync",
+                summary_record_id="rec-summary",
+                scope="E",
+                task_payload={
+                    "event_record_id": "rec-event",
+                    "month": "2026-07",
+                },
+                error="模拟首次同步失败",
+            )
+            pending = service._state_store.get_repair_management_operation(
+                operation_id
+            )
+            pending_result = dict(pending["result"])
+            pending_result["available_at"] = 0
+            service._state_store.update_repair_management_operation(
+                operation_id,
+                status="sync_pending",
+                result=pending_result,
+            )
+            calls: list[dict] = []
+            service.mark_event_transferred_to_repair = (  # type: ignore[method-assign]
+                lambda **kwargs: calls.append(kwargs)
+                or {"record_id": kwargs["record_id"], "transfer_to_overhaul": True}
+            )
+
+            stats = service.process_due_repair_sync_tasks()
+            completed = service._state_store.get_repair_management_operation(
+                operation_id
+            )
+
+            self.assertEqual(stats["completed"], 1)
+            self.assertEqual(
+                calls,
+                [
+                    {
+                        "record_id": "rec-event",
+                        "month": "2026-07",
+                        "refresh_snapshot": False,
+                    }
+                ],
+            )
+            self.assertEqual(completed["status"], "completed")
 
     def test_repair_sync_task_does_not_overwrite_newer_reschedule(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -13783,6 +13864,44 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 PortalRuntime.repair_refresh_started_at = 0.0
                 PortalRuntime.repair_refresh_completed_at = 0.0
 
+    def test_event_refresh_status_keeps_protocol_status_authoritative(self):
+        with PortalRuntime.event_refresh_lock:
+            original = {
+                "inflight": PortalRuntime.event_refresh_inflight,
+                "result": PortalRuntime.event_refresh_last_result,
+                "error": PortalRuntime.event_refresh_last_error,
+                "started_at": PortalRuntime.event_refresh_started_at,
+                "completed_at": PortalRuntime.event_refresh_completed_at,
+                "month": PortalRuntime.event_refresh_last_month,
+            }
+            PortalRuntime.event_refresh_inflight = False
+            PortalRuntime.event_refresh_last_result = {
+                "status": "active",
+                "event_count": 85,
+                "event_refresh_month": "2026-07",
+            }
+            PortalRuntime.event_refresh_last_error = ""
+            PortalRuntime.event_refresh_started_at = 100.0
+            PortalRuntime.event_refresh_completed_at = 120.0
+            PortalRuntime.event_refresh_last_month = "2026-07"
+        try:
+            status = PortalRuntime.source_refresh_status(
+                "event",
+                month="2026-07",
+            )
+            self.assertEqual(status["status"], "success")
+            self.assertFalse(status["event_refresh_inflight"])
+            self.assertEqual(status["event_count"], 85)
+            self.assertEqual(status["result"]["status"], "active")
+        finally:
+            with PortalRuntime.event_refresh_lock:
+                PortalRuntime.event_refresh_inflight = original["inflight"]
+                PortalRuntime.event_refresh_last_result = original["result"]
+                PortalRuntime.event_refresh_last_error = original["error"]
+                PortalRuntime.event_refresh_started_at = original["started_at"]
+                PortalRuntime.event_refresh_completed_at = original["completed_at"]
+                PortalRuntime.event_refresh_last_month = original["month"]
+
     def test_change_source_refresh_request_is_blocking_singleflight(self):
         class _SlowChangeRefreshService:
             _load_warnings: list[str] = []
@@ -17725,7 +17844,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
         record = payload["records"][0]
         self.assertFalse(record["is_completed"])
-        self.assertFalse(record["read_only"])
+        self.assertTrue(record["read_only"])
+        self.assertTrue(record["state_locked"])
         self.assertFalse(record["followup_state_verified"])
         self.assertEqual(record["workflow"], "维修中")
         self.assertEqual(record["followup_count"], 0)
@@ -17764,7 +17884,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
         record = payload["record"]
         self.assertFalse(record["is_completed"])
-        self.assertFalse(record["read_only"])
+        self.assertTrue(record["read_only"])
+        self.assertTrue(record["state_locked"])
         self.assertFalse(record["followup_state_verified"])
         self.assertEqual(record["workflow"], "维修中")
         self.assertEqual(record["followup_count"], 0)
@@ -19578,6 +19699,44 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
         self.assertTrue(conflicted["conflict"])
         self.assertEqual(len(patches), 1)
+
+    def test_repair_notice_sync_conflict_does_not_patch_project(self):
+        service = _TestMaintenancePortalService()
+        project_patches: list[dict] = []
+        service._ensure_repair_management_record_in_scope = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: {
+                "record_id": "rec_summary",
+                "raw_fields": {},
+                "display_fields": {},
+            }
+        )
+        service._load_repair_management_project_records = (  # type: ignore[method-assign]
+            lambda **_kwargs: ([], {}, [])
+        )
+        service._sync_repair_target_summary_id = (  # type: ignore[method-assign]
+            lambda **_kwargs: {
+                "synced": False,
+                "conflict": True,
+                "warning": "检修目标记录已关联其他维修单。",
+            }
+        )
+        service._patch_record_fields = (  # type: ignore[method-assign]
+            lambda **kwargs: project_patches.append(kwargs) or {"code": 0}
+        )
+
+        with self.assertRaisesRegex(PortalError, "已关联其他维修单"):
+            service.sync_repair_management_notice_action(
+                {
+                    "work_type": WORK_TYPE_REPAIR,
+                    "repair_management_record_id": "rec_summary",
+                    "scope": "E",
+                    "title": "E楼设备检修",
+                },
+                action="start",
+                target_record_id="rec_target",
+            )
+
+        self.assertEqual(project_patches, [])
 
     def test_repair_workflow_requires_end_followup_and_full_progress(self):
         resolver = MaintenancePortalService._repair_management_workflow_for_state
@@ -23556,6 +23715,11 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
     def test_repair_management_delete_cascades_followup_records(self):
         service = _TestMaintenancePortalService()
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        service._state_store = LanPortalStateStore(  # type: ignore[assignment]
+            Path(temp_dir.name) / "lan_portal_state.sqlite3"
+        )
         service._load_repair_management_project_records = (  # type: ignore[method-assign]
             lambda **_kwargs: ([], {}, [])
         )
@@ -23607,6 +23771,14 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
     def test_repair_management_delete_keeps_parent_when_followup_delete_fails(self):
         service = _TestMaintenancePortalService()
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        service._state_store = LanPortalStateStore(  # type: ignore[assignment]
+            Path(temp_dir.name) / "lan_portal_state.sqlite3"
+        )
+        service._process_repair_sync_tasks_async = (  # type: ignore[method-assign]
+            lambda: None
+        )
         service._load_repair_management_project_records = (  # type: ignore[method-assign]
             lambda **_kwargs: ([], {}, [])
         )
@@ -23634,6 +23806,79 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             service.delete_repair_management_record("rec_summary")
 
         self.assertNotIn((REPAIR_MANAGEMENT_TABLE_ID, "rec_summary"), deleted)
+
+    def test_repair_management_delete_resumes_without_redeleting_followups(self):
+        service = _TestMaintenancePortalService()
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        service._state_store = LanPortalStateStore(  # type: ignore[assignment]
+            Path(temp_dir.name) / "lan_portal_state.sqlite3"
+        )
+        service._process_repair_sync_tasks_async = (  # type: ignore[method-assign]
+            lambda: None
+        )
+        service._load_repair_management_project_records = (  # type: ignore[method-assign]
+            lambda **_kwargs: ([], {}, [])
+        )
+        service._ensure_repair_management_record_in_scope = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: {"record_id": "rec_summary", "raw_fields": {}}
+        )
+        service._load_repair_followups_for_summary = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: (
+                [],
+                {},
+                [{"record_id": "rec_followup_1"}, {"record_id": "rec_followup_2"}],
+            )
+        )
+        deleted: list[tuple[str, str]] = []
+        fail_second = {"value": True}
+
+        def fake_delete(**kwargs):
+            key = (kwargs["table_id"], kwargs["record_id"])
+            deleted.append(key)
+            if kwargs["record_id"] == "rec_followup_2" and fail_second["value"]:
+                fail_second["value"] = False
+                raise PortalError("模拟一次性删除失败")
+            return {"code": 0}
+
+        service._delete_record_fields = fake_delete  # type: ignore[method-assign]
+
+        with self.assertRaisesRegex(PortalError, "已删除 1/2 条跟进记录"):
+            service.delete_repair_management_record("rec_summary")
+
+        operation_id = service._repair_sync_operation_id(
+            "project_delete",
+            "rec_summary",
+        )
+        pending = service._state_store.get_repair_management_operation(operation_id)
+        pending_result = dict(pending["result"])
+        pending_result["available_at"] = 0
+        service._state_store.update_repair_management_operation(
+            operation_id,
+            status="sync_pending",
+            result=pending_result,
+        )
+
+        stats = service.process_due_repair_sync_tasks()
+        completed = service._state_store.get_repair_management_operation(
+            operation_id
+        )
+
+        self.assertEqual(stats["completed"], 1)
+        self.assertEqual(
+            deleted.count((REPAIR_FOLLOWUP_TABLE_ID, "rec_followup_1")),
+            1,
+        )
+        self.assertEqual(
+            deleted.count((REPAIR_FOLLOWUP_TABLE_ID, "rec_followup_2")),
+            2,
+        )
+        self.assertEqual(
+            deleted.count((REPAIR_MANAGEMENT_TABLE_ID, "rec_summary")),
+            1,
+        )
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(completed["result"]["deleted_followup_count"], 2)
 
     def test_repair_management_create_filters_system_readonly_field_names(self):
         service = _TestMaintenancePortalService()
@@ -23672,6 +23917,11 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
     def test_repair_management_delete_uses_repair_source_table(self):
         service = _TestMaintenancePortalService()
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        service._state_store = LanPortalStateStore(  # type: ignore[assignment]
+            Path(temp_dir.name) / "lan_portal_state.sqlite3"
+        )
         captured = {}
 
         def fake_delete_record_fields(**kwargs):
@@ -23679,6 +23929,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             return {"code": 0}
 
         service._delete_record_fields = fake_delete_record_fields  # type: ignore[method-assign]
+        service._load_repair_management_project_records = (  # type: ignore[method-assign]
+            lambda **_kwargs: ([], {}, [])
+        )
         service._ensure_repair_management_record_in_scope = (  # type: ignore[method-assign]
             lambda *_args, **_kwargs: {"record_id": "rec_repair_delete", "raw_fields": {}}
         )

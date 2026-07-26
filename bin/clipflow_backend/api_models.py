@@ -62,6 +62,7 @@ class NoticeWorkTypeOverrideRequest(APIModel):
 
 class RepairManagementRecordRequest(APIModel):
     operation_id: str = Field(default="", max_length=128)
+    expected_version: str = Field(default="", max_length=128)
     scope: str = "ALL"
     source_event_id: str = ""
     source_repair_ids: list[str] = Field(default_factory=list, max_length=1)
@@ -95,10 +96,27 @@ class RepairNoticeEventBindRequest(APIModel):
 
 class RepairFollowupRecordRequest(APIModel):
     operation_id: str = Field(default="", max_length=128)
+    expected_version: str = Field(default="", max_length=128)
     scope: str = "ALL"
     summary_record_id: str
     cmdb_record_ids: list[str] | None = None
     fields: dict[str, Any] = Field(default_factory=dict)
+
+
+class RepairSyncRetryRequest(APIModel):
+    scope: str = "ALL"
+    summary_record_id: str
+    operation_id: str = ""
+
+    class Config(APIModel.Config):
+        extra = "forbid"
+
+
+class RepairScopeRequest(APIModel):
+    scope: str = "ALL"
+
+    class Config(APIModel.Config):
+        extra = "forbid"
 
 
 class RepairFollowupBindRequest(APIModel):

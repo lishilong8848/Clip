@@ -1520,7 +1520,11 @@ class PortalRuntime:
             status = "success"
         else:
             status = "idle"
-        payload = {
+        # Result payloads can have their own business-level ``status`` value
+        # (event snapshots use ``active``). Keep refresh protocol fields
+        # authoritative so clients always observe success/failed terminal states.
+        payload = dict(result)
+        payload.update({
             "refresh_kind": normalized_kind,
             "status": status,
             "inflight": inflight,
@@ -1528,8 +1532,7 @@ class PortalRuntime:
             "started_at": started_at,
             "completed_at": completed_at,
             "result": result,
-        }
-        payload.update(result)
+        })
         payload[f"{normalized_kind}_refresh_inflight"] = inflight
         payload[f"{normalized_kind}_refresh_error"] = error
         return payload

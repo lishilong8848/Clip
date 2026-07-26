@@ -10,6 +10,10 @@
           <Activity :size="16" aria-hidden="true" />
           <span>检修状态</span>
         </button>
+        <button type="button" class="btn secondary" @click="openFailureCenter">
+          <ClipboardList :size="16" aria-hidden="true" />
+          <span>任务中心</span>
+        </button>
         <button type="button" class="btn secondary" :disabled="loading || refreshingSources" @click="refreshRepairSources">
           <RefreshCw :size="16" :class="{ spinning: refreshingSources }" aria-hidden="true" />
           <span>{{ refreshingSources ? "刷新中" : "刷新" }}</span>
@@ -25,6 +29,38 @@
     <div v-if="hasAnyUnsavedChanges && !projectDrawerOpen" class="page-unsaved-notice" role="status" aria-live="polite">
       <AlertCircle :size="16" aria-hidden="true" />
       <span>{{ unsavedNoticeText }}</span>
+    </div>
+    <div
+      v-if="repairHealthVisible"
+      class="repair-health-strip"
+      :class="repairHealthTone"
+      role="status"
+      aria-live="polite"
+    >
+      <div>
+        <AlertCircle :size="17" aria-hidden="true" />
+        <span>{{ repairHealthText }}</span>
+      </div>
+      <div class="repair-health-actions">
+        <button
+          v-if="repairHealthFailedCount"
+          type="button"
+          :disabled="globalSyncRetrying"
+          @click="retryAllRepairSync"
+        >
+          <RefreshCw :size="14" :class="{ spinning: globalSyncRetrying }" aria-hidden="true" />
+          {{ globalSyncRetrying ? "重试中" : "重试失败任务" }}
+        </button>
+        <button
+          v-if="repairHealthIntegrityCount && repairHealth?.can_repair"
+          type="button"
+          :disabled="integrityRepairing"
+          @click="repairIntegrity"
+        >
+          <Wrench :size="14" aria-hidden="true" />
+          {{ integrityRepairing ? "修复中" : "修复关联" }}
+        </button>
+      </div>
     </div>
 
     <div class="repair-layout">
@@ -52,6 +88,23 @@
               {{ option.label }}
             </button>
           </div>
+          <div
+            v-if="recordState === 'completed'"
+            class="record-history-period"
+            role="group"
+            aria-label="已完成时间范围"
+          >
+            <button
+              v-for="option in recordHistoryPeriodOptions"
+              :key="option.value"
+              type="button"
+              :class="{ active: recordHistoryPeriod === option.value }"
+              :disabled="loading"
+              @click="changeRecordHistoryPeriod(option.value)"
+            >
+              {{ option.label }}
+            </button>
+          </div>
         </div>
         <div v-if="records.length" class="record-table-head" aria-hidden="true">
           <span>维修项目</span>
@@ -61,58 +114,73 @@
           <span>最近更新</span>
           <span></span>
         </div>
-        <div class="record-list" :aria-busy="loading">
+        <div ref="recordListRef" class="record-list" :aria-busy="loading">
           <div v-if="loading && !records.length" class="empty-state">正在读取维修项目...</div>
           <div v-else-if="!records.length" class="empty-state">{{ recordEmptyText }}</div>
-          <article
-            v-for="record in records"
+          <div
             v-else
-            :key="record.record_id"
-            class="record-row"
-            :class="{
-              active: selectedRecord?.record_id === record.record_id,
-              completed: repairRecordIsCompleted(record),
-            }"
-            role="button"
-            tabindex="0"
-            :aria-label="`打开维修项目：${record.title || '未命名维修项目'}`"
-            @click="requestSelectRecord(record, 'project')"
-            @keydown.enter.prevent="requestSelectRecord(record, 'project')"
-            @keydown.space.prevent="requestSelectRecord(record, 'project')"
+            class="record-virtual-spacer"
+            :style="{ height: `${recordVirtualTotalSize}px` }"
           >
-            <span class="record-project-cell">
-              <span class="record-title" :title="record.title || '未命名维修项目'">
-                {{ record.title || "未命名维修项目" }}
-              </span>
-              <span class="record-meta">
-                <b>{{ recordBuildingLabel(record) }}</b>
-                <b>{{ recordSpecialtyLabel(record) }}</b>
-              </span>
-            </span>
-            <span class="record-status-cell">
-              <b class="workflow">{{ record.workflow || "流程未填写" }}</b>
-              <small v-if="repairRecordIsCompleted(record)">只读</small>
-            </span>
-            <button
-              type="button"
-              class="record-followup-button"
-              :aria-label="`查看 ${record.followup_count || 0} 条跟进记录`"
-              @click.stop="requestSelectRecord(record, 'followups')"
+            <article
+              v-for="virtualRow in virtualRecordRows"
+              :key="recordVirtualKey(virtualRow)"
+              class="record-row"
+              :class="{
+                active: selectedRecord?.record_id === recordAt(virtualRow.index).record_id,
+                completed: repairRecordIsCompleted(recordAt(virtualRow.index)),
+              }"
+              :style="{ transform: `translateY(${virtualRow.start}px)` }"
+              role="button"
+              tabindex="0"
+              :aria-label="`打开维修项目：${recordAt(virtualRow.index).title || '未命名维修项目'}`"
+              @click="requestSelectRecord(recordAt(virtualRow.index), 'project')"
+              @keydown.enter.prevent="requestSelectRecord(recordAt(virtualRow.index), 'project')"
+              @keydown.space.prevent="requestSelectRecord(recordAt(virtualRow.index), 'project')"
             >
-              <ClipboardList :size="15" aria-hidden="true" />
-              <b>{{ Number(record.followup_count || 0) }}</b>
-              <span>条</span>
-            </button>
-            <span class="record-progress-cell">
-              <span><b>{{ recordProgressPercent(record) }}%</b></span>
-              <i aria-hidden="true"><b :style="{ width: `${recordProgressPercent(record)}%` }"></b></i>
-            </span>
-            <span class="record-time" :title="recordLatestTimeLabel(record)">
-              <Clock3 :size="13" aria-hidden="true" />
-              <span>{{ recordLatestTimeLabel(record) }}</span>
-            </span>
-            <ChevronRight :size="18" class="record-open-icon" aria-hidden="true" />
-          </article>
+              <span class="record-project-cell">
+                <span
+                  class="record-title"
+                  :title="recordAt(virtualRow.index).title || '未命名维修项目'"
+                >
+                  {{ recordAt(virtualRow.index).title || "未命名维修项目" }}
+                </span>
+                <span class="record-meta">
+                  <b>{{ recordBuildingLabel(recordAt(virtualRow.index)) }}</b>
+                  <b>{{ recordSpecialtyLabel(recordAt(virtualRow.index)) }}</b>
+                </span>
+              </span>
+              <span class="record-status-cell">
+                <b class="workflow">{{ recordAt(virtualRow.index).workflow || "流程未填写" }}</b>
+                <small v-if="repairRecordStateLocked(recordAt(virtualRow.index))">状态待确认</small>
+                <small v-else-if="repairRecordIsCompleted(recordAt(virtualRow.index))">只读</small>
+              </span>
+              <button
+                type="button"
+                class="record-followup-button"
+                :aria-label="`查看 ${recordAt(virtualRow.index).followup_count || 0} 条跟进记录`"
+                @click.stop="requestSelectRecord(recordAt(virtualRow.index), 'followups')"
+              >
+                <ClipboardList :size="15" aria-hidden="true" />
+                <b>{{ Number(recordAt(virtualRow.index).followup_count || 0) }}</b>
+                <span>条</span>
+              </button>
+              <span class="record-progress-cell">
+                <span><b>{{ recordProgressPercent(recordAt(virtualRow.index)) }}%</b></span>
+                <i aria-hidden="true">
+                  <b :style="{ width: `${recordProgressPercent(recordAt(virtualRow.index))}%` }"></b>
+                </i>
+              </span>
+              <span
+                class="record-time"
+                :title="recordLatestTimeLabel(recordAt(virtualRow.index))"
+              >
+                <Clock3 :size="13" aria-hidden="true" />
+                <span>{{ recordLatestTimeLabel(recordAt(virtualRow.index)) }}</span>
+              </span>
+              <ChevronRight :size="18" class="record-open-icon" aria-hidden="true" />
+            </article>
+          </div>
         </div>
         <nav v-if="recordPageCount > 1" class="pager" aria-label="维修项目分页">
           <button type="button" :disabled="loading || recordPage <= 1" @click="changeRecordPage(-1)">上一页</button>
@@ -140,7 +208,7 @@
         >
           <header class="project-drawer-head">
             <div class="project-drawer-title">
-              <span>{{ selectedRecordReadOnly ? "已完成 · 只读" : activeWorkspaceTab === "followups" ? "跟进记录" : editingRecordId ? "维修单信息" : "新建维修单" }}</span>
+              <span>{{ selectedRecordStateLocked ? "状态待确认 · 只读" : selectedRecordReadOnly ? "已完成 · 只读" : activeWorkspaceTab === "followups" ? "跟进记录" : editingRecordId ? "维修单信息" : "新建维修单" }}</span>
               <h3 id="repair-project-drawer-title">
                 {{ editingRecordId ? selectedRecordHeaderTitle : "填写维修项目" }}
               </h3>
@@ -175,15 +243,60 @@
             <span><small>当前进度</small><b>{{ recordProgressPercent(selectedRecord || {}) }}%</b></span>
             <span><small>跟进记录</small><b>{{ selectedFollowupCount }} 条</b></span>
           </div>
+          <div
+            v-if="editingRecordId && ['pending', 'failed'].includes(String(projectSyncStatus?.status || ''))"
+            class="project-sync-status"
+            :class="String(projectSyncStatus?.status || '')"
+            role="status"
+            aria-live="polite"
+          >
+            <div>
+              <LoaderCircle
+                v-if="projectSyncStatus?.status === 'pending'"
+                :size="17"
+                class="spinning"
+                aria-hidden="true"
+              />
+              <AlertCircle v-else :size="17" aria-hidden="true" />
+              <span>{{ projectSyncStatusText }}</span>
+            </div>
+            <button
+              v-if="projectSyncStatus?.status === 'failed'"
+              type="button"
+              :disabled="syncRetrying"
+              @click="retryProjectSync"
+            >
+              <RefreshCw :size="14" :class="{ spinning: syncRetrying }" aria-hidden="true" />
+              {{ syncRetrying ? "重试中" : "立即重试" }}
+            </button>
+          </div>
 
           <div class="project-drawer-body">
             <MessageBanner v-if="messageText" :tone="messageTone" :text="messageText" />
+            <section v-if="projectConflict" class="project-conflict" role="alert">
+              <div>
+                <AlertCircle :size="17" aria-hidden="true" />
+                <span>{{ projectConflict.message }}</span>
+              </div>
+              <div class="project-conflict-actions">
+                <button type="button" @click="copyCurrentProjectDraft">复制当前填写</button>
+                <button type="button" class="primary" :disabled="recordDetailLoading" @click="reloadLatestProject">
+                  {{ recordDetailLoading ? "读取中" : "读取最新内容" }}
+                </button>
+                <button type="button" @click="projectConflict = null">稍后处理</button>
+              </div>
+            </section>
             <div v-if="hasAnyUnsavedChanges" class="page-unsaved-notice" role="status" aria-live="polite">
               <AlertCircle :size="16" aria-hidden="true" />
               <span>{{ unsavedNoticeText }}</span>
             </div>
 
-            <main class="editor-panel">
+            <div v-if="recordDetailLoading" class="project-detail-loading" role="status" aria-live="polite">
+              <LoaderCircle :size="22" class="spinning" aria-hidden="true" />
+              <span>正在读取维修单...</span>
+            </div>
+
+            <main v-else class="editor-panel">
         <header class="workspace-tabs-row">
           <nav class="workspace-tabs" aria-label="维修项目工作区">
             <button
@@ -360,7 +473,7 @@
           </footer>
           <div v-else class="completed-readonly-bar" role="status">
             <LockKeyhole :size="16" aria-hidden="true" />
-            <span>维修已完成，仅供查看</span>
+            <span>{{ selectedRecordStateLocked ? "跟进状态暂未确认，当前仅供查看" : "维修已完成，仅供查看" }}</span>
           </div>
         </div>
 
@@ -383,6 +496,25 @@
         </section>
       </div>
     </Teleport>
+
+    <RepairTaskCenter
+      :open="failureCenterOpen"
+      :loading="failureCenterLoading"
+      :items="failureCenterItems"
+      :failed-count="failureCenterFailedCount"
+      :pending-count="failureCenterPendingCount"
+      :integrity-count="repairHealthIntegrityCount"
+      :can-reconcile="failureCenterCanReconcile"
+      :message="failureCenterMessage"
+      :message-tone="failureCenterMessageTone"
+      :retrying="globalSyncRetrying"
+      :integration-checking="integrationChecking"
+      :reconciling="reconcilingRemote"
+      @close="failureCenterOpen = false"
+      @retry="retryAllRepairSyncFromCenter"
+      @integration-check="runIntegrationCheck"
+      @reconcile="runRemoteReconcile"
+    />
 
     <ConfirmDialog
       :open="confirmDialog.open"
@@ -437,6 +569,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from "vue";
+import { useVirtualizer } from "@tanstack/vue-virtual";
 import {
   Activity,
   AlertCircle,
@@ -454,7 +587,7 @@ import {
   Wrench,
   X,
 } from "lucide-vue-next";
-import { refreshRemoteSourceAndWait, requestJson } from "../api/client";
+import { ApiError, refreshRemoteSourceAndWait, requestJson } from "../api/client";
 import { navigate, navigateHard } from "../navigation";
 import { invalidateRepairStatus } from "../repairStatusState";
 import {
@@ -478,6 +611,7 @@ import MessageBanner from "./MessageBanner.vue";
 import RepairFieldControl from "./RepairFieldControl.vue";
 import RepairFollowupPanel from "./RepairFollowupPanel.vue";
 import RepairPeoplePicker from "./RepairPeoplePicker.vue";
+import RepairTaskCenter from "./RepairTaskCenter.vue";
 import RecordPickerDialog from "./RecordPickerDialog.vue";
 import VnetBackButton from "./VnetBackButton.vue";
 
@@ -485,24 +619,65 @@ type PickerColumn = { key: string; label: string; width?: string; wrap?: boolean
 type SourcePicker = "" | "event" | "repair";
 type WorkspaceTab = "project" | "followups";
 type RecordStateFilter = "all" | "active" | "completed";
+type RecordHistoryPeriod = "all" | "month" | "week" | "today";
 type ConfirmTone = "warning" | "danger" | "primary";
 type ProjectFieldGroupKey = "basic" | "execution" | "other";
 type PrefillSelection = { eventRecordId: string; repairRecordIds: string[] };
 
 const RECORD_PAGE_SIZE = 30;
+const REPAIR_STREAM_STALE_MS = 30_000;
+const REPAIR_STREAM_POLL_MS = 15_000;
 const RECORD_RESPONSE_CACHE_TTL_MS = 15_000;
+const RECORD_DETAIL_CACHE_TTL_MS = 120_000;
+const RECORD_DETAIL_CACHE_MAX_ITEMS = 20;
 const REPAIR_SPECIALTY_OPTIONS = ["电气", "暖通", "消防", "弱电"];
 const PROJECT_WORKER_FIELD_NAME = "随工人员（或我方维修人员）";
 const CURRENT_PROJECT_PROGRESS_FIELD_NAME = "当前维修进度";
 const recordResponseCache = new Map<string, { expiresAt: number; payload: LooseDict }>();
+const recordDetailCache = new Map<string, { expiresAt: number; record: LooseDict }>();
 const recordStateOptions: Array<{ value: RecordStateFilter; label: string }> = [
   { value: "all", label: "全部" },
   { value: "active", label: "未完成" },
   { value: "completed", label: "已完成" },
 ];
+const recordHistoryPeriodOptions: Array<{ value: RecordHistoryPeriod; label: string }> = [
+  { value: "all", label: "全部历史" },
+  { value: "month", label: "本月" },
+  { value: "week", label: "本周" },
+  { value: "today", label: "今天" },
+];
 
 function clearRecordResponseCache(): void {
   recordResponseCache.clear();
+}
+
+function recordDetailCacheKey(recordId: string): string {
+  return `${String(props?.scope || "ALL").toUpperCase()}:${String(recordId || "").trim()}`;
+}
+
+function clearRecordDetailCache(recordId = ""): void {
+  const normalizedRecordId = String(recordId || "").trim();
+  if (!normalizedRecordId) {
+    recordDetailCache.clear();
+    return;
+  }
+  recordDetailCache.delete(recordDetailCacheKey(normalizedRecordId));
+}
+
+function cacheRecordDetail(record: LooseDict): void {
+  const recordId = String(record.record_id || "").trim();
+  if (!recordId) return;
+  const key = recordDetailCacheKey(recordId);
+  recordDetailCache.delete(key);
+  recordDetailCache.set(key, {
+    expiresAt: Date.now() + RECORD_DETAIL_CACHE_TTL_MS,
+    record,
+  });
+  while (recordDetailCache.size > RECORD_DETAIL_CACHE_MAX_ITEMS) {
+    const firstKey = recordDetailCache.keys().next().value;
+    if (!firstKey) break;
+    recordDetailCache.delete(firstKey);
+  }
 }
 
 function withStandardRepairOptions(field: LooseDict): LooseDict {
@@ -582,15 +757,41 @@ const props = defineProps<{
 }>();
 
 const loading = ref(false);
+const recordDetailLoading = ref(false);
+const projectSyncStatus = ref<LooseDict | null>(null);
+const repairHealth = ref<LooseDict | null>(null);
+const syncRetrying = ref(false);
+const globalSyncRetrying = ref(false);
+const integrityRepairing = ref(false);
+const failureCenterOpen = ref(false);
+const failureCenterLoading = ref(false);
+const failureCenterItems = ref<LooseDict[]>([]);
+const failureCenterCanReconcile = ref(false);
+const failureCenterMessage = ref("");
+const failureCenterMessageTone = ref<"success" | "warning" | "failed">("success");
+const integrationChecking = ref(false);
+const reconcilingRemote = ref(false);
+const serverUpdatePending = ref(false);
 const refreshingSources = ref(false);
 const repairSourceRefreshVersion = ref(0);
 const saving = ref(false);
 const searchText = ref("");
 const recordState = ref<RecordStateFilter>("all");
+const recordHistoryPeriod = ref<RecordHistoryPeriod>("all");
 const messageText = ref("");
 const messageTone = ref<"success" | "warning" | "failed">("success");
 const fields = ref<LooseDict[]>([]);
 const records = ref<LooseDict[]>([]);
+const recordListRef = ref<HTMLElement | null>(null);
+const recordVirtualizerOptions = computed(() => ({
+  count: records.value.length,
+  getScrollElement: () => recordListRef.value,
+  estimateSize: () => 78,
+  overscan: 7,
+}));
+const recordVirtualizer = useVirtualizer(recordVirtualizerOptions);
+const virtualRecordRows = computed(() => recordVirtualizer.value.getVirtualItems());
+const recordVirtualTotalSize = computed(() => recordVirtualizer.value.getTotalSize());
 const total = ref(0);
 const selectedRecord = ref<LooseDict | null>(null);
 const editingRecordId = ref("");
@@ -628,6 +829,9 @@ const projectDrawerOpen = ref(false);
 const followupPanelMounted = ref(false);
 const projectDrawerRef = ref<HTMLElement | null>(null);
 const createOperationId = ref("");
+const updateOperationId = ref("");
+let updateOperationPayloadKey = "";
+const projectConflict = ref<{ message: string; recordId: string } | null>(null);
 const pendingRecordFocusId = ref("");
 const recordPage = ref(1);
 const confirmDialog = reactive({
@@ -642,6 +846,13 @@ const confirmDialog = reactive({
 let pendingConfirmAction: null | (() => void | Promise<void>) = null;
 let searchTimer: ReturnType<typeof setTimeout> | undefined;
 let postSaveRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+let syncStatusTimer: ReturnType<typeof setTimeout> | undefined;
+let repairStreamRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+let repairStreamPollTimer: ReturnType<typeof setInterval> | undefined;
+let repairStreamLastActivityAt = 0;
+let repairStreamCursor = 0;
+let repairStreamPollInFlight = false;
+let repairPageActive = false;
 let skipNextSearchReload = false;
 let recordsRequestVersion = 0;
 let eventRequestVersion = 0;
@@ -649,18 +860,28 @@ let repairRequestVersion = 0;
 let prefillRequestVersion = 0;
 let recordDetailRequestVersion = 0;
 let activationCount = 0;
+let lastRenderedRecordQuery = "";
 let recordsAbortController: AbortController | null = null;
 let sourceRefreshAbortController: AbortController | null = null;
 let eventAbortController: AbortController | null = null;
 let repairAbortController: AbortController | null = null;
 let prefillAbortController: AbortController | null = null;
 let recordDetailAbortController: AbortController | null = null;
+let repairManagementStream: EventSource | null = null;
 let bodyOverflowBeforeDrawer = "";
 let projectDrawerReturnFocus: HTMLElement | null = null;
 
 const routeParams = new URLSearchParams(window.location.search);
 const routeEventTitle = String(routeParams.get("event_title") || "").trim();
 const routeEventId = String(routeParams.get("from_event_record_id") || "").trim();
+
+function recordAt(index: number): LooseDict {
+  return records.value[index] || {};
+}
+
+function recordVirtualKey(virtualRow: { index: number; key: unknown }): string {
+  return String(recordAt(virtualRow.index).record_id || virtualRow.key);
+}
 const appliedFocusRecordId = ref("");
 const eventTitle = ref(routeEventTitle);
 const sourceEventId = ref(routeEventId);
@@ -763,10 +984,77 @@ const saveDisabledReason = computed(() => {
 
 const selectedRecordTitle = computed(() => selectedRecord.value?.title || "未命名维修项目");
 const selectedRecordHeaderTitle = computed(() => repairRecordHeaderTitle(selectedRecord.value || {}));
-const selectedRecordReadOnly = computed(() => repairRecordIsCompleted(selectedRecord.value || {}));
+const selectedRecordStateLocked = computed(() => repairRecordStateLocked(selectedRecord.value || {}));
+const selectedRecordReadOnly = computed(() => repairRecordIsReadOnly(selectedRecord.value || {}));
 const selectedFollowupCount = computed(() => Math.max(
   0,
   Number(selectedRecord.value?.followup_count || 0),
+));
+const projectSyncStatusText = computed(() => {
+  const status = String(projectSyncStatus.value?.status || "");
+  if (status === "pending") {
+    const count = Math.max(1, Number(projectSyncStatus.value?.pending_count || 0));
+    return `${count} 项后台同步正在处理`;
+  }
+  const operations = Array.isArray(projectSyncStatus.value?.operations)
+    ? projectSyncStatus.value?.operations as LooseDict[]
+    : [];
+  const firstError = operations
+    .map((item) => String(item.error || "").trim())
+    .find(Boolean);
+  return firstError ? `后台同步失败：${firstError}` : "后台同步失败，可立即重试";
+});
+const repairHealthFailedCount = computed(() => Math.max(
+  0,
+  Number((repairHealth.value?.sync as LooseDict | undefined)?.failed_count || 0),
+));
+const repairHealthPendingCount = computed(() => Math.max(
+  0,
+  Number((repairHealth.value?.sync as LooseDict | undefined)?.pending_count || 0),
+));
+const repairHealthIntegrityCount = computed(() => Math.max(
+  0,
+  Number((repairHealth.value?.integrity as LooseDict | undefined)?.issue_count || 0),
+));
+const repairHealthVisible = computed(() => (
+  repairHealthFailedCount.value > 0
+  || repairHealthIntegrityCount.value > 0
+  || serverUpdatePending.value
+));
+const repairHealthTone = computed(() => (
+  repairHealthFailedCount.value > 0 ? "failed" : "warning"
+));
+const repairHealthText = computed(() => {
+  const parts: string[] = [];
+  if (repairHealthFailedCount.value) {
+    parts.push(`${repairHealthFailedCount.value} 项后台同步失败`);
+  }
+  if (repairHealthIntegrityCount.value) {
+    parts.push(`${repairHealthIntegrityCount.value} 项关联待修复`);
+  }
+  if (repairHealthPendingCount.value) {
+    parts.push(`${repairHealthPendingCount.value} 项同步处理中`);
+  }
+  if (serverUpdatePending.value) {
+    parts.push("服务器有新数据，保存或关闭编辑后自动更新");
+  }
+  return parts.join("；") || "维修数据正常";
+});
+const failureCenterFailedCount = computed(() => Math.max(
+  repairHealthFailedCount.value,
+  Number(
+    failureCenterItems.value.filter((item) => String(item.status || "") === "failed").length,
+  ),
+));
+const failureCenterPendingCount = computed(() => Math.max(
+  repairHealthPendingCount.value,
+  Number(
+    failureCenterItems.value.filter((item) => (
+      ["started", "remote_written", "sync_pending", "processing"].includes(
+        String(item.status || ""),
+      )
+    )).length,
+  ),
 ));
 const recordPageCount = computed(() => Math.max(1, Math.ceil(total.value / RECORD_PAGE_SIZE)));
 const recordEmptyText = computed(() => (
@@ -790,7 +1078,15 @@ function recordProgressPercent(record: LooseDict): number {
 }
 
 function repairRecordIsCompleted(record: LooseDict): boolean {
-  return record.is_completed === true || record.read_only === true;
+  return record.is_completed === true;
+}
+
+function repairRecordStateLocked(record: LooseDict): boolean {
+  return record.state_locked === true || record.followup_state_verified === false;
+}
+
+function repairRecordIsReadOnly(record: LooseDict): boolean {
+  return repairRecordIsCompleted(record) || repairRecordStateLocked(record) || record.read_only === true;
 }
 
 function recordLatestTimeLabel(record: LooseDict): string {
@@ -1005,8 +1301,10 @@ function scopedQuery(): string {
     scope: props.scope || "ALL",
     q: searchText.value,
     state: recordState.value,
+    period: recordState.value === "completed" ? recordHistoryPeriod.value : "all",
     limit: String(RECORD_PAGE_SIZE),
     offset: String((recordPage.value - 1) * RECORD_PAGE_SIZE),
+    summary_only: "1",
   });
   const routeFocusRecordId = String(props.focusRecordId || "").trim();
   const focusRecordId = pendingRecordFocusId.value
@@ -1039,6 +1337,19 @@ function changeRecordState(nextState: RecordStateFilter): void {
   });
 }
 
+function changeRecordHistoryPeriod(nextPeriod: RecordHistoryPeriod): void {
+  if (nextPeriod === recordHistoryPeriod.value || recordState.value !== "completed") return;
+  runWithUnsavedGuard(() => {
+    recordHistoryPeriod.value = nextPeriod;
+    recordPage.value = 1;
+    selectedRecord.value = null;
+    editingRecordId.value = "";
+    projectDrawerOpen.value = false;
+    resetDraft();
+    void loadRecords(false);
+  });
+}
+
 function currentMonthKey(): string {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
@@ -1059,6 +1370,148 @@ function candidateHasMore(
 function showMessage(text: string, tone: "success" | "warning" | "failed" = "success"): void {
   messageText.value = text;
   messageTone.value = tone;
+}
+
+function captureProjectConflict(error: unknown): boolean {
+  if (!(error instanceof ApiError) || error.status !== 409) return false;
+  projectConflict.value = {
+    message: error.message || "该维修单已被其他用户修改，请选择如何处理。",
+    recordId: editingRecordId.value,
+  };
+  showMessage("当前填写已保留，请复制备份或读取服务器最新内容。", "warning");
+  return true;
+}
+
+async function copyCurrentProjectDraft(): Promise<void> {
+  const content = JSON.stringify(
+    {
+      title: selectedRecordTitle.value,
+      fields: Object.fromEntries(
+        projectFormFields.value.map((field) => {
+          const name = String(field.field_name || "");
+          return [
+            projectFieldLabel(name),
+            isProjectWorkerField(field)
+              ? projectWorkerPeople.value.map((person) => String(person.name || person.user_id || "")).filter(Boolean)
+              : fieldDraft[name] || "",
+          ];
+        }),
+      ),
+    },
+    null,
+    2,
+  );
+  try {
+    await navigator.clipboard.writeText(content);
+    showMessage("当前填写已复制。", "success");
+  } catch {
+    showMessage("浏览器未允许复制，请先不要关闭当前页面。", "warning");
+  }
+}
+
+async function reloadLatestProject(): Promise<void> {
+  const recordId = projectConflict.value?.recordId || editingRecordId.value;
+  if (!recordId || recordDetailLoading.value) return;
+  const summary = records.value.find(
+    (item) => String(item.record_id || "").trim() === recordId,
+  ) || selectedRecord.value || { record_id: recordId };
+  projectConflict.value = null;
+  hasUnsavedChanges.value = false;
+  dirtyFieldNames.clear();
+  clearRecordDetailCache(recordId);
+  await loadRecordDetailAndOpen(summary, activeWorkspaceTab.value, true);
+  if (editingRecordId.value === recordId && projectDrawerOpen.value) {
+    showMessage("已读取服务器最新内容。", "success");
+  }
+}
+
+async function loadFailureCenter(): Promise<void> {
+  if (failureCenterLoading.value) return;
+  failureCenterLoading.value = true;
+  try {
+    const params = new URLSearchParams({ scope: props.scope || "ALL" });
+    const payload = await requestJson(
+      `/api/repair-management/failures?${params.toString()}`,
+    );
+    failureCenterItems.value = Array.isArray(payload.items) ? payload.items : [];
+    failureCenterCanReconcile.value = payload.can_reconcile === true;
+  } catch (error: unknown) {
+    failureCenterMessage.value = error instanceof Error ? error.message : "任务状态读取失败。";
+    failureCenterMessageTone.value = "failed";
+  } finally {
+    failureCenterLoading.value = false;
+  }
+}
+
+function openFailureCenter(): void {
+  failureCenterOpen.value = true;
+  failureCenterMessage.value = "";
+  void loadFailureCenter();
+}
+
+async function retryAllRepairSyncFromCenter(): Promise<void> {
+  await retryAllRepairSync();
+  await loadFailureCenter();
+}
+
+async function runIntegrationCheck(): Promise<void> {
+  if (integrationChecking.value || reconcilingRemote.value) return;
+  integrationChecking.value = true;
+  failureCenterMessage.value = "";
+  try {
+    const result = await requestJson(
+      "/api/repair-management/integration-check",
+      {
+        method: "POST",
+        body: JSON.stringify({ scope: props.scope || "ALL" }),
+      },
+    );
+    const warnings = Array.isArray(result.warnings)
+      ? result.warnings.map((item: unknown) => String(item || "")).filter(Boolean)
+      : [];
+    failureCenterMessage.value = warnings.length
+      ? `读取校验完成：${warnings.join("；")}`
+      : `飞书读取正常，维修单 ${Number(result.project_record_count || 0)} 条，跟进 ${Number(result.followup_record_count || 0)} 条。`;
+    failureCenterMessageTone.value = warnings.length ? "warning" : "success";
+    clearRecordResponseCache();
+    clearRecordDetailCache();
+    await loadRecords(false, true);
+  } catch (error: unknown) {
+    failureCenterMessage.value = error instanceof Error ? error.message : "飞书读取校验失败。";
+    failureCenterMessageTone.value = "failed";
+  } finally {
+    integrationChecking.value = false;
+  }
+}
+
+async function runRemoteReconcile(): Promise<void> {
+  if (integrationChecking.value || reconcilingRemote.value) return;
+  reconcilingRemote.value = true;
+  failureCenterMessage.value = "";
+  try {
+    const result = await requestJson(
+      "/api/repair-management/reconcile",
+      {
+        method: "POST",
+        body: JSON.stringify({ scope: props.scope || "ALL" }),
+      },
+    );
+    const changedCount = Math.max(0, Number(result.changed_count || 0));
+    failureCenterMessage.value = changedCount
+      ? `对账完成，本地已同步 ${changedCount} 项远端变化。`
+      : "对账完成，本地与飞书数据一致。";
+    failureCenterMessageTone.value = "success";
+    clearRecordResponseCache();
+    clearRecordDetailCache();
+    repairSourceRefreshVersion.value += 1;
+    await loadRecords(false, true);
+    await Promise.all([loadRepairHealth(), loadFailureCenter()]);
+  } catch (error: unknown) {
+    failureCenterMessage.value = error instanceof Error ? error.message : "远端对账失败。";
+    failureCenterMessageTone.value = "failed";
+  } finally {
+    reconcilingRemote.value = false;
+  }
 }
 
 function openConfirmation(
@@ -1662,6 +2115,7 @@ async function handleFollowupChanged(): Promise<void> {
   clearRecordResponseCache();
   const recordId = editingRecordId.value;
   if (!recordId) return;
+  clearRecordDetailCache(recordId);
   const authoritativeFollowupCount = selectedFollowupCount.value;
   const requestVersion = ++recordDetailRequestVersion;
   recordDetailAbortController?.abort();
@@ -1691,7 +2145,9 @@ async function handleFollowupChanged(): Promise<void> {
       records.value = nextRecords;
     }
     selectedRecord.value = current;
+    cacheRecordDetail(current);
     if (!hasUnsavedChanges.value) resetDraft();
+    void loadProjectSyncStatus(recordId);
   } catch (error: unknown) {
     if (abortController.signal.aborted) return;
     if (requestVersion !== recordDetailRequestVersion) return;
@@ -1707,6 +2163,7 @@ async function handleFollowupChanged(): Promise<void> {
 async function handleRepairSourceRefreshed(): Promise<void> {
   invalidateRepairStatus();
   clearRecordResponseCache();
+  clearRecordDetailCache();
   await loadRecords(false, true);
 }
 
@@ -1785,6 +2242,9 @@ function selectRecordNow(record: LooseDict, initialTab: WorkspaceTab = "project"
   messageText.value = "";
   prefillWarnings.value = [];
   createOperationId.value = "";
+  updateOperationId.value = "";
+  updateOperationPayloadKey = "";
+  projectConflict.value = null;
   pendingRecordFocusId.value = "";
   followupHasUnsavedChanges.value = false;
   creatingNewProject.value = false;
@@ -1819,27 +2279,617 @@ function selectRecordNow(record: LooseDict, initialTab: WorkspaceTab = "project"
   focusProjectDrawer();
 }
 
+function clearSyncStatusTimer(): void {
+  if (!syncStatusTimer) return;
+  window.clearTimeout(syncStatusTimer);
+  syncStatusTimer = undefined;
+}
+
+async function loadRepairHealth(): Promise<void> {
+  try {
+    const params = new URLSearchParams({
+      scope: props.scope || "ALL",
+      integrity: "1",
+    });
+    repairHealth.value = await requestJson(
+      `/api/repair-management/health?${params.toString()}`,
+    );
+  } catch {
+    // The normal list request owns login/error feedback. Health is auxiliary.
+  }
+}
+
+async function retryAllRepairSync(): Promise<void> {
+  if (globalSyncRetrying.value) return;
+  globalSyncRetrying.value = true;
+  try {
+    const result = await requestJson("/api/repair-management/sync-retry-all", {
+      method: "POST",
+      body: JSON.stringify({ scope: props.scope || "ALL" }),
+    });
+    const retried = Math.max(0, Number(result.retried || 0));
+    showMessage(
+      retried ? `已重新提交 ${retried} 项同步任务。` : "当前没有可重试任务。",
+      retried ? "success" : "warning",
+    );
+    await loadRepairHealth();
+  } catch (error: unknown) {
+    showMessage(
+      error instanceof Error ? error.message : "批量重试失败。",
+      "failed",
+    );
+  } finally {
+    globalSyncRetrying.value = false;
+  }
+}
+
+async function repairIntegrity(): Promise<void> {
+  if (integrityRepairing.value) return;
+  integrityRepairing.value = true;
+  try {
+    const result = await requestJson(
+      "/api/repair-management/integrity/repair",
+      {
+        method: "POST",
+        body: JSON.stringify({ scope: props.scope || "ALL" }),
+      },
+    );
+    const remaining = Math.max(0, Number(result.after_issue_count || 0));
+    clearRecordResponseCache();
+    clearRecordDetailCache();
+    await loadRecords(false, true);
+    await loadRepairHealth();
+    showMessage(
+      remaining
+        ? `关联修复已完成，仍有 ${remaining} 项需人工核对。`
+        : "维修单与跟进记录关联已修复。",
+      remaining ? "warning" : "success",
+    );
+  } catch (error: unknown) {
+    showMessage(
+      error instanceof Error ? error.message : "关联修复失败。",
+      "failed",
+    );
+  } finally {
+    integrityRepairing.value = false;
+  }
+}
+
+function stopRepairManagementStream(): void {
+  repairManagementStream?.close();
+  repairManagementStream = null;
+  if (repairStreamRefreshTimer) {
+    window.clearTimeout(repairStreamRefreshTimer);
+    repairStreamRefreshTimer = undefined;
+  }
+  if (repairStreamPollTimer) {
+    window.clearInterval(repairStreamPollTimer);
+    repairStreamPollTimer = undefined;
+  }
+  repairStreamPollInFlight = false;
+}
+
+function repairStreamCursorStorageKey(): string {
+  return `clipflow:repair-stream-cursor:${String(props.scope || "ALL").trim() || "ALL"}`;
+}
+
+function readRepairStreamCursor(): number {
+  try {
+    return Math.max(
+      0,
+      Number.parseInt(
+        window.sessionStorage.getItem(repairStreamCursorStorageKey()) || "0",
+        10,
+      ) || 0,
+    );
+  } catch {
+    return 0;
+  }
+}
+
+function storeRepairStreamCursor(cursor: unknown): void {
+  const normalizedCursor = Math.max(0, Number(cursor || 0));
+  if (!Number.isFinite(normalizedCursor)) return;
+  repairStreamCursor = normalizedCursor;
+  try {
+    window.sessionStorage.setItem(
+      repairStreamCursorStorageKey(),
+      String(normalizedCursor),
+    );
+  } catch {
+    // Private browsing can disable sessionStorage; in-memory recovery still works.
+  }
+}
+
+function markRepairStreamActive(cursor: unknown = 0): void {
+  repairStreamLastActivityAt = Date.now();
+  const normalizedCursor = Math.max(0, Number(cursor || 0));
+  if (normalizedCursor > repairStreamCursor) {
+    storeRepairStreamCursor(normalizedCursor);
+  }
+}
+
+function repairRecordMatchesCurrentView(record: LooseDict): boolean {
+  if (recordState.value === "completed" && !repairRecordIsCompleted(record)) return false;
+  if (recordState.value === "active" && repairRecordIsCompleted(record)) return false;
+  const query = searchText.value.trim().toLocaleLowerCase();
+  if (query) {
+    const searchable = [
+      record.title,
+      record.workflow,
+      recordBuildingLabel(record),
+      recordSpecialtyLabel(record),
+      ...Object.values(
+        record.display_fields && typeof record.display_fields === "object"
+          ? record.display_fields
+          : {},
+      ),
+    ].map((value) => String(value || "").toLocaleLowerCase()).join(" ");
+    if (!searchable.includes(query)) return false;
+  }
+  if (recordState.value !== "completed" || recordHistoryPeriod.value === "all") {
+    return true;
+  }
+  const date = new Date(
+    String(
+      record.latest_followup_time
+      || record.last_modified_time
+      || record.created_time
+      || "",
+    ).replace(" ", "T"),
+  );
+  if (Number.isNaN(date.getTime())) return false;
+  const now = new Date();
+  if (recordHistoryPeriod.value === "today") {
+    return date.getFullYear() === now.getFullYear()
+      && date.getMonth() === now.getMonth()
+      && date.getDate() === now.getDate();
+  }
+  if (recordHistoryPeriod.value === "month") {
+    return date.getFullYear() === now.getFullYear()
+      && date.getMonth() === now.getMonth();
+  }
+  const startOfWeek = new Date(now);
+  const weekday = (now.getDay() + 6) % 7;
+  startOfWeek.setHours(0, 0, 0, 0);
+  startOfWeek.setDate(now.getDate() - weekday);
+  return date >= startOfWeek;
+}
+
+function mergeProjectSummary(existing: LooseDict, patch: LooseDict): LooseDict {
+  return {
+    ...existing,
+    ...patch,
+    display_fields: {
+      ...(existing.display_fields && typeof existing.display_fields === "object"
+        ? existing.display_fields
+        : {}),
+      ...(patch.display_fields && typeof patch.display_fields === "object"
+        ? patch.display_fields
+        : {}),
+    },
+    raw_fields: existing.raw_fields && typeof existing.raw_fields === "object"
+      ? existing.raw_fields
+      : patch.raw_fields,
+    summary_only: existing.summary_only === false ? false : patch.summary_only,
+  };
+}
+
+function applyRepairProjectPatch(patch: LooseDict, created = false): boolean {
+  const recordId = String(patch.record_id || "").trim();
+  if (!recordId) return true;
+  clearRecordDetailCache(recordId);
+  const existingIndex = records.value.findIndex(
+    (item) => String(item.record_id || "").trim() === recordId,
+  );
+  const existing = existingIndex >= 0 ? records.value[existingIndex] : {};
+  const merged = mergeProjectSummary(existing, patch);
+  const matches = repairRecordMatchesCurrentView(merged);
+  if (existingIndex >= 0 && matches) {
+    records.value = records.value.map((item, index) => (
+      index === existingIndex ? merged : item
+    ));
+  } else if (existingIndex >= 0 && !matches) {
+    records.value = records.value.filter(
+      (item) => String(item.record_id || "").trim() !== recordId,
+    );
+    total.value = Math.max(0, total.value - 1);
+  } else if (matches && recordPage.value === 1) {
+    if (!created) return true;
+    records.value = [merged, ...records.value].slice(0, RECORD_PAGE_SIZE);
+    total.value += 1;
+  }
+  if (editingRecordId.value !== recordId || !selectedRecord.value) return false;
+  if (hasAnyUnsavedChanges.value) {
+    serverUpdatePending.value = true;
+    return false;
+  }
+  selectedRecord.value = mergeProjectSummary(selectedRecord.value, patch);
+  cacheRecordDetail(selectedRecord.value);
+  if (activeWorkspaceTab.value === "project") resetDraft();
+  void loadProjectSyncStatus(recordId);
+  return false;
+}
+
+function applyRepairProjectDelete(recordIdValue: unknown): void {
+  const recordId = String(recordIdValue || "").trim();
+  if (!recordId) return;
+  const existed = records.value.some(
+    (item) => String(item.record_id || "").trim() === recordId,
+  );
+  records.value = records.value.filter(
+    (item) => String(item.record_id || "").trim() !== recordId,
+  );
+  if (existed) total.value = Math.max(0, total.value - 1);
+  clearRecordDetailCache(recordId);
+  if (editingRecordId.value !== recordId) return;
+  if (hasAnyUnsavedChanges.value) {
+    serverUpdatePending.value = true;
+    return;
+  }
+  projectDrawerOpen.value = false;
+  followupPanelMounted.value = false;
+  selectedRecord.value = null;
+  editingRecordId.value = "";
+  resetDraft();
+  showMessage("当前维修项目已在其他页面删除。", "warning");
+}
+
+function applyRepairChanges(changes: unknown): boolean {
+  if (!Array.isArray(changes) || !changes.length) return false;
+  let needsFullRefresh = false;
+  let followupChanged = false;
+  for (const rawChange of changes) {
+    if (!rawChange || typeof rawChange !== "object") {
+      needsFullRefresh = true;
+      continue;
+    }
+    const change = rawChange as LooseDict;
+    const entityType = String(change.entity_type || "");
+    const action = String(change.action || "");
+    const payload = change.payload && typeof change.payload === "object"
+      ? change.payload as LooseDict
+      : {};
+    const patch = payload.record_patch && typeof payload.record_patch === "object"
+      ? payload.record_patch as LooseDict
+      : null;
+    if (entityType === "project" && action === "delete") {
+      applyRepairProjectDelete(change.record_id);
+      continue;
+    }
+    if (patch) {
+      needsFullRefresh = applyRepairProjectPatch(
+        patch,
+        entityType === "project" && payload.created === true,
+      ) || needsFullRefresh;
+      if (entityType === "followup") followupChanged = true;
+      continue;
+    }
+    if (action === "refresh") {
+      needsFullRefresh = true;
+      continue;
+    }
+    needsFullRefresh = true;
+  }
+  if (followupChanged) {
+    repairSourceRefreshVersion.value += 1;
+    invalidateRepairStatus();
+  }
+  return needsFullRefresh;
+}
+
+async function pollRepairChangesIfStale(force = false): Promise<void> {
+  if (
+    !repairPageActive
+    ||
+    repairStreamPollInFlight
+    || (document.hidden && !force)
+    || (
+      !force
+      && Date.now() - repairStreamLastActivityAt < REPAIR_STREAM_STALE_MS
+    )
+  ) {
+    return;
+  }
+  repairStreamPollInFlight = true;
+  try {
+    const params = new URLSearchParams({
+      scope: props.scope || "ALL",
+      after_id: String(repairStreamCursor),
+      limit: "100",
+    });
+    const payload = await requestJson(
+      `/api/repair-management/changes?${params.toString()}`,
+    );
+    const nextCursor = Math.max(
+      0,
+      Number(payload.cursor || payload.latest_cursor || repairStreamCursor),
+    );
+    storeRepairStreamCursor(nextCursor);
+    repairStreamLastActivityAt = Date.now();
+    const needsFullRefresh = applyRepairChanges(payload.changes);
+    if (Boolean(payload.cursor_reset) || needsFullRefresh) {
+      scheduleRepairStreamRefresh();
+    }
+    await loadRepairHealth();
+  } catch {
+    // Keep the current page usable. The next interval and EventSource reconnect retry.
+  } finally {
+    repairStreamPollInFlight = false;
+  }
+}
+
+function startRepairStreamFallbackPoll(): void {
+  if (repairStreamPollTimer) return;
+  repairStreamPollTimer = window.setInterval(() => {
+    void pollRepairChangesIfStale();
+  }, REPAIR_STREAM_POLL_MS);
+}
+
+function handleRepairStreamVisibilityChange(): void {
+  if (repairPageActive && !document.hidden) {
+    void pollRepairChangesIfStale(true);
+  }
+}
+
+function scheduleRepairStreamRefresh(): void {
+  if (hasAnyUnsavedChanges.value) {
+    serverUpdatePending.value = true;
+    return;
+  }
+  if (repairStreamRefreshTimer) {
+    window.clearTimeout(repairStreamRefreshTimer);
+  }
+  repairStreamRefreshTimer = window.setTimeout(async () => {
+    repairStreamRefreshTimer = undefined;
+    if (hasAnyUnsavedChanges.value) {
+      serverUpdatePending.value = true;
+      return;
+    }
+    const activeRecordId = editingRecordId.value;
+    clearRecordResponseCache();
+    clearRecordDetailCache();
+    repairSourceRefreshVersion.value += 1;
+    invalidateRepairStatus();
+    await loadRecords(false, true);
+    if (activeRecordId && selectedRecord.value) {
+      const current = records.value.find(
+        (item) => String(item.record_id || "").trim() === activeRecordId,
+      );
+      if (current) {
+        selectedRecord.value = {
+          ...selectedRecord.value,
+          ...current,
+          display_fields: {
+            ...(selectedRecord.value.display_fields || {}),
+            ...(current.display_fields || {}),
+          },
+          raw_fields: selectedRecord.value.raw_fields || {},
+          summary_only: false,
+        };
+        if (activeWorkspaceTab.value === "project") resetDraft();
+      }
+      void loadProjectSyncStatus(activeRecordId);
+    }
+    serverUpdatePending.value = false;
+  }, 180);
+}
+
+function startRepairManagementStream(): void {
+  startRepairStreamFallbackPoll();
+  if (typeof EventSource === "undefined") {
+    repairStreamLastActivityAt = 0;
+    void pollRepairChangesIfStale(true);
+    return;
+  }
+  if (repairManagementStream) return;
+  repairStreamCursor = readRepairStreamCursor();
+  repairStreamLastActivityAt = Date.now();
+  const params = new URLSearchParams({
+    scope: props.scope || "ALL",
+    cursor: String(repairStreamCursor),
+  });
+  const stream = new EventSource(
+    `/api/repair-management/stream?${params.toString()}`,
+  );
+  repairManagementStream = stream;
+  stream.addEventListener("open", () => {
+    if (repairManagementStream !== stream) return;
+    markRepairStreamActive();
+  });
+  stream.addEventListener("repair_change", (event) => {
+    if (repairManagementStream !== stream) return;
+    try {
+      const payload = JSON.parse(String((event as MessageEvent).data || "{}"));
+      markRepairStreamActive(
+        payload.cursor || (event as MessageEvent).lastEventId,
+      );
+      if (Array.isArray(payload.changes) && payload.changes.length) {
+        if (applyRepairChanges(payload.changes)) {
+          scheduleRepairStreamRefresh();
+        }
+      }
+    } catch {
+      // EventSource reconnects and the next list refresh reconciles the page.
+    }
+  });
+  stream.addEventListener("health", (event) => {
+    if (repairManagementStream !== stream) return;
+    try {
+      markRepairStreamActive((event as MessageEvent).lastEventId);
+      repairHealth.value = JSON.parse(
+        String((event as MessageEvent).data || "{}"),
+      );
+    } catch {
+      // Ignore malformed heartbeat data.
+    }
+  });
+  stream.addEventListener("error", (event) => {
+    if (repairManagementStream !== stream) return;
+    const raw = String((event as MessageEvent).data || "").trim();
+    if (!raw) {
+      void pollRepairChangesIfStale();
+      return;
+    }
+    try {
+      const payload = JSON.parse(raw);
+      if (payload.auth_required) {
+        const next = encodeURIComponent(
+          `${window.location.pathname}${window.location.search}`,
+        );
+        window.location.assign(`/api/auth/login?next=${next}`);
+      }
+    } catch {
+      // Native EventSource reconnects automatically after transient failures.
+    }
+  });
+}
+
+async function loadProjectSyncStatus(recordId: string): Promise<void> {
+  const normalizedRecordId = String(recordId || "").trim();
+  clearSyncStatusTimer();
+  if (!normalizedRecordId || normalizedRecordId !== editingRecordId.value) {
+    projectSyncStatus.value = null;
+    return;
+  }
+  try {
+    const params = new URLSearchParams({
+      scope: props.scope || "ALL",
+      summary_record_id: normalizedRecordId,
+    });
+    const payload = await requestJson(
+      `/api/repair-management/sync-status?${params.toString()}`,
+    );
+    if (normalizedRecordId !== editingRecordId.value) return;
+    projectSyncStatus.value = payload;
+    if (String(payload.status || "") === "pending" && projectDrawerOpen.value) {
+      syncStatusTimer = window.setTimeout(() => {
+        syncStatusTimer = undefined;
+        void loadProjectSyncStatus(normalizedRecordId);
+      }, 3000);
+    }
+  } catch {
+    if (normalizedRecordId === editingRecordId.value) {
+      projectSyncStatus.value = null;
+    }
+  }
+}
+
+async function retryProjectSync(): Promise<void> {
+  const recordId = editingRecordId.value;
+  if (!recordId || syncRetrying.value) return;
+  syncRetrying.value = true;
+  try {
+    await requestJson("/api/repair-management/sync-retry", {
+      method: "POST",
+      body: JSON.stringify({
+        scope: props.scope || "ALL",
+        summary_record_id: recordId,
+      }),
+    });
+    showMessage("同步任务已重新提交。", "success");
+    await loadProjectSyncStatus(recordId);
+  } catch (error: unknown) {
+    showMessage(
+      error instanceof Error ? error.message : "同步任务重试失败。",
+      "failed",
+    );
+  } finally {
+    syncRetrying.value = false;
+  }
+}
+
+async function loadRecordDetailAndOpen(
+  record: LooseDict,
+  initialTab: WorkspaceTab = "project",
+  force = false,
+): Promise<void> {
+  const recordId = String(record.record_id || "").trim();
+  if (!recordId) return;
+  const cacheKey = recordDetailCacheKey(recordId);
+  const cached = recordDetailCache.get(cacheKey);
+  if (!force && cached && cached.expiresAt > Date.now()) {
+    recordDetailCache.delete(cacheKey);
+    recordDetailCache.set(cacheKey, cached);
+    selectRecordNow(cached.record, initialTab);
+    void loadProjectSyncStatus(recordId);
+    return;
+  }
+  if (cached) recordDetailCache.delete(cacheKey);
+  const requestVersion = ++recordDetailRequestVersion;
+  recordDetailAbortController?.abort();
+  const abortController = new AbortController();
+  recordDetailAbortController = abortController;
+  selectedRecord.value = record;
+  editingRecordId.value = recordId;
+  activeWorkspaceTab.value = initialTab;
+  followupPanelMounted.value = false;
+  projectDrawerOpen.value = true;
+  recordDetailLoading.value = true;
+  focusProjectDrawer();
+  try {
+    const params = new URLSearchParams({ scope: props.scope || "ALL" });
+    const payload = await requestJson(
+      `/api/repair-management/records/${encodeURIComponent(recordId)}?${params.toString()}`,
+      { signal: abortController.signal },
+    );
+    if (requestVersion !== recordDetailRequestVersion) return;
+    if (recordId !== editingRecordId.value) return;
+    const detail = payload.record && typeof payload.record === "object"
+      ? payload.record as LooseDict
+      : null;
+    if (!detail) throw new Error("维修单详情为空，请刷新后重试。");
+    cacheRecordDetail(detail);
+    recordDetailLoading.value = false;
+    selectRecordNow(detail, initialTab);
+    void loadProjectSyncStatus(recordId);
+  } catch (error: unknown) {
+    if (abortController.signal.aborted) return;
+    if (requestVersion !== recordDetailRequestVersion) return;
+    recordDetailLoading.value = false;
+    projectDrawerOpen.value = false;
+    showMessage(
+      error instanceof Error ? error.message : "维修单详情读取失败。",
+      "failed",
+    );
+  } finally {
+    if (recordDetailAbortController === abortController) {
+      recordDetailAbortController = null;
+    }
+  }
+}
+
 function requestSelectRecord(record: LooseDict, initialTab: WorkspaceTab = "project"): void {
-  if (String(record.record_id || "") === editingRecordId.value) {
+  if (
+    String(record.record_id || "") === editingRecordId.value
+    && selectedRecord.value?.summary_only !== true
+  ) {
     projectDrawerOpen.value = true;
     openWorkspaceTab(initialTab);
     focusProjectDrawer();
     scheduleLinkedEventPrefillIfNeeded();
     return;
   }
-  runWithUnsavedGuard(() => selectRecordNow(record, initialTab));
+  runWithUnsavedGuard(() => {
+    void loadRecordDetailAndOpen(record, initialTab);
+  });
 }
 
 function startCreateNow(): void {
   recordDetailRequestVersion += 1;
   recordDetailAbortController?.abort();
   recordDetailAbortController = null;
+  clearSyncStatusTimer();
+  projectSyncStatus.value = null;
   prefillRequestVersion += 1;
   prefillAbortController?.abort();
   prefillAbortController = null;
   prefillLoading.value = false;
   messageText.value = "";
   createOperationId.value = "";
+  updateOperationId.value = "";
+  updateOperationPayloadKey = "";
+  projectConflict.value = null;
   pendingRecordFocusId.value = "";
   followupHasUnsavedChanges.value = false;
   creatingNewProject.value = true;
@@ -1912,6 +2962,7 @@ async function refreshRepairSources(): Promise<void> {
       { scope, signal: abortController.signal },
     );
     clearRecordResponseCache();
+    clearRecordDetailCache();
     repairSourceRefreshVersion.value += 1;
     invalidateRepairStatus();
     if (!editingRecordId.value) recordPage.value = 1;
@@ -1964,11 +3015,18 @@ async function loadRecords(announce = false, silent = false): Promise<void> {
       }
     }
     if (requestVersion !== recordsRequestVersion) return;
+    const recordQueryChanged = requestUrl !== lastRenderedRecordQuery;
+    lastRenderedRecordQuery = requestUrl;
     fields.value = Array.isArray(payload.fields)
       ? payload.fields.map((field: LooseDict) => withStandardRepairOptions(field))
       : [];
     records.value = Array.isArray(payload.records) ? payload.records : [];
     total.value = Number(payload.total || records.value.length || 0);
+    if (recordQueryChanged) {
+      void nextTick(() => {
+        if (recordListRef.value) recordListRef.value.scrollTop = 0;
+      });
+    }
     const routeFocusRecordId = String(props.focusRecordId || "").trim();
     const pendingFocusRecordId = pendingRecordFocusId.value;
     const focusRecordId = pendingFocusRecordId
@@ -1984,7 +3042,7 @@ async function loadRecords(announce = false, silent = false): Promise<void> {
           pendingRecordFocusId.value = "";
         } else {
           appliedFocusRecordId.value = focusRecordId;
-          selectRecordNow(focused);
+          void loadRecordDetailAndOpen(focused);
         }
       } else if (pendingFocusRecordId) {
         pendingRecordFocusId.value = "";
@@ -2002,7 +3060,15 @@ async function loadRecords(announce = false, silent = false): Promise<void> {
     if (editingRecordId.value) {
       const current = records.value.find((item) => String(item.record_id || "") === editingRecordId.value);
       if (current) {
-        selectedRecord.value = current;
+        selectedRecord.value = selectedRecord.value?.summary_only === false
+          ? {
+              ...selectedRecord.value,
+              ...current,
+              display_fields: selectedRecord.value.display_fields,
+              raw_fields: selectedRecord.value.raw_fields,
+              summary_only: false,
+            }
+          : current;
       }
     } else if (!selectedRecord.value) {
       resetDraft();
@@ -2055,7 +3121,11 @@ function writablePayload(): Record<string, unknown> {
   return result;
 }
 
-function applySavedProjectRecord(recordId: string, savedFields: LooseDict): void {
+function applySavedProjectRecord(
+  recordId: string,
+  savedFields: LooseDict,
+  recordVersion = "",
+): void {
   const normalizedRecordId = String(recordId || "").trim();
   if (!normalizedRecordId) return;
   const existing = (
@@ -2088,6 +3158,8 @@ function applySavedProjectRecord(recordId: string, savedFields: LooseDict): void
     source_event_id: sourceEventId.value,
     source_repair_ids: selectedRepairIds.value.slice(),
     followup_count: Math.max(0, Number(existing.followup_count || 0)),
+    record_version: recordVersion || String(existing.record_version || ""),
+    summary_only: false,
   };
   const existingIndex = records.value.findIndex(
     (item) => String(item.record_id || "").trim() === normalizedRecordId,
@@ -2137,14 +3209,34 @@ async function saveRecord(): Promise<boolean> {
     if (!editingRecordId.value && !createOperationId.value) {
       createOperationId.value = createRepairOperationId("repair-project");
     }
-    const body = JSON.stringify({
-      operation_id: editingRecordId.value ? "" : createOperationId.value,
+    const requestPayload = {
+      expected_version: editingRecordId.value
+        ? String(selectedRecord.value?.record_version || "")
+        : "",
       scope: props.scope || "ALL",
       source_event_id: sourceEventId.value,
       source_repair_ids: selectedRepairIds.value,
       replace_source_relations: true,
       source_month: currentMonthKey(),
       fields: writablePayload(),
+    };
+    if (editingRecordId.value) {
+      const nextPayloadKey = JSON.stringify(requestPayload);
+      if (
+        !updateOperationId.value
+        || updateOperationPayloadKey !== nextPayloadKey
+      ) {
+        updateOperationId.value = createRepairOperationId(
+          "repair-project-update",
+        );
+        updateOperationPayloadKey = nextPayloadKey;
+      }
+    }
+    const body = JSON.stringify({
+      ...requestPayload,
+      operation_id: editingRecordId.value
+        ? updateOperationId.value
+        : createOperationId.value,
     });
     let savedPayload: LooseDict;
     if (editingRecordId.value) {
@@ -2153,6 +3245,8 @@ async function saveRecord(): Promise<boolean> {
         body,
       });
       savedPayload = updated;
+      updateOperationId.value = "";
+      updateOperationPayloadKey = "";
       const warnings = Array.isArray(updated.warnings) ? updated.warnings.filter(Boolean) : [];
       const syncedFollowupCount = Math.max(0, Number(updated.followup_synced_count || 0));
       const savedText = updated.followup_sync_pending
@@ -2183,14 +3277,21 @@ async function saveRecord(): Promise<boolean> {
       savedPayload.fields && typeof savedPayload.fields === "object"
         ? savedPayload.fields
         : {},
+      String(savedPayload.record_version || ""),
     );
+    projectConflict.value = null;
+    clearRecordDetailCache(String(savedPayload.record_id || editingRecordId.value || ""));
+    if (selectedRecord.value) cacheRecordDetail(selectedRecord.value);
     sourceExpanded.value = false;
     recordPage.value = 1;
     invalidateRepairStatus();
     refreshProjectsAfterSave();
+    void loadProjectSyncStatus(editingRecordId.value);
     return true;
   } catch (error: unknown) {
-    showMessage(error instanceof Error ? error.message : "保存失败。", "failed");
+    if (!captureProjectConflict(error)) {
+      showMessage(error instanceof Error ? error.message : "保存失败。", "failed");
+    }
     return false;
   } finally {
     saving.value = false;
@@ -2227,6 +3328,8 @@ async function deleteRecordNow(): Promise<void> {
     const result = await requestJson(`/api/repair-management/records/${encodeURIComponent(deletedRecordId)}?${params.toString()}`, {
       method: "DELETE",
     });
+    clearRecordDetailCache(deletedRecordId);
+    projectConflict.value = null;
     records.value = records.value.filter(
       (item) => String(item.record_id || "") !== deletedRecordId,
     );
@@ -2277,6 +3380,13 @@ function openRepairNoticeWorkbench(): void {
 watch(
   () => props.scope,
   () => {
+    stopRepairManagementStream();
+    clearRecordResponseCache();
+    clearRecordDetailCache();
+    repairHealth.value = null;
+    serverUpdatePending.value = false;
+    clearSyncStatusTimer();
+    projectSyncStatus.value = null;
     projectDrawerOpen.value = false;
     followupPanelMounted.value = false;
     recordPage.value = 1;
@@ -2296,8 +3406,14 @@ watch(
     routeEventPrefillApplied.value = false;
     appliedFocusRecordId.value = "";
     void loadRecords(false);
+    void loadRepairHealth();
+    startRepairManagementStream();
   },
 );
+
+watch(hasAnyUnsavedChanges, (dirty) => {
+  if (!dirty && serverUpdatePending.value) scheduleRepairStreamRefresh();
+});
 
 watch(projectDrawerOpen, (open) => {
   if (open) {
@@ -2310,6 +3426,7 @@ watch(projectDrawerOpen, (open) => {
     return;
   }
   document.body.style.overflow = bodyOverflowBeforeDrawer;
+  clearSyncStatusTimer();
 });
 
 watch(
@@ -2321,7 +3438,9 @@ watch(
     );
     if (focused) {
       appliedFocusRecordId.value = focusRecordId;
-      runWithUnsavedGuard(() => selectRecordNow(focused));
+      runWithUnsavedGuard(() => {
+        void loadRecordDetailAndOpen(focused);
+      });
       return;
     }
     if (!loading.value) void loadRecords(false);
@@ -2329,6 +3448,9 @@ watch(
 );
 
 onActivated(() => {
+  repairPageActive = true;
+  startRepairManagementStream();
+  void loadRepairHealth();
   activationCount += 1;
   if (activationCount === 1) return;
   const focusRecordId = String(props.focusRecordId || "").trim();
@@ -2339,7 +3461,9 @@ onActivated(() => {
   if (focused) {
     appliedFocusRecordId.value = focusRecordId;
     if (editingRecordId.value !== focusRecordId) {
-      runWithUnsavedGuard(() => selectRecordNow(focused));
+      runWithUnsavedGuard(() => {
+        void loadRecordDetailAndOpen(focused);
+      });
     } else {
       projectDrawerOpen.value = true;
       focusProjectDrawer();
@@ -2351,11 +3475,14 @@ onActivated(() => {
 });
 
 onDeactivated(() => {
+  repairPageActive = false;
+  stopRepairManagementStream();
   if (postSaveRefreshTimer) {
     clearTimeout(postSaveRefreshTimer);
     postSaveRefreshTimer = undefined;
   }
   projectDrawerOpen.value = false;
+  clearSyncStatusTimer();
   followupPanelMounted.value = false;
   activeWorkspaceTab.value = "project";
   projectDrawerReturnFocus = null;
@@ -2375,15 +3502,28 @@ watch(searchText, () => {
 });
 
 onMounted(() => {
+  repairPageActive = true;
+  document.addEventListener(
+    "visibilitychange",
+    handleRepairStreamVisibilityChange,
+  );
   if (routeParams.get("mode") === "create") {
     startCreateNow();
     sourceEventId.value = routeEventId;
     eventTitle.value = routeEventTitle;
   }
   void loadRecords(false);
+  void loadRepairHealth();
+  startRepairManagementStream();
 });
 
 onBeforeUnmount(() => {
+  repairPageActive = false;
+  document.removeEventListener(
+    "visibilitychange",
+    handleRepairStreamVisibilityChange,
+  );
+  stopRepairManagementStream();
   document.body.style.overflow = bodyOverflowBeforeDrawer;
   if (searchTimer) clearTimeout(searchTimer);
   if (postSaveRefreshTimer) {
@@ -2396,6 +3536,7 @@ onBeforeUnmount(() => {
   repairAbortController?.abort();
   prefillAbortController?.abort();
   recordDetailAbortController?.abort();
+  clearSyncStatusTimer();
 });
 </script>
 
@@ -2425,6 +3566,67 @@ onBeforeUnmount(() => {
 
 .page-unsaved-notice svg {
   flex: 0 0 auto;
+}
+
+.repair-health-strip {
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 10px 7px 12px;
+  border: 1px solid #f0c68f;
+  border-radius: 10px;
+  background: #fff8ed;
+  color: #8d4b0d;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.repair-health-strip.failed {
+  border-color: #efb1b1;
+  background: #fff2f2;
+  color: #a42d2d;
+}
+
+.repair-health-strip > div,
+.repair-health-actions,
+.repair-health-actions button {
+  display: flex;
+  align-items: center;
+}
+
+.repair-health-strip > div:first-child {
+  min-width: 0;
+  gap: 7px;
+}
+
+.repair-health-strip > div:first-child span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.repair-health-actions {
+  flex: 0 0 auto;
+  gap: 7px;
+}
+
+.repair-health-actions button {
+  min-height: 28px;
+  gap: 5px;
+  border: 1px solid currentColor;
+  border-radius: 7px;
+  padding: 3px 9px;
+  background: #fff;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.repair-health-actions button:disabled {
+  cursor: wait;
+  opacity: 0.62;
 }
 
 .repair-hero-title {
@@ -3008,13 +4210,23 @@ onBeforeUnmount(() => {
 }
 
 .record-list {
+  position: relative;
   min-height: 220px;
   max-height: calc(100vh - 300px);
   overflow-y: auto;
   overscroll-behavior: contain;
-  display: grid;
-  gap: 6px;
   padding: 6px 4px 6px 0;
+}
+
+.record-virtual-spacer {
+  position: relative;
+  width: 100%;
+}
+
+.record-virtual-spacer .record-row {
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 72px;
 }
 
 .record-table-head,
@@ -3080,6 +4292,40 @@ onBeforeUnmount(() => {
 .record-state-filter button:disabled {
   cursor: wait;
   opacity: 0.66;
+}
+
+.record-history-period {
+  width: fit-content;
+  display: inline-flex !important;
+  justify-content: flex-start !important;
+  gap: 4px !important;
+  padding: 2px;
+  border: 1px solid #d7e3f1;
+  border-radius: 9px;
+  background: #f7faff;
+}
+
+.record-history-period button {
+  min-height: 28px;
+  border: 0;
+  border-radius: 7px;
+  padding: 0 10px;
+  background: transparent;
+  color: #607792;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.record-history-period button.active {
+  background: #1e63ff;
+  color: #fff;
+}
+
+.record-history-period button:disabled {
+  cursor: wait;
+  opacity: 0.65;
 }
 
 .record-search input {
@@ -3308,6 +4554,9 @@ onBeforeUnmount(() => {
 .record-row {
   width: 100%;
   min-height: 72px;
+  content-visibility: auto;
+  contain: layout paint style;
+  contain-intrinsic-size: auto 72px;
   padding: 9px 12px;
   text-align: left;
   border: 1px solid #e0e9f7;
@@ -3979,6 +5228,62 @@ onBeforeUnmount(() => {
   font-weight: 800;
 }
 
+.project-sync-status {
+  min-height: 38px;
+  margin: 0 16px;
+  padding: 7px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid #f2c58e;
+  border-radius: 9px;
+  background: #fff8ec;
+  color: #8b4a0b;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.project-sync-status.failed {
+  border-color: #efb2b2;
+  background: #fff2f2;
+  color: #a52b2b;
+}
+
+.project-sync-status > div,
+.project-sync-status button {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.project-sync-status > div {
+  min-width: 0;
+}
+
+.project-sync-status > div span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-sync-status button {
+  flex: 0 0 auto;
+  min-height: 28px;
+  padding: 4px 9px;
+  border: 1px solid currentColor;
+  border-radius: 7px;
+  background: #fff;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.project-sync-status button:disabled {
+  cursor: wait;
+  opacity: .65;
+}
+
 .project-drawer-body {
   overflow: auto;
   overscroll-behavior: contain;
@@ -3986,6 +5291,70 @@ onBeforeUnmount(() => {
   align-content: start;
   gap: 10px;
   padding: 12px 16px 18px;
+}
+
+.project-conflict {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid #eeba76;
+  border-radius: 10px;
+  background: #fff8ed;
+  color: #8b4b12;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.project-conflict > div,
+.project-conflict-actions,
+.project-conflict-actions button {
+  display: flex;
+  align-items: center;
+}
+
+.project-conflict > div:first-child {
+  min-width: 0;
+  gap: 7px;
+}
+
+.project-conflict-actions {
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+.project-conflict-actions button {
+  min-height: 30px;
+  border: 1px solid #d5a25f;
+  border-radius: 8px;
+  padding: 0 10px;
+  background: #fff;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.project-conflict-actions button.primary {
+  border-color: #1e63ff;
+  background: #1e63ff;
+  color: #fff;
+}
+
+.project-conflict-actions button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.project-detail-loading {
+  min-height: 260px;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 10px;
+  color: #48647f;
+  font-size: 14px;
+  font-weight: 700;
 }
 
 .repair-project-drawer .editor-panel {

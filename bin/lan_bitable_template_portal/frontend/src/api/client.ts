@@ -231,7 +231,10 @@ export async function refreshRemoteSourceAndWait(
     if (options.month) params.set("month", options.month);
     const status = await requestJson(
       `/api/source-refresh-status?${params.toString()}`,
-      { signal: options.signal || undefined },
+      {
+        signal: options.signal || undefined,
+        cache: "no-store",
+      },
     );
     options.onProgress?.(status);
     if (status.status === "success") {

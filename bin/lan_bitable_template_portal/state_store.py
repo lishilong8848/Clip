@@ -55,7 +55,7 @@ class LanPortalStateStore:
     are migration inputs only and are never deleted or overwritten here.
     """
 
-    SCHEMA_VERSION = 26
+    SCHEMA_VERSION = 28
     _schema_process_lock = threading.RLock()
     _schema_ready_paths: set[str] = set()
     SOURCE_SCOPE_TABLES = {
@@ -111,6 +111,9 @@ class LanPortalStateStore:
         "repair_management_operations",
         "repair_snapshot_sources",
         "repair_snapshot_records",
+        "repair_project_status_index",
+        "repair_management_change_log",
+        "business_operation_audits",
         "schema_migrations",
     ]
     REQUIRED_INDEXES = [
@@ -150,6 +153,13 @@ class LanPortalStateStore:
         "idx_repair_snapshot_records_source_sort",
         "idx_repair_snapshot_records_parent_sort",
         "idx_repair_snapshot_records_status_sort",
+        "idx_repair_project_status_state",
+        "idx_repair_project_status_completed",
+        "idx_repair_management_change_created",
+        "idx_repair_management_change_record",
+        "idx_business_operation_audits_domain_status",
+        "idx_business_operation_audits_operation",
+        "idx_business_operation_audits_target",
     ]
 
     def __init__(self, db_path: str | Path | None = None):
@@ -1090,6 +1100,54 @@ class LanPortalStateStore:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS business_operation_audits (
+                audit_id TEXT PRIMARY KEY,
+                operation_id TEXT NOT NULL DEFAULT '',
+                domain TEXT NOT NULL,
+                action TEXT NOT NULL,
+                status TEXT NOT NULL,
+                scope TEXT NOT NULL DEFAULT '',
+                actor_open_id TEXT NOT NULL DEFAULT '',
+                actor_name TEXT NOT NULL DEFAULT '',
+                active_item_id TEXT NOT NULL DEFAULT '',
+                source_record_id TEXT NOT NULL DEFAULT '',
+                target_record_id TEXT NOT NULL DEFAULT '',
+                summary_record_id TEXT NOT NULL DEFAULT '',
+                related_record_ids_json TEXT NOT NULL DEFAULT '[]',
+                remote_written INTEGER NOT NULL DEFAULT 0,
+                message_sent INTEGER NOT NULL DEFAULT 0,
+                warning TEXT NOT NULL DEFAULT '',
+                error_stage TEXT NOT NULL DEFAULT '',
+                error TEXT NOT NULL DEFAULT '',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                started_at REAL NOT NULL,
+                completed_at REAL NOT NULL DEFAULT 0,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_business_operation_audits_domain_status
+            ON business_operation_audits(domain, status, updated_at DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_business_operation_audits_operation
+            ON business_operation_audits(operation_id, updated_at DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_business_operation_audits_target
+            ON business_operation_audits(
+                target_record_id, summary_record_id, updated_at DESC
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS repair_snapshot_sources (
                 source_key TEXT PRIMARY KEY,
                 app_token TEXT NOT NULL DEFAULT '',
@@ -1140,6 +1198,70 @@ class LanPortalStateStore:
             """
             CREATE INDEX IF NOT EXISTS idx_repair_snapshot_records_status_sort
             ON repair_snapshot_records(source_key, status, sort_time DESC, record_id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS repair_project_status_index (
+                record_id TEXT PRIMARY KEY,
+                state TEXT NOT NULL DEFAULT 'active',
+                workflow TEXT NOT NULL DEFAULT '',
+                followup_count INTEGER NOT NULL DEFAULT 0,
+                progress_percent INTEGER NOT NULL DEFAULT 0,
+                latest_followup_time TEXT NOT NULL DEFAULT '',
+                latest_followup_sort_time REAL NOT NULL DEFAULT 0,
+                completed_at REAL NOT NULL DEFAULT 0,
+                state_verified INTEGER NOT NULL DEFAULT 1,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        self._ensure_column_locked(
+            conn,
+            "repair_project_status_index",
+            "completed_at",
+            "REAL NOT NULL DEFAULT 0",
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_repair_project_status_state
+            ON repair_project_status_index(
+                state, latest_followup_sort_time DESC, updated_at DESC, record_id
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_repair_project_status_completed
+            ON repair_project_status_index(
+                state, completed_at DESC, updated_at DESC, record_id
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS repair_management_change_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_type TEXT NOT NULL,
+                action TEXT NOT NULL,
+                record_id TEXT NOT NULL DEFAULT '',
+                summary_record_id TEXT NOT NULL DEFAULT '',
+                scope_codes_json TEXT NOT NULL DEFAULT '[]',
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                created_at REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_repair_management_change_created
+            ON repair_management_change_log(created_at, id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_repair_management_change_record
+            ON repair_management_change_log(summary_record_id, record_id, id)
             """
         )
         conn.execute(
@@ -3838,6 +3960,432 @@ class LanPortalStateStore:
             "has_more": page_offset + len(records) < total,
         }
 
+    def replace_repair_project_status_index(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        source_signature: str,
+    ) -> dict[str, Any]:
+        now = time.time()
+        normalized: list[tuple[Any, ...]] = []
+        seen: set[str] = set()
+        for item in rows or []:
+            if not isinstance(item, dict):
+                continue
+            record_id = self._text(item.get("record_id"))
+            if not record_id or record_id in seen:
+                continue
+            seen.add(record_id)
+            state = self._text(item.get("state")).lower()
+            if state not in {"active", "completed"}:
+                state = "active"
+            normalized.append(
+                (
+                    record_id,
+                    state,
+                    self._text(item.get("workflow")),
+                    max(0, int(item.get("followup_count") or 0)),
+                    max(0, min(100, int(item.get("progress_percent") or 0))),
+                    self._text(item.get("latest_followup_time")),
+                    float(item.get("latest_followup_sort_time") or 0),
+                    float(item.get("completed_at") or 0),
+                    1 if item.get("state_verified", True) else 0,
+                    now,
+                )
+            )
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute("DELETE FROM repair_project_status_index")
+                if normalized:
+                    conn.executemany(
+                        """
+                        INSERT INTO repair_project_status_index(
+                            record_id, state, workflow, followup_count,
+                            progress_percent, latest_followup_time,
+                            latest_followup_sort_time, completed_at,
+                            state_verified, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        normalized,
+                    )
+                conn.execute(
+                    """
+                    INSERT INTO meta(key, value)
+                    VALUES ('repair_project_status_index_signature', ?)
+                    ON CONFLICT(key) DO UPDATE SET value=excluded.value
+                    """,
+                    (self._text(source_signature),),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO meta(key, value)
+                    VALUES ('repair_project_status_index_updated_at', ?)
+                    ON CONFLICT(key) DO UPDATE SET value=excluded.value
+                    """,
+                    (str(now),),
+                )
+                conn.commit()
+        return {
+            "record_count": len(normalized),
+            "source_signature": self._text(source_signature),
+            "updated_at": now,
+        }
+
+    def upsert_repair_project_status_index(
+        self,
+        item: dict[str, Any],
+        *,
+        source_signature: str,
+    ) -> bool:
+        record_id = self._text((item or {}).get("record_id"))
+        if not record_id:
+            return False
+        state = self._text((item or {}).get("state")).lower()
+        if state not in {"active", "completed"}:
+            state = "active"
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute(
+                    """
+                    INSERT INTO repair_project_status_index(
+                        record_id, state, workflow, followup_count,
+                        progress_percent, latest_followup_time,
+                        latest_followup_sort_time, completed_at,
+                        state_verified, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(record_id) DO UPDATE SET
+                        state=excluded.state,
+                        workflow=excluded.workflow,
+                        followup_count=excluded.followup_count,
+                        progress_percent=excluded.progress_percent,
+                        latest_followup_time=excluded.latest_followup_time,
+                        latest_followup_sort_time=excluded.latest_followup_sort_time,
+                        completed_at=excluded.completed_at,
+                        state_verified=excluded.state_verified,
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        record_id,
+                        state,
+                        self._text((item or {}).get("workflow")),
+                        max(0, int((item or {}).get("followup_count") or 0)),
+                        max(
+                            0,
+                            min(100, int((item or {}).get("progress_percent") or 0)),
+                        ),
+                        self._text((item or {}).get("latest_followup_time")),
+                        float(
+                            (item or {}).get("latest_followup_sort_time") or 0
+                        ),
+                        float((item or {}).get("completed_at") or 0),
+                        1 if (item or {}).get("state_verified", True) else 0,
+                        now,
+                    ),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO meta(key, value)
+                    VALUES ('repair_project_status_index_signature', ?)
+                    ON CONFLICT(key) DO UPDATE SET value=excluded.value
+                    """,
+                    (self._text(source_signature),),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO meta(key, value)
+                    VALUES ('repair_project_status_index_updated_at', ?)
+                    ON CONFLICT(key) DO UPDATE SET value=excluded.value
+                    """,
+                    (str(now),),
+                )
+                conn.commit()
+        return True
+
+    def delete_repair_project_status_index(
+        self,
+        record_id: str,
+        *,
+        source_signature: str = "",
+    ) -> bool:
+        record_id = self._text(record_id)
+        if not record_id:
+            return False
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                cursor = conn.execute(
+                    "DELETE FROM repair_project_status_index WHERE record_id=?",
+                    (record_id,),
+                )
+                if source_signature:
+                    conn.execute(
+                        """
+                        INSERT INTO meta(key, value)
+                        VALUES ('repair_project_status_index_signature', ?)
+                        ON CONFLICT(key) DO UPDATE SET value=excluded.value
+                        """,
+                        (self._text(source_signature),),
+                    )
+                conn.execute(
+                    """
+                    INSERT INTO meta(key, value)
+                    VALUES ('repair_project_status_index_updated_at', ?)
+                    ON CONFLICT(key) DO UPDATE SET value=excluded.value
+                    """,
+                    (str(now),),
+                )
+                conn.commit()
+                return int(cursor.rowcount or 0) > 0
+
+    def repair_project_status_index_meta(self) -> dict[str, Any]:
+        if not self.db_path.exists():
+            return {"record_count": 0, "source_signature": "", "updated_at": 0.0}
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                count_row = conn.execute(
+                    "SELECT COUNT(*) AS c FROM repair_project_status_index"
+                ).fetchone()
+                meta_rows = conn.execute(
+                    """
+                    SELECT key, value FROM meta
+                    WHERE key IN (
+                        'repair_project_status_index_signature',
+                        'repair_project_status_index_updated_at'
+                    )
+                    """
+                ).fetchall()
+        values = {
+            str(row["key"] or ""): str(row["value"] or "") for row in meta_rows
+        }
+        try:
+            updated_at = float(
+                values.get("repair_project_status_index_updated_at") or 0
+            )
+        except (TypeError, ValueError):
+            updated_at = 0.0
+        return {
+            "record_count": int(count_row["c"] or 0) if count_row else 0,
+            "source_signature": values.get(
+                "repair_project_status_index_signature", ""
+            ),
+            "updated_at": updated_at,
+        }
+
+    def query_repair_project_status_page(
+        self,
+        project_source_key: str,
+        *,
+        scope: str = "ALL",
+        query: str = "",
+        state: str = "active",
+        period: str = "all",
+        limit: int = 200,
+        offset: int = 0,
+        focus_record_id: str = "",
+    ) -> dict[str, Any]:
+        project_source_key = self._normalize_repair_snapshot_source_key(
+            project_source_key
+        )
+        normalized_state = self._text(state).lower()
+        if normalized_state not in {"active", "completed"}:
+            normalized_state = "active"
+        normalized_period = self._text(period).lower()
+        if normalized_period not in {"today", "week", "month", "all"}:
+            normalized_period = "all"
+        if not self.db_path.exists():
+            return {
+                "records": [],
+                "total": 0,
+                "returned": 0,
+                "offset": 0,
+                "has_more": False,
+            }
+        normalized_scope = self._text(scope).upper() or "ALL"
+        clauses = ["p.source_key = ?", "i.state = ?"]
+        params: list[Any] = [project_source_key, normalized_state]
+        if normalized_state == "completed" and normalized_period != "all":
+            now = time.localtime()
+            today_start = time.mktime(
+                (
+                    now.tm_year,
+                    now.tm_mon,
+                    now.tm_mday,
+                    0,
+                    0,
+                    0,
+                    now.tm_wday,
+                    now.tm_yday,
+                    now.tm_isdst,
+                )
+            )
+            if normalized_period == "today":
+                cutoff = today_start
+            elif normalized_period == "week":
+                cutoff = today_start - max(0, int(now.tm_wday)) * 86400
+            else:
+                cutoff = time.mktime(
+                    (
+                        now.tm_year,
+                        now.tm_mon,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        now.tm_isdst,
+                    )
+                )
+            clauses.append("i.completed_at >= ?")
+            params.append(float(cutoff))
+            clauses.append("i.completed_at <= ?")
+            params.append(float(time.time()))
+        if normalized_scope == "CAMPUS":
+            clauses.append(
+                """
+                (
+                    SELECT COUNT(DISTINCT UPPER(CAST(value AS TEXT)))
+                    FROM json_each(p.scope_codes_json)
+                    WHERE UPPER(CAST(value AS TEXT))
+                          IN ('110', 'A', 'B', 'C', 'D', 'E', 'H')
+                ) >= 2
+                """
+            )
+        elif normalized_scope != "ALL":
+            clauses.append(
+                """
+                EXISTS (
+                    SELECT 1
+                    FROM json_each(p.scope_codes_json)
+                    WHERE UPPER(CAST(value AS TEXT)) = ?
+                )
+                """
+            )
+            params.append(normalized_scope)
+        query_text = self._text(query).casefold()
+        if query_text:
+            escaped_query = (
+                query_text.replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_")
+            )
+            like_value = f"%{escaped_query}%"
+            clauses.append(
+                """
+                (
+                    LOWER(p.record_id) LIKE ? ESCAPE '\\'
+                    OR LOWER(p.title) LIKE ? ESCAPE '\\'
+                    OR LOWER(p.search_text) LIKE ? ESCAPE '\\'
+                )
+                """
+            )
+            params.extend([like_value, like_value, like_value])
+        max_limit = max(1, min(int(limit or 200), 500))
+        page_offset = max(0, int(offset or 0))
+        where_sql = " AND ".join(clauses)
+        if normalized_state == "completed":
+            order_sql = """
+                i.completed_at DESC,
+                p.sort_time DESC,
+                p.record_id ASC
+            """
+        else:
+            order_sql = """
+                CASE
+                    WHEN i.latest_followup_sort_time > 0
+                    THEN i.latest_followup_sort_time
+                    ELSE p.sort_time
+                END DESC,
+                p.sort_time DESC,
+                p.record_id ASC
+            """
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                total_row = conn.execute(
+                    f"""
+                    SELECT COUNT(*) AS c
+                    FROM repair_snapshot_records AS p
+                    JOIN repair_project_status_index AS i
+                      ON i.record_id = p.record_id
+                    WHERE {where_sql}
+                    """,
+                    tuple(params),
+                ).fetchone()
+                total = int(total_row["c"] or 0) if total_row else 0
+                focus_id = self._text(focus_record_id)
+                if focus_id:
+                    focus_row = conn.execute(
+                        f"""
+                        WITH ranked AS (
+                            SELECT
+                                p.record_id,
+                                ROW_NUMBER() OVER (ORDER BY {order_sql}) - 1
+                                    AS row_index
+                            FROM repair_snapshot_records AS p
+                            JOIN repair_project_status_index AS i
+                              ON i.record_id = p.record_id
+                            WHERE {where_sql}
+                        )
+                        SELECT row_index FROM ranked
+                        WHERE record_id = ?
+                        LIMIT 1
+                        """,
+                        (*params, focus_id),
+                    ).fetchone()
+                    if focus_row is not None:
+                        focus_index = int(focus_row["row_index"] or 0)
+                        page_offset = (focus_index // max_limit) * max_limit
+                rows = conn.execute(
+                    f"""
+                    SELECT
+                        p.payload_json,
+                        i.workflow,
+                        i.followup_count,
+                        i.progress_percent,
+                        i.latest_followup_time,
+                        i.completed_at,
+                        i.state_verified
+                    FROM repair_snapshot_records AS p
+                    JOIN repair_project_status_index AS i
+                      ON i.record_id = p.record_id
+                    WHERE {where_sql}
+                    ORDER BY {order_sql}
+                    LIMIT ? OFFSET ?
+                    """,
+                    (*params, max_limit, page_offset),
+                ).fetchall()
+        records: list[dict[str, Any]] = []
+        for row in rows:
+            payload = self._loads(str(row["payload_json"] or ""), {})
+            if not isinstance(payload, dict):
+                continue
+            payload = dict(payload)
+            payload["_repair_status_index"] = {
+                "workflow": str(row["workflow"] or ""),
+                "followup_count": int(row["followup_count"] or 0),
+                "progress_percent": int(row["progress_percent"] or 0),
+                "latest_followup_time": str(row["latest_followup_time"] or ""),
+                "completed_at": float(row["completed_at"] or 0),
+                "state_verified": bool(row["state_verified"]),
+            }
+            records.append(payload)
+        return {
+            "records": records,
+            "total": total,
+            "returned": len(records),
+            "offset": page_offset,
+            "has_more": page_offset + len(records) < total,
+        }
+
     def repair_snapshot_parent_counts(
         self,
         source_key: str,
@@ -3875,6 +4423,48 @@ class LanPortalStateStore:
                         if parent_id:
                             counts[parent_id] = int(row["c"] or 0)
         return counts
+
+    def repair_snapshot_records_by_parents(
+        self,
+        source_key: str,
+        parent_record_ids: list[str] | tuple[str, ...],
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Return only follow-up rows linked to the requested parent records."""
+        source_key = self._normalize_repair_snapshot_source_key(source_key)
+        normalized_ids = list(
+            dict.fromkeys(
+                self._text(value)
+                for value in parent_record_ids
+                if self._text(value)
+            )
+        )
+        if not normalized_ids or not self.db_path.exists():
+            return {}
+        grouped: dict[str, list[dict[str, Any]]] = {
+            parent_id: [] for parent_id in normalized_ids
+        }
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                for start in range(0, len(normalized_ids), 500):
+                    batch = normalized_ids[start : start + 500]
+                    placeholders = ",".join("?" for _ in batch)
+                    rows = conn.execute(
+                        f"""
+                        SELECT parent_record_id, payload_json
+                        FROM repair_snapshot_records
+                        WHERE source_key = ?
+                          AND parent_record_id IN ({placeholders})
+                        ORDER BY parent_record_id, sort_time DESC, record_id ASC
+                        """,
+                        (source_key, *batch),
+                    ).fetchall()
+                    for row in rows:
+                        parent_id = self._text(row["parent_record_id"])
+                        payload = self._loads(str(row["payload_json"] or ""), {})
+                        if parent_id and isinstance(payload, dict):
+                            grouped.setdefault(parent_id, []).append(payload)
+        return grouped
 
     def upsert_repair_snapshot_record(
         self,
@@ -4406,6 +4996,16 @@ class LanPortalStateStore:
             }
 
         manifest = manifest_payload(manifest_row)
+        last_failed = manifest_payload(failed_row)
+        active_finished_at = float(
+            manifest.get("finished_at") or manifest.get("updated_at") or 0
+        )
+        if (
+            last_failed
+            and active_finished_at > 0
+            and float(last_failed.get("updated_at") or 0) <= active_finished_at
+        ):
+            last_failed = {}
         return {
             "exists": bool(manifest_row),
             "month": month,
@@ -4415,7 +5015,7 @@ class LanPortalStateStore:
             "snapshot_id": manifest.get("snapshot_id") or "",
             "count": len(records),
             "manifest": manifest,
-            "last_failed": manifest_payload(failed_row),
+            "last_failed": last_failed,
         }
 
     def event_month_snapshot_stats(self) -> dict[str, Any]:
@@ -8888,7 +9488,7 @@ class LanPortalStateStore:
         ]
         if not normalized_types or not normalized_statuses or not self.db_path.exists():
             return []
-        limit = max(1, min(int(limit or 100), 500))
+        limit = max(1, min(int(limit or 100), 5000))
         type_placeholders = ", ".join("?" for _ in normalized_types)
         status_placeholders = ", ".join("?" for _ in normalized_statuses)
         with self._lock:
@@ -8981,6 +9581,515 @@ class LanPortalStateStore:
                 )
                 conn.commit()
                 return bool(cursor.rowcount)
+
+    def cleanup_repair_management_operations(
+        self,
+        *,
+        completed_before: float,
+        failed_before: float,
+        limit: int = 2000,
+    ) -> dict[str, int]:
+        if not self.db_path.exists():
+            return {"completed": 0, "failed": 0}
+        max_rows = max(1, min(int(limit or 2000), 10000))
+        deleted = {"completed": 0, "failed": 0}
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                completed_cursor = conn.execute(
+                    """
+                    DELETE FROM repair_management_operations
+                    WHERE operation_id IN (
+                        SELECT operation_id
+                        FROM repair_management_operations
+                        WHERE status = 'completed' AND updated_at < ?
+                        ORDER BY updated_at ASC
+                        LIMIT ?
+                    )
+                    """,
+                    (float(completed_before or 0), max_rows),
+                )
+                deleted["completed"] = max(
+                    0, int(completed_cursor.rowcount or 0)
+                )
+                remaining = max(0, max_rows - deleted["completed"])
+                if remaining:
+                    failed_cursor = conn.execute(
+                        """
+                        DELETE FROM repair_management_operations
+                        WHERE operation_id IN (
+                            SELECT operation_id
+                            FROM repair_management_operations
+                            WHERE status = 'failed' AND updated_at < ?
+                            ORDER BY updated_at ASC
+                            LIMIT ?
+                        )
+                        """,
+                        (float(failed_before or 0), remaining),
+                    )
+                    deleted["failed"] = max(
+                        0, int(failed_cursor.rowcount or 0)
+                    )
+                conn.commit()
+        return deleted
+
+    @classmethod
+    def _business_operation_audit_payload(
+        cls,
+        row: sqlite3.Row | None,
+    ) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        related_ids = cls._loads(str(row["related_record_ids_json"] or ""), [])
+        metadata = cls._loads(str(row["metadata_json"] or ""), {})
+        return {
+            "audit_id": str(row["audit_id"] or ""),
+            "operation_id": str(row["operation_id"] or ""),
+            "domain": str(row["domain"] or ""),
+            "action": str(row["action"] or ""),
+            "status": str(row["status"] or ""),
+            "scope": str(row["scope"] or ""),
+            "actor_open_id": str(row["actor_open_id"] or ""),
+            "actor_name": str(row["actor_name"] or ""),
+            "active_item_id": str(row["active_item_id"] or ""),
+            "source_record_id": str(row["source_record_id"] or ""),
+            "target_record_id": str(row["target_record_id"] or ""),
+            "summary_record_id": str(row["summary_record_id"] or ""),
+            "related_record_ids": related_ids if isinstance(related_ids, list) else [],
+            "remote_written": bool(row["remote_written"]),
+            "message_sent": bool(row["message_sent"]),
+            "warning": str(row["warning"] or ""),
+            "error_stage": str(row["error_stage"] or ""),
+            "error": str(row["error"] or ""),
+            "metadata": metadata if isinstance(metadata, dict) else {},
+            "started_at": float(row["started_at"] or 0),
+            "completed_at": float(row["completed_at"] or 0),
+            "updated_at": float(row["updated_at"] or 0),
+        }
+
+    def record_business_operation_audit(
+        self,
+        *,
+        audit_id: str = "",
+        operation_id: str | None = None,
+        domain: str | None = None,
+        action: str | None = None,
+        status: str,
+        scope: str | None = None,
+        actor_open_id: str | None = None,
+        actor_name: str | None = None,
+        active_item_id: str | None = None,
+        source_record_id: str | None = None,
+        target_record_id: str | None = None,
+        summary_record_id: str | None = None,
+        related_record_ids: list[str] | tuple[str, ...] | None = None,
+        remote_written: bool | None = None,
+        message_sent: bool | None = None,
+        warning: str | None = None,
+        error_stage: str | None = None,
+        error: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized_audit_id = self._text(audit_id) or uuid.uuid4().hex
+        normalized_status = self._text(status).lower() or "unknown"
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                existing_row = conn.execute(
+                    "SELECT * FROM business_operation_audits WHERE audit_id = ?",
+                    (normalized_audit_id,),
+                ).fetchone()
+                existing = self._business_operation_audit_payload(existing_row) or {}
+
+                def text_value(value: str | None, key: str) -> str:
+                    return (
+                        self._text(value)
+                        if value is not None
+                        else self._text(existing.get(key))
+                    )
+
+                normalized_related = (
+                    list(
+                        dict.fromkeys(
+                            self._text(value)
+                            for value in (related_record_ids or [])
+                            if self._text(value)
+                        )
+                    )
+                    if related_record_ids is not None
+                    else list(existing.get("related_record_ids") or [])
+                )
+                normalized_metadata = dict(existing.get("metadata") or {})
+                if metadata is not None:
+                    normalized_metadata.update(dict(metadata or {}))
+                is_restart = normalized_status == "started"
+                is_terminal = normalized_status in {
+                    "success",
+                    "failed",
+                    "cancelled",
+                    "completed",
+                }
+                completed_at = (
+                    now
+                    if is_terminal
+                    else 0.0
+                    if is_restart
+                    else float(existing.get("completed_at") or 0)
+                )
+                started_at = (
+                    now
+                    if is_restart
+                    else float(existing.get("started_at") or now)
+                )
+
+                def result_flag(value: bool | None, key: str) -> int:
+                    if value is not None:
+                        return int(bool(value))
+                    if is_restart:
+                        return 0
+                    return int(bool(existing.get(key)))
+
+                def result_text(value: str | None, key: str) -> str:
+                    if value is not None:
+                        return self._text(value)
+                    if is_restart:
+                        return ""
+                    return self._text(existing.get(key))
+
+                values = (
+                    normalized_audit_id,
+                    text_value(operation_id, "operation_id"),
+                    text_value(domain, "domain") or "unknown",
+                    text_value(action, "action") or "unknown",
+                    normalized_status,
+                    text_value(scope, "scope"),
+                    text_value(actor_open_id, "actor_open_id"),
+                    text_value(actor_name, "actor_name"),
+                    text_value(active_item_id, "active_item_id"),
+                    text_value(source_record_id, "source_record_id"),
+                    text_value(target_record_id, "target_record_id"),
+                    text_value(summary_record_id, "summary_record_id"),
+                    self._json(normalized_related),
+                    result_flag(remote_written, "remote_written"),
+                    result_flag(message_sent, "message_sent"),
+                    result_text(warning, "warning"),
+                    result_text(error_stage, "error_stage"),
+                    result_text(error, "error"),
+                    self._json(normalized_metadata),
+                    started_at,
+                    completed_at,
+                    now,
+                )
+                conn.execute(
+                    """
+                    INSERT INTO business_operation_audits(
+                        audit_id, operation_id, domain, action, status, scope,
+                        actor_open_id, actor_name, active_item_id,
+                        source_record_id, target_record_id, summary_record_id,
+                        related_record_ids_json, remote_written, message_sent,
+                        warning, error_stage, error, metadata_json,
+                        started_at, completed_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(audit_id) DO UPDATE SET
+                        operation_id=excluded.operation_id,
+                        domain=excluded.domain,
+                        action=excluded.action,
+                        status=excluded.status,
+                        scope=excluded.scope,
+                        actor_open_id=excluded.actor_open_id,
+                        actor_name=excluded.actor_name,
+                        active_item_id=excluded.active_item_id,
+                        source_record_id=excluded.source_record_id,
+                        target_record_id=excluded.target_record_id,
+                        summary_record_id=excluded.summary_record_id,
+                        related_record_ids_json=excluded.related_record_ids_json,
+                        remote_written=excluded.remote_written,
+                        message_sent=excluded.message_sent,
+                        warning=excluded.warning,
+                        error_stage=excluded.error_stage,
+                        error=excluded.error,
+                        metadata_json=excluded.metadata_json,
+                        started_at=excluded.started_at,
+                        completed_at=excluded.completed_at,
+                        updated_at=excluded.updated_at
+                    """,
+                    values,
+                )
+                row = conn.execute(
+                    "SELECT * FROM business_operation_audits WHERE audit_id = ?",
+                    (normalized_audit_id,),
+                ).fetchone()
+                conn.commit()
+        return self._business_operation_audit_payload(row) or {}
+
+    def list_business_operation_audits(
+        self,
+        *,
+        domain: str = "",
+        statuses: tuple[str, ...] | list[str] = (),
+        scope: str = "",
+        operation_id: str = "",
+        before: float = 0,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        if not self.db_path.exists():
+            return []
+        clauses: list[str] = []
+        params: list[Any] = []
+        normalized_domain = self._text(domain)
+        if normalized_domain:
+            clauses.append("domain = ?")
+            params.append(normalized_domain)
+        normalized_statuses = [
+            self._text(item).lower()
+            for item in (statuses or [])
+            if self._text(item)
+        ]
+        if normalized_statuses:
+            clauses.append(
+                f"status IN ({', '.join('?' for _ in normalized_statuses)})"
+            )
+            params.extend(normalized_statuses)
+        normalized_scope = self._text(scope).upper()
+        if normalized_scope:
+            clauses.append("UPPER(scope) = ?")
+            params.append(normalized_scope)
+        normalized_operation_id = self._text(operation_id)
+        if normalized_operation_id:
+            clauses.append("operation_id = ?")
+            params.append(normalized_operation_id)
+        if float(before or 0) > 0:
+            clauses.append("updated_at < ?")
+            params.append(float(before))
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        max_limit = max(1, min(int(limit or 100), 1000))
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                rows = conn.execute(
+                    f"""
+                    SELECT * FROM business_operation_audits
+                    {where_sql}
+                    ORDER BY updated_at DESC, audit_id DESC
+                    LIMIT ?
+                    """,
+                    (*params, max_limit),
+                ).fetchall()
+        return [
+            payload
+            for row in rows
+            if (payload := self._business_operation_audit_payload(row)) is not None
+        ]
+
+    def cleanup_business_operation_audits(
+        self,
+        *,
+        terminal_retention_seconds: float = 90 * 24 * 3600,
+        unfinished_retention_seconds: float = 7 * 24 * 3600,
+        max_delete: int = 2000,
+    ) -> int:
+        if not self.db_path.exists():
+            return 0
+        now = time.time()
+        terminal_before = now - max(3600.0, float(terminal_retention_seconds or 0))
+        unfinished_before = now - max(
+            3600.0, float(unfinished_retention_seconds or 0)
+        )
+        delete_limit = max(1, min(int(max_delete or 2000), 10000))
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                cursor = conn.execute(
+                    """
+                    DELETE FROM business_operation_audits
+                    WHERE audit_id IN (
+                        SELECT audit_id
+                        FROM business_operation_audits
+                        WHERE (
+                            status IN ('success', 'failed', 'cancelled', 'completed')
+                            AND updated_at < ?
+                        ) OR (
+                            status NOT IN ('success', 'failed', 'cancelled', 'completed')
+                            AND updated_at < ?
+                        )
+                        ORDER BY updated_at ASC, audit_id ASC
+                        LIMIT ?
+                    )
+                    """,
+                    (terminal_before, unfinished_before, delete_limit),
+                )
+                conn.commit()
+                return max(0, int(cursor.rowcount or 0))
+
+    def append_repair_management_change(
+        self,
+        *,
+        entity_type: str,
+        action: str,
+        record_id: str = "",
+        summary_record_id: str = "",
+        scope_codes: list[str] | tuple[str, ...] | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> int:
+        normalized_entity = self._text(entity_type)
+        normalized_action = self._text(action)
+        if not normalized_entity or not normalized_action:
+            return 0
+        normalized_scopes = list(
+            dict.fromkeys(
+                self._text(value).upper()
+                for value in (scope_codes or [])
+                if self._text(value)
+            )
+        )
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                cursor = conn.execute(
+                    """
+                    INSERT INTO repair_management_change_log(
+                        entity_type, action, record_id, summary_record_id,
+                        scope_codes_json, payload_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        normalized_entity,
+                        normalized_action,
+                        self._text(record_id),
+                        self._text(summary_record_id),
+                        self._json(normalized_scopes),
+                        self._json(dict(payload or {})),
+                        now,
+                    ),
+                )
+                conn.commit()
+                return max(0, int(cursor.lastrowid or 0))
+
+    def latest_repair_management_change_id(self) -> int:
+        if not self.db_path.exists():
+            return 0
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    "SELECT COALESCE(MAX(id), 0) AS max_id "
+                    "FROM repair_management_change_log"
+                ).fetchone()
+        return int(row["max_id"] or 0) if row else 0
+
+    def list_repair_management_changes(
+        self,
+        *,
+        after_id: int = 0,
+        scope: str = "ALL",
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        if not self.db_path.exists():
+            return []
+        normalized_scope = self._text(scope).upper() or "ALL"
+        clauses = ["id > ?"]
+        params: list[Any] = [max(0, int(after_id or 0))]
+        if normalized_scope == "CAMPUS":
+            clauses.append(
+                """
+                (
+                    json_array_length(scope_codes_json) = 0
+                    OR (
+                        SELECT COUNT(DISTINCT UPPER(CAST(value AS TEXT)))
+                        FROM json_each(
+                            repair_management_change_log.scope_codes_json
+                        )
+                        WHERE UPPER(CAST(value AS TEXT))
+                              IN ('110', 'A', 'B', 'C', 'D', 'E', 'H')
+                    ) >= 2
+                )
+                """
+            )
+        elif normalized_scope != "ALL":
+            clauses.append(
+                """
+                (
+                    json_array_length(scope_codes_json) = 0
+                    OR EXISTS (
+                        SELECT 1
+                        FROM json_each(
+                            repair_management_change_log.scope_codes_json
+                        )
+                        WHERE UPPER(CAST(value AS TEXT)) = ?
+                    )
+                )
+                """
+            )
+            params.append(normalized_scope)
+        max_limit = max(1, min(int(limit or 100), 500))
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                rows = conn.execute(
+                    f"""
+                    SELECT *
+                    FROM repair_management_change_log
+                    WHERE {' AND '.join(clauses)}
+                    ORDER BY id ASC
+                    LIMIT ?
+                    """,
+                    (*params, max_limit),
+                ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            scopes = self._loads(str(row["scope_codes_json"] or ""), [])
+            payload = self._loads(str(row["payload_json"] or ""), {})
+            result.append(
+                {
+                    "id": int(row["id"] or 0),
+                    "entity_type": str(row["entity_type"] or ""),
+                    "action": str(row["action"] or ""),
+                    "record_id": str(row["record_id"] or ""),
+                    "summary_record_id": str(row["summary_record_id"] or ""),
+                    "scope_codes": scopes if isinstance(scopes, list) else [],
+                    "payload": payload if isinstance(payload, dict) else {},
+                    "created_at": float(row["created_at"] or 0),
+                }
+            )
+        return result
+
+    def cleanup_repair_management_changes(
+        self,
+        *,
+        before: float,
+        keep_latest: int = 10000,
+    ) -> int:
+        if not self.db_path.exists():
+            return 0
+        keep_latest = max(100, min(int(keep_latest or 10000), 100000))
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                cursor = conn.execute(
+                    """
+                    DELETE FROM repair_management_change_log
+                    WHERE created_at < ?
+                      AND id < COALESCE(
+                          (
+                              SELECT MIN(id)
+                              FROM (
+                                  SELECT id
+                                  FROM repair_management_change_log
+                                  ORDER BY id DESC
+                                  LIMIT ?
+                              )
+                          ),
+                          9223372036854775807
+                      )
+                    """,
+                    (float(before or 0), keep_latest),
+                )
+                conn.commit()
+                return max(0, int(cursor.rowcount or 0))
 
     def upsert_runtime_queue_item(
         self,

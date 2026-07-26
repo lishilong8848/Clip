@@ -22,6 +22,19 @@
     </header>
 
     <MessageBanner v-if="message" :tone="messageTone" :text="message" />
+    <section v-if="conflictState" class="followup-conflict" role="alert">
+      <div>
+        <AlertCircle :size="17" aria-hidden="true" />
+        <span>{{ conflictState.message }}</span>
+      </div>
+      <div class="followup-conflict-actions">
+        <button type="button" @click="copyCurrentFollowupDraft">复制当前填写</button>
+        <button type="button" class="primary" :disabled="loading" @click="reloadLatestFollowup">
+          {{ loading ? "读取中" : "读取最新内容" }}
+        </button>
+        <button type="button" @click="conflictState = null">稍后处理</button>
+      </div>
+    </section>
 
     <div v-if="!summaryRecordId" class="followup-empty">未选择维修项目</div>
     <div v-else-if="loading && !fields.length" class="followup-empty" aria-live="polite">
@@ -286,7 +299,7 @@ import {
   Search,
   Trash2,
 } from "lucide-vue-next";
-import { refreshRemoteSourceAndWait, requestJson } from "../api/client";
+import { ApiError, refreshRemoteSourceAndWait, requestJson } from "../api/client";
 import {
   createRepairOperationId,
   parseRepairDraftValue,
@@ -435,6 +448,11 @@ const page = ref(1);
 const deleteDialogOpen = ref(false);
 const creatingNewFollowup = ref(false);
 const createOperationId = ref("");
+const updateOperationId = ref("");
+let updateOperationPayloadKey = "";
+const deleteOperationId = ref("");
+let deleteOperationRecordId = "";
+const conflictState = ref<{ message: string; recordId: string } | null>(null);
 const followupFocusRecordId = ref("");
 const followupDirty = ref(false);
 const discardDialogOpen = ref(false);
@@ -568,6 +586,62 @@ const followupSaveStateIcon = computed(() => {
 function showMessage(text: string, tone: "success" | "warning" | "failed" = "success"): void {
   message.value = text;
   messageTone.value = tone;
+}
+
+function captureFollowupConflict(error: unknown): boolean {
+  if (!(error instanceof ApiError) || error.status !== 409) return false;
+  conflictState.value = {
+    message: error.message || "该跟进已被其他用户修改，请选择如何处理。",
+    recordId: editingRecordId.value,
+  };
+  showMessage("当前填写已保留，请复制备份或读取服务器最新内容。", "warning");
+  return true;
+}
+
+async function copyCurrentFollowupDraft(): Promise<void> {
+  const content = JSON.stringify(
+    {
+      title: String(selectedRecord.value?.title || "维修跟进"),
+      fields: Object.fromEntries(
+        editableFields.value.map((field) => {
+          const name = String(field.field_name || "");
+          return [
+            fieldLabel(name),
+            name === WORKER_FIELD_NAME
+              ? workerPeople.value.map((person) => String(person.name || person.user_id || "")).filter(Boolean)
+              : draft[name] || "",
+          ];
+        }),
+      ),
+    },
+    null,
+    2,
+  );
+  try {
+    await navigator.clipboard.writeText(content);
+    showMessage("当前填写已复制。", "success");
+  } catch {
+    showMessage("浏览器未允许复制，请先不要关闭当前页面。", "warning");
+  }
+}
+
+async function reloadLatestFollowup(): Promise<void> {
+  const recordId = conflictState.value?.recordId || editingRecordId.value;
+  if (!recordId || loading.value) return;
+  conflictState.value = null;
+  followupFocusRecordId.value = recordId;
+  clearRepairFollowupCache(props.summaryRecordId);
+  setDirty(false);
+  await loadRecords(true, true);
+  const latest = records.value.find(
+    (item) => String(item.record_id || "").trim() === recordId,
+  );
+  if (latest) {
+    selectRecord(latest);
+    showMessage("已读取服务器最新内容。", "success");
+  } else {
+    showMessage("该跟进记录已不存在。", "warning");
+  }
 }
 
 function isOutsideFilterRecord(record: LooseDict): boolean {
@@ -857,6 +931,11 @@ function resolveDiscardConfirmation(confirmed: boolean): void {
 
 function startCreate(): void {
   createOperationId.value = "";
+  updateOperationId.value = "";
+  updateOperationPayloadKey = "";
+  deleteOperationId.value = "";
+  deleteOperationRecordId = "";
+  conflictState.value = null;
   followupFocusRecordId.value = "";
   creatingNewFollowup.value = true;
   editingRecordId.value = "";
@@ -875,6 +954,11 @@ function requestStartCreate(): void {
 
 function selectRecord(record: LooseDict): void {
   createOperationId.value = "";
+  updateOperationId.value = "";
+  updateOperationPayloadKey = "";
+  deleteOperationId.value = "";
+  deleteOperationRecordId = "";
+  conflictState.value = null;
   followupFocusRecordId.value = "";
   creatingNewFollowup.value = false;
   editingRecordId.value = String(record.record_id || "");
@@ -958,6 +1042,9 @@ function resetForParent(): void {
   bindCandidatesHaveMore.value = false;
   bindCandidateNote.value = "";
   deleteDialogOpen.value = false;
+  deleteOperationId.value = "";
+  deleteOperationRecordId = "";
+  conflictState.value = null;
   discardDialogOpen.value = false;
   pendingDiscardAction = null;
   creatingNewFollowup.value = false;
@@ -1159,7 +1246,11 @@ function buildFields(): LooseDict {
   return payload;
 }
 
-function applySavedFollowupRecord(recordId: string, savedFields: LooseDict): void {
+function applySavedFollowupRecord(
+  recordId: string,
+  savedFields: LooseDict,
+  recordVersion = "",
+): void {
   const normalizedRecordId = String(recordId || "").trim();
   if (!normalizedRecordId) return;
   const existing = (
@@ -1191,6 +1282,7 @@ function applySavedFollowupRecord(recordId: string, savedFields: LooseDict): voi
     raw_fields: rawFields,
     display_fields: displayFields,
     cmdb_record_ids: cmdbRecordIds.value.slice(),
+    record_version: recordVersion || String(existing.record_version || ""),
   };
   const existingIndex = records.value.findIndex(
     (item) => String(item.record_id || "").trim() === normalizedRecordId,
@@ -1242,12 +1334,32 @@ async function saveRecord(): Promise<void> {
     if (!editingRecordId.value && !createOperationId.value) {
       createOperationId.value = createRepairOperationId("repair-followup");
     }
-    const body = JSON.stringify({
-      operation_id: editingRecordId.value ? "" : createOperationId.value,
+    const requestPayload = {
+      expected_version: editingRecordId.value
+        ? String(selectedRecord.value?.record_version || "")
+        : "",
       scope: props.scope || "ALL",
       summary_record_id: props.summaryRecordId,
       cmdb_record_ids: cmdbRecordIds.value,
       fields: buildFields(),
+    };
+    if (editingRecordId.value) {
+      const nextPayloadKey = JSON.stringify(requestPayload);
+      if (
+        !updateOperationId.value
+        || updateOperationPayloadKey !== nextPayloadKey
+      ) {
+        updateOperationId.value = createRepairOperationId(
+          "repair-followup-update",
+        );
+        updateOperationPayloadKey = nextPayloadKey;
+      }
+    }
+    const body = JSON.stringify({
+      ...requestPayload,
+      operation_id: editingRecordId.value
+        ? updateOperationId.value
+        : createOperationId.value,
     });
     const payload = wasEditing
       ? await requestJson(`/api/repair-management/followups/${encodeURIComponent(editingRecordId.value)}`, {
@@ -1257,6 +1369,8 @@ async function saveRecord(): Promise<void> {
       : await requestJson("/api/repair-management/followups", { method: "POST", body });
     editingRecordId.value = String(payload.record_id || editingRecordId.value || "");
     createOperationId.value = "";
+    updateOperationId.value = "";
+    updateOperationPayloadKey = "";
     if (!wasEditing) page.value = 1;
     const warnings = Array.isArray(payload.warnings)
       ? payload.warnings.map((item: unknown) => String(item || "").trim()).filter(Boolean)
@@ -1271,12 +1385,15 @@ async function saveRecord(): Promise<void> {
     applySavedFollowupRecord(
       editingRecordId.value,
       payload.fields && typeof payload.fields === "object" ? payload.fields : {},
+      String(payload.record_version || ""),
     );
     followupFocusRecordId.value = editingRecordId.value;
     refreshFollowupsAfterSave();
     emit("changed");
   } catch (error: unknown) {
-    showMessage(error instanceof Error ? error.message : "维修跟进保存失败。", "failed");
+    if (!captureFollowupConflict(error)) {
+      showMessage(error instanceof Error ? error.message : "维修跟进保存失败。", "failed");
+    }
   } finally {
     saving.value = false;
   }
@@ -1295,23 +1412,35 @@ async function resolveDeleteConfirmation(confirmed: boolean): Promise<void> {
 
 async function deleteRecordNow(): Promise<void> {
   if (saving.value || !editingRecordId.value || !props.summaryRecordId) return;
+  const recordId = editingRecordId.value;
+  if (!deleteOperationId.value || deleteOperationRecordId !== recordId) {
+    deleteOperationId.value = createRepairOperationId("repair-followup-delete");
+    deleteOperationRecordId = recordId;
+  }
   saving.value = true;
   try {
     const params = new URLSearchParams({
       scope: props.scope || "ALL",
       summary_record_id: props.summaryRecordId,
+      operation_id: deleteOperationId.value,
+      expected_version: String(selectedRecord.value?.record_version || ""),
     });
     await requestJson(
-      `/api/repair-management/followups/${encodeURIComponent(editingRecordId.value)}?${params.toString()}`,
+      `/api/repair-management/followups/${encodeURIComponent(recordId)}?${params.toString()}`,
       { method: "DELETE" },
     );
+    deleteOperationId.value = "";
+    deleteOperationRecordId = "";
+    conflictState.value = null;
     resetForParent();
     clearRepairFollowupCache(props.summaryRecordId);
     await loadRecords(false);
     emit("changed");
     showMessage("维修跟进已删除。", "success");
   } catch (error: unknown) {
-    showMessage(error instanceof Error ? error.message : "维修跟进删除失败。", "failed");
+    if (!captureFollowupConflict(error)) {
+      showMessage(error instanceof Error ? error.message : "维修跟进删除失败。", "failed");
+    }
   } finally {
     saving.value = false;
   }
@@ -1752,6 +1881,59 @@ onBeforeUnmount(() => {
   border-radius: 16px;
   background: #fff;
   box-shadow: 0 14px 34px rgba(16, 91, 94, 0.08);
+}
+
+.followup-conflict {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid #eeb873;
+  border-radius: 10px;
+  background: #fff8ed;
+  color: #8b4b12;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.followup-conflict > div,
+.followup-conflict-actions,
+.followup-conflict-actions button {
+  display: flex;
+  align-items: center;
+}
+
+.followup-conflict > div:first-child {
+  min-width: 0;
+  gap: 7px;
+}
+
+.followup-conflict-actions {
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+.followup-conflict-actions button {
+  min-height: 30px;
+  border: 1px solid #d7a665;
+  border-radius: 8px;
+  padding: 0 10px;
+  background: #fff;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.followup-conflict-actions button.primary {
+  border-color: #1e63ff;
+  background: #1e63ff;
+  color: #fff;
+}
+
+.followup-conflict-actions button:disabled {
+  cursor: wait;
+  opacity: 0.65;
 }
 
 .followup-panel.embedded {

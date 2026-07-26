@@ -71,6 +71,8 @@ from clipflow_backend.api_models import (
     PermissionRequestReviewRequest,
     RepairManagementPrefillRequest,
     RepairManagementRecordRequest,
+    RepairScopeRequest,
+    RepairSyncRetryRequest,
     RepairNoticeEventBindRequest,
     RepairFollowupBindRequest,
     RepairFollowupRecordRequest,
@@ -125,6 +127,11 @@ from lan_bitable_template_portal.identity_utils import (
     canonical_target_record_id,
     is_local_record_id,
     normalize_notice_identity_payload,
+)
+from lan_bitable_template_portal.operation_audit import (
+    audited_thread_call,
+    begin_business_audit,
+    finish_business_audit,
 )
 from lan_bitable_template_portal.portal_service import (
     BUILDING_SCOPE_CODES,
@@ -1180,6 +1187,53 @@ class FastAPIPortalController:
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=500)
 
+        @app.get("/api/backend/operation-audits")
+        async def backend_operation_audits(request: Request):
+            admin_response, _session = self._require_admin_response(request)
+            if admin_response is not None:
+                return admin_response
+            try:
+                try:
+                    limit = int(request.query_params.get("limit") or 100)
+                except ValueError:
+                    limit = 100
+                try:
+                    before = float(request.query_params.get("before") or 0)
+                except ValueError:
+                    before = 0.0
+                statuses = tuple(
+                    item.strip().lower()
+                    for item in str(
+                        request.query_params.get("status") or ""
+                    ).split(",")
+                    if item.strip()
+                )
+                items = await asyncio.to_thread(
+                    PortalRuntime.state_store.list_business_operation_audits,
+                    domain=str(request.query_params.get("domain") or ""),
+                    statuses=statuses,
+                    scope=str(request.query_params.get("scope") or ""),
+                    operation_id=str(
+                        request.query_params.get("operation_id") or ""
+                    ),
+                    before=before,
+                    limit=limit,
+                )
+                return {
+                    "ok": True,
+                    "data": {
+                        "items": items,
+                        "returned": len(items),
+                        "next_before": (
+                            float(items[-1].get("updated_at") or 0)
+                            if items
+                            else 0
+                        ),
+                    },
+                }
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=500)
+
         @app.post("/api/backend/notice-projection-repair")
         async def backend_notice_projection_repair(request: Request):
             admin_response, _session = self._require_admin_response(request)
@@ -2005,8 +2059,18 @@ class FastAPIPortalController:
                 scope = self._authorized_scope_or_error(
                     session, payload.get("scope") or "ALL"
                 )
-                data = await asyncio.to_thread(
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                data = await audited_thread_call(
+                    PortalRuntime.state_store,
                     PortalRuntime.service.fill_engineer_mop_file,
+                    audit_domain="mop",
+                    audit_action="write_signatures",
+                    audit_operation_id=str(payload.get("operation_id") or ""),
+                    audit_scope=scope,
+                    audit_actor_open_id=str(user.get("open_id") or ""),
+                    audit_actor_name=str(user.get("name") or user.get("en_name") or ""),
+                    audit_source_record_id=str(payload.get("source_record_id") or ""),
+                    audit_metadata={"file_name": payload.get("file_name")},
                     **engineer_mop_fill_kwargs_from_payload(payload, scope=scope),
                 )
                 return self._json_ok(request, session, data)
@@ -2030,8 +2094,18 @@ class FastAPIPortalController:
                     session, payload.get("scope") or "ALL"
                 )
                 user = session.get("user") if isinstance(session.get("user"), dict) else {}
-                data = await asyncio.to_thread(
+                data = await audited_thread_call(
+                    PortalRuntime.state_store,
                     PortalRuntime.service.upload_signed_engineer_mop_file,
+                    audit_domain="mop",
+                    audit_action="upload_signed",
+                    audit_operation_id=str(payload.get("operation_id") or ""),
+                    audit_scope=scope,
+                    audit_actor_open_id=str(user.get("open_id") or ""),
+                    audit_actor_name=str(user.get("name") or user.get("en_name") or ""),
+                    audit_source_record_id=str(payload.get("source_record_id") or ""),
+                    audit_metadata={"file_name": payload.get("file_name")},
+                    audit_remote_written_on_success=True,
                     **engineer_mop_upload_signed_kwargs_from_payload(
                         payload,
                         scope=scope,
@@ -3184,8 +3258,18 @@ class FastAPIPortalController:
                 scope = self._authorized_scope_or_error(
                     session, payload.get("scope") or "ALL"
                 )
-                data = await asyncio.to_thread(
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                data = await audited_thread_call(
+                    PortalRuntime.state_store,
                     PortalRuntime.service.bind_repair_followup_records,
+                    audit_domain="repair",
+                    audit_action="bind_followups",
+                    audit_scope=scope,
+                    audit_actor_open_id=str(user.get("open_id") or ""),
+                    audit_actor_name=str(user.get("name") or user.get("en_name") or ""),
+                    audit_summary_record_id=str(payload.get("summary_record_id") or ""),
+                    audit_related_record_ids=payload.get("followup_record_ids") or [],
+                    audit_remote_written_on_success=True,
                     summary_record_id=str(
                         payload.get("summary_record_id") or ""
                     ),
@@ -3208,8 +3292,18 @@ class FastAPIPortalController:
                 scope = self._authorized_scope_or_error(
                     session, payload.get("scope") or "ALL"
                 )
-                data = await asyncio.to_thread(
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                data = await audited_thread_call(
+                    PortalRuntime.state_store,
                     PortalRuntime.service.create_repair_followup_record,
+                    audit_domain="repair",
+                    audit_action="create_followup",
+                    audit_operation_id=str(payload.get("operation_id") or ""),
+                    audit_scope=scope,
+                    audit_actor_open_id=str(user.get("open_id") or ""),
+                    audit_actor_name=str(user.get("name") or user.get("en_name") or ""),
+                    audit_summary_record_id=str(payload.get("summary_record_id") or ""),
+                    audit_remote_written_on_success=True,
                     summary_record_id=str(payload.get("summary_record_id") or ""),
                     fields=payload.get("fields") or {},
                     cmdb_record_ids=payload.get("cmdb_record_ids"),
@@ -3232,12 +3326,25 @@ class FastAPIPortalController:
                 scope = self._authorized_scope_or_error(
                     session, payload.get("scope") or "ALL"
                 )
-                data = await asyncio.to_thread(
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                data = await audited_thread_call(
+                    PortalRuntime.state_store,
                     PortalRuntime.service.update_repair_followup_record,
                     record_id,
+                    audit_domain="repair",
+                    audit_action="update_followup",
+                    audit_operation_id=str(payload.get("operation_id") or ""),
+                    audit_scope=scope,
+                    audit_actor_open_id=str(user.get("open_id") or ""),
+                    audit_actor_name=str(user.get("name") or user.get("en_name") or ""),
+                    audit_target_record_id=record_id,
+                    audit_summary_record_id=str(payload.get("summary_record_id") or ""),
+                    audit_remote_written_on_success=True,
                     summary_record_id=str(payload.get("summary_record_id") or ""),
                     fields=payload.get("fields") or {},
                     cmdb_record_ids=payload.get("cmdb_record_ids"),
+                    operation_id=str(payload.get("operation_id") or ""),
+                    expected_version=str(payload.get("expected_version") or ""),
                     scope=scope,
                 )
                 return self._json_ok(request, session, data)
@@ -3253,11 +3360,28 @@ class FastAPIPortalController:
                 scope = self._authorized_scope_or_error(
                     session, request.query_params.get("scope") or "ALL"
                 )
-                data = await asyncio.to_thread(
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                operation_id = str(request.query_params.get("operation_id") or "")
+                summary_record_id = str(
+                    request.query_params.get("summary_record_id") or ""
+                )
+                data = await audited_thread_call(
+                    PortalRuntime.state_store,
                     PortalRuntime.service.delete_repair_followup_record,
                     record_id,
-                    summary_record_id=str(
-                        request.query_params.get("summary_record_id") or ""
+                    audit_domain="repair",
+                    audit_action="delete_followup",
+                    audit_operation_id=operation_id,
+                    audit_scope=scope,
+                    audit_actor_open_id=str(user.get("open_id") or ""),
+                    audit_actor_name=str(user.get("name") or user.get("en_name") or ""),
+                    audit_target_record_id=record_id,
+                    audit_summary_record_id=summary_record_id,
+                    audit_remote_written_on_success=True,
+                    summary_record_id=summary_record_id,
+                    operation_id=operation_id,
+                    expected_version=str(
+                        request.query_params.get("expected_version") or ""
                     ),
                     scope=scope,
                 )
@@ -3368,6 +3492,7 @@ class FastAPIPortalController:
                     scope=request.query_params.get("scope") or "ALL",
                     query=query,
                     state=str(request.query_params.get("state") or "all"),
+                    period=str(request.query_params.get("period") or "all"),
                     limit=limit,
                     offset=offset,
                     focus_record_id=str(
@@ -3377,10 +3502,226 @@ class FastAPIPortalController:
                         request.query_params.get("refresh") or ""
                     ).lower()
                     in {"1", "true", "yes"},
+                    summary_only=str(
+                        request.query_params.get("summary_only") or ""
+                    ).lower()
+                    in {"1", "true", "yes"},
                 )
                 return self._json_ok(request, session, data)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)
+
+        @app.get("/api/repair-management/health")
+        async def repair_management_health(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_scope_or_error(
+                    session, request.query_params.get("scope") or "ALL"
+                )
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.get_repair_management_health,
+                    scope=scope,
+                    include_integrity=str(
+                        request.query_params.get("integrity") or "1"
+                    ).lower()
+                    not in {"0", "false", "no"},
+                )
+                data["can_repair"] = PortalRuntime.auth_manager.is_admin(session)
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.get("/api/repair-management/failures")
+        async def repair_management_failures(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_scope_or_error(
+                    session, request.query_params.get("scope") or "ALL"
+                )
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.list_repair_management_failures,
+                    scope=scope,
+                )
+                data["can_reconcile"] = PortalRuntime.auth_manager.is_admin(session)
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.post("/api/repair-management/integration-check")
+        async def repair_management_integration_check(request: Request):
+            admin_response, session = self._require_admin_response(request)
+            if admin_response is not None:
+                return admin_response
+            try:
+                payload = (
+                    await self._read_model_request(request, RepairScopeRequest)
+                ).to_payload()
+                scope = self._authorized_scope_or_error(
+                    session, payload.get("scope") or "ALL"
+                )
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.check_repair_management_integration,
+                    scope=scope,
+                )
+                data["can_reconcile"] = True
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.post("/api/repair-management/reconcile")
+        async def repair_management_reconcile(request: Request):
+            admin_response, session = self._require_admin_response(request)
+            if admin_response is not None:
+                return admin_response
+            try:
+                payload = (
+                    await self._read_model_request(request, RepairScopeRequest)
+                ).to_payload()
+                scope = self._authorized_scope_or_error(
+                    session, payload.get("scope") or "ALL"
+                )
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.reconcile_repair_management_remote,
+                    scope=scope,
+                )
+                PortalRuntime.clear_payload_cache()
+                self._clear_read_cache()
+                data["can_reconcile"] = True
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.get("/api/repair-management/integrity")
+        async def repair_management_integrity(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_scope_or_error(
+                    session, request.query_params.get("scope") or "ALL"
+                )
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.get_repair_management_integrity,
+                    scope=scope,
+                    force_refresh=str(
+                        request.query_params.get("refresh") or ""
+                    ).lower()
+                    in {"1", "true", "yes"},
+                )
+                data["can_repair"] = PortalRuntime.auth_manager.is_admin(session)
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.post("/api/repair-management/integrity/repair")
+        async def repair_management_integrity_repair(request: Request):
+            admin_response, session = self._require_admin_response(request)
+            if admin_response is not None:
+                return admin_response
+            try:
+                payload = (
+                    await self._read_model_request(request, RepairScopeRequest)
+                ).to_payload()
+                scope = self._authorized_scope_or_error(
+                    session, payload.get("scope") or "ALL"
+                )
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.repair_repair_management_integrity,
+                    scope=scope,
+                )
+                data["can_repair"] = True
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.post("/api/repair-management/sync-retry-all")
+        async def repair_management_sync_retry_all(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                payload = (
+                    await self._read_model_request(request, RepairScopeRequest)
+                ).to_payload()
+                scope = self._authorized_scope_or_error(
+                    session, payload.get("scope") or "ALL"
+                )
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.retry_all_repair_management_sync,
+                    scope=scope,
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.get("/api/repair-management/stream")
+        async def repair_management_stream(request: Request):
+            return StreamingResponse(
+                self._repair_management_stream(request),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-store",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+
+        @app.get("/api/repair-management/changes")
+        async def repair_management_changes(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_scope_or_error(
+                    session, request.query_params.get("scope") or "ALL"
+                )
+                try:
+                    after_id = max(
+                        0,
+                        int(request.query_params.get("after_id") or 0),
+                    )
+                except ValueError:
+                    after_id = 0
+                try:
+                    limit = max(
+                        1,
+                        min(
+                            200,
+                            int(request.query_params.get("limit") or 100),
+                        ),
+                    )
+                except ValueError:
+                    limit = 100
+                latest_cursor = await asyncio.to_thread(
+                    PortalRuntime.state_store.latest_repair_management_change_id
+                )
+                cursor_reset = after_id > latest_cursor
+                effective_after_id = latest_cursor if cursor_reset else after_id
+                changes = await asyncio.to_thread(
+                    PortalRuntime.service.list_repair_management_changes,
+                    scope=scope,
+                    after_id=effective_after_id,
+                    limit=limit,
+                )
+                cursor = max(
+                    [effective_after_id]
+                    + [int(item.get("id") or 0) for item in changes]
+                )
+                return self._json_ok(
+                    request,
+                    session,
+                    {
+                        "cursor": cursor,
+                        "latest_cursor": latest_cursor,
+                        "cursor_reset": cursor_reset,
+                        "changes": changes,
+                    },
+                )
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
 
         @app.get("/api/repair-management/records/{record_id}")
         async def repair_management_record_detail(record_id: str, request: Request):
@@ -3404,6 +3745,46 @@ class FastAPIPortalController:
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=404)
 
+        @app.get("/api/repair-management/sync-status")
+        async def repair_management_sync_status(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_scope_or_error(
+                    session, request.query_params.get("scope") or "ALL"
+                )
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.get_repair_management_sync_status,
+                    str(request.query_params.get("summary_record_id") or ""),
+                    scope=scope,
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.post("/api/repair-management/sync-retry")
+        async def repair_management_sync_retry(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                payload = (
+                    await self._read_model_request(request, RepairSyncRetryRequest)
+                ).to_payload()
+                scope = self._authorized_scope_or_error(
+                    session, payload.get("scope") or "ALL"
+                )
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.retry_repair_management_sync,
+                    str(payload.get("summary_record_id") or ""),
+                    operation_id=str(payload.get("operation_id") or ""),
+                    scope=scope,
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
         @app.post("/api/repair-management/records")
         async def repair_management_record_create(request: Request):
             session = self._current_session(request)
@@ -3413,10 +3794,23 @@ class FastAPIPortalController:
                 payload = (
                     await self._read_model_request(request, RepairManagementRecordRequest)
                 ).to_payload()
-                self._authorized_scope_or_error(session, payload.get("scope") or "ALL")
-                data = await asyncio.to_thread(
+                scope = self._authorized_scope_or_error(
+                    session, payload.get("scope") or "ALL"
+                )
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                data = await audited_thread_call(
+                    PortalRuntime.state_store,
                     PortalRuntime.service.create_repair_management_record,
                     payload.get("fields") if isinstance(payload.get("fields"), dict) else {},
+                    audit_domain="repair",
+                    audit_action="create_project",
+                    audit_operation_id=str(payload.get("operation_id") or ""),
+                    audit_scope=scope,
+                    audit_actor_open_id=str(user.get("open_id") or ""),
+                    audit_actor_name=str(user.get("name") or user.get("en_name") or ""),
+                    audit_source_record_id=str(payload.get("source_event_id") or ""),
+                    audit_related_record_ids=payload.get("source_repair_ids") or [],
+                    audit_remote_written_on_success=True,
                     operation_id=str(payload.get("operation_id") or ""),
                     source_event_id=str(payload.get("source_event_id") or ""),
                     source_repair_ids=payload.get("source_repair_ids") or [],
@@ -3436,17 +3830,33 @@ class FastAPIPortalController:
                 payload = (
                     await self._read_model_request(request, RepairManagementRecordRequest)
                 ).to_payload()
-                self._authorized_scope_or_error(session, payload.get("scope") or "ALL")
-                data = await asyncio.to_thread(
+                scope = self._authorized_scope_or_error(
+                    session, payload.get("scope") or "ALL"
+                )
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                data = await audited_thread_call(
+                    PortalRuntime.state_store,
                     PortalRuntime.service.update_repair_management_record,
                     record_id,
                     payload.get("fields") if isinstance(payload.get("fields"), dict) else {},
+                    audit_domain="repair",
+                    audit_action="update_project",
+                    audit_operation_id=str(payload.get("operation_id") or ""),
+                    audit_scope=scope,
+                    audit_actor_open_id=str(user.get("open_id") or ""),
+                    audit_actor_name=str(user.get("name") or user.get("en_name") or ""),
+                    audit_target_record_id=record_id,
+                    audit_source_record_id=str(payload.get("source_event_id") or ""),
+                    audit_related_record_ids=payload.get("source_repair_ids") or [],
+                    audit_remote_written_on_success=True,
                     source_event_id=str(payload.get("source_event_id") or ""),
                     source_repair_ids=payload.get("source_repair_ids") or [],
                     replace_source_relations=bool(
                         payload.get("replace_source_relations")
                     ),
                     source_month=str(payload.get("source_month") or ""),
+                    operation_id=str(payload.get("operation_id") or ""),
+                    expected_version=str(payload.get("expected_version") or ""),
                     scope=str(payload.get("scope") or "ALL"),
                 )
                 return self._json_ok(request, session, data)
@@ -3459,12 +3869,21 @@ class FastAPIPortalController:
             if session is None:
                 return self._auth_required_response()
             try:
-                self._authorized_scope_or_error(
+                scope = self._authorized_scope_or_error(
                     session, request.query_params.get("scope") or "ALL"
                 )
-                data = await asyncio.to_thread(
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                data = await audited_thread_call(
+                    PortalRuntime.state_store,
                     PortalRuntime.service.delete_repair_management_record,
                     record_id,
+                    audit_domain="repair",
+                    audit_action="delete_project",
+                    audit_scope=scope,
+                    audit_actor_open_id=str(user.get("open_id") or ""),
+                    audit_actor_name=str(user.get("name") or user.get("en_name") or ""),
+                    audit_target_record_id=record_id,
+                    audit_remote_written_on_success=True,
                     scope=request.query_params.get("scope") or "ALL",
                 )
                 return self._json_ok(request, session, data)
@@ -3766,11 +4185,69 @@ class FastAPIPortalController:
                         user.get("name") or user.get("en_name") or ""
                     )
                 job_id, should_start = PortalRuntime.service.create_action_job(payload)
+                job = PortalRuntime.service.get_job(job_id) or {}
+                audit_id = str(job.get("business_audit_id") or "").strip()
+                if should_start or not audit_id:
+                    audit_id = begin_business_audit(
+                        PortalRuntime.state_store,
+                        domain="notice",
+                        action=str(payload.get("action") or "submit"),
+                        operation_id=job_id,
+                        scope=scope,
+                        actor_open_id=str(user.get("open_id") or ""),
+                        actor_name=str(user.get("name") or user.get("en_name") or ""),
+                        active_item_id=str(payload.get("active_item_id") or ""),
+                        source_record_id=str(payload.get("source_record_id") or ""),
+                        target_record_id=str(payload.get("target_record_id") or ""),
+                        metadata={
+                            "work_type": payload.get("work_type"),
+                            "notice_type": payload.get("notice_type"),
+                            "phase": "accepted",
+                        },
+                    )
+                    mark_job = getattr(PortalRuntime.service, "mark_job", None)
+                    if callable(mark_job):
+                        mark_job(
+                            job_id,
+                            business_audit_id=audit_id,
+                            _persist=True,
+                        )
+                    if (
+                        not should_start
+                        and str(job.get("phase") or "") == "success"
+                    ):
+                        finish_business_audit(
+                            PortalRuntime.state_store,
+                            audit_id,
+                            success=True,
+                            result={
+                                "active_item_id": str(
+                                    job.get("active_item_id") or ""
+                                ),
+                                "target_record_id": str(
+                                    job.get("target_record_id")
+                                    or job.get("record_id")
+                                    or ""
+                                ),
+                                "message_sent": bool(job.get("message_sent")),
+                                "message_warning": str(
+                                    job.get("message_warning") or ""
+                                ),
+                                "work_type": payload.get("work_type"),
+                                "notice_type": payload.get("notice_type"),
+                                "phase": "success",
+                            },
+                            remote_written=bool(
+                                job.get("target_record_id")
+                                or job.get("record_id")
+                            ),
+                            message_sent=bool(job.get("message_sent")),
+                        )
                 if should_start:
                     PortalRuntime.clear_payload_cache()
                     self._clear_read_cache()
                     PortalRuntime.enqueue_initial_message_or_upload_job(job_id)
-                job = PortalRuntime.service.get_job(job_id) or {}
+                job = PortalRuntime.service.get_job(job_id) or job
                 return JSONResponse(
                     {
                         "ok": True,
@@ -4748,16 +5225,67 @@ class FastAPIPortalController:
                     command_payload = dict(payload.get("payload") or {})
                     command_payload["action_type"] = action_map[command]
                     command_payload = normalize_notice_identity_payload(command_payload)
+                    data_dict = (
+                        command_payload.get("data_dict")
+                        if isinstance(command_payload.get("data_dict"), dict)
+                        else {}
+                    )
+                    notice_type = str(
+                        data_dict.get("notice_type")
+                        or command_payload.get("notice_type")
+                        or ""
+                    ).strip()
+                    audit_id = begin_business_audit(
+                        PortalRuntime.state_store,
+                        domain=(
+                            "event"
+                            if notice_type == "事件通告"
+                            else "notice"
+                        ),
+                        action=f"qt_{action_map[command]}",
+                        operation_id=str(
+                            command_payload.get("operation_id") or ""
+                        ),
+                        scope=str(
+                            data_dict.get("scope")
+                            or command_payload.get("scope")
+                            or ""
+                        ),
+                        active_item_id=str(
+                            data_dict.get("active_item_id")
+                            or command_payload.get("active_item_id")
+                            or ""
+                        ),
+                        source_record_id=str(
+                            data_dict.get("source_record_id")
+                            or command_payload.get("source_record_id")
+                            or ""
+                        ),
+                        target_record_id=str(
+                            data_dict.get("target_record_id")
+                            or data_dict.get("record_id")
+                            or command_payload.get("target_record_id")
+                            or command_payload.get("record_id")
+                            or ""
+                        ),
+                        metadata={
+                            "notice_type": notice_type,
+                            "work_type": data_dict.get("work_type")
+                            or command_payload.get("work_type"),
+                        },
+                    )
                     try:
                         data = await asyncio.to_thread(
                             PortalRuntime.execute_local_notice_upload,
                             command_payload,
                         )
                     except Exception as exc:
-                        data_dict = (
-                            command_payload.get("data_dict")
-                            if isinstance(command_payload.get("data_dict"), dict)
-                            else {}
+                        finish_business_audit(
+                            PortalRuntime.state_store,
+                            audit_id,
+                            success=False,
+                            error=str(exc),
+                            error_stage="execute",
                         )
                         fail_record_id = str(
                             data_dict.get("target_record_id")
@@ -4776,6 +5304,32 @@ class FastAPIPortalController:
                                 "real_record_id": "",
                             },
                         }
+                    finish_business_audit(
+                        PortalRuntime.state_store,
+                        audit_id,
+                        success=bool((data or {}).get("ok")),
+                        result=data if isinstance(data, dict) else {},
+                        error=(
+                            ""
+                            if bool((data or {}).get("ok"))
+                            else str((data or {}).get("message") or "上传失败")
+                        ),
+                        error_stage=(
+                            ""
+                            if bool((data or {}).get("ok"))
+                            else "remote_write"
+                        ),
+                        remote_written=bool(
+                            (data or {}).get("remote_written")
+                            or (
+                                bool((data or {}).get("ok"))
+                                and (
+                                    (data or {}).get("real_record_id")
+                                    or (data or {}).get("record_id")
+                                )
+                            )
+                        ),
+                    )
                     PortalRuntime.clear_payload_cache()
                     self._clear_read_cache()
                     return {"ok": True, "data": data}
@@ -6516,7 +7070,11 @@ class FastAPIPortalController:
 
     @staticmethod
     def _portal_error_response(exc: Exception, *, default_status: int) -> JSONResponse:
-        status = default_status if isinstance(exc, PortalError) else 500
+        status = (
+            int(getattr(exc, "status_code", default_status) or default_status)
+            if isinstance(exc, PortalError)
+            else 500
+        )
         if not isinstance(exc, PortalError):
             logging.getLogger(__name__).exception(
                 "Portal API unexpected failure: %s",
@@ -7849,6 +8407,18 @@ class FastAPIPortalController:
         mop_temp_signature_removed = (
             PortalRuntime.state_store.cleanup_mop_temporary_signature_sessions()
         )
+        try:
+            cleanup_audits = getattr(
+                PortalRuntime.state_store,
+                "cleanup_business_operation_audits",
+                None,
+            )
+            business_audits_removed = (
+                int(cleanup_audits() or 0) if callable(cleanup_audits) else 0
+            )
+        except Exception as exc:
+            business_audits_removed = 0
+            log_warning(f"业务操作审计清理失败: {exc}")
         return {
             **cleanup,
             "runtime_queue_removed": queue_removed,
@@ -7859,6 +8429,7 @@ class FastAPIPortalController:
             "clipboard_removed": clipboard_removed,
             "dialog_removed": dialog_removed,
             "mop_temp_signature_removed": mop_temp_signature_removed,
+            "business_audits_removed": business_audits_removed,
             "cleaned_at": time.time(),
         }
 
@@ -8180,6 +8751,108 @@ class FastAPIPortalController:
                 if job_id and terminal:
                     return
                 await asyncio.sleep(interval_s)
+        finally:
+            self._unregister_sse(sse_key, sse_id)
+
+    async def _repair_management_stream(
+        self,
+        request: Request,
+    ) -> AsyncIterator[bytes]:
+        session = self._current_session(request)
+        if session is None:
+            payload = json.dumps(
+                {
+                    "ok": False,
+                    "error": "登录已失效，请重新登录。",
+                    "auth_required": True,
+                },
+                ensure_ascii=False,
+            )
+            yield f"event: error\ndata: {payload}\n\n".encode("utf-8")
+            return
+        try:
+            scope = self._authorized_scope_or_error(
+                session, request.query_params.get("scope") or "ALL"
+            )
+        except Exception as exc:
+            payload = json.dumps(
+                {"ok": False, "error": str(exc), "auth_required": False},
+                ensure_ascii=False,
+            )
+            yield f"event: error\ndata: {payload}\n\n".encode("utf-8")
+            return
+        raw_cursor = str(
+            request.query_params.get("cursor")
+            or request.headers.get("last-event-id")
+            or ""
+        ).strip()
+        try:
+            cursor = max(0, int(raw_cursor))
+        except (TypeError, ValueError):
+            cursor = 0
+        latest_cursor = await asyncio.to_thread(
+            PortalRuntime.state_store.latest_repair_management_change_id
+        )
+        if cursor <= 0 or cursor > latest_cursor:
+            cursor = latest_cursor
+        heartbeat_seconds = _env_float(
+            "CLIPFLOW_REPAIR_SSE_HEARTBEAT_SECONDS",
+            10.0,
+            minimum=3.0,
+            maximum=60.0,
+        )
+        idle_seconds = _env_float(
+            "CLIPFLOW_REPAIR_SSE_IDLE_SECONDS",
+            1.0,
+            minimum=0.25,
+            maximum=5.0,
+        )
+        last_health_at = 0.0
+        sse_key, sse_id = self._register_sse(
+            request, "repair_management", scope
+        )
+        try:
+            while (
+                self._sse_active(sse_key, sse_id)
+                and not await request.is_disconnected()
+            ):
+                changes = await asyncio.to_thread(
+                    PortalRuntime.service.list_repair_management_changes,
+                    scope=scope,
+                    after_id=cursor,
+                    limit=100,
+                )
+                if changes:
+                    cursor = max(
+                        cursor,
+                        max(int(item.get("id") or 0) for item in changes),
+                    )
+                    raw = json.dumps(
+                        {"cursor": cursor, "changes": changes},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    )
+                    yield (
+                        f"id: {cursor}\nevent: repair_change\ndata: {raw}\n\n"
+                    ).encode("utf-8")
+                now = time.monotonic()
+                if now - last_health_at >= heartbeat_seconds:
+                    last_health_at = now
+                    health = await asyncio.to_thread(
+                        PortalRuntime.service.get_repair_management_health,
+                        scope=scope,
+                        include_integrity=True,
+                    )
+                    health["can_repair"] = PortalRuntime.auth_manager.is_admin(
+                        session
+                    )
+                    raw = json.dumps(
+                        health,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    )
+                    yield f"event: health\ndata: {raw}\n\n".encode("utf-8")
+                await asyncio.sleep(idle_seconds)
         finally:
             self._unregister_sse(sse_key, sse_id)
 

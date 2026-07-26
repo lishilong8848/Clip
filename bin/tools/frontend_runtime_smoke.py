@@ -434,10 +434,12 @@ class _SmokePortalService:
         scope: str = "ALL",
         query: str = "",
         state: str = "all",
+        period: str = "all",
         limit: int = 200,
         offset: int = 0,
         focus_record_id: str = "",
         force_refresh: bool = False,
+        summary_only: bool = False,
     ) -> dict:
         records = [
             {
@@ -586,6 +588,163 @@ class _SmokePortalService:
             "schema_warnings": [],
         }
 
+    def get_repair_management_sync_status(
+        self,
+        summary_record_id: str,
+        *,
+        scope: str = "ALL",
+    ) -> dict:
+        return {
+            "summary_record_id": summary_record_id,
+            "status": "idle",
+            "pending_count": 0,
+            "failed_count": 0,
+            "operations": [],
+        }
+
+    def retry_repair_management_sync(
+        self,
+        summary_record_id: str,
+        *,
+        operation_id: str = "",
+        scope: str = "ALL",
+    ) -> dict:
+        return {
+            "summary_record_id": summary_record_id,
+            "retried": 1,
+            "status": "pending",
+        }
+
+    def get_repair_management_integrity(
+        self,
+        *,
+        scope: str = "ALL",
+        force_refresh: bool = False,
+    ) -> dict:
+        return {
+            "scope": self._normalize_scope(scope),
+            "status": "ready",
+            "issue_count": 0,
+            "project_issue_count": 0,
+            "orphan_followup_count": 0,
+            "project_count": 2,
+            "followup_snapshot_ready": True,
+            "issues": [],
+            "checked_at": time.time(),
+        }
+
+    def repair_repair_management_integrity(
+        self,
+        *,
+        scope: str = "ALL",
+    ) -> dict:
+        integrity = self.get_repair_management_integrity(
+            scope=scope,
+            force_refresh=True,
+        )
+        return {
+            "scope": self._normalize_scope(scope),
+            "before_issue_count": 0,
+            "after_issue_count": 0,
+            "backfill": {"status": "completed"},
+            "integrity": integrity,
+        }
+
+    def get_repair_management_health(
+        self,
+        *,
+        scope: str = "ALL",
+        include_integrity: bool = True,
+    ) -> dict:
+        integrity = (
+            self.get_repair_management_integrity(scope=scope)
+            if include_integrity
+            else {
+                "scope": self._normalize_scope(scope),
+                "status": "not_checked",
+                "issue_count": 0,
+            }
+        )
+        return {
+            "scope": self._normalize_scope(scope),
+            "status": "ready",
+            "sync": {
+                "scope": self._normalize_scope(scope),
+                "status": "ready",
+                "failed_count": 0,
+                "pending_count": 0,
+                "operations": [],
+                "checked_at": time.time(),
+            },
+            "integrity": integrity,
+            "change_cursor": 0,
+            "checked_at": time.time(),
+        }
+
+    def list_repair_management_failures(
+        self,
+        *,
+        scope: str = "ALL",
+    ) -> dict:
+        return {
+            "scope": self._normalize_scope(scope),
+            "status": "ready",
+            "failed_count": 0,
+            "pending_count": 0,
+            "items": [],
+            "checked_at": time.time(),
+        }
+
+    def check_repair_management_integration(
+        self,
+        *,
+        scope: str = "ALL",
+    ) -> dict:
+        return {
+            "scope": self._normalize_scope(scope),
+            "status": "ready",
+            "read_verified": True,
+            "remote_write_performed": False,
+            "project_record_count": 2,
+            "followup_record_count": 1,
+            "warnings": [],
+            "checked_at": time.time(),
+        }
+
+    def reconcile_repair_management_remote(
+        self,
+        *,
+        scope: str = "ALL",
+    ) -> dict:
+        return {
+            "scope": self._normalize_scope(scope),
+            "status": "ready",
+            "changed_count": 0,
+            "remote_write_performed": False,
+            "checked_at": time.time(),
+        }
+
+    def retry_all_repair_management_sync(
+        self,
+        *,
+        scope: str = "ALL",
+    ) -> dict:
+        return {
+            "scope": self._normalize_scope(scope),
+            "retried": 0,
+            "skipped_delete_tasks": 0,
+            "status": "ready",
+        }
+
+    def list_repair_management_changes(
+        self,
+        *,
+        scope: str = "ALL",
+        after_id: int = 0,
+        limit: int = 100,
+    ) -> list[dict]:
+        return []
+
     def get_repair_management_status(
         self,
         *,
@@ -719,6 +878,8 @@ class _SmokePortalService:
         source_repair_ids=None,
         replace_source_relations: bool = False,
         source_month: str = "",
+        operation_id: str = "",
+        expected_version: str = "",
         scope: str = "ALL",
     ) -> dict:
         return {"record_id": record_id, "fields": dict(fields or {}), "field_count": len(fields or {})}
@@ -997,6 +1158,8 @@ class _SmokePortalService:
         summary_record_id: str,
         fields: dict,
         cmdb_record_ids: list[str] | None = None,
+        operation_id: str = "",
+        expected_version: str = "",
         scope: str = "ALL",
     ) -> dict:
         for item in self._created_repair_followups.get(summary_record_id, []):
@@ -1018,6 +1181,8 @@ class _SmokePortalService:
         record_id: str,
         *,
         summary_record_id: str,
+        operation_id: str = "",
+        expected_version: str = "",
         scope: str = "ALL",
     ) -> dict:
         records = self._created_repair_followups.get(summary_record_id, [])
@@ -1359,6 +1524,12 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await repairScopeCard.getByRole('button', {{ name: '进入检修单管理' }}).click();
           await waitForTextOrDump(page, '维修项目与跟进', 'repair-management-entry');
           await waitForTextOrDump(page, 'A楼测试检修管理记录', 'repair-management-entry');
+          await page.getByRole('button', {{ name: '任务中心', exact: true }}).click();
+          const repairTaskCenter = page.getByRole('dialog', {{ name: '维修任务中心' }});
+          await repairTaskCenter.getByText('当前没有失败或处理中任务', {{ exact: true }}).waitFor({{ state: 'visible' }});
+          await repairTaskCenter.getByRole('button', {{ name: '校验飞书读取', exact: true }}).click();
+          await repairTaskCenter.getByText(/飞书读取正常/).waitFor({{ state: 'visible' }});
+          await repairTaskCenter.getByRole('button', {{ name: '关闭任务中心', exact: true }}).click();
           if (repairEventCandidateRequestCount !== 0 || repairNoticeCandidateRequestCount !== 0) {{
             throw new Error(
               `repair source candidates were eagerly loaded: event=${{repairEventCandidateRequestCount}}, repair=${{repairNoticeCandidateRequestCount}}`,
