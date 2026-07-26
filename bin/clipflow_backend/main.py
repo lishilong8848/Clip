@@ -147,6 +147,7 @@ from lan_bitable_template_portal.portal_service import (
     REPAIR_SOURCE_APP_TOKEN,
     REPAIR_SOURCE_TABLE_ID,
     SCOPE_OPTIONS,
+    WORK_TYPE_REPAIR,
     WORK_TYPE_BY_NOTICE_TYPE,
     ZHIHANG_CHANGE_APP_TOKEN,
     ZHIHANG_CHANGE_TABLE_ID,
@@ -3067,6 +3068,8 @@ class FastAPIPortalController:
                     candidate_project_record_id=str(
                         payload.get("candidate_project_record_id") or ""
                     ),
+                    active_item_id=str(payload.get("active_item_id") or ""),
+                    target_record_id=str(payload.get("target_record_id") or ""),
                     scope=scope,
                 )
                 PortalRuntime.clear_payload_cache()
@@ -3630,7 +3633,7 @@ class FastAPIPortalController:
                     session, payload.get("scope") or "ALL"
                 )
                 data = await asyncio.to_thread(
-                    PortalRuntime.service.repair_repair_management_integrity,
+                    PortalRuntime.service.start_repair_management_integrity_repair,
                     scope=scope,
                 )
                 data["can_repair"] = True
@@ -4712,15 +4715,59 @@ class FastAPIPortalController:
                     }
                 )
 
+                repair_relation: dict[str, Any] = {}
+                if (
+                    work_type == WORK_TYPE_REPAIR
+                    and source_record_id.startswith("rec")
+                    and target_record_id.startswith("rec")
+                ):
+                    repair_relation = await asyncio.to_thread(
+                        PortalRuntime.service.bind_repair_notice_target,
+                        summary_record_id=source_record_id,
+                        target_record_id=target_record_id,
+                        scope=scope,
+                        active_item_id=active_item_id,
+                    )
+                    related_event_id = str(
+                        repair_relation.get("event_record_id") or ""
+                    ).strip()
+                    identity_payload["repair_management_record_id"] = (
+                        source_record_id
+                    )
+                    if related_event_id:
+                        identity_payload["source_event_id"] = related_event_id
+                        identity_payload["related_event_record_id"] = (
+                            related_event_id
+                        )
+                    PortalRuntime.clear_payload_cache()
+
+                repair_projection = (
+                    repair_relation.get("projection")
+                    if isinstance(repair_relation.get("projection"), dict)
+                    else {}
+                )
+                repair_projection_active_updated = bool(
+                    int(repair_projection.get("active_updated") or 0)
+                )
+                repair_projection_qt_event_ids = [
+                    int(event_id)
+                    for event_id in (repair_projection.get("qt_event_ids") or [])
+                    if str(event_id or "").isdigit()
+                ]
+
                 def persist_binding() -> dict[str, Any]:
                     state_store = PortalRuntime.state_store
                     identity = state_store.upsert_notice_identity(
                         identity_payload,
                         origin="manual_notice_binding",
                     )
-                    active_updated = False
-                    qt_event_id = 0
-                    if active_item_id:
+                    active_updated = repair_projection_active_updated
+                    qt_event_id = (
+                        repair_projection_qt_event_ids[0]
+                        if repair_projection_qt_event_ids
+                        else 0
+                    )
+                    if active_item_id and not active_updated:
                         try:
                             for row in state_store.list_qt_active_items(include_deleted=False):
                                 if str(row.get("active_item_id") or "") != active_item_id:
@@ -4789,7 +4836,19 @@ class FastAPIPortalController:
                         "source_record_id": source_record_id,
                         "target_record_id": target_record_id,
                         "active_item_id": active_item_id,
+                        "repair_management_record_id": (
+                            source_record_id
+                            if work_type == WORK_TYPE_REPAIR
+                            else ""
+                        ),
+                        "event_record_id": str(
+                            repair_relation.get("event_record_id") or ""
+                        ).strip(),
                         "validation": validation,
+                        "repair_relation": repair_relation,
+                        "warnings": list(
+                            dict.fromkeys(repair_relation.get("warnings") or [])
+                        ),
                         **result,
                     },
                 )

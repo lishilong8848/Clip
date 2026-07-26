@@ -86,9 +86,11 @@ class RepairManagementPrefillRequest(APIModel):
 
 class RepairNoticeEventBindRequest(APIModel):
     scope: str = "ALL"
-    source_record_id: str
+    source_record_id: str = ""
     event_record_id: str
     candidate_project_record_id: str
+    active_item_id: str = ""
+    target_record_id: str = ""
 
     class Config(APIModel.Config):
         extra = "forbid"

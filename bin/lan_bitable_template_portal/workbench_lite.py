@@ -1469,6 +1469,15 @@ def _ongoing_rows(
         draft = _draft_from_record(item, work_type=row_work_type)
         target_record_id = str(item.get("target_record_id") or item.get("record_id") or "")
         source_record_id = _explicit_source_id(item)
+        source_event_id = _first(
+            item.get("source_event_id"),
+            item.get("related_event_record_id"),
+        )
+        source_event_title = _first(
+            item.get("event_title"),
+            item.get("source_event_title"),
+            _field(item, "事件描述", "故障维修原因", "故障发生现象描述"),
+        )
         status = _ongoing_display_status(item)
         site_photo_count = _site_photo_count(item)
         mop_status = _mop_status_text(item, row_work_type)
@@ -1484,6 +1493,8 @@ def _ongoing_rows(
         f" data-record-id=\"{_e(str(item.get('record_id') or ''))}\""
         f" data-target-record-id=\"{_e(target_record_id)}\""
         f" data-source-record-id=\"{_e(source_record_id)}\""
+        f" data-source-event-id=\"{_e(source_event_id)}\""
+        f" data-source-event-title=\"{_e(source_event_title)}\""
         f" data-site-photo-count=\"{_e(site_photo_count)}\""
         f" data-mop-status=\"{_e(mop_status)}\""
         f" data-action=\"update\""
@@ -1972,7 +1983,7 @@ def _detail_form(
     repair_event_link_panel = (
         _repair_event_link_panel(
             source,
-            visible=bool(record) and not ongoing_item and not effective_manual,
+            visible=bool(source_record_id) or bool(ongoing_item),
             repair_management_record_id=str(
                 source.get("repair_management_record_id")
                 or prefill_context_id
@@ -3584,6 +3595,24 @@ def render_workbench_lite(
       const activeItemId = String(
         result?.active_item_id || previewValue(form, 'active_item_id') || ''
       ).trim();
+      const eventRecordId = String(
+        result?.event_record_id
+        || result?.source_event_id
+        || previewValue(form, 'related_event_record_id')
+        || ''
+      ).trim();
+      const eventTitle = String(
+        result?.event_title
+        || result?.event?.title
+        || ''
+      ).trim();
+      const targetEnded = result?.target_ended === true || isEndedCandidate({{
+        status: result?.target_status
+          || result?.validation?.target_status
+          || result?.status
+          || '',
+      }});
+      const hasOngoingBinding = Boolean(activeItemId || targetRecordId) && !targetEnded;
       if (sourceRecordId) {{
         const sourceRow = Array.from(document.querySelectorAll('.notice-row')).find(row =>
           [row.getAttribute('data-source-record-id'), row.getAttribute('data-record-id')]
@@ -3591,14 +3620,30 @@ def render_workbench_lite(
             .includes(sourceRecordId)
         );
         if (sourceRow) {{
-          sourceRow.classList.remove('is-disabled');
-          sourceRow.setAttribute('aria-disabled', 'false');
-          sourceRow.setAttribute('data-disabled-reason', '');
-          sourceRow.setAttribute('data-linked-ongoing', '1');
-          sourceRow.setAttribute('data-action', 'update');
-          sourceRow.setAttribute('data-active-item-id', activeItemId);
-          sourceRow.setAttribute('data-target-record-id', targetRecordId);
-          setOngoingRowStatus(sourceRow, '进行中', 'working');
+          if (eventRecordId) {{
+            sourceRow.setAttribute('data-source-event-id', eventRecordId);
+            sourceRow.setAttribute('data-source-event-title', eventTitle || '已关联事件');
+          }}
+          if (targetEnded) {{
+            sourceRow.classList.add('is-disabled');
+            sourceRow.setAttribute('aria-disabled', 'true');
+            sourceRow.setAttribute(
+              'data-disabled-reason',
+              '该事项已结束，只保留查看状态，不可再次发起。'
+            );
+            sourceRow.setAttribute('data-linked-ongoing', '0');
+            sourceRow.setAttribute('data-target-record-id', targetRecordId);
+            setOngoingRowStatus(sourceRow, '已结束', 'done');
+          }} else if (hasOngoingBinding) {{
+            sourceRow.classList.remove('is-disabled');
+            sourceRow.setAttribute('aria-disabled', 'false');
+            sourceRow.setAttribute('data-disabled-reason', '');
+            sourceRow.setAttribute('data-linked-ongoing', '1');
+            sourceRow.setAttribute('data-action', 'update');
+            sourceRow.setAttribute('data-active-item-id', activeItemId);
+            sourceRow.setAttribute('data-target-record-id', targetRecordId);
+            setOngoingRowStatus(sourceRow, '进行中', 'working');
+          }}
         }}
       }}
       const ongoingRow = Array.from(document.querySelectorAll('.ongoing-row')).find(row => {{
@@ -3612,6 +3657,10 @@ def render_workbench_lite(
       }});
       if (ongoingRow) {{
         ongoingRow.setAttribute('data-source-record-id', sourceRecordId);
+        if (eventRecordId) {{
+          ongoingRow.setAttribute('data-source-event-id', eventRecordId);
+          ongoingRow.setAttribute('data-source-event-title', eventTitle || '已关联事件');
+        }}
         if (targetRecordId) {{
           ongoingRow.setAttribute('data-target-record-id', targetRecordId);
           ongoingRow.setAttribute('data-record-id', targetRecordId);
@@ -4050,6 +4099,8 @@ def render_workbench_lite(
     }}
     let liteTargetCandidates = [];
     let liteSelectedTargetIndex = -1;
+    let liteTargetBindSequence = 0;
+    let liteTargetBindInFlight = false;
     function closeTargetCandidates() {{
       const modal = document.getElementById('lite-target-candidates');
       if (modal) modal.hidden = true;
@@ -4081,6 +4132,13 @@ def render_workbench_lite(
         'repair_management_record_id',
         normalized === 'bind' && workType === 'repair' ? sourceId : ''
       );
+      if (workType === 'repair') {{
+        resetRepairEventSelection(
+          form,
+          normalized === 'bind' && Boolean(sourceId),
+          sourceId
+        );
+      }}
       const panel = form.querySelector('[data-manual-source-binding]');
       panel?.querySelectorAll('[data-manual-binding-mode]').forEach(button => {{
         button.classList.toggle('active', button.getAttribute('data-manual-binding-mode') === normalized);
@@ -4269,26 +4327,41 @@ def render_workbench_lite(
     function repairEventModal() {{
       return document.getElementById('lite-repair-event-candidates');
     }}
-    function closeRepairEventCandidates() {{
+    function closeRepairEventCandidates(force = false) {{
+      if (liteRepairEventPrefillController && !force) {{
+        setLiteStatus('正在保存事件关联，请稍候...');
+        return false;
+      }}
       window.clearTimeout(liteRepairEventSearchTimer);
       liteRepairEventSearchTimer = 0;
       liteRepairEventRequestSequence += 1;
       if (liteRepairEventRequestController) liteRepairEventRequestController.abort();
       liteRepairEventRequestController = null;
-      liteRepairEventPrefillSequence += 1;
-      if (liteRepairEventPrefillController) liteRepairEventPrefillController.abort();
-      liteRepairEventPrefillController = null;
       const modal = repairEventModal();
       if (modal) modal.hidden = true;
       liteRepairEventCandidates = [];
       liteSelectedRepairEventIndex = -1;
+      return true;
     }}
-    function resetRepairEventSelection(form, visible) {{
+    function repairEventSourceRecordId(form) {{
+      return String(
+        previewValue(form, 'repair_management_record_id')
+        || previewValue(form, 'source_record_id')
+        || ''
+      ).trim();
+    }}
+    function resetRepairEventSelection(form, visible, sourceRecordId = '') {{
       const panel = form?.querySelector('[data-repair-event-link]');
       if (!panel) return;
       panel.hidden = !visible;
       setFormValue(form, 'related_event_record_id', '');
-      setFormValue(form, 'repair_management_record_id', '');
+      setFormValue(
+        form,
+        'repair_management_record_id',
+        visible
+          ? String(sourceRecordId || previewValue(form, 'source_record_id') || '').trim()
+          : ''
+      );
       const status = panel.querySelector('#lite-repair-event-link-status');
       if (status) status.textContent = '未选择';
     }}
@@ -4383,13 +4456,41 @@ def render_workbench_lite(
     async function openRepairEventCandidates(opener) {{
       const form = document.getElementById('lite-notice-form');
       const panel = form?.querySelector('[data-repair-event-link]');
-      if (!form || !panel || panel.hidden || form.dataset.detailMode !== 'source') return;
+      if (!form) {{
+        showLiteError('当前通告尚未加载完成，请重新打开后再试。');
+        return;
+      }}
+      const workType = previewValue(form, 'work_type') || form.dataset.workType || '';
+      if (workType !== 'repair') {{
+        showLiteError('只有检修通告可以关联对应事件。');
+        return;
+      }}
+      const sourceRecordId = repairEventSourceRecordId(form);
+      const activeItemId = previewValue(form, 'active_item_id');
+      const targetRecordId = previewValue(form, 'target_record_id');
+      if (!sourceRecordId && !activeItemId && !targetRecordId) {{
+        showLiteError('请先选择计划检修事项，或打开一条未结束检修通告。');
+        setLiteStatus('对应事件关联失败：当前没有可保存关系的检修通告');
+        return;
+      }}
+      if (!panel) {{
+        showLiteError('对应事件关联组件未加载，请重新打开当前通告。');
+        return;
+      }}
+      panel.hidden = false;
+      if (sourceRecordId) {{
+        setFormValue(form, 'repair_management_record_id', sourceRecordId);
+      }}
       const modal = repairEventModal();
       const search = document.getElementById('lite-repair-event-search');
-      if (!modal) return;
+      if (!modal) {{
+        showLiteError('事件选择窗口未加载，请刷新本页后重试。');
+        return;
+      }}
       modal.hidden = false;
       if (search) search.value = '';
       setButtonBusy(opener, true);
+      setLiteStatus('正在读取可关联事件...');
       try {{
         const loaded = await loadRepairEventCandidates('');
         if (loaded) search?.focus();
@@ -4423,13 +4524,25 @@ def render_workbench_lite(
       const candidate = liteRepairEventCandidates[liteSelectedRepairEventIndex];
       const form = document.getElementById('lite-notice-form');
       const repairManagementRecordId = String(candidate?.repair_management_record_id || '').trim();
-      if (!candidate || !form || !repairManagementRecordId) return;
-      const sourceRecordIdAtStart = previewValue(form, 'source_record_id');
-      const recordIdAtStart = previewValue(form, 'record_id');
-      const detailModeAtStart = String(form.dataset.detailMode || '');
+      if (!candidate || !form) {{
+        showLiteError('请先选择一条对应事件。');
+        return;
+      }}
+      if (!repairManagementRecordId) {{
+        showLiteError('所选事件缺少维修项目记录，请刷新列表后重试。');
+        return;
+      }}
+      const sourceRecordIdAtStart = repairEventSourceRecordId(form);
+      const activeItemIdAtStart = previewValue(form, 'active_item_id');
+      const targetRecordIdAtStart = previewValue(form, 'target_record_id');
+      const workTypeAtStart = previewValue(form, 'work_type') || form.dataset.workType || '';
       const wasDirtyAtStart = liteFormDirty;
-      if (!sourceRecordIdAtStart || detailModeAtStart !== 'source') {{
-        showLiteError('请先选择一条待发起检修事项。');
+      const formValuesAtStart = JSON.stringify(captureNoticeFormValues(form));
+      if (
+        workTypeAtStart !== 'repair'
+        || (!sourceRecordIdAtStart && !activeItemIdAtStart && !targetRecordIdAtStart)
+      ) {{
+        showLiteError('当前检修通告缺少可保存的计划事项或未结束通告。');
         return;
       }}
       const requestSequence = ++liteRepairEventPrefillSequence;
@@ -4450,6 +4563,8 @@ def render_workbench_lite(
             source_record_id: sourceRecordIdAtStart,
             event_record_id: String(candidate.event_record_id || '').trim(),
             candidate_project_record_id: repairManagementRecordId,
+            active_item_id: activeItemIdAtStart,
+            target_record_id: targetRecordIdAtStart,
           }}),
         }});
         const data = await response.json().catch(() => ({{}}));
@@ -4463,45 +4578,84 @@ def render_workbench_lite(
         const activeForm = document.getElementById('lite-notice-form');
         if (
           activeForm !== form
-          || previewValue(form, 'source_record_id') !== sourceRecordIdAtStart
-          || previewValue(form, 'record_id') !== recordIdAtStart
-          || String(form.dataset.detailMode || '') !== detailModeAtStart
+          || (
+            Boolean(sourceRecordIdAtStart)
+            && repairEventSourceRecordId(form) !== sourceRecordIdAtStart
+          )
+          || previewValue(form, 'active_item_id') !== activeItemIdAtStart
+          || previewValue(form, 'target_record_id') !== targetRecordIdAtStart
+          || (previewValue(form, 'work_type') || form.dataset.workType || '')
+            !== workTypeAtStart
         ) {{
-          closeRepairEventCandidates();
+          closeRepairEventCandidates(true);
           setLiteStatus('事件关联已保存；当前通告已切换，未改写当前表单');
           return;
         }}
         const result = data.data || data;
         const draft = result.draft && typeof result.draft === 'object' ? result.draft : {{}};
         const draftComplete = result.draft_complete === true;
-        const filledCount = draftComplete
+        const formChangedWhileSaving = (
+          JSON.stringify(captureNoticeFormValues(form)) !== formValuesAtStart
+        );
+        const filledCount = draftComplete && !formChangedWhileSaving
           ? applyRepairNoticeDraft(form, draft)
           : 0;
-        setFormValue(form, 'related_event_record_id', candidate.event_record_id || '');
-        setFormValue(form, 'repair_management_record_id', sourceRecordIdAtStart);
+        const boundSourceRecordId = String(
+          result.source_record_id
+          || result.repair_management_record_id
+          || sourceRecordIdAtStart
+          || repairManagementRecordId
+          || ''
+        ).trim();
+        const boundTargetRecordId = String(
+          result.target_record_id || targetRecordIdAtStart || ''
+        ).trim();
+        const boundEventRecordId = String(
+          result.event_record_id || candidate.event_record_id || ''
+        ).trim();
+        setFormValue(form, 'source_record_id', boundSourceRecordId);
+        setFormValue(form, 'related_event_record_id', boundEventRecordId);
+        setFormValue(form, 'repair_management_record_id', boundSourceRecordId);
+        if (boundTargetRecordId) {{
+          setFormValue(form, 'target_record_id', boundTargetRecordId);
+        }}
+        setSourceLinkDisplay(form, boundSourceRecordId, '已关联');
         const status = document.getElementById('lite-repair-event-link-status');
         if (status) status.textContent = candidate.title || candidate.project_title || '已选择事件';
+        applyIdentityBindingToInbox(
+          form,
+          Object.assign({{}}, result, {{
+            source_record_id: boundSourceRecordId,
+            target_record_id: boundTargetRecordId,
+            active_item_id: activeItemIdAtStart,
+            event_record_id: boundEventRecordId,
+            event_title: candidate.title || candidate.project_title || '已关联事件',
+          }}),
+          boundTargetRecordId
+        );
         const sourceRow = Array.from(document.querySelectorAll('.notice-row')).find(row =>
           [row.getAttribute('data-source-record-id'), row.getAttribute('data-record-id')]
             .map(value => String(value || '').trim())
-            .includes(sourceRecordIdAtStart)
+            .includes(boundSourceRecordId)
         );
         if (sourceRow) {{
-          if (draftComplete) {{
+          if (draftComplete && !formChangedWhileSaving) {{
             setSafeDraftAttr(sourceRow, Object.assign({{}}, draftFromRow(sourceRow), draft));
           }}
-          sourceRow.setAttribute('data-source-event-id', String(candidate.event_record_id || '').trim());
+          sourceRow.setAttribute('data-source-event-id', boundEventRecordId);
           sourceRow.setAttribute(
             'data-source-event-title',
             candidate.title || candidate.project_title || '已关联事件'
           );
         }}
-        setLiteFormDirty(wasDirtyAtStart);
+        setLiteFormDirty(formChangedWhileSaving ? true : wasDirtyAtStart);
         updateNoticePreview(form);
-        closeRepairEventCandidates();
+        closeRepairEventCandidates(true);
         const warnings = Array.isArray(result.warnings) ? result.warnings.filter(Boolean) : [];
         setLiteStatus(
-          !draftComplete
+          formChangedWhileSaving
+            ? '事件关联已保存；检测到你继续编辑，未覆盖当前输入'
+            : !draftComplete
             ? (warnings.join('；') || '事件关联已保存，页面字段暂未刷新')
             : (
               warnings.length
@@ -4517,6 +4671,7 @@ def render_workbench_lite(
         if (controller.signal.aborted || requestSequence !== liteRepairEventPrefillSequence) {{
           return;
         }}
+        closeRepairEventCandidates(true);
         showLiteError(error && error.message ? error.message : '保存事件关联失败');
       }} finally {{
         if (liteRepairEventPrefillController === controller) {{
@@ -4714,7 +4869,10 @@ def render_workbench_lite(
       list.replaceChildren(...rows);
     }}
     async function openTargetCandidates(form, opener) {{
-      if (!form) return;
+      if (!form) {{
+        showLiteError('当前通告尚未加载完成，请重新打开后再试。');
+        return;
+      }}
       const payload = targetLookupPayload(form);
       if (!payload.title) {{
         showLiteError('请先填写标题或名称，再查找目标记录。');
@@ -4756,7 +4914,24 @@ def render_workbench_lite(
       const candidate = liteTargetCandidates[liteSelectedTargetIndex];
       const form = document.getElementById('lite-notice-form');
       const targetRecordId = targetCandidateRecordId(candidate);
-      if (!form || !targetRecordId) return;
+      if (!form || !candidate || !targetRecordId) {{
+        showLiteError('请先选择一条目标多维记录。');
+        return;
+      }}
+      if (liteTargetBindInFlight) {{
+        setLiteStatus('正在保存目标关系，请稍候...');
+        return;
+      }}
+      const sourceRecordIdAtStart = previewValue(form, 'source_record_id');
+      const activeItemIdAtStart = previewValue(form, 'active_item_id');
+      const currentTargetIdAtStart = previewValue(form, 'target_record_id');
+      const workTypeAtStart = (
+        previewValue(form, 'work_type') || form.dataset.workType || 'maintenance'
+      );
+      const formValuesAtStart = JSON.stringify(captureNoticeFormValues(form));
+      const wasDirtyAtStart = liteFormDirty;
+      const bindSequence = ++liteTargetBindSequence;
+      liteTargetBindInFlight = true;
       const confirmButton = document.getElementById('lite-target-candidates-confirm');
       setButtonBusy(confirmButton, true);
       try {{
@@ -4783,14 +4958,40 @@ def render_workbench_lite(
         const data = await response.json().catch(() => ({{}}));
         if (handleLiteAuthRequired(response, data)) return;
         if (!response.ok || data.ok === false) throw new Error(data.error || '绑定目标记录失败');
+        if (
+          bindSequence !== liteTargetBindSequence
+          || document.getElementById('lite-notice-form') !== form
+          || previewValue(form, 'source_record_id') !== sourceRecordIdAtStart
+          || previewValue(form, 'active_item_id') !== activeItemIdAtStart
+          || previewValue(form, 'target_record_id') !== currentTargetIdAtStart
+          || (previewValue(form, 'work_type') || form.dataset.workType || 'maintenance')
+            !== workTypeAtStart
+        ) {{
+          closeTargetCandidates();
+          setLiteStatus('目标关系已保存；当前通告已切换，未改写当前表单');
+          refreshTaskInboxAfterIdentityBinding().catch(() => null);
+          return;
+        }}
         const result = data.data || data;
         const targetFormFields = result.target_form_fields
           || result.validation?.target_form_fields
           || candidate.form_fields
           || {{}};
         setFormValue(form, 'target_record_id', targetRecordId);
-        const appliedFieldCount = applyTargetRecordFormFields(form, targetFormFields);
-        applyIdentityBindingToInbox(form, result, targetRecordId);
+        const formChangedWhileSaving = (
+          JSON.stringify(captureNoticeFormValues(form)) !== formValuesAtStart
+        );
+        const appliedFieldCount = formChangedWhileSaving
+          ? 0
+          : applyTargetRecordFormFields(form, targetFormFields);
+        applyIdentityBindingToInbox(
+          form,
+          Object.assign({{}}, result, {{
+            target_ended: isEndedCandidate(candidate),
+            target_status: candidate.status || '',
+          }}),
+          targetRecordId
+        );
         form.dataset.targetEnded = isEndedCandidate(candidate) ? '1' : '';
         const status = document.getElementById('lite-target-link-status');
         if (status) status.textContent = isEndedCandidate(candidate)
@@ -4801,9 +5002,16 @@ def render_workbench_lite(
         }} else {{
           setOngoingSubmitButtons(form);
         }}
-        setLiteFormDirty(appliedFieldCount > 0);
+        // The backend has already persisted the relation and returned fields.
+        // Only preserve edits that existed before binding so the drawer can close
+        // without requiring the user to send a notice.
+        setLiteFormDirty(formChangedWhileSaving ? true : wasDirtyAtStart);
         closeTargetCandidates();
-        setLiteStatus(appliedFieldCount > 0 ? '已绑定目标记录并填入字段' : '目标多维关系已保存');
+        setLiteStatus(
+          formChangedWhileSaving
+            ? '目标关系已保存；检测到你继续编辑，未覆盖当前输入'
+            : (appliedFieldCount > 0 ? '已绑定目标记录并填入字段' : '目标多维关系已保存')
+        );
         refreshTaskInboxAfterIdentityBinding().catch(() => {{
           const overlay = noticeDrawerOverlay();
           if (overlay) overlay.dataset.detailNeedsReload = '1';
@@ -4811,6 +5019,9 @@ def render_workbench_lite(
       }} catch (error) {{
         showLiteError(error && error.message ? error.message : '绑定目标记录失败');
       }} finally {{
+        if (bindSequence === liteTargetBindSequence) {{
+          liteTargetBindInFlight = false;
+        }}
         setButtonBusy(confirmButton, false);
       }}
     }}
@@ -4909,7 +5120,6 @@ def render_workbench_lite(
       form.dataset.targetEnded = '';
       setFormValue(form, 'manual', '');
       setFormValue(form, 'manual_id', '');
-      resetRepairEventSelection(form, !linkedOngoing && workType === 'repair');
       for (const [key, value] of Object.entries(draft)) {{
         setFormValue(form, key, value);
       }}
@@ -4919,10 +5129,15 @@ def render_workbench_lite(
       const targetRecordId = linkedOngoing ? (link.getAttribute('data-target-record-id') || '') : '';
       setFormValue(form, 'record_id', targetRecordId || sourceRecordId);
       setFormValue(form, 'source_record_id', sourceRecordId);
+      resetRepairEventSelection(
+        form,
+        workType === 'repair',
+        sourceRecordId
+      );
       setFormValue(form, 'related_event_record_id', sourceEventId);
       setFormValue(form, 'repair_management_record_id', sourceRecordId);
       const repairEventStatus = form.querySelector('#lite-repair-event-link-status');
-      if (repairEventStatus && !linkedOngoing && workType === 'repair') {{
+      if (repairEventStatus && workType === 'repair') {{
         repairEventStatus.textContent = sourceEventTitle || (sourceEventId ? '已关联事件' : '未选择');
       }}
       setSourceLinkDisplay(form, sourceRecordId, '已关联');
@@ -4954,11 +5169,21 @@ def render_workbench_lite(
       form.dataset.targetEnded = '';
       setFormValue(form, 'manual', '');
       setFormValue(form, 'manual_id', '');
-      resetRepairEventSelection(form, false);
-      setFormValue(form, 'record_id', link.getAttribute('data-target-record-id') || link.getAttribute('data-record-id') || '');
-      setFormValue(form, 'source_record_id', link.getAttribute('data-source-record-id') || '');
-      setSourceLinkDisplay(form, link.getAttribute('data-source-record-id') || '', '已关联');
-      setFormValue(form, 'target_record_id', link.getAttribute('data-target-record-id') || link.getAttribute('data-record-id') || '');
+      const sourceId = link.getAttribute('data-source-record-id') || '';
+      const targetId = link.getAttribute('data-target-record-id') || link.getAttribute('data-record-id') || '';
+      const sourceEventId = link.getAttribute('data-source-event-id') || '';
+      const sourceEventTitle = link.getAttribute('data-source-event-title') || '';
+      resetRepairEventSelection(form, workType === 'repair', sourceId);
+      setFormValue(form, 'record_id', targetId);
+      setFormValue(form, 'source_record_id', sourceId);
+      setFormValue(form, 'repair_management_record_id', sourceId);
+      setFormValue(form, 'related_event_record_id', sourceEventId);
+      const repairEventStatus = form.querySelector('#lite-repair-event-link-status');
+      if (repairEventStatus && workType === 'repair') {{
+        repairEventStatus.textContent = sourceEventTitle || (sourceEventId ? '已关联事件' : '未选择');
+      }}
+      setSourceLinkDisplay(form, sourceId, '已关联');
+      setFormValue(form, 'target_record_id', targetId);
       setFormValue(form, 'active_item_id', link.getAttribute('data-active-item-id') || '');
       setFormValue(form, 'site_photo_count', link.getAttribute('data-site-photo-count') || '0');
       setFormValue(form, 'mop_status', link.getAttribute('data-mop-status') || '');
@@ -4968,8 +5193,6 @@ def render_workbench_lite(
       form.querySelector('.detail-head strong')?.replaceChildren(document.createTextNode(title));
       const hint = form.querySelector('.detail-head em');
       if (hint) hint.textContent = '';
-      const sourceId = link.getAttribute('data-source-record-id') || '';
-      const targetId = link.getAttribute('data-target-record-id') || link.getAttribute('data-record-id') || '';
       setDetailModeNote(sourceId && targetId
         ? ''
         : (targetId ? '' : '需绑定目标')

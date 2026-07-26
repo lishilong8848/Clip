@@ -440,6 +440,7 @@ REPAIR_FOLLOWUP_CUSTOM_SINGLE_SELECT_FIELDS = {
 }
 REPAIR_FOLLOWUP_BACKFILL_RUNTIME_KEY = "repair_followup_parent_backfill_v1"
 REPAIR_FOLLOWUP_BACKFILL_INTERVAL_SECONDS = 24 * 60 * 60
+REPAIR_INTEGRITY_REPAIR_RUNTIME_KEY = "repair_management_integrity_repair_v1"
 REPAIR_FOLLOWUP_SCHEMA_INITIALIZATION_RUNTIME_KEY = (
     "repair_followup_schema_initialization_v1"
 )
@@ -1116,6 +1117,8 @@ class MaintenancePortalService:
         self._repair_followup_sync_locks: dict[str, threading.RLock] = {}
         self._repair_followup_binding_lock = threading.RLock()
         self._repair_followup_backfill_lock = threading.RLock()
+        self._repair_integrity_repair_worker_lock = threading.RLock()
+        self._repair_integrity_repair_worker_running = False
         self._repair_followup_catalog_cache_lock = threading.RLock()
         self._repair_followup_catalog_cache: dict[str, Any] | None = None
         self._repair_maintenance_worker_lock = threading.RLock()
@@ -5899,12 +5902,25 @@ class MaintenancePortalService:
             if not self._repair_management_target_record_in_scope(record, scope):
                 continue
             fields = record.get("display_fields") if isinstance(record.get("display_fields"), dict) else {}
+            raw_fields = (
+                record.get("raw_fields")
+                if isinstance(record.get("raw_fields"), dict)
+                else {}
+            )
             haystack = "\n".join(str(value or "") for value in fields.values()).lower()
             if query_text and query_text not in haystack:
                 continue
             score, reasons = self._repair_management_candidate_score(event, record) if event else (0, [])
             building_codes = self._repair_building_codes_from_value(
                 fields.get("楼栋") or fields.get("名称（标题）") or fields.get("检修概述")
+            )
+            created_time_value = (
+                fields.get("创建时间")
+                or raw_fields.get("创建时间")
+                or record.get("created_time")
+            )
+            created_time_ms = (
+                self._repair_management_datetime_ms(created_time_value) or 0
             )
             candidates.append(
                 {
@@ -5924,19 +5940,42 @@ class MaintenancePortalService:
                     "score": score,
                     "match_reasons": reasons,
                     "recommended": bool(event and score >= 72),
+                    "created_time": self._format_source_datetime(
+                        created_time_value
+                    ),
+                    "_created_time_ms": created_time_ms,
                 }
             )
         candidates.sort(
-            key=lambda item: (int(item.get("score") or 0), str(item.get("actual_start_time") or item.get("fault_time") or "")),
+            key=lambda item: (
+                int(item.get("_created_time_ms") or 0),
+                str(item.get("record_id") or ""),
+            ),
             reverse=True,
         )
         max_limit = max(1, min(int(limit or 80), 200))
         visible = candidates[:max_limit]
         auto_selected_ids: list[str] = []
-        if visible and int(visible[0].get("score") or 0) >= 70:
-            second_score = int(visible[1].get("score") or 0) if len(visible) > 1 else 0
-            if int(visible[0].get("score") or 0) - second_score >= 12:
-                auto_selected_ids = [str(visible[0].get("record_id") or "")]
+        ranked_visible = sorted(
+            visible,
+            key=lambda item: (
+                int(item.get("score") or 0),
+                int(item.get("_created_time_ms") or 0),
+            ),
+            reverse=True,
+        )
+        if ranked_visible and int(ranked_visible[0].get("score") or 0) >= 70:
+            second_score = (
+                int(ranked_visible[1].get("score") or 0)
+                if len(ranked_visible) > 1
+                else 0
+            )
+            if int(ranked_visible[0].get("score") or 0) - second_score >= 12:
+                auto_selected_ids = [
+                    str(ranked_visible[0].get("record_id") or "")
+                ]
+        for candidate in visible:
+            candidate.pop("_created_time_ms", None)
         return {
             "scope": self._normalize_scope(scope),
             "event_record_id": event_id,
@@ -9579,28 +9618,12 @@ class MaintenancePortalService:
             "status": "pending" if retried else "ready",
         }
 
-    def get_repair_management_integrity(
+    def _repair_management_integrity_context(
         self,
         *,
         scope: str = "ALL",
-        force_refresh: bool = False,
     ) -> dict[str, Any]:
         normalized_scope = self._normalize_scope(scope)
-        now = time.monotonic()
-        with self._repair_integrity_cache_lock:
-            cached = self._repair_integrity_cache.get(normalized_scope)
-            if (
-                not force_refresh
-                and isinstance(cached, dict)
-                and now - float(cached.get("_loaded_at") or 0)
-                <= REPAIR_INTEGRITY_CACHE_SECONDS
-            ):
-                return {
-                    key: value
-                    for key, value in cached.items()
-                    if key != "_loaded_at"
-                }
-
         project_snapshot = self._state_store.get_repair_snapshot(
             REPAIR_SNAPSHOT_SOURCE_PROJECTS
         )
@@ -9634,11 +9657,46 @@ class MaintenancePortalService:
         actual_by_parent: dict[str, set[str]] = {
             project_id: set() for project_id in scoped_project_ids
         }
+        projects_by_followup_id: dict[str, list[dict[str, Any]]] = {}
+        projects_by_order: dict[str, list[dict[str, Any]]] = {}
+        projects_by_name: dict[str, list[dict[str, Any]]] = {}
+        for project in projects:
+            project_id = str(project.get("record_id") or "").strip()
+            if not project_id:
+                continue
+            display = (
+                project.get("display_fields")
+                if isinstance(project.get("display_fields"), dict)
+                else {}
+            )
+            raw = (
+                project.get("raw_fields")
+                if isinstance(project.get("raw_fields"), dict)
+                else {}
+            )
+            order_key = self._repair_followup_match_key(
+                display.get("维修单号") or raw.get("维修单号")
+            )
+            name_key = self._repair_followup_match_key(
+                display.get("维修名称") or raw.get("维修名称")
+            )
+            if order_key:
+                projects_by_order.setdefault(order_key, []).append(project)
+            if name_key:
+                projects_by_name.setdefault(name_key, []).append(project)
+            for followup_id in project_backlinks.get(project_id, set()):
+                projects_by_followup_id.setdefault(followup_id, []).append(
+                    project
+                )
+
         orphan_followups: list[dict[str, Any]] = []
+        followup_records_by_id: dict[str, dict[str, Any]] = {}
         for followup in (followup_snapshot.get("records") or []):
             if not isinstance(followup, dict):
                 continue
             followup_id = str(followup.get("record_id") or "").strip()
+            if followup_id:
+                followup_records_by_id[followup_id] = followup
             parent_ids = self._repair_followup_parent_ids(followup)
             parent_id = parent_ids[0] if len(parent_ids) == 1 else ""
             if parent_id in scoped_project_ids:
@@ -9648,16 +9706,66 @@ class MaintenancePortalService:
             if normalized_scope == "ALL" and (
                 not parent_id or parent_id not in all_project_ids
             ):
+                display = (
+                    followup.get("display_fields")
+                    if isinstance(followup.get("display_fields"), dict)
+                    else {}
+                )
+                raw = (
+                    followup.get("raw_fields")
+                    if isinstance(followup.get("raw_fields"), dict)
+                    else {}
+                )
+                candidates = projects_by_followup_id.get(followup_id, [])
+                match_source = "维修单反向记录"
+                order_key = self._repair_followup_match_key(
+                    display.get("维修单号") or raw.get("维修单号")
+                )
+                name_key = self._repair_followup_match_key(
+                    display.get("维修名称") or raw.get("维修名称")
+                )
+                if len(candidates) != 1:
+                    candidates = (
+                        projects_by_order.get(order_key, [])
+                        if order_key
+                        else []
+                    )
+                    match_source = "维修单号"
+                if len(candidates) != 1:
+                    candidates = (
+                        projects_by_name.get(name_key, []) if name_key else []
+                    )
+                    match_source = "维修名称"
+                candidate_id = (
+                    str(candidates[0].get("record_id") or "").strip()
+                    if len(candidates) == 1
+                    else ""
+                )
+                repairable = bool(candidate_id)
+                unidentified = not bool(
+                    projects_by_followup_id.get(followup_id)
+                    or order_key
+                    or name_key
+                )
+                if repairable:
+                    message = f"可按{match_source}恢复维修单关联"
+                elif len(candidates) > 1:
+                    message = "跟进记录可匹配多个维修单，需人工确认"
+                elif unidentified:
+                    message = "跟进记录缺少维修单号、维修名称和反向关联"
+                else:
+                    message = "没有找到可唯一匹配的维修单"
                 orphan_followups.append(
                     {
                         "type": "orphan_followup",
                         "record_id": followup_id,
                         "summary_record_id": parent_id,
-                        "message": (
-                            "跟进记录未绑定维修单"
-                            if not parent_id
-                            else "跟进记录绑定的维修单不存在"
-                        ),
+                        "candidate_summary_record_id": candidate_id,
+                        "candidate_count": len(candidates),
+                        "match_source": match_source if repairable else "",
+                        "repairable": repairable,
+                        "unidentified": unidentified,
+                        "message": message,
                     }
                 )
 
@@ -9675,14 +9783,62 @@ class MaintenancePortalService:
                         "summary_record_id": project_id,
                         "missing_followup_ids": missing_backlinks,
                         "stale_followup_ids": stale_backlinks,
+                        "repairable": True,
                         "message": "维修单与跟进记录 ID 对应关系不一致",
                     }
                 )
         issues.extend(orphan_followups)
+        return {
+            "scope": normalized_scope,
+            "projects": projects,
+            "followup_records_by_id": followup_records_by_id,
+            "project_backlinks": project_backlinks,
+            "actual_by_parent": actual_by_parent,
+            "issues": issues,
+            "project_count": len(projects),
+            "followup_snapshot_ready": bool(followup_snapshot.get("exists")),
+        }
+
+    def get_repair_management_integrity(
+        self,
+        *,
+        scope: str = "ALL",
+        force_refresh: bool = False,
+    ) -> dict[str, Any]:
+        normalized_scope = self._normalize_scope(scope)
+        now = time.monotonic()
+        with self._repair_integrity_cache_lock:
+            cached = self._repair_integrity_cache.get(normalized_scope)
+            if (
+                not force_refresh
+                and isinstance(cached, dict)
+                and now - float(cached.get("_loaded_at") or 0)
+                <= REPAIR_INTEGRITY_CACHE_SECONDS
+            ):
+                return {
+                    key: value
+                    for key, value in cached.items()
+                    if key != "_loaded_at"
+                }
+
+        context = self._repair_management_integrity_context(
+            scope=normalized_scope
+        )
+        issues = [
+            item
+            for item in (context.get("issues") or [])
+            if isinstance(item, dict)
+        ]
+        repairable_issue_count = sum(
+            1 for item in issues if bool(item.get("repairable"))
+        )
+        manual_review_count = len(issues) - repairable_issue_count
         payload = {
             "scope": normalized_scope,
             "status": "warning" if issues else "ready",
             "issue_count": len(issues),
+            "repairable_issue_count": repairable_issue_count,
+            "manual_review_count": manual_review_count,
             "project_issue_count": sum(
                 1
                 for item in issues
@@ -9691,8 +9847,22 @@ class MaintenancePortalService:
             "orphan_followup_count": sum(
                 1 for item in issues if item.get("type") == "orphan_followup"
             ),
-            "project_count": len(projects),
-            "followup_snapshot_ready": bool(followup_snapshot.get("exists")),
+            "unidentified_followup_count": sum(
+                1
+                for item in issues
+                if item.get("type") == "orphan_followup"
+                and bool(item.get("unidentified"))
+            ),
+            "ambiguous_followup_count": sum(
+                1
+                for item in issues
+                if item.get("type") == "orphan_followup"
+                and int(item.get("candidate_count") or 0) > 1
+            ),
+            "project_count": int(context.get("project_count") or 0),
+            "followup_snapshot_ready": bool(
+                context.get("followup_snapshot_ready")
+            ),
             "issues": issues[:50],
             "checked_at": time.time(),
         }
@@ -9707,27 +9877,357 @@ class MaintenancePortalService:
         self,
         *,
         scope: str = "ALL",
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
+        normalized_scope = self._normalize_scope(scope)
         before = self.get_repair_management_integrity(
-            scope=scope,
+            scope=normalized_scope,
             force_refresh=True,
         )
-        backfill = self.backfill_repair_followup_records(force=True)
-        self._load_repair_management_project_records(force_refresh=True)
-        self._load_repair_followup_snapshot(force_refresh=True)
+        repairable_count = int(before.get("repairable_issue_count") or 0)
+        if repairable_count <= 0:
+            return {
+                "scope": normalized_scope,
+                "status": "not_needed",
+                "before_issue_count": int(before.get("issue_count") or 0),
+                "before_repairable_issue_count": 0,
+                "after_issue_count": int(before.get("issue_count") or 0),
+                "after_repairable_issue_count": 0,
+                "repaired": 0,
+                "failed": 0,
+                "errors": [],
+                "integrity": before,
+            }
+
+        context = self._repair_management_integrity_context(
+            scope=normalized_scope
+        )
+        issues = [
+            item
+            for item in (context.get("issues") or [])
+            if isinstance(item, dict) and bool(item.get("repairable"))
+        ]
+        actual_by_parent = {
+            str(project_id): set(followup_ids)
+            for project_id, followup_ids in (
+                context.get("actual_by_parent") or {}
+            ).items()
+        }
+        project_backlinks = {
+            str(project_id): set(followup_ids)
+            for project_id, followup_ids in (
+                context.get("project_backlinks") or {}
+            ).items()
+        }
+        orphan_issues = [
+            item for item in issues if item.get("type") == "orphan_followup"
+        ]
+        initial_project_issue_ids = {
+            str(item.get("record_id") or "").strip()
+            for item in issues
+            if item.get("type") == "project_followup_mismatch"
+            and str(item.get("record_id") or "").strip()
+        }
+        repaired_orphans = 0
+        repaired_projects = 0
+        failed = 0
+        processed = 0
+        errors: list[str] = []
+
+        def report(stage: str, current_record_id: str = "") -> None:
+            if progress_callback is None:
+                return
+            progress_callback(
+                {
+                    "stage": stage,
+                    "total": repairable_count,
+                    "processed": min(processed, repairable_count),
+                    "repaired": repaired_orphans + repaired_projects,
+                    "failed": failed,
+                    "current_record_id": current_record_id,
+                    "updated_at": time.time(),
+                }
+            )
+
+        # This lock also excludes the daily legacy backfill.  The manual
+        # integrity repair only writes relation IDs; it must not rewrite every
+        # business field in all historical follow-up records.
+        with self._repair_followup_backfill_lock:
+            for issue in orphan_issues:
+                followup_id = str(issue.get("record_id") or "").strip()
+                summary_id = str(
+                    issue.get("candidate_summary_record_id") or ""
+                ).strip()
+                processed += 1
+                if not followup_id or not summary_id:
+                    failed += 1
+                    errors.append(
+                        f"{followup_id or '未知跟进记录'}缺少唯一维修单候选"
+                    )
+                    report("repairing_followup", followup_id)
+                    continue
+                try:
+                    self._patch_record_fields(
+                        app_token=REPAIR_SOURCE_APP_TOKEN,
+                        table_id=REPAIR_FOLLOWUP_TABLE_ID,
+                        record_id=followup_id,
+                        fields={
+                            REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: summary_id
+                        },
+                    )
+                    self._upsert_repair_snapshot_fields(
+                        source_key=REPAIR_SNAPSHOT_SOURCE_FOLLOWUPS,
+                        record_id=followup_id,
+                        fields={
+                            REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: summary_id
+                        },
+                    )
+                    actual_by_parent.setdefault(summary_id, set()).add(
+                        followup_id
+                    )
+                    repaired_orphans += 1
+                except Exception as exc:
+                    failed += 1
+                    errors.append(f"{followup_id}恢复维修单关联失败: {exc}")
+                report("repairing_followup", followup_id)
+
+            summary_ids_to_reconcile = set(initial_project_issue_ids)
+            summary_ids_to_reconcile.update(
+                str(issue.get("candidate_summary_record_id") or "").strip()
+                for issue in orphan_issues
+                if str(issue.get("candidate_summary_record_id") or "").strip()
+            )
+            for summary_id in sorted(summary_ids_to_reconcile):
+                desired_ids = sorted(actual_by_parent.get(summary_id, set()))
+                current_ids = sorted(project_backlinks.get(summary_id, set()))
+                if desired_ids == current_ids:
+                    if summary_id in initial_project_issue_ids:
+                        repaired_projects += 1
+                        processed += 1
+                    continue
+                try:
+                    link_value = ",".join(desired_ids) if desired_ids else None
+                    self._patch_record_fields(
+                        app_token=REPAIR_SOURCE_APP_TOKEN,
+                        table_id=REPAIR_MANAGEMENT_TABLE_ID,
+                        record_id=summary_id,
+                        fields={
+                            REPAIR_MANAGEMENT_FOLLOWUP_LINK_FIELD_NAME: (
+                                link_value
+                            )
+                        },
+                    )
+                    self._upsert_repair_snapshot_fields(
+                        source_key=REPAIR_SNAPSHOT_SOURCE_PROJECTS,
+                        record_id=summary_id,
+                        fields={
+                            REPAIR_MANAGEMENT_FOLLOWUP_LINK_FIELD_NAME: (
+                                link_value
+                            )
+                        },
+                    )
+                    if summary_id in initial_project_issue_ids:
+                        repaired_projects += 1
+                        processed += 1
+                except Exception as exc:
+                    failed += 1
+                    errors.append(f"{summary_id}回写维修跟进记录失败: {exc}")
+                    if summary_id in initial_project_issue_ids:
+                        processed += 1
+                report("repairing_project", summary_id)
+
         self._rebuild_repair_project_status_index()
         self._invalidate_repair_integrity_cache()
         after = self.get_repair_management_integrity(
-            scope=scope,
+            scope=normalized_scope,
             force_refresh=True,
         )
         return {
-            "scope": self._normalize_scope(scope),
+            "scope": normalized_scope,
+            "status": "partial" if failed else "complete",
             "before_issue_count": int(before.get("issue_count") or 0),
+            "before_repairable_issue_count": repairable_count,
             "after_issue_count": int(after.get("issue_count") or 0),
-            "backfill": backfill,
+            "after_repairable_issue_count": int(
+                after.get("repairable_issue_count") or 0
+            ),
+            "repaired": repaired_orphans + repaired_projects,
+            "repaired_followups": repaired_orphans,
+            "repaired_projects": repaired_projects,
+            "failed": failed,
+            "errors": errors[-50:],
             "integrity": after,
         }
+
+    def get_repair_management_integrity_repair_status(
+        self,
+    ) -> dict[str, Any]:
+        runtime = self._state_store.get_backend_runtime(
+            REPAIR_INTEGRITY_REPAIR_RUNTIME_KEY
+        )
+        if not isinstance(runtime, dict) or not runtime:
+            return {"status": "idle", "running": False}
+        with self._repair_integrity_repair_worker_lock:
+            running = self._repair_integrity_repair_worker_running
+        status = str(runtime.get("status") or "idle")
+        if status in {"queued", "running"} and not running:
+            return {
+                **runtime,
+                "status": "interrupted",
+                "running": False,
+                "message": "上次关联修复已中断，可重新执行。",
+            }
+        return {
+            **runtime,
+            "running": bool(running and status in {"queued", "running"}),
+        }
+
+    def start_repair_management_integrity_repair(
+        self,
+        *,
+        scope: str = "ALL",
+    ) -> dict[str, Any]:
+        normalized_scope = self._normalize_scope(scope)
+        integrity = self.get_repair_management_integrity(
+            scope=normalized_scope,
+            force_refresh=True,
+        )
+        repairable_count = int(
+            integrity.get("repairable_issue_count") or 0
+        )
+        if repairable_count <= 0:
+            return {
+                "status": "not_needed",
+                "running": False,
+                "started": False,
+                "scope": normalized_scope,
+                "issue_count": int(integrity.get("issue_count") or 0),
+                "repairable_issue_count": 0,
+                "manual_review_count": int(
+                    integrity.get("manual_review_count") or 0
+                ),
+                "message": (
+                    "当前没有可自动修复的关联；缺少匹配依据的跟进记录"
+                    "需要人工绑定维修单。"
+                    if int(integrity.get("manual_review_count") or 0)
+                    else "当前关联数据正常。"
+                ),
+            }
+
+        with self._repair_integrity_repair_worker_lock:
+            if self._repair_integrity_repair_worker_running:
+                return {
+                    **self.get_repair_management_integrity_repair_status(),
+                    "started": False,
+                }
+            self._repair_integrity_repair_worker_running = True
+            started_at = time.time()
+            runtime = {
+                "status": "queued",
+                "running": True,
+                "started": True,
+                "scope": normalized_scope,
+                "total": repairable_count,
+                "processed": 0,
+                "repaired": 0,
+                "failed": 0,
+                "before_issue_count": int(
+                    integrity.get("issue_count") or 0
+                ),
+                "manual_review_count": int(
+                    integrity.get("manual_review_count") or 0
+                ),
+                "started_at": started_at,
+                "updated_at": started_at,
+                "message": "关联修复已进入后台队列。",
+            }
+            self._state_store.put_backend_runtime(
+                REPAIR_INTEGRITY_REPAIR_RUNTIME_KEY,
+                runtime,
+            )
+
+        def update_runtime(patch: dict[str, Any]) -> None:
+            current = self._state_store.get_backend_runtime(
+                REPAIR_INTEGRITY_REPAIR_RUNTIME_KEY
+            )
+            merged = dict(current) if isinstance(current, dict) else {}
+            merged.update(patch)
+            self._state_store.put_backend_runtime(
+                REPAIR_INTEGRITY_REPAIR_RUNTIME_KEY,
+                merged,
+            )
+
+        def run() -> None:
+            update_runtime(
+                {
+                    "status": "running",
+                    "running": True,
+                    "message": "正在修复可唯一确认的关联。",
+                    "updated_at": time.time(),
+                }
+            )
+            try:
+                result = self.repair_repair_management_integrity(
+                    scope=normalized_scope,
+                    progress_callback=update_runtime,
+                )
+                result_status = str(result.get("status") or "complete")
+                update_runtime(
+                    {
+                        "status": (
+                            "completed"
+                            if result_status in {"complete", "not_needed"}
+                            else "partial"
+                        ),
+                        "running": False,
+                        "processed": repairable_count,
+                        "repaired": int(result.get("repaired") or 0),
+                        "failed": int(result.get("failed") or 0),
+                        "after_issue_count": int(
+                            result.get("after_issue_count") or 0
+                        ),
+                        "after_repairable_issue_count": int(
+                            result.get("after_repairable_issue_count") or 0
+                        ),
+                        "errors": list(result.get("errors") or [])[-50:],
+                        "result": result,
+                        "finished_at": time.time(),
+                        "updated_at": time.time(),
+                        "message": (
+                            "关联自动修复完成。"
+                            if result_status in {"complete", "not_needed"}
+                            else "关联修复已完成，部分记录仍需重试或人工核对。"
+                        ),
+                    }
+                )
+            except Exception as exc:
+                logging.exception("维修项目关联后台修复失败")
+                update_runtime(
+                    {
+                        "status": "failed",
+                        "running": False,
+                        "failed": repairable_count,
+                        "error": str(exc),
+                        "finished_at": time.time(),
+                        "updated_at": time.time(),
+                        "message": f"关联修复失败：{exc}",
+                    }
+                )
+            finally:
+                with self._repair_integrity_repair_worker_lock:
+                    self._repair_integrity_repair_worker_running = False
+
+        try:
+            threading.Thread(
+                target=run,
+                name="repair-integrity-repair",
+                daemon=True,
+            ).start()
+        except Exception:
+            with self._repair_integrity_repair_worker_lock:
+                self._repair_integrity_repair_worker_running = False
+            raise
+        return runtime
 
     def get_repair_management_health(
         self,
@@ -9758,6 +10258,9 @@ class MaintenancePortalService:
             ),
             "sync": sync,
             "integrity": integrity,
+            "integrity_repair": (
+                self.get_repair_management_integrity_repair_status()
+            ),
             "change_cursor": (
                 self._state_store.latest_repair_management_change_id()
             ),
@@ -11170,9 +11673,39 @@ class MaintenancePortalService:
         write: bool = True,
     ) -> dict[str, Any]:
         target_id = str(target_record_id or "").strip()
+        if not target_id.startswith("rec"):
+            return self._sync_repair_target_summary_id_unlocked(
+                target_record_id=target_id,
+                summary_record_id=summary_record_id,
+                write=write,
+            )
+        with self._repair_management_record_lock(f"repair-target:{target_id}"):
+            return self._sync_repair_target_summary_id_unlocked(
+                target_record_id=target_id,
+                summary_record_id=summary_record_id,
+                write=write,
+            )
+
+    def _sync_repair_target_summary_id_unlocked(
+        self,
+        *,
+        target_record_id: str,
+        summary_record_id: str,
+        write: bool = True,
+    ) -> dict[str, Any]:
+        target_id = str(target_record_id or "").strip()
         summary_id = str(summary_record_id or "").strip()
+        result_identity = {
+            "target_record_id": target_id,
+            "summary_record_id": summary_id,
+        }
         if not target_id.startswith("rec") or not summary_id.startswith("rec"):
-            return {"synced": False, "skipped": True, "warning": ""}
+            return {
+                **result_identity,
+                "synced": False,
+                "skipped": True,
+                "warning": "",
+            }
 
         app_token, table_id = self._repair_management_repair_source_config()
         _metas, meta_by_name = self._load_table_fields(
@@ -11218,6 +11751,7 @@ class MaintenancePortalService:
         current_text = self._repair_management_plain_text(current_value).strip()
         if current_ids == [summary_id] or current_text == summary_id:
             return {
+                **result_identity,
                 "synced": False,
                 "skipped": False,
                 "already_synced": True,
@@ -11225,6 +11759,7 @@ class MaintenancePortalService:
             }
         if current_ids or current_text:
             return {
+                **result_identity,
                 "synced": False,
                 "skipped": False,
                 "conflict": True,
@@ -11235,6 +11770,7 @@ class MaintenancePortalService:
             }
         if not write:
             return {
+                **result_identity,
                 "synced": False,
                 "skipped": False,
                 "already_synced": False,
@@ -11257,11 +11793,439 @@ class MaintenancePortalService:
         with self._repair_management_target_cache_lock:
             self._repair_management_target_cache = None
         return {
+            **result_identity,
             "synced": True,
             "skipped": False,
             "already_synced": False,
             "warning": "",
         }
+
+    def _clear_repair_target_summary_id(
+        self,
+        *,
+        target_record_id: str,
+        summary_record_id: str,
+    ) -> dict[str, Any]:
+        target_id = str(target_record_id or "").strip()
+        summary_id = str(summary_record_id or "").strip()
+        result_identity = {
+            "target_record_id": target_id,
+            "summary_record_id": summary_id,
+        }
+        if not target_id.startswith("rec") or not summary_id.startswith("rec"):
+            return {
+                **result_identity,
+                "cleared": False,
+                "skipped": True,
+                "warning": "",
+            }
+        with self._repair_management_record_lock(f"repair-target:{target_id}"):
+            app_token, table_id = self._repair_management_repair_source_config()
+            _metas, meta_by_name = self._load_table_fields(
+                app_token=app_token,
+                table_id=table_id,
+            )
+            summary_id_meta = meta_by_name.get(REPAIR_TARGET_SUMMARY_ID_FIELD_NAME)
+            if summary_id_meta is None:
+                raise PortalError(
+                    f"检修目标表缺少文本字段“{REPAIR_TARGET_SUMMARY_ID_FIELD_NAME}”。"
+                )
+            if int(summary_id_meta.field_type or 0) != 1:
+                raise PortalError(
+                    f"检修目标表字段“{REPAIR_TARGET_SUMMARY_ID_FIELD_NAME}”"
+                    "必须是文本字段。"
+                )
+            records = self._load_table_records_by_ids(
+                app_token=app_token,
+                table_id=table_id,
+                meta_by_name=meta_by_name,
+                work_type=WORK_TYPE_REPAIR,
+                notice_type=NOTICE_TYPE_REPAIR,
+                record_ids=[target_id],
+            )
+            if len(records) != 1:
+                return {
+                    **result_identity,
+                    "cleared": False,
+                    "skipped": True,
+                    "warning": f"旧检修目标记录已不存在：{target_id}",
+                }
+            record = records[0]
+            raw_fields = (
+                record.get("raw_fields")
+                if isinstance(record.get("raw_fields"), dict)
+                else {}
+            )
+            display_fields = (
+                record.get("display_fields")
+                if isinstance(record.get("display_fields"), dict)
+                else {}
+            )
+            current_value = raw_fields.get(REPAIR_TARGET_SUMMARY_ID_FIELD_NAME)
+            if current_value in (None, "", [], {}):
+                current_value = display_fields.get(REPAIR_TARGET_SUMMARY_ID_FIELD_NAME)
+            current_ids = self._repair_management_record_ids(current_value)
+            current_text = self._repair_management_plain_text(current_value).strip()
+            if not current_ids and not current_text:
+                return {
+                    **result_identity,
+                    "cleared": False,
+                    "skipped": False,
+                    "already_cleared": True,
+                    "warning": "",
+                }
+            if current_ids != [summary_id] and current_text != summary_id:
+                return {
+                    **result_identity,
+                    "cleared": False,
+                    "skipped": True,
+                    "warning": (
+                        "旧检修目标记录已关联其他维修单，"
+                        "未清除其维修汇总记录ID。"
+                    ),
+                }
+            fields = {REPAIR_TARGET_SUMMARY_ID_FIELD_NAME: ""}
+            self._patch_record_fields_exact(
+                app_token=app_token,
+                table_id=table_id,
+                record_id=target_id,
+                fields=fields,
+            )
+            self._upsert_repair_snapshot_fields(
+                source_key=REPAIR_SNAPSHOT_SOURCE_NOTICES,
+                record_id=target_id,
+                fields=fields,
+            )
+            with self._repair_management_target_cache_lock:
+                self._repair_management_target_cache = None
+            return {
+                **result_identity,
+                "cleared": True,
+                "skipped": False,
+                "already_cleared": False,
+                "warning": "",
+            }
+
+    def _sync_repair_notice_relation_projection(
+        self,
+        *,
+        summary_record_id: str,
+        event_record_id: str = "",
+        target_record_ids: list[str] | tuple[str, ...] | None = None,
+        active_item_id: str = "",
+    ) -> dict[str, Any]:
+        """Keep the SQLite/Qt projection aligned with repair source relations."""
+        summary_id = str(summary_record_id or "").strip()
+        event_id = str(event_record_id or "").strip()
+        active_id = str(active_item_id or "").strip()
+        target_ids = list(
+            dict.fromkeys(
+                str(record_id or "").strip()
+                for record_id in (target_record_ids or [])
+                if str(record_id or "").strip().startswith("rec")
+            )
+        )
+        if not summary_id.startswith("rec"):
+            return {
+                "active_updated": 0,
+                "identity_updated": 0,
+                "qt_event_ids": [],
+                "warnings": [],
+            }
+
+        state_store = self._state_store
+        active_updated = 0
+        identity_updated = 0
+        qt_event_ids: list[int] = []
+        warnings: list[str] = []
+        try:
+            active_rows = state_store.list_qt_active_items(include_deleted=False)
+        except Exception as exc:
+            active_rows = []
+            warnings.append(f"未结束通告关联状态暂未读取：{exc}")
+
+        for row in active_rows:
+            if not isinstance(row, dict):
+                continue
+            row_payload = (
+                row.get("payload")
+                if isinstance(row.get("payload"), dict)
+                else {}
+            )
+            merged = normalize_notice_identity_payload(dict(row_payload))
+            row_work_type = self._normalize_notice_work_type_alias(
+                str(
+                    merged.get("work_type")
+                    or WORK_TYPE_BY_NOTICE_TYPE.get(
+                        str(merged.get("notice_type") or row.get("notice_type") or "")
+                    )
+                    or ""
+                )
+            )
+            if row_work_type != WORK_TYPE_REPAIR:
+                continue
+            row_active_id = str(
+                merged.get("active_item_id") or row.get("active_item_id") or ""
+            ).strip()
+            row_target_id = str(
+                canonical_target_record_id(merged)
+                or row.get("record_id")
+                or ""
+            ).strip()
+            row_source_id = str(canonical_source_record_id(merged) or "").strip()
+            explicit_match = bool(
+                (active_id and row_active_id == active_id)
+                or (target_ids and row_target_id in target_ids)
+            )
+            compatible_source_match = bool(
+                row_source_id == summary_id
+                and (
+                    not target_ids
+                    or not row_target_id
+                    or row_target_id in target_ids
+                )
+            )
+            if not (explicit_match or compatible_source_match):
+                continue
+
+            merged.update(
+                {
+                    "work_type": WORK_TYPE_REPAIR,
+                    "notice_type": NOTICE_TYPE_REPAIR,
+                    "active_item_id": row_active_id,
+                    "source_app_token": REPAIR_SOURCE_APP_TOKEN,
+                    "source_table_id": REPAIR_MANAGEMENT_TABLE_ID,
+                    "source_record_id": summary_id,
+                    "repair_management_record_id": summary_id,
+                }
+            )
+            # An explicit single target selected for this active item must win
+            # over a stale target retained in its local projection.
+            projected_target_id = (
+                target_ids[0]
+                if len(target_ids) == 1
+                else row_target_id
+            )
+            if projected_target_id:
+                merged["target_record_id"] = projected_target_id
+                merged["record_id"] = projected_target_id
+            if event_id:
+                merged["source_event_id"] = event_id
+                merged["related_event_record_id"] = event_id
+            try:
+                state_store.upsert_qt_active_item(
+                    merged,
+                    section=str(row.get("section") or "other"),
+                    sort_order=int(row.get("sort_order") or 0),
+                    origin=str(row.get("origin") or "repair_relation_binding"),
+                )
+                qt_event_id = state_store.enqueue_outbox_event(
+                    "qt_action",
+                    {
+                        "kind": "active_upsert",
+                        "payload": {
+                            "item": {
+                                "active_item_id": row_active_id,
+                                "record_id": str(
+                                    merged.get("target_record_id")
+                                    or row.get("record_id")
+                                    or ""
+                                ),
+                                "notice_type": NOTICE_TYPE_REPAIR,
+                                "section": str(row.get("section") or "other"),
+                                "sort_order": int(row.get("sort_order") or 0),
+                                "origin": "repair_relation_binding",
+                                "payload": merged,
+                            },
+                            "source": "repair_relation_binding",
+                        },
+                    },
+                )
+                if qt_event_id:
+                    qt_event_ids.append(int(qt_event_id))
+                active_updated += 1
+            except Exception as exc:
+                warnings.append(f"未结束通告关联状态暂未同步：{exc}")
+
+        identity_targets = target_ids or [""]
+        for target_id in identity_targets:
+            identity_payload = {
+                "work_type": WORK_TYPE_REPAIR,
+                "notice_type": NOTICE_TYPE_REPAIR,
+                "active_item_id": active_id,
+                "source_app_token": REPAIR_SOURCE_APP_TOKEN,
+                "source_table_id": REPAIR_MANAGEMENT_TABLE_ID,
+                "source_record_id": summary_id,
+                "target_record_id": target_id,
+                "record_id": target_id or summary_id,
+                "repair_management_record_id": summary_id,
+                "source_event_id": event_id,
+                "related_event_record_id": event_id,
+            }
+            try:
+                if state_store.upsert_notice_identity(
+                    identity_payload,
+                    origin="repair_relation_binding",
+                ):
+                    identity_updated += 1
+            except Exception as exc:
+                warnings.append(f"通告关联索引暂未同步：{exc}")
+
+        return {
+            "active_updated": active_updated,
+            "identity_updated": identity_updated,
+            "qt_event_ids": qt_event_ids,
+            "warnings": list(dict.fromkeys(warnings)),
+        }
+
+    def _sync_repair_project_relations(
+        self,
+        *,
+        summary_record_id: str,
+        event_record_id: str = "",
+        target_record_ids: list[str] | tuple[str, ...] | None = None,
+        previous_target_record_ids: list[str] | tuple[str, ...] | None = None,
+        active_item_id: str = "",
+        sync_target_summary: bool = True,
+        write_target_summary: bool = True,
+    ) -> dict[str, Any]:
+        summary_id = str(summary_record_id or "").strip()
+        target_ids = list(
+            dict.fromkeys(
+                str(record_id or "").strip()
+                for record_id in (target_record_ids or [])
+                if str(record_id or "").strip().startswith("rec")
+            )
+        )
+        if len(target_ids) > 1:
+            raise PortalError("设备检修关联一次只能选择一条检修通告。")
+        target_results: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        if sync_target_summary:
+            for target_id in target_ids:
+                result = dict(
+                    self._sync_repair_target_summary_id(
+                        target_record_id=target_id,
+                        summary_record_id=summary_id,
+                        write=write_target_summary,
+                    )
+                )
+                result.setdefault("target_record_id", target_id)
+                result.setdefault("summary_record_id", summary_id)
+                target_results.append(result)
+                warning = str(result.get("warning") or "").strip()
+                if warning:
+                    warnings.append(warning)
+                if bool(result.get("conflict")):
+                    raise PortalError(
+                        warning
+                        or "检修目标记录已关联其他维修单，请重新选择检修通告。"
+                    )
+        cleared_target_results: list[dict[str, Any]] = []
+        previous_target_ids = list(
+            dict.fromkeys(
+                str(record_id or "").strip()
+                for record_id in (previous_target_record_ids or [])
+                if str(record_id or "").strip().startswith("rec")
+                and str(record_id or "").strip() not in target_ids
+            )
+        )
+        for previous_target_id in previous_target_ids:
+            try:
+                clear_result = self._clear_repair_target_summary_id(
+                    target_record_id=previous_target_id,
+                    summary_record_id=summary_id,
+                )
+            except Exception as exc:
+                clear_result = {
+                    "target_record_id": previous_target_id,
+                    "summary_record_id": summary_id,
+                    "cleared": False,
+                    "skipped": True,
+                    "warning": f"旧检修目标关系暂未清理：{exc}",
+                }
+            cleared_target_results.append(clear_result)
+            warning = str(clear_result.get("warning") or "").strip()
+            if warning:
+                warnings.append(warning)
+        projection = self._sync_repair_notice_relation_projection(
+            summary_record_id=summary_id,
+            event_record_id=event_record_id,
+            target_record_ids=target_ids,
+            active_item_id=active_item_id,
+        )
+        warnings.extend(projection.get("warnings") or [])
+        return {
+            "target_results": target_results,
+            "cleared_target_results": cleared_target_results,
+            "projection": projection,
+            "warnings": list(dict.fromkeys(warnings)),
+        }
+
+    def _ensure_repair_target_relation_synced(
+        self,
+        *,
+        summary_record_id: str,
+        target_record_id: str,
+        relation_sync: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Require both sides of an explicit repair binding to be persisted."""
+        summary_id = str(summary_record_id or "").strip()
+        target_id = str(target_record_id or "").strip()
+        if not summary_id.startswith("rec") or not target_id.startswith("rec"):
+            raise PortalError("检修通告与维修单关系缺少有效记录 ID。")
+        sync_result = (
+            relation_sync
+            if isinstance(relation_sync, dict)
+            else {}
+        )
+        target_results = [
+            dict(item)
+            for item in (sync_result.get("target_results") or [])
+            if isinstance(item, dict)
+        ]
+        matching_results = [
+            item
+            for item in target_results
+            if str(item.get("target_record_id") or "").strip() == target_id
+        ]
+        if any(
+            bool(item.get("synced") or item.get("already_synced"))
+            for item in matching_results
+        ):
+            return sync_result
+
+        result = dict(
+            self._sync_repair_target_summary_id(
+                target_record_id=target_id,
+                summary_record_id=summary_id,
+                write=True,
+            )
+        )
+        result.setdefault("target_record_id", target_id)
+        result.setdefault("summary_record_id", summary_id)
+        warning = str(result.get("warning") or "").strip()
+        if bool(result.get("conflict")):
+            raise PortalError(
+                warning
+                or "检修目标记录已关联其他维修单，请重新选择检修通告。"
+            )
+        if not bool(result.get("synced") or result.get("already_synced")):
+            raise PortalError(
+                warning
+                or "检修目标记录的维修汇总关系未成功回填，请重试。"
+            )
+        target_results.append(result)
+        sync_result["target_results"] = target_results
+        warnings = [
+            str(item or "").strip()
+            for item in (sync_result.get("warnings") or [])
+            if str(item or "").strip()
+        ]
+        if warning:
+            warnings.append(warning)
+        sync_result["warnings"] = list(dict.fromkeys(warnings))
+        return sync_result
 
     def sync_repair_management_notice_action(
         self,
@@ -12921,6 +13885,15 @@ class MaintenancePortalService:
         sync_event_transfer_status: bool = True,
         retry_failed_operation: bool = False,
     ) -> dict[str, Any]:
+        source_repair_ids = list(
+            dict.fromkeys(
+                str(record_id or "").strip()
+                for record_id in (source_repair_ids or [])
+                if str(record_id or "").strip().startswith("rec")
+            )
+        )
+        if len(source_repair_ids) > 1:
+            raise PortalError("设备检修关联一次只能选择一条检修通告。")
         metas, meta_by_name, _records = (
             self._load_repair_management_project_records()
         )
@@ -13132,6 +14105,24 @@ class MaintenancePortalService:
             workflow=workflow,
             meta_by_name=meta_by_name,
         )
+        relation_sync: dict[str, Any] = {
+            "target_results": [],
+            "projection": {},
+            "warnings": [],
+        }
+        if str(source_event_id or "").strip() or any(
+            str(record_id or "").strip() for record_id in (source_repair_ids or [])
+        ):
+            try:
+                relation_sync = self._sync_repair_project_relations(
+                    summary_record_id=record_id,
+                    event_record_id=str(source_event_id or "").strip(),
+                    target_record_ids=list(source_repair_ids or []),
+                )
+            except Exception as exc:
+                relation_sync["warnings"] = [
+                    f"维修项目已创建，通告关联状态暂未同步：{exc}"
+                ]
         response = {
             "record_id": record_id,
             "fields": prepared,
@@ -13148,6 +14139,7 @@ class MaintenancePortalService:
                         *(auto.get("warnings") or []),
                         *write_warnings,
                         *workflow_warnings,
+                        *(relation_sync.get("warnings") or []),
                     ]
                 )
             ),
@@ -13300,19 +14292,52 @@ class MaintenancePortalService:
         )
         self._assert_repair_record_version(existing, expected_version)
         existing_raw = existing.get("raw_fields") if isinstance((existing or {}).get("raw_fields"), dict) else {}
+        existing_display = (
+            existing.get("display_fields")
+            if isinstance((existing or {}).get("display_fields"), dict)
+            else {}
+        )
         summary_id = str(record_id or "").strip()
+        existing_event_ids = self._repair_management_record_ids(
+            existing_raw.get("关联事件单")
+            or existing_display.get("关联事件单")
+        )
         effective_event_id = str(source_event_id or "").strip()
         if not replace_source_relations and not effective_event_id:
-            existing_event_ids = self._repair_management_record_ids(existing_raw.get("关联事件单"))
             effective_event_id = existing_event_ids[0] if existing_event_ids else ""
+        existing_repair_target_id = self._repair_target_record_id(existing)
         effective_repair_ids = list(source_repair_ids or [])
         if not replace_source_relations and not effective_repair_ids:
-            existing_repair_target_id = self._repair_target_record_id(existing)
             effective_repair_ids = (
                 [existing_repair_target_id]
                 if existing_repair_target_id
                 else []
             )
+        effective_repair_ids = list(
+            dict.fromkeys(
+                str(target_id or "").strip()
+                for target_id in effective_repair_ids
+                if str(target_id or "").strip().startswith("rec")
+            )
+        )
+        if len(effective_repair_ids) > 1:
+            raise PortalError("设备检修关联一次只能选择一条检修通告。")
+        repair_relation_changed = (
+            (effective_repair_ids[0] if effective_repair_ids else "")
+            != existing_repair_target_id
+        )
+        if repair_relation_changed and effective_repair_ids:
+            for target_id in effective_repair_ids:
+                target_preflight = self._sync_repair_target_summary_id(
+                    target_record_id=target_id,
+                    summary_record_id=summary_id,
+                    write=False,
+                )
+                if bool(target_preflight.get("conflict")):
+                    raise PortalError(
+                        str(target_preflight.get("warning") or "").strip()
+                        or "检修目标记录已关联其他维修单，请重新选择检修通告。"
+                    )
         cleaned = self._clean_repair_management_fields(
             fields,
             meta_by_name,
@@ -13435,6 +14460,32 @@ class MaintenancePortalService:
             record_id=summary_id,
             fields=prepared,
         )
+        relation_sync: dict[str, Any] = {
+            "target_results": [],
+            "projection": {},
+            "warnings": [],
+        }
+        if (
+            effective_event_id
+            or effective_repair_ids
+            or (repair_relation_changed and existing_repair_target_id)
+        ):
+            try:
+                relation_sync = self._sync_repair_project_relations(
+                    summary_record_id=summary_id,
+                    event_record_id=effective_event_id,
+                    target_record_ids=effective_repair_ids,
+                    previous_target_record_ids=(
+                        [existing_repair_target_id]
+                        if repair_relation_changed and existing_repair_target_id
+                        else []
+                    ),
+                    sync_target_summary=repair_relation_changed,
+                )
+            except Exception as exc:
+                relation_sync["warnings"] = [
+                    f"维修项目已保存，通告关联状态暂未同步：{exc}"
+                ]
         followup_sync = {
             "synced_count": 0,
             "failed_count": 0,
@@ -13528,9 +14579,11 @@ class MaintenancePortalService:
                         *write_warnings,
                         *(followup_sync.get("warnings") or []),
                         *workflow_warnings,
+                        *(relation_sync.get("warnings") or []),
                     ]
                 )
             ),
+            "relation_sync": relation_sync,
         }
 
     def delete_repair_management_record(
@@ -14891,23 +15944,120 @@ class MaintenancePortalService:
             "warnings": list(dict.fromkeys(warnings)),
         }
 
+    def bind_repair_notice_target(
+        self,
+        *,
+        summary_record_id: str,
+        target_record_id: str,
+        scope: str = "ALL",
+        active_item_id: str = "",
+    ) -> dict[str, Any]:
+        """Bind a repair target record to its source work order and projections."""
+        summary_id = str(summary_record_id or "").strip()
+        target_id = str(target_record_id or "").strip()
+        if not summary_id.startswith("rec"):
+            raise PortalError("当前检修通告缺少有效的维修单记录 ID。")
+        if not target_id.startswith("rec"):
+            raise PortalError("请选择有效的检修目标记录。")
+        summary_record = self._ensure_repair_management_record_in_scope(
+            summary_id,
+            scope,
+        )
+        raw_fields = (
+            summary_record.get("raw_fields")
+            if isinstance(summary_record.get("raw_fields"), dict)
+            else {}
+        )
+        display_fields = (
+            summary_record.get("display_fields")
+            if isinstance(summary_record.get("display_fields"), dict)
+            else {}
+        )
+        event_ids = self._repair_management_record_ids(
+            raw_fields.get("关联事件单")
+            or display_fields.get("关联事件单")
+        )
+        update_result = self.update_repair_management_record(
+            summary_id,
+            {},
+            source_event_id=event_ids[0] if event_ids else "",
+            source_repair_ids=[target_id],
+            replace_source_relations=False,
+            scope=scope,
+            validate_required=False,
+        )
+        relation_sync = (
+            update_result.get("relation_sync")
+            if isinstance(update_result.get("relation_sync"), dict)
+            else {}
+        )
+        relation_sync = self._ensure_repair_target_relation_synced(
+            summary_record_id=summary_id,
+            target_record_id=target_id,
+            relation_sync=relation_sync,
+        )
+        projection = (
+            relation_sync.get("projection")
+            if isinstance(relation_sync.get("projection"), dict)
+            else {}
+        )
+        if not projection or (
+            active_item_id and not int(projection.get("active_updated") or 0)
+        ):
+            projection = self._sync_repair_notice_relation_projection(
+                summary_record_id=summary_id,
+                event_record_id=event_ids[0] if event_ids else "",
+                target_record_ids=[target_id],
+                active_item_id=active_item_id,
+            )
+        return {
+            "saved": True,
+            "source_record_id": summary_id,
+            "repair_management_record_id": summary_id,
+            "target_record_id": target_id,
+            "event_record_id": event_ids[0] if event_ids else "",
+            "fields": dict(update_result.get("fields") or {}),
+            "relation_sync": relation_sync,
+            "projection": projection,
+            "warnings": list(
+                dict.fromkeys(
+                    [
+                        *(update_result.get("warnings") or []),
+                        *(projection.get("warnings") or []),
+                    ]
+                )
+            ),
+        }
+
     def bind_repair_notice_event(
         self,
         *,
-        source_record_id: str,
+        source_record_id: str = "",
         event_record_id: str,
         candidate_project_record_id: str,
+        active_item_id: str = "",
+        target_record_id: str = "",
         scope: str = "ALL",
     ) -> dict[str, Any]:
-        """Persist an event relation on a pending repair project without sending."""
-        source_record_id = str(source_record_id or "").strip()
-        if not source_record_id.startswith("rec"):
-            raise PortalError("当前待发起检修缺少有效的源记录 ID。")
-        with self._repair_management_record_lock(source_record_id):
+        """Persist one event/project/notice relation without sending a notice."""
+        requested_source_id = str(source_record_id or "").strip()
+        candidate_project_id = str(candidate_project_record_id or "").strip()
+        active_id = str(active_item_id or "").strip()
+        target_id = str(target_record_id or "").strip()
+        if not requested_source_id.startswith("rec"):
+            requested_source_id = ""
+        if not candidate_project_id.startswith("rec"):
+            raise PortalError("关联事件缺少有效的维修项目记录。")
+        if not requested_source_id and not (active_id or target_id.startswith("rec")):
+            raise PortalError("当前检修通告缺少可绑定的维修单或未结束通告。")
+        effective_source_id = requested_source_id or candidate_project_id
+        with self._repair_management_record_lock(effective_source_id):
             return self._bind_repair_notice_event_unlocked(
-                source_record_id=source_record_id,
+                source_record_id=effective_source_id,
                 event_record_id=event_record_id,
-                candidate_project_record_id=candidate_project_record_id,
+                candidate_project_record_id=candidate_project_id,
+                active_item_id=active_id,
+                target_record_id=target_id,
                 scope=scope,
             )
 
@@ -14917,10 +16067,14 @@ class MaintenancePortalService:
         source_record_id: str,
         event_record_id: str,
         candidate_project_record_id: str,
+        active_item_id: str = "",
+        target_record_id: str = "",
         scope: str = "ALL",
     ) -> dict[str, Any]:
         source_record_id = str(source_record_id or "").strip()
         event_record_id = str(event_record_id or "").strip()
+        active_item_id = str(active_item_id or "").strip()
+        target_record_id = str(target_record_id or "").strip()
         candidate_project_record_id = str(
             candidate_project_record_id or ""
         ).strip()
@@ -14964,8 +16118,14 @@ class MaintenancePortalService:
             if isinstance(candidate_record.get("raw_fields"), dict)
             else {}
         )
+        candidate_display_fields = (
+            candidate_record.get("display_fields")
+            if isinstance(candidate_record.get("display_fields"), dict)
+            else {}
+        )
         candidate_event_ids = self._repair_management_record_ids(
             candidate_raw_fields.get("关联事件单")
+            or candidate_display_fields.get("关联事件单")
         )
         if event_record_id not in candidate_event_ids:
             raise PortalError("所选事件与候选维修项目的关联关系已变化，请重新选择。")
@@ -14986,7 +16146,11 @@ class MaintenancePortalService:
             source_record_id,
             {},
             source_event_id=event_record_id,
-            source_repair_ids=[],
+            source_repair_ids=(
+                [target_record_id]
+                if target_record_id.startswith("rec")
+                else []
+            ),
             replace_source_relations=False,
             scope=scope,
             validate_required=False,
@@ -14995,6 +16159,35 @@ class MaintenancePortalService:
             update_result.get("fields") or {}
         ):
             raise PortalError("事件关联字段未成功写入，请检查维修项目表字段配置。")
+        relation_sync = (
+            update_result.get("relation_sync")
+            if isinstance(update_result.get("relation_sync"), dict)
+            else {}
+        )
+        if target_record_id.startswith("rec"):
+            relation_sync = self._ensure_repair_target_relation_synced(
+                summary_record_id=source_record_id,
+                target_record_id=target_record_id,
+                relation_sync=relation_sync,
+            )
+        projection = (
+            relation_sync.get("projection")
+            if isinstance(relation_sync.get("projection"), dict)
+            else {}
+        )
+        if not projection or (
+            active_item_id and not int(projection.get("active_updated") or 0)
+        ):
+            projection = self._sync_repair_notice_relation_projection(
+                summary_record_id=source_record_id,
+                event_record_id=event_record_id,
+                target_record_ids=(
+                    [target_record_id]
+                    if target_record_id.startswith("rec")
+                    else []
+                ),
+                active_item_id=active_item_id,
+            )
         prefill: dict[str, Any] = {}
         prefill_warning = ""
         try:
@@ -15055,7 +16248,7 @@ class MaintenancePortalService:
             if isinstance(prefill.get("source_record"), dict)
             else fallback_source_record
         )
-        return {
+        response = {
             "saved": True,
             "draft_complete": draft_complete,
             "source_record_id": source_record_id,
@@ -15080,12 +16273,18 @@ class MaintenancePortalService:
                 dict.fromkeys(
                     [
                         *(update_result.get("warnings") or []),
+                        *(projection.get("warnings") or []),
                         *(prefill.get("warnings") or []),
                         *([prefill_warning] if prefill_warning else []),
                     ]
                 )
             ),
         }
+        if target_record_id.startswith("rec"):
+            response["target_record_id"] = target_record_id
+        if active_item_id:
+            response["active_item_id"] = active_item_id
+        return response
 
     def list_repair_management_event_candidates(
         self,

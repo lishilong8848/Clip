@@ -52,13 +52,13 @@
           {{ globalSyncRetrying ? "重试中" : "重试失败任务" }}
         </button>
         <button
-          v-if="repairHealthIntegrityCount && repairHealth?.can_repair"
+          v-if="repairHealthRepairableCount && repairHealth?.can_repair"
           type="button"
           :disabled="integrityRepairing"
           @click="repairIntegrity"
         >
-          <Wrench :size="14" aria-hidden="true" />
-          {{ integrityRepairing ? "修复中" : "修复关联" }}
+          <Wrench :size="14" :class="{ spinning: integrityRepairing }" aria-hidden="true" />
+          {{ integrityRepairing ? "后台修复中" : "修复关联" }}
         </button>
       </div>
     </div>
@@ -762,7 +762,7 @@ const projectSyncStatus = ref<LooseDict | null>(null);
 const repairHealth = ref<LooseDict | null>(null);
 const syncRetrying = ref(false);
 const globalSyncRetrying = ref(false);
-const integrityRepairing = ref(false);
+const integrityRepairSubmitting = ref(false);
 const failureCenterOpen = ref(false);
 const failureCenterLoading = ref(false);
 const failureCenterItems = ref<LooseDict[]>([]);
@@ -1016,9 +1016,35 @@ const repairHealthIntegrityCount = computed(() => Math.max(
   0,
   Number((repairHealth.value?.integrity as LooseDict | undefined)?.issue_count || 0),
 ));
+const repairHealthRepairableCount = computed(() => Math.max(
+  0,
+  Number(
+    (repairHealth.value?.integrity as LooseDict | undefined)
+      ?.repairable_issue_count || 0,
+  ),
+));
+const repairHealthManualReviewCount = computed(() => {
+  const integrity = repairHealth.value?.integrity as LooseDict | undefined;
+  const count = (
+    integrity && Object.prototype.hasOwnProperty.call(integrity, "manual_review_count")
+      ? Number(integrity.manual_review_count || 0)
+      : Number(integrity?.issue_count || 0)
+        - Number(integrity?.repairable_issue_count || 0)
+  );
+  return Math.max(0, count);
+});
+const integrityRepairStatus = computed(() => String(
+  (repairHealth.value?.integrity_repair as LooseDict | undefined)?.status
+  || "idle",
+));
+const integrityRepairing = computed(() => (
+  integrityRepairSubmitting.value
+  || ["queued", "running"].includes(integrityRepairStatus.value)
+));
 const repairHealthVisible = computed(() => (
   repairHealthFailedCount.value > 0
   || repairHealthIntegrityCount.value > 0
+  || integrityRepairing.value
   || serverUpdatePending.value
 ));
 const repairHealthTone = computed(() => (
@@ -1029,8 +1055,23 @@ const repairHealthText = computed(() => {
   if (repairHealthFailedCount.value) {
     parts.push(`${repairHealthFailedCount.value} 项后台同步失败`);
   }
-  if (repairHealthIntegrityCount.value) {
-    parts.push(`${repairHealthIntegrityCount.value} 项关联待修复`);
+  const repairJob = repairHealth.value?.integrity_repair as LooseDict | undefined;
+  if (integrityRepairing.value && repairJob) {
+    const total = Math.max(0, Number(repairJob.total || 0));
+    const processed = Math.max(0, Number(repairJob.processed || 0));
+    parts.push(
+      total
+        ? `关联后台修复中 ${Math.min(processed, total)}/${total}`
+        : "关联后台修复中",
+    );
+  }
+  if (repairHealthRepairableCount.value) {
+    parts.push(`${repairHealthRepairableCount.value} 项关联可自动修复`);
+  }
+  if (repairHealthManualReviewCount.value) {
+    parts.push(
+      `${repairHealthManualReviewCount.value} 条跟进缺少可唯一匹配的维修单`,
+    );
   }
   if (repairHealthPendingCount.value) {
     parts.push(`${repairHealthPendingCount.value} 项同步处理中`);
@@ -2325,7 +2366,7 @@ async function retryAllRepairSync(): Promise<void> {
 
 async function repairIntegrity(): Promise<void> {
   if (integrityRepairing.value) return;
-  integrityRepairing.value = true;
+  integrityRepairSubmitting.value = true;
   try {
     const result = await requestJson(
       "/api/repair-management/integrity/repair",
@@ -2334,24 +2375,27 @@ async function repairIntegrity(): Promise<void> {
         body: JSON.stringify({ scope: props.scope || "ALL" }),
       },
     );
-    const remaining = Math.max(0, Number(result.after_issue_count || 0));
-    clearRecordResponseCache();
-    clearRecordDetailCache();
-    await loadRecords(false, true);
+    repairHealth.value = {
+      ...(repairHealth.value || {}),
+      integrity_repair: result,
+    };
     await loadRepairHealth();
-    showMessage(
-      remaining
-        ? `关联修复已完成，仍有 ${remaining} 项需人工核对。`
-        : "维修单与跟进记录关联已修复。",
-      remaining ? "warning" : "success",
-    );
+    const status = String(result.status || "");
+    if (status === "not_needed") {
+      showMessage(
+        String(result.message || "当前没有可自动修复的关联。"),
+        Number(result.manual_review_count || 0) ? "warning" : "success",
+      );
+    } else {
+      showMessage("关联修复已转入后台，可继续使用当前页面。", "success");
+    }
   } catch (error: unknown) {
     showMessage(
       error instanceof Error ? error.message : "关联修复失败。",
       "failed",
     );
   } finally {
-    integrityRepairing.value = false;
+    integrityRepairSubmitting.value = false;
   }
 }
 
@@ -3376,6 +3420,32 @@ function openRepairNoticeWorkbench(): void {
   }
   navigateHard(url);
 }
+
+watch(integrityRepairStatus, (status, previousStatus) => {
+  if (!["queued", "running"].includes(previousStatus)) return;
+  if (!["completed", "partial", "failed"].includes(status)) return;
+  const repairJob = repairHealth.value?.integrity_repair as LooseDict | undefined;
+  if (status === "failed") {
+    showMessage(
+      String(repairJob?.message || repairJob?.error || "关联后台修复失败。"),
+      "failed",
+    );
+    return;
+  }
+  clearRecordResponseCache();
+  clearRecordDetailCache();
+  void loadRecords(false, true);
+  const remaining = Math.max(
+    0,
+    Number(repairJob?.after_repairable_issue_count || 0),
+  );
+  showMessage(
+    remaining
+      ? `关联自动修复已完成，仍有 ${remaining} 项可重试。`
+      : "关联自动修复已完成。",
+    remaining || status === "partial" ? "warning" : "success",
+  );
+});
 
 watch(
   () => props.scope,
