@@ -4669,6 +4669,33 @@ class MaintenancePortalService:
         cls,
         record: dict[str, Any],
     ) -> bool:
+        # The legacy cutoff is a read-time fallback for untouched historical
+        # records. Once a current lifecycle starts, the real completion rules
+        # must take over even when the project record itself is older.
+        for field_container_name in ("raw_fields", "display_fields"):
+            fields = record.get(field_container_name)
+            if not isinstance(fields, dict):
+                continue
+            for field_name in (
+                "维修开始时间",
+                "维修开始时间-L",
+                "维修结束时间（2026）",
+                "维修结束时间（2026）-L",
+            ):
+                lifecycle_at_ms = cls._repair_management_datetime_ms(
+                    fields.get(field_name)
+                )
+                if lifecycle_at_ms is None:
+                    continue
+                try:
+                    lifecycle_date = dt.datetime.fromtimestamp(
+                        lifecycle_at_ms / 1000
+                    ).date()
+                except (OSError, OverflowError, TypeError, ValueError):
+                    continue
+                if lifecycle_date >= REPAIR_MANAGEMENT_LEGACY_COMPLETED_BEFORE:
+                    return False
+
         candidates: list[Any] = [record.get("created_time")]
         for field_container_name in ("raw_fields", "display_fields"):
             fields = record.get(field_container_name)
@@ -8033,6 +8060,7 @@ class MaintenancePortalService:
             end_value=prepared.get("维修结束时间（2026）", existing_end),
             has_followup=has_followup,
             latest_progress_percent=latest_progress_percent,
+            include_legacy_completion=False,
         )
         _workflow_synced, workflow_warnings = (
             self._sync_repair_management_workflow(
@@ -12449,6 +12477,7 @@ class MaintenancePortalService:
             end_value=effective_end,
             has_followup=has_followup,
             latest_progress_percent=latest_progress_percent,
+            include_legacy_completion=False,
         )
         workflow_synced, workflow_warnings = (
             self._sync_repair_management_workflow(
@@ -12556,8 +12585,12 @@ class MaintenancePortalService:
         end_value: Any,
         has_followup: bool,
         latest_progress_percent: float | None,
+        include_legacy_completion: bool = True,
     ) -> str:
-        if cls._repair_management_is_legacy_completed(record):
+        if (
+            include_legacy_completion
+            and cls._repair_management_is_legacy_completed(record)
+        ):
             return REPAIR_MANAGEMENT_COMPLETED_WORKFLOW
         return cls._repair_management_workflow_for_state(
             start_value=start_value,
@@ -14547,6 +14580,7 @@ class MaintenancePortalService:
             end_value=effective_fields.get("维修结束时间（2026）"),
             has_followup=has_followup,
             latest_progress_percent=latest_progress_percent,
+            include_legacy_completion=False,
         )
         workflow_synced, workflow_warnings = (
             self._sync_repair_management_workflow(

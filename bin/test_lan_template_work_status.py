@@ -17756,6 +17756,18 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             },
             authoritative_followups=[],
         )
+        reactivated_legacy_payload = service._repair_management_record_payload(
+            {
+                "record_id": "rec_repair_legacy_reactivated",
+                "created_time": "2026-07-20 12:00",
+                "display_fields": {"维修名称": "重新开始的历史维修项目"},
+                "raw_fields": {
+                    "流程-L": "维修中",
+                    "维修开始时间": "2026-07-22 09:00",
+                },
+            },
+            authoritative_followups=[],
+        )
 
         self.assertTrue(legacy_payload["is_completed"])
         self.assertTrue(legacy_payload["read_only"])
@@ -17768,6 +17780,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertFalse(boundary_payload["is_completed"])
         self.assertFalse(boundary_payload["read_only"])
         self.assertEqual(boundary_payload["workflow"], "维修中")
+        self.assertFalse(reactivated_legacy_payload["is_completed"])
+        self.assertFalse(reactivated_legacy_payload["read_only"])
+        self.assertEqual(reactivated_legacy_payload["workflow"], "维修中")
 
     def test_repair_management_legacy_completion_uses_created_date_field(self):
         service = _TestMaintenancePortalService()
@@ -19697,12 +19712,25 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             meta_by_name = {meta.field_name: meta for meta in metas}
             current_record = {
                 "record_id": "rec_repair_summary",
+                "created_time": "2026-07-20 08:00",
                 "raw_fields": {},
                 "display_fields": {},
             }
             captured: list[dict] = []
             workflow_updates: list[dict] = []
             snapshots: list[dict] = []
+            linked_followups = [
+                {
+                    "record_id": "rec_followup_complete",
+                    "raw_fields": {
+                        REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: (
+                            "rec_repair_summary"
+                        ),
+                        "维修进度": 1,
+                    },
+                    "display_fields": {"创建时间": "2026-07-18 11:40"},
+                }
+            ]
             service._ensure_repair_management_record_in_scope = (  # type: ignore[method-assign]
                 lambda *_args, **_kwargs: current_record
             )
@@ -19721,18 +19749,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 lambda *_args, **_kwargs: (
                     [],
                     {},
-                    [
-                        {
-                            "record_id": "rec_followup_complete",
-                            "raw_fields": {
-                                REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: (
-                                    "rec_repair_summary"
-                                ),
-                                "维修进度": 1,
-                            },
-                            "display_fields": {"创建时间": "2026-07-18 11:40"},
-                        }
-                    ],
+                    list(linked_followups),
                 )
             )
             service._upsert_repair_snapshot_fields = (  # type: ignore[method-assign]
@@ -19817,6 +19834,31 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "设备检查中，已完成一半",
             )
 
+            captured.clear()
+            linked_followups.clear()
+            service.sync_repair_management_notice_action(
+                {
+                    **prepared,
+                    "progress": "检修结束，尚未填写维修跟进",
+                    "response_time": "2026-07-18 11:40",
+                },
+                action="end",
+                target_record_id="rec_repair_target",
+            )
+            self.assertEqual(workflow_updates[-1]["fields"], {"流程": "维修中"})
+
+            linked_followups.append(
+                {
+                    "record_id": "rec_followup_complete",
+                    "raw_fields": {
+                        REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: (
+                            "rec_repair_summary"
+                        ),
+                        "维修进度": 1,
+                    },
+                    "display_fields": {"创建时间": "2026-07-18 11:40"},
+                }
+            )
             captured.clear()
             service.sync_repair_management_notice_action(
                 {
