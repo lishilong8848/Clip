@@ -70,7 +70,6 @@ REPAIR_MANAGEMENT_TABLE_ID = REPAIR_SOURCE_TABLE_ID
 REPAIR_MANAGEMENT_NOT_STARTED_WORKFLOW = "未开始"
 REPAIR_MANAGEMENT_IN_PROGRESS_WORKFLOW = "维修中"
 REPAIR_MANAGEMENT_COMPLETED_WORKFLOW = "维修完成"
-REPAIR_MANAGEMENT_LEGACY_COMPLETED_BEFORE = dt.date(2026, 7, 21)
 REPAIR_MANAGEMENT_WORKFLOW_OPTIONS = (
     REPAIR_MANAGEMENT_NOT_STARTED_WORKFLOW,
     REPAIR_MANAGEMENT_IN_PROGRESS_WORKFLOW,
@@ -4665,62 +4664,6 @@ class MaintenancePortalService:
         return ""
 
     @classmethod
-    def _repair_management_is_legacy_completed(
-        cls,
-        record: dict[str, Any],
-    ) -> bool:
-        # The legacy cutoff is a read-time fallback for untouched historical
-        # records. Once a current lifecycle starts, the real completion rules
-        # must take over even when the project record itself is older.
-        for field_container_name in ("raw_fields", "display_fields"):
-            fields = record.get(field_container_name)
-            if not isinstance(fields, dict):
-                continue
-            for field_name in (
-                "维修开始时间",
-                "维修开始时间-L",
-                "维修结束时间（2026）",
-                "维修结束时间（2026）-L",
-            ):
-                lifecycle_at_ms = cls._repair_management_datetime_ms(
-                    fields.get(field_name)
-                )
-                if lifecycle_at_ms is None:
-                    continue
-                try:
-                    lifecycle_date = dt.datetime.fromtimestamp(
-                        lifecycle_at_ms / 1000
-                    ).date()
-                except (OSError, OverflowError, TypeError, ValueError):
-                    continue
-                if lifecycle_date >= REPAIR_MANAGEMENT_LEGACY_COMPLETED_BEFORE:
-                    return False
-
-        candidates: list[Any] = [record.get("created_time")]
-        for field_container_name in ("raw_fields", "display_fields"):
-            fields = record.get(field_container_name)
-            if not isinstance(fields, dict):
-                continue
-            candidates.extend(
-                (
-                    fields.get("创建日期"),
-                    fields.get("创建时间"),
-                )
-            )
-        for value in candidates:
-            created_at_ms = cls._repair_management_datetime_ms(value)
-            if created_at_ms is None:
-                continue
-            try:
-                created_date = dt.datetime.fromtimestamp(
-                    created_at_ms / 1000
-                ).date()
-            except (OSError, OverflowError, TypeError, ValueError):
-                continue
-            return created_date < REPAIR_MANAGEMENT_LEGACY_COMPLETED_BEFORE
-        return False
-
-    @classmethod
     def _repair_management_is_completed(
         cls,
         record: dict[str, Any],
@@ -4730,8 +4673,6 @@ class MaintenancePortalService:
         latest_progress_percent: float | None = None,
     ) -> bool:
         del meta_by_name
-        if cls._repair_management_is_legacy_completed(record):
-            return True
         end_value: Any = None
         for field_container_name in ("raw_fields", "display_fields"):
             fields = record.get(field_container_name)
@@ -8054,13 +7995,11 @@ class MaintenancePortalService:
         has_followup, latest_progress_percent = (
             self._repair_management_latest_followup_progress(linked_followups)
         )
-        workflow = self._repair_management_workflow_for_record(
-            summary,
+        workflow = self._repair_management_workflow_for_state(
             start_value=prepared.get("维修开始时间", existing_start),
             end_value=prepared.get("维修结束时间（2026）", existing_end),
             has_followup=has_followup,
             latest_progress_percent=latest_progress_percent,
-            include_legacy_completion=False,
         )
         _workflow_synced, workflow_warnings = (
             self._sync_repair_management_workflow(
@@ -12471,13 +12410,11 @@ class MaintenancePortalService:
         has_followup, latest_progress_percent = (
             self._repair_management_latest_followup_progress(linked_followups)
         )
-        workflow = self._repair_management_workflow_for_record(
-            updated_record,
+        workflow = self._repair_management_workflow_for_state(
             start_value=effective_start,
             end_value=effective_end,
             has_followup=has_followup,
             latest_progress_percent=latest_progress_percent,
-            include_legacy_completion=False,
         )
         workflow_synced, workflow_warnings = (
             self._sync_repair_management_workflow(
@@ -12575,29 +12512,6 @@ class MaintenancePortalService:
         if has_start or has_end or has_followup:
             return REPAIR_MANAGEMENT_IN_PROGRESS_WORKFLOW
         return REPAIR_MANAGEMENT_NOT_STARTED_WORKFLOW
-
-    @classmethod
-    def _repair_management_workflow_for_record(
-        cls,
-        record: dict[str, Any],
-        *,
-        start_value: Any,
-        end_value: Any,
-        has_followup: bool,
-        latest_progress_percent: float | None,
-        include_legacy_completion: bool = True,
-    ) -> str:
-        if (
-            include_legacy_completion
-            and cls._repair_management_is_legacy_completed(record)
-        ):
-            return REPAIR_MANAGEMENT_COMPLETED_WORKFLOW
-        return cls._repair_management_workflow_for_state(
-            start_value=start_value,
-            end_value=end_value,
-            has_followup=has_followup,
-            latest_progress_percent=latest_progress_percent,
-        )
 
     def _sync_repair_management_workflow(
         self,
@@ -12914,11 +12828,7 @@ class MaintenancePortalService:
             completed_count = sum(
                 1 for value in progress_values if value is not None and value >= 100
             )
-            progress_percent = (
-                100
-                if self._repair_management_is_legacy_completed(project)
-                else round(latest_progress_percent or 0)
-            )
+            progress_percent = round(latest_progress_percent or 0)
             item_state = (
                 "completed"
                 if is_completed
@@ -13231,8 +13141,7 @@ class MaintenancePortalService:
         end_value = raw_fields.get("维修结束时间（2026）")
         if end_value in (None, "", [], {}):
             end_value = display_fields.get("维修结束时间（2026）")
-        workflow = self._repair_management_workflow_for_record(
-            item,
+        workflow = self._repair_management_workflow_for_state(
             start_value=start_value,
             end_value=end_value,
             has_followup=has_followup,
@@ -13257,9 +13166,6 @@ class MaintenancePortalService:
         )
         if is_completed:
             workflow = REPAIR_MANAGEMENT_COMPLETED_WORKFLOW
-        if self._repair_management_is_legacy_completed(item):
-            normalized_progress_percent = 100
-            display_fields["当前维修进度"] = "100%"
         payload = {
             "record_id": str(item.get("record_id") or ""),
             "record_version": self._repair_record_version(item),
@@ -13269,7 +13175,7 @@ class MaintenancePortalService:
             "building_codes": self._repair_record_building_codes(item),
             "workflow": workflow,
             "is_completed": is_completed,
-            "read_only": is_completed or not bool(followup_state_verified),
+            "read_only": not bool(followup_state_verified),
             "state_locked": not bool(followup_state_verified),
             "followup_state_verified": bool(followup_state_verified),
             "display_fields": display_fields,
@@ -14574,13 +14480,11 @@ class MaintenancePortalService:
                 linked_followups
             )
         )
-        workflow = self._repair_management_workflow_for_record(
-            updated_summary,
+        workflow = self._repair_management_workflow_for_state(
             start_value=effective_fields.get("维修开始时间"),
             end_value=effective_fields.get("维修结束时间（2026）"),
             has_followup=has_followup,
             latest_progress_percent=latest_progress_percent,
-            include_legacy_completion=False,
         )
         workflow_synced, workflow_warnings = (
             self._sync_repair_management_workflow(

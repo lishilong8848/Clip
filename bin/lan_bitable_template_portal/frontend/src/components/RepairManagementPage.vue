@@ -153,7 +153,6 @@
               <span class="record-status-cell">
                 <b class="workflow">{{ recordAt(virtualRow.index).workflow || "流程未填写" }}</b>
                 <small v-if="repairRecordStateLocked(recordAt(virtualRow.index))">状态待确认</small>
-                <small v-else-if="repairRecordIsCompleted(recordAt(virtualRow.index))">只读</small>
               </span>
               <button
                 type="button"
@@ -208,7 +207,7 @@
         >
           <header class="project-drawer-head">
             <div class="project-drawer-title">
-              <span>{{ selectedRecordStateLocked ? "状态待确认 · 只读" : selectedRecordReadOnly ? "已完成 · 只读" : activeWorkspaceTab === "followups" ? "跟进记录" : editingRecordId ? "维修单信息" : "新建维修单" }}</span>
+              <span>{{ selectedRecordStateLocked ? "状态待确认 · 只读" : activeWorkspaceTab === "followups" ? "跟进记录" : editingRecordId ? "维修单信息" : "新建维修单" }}</span>
               <h3 id="repair-project-drawer-title">
                 {{ editingRecordId ? selectedRecordHeaderTitle : "填写维修项目" }}
               </h3>
@@ -473,7 +472,7 @@
           </footer>
           <div v-else class="completed-readonly-bar" role="status">
             <LockKeyhole :size="16" aria-hidden="true" />
-            <span>{{ selectedRecordStateLocked ? "跟进状态暂未确认，当前仅供查看" : "维修已完成，仅供查看" }}</span>
+            <span>跟进状态暂未确认，当前仅供查看</span>
           </div>
         </div>
 
@@ -1127,7 +1126,7 @@ function repairRecordStateLocked(record: LooseDict): boolean {
 }
 
 function repairRecordIsReadOnly(record: LooseDict): boolean {
-  return repairRecordIsCompleted(record) || repairRecordStateLocked(record) || record.read_only === true;
+  return repairRecordStateLocked(record) || record.read_only === true;
 }
 
 function recordLatestTimeLabel(record: LooseDict): string {
@@ -3235,7 +3234,7 @@ function refreshProjectsAfterSave(): void {
 async function saveRecord(): Promise<boolean> {
   if (saving.value) return false;
   if (selectedRecordReadOnly.value) {
-    showMessage("已完成维修项目不能修改。", "warning");
+    showMessage("跟进状态暂未确认，当前不能修改。", "warning");
     return false;
   }
   validationAttempted.value = true;
@@ -3345,7 +3344,7 @@ async function saveRecord(): Promise<boolean> {
 function requestDeleteRecord(): void {
   if (!editingRecordId.value) return;
   if (selectedRecordReadOnly.value) {
-    showMessage("已完成维修项目不能删除。", "warning");
+    showMessage("跟进状态暂未确认，当前不能删除。", "warning");
     return;
   }
   openConfirmation(

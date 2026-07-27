@@ -17732,17 +17732,17 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         )
         self.assertEqual(completed_payload["workflow"], "维修完成")
         self.assertTrue(completed_payload["is_completed"])
-        self.assertTrue(completed_payload["read_only"])
+        self.assertFalse(completed_payload["read_only"])
         self.assertEqual(completed_payload["progress_percent"], 100)
 
-    def test_repair_management_records_before_2026_07_21_are_legacy_completed(self):
+    def test_repair_management_created_date_never_forces_completion(self):
         service = _TestMaintenancePortalService()
 
-        legacy_payload = service._repair_management_record_payload(
+        old_record_payload = service._repair_management_record_payload(
             {
-                "record_id": "rec_repair_legacy",
+                "record_id": "rec_repair_old",
                 "created_time": "2026-07-20 23:59",
-                "display_fields": {"维修名称": "历史维修项目"},
+                "display_fields": {"维修名称": "较早创建的维修项目"},
                 "raw_fields": {"流程-L": "维修中"},
             },
             authoritative_followups=[],
@@ -17756,11 +17756,11 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             },
             authoritative_followups=[],
         )
-        reactivated_legacy_payload = service._repair_management_record_payload(
+        old_record_with_start_payload = service._repair_management_record_payload(
             {
-                "record_id": "rec_repair_legacy_reactivated",
+                "record_id": "rec_repair_old_with_start",
                 "created_time": "2026-07-20 12:00",
-                "display_fields": {"维修名称": "重新开始的历史维修项目"},
+                "display_fields": {"维修名称": "已有开始时间的较早项目"},
                 "raw_fields": {
                     "流程-L": "维修中",
                     "维修开始时间": "2026-07-22 09:00",
@@ -17769,33 +17769,30 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             authoritative_followups=[],
         )
 
-        self.assertTrue(legacy_payload["is_completed"])
-        self.assertTrue(legacy_payload["read_only"])
-        self.assertEqual(legacy_payload["workflow"], "维修完成")
-        self.assertEqual(legacy_payload["progress_percent"], 100)
-        self.assertEqual(
-            legacy_payload["display_fields"]["当前维修进度"],
-            "100%",
-        )
+        self.assertFalse(old_record_payload["is_completed"])
+        self.assertFalse(old_record_payload["read_only"])
+        self.assertEqual(old_record_payload["workflow"], "维修中")
+        self.assertEqual(old_record_payload["progress_percent"], 0)
+        self.assertEqual(old_record_payload["display_fields"]["当前维修进度"], "0%")
         self.assertFalse(boundary_payload["is_completed"])
         self.assertFalse(boundary_payload["read_only"])
         self.assertEqual(boundary_payload["workflow"], "维修中")
-        self.assertFalse(reactivated_legacy_payload["is_completed"])
-        self.assertFalse(reactivated_legacy_payload["read_only"])
-        self.assertEqual(reactivated_legacy_payload["workflow"], "维修中")
+        self.assertFalse(old_record_with_start_payload["is_completed"])
+        self.assertFalse(old_record_with_start_payload["read_only"])
+        self.assertEqual(old_record_with_start_payload["workflow"], "维修中")
 
-    def test_repair_management_legacy_completion_uses_created_date_field(self):
+    def test_repair_management_created_date_field_does_not_complete_record(self):
         service = _TestMaintenancePortalService()
         record = {
-            "record_id": "rec_repair_legacy_created_field",
+            "record_id": "rec_repair_old_created_field",
             "display_fields": {
-                "维修名称": "旧维修项目",
+                "维修名称": "较早创建的维修项目",
                 "创建日期": "2026/07/20 08:30",
             },
             "raw_fields": {},
         }
 
-        self.assertTrue(service._repair_management_is_completed(record))
+        self.assertFalse(service._repair_management_is_completed(record))
 
     def test_repair_management_record_payload_formats_epoch_times(self):
         service = _TestMaintenancePortalService()
@@ -18150,7 +18147,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             ["rec_completed"],
         )
         self.assertTrue(completed_payload["records"][0]["is_completed"])
-        self.assertTrue(completed_payload["records"][0]["read_only"])
+        self.assertFalse(completed_payload["records"][0]["read_only"])
 
     def test_repair_management_status_separates_active_and_completed_projects(self):
         service = _TestMaintenancePortalService()
@@ -22870,10 +22867,13 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             },
         ]
         captured = {}
+        workflows: list[str] = []
         service._ensure_repair_management_record_in_scope = (  # type: ignore[method-assign]
             lambda *_args, **_kwargs: {
                 "record_id": "rec_summary",
-                "raw_fields": {},
+                "raw_fields": {
+                    "维修结束时间（2026）": "2026-07-10 12:00",
+                },
             }
         )
         service._load_table_fields = (  # type: ignore[method-assign]
@@ -22928,6 +22928,12 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         service._patch_record_fields = (  # type: ignore[method-assign]
             lambda **kwargs: captured.update(kwargs) or {"code": 0}
         )
+        service._sync_repair_management_workflow = (  # type: ignore[method-assign]
+            lambda **kwargs: (
+                workflows.append(str(kwargs.get("workflow") or "")),
+                [],
+            )
+        )
 
         service._sync_repair_management_from_followup(
             summary_record_id="rec_summary",
@@ -22954,6 +22960,21 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(fields["更换备件数量"], 5)
         self.assertEqual(fields["故障维修总费用（跟进完成的维修项）"], 100)
         self.assertNotIn("维修方案附件", fields)
+        self.assertEqual(workflows[-1], "维修中")
+
+        followups[0]["display_fields"]["维修进度"] = "1"
+        service._sync_repair_management_from_followup(
+            summary_record_id="rec_summary",
+            scope="ALL",
+        )
+        self.assertEqual(workflows[-1], "维修完成")
+
+        followups[0]["display_fields"]["维修进度"] = "0.5"
+        service._sync_repair_management_from_followup(
+            summary_record_id="rec_summary",
+            scope="ALL",
+        )
+        self.assertEqual(workflows[-1], "维修中")
 
     def test_repair_followup_bind_candidates_only_include_unbound_scope_records(self):
         service = _TestMaintenancePortalService()
