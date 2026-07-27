@@ -4195,7 +4195,7 @@ class LanPortalStateStore:
             project_source_key
         )
         normalized_state = self._text(state).lower()
-        if normalized_state not in {"active", "completed"}:
+        if normalized_state not in {"all", "active", "completed"}:
             normalized_state = "active"
         normalized_period = self._text(period).lower()
         if normalized_period not in {"today", "week", "month", "all"}:
@@ -4209,8 +4209,11 @@ class LanPortalStateStore:
                 "has_more": False,
             }
         normalized_scope = self._text(scope).upper() or "ALL"
-        clauses = ["p.source_key = ?", "i.state = ?"]
-        params: list[Any] = [project_source_key, normalized_state]
+        clauses = ["p.source_key = ?"]
+        params: list[Any] = [project_source_key]
+        if normalized_state != "all":
+            clauses.append("i.state = ?")
+            params.append(normalized_state)
         if normalized_state == "completed" and normalized_period != "all":
             now = time.localtime()
             today_start = time.mktime(
@@ -4291,14 +4294,38 @@ class LanPortalStateStore:
         max_limit = max(1, min(int(limit or 200), 500))
         page_offset = max(0, int(offset or 0))
         where_sql = " AND ".join(clauses)
+        workflow_order_sql = """
+            CASE
+                WHEN i.workflow = '未开始' THEN 0
+                WHEN i.workflow = '维修中' THEN 1
+                WHEN i.workflow = '维修完成' THEN 2
+                WHEN i.state = 'active' THEN 1
+                WHEN i.state = 'completed' THEN 2
+                ELSE 3
+            END
+        """
         if normalized_state == "completed":
             order_sql = """
                 i.completed_at DESC,
                 p.sort_time DESC,
                 p.record_id ASC
             """
+        elif normalized_state == "all":
+            order_sql = f"""
+                {workflow_order_sql} ASC,
+                CASE
+                    WHEN i.workflow = '维修完成' AND i.completed_at > 0
+                    THEN i.completed_at
+                    WHEN i.latest_followup_sort_time > 0
+                    THEN i.latest_followup_sort_time
+                    ELSE p.sort_time
+                END DESC,
+                p.sort_time DESC,
+                p.record_id ASC
+            """
         else:
-            order_sql = """
+            order_sql = f"""
+                {workflow_order_sql} ASC,
                 CASE
                     WHEN i.latest_followup_sort_time > 0
                     THEN i.latest_followup_sort_time

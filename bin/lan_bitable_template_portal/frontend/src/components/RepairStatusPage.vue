@@ -23,7 +23,7 @@
       </button>
       <button type="button" :class="{ active: activeState === 'without_followup' }" @click="setStatusFilter('without_followup')">
         <span class="summary-icon amber"><CircleAlert :size="19" aria-hidden="true" /></span>
-        <span><small>待首次跟进</small><strong>{{ stats.without_followup }}</strong></span>
+        <span><small>未开始</small><strong>{{ stats.without_followup }}</strong></span>
       </button>
       <button type="button" :class="{ active: activeState === 'in_progress' }" @click="setStatusFilter('in_progress')">
         <span class="summary-icon teal"><Activity :size="19" aria-hidden="true" /></span>
@@ -194,13 +194,13 @@ const responseCache = new Map<string, { payload: LooseDict; cachedAt: number }>(
 const pageCount = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)));
 const statusViewTitle = computed(() => ({
   all: "当前状态项目",
-  without_followup: "待首次跟进",
+  without_followup: "未开始",
   in_progress: "维修进行中",
   completed: "历史已完成",
 }[activeState.value]));
 const statusEmptyText = computed(() => ({
   all: "当前没有待处理检修项目",
-  without_followup: "当前没有待首次跟进的项目",
+  without_followup: "当前没有未开始的项目",
   in_progress: "当前没有维修进行中的项目",
   completed: "当前时间范围内没有已完成项目",
 }[activeState.value]));

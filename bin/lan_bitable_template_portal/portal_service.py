@@ -12513,6 +12513,63 @@ class MaintenancePortalService:
             return REPAIR_MANAGEMENT_IN_PROGRESS_WORKFLOW
         return REPAIR_MANAGEMENT_NOT_STARTED_WORKFLOW
 
+    @classmethod
+    def _repair_management_effective_workflow(
+        cls,
+        record: dict[str, Any],
+        *,
+        has_followup: bool,
+        latest_progress_percent: float | None,
+        meta_by_name: dict[str, FieldMeta] | None = None,
+    ) -> str:
+        raw_fields = (
+            record.get("raw_fields")
+            if isinstance(record.get("raw_fields"), dict)
+            else {}
+        )
+        display_fields = (
+            record.get("display_fields")
+            if isinstance(record.get("display_fields"), dict)
+            else {}
+        )
+        start_value = raw_fields.get("维修开始时间")
+        if start_value in (None, "", [], {}):
+            start_value = display_fields.get("维修开始时间")
+        end_value = raw_fields.get("维修结束时间（2026）")
+        if end_value in (None, "", [], {}):
+            end_value = display_fields.get("维修结束时间（2026）")
+        workflow = cls._repair_management_workflow_for_state(
+            start_value=start_value,
+            end_value=end_value,
+            has_followup=has_followup,
+            latest_progress_percent=latest_progress_percent,
+        )
+        stored_workflow = re.sub(
+            r"\s+",
+            "",
+            cls._repair_management_workflow_text(
+                record,
+                meta_by_name=meta_by_name,
+            ),
+        )
+        if (
+            workflow == REPAIR_MANAGEMENT_NOT_STARTED_WORKFLOW
+            and stored_workflow
+            in {
+                REPAIR_MANAGEMENT_NOT_STARTED_WORKFLOW,
+                REPAIR_MANAGEMENT_IN_PROGRESS_WORKFLOW,
+            }
+        ):
+            workflow = stored_workflow
+        if cls._repair_management_is_completed(
+            record,
+            meta_by_name=meta_by_name,
+            has_followup=has_followup,
+            latest_progress_percent=latest_progress_percent,
+        ):
+            return REPAIR_MANAGEMENT_COMPLETED_WORKFLOW
+        return workflow
+
     def _sync_repair_management_workflow(
         self,
         *,
@@ -12810,11 +12867,12 @@ class MaintenancePortalService:
                 else {}
             )
             completed_at_ms: int | None = None
-            is_completed = self._repair_management_is_completed(
+            workflow = self._repair_management_effective_workflow(
                 project,
                 has_followup=bool(linked),
                 latest_progress_percent=latest_progress_percent,
             )
+            is_completed = workflow == REPAIR_MANAGEMENT_COMPLETED_WORKFLOW
             if is_completed:
                 completion_values = [
                     project_fields.get("维修结束时间（2026）"),
@@ -12832,7 +12890,9 @@ class MaintenancePortalService:
             item_state = (
                 "completed"
                 if is_completed
-                else "in_progress" if linked else "without_followup"
+                else "in_progress"
+                if workflow == REPAIR_MANAGEMENT_IN_PROGRESS_WORKFLOW
+                else "without_followup"
             )
             source_event_ids = self._repair_management_record_ids(
                 project_raw_fields.get("关联事件单")
@@ -12866,10 +12926,13 @@ class MaintenancePortalService:
                         project_fields.get("故障维修原因")
                     ),
                     "state": item_state,
+                    "workflow": workflow,
                     "status_label": (
                         "历史已完成"
                         if is_completed
-                        else "维修进行中" if linked else "待首次跟进"
+                        else "维修进行中"
+                        if workflow == REPAIR_MANAGEMENT_IN_PROGRESS_WORKFLOW
+                        else "未开始"
                     ),
                     "followup_count": len(linked),
                     "completed_followup_count": completed_count,
@@ -13135,37 +13198,13 @@ class MaintenancePortalService:
             has_followup = int(authoritative_followup_count or 0) > 0
         else:
             has_followup = bool(followup_ids)
-        start_value = raw_fields.get("维修开始时间")
-        if start_value in (None, "", [], {}):
-            start_value = display_fields.get("维修开始时间")
-        end_value = raw_fields.get("维修结束时间（2026）")
-        if end_value in (None, "", [], {}):
-            end_value = display_fields.get("维修结束时间（2026）")
-        workflow = self._repair_management_workflow_for_state(
-            start_value=start_value,
-            end_value=end_value,
+        workflow = self._repair_management_effective_workflow(
+            item,
             has_followup=has_followup,
             latest_progress_percent=progress_percent,
-        )
-        stored_workflow = self._repair_management_workflow_text(
-            item,
             meta_by_name=meta_by_name,
         )
-        if (
-            workflow == REPAIR_MANAGEMENT_NOT_STARTED_WORKFLOW
-            and stored_workflow
-            and re.sub(r"\s+", "", stored_workflow)
-            != REPAIR_MANAGEMENT_COMPLETED_WORKFLOW
-        ):
-            workflow = stored_workflow
-        is_completed = self._repair_management_is_completed(
-            item,
-            meta_by_name=meta_by_name,
-            has_followup=has_followup,
-            latest_progress_percent=progress_percent,
-        )
-        if is_completed:
-            workflow = REPAIR_MANAGEMENT_COMPLETED_WORKFLOW
+        is_completed = workflow == REPAIR_MANAGEMENT_COMPLETED_WORKFLOW
         payload = {
             "record_id": str(item.get("record_id") or ""),
             "record_version": self._repair_record_version(item),
@@ -13346,31 +13385,21 @@ class MaintenancePortalService:
         )
         if snapshot_schema is not None:
             metas, meta_by_name = snapshot_schema
-            if normalized_state == "all":
-                snapshot_page = self._state_store.query_repair_snapshot_page(
+            self._ensure_repair_project_status_index(
+                force_refresh=force_refresh
+            )
+            snapshot_page = (
+                self._state_store.query_repair_project_status_page(
                     REPAIR_SNAPSHOT_SOURCE_PROJECTS,
                     scope=self._normalize_scope(scope),
                     query=query,
+                    state=normalized_state,
+                    period=period,
                     limit=limit,
                     offset=max(0, int(offset or 0)),
                     focus_record_id=focus_record_id,
                 )
-            else:
-                self._ensure_repair_project_status_index(
-                    force_refresh=force_refresh
-                )
-                snapshot_page = (
-                    self._state_store.query_repair_project_status_page(
-                        REPAIR_SNAPSHOT_SOURCE_PROJECTS,
-                        scope=self._normalize_scope(scope),
-                        query=query,
-                        state=normalized_state,
-                        period=period,
-                        limit=limit,
-                        offset=max(0, int(offset or 0)),
-                        focus_record_id=focus_record_id,
-                    )
-                )
+            )
             page_records = [
                 item
                 for item in (snapshot_page.get("records") or [])
@@ -13472,17 +13501,31 @@ class MaintenancePortalService:
             followup_state_verified = False
             followup_state_warning = f"维修跟进状态暂未确认：{exc}"
 
-        def record_is_completed(item: dict[str, Any]) -> bool:
+        workflow_by_record: dict[str, str] = {}
+
+        def record_workflow(item: dict[str, Any]) -> str:
             record_id = str(item.get("record_id") or "").strip()
+            cached = workflow_by_record.get(record_id)
+            if cached:
+                return cached
             linked = list(followups_by_record.get(record_id) or [])
             has_followup, latest_progress_percent = (
                 self._repair_management_latest_followup_progress(linked)
             )
-            return self._repair_management_is_completed(
+            workflow = self._repair_management_effective_workflow(
                 item,
                 meta_by_name=meta_by_name,
                 has_followup=has_followup,
                 latest_progress_percent=latest_progress_percent,
+            )
+            if record_id:
+                workflow_by_record[record_id] = workflow
+            return workflow
+
+        def record_is_completed(item: dict[str, Any]) -> bool:
+            return (
+                record_workflow(item)
+                == REPAIR_MANAGEMENT_COMPLETED_WORKFLOW
             )
 
         records = [
@@ -13577,6 +13620,14 @@ class MaintenancePortalService:
                 item.get("last_modified_time") or item.get("created_time") or ""
             ),
             reverse=True,
+        )
+        workflow_rank = {
+            REPAIR_MANAGEMENT_NOT_STARTED_WORKFLOW: 0,
+            REPAIR_MANAGEMENT_IN_PROGRESS_WORKFLOW: 1,
+            REPAIR_MANAGEMENT_COMPLETED_WORKFLOW: 2,
+        }
+        records.sort(
+            key=lambda item: workflow_rank.get(record_workflow(item), 3)
         )
         max_limit = max(1, min(int(limit or 200), 500))
         page_offset = max(0, int(offset or 0))

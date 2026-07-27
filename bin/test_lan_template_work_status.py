@@ -17820,8 +17820,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             "SingleSelect",
             3,
             False,
-            {"opt_in_progress": "维修进行中"},
-            ["维修进行中"],
+            {"opt_in_progress": "维修中"},
+            ["维修中"],
             False,
         )
 
@@ -17834,7 +17834,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             meta_by_name={"流程": workflow_meta},
         )
 
-        self.assertEqual(payload["workflow"], "维修进行中")
+        self.assertEqual(payload["workflow"], "维修中")
         self.assertEqual(payload["progress_percent"], 100)
 
     def test_repair_management_followup_count_ignores_stale_backlink(self):
@@ -18132,12 +18132,16 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
         self.assertEqual(all_payload["total"], 3)
         self.assertEqual(all_payload["state"], "all")
+        self.assertEqual(
+            [item["record_id"] for item in all_payload["records"]],
+            ["rec_active_old", "rec_active_new", "rec_completed"],
+        )
         self.assertEqual(active_payload["total"], 2)
         self.assertEqual(
             [item["record_id"] for item in active_payload["records"]],
-            ["rec_active_new"],
+            ["rec_active_old"],
         )
-        self.assertEqual(active_payload["records"][0]["workflow"], "维修中")
+        self.assertEqual(active_payload["records"][0]["workflow"], "未开始")
         self.assertFalse(active_payload["records"][0]["read_only"])
         self.assertTrue(active_payload["has_more"])
         self.assertEqual(completed_payload["total"], 1)
@@ -18167,6 +18171,16 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "维修名称": "E楼维修进行中",
                     "所属数据中心/楼栋-使用": "南通E楼",
                     "所属专业": "电气",
+                },
+                "raw_fields": {},
+            },
+            {
+                "record_id": "rec_started_without_followup",
+                "display_fields": {
+                    "维修名称": "E楼已开始待首次跟进",
+                    "所属数据中心/楼栋-使用": "南通E楼",
+                    "所属专业": "电气",
+                    "维修开始时间": "2026-07-13 08:00",
                 },
                 "raw_fields": {},
             },
@@ -18269,14 +18283,22 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             [
                 "rec_without_followup",
                 "rec_workflow_completed_stale",
+                "rec_started_without_followup",
                 "rec_in_progress",
             ],
         )
-        self.assertEqual(payload["stats"]["total"], 3)
+        self.assertEqual(payload["stats"]["total"], 4)
         self.assertEqual(payload["stats"]["without_followup"], 2)
-        self.assertEqual(payload["stats"]["in_progress"], 1)
+        self.assertEqual(payload["stats"]["in_progress"], 2)
         self.assertEqual(payload["stats"]["completed_total"], 2)
         self.assertEqual(payload["stats"]["completed_today"], 1)
+        started_without_followup = next(
+            item
+            for item in payload["records"]
+            if item["record_id"] == "rec_started_without_followup"
+        )
+        self.assertEqual(started_without_followup["state"], "in_progress")
+        self.assertEqual(started_without_followup["workflow"], "维修中")
         in_progress_record = next(
             item
             for item in payload["records"]

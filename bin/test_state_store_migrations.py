@@ -299,6 +299,95 @@ class StateStoreMigrationTests(unittest.TestCase):
             )
             self.assertEqual(all_completed["total"], 4)
 
+    def test_repair_project_status_page_orders_workflow_before_recency(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            now = time.time()
+            project_rows = [
+                ("rec_completed", "已完成", now + 30),
+                ("rec_in_progress_old", "维修中旧记录", now + 10),
+                ("rec_not_started", "未开始", now),
+                ("rec_in_progress_new", "维修中新记录", now + 20),
+            ]
+            store.replace_repair_snapshot(
+                "repair_projects",
+                records=[
+                    {
+                        "record_id": record_id,
+                        "scope_codes": ["A"],
+                        "title": title,
+                        "sort_time": sort_time,
+                        "payload": {"record_id": record_id},
+                    }
+                    for record_id, title, sort_time in project_rows
+                ],
+            )
+            store.replace_repair_project_status_index(
+                [
+                    {
+                        "record_id": "rec_completed",
+                        "state": "completed",
+                        "workflow": "维修完成",
+                        "completed_at": now + 30,
+                    },
+                    {
+                        "record_id": "rec_in_progress_old",
+                        "state": "active",
+                        "workflow": "维修中",
+                        "latest_followup_sort_time": now + 10,
+                    },
+                    {
+                        "record_id": "rec_not_started",
+                        "state": "active",
+                        "workflow": "未开始",
+                    },
+                    {
+                        "record_id": "rec_in_progress_new",
+                        "state": "active",
+                        "workflow": "维修中",
+                        "latest_followup_sort_time": now + 20,
+                    },
+                ],
+                source_signature="workflow-order-v1",
+            )
+
+            first_page = store.query_repair_project_status_page(
+                "repair_projects",
+                scope="A",
+                state="all",
+                limit=2,
+            )
+            second_page = store.query_repair_project_status_page(
+                "repair_projects",
+                scope="A",
+                state="all",
+                limit=2,
+                offset=2,
+            )
+            active_page = store.query_repair_project_status_page(
+                "repair_projects",
+                scope="A",
+                state="active",
+            )
+
+            self.assertEqual(first_page["total"], 4)
+            self.assertEqual(
+                [item["record_id"] for item in first_page["records"]],
+                ["rec_not_started", "rec_in_progress_new"],
+            )
+            self.assertEqual(
+                [item["record_id"] for item in second_page["records"]],
+                ["rec_in_progress_old", "rec_completed"],
+            )
+            self.assertEqual(
+                [item["record_id"] for item in active_page["records"]],
+                [
+                    "rec_not_started",
+                    "rec_in_progress_new",
+                    "rec_in_progress_old",
+                ],
+            )
+
     def test_business_operation_audit_preserves_context_on_completion(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = LanPortalStateStore(Path(tmp) / "state.sqlite3")

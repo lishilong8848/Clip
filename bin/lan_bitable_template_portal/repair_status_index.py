@@ -6,7 +6,7 @@ import json
 from typing import Any, Callable
 
 
-REPAIR_PROJECT_STATUS_INDEX_VERSION = 3
+REPAIR_PROJECT_STATUS_INDEX_VERSION = 4
 REPAIR_COMPLETION_FIELD_NAMES = (
     "维修结束时间（2026）",
     "维修结束时间",

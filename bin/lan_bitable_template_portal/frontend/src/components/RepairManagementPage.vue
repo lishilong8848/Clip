@@ -2518,6 +2518,38 @@ function mergeProjectSummary(existing: LooseDict, patch: LooseDict): LooseDict {
   };
 }
 
+function repairProjectWorkflowRank(record: LooseDict): number {
+  const workflow = String(record.workflow || "").replace(/\s+/g, "");
+  if (workflow === "未开始") return 0;
+  if (workflow === "维修中") return 1;
+  if (workflow === "维修完成" || repairRecordIsCompleted(record)) return 2;
+  return 3;
+}
+
+function repairProjectSortTime(record: LooseDict): number {
+  const value = record.latest_followup_time
+    || record.last_modified_time
+    || record.created_time
+    || "";
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric > 0) {
+    return numeric < 10_000_000_000 ? numeric * 1000 : numeric;
+  }
+  const parsed = Date.parse(String(value).replace(" ", "T"));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function sortRepairProjectPage(items: LooseDict[]): LooseDict[] {
+  return items
+    .map((record, index) => ({ record, index }))
+    .sort((left, right) => (
+      repairProjectWorkflowRank(left.record) - repairProjectWorkflowRank(right.record)
+      || repairProjectSortTime(right.record) - repairProjectSortTime(left.record)
+      || left.index - right.index
+    ))
+    .map(({ record }) => record);
+}
+
 function applyRepairProjectPatch(patch: LooseDict, created = false): boolean {
   const recordId = String(patch.record_id || "").trim();
   if (!recordId) return true;
@@ -2529,9 +2561,11 @@ function applyRepairProjectPatch(patch: LooseDict, created = false): boolean {
   const merged = mergeProjectSummary(existing, patch);
   const matches = repairRecordMatchesCurrentView(merged);
   if (existingIndex >= 0 && matches) {
-    records.value = records.value.map((item, index) => (
-      index === existingIndex ? merged : item
-    ));
+    records.value = sortRepairProjectPage(
+      records.value.map((item, index) => (
+        index === existingIndex ? merged : item
+      )),
+    );
   } else if (existingIndex >= 0 && !matches) {
     records.value = records.value.filter(
       (item) => String(item.record_id || "").trim() !== recordId,
@@ -2539,7 +2573,9 @@ function applyRepairProjectPatch(patch: LooseDict, created = false): boolean {
     total.value = Math.max(0, total.value - 1);
   } else if (matches && recordPage.value === 1) {
     if (!created) return true;
-    records.value = [merged, ...records.value].slice(0, RECORD_PAGE_SIZE);
+    records.value = sortRepairProjectPage(
+      [merged, ...records.value],
+    ).slice(0, RECORD_PAGE_SIZE);
     total.value += 1;
   }
   if (editingRecordId.value !== recordId || !selectedRecord.value) return false;
@@ -3208,11 +3244,13 @@ function applySavedProjectRecord(
     (item) => String(item.record_id || "").trim() === normalizedRecordId,
   );
   if (existingIndex >= 0) {
-    records.value = records.value.map((item, index) => (
-      index === existingIndex ? savedRecord : item
-    ));
+    records.value = sortRepairProjectPage(
+      records.value.map((item, index) => (
+        index === existingIndex ? savedRecord : item
+      )),
+    );
   } else {
-    records.value = [savedRecord, ...records.value];
+    records.value = sortRepairProjectPage([savedRecord, ...records.value]);
     total.value = Math.max(records.value.length, total.value + 1);
   }
   editingRecordId.value = normalizedRecordId;
