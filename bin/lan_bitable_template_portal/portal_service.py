@@ -12,6 +12,7 @@ import io
 import json
 import logging
 import math
+import mimetypes
 import os
 import re
 import secrets
@@ -85,6 +86,41 @@ EVENT_I2_OR_HIGHER_LEVELS = frozenset(
     }
 )
 EVENT_I3_LEVEL = "I3"
+WATER_CONSUMPTION_APP_TOKEN = "ASLxbfESPahdTKs0A9NccgbrnXc"
+WATER_CONSUMPTION_TABLE_ID = "tbl6Py6PQzqKGMzO"
+WATER_CONSUMPTION_SCOPE_CODES = ("A", "B", "C", "D", "E", "H")
+WATER_CONSUMPTION_SCOPE_LABELS = {
+    "A": "A楼",
+    "B": "B楼",
+    "C": "C楼",
+    "D": "D楼",
+    "E": "E楼",
+    "H": "H楼",
+}
+WATER_CONSUMPTION_WRITABLE_FIELDS = frozenset(
+    {
+        "楼栋",
+        "水表",
+        "统计频次",
+        "班次",
+        "统计日期",
+        "当期耗水量（修正）",
+        "水表数值",
+        "水表照片",
+    }
+)
+WATER_CONSUMPTION_READONLY_FIELDS = (
+    "变更编码&描述",
+    "自增编号",
+    "辅助列-上期日期",
+    "辅助列-上期数值",
+    "当期耗水量（t）",
+    "辅助列-上期耗水量",
+    "耗水量同比",
+    "创建时间",
+)
+WATER_CONSUMPTION_SNAPSHOT_TTL_SECONDS = 30 * 60
+WATER_CONSUMPTION_IMAGE_MAX_BYTES = 8 * 1024 * 1024
 REPAIR_MANAGEMENT_RETIRED_FIELD_NAMES = frozenset(
     {
         "维修名称",
@@ -1074,6 +1110,7 @@ class MaintenancePortalService:
         # maintenance, repair, and CMDB reads because each client serializes
         # requests while reusing its TLS connection.
         self._event_http_client = FeishuHttpClient()
+        self._water_consumption_image_http_client = FeishuHttpClient()
         # Keep interactive record mutations independent from long-running
         # snapshot/catalog reads. FeishuHttpClient serializes calls per client.
         self._write_http_client = FeishuHttpClient(retries=1)
@@ -1161,6 +1198,15 @@ class MaintenancePortalService:
         self._signature_people_cache: dict[str, Any] | None = None
         self._external_signature_people_cache_lock = threading.RLock()
         self._external_signature_people_cache: dict[str, Any] | None = None
+        self._water_consumption_refresh_lock = threading.Lock()
+        self._water_consumption_refresh_worker_lock = threading.RLock()
+        self._water_consumption_refresh_worker_running = False
+        self._water_consumption_refresh_worker_pending = False
+        self._water_consumption_field_cache_lock = threading.RLock()
+        self._water_consumption_field_cache: dict[str, Any] | None = None
+        self._water_consumption_image_cache_lock = threading.RLock()
+        self._water_consumption_record_locks_guard = threading.RLock()
+        self._water_consumption_record_locks: dict[str, threading.RLock] = {}
         self._signature_crypto = SignatureCryptoManager()
         self._signature_crypto_migration_lock = threading.RLock()
         self._signature_crypto_migration_running = False
@@ -15581,6 +15627,1279 @@ class MaintenancePortalService:
             "config_missing": config_missing,
             "config_error": config_error,
         }
+
+    @staticmethod
+    def _water_scope_code(value: Any) -> str:
+        text = str(value or "").strip().upper()
+        if text in WATER_CONSUMPTION_SCOPE_CODES:
+            return text
+        match = re.search(r"(?<![A-Z])([ABCDEH])(?:楼|栋)?", text)
+        return match.group(1) if match and match.group(1) in WATER_CONSUMPTION_SCOPE_CODES else ""
+
+    @classmethod
+    def _water_plain_text(cls, value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, (int, float)):
+            return str(value)
+        if isinstance(value, dict):
+            for key in ("text", "name", "value"):
+                text = cls._water_plain_text(value.get(key))
+                if text:
+                    return text
+            return ""
+        if isinstance(value, (list, tuple, set)):
+            values = [
+                cls._water_plain_text(item)
+                for item in value
+            ]
+            return "、".join(item for item in values if item)
+        return str(value or "").strip()
+
+    @classmethod
+    def _water_number(cls, value: Any) -> float | None:
+        if value in (None, "", [], {}):
+            return None
+        if isinstance(value, bool):
+            return float(int(value))
+        if isinstance(value, (int, float)):
+            number = float(value)
+            return number if math.isfinite(number) else None
+        if isinstance(value, (list, tuple)) and len(value) == 1:
+            return cls._water_number(value[0])
+        text = cls._water_plain_text(value)
+        if not text:
+            return None
+        text = text.replace(",", "").replace("，", "").strip()
+        if text.startswith("[") and text.endswith("]"):
+            with suppress(Exception):
+                decoded = json.loads(text)
+                return cls._water_number(decoded)
+        text = text.rstrip("%").strip()
+        try:
+            number = float(text)
+        except (TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) else None
+
+    @classmethod
+    def _water_datetime_ms(cls, value: Any) -> int:
+        if isinstance(value, (int, float)):
+            number = float(value)
+            if number > 10_000_000_000:
+                return int(number)
+            if number > 1_000_000_000:
+                return int(number * 1000)
+        text = cls._water_plain_text(value)
+        if not text:
+            return 0
+        if re.fullmatch(r"\d{10,13}", text):
+            number = int(text)
+            return number if number > 10_000_000_000 else number * 1000
+        parsed = cls._parse_notice_datetime(text)
+        return int(parsed.timestamp() * 1000) if parsed else 0
+
+    @staticmethod
+    def _water_date_key(value_ms: int) -> str:
+        if not value_ms:
+            return ""
+        try:
+            return dt.datetime.fromtimestamp(value_ms / 1000).strftime("%Y-%m-%d")
+        except (OSError, OverflowError, ValueError):
+            return ""
+
+    @classmethod
+    def _water_previous_date_text(cls, value: Any) -> str:
+        number = cls._water_number(value)
+        if number is not None and 20_000 <= number <= 80_000:
+            with suppress(Exception):
+                return (
+                    dt.datetime(1899, 12, 30) + dt.timedelta(days=number)
+                ).strftime("%Y-%m-%d")
+        value_ms = cls._water_datetime_ms(value)
+        if value_ms:
+            return cls._water_date_key(value_ms)
+        return cls._water_plain_text(value)
+
+    @staticmethod
+    def _water_image_id(record_id: str, file_token: str) -> str:
+        raw = f"{record_id}:{file_token}".encode("utf-8")
+        return hashlib.sha256(raw).hexdigest()[:32]
+
+    @staticmethod
+    def _water_photo_display_name(file_name: Any, index: int = 0) -> str:
+        name = Path(str(file_name or "").strip()).name
+        suffix = Path(name).suffix.lower()
+        stem = Path(name).stem
+        if not suffix:
+            suffix = ".jpg"
+        if not stem or re.fullmatch(r"[0-9a-fA-F]{24,64}", stem):
+            return f"水表照片 {max(0, int(index)) + 1}{suffix}"
+        return name
+
+    @classmethod
+    def _water_photos(
+        cls, record_id: str, value: Any
+    ) -> list[dict[str, Any]]:
+        photos: list[dict[str, Any]] = []
+        for index, item in enumerate(value if isinstance(value, list) else []):
+            if not isinstance(item, dict):
+                continue
+            file_token = str(item.get("file_token") or "").strip()
+            if not file_token:
+                continue
+            photos.append(
+                {
+                    "image_id": cls._water_image_id(record_id, file_token),
+                    "file_token": file_token,
+                    "name": cls._water_photo_display_name(
+                        item.get("name"),
+                        index,
+                    ),
+                    "mime_type": str(
+                        item.get("type") or item.get("mime_type") or "image/jpeg"
+                    ).strip(),
+                    "size": int(item.get("size") or 0),
+                    "download_url": str(item.get("url") or "").strip(),
+                    "tmp_url": str(item.get("tmp_url") or "").strip(),
+                }
+            )
+        return photos
+
+    def _normalize_water_consumption_record(
+        self, normalized: dict[str, Any]
+    ) -> dict[str, Any]:
+        record_id = str(normalized.get("record_id") or "").strip()
+        raw_fields = (
+            normalized.get("raw_fields")
+            if isinstance(normalized.get("raw_fields"), dict)
+            else {}
+        )
+        display_fields = (
+            normalized.get("display_fields")
+            if isinstance(normalized.get("display_fields"), dict)
+            else {}
+        )
+        building = self._water_plain_text(
+            display_fields.get("楼栋") or raw_fields.get("楼栋")
+        )
+        scope_code = self._water_scope_code(building)
+        statistic_date_ms = self._water_datetime_ms(
+            raw_fields.get("统计日期") or display_fields.get("统计日期")
+        )
+        photos = self._water_photos(
+            record_id,
+            raw_fields.get("水表照片"),
+        )
+        meter = self._water_plain_text(
+            display_fields.get("水表") or raw_fields.get("水表")
+        )
+        frequency = self._water_plain_text(
+            display_fields.get("统计频次") or raw_fields.get("统计频次")
+        )
+        shift = self._water_plain_text(
+            display_fields.get("班次") or raw_fields.get("班次")
+        )
+        title = self._water_plain_text(
+            display_fields.get("变更编码&描述")
+            or raw_fields.get("变更编码&描述")
+        )
+        meter_value = self._water_number(raw_fields.get("水表数值"))
+        corrected_usage = self._water_number(raw_fields.get("当期耗水量（修正）"))
+        computed_usage = self._water_number(raw_fields.get("当期耗水量（t）"))
+        previous_usage = self._water_number(raw_fields.get("辅助列-上期耗水量"))
+        yoy_ratio = self._water_number(raw_fields.get("耗水量同比"))
+        statistic_date_key = self._water_date_key(statistic_date_ms)
+        source_updated_at = self._water_number(
+            normalized.get("last_modified_time")
+        ) or 0.0
+        return {
+            "record_id": record_id,
+            "scope_code": scope_code,
+            "building": building or WATER_CONSUMPTION_SCOPE_LABELS.get(scope_code, ""),
+            "title": title,
+            "auto_number": self._water_plain_text(
+                display_fields.get("自增编号") or raw_fields.get("自增编号")
+            ),
+            "meter": meter,
+            "frequency": frequency,
+            "shift": shift,
+            "statistic_date_ms": statistic_date_ms,
+            "statistic_date_key": statistic_date_key,
+            "statistic_date": statistic_date_key,
+            "meter_value": meter_value,
+            "corrected_usage": corrected_usage,
+            "computed_usage": computed_usage,
+            "previous_date_text": self._water_previous_date_text(
+                raw_fields.get("辅助列-上期日期")
+            ),
+            "previous_value_text": self._water_plain_text(
+                raw_fields.get("辅助列-上期数值")
+            ),
+            "previous_usage": previous_usage,
+            "yoy_ratio": yoy_ratio,
+            "created_time": self._format_source_datetime(
+                raw_fields.get("创建时间") or normalized.get("created_time")
+            ),
+            "version": str(normalized.get("last_modified_time") or ""),
+            "source_updated_at": source_updated_at,
+            "formula_pending": computed_usage is None,
+            "photos": photos,
+            "photo_count": len(photos),
+            "search_text": "\n".join(
+                item
+                for item in (
+                    title,
+                    building,
+                    meter,
+                    frequency,
+                    shift,
+                    statistic_date_key,
+                )
+                if item
+            ),
+        }
+
+    def _water_consumption_fields(
+        self, *, force: bool = False
+    ) -> tuple[list[FieldMeta], dict[str, FieldMeta], dict[str, list[str]]]:
+        now = time.time()
+        with self._water_consumption_field_cache_lock:
+            cached = self._water_consumption_field_cache
+            if (
+                not force
+                and isinstance(cached, dict)
+                and now - float(cached.get("loaded_at") or 0)
+                < 10 * 60
+            ):
+                metas = cached.get("metas")
+                by_name = cached.get("by_name")
+                options = cached.get("options")
+                if isinstance(metas, list) and isinstance(by_name, dict) and isinstance(options, dict):
+                    return metas, by_name, options
+        metas, by_name = self._load_table_fields(
+            app_token=WATER_CONSUMPTION_APP_TOKEN,
+            table_id=WATER_CONSUMPTION_TABLE_ID,
+        )
+        options = {
+            name: list(meta.option_names)
+            for name, meta in by_name.items()
+            if meta.option_names
+        }
+        with self._water_consumption_field_cache_lock:
+            self._water_consumption_field_cache = {
+                "loaded_at": now,
+                "metas": metas,
+                "by_name": by_name,
+                "options": options,
+            }
+        return metas, by_name, options
+
+    def refresh_water_consumption_snapshot(
+        self, *, force: bool = False
+    ) -> dict[str, Any]:
+        requested_at = time.time()
+        with self._water_consumption_refresh_lock:
+            current = self._state_store.get_water_consumption_snapshot_meta()
+            if (
+                current.get("exists")
+                and (
+                    (
+                        not force
+                        and requested_at - float(current.get("refreshed_at") or 0)
+                        < WATER_CONSUMPTION_SNAPSHOT_TTL_SECONDS
+                    )
+                    or float(current.get("refreshed_at") or 0) >= requested_at
+                )
+            ):
+                return {
+                    **current,
+                    "reused": True,
+                }
+            try:
+                metas, by_name, options = self._water_consumption_fields(force=force)
+                records = self._load_table_records(
+                    app_token=WATER_CONSUMPTION_APP_TOKEN,
+                    table_id=WATER_CONSUMPTION_TABLE_ID,
+                    meta_by_name=by_name,
+                    work_type="water",
+                    notice_type="水耗管理",
+                    http_client=self._event_http_client,
+                )
+                normalized = [
+                    self._normalize_water_consumption_record(item)
+                    for item in records
+                    if isinstance(item, dict)
+                ]
+                supported = [
+                    item
+                    for item in normalized
+                    if item.get("scope_code") in WATER_CONSUMPTION_SCOPE_CODES
+                ]
+                result = self._state_store.replace_water_consumption_snapshot(
+                    app_token=WATER_CONSUMPTION_APP_TOKEN,
+                    table_id=WATER_CONSUMPTION_TABLE_ID,
+                    fields=[
+                        {
+                            "field_id": meta.field_id,
+                            "field_name": meta.field_name,
+                            "field_type": meta.field_type,
+                            "ui_type": meta.ui_type,
+                            "editable": meta.field_name in WATER_CONSUMPTION_WRITABLE_FIELDS,
+                            "is_primary": meta.is_primary,
+                        }
+                        for meta in metas
+                    ],
+                    options=options,
+                    records=supported,
+                )
+                self._touch_state_cache_version()
+                return {
+                    **result,
+                    "ignored_records": len(normalized) - len(supported),
+                    "reused": False,
+                }
+            except Exception as exc:
+                self._state_store.mark_water_consumption_snapshot_failed(str(exc))
+                if isinstance(exc, PortalError):
+                    raise
+                raise PortalError(f"水耗记录同步失败：{exc}") from exc
+
+    def start_water_consumption_refresh_async(
+        self,
+        *,
+        force: bool = False,
+        delay_seconds: float = 0,
+    ) -> bool:
+        with self._water_consumption_refresh_worker_lock:
+            if self._water_consumption_refresh_worker_running:
+                if force:
+                    self._water_consumption_refresh_worker_pending = True
+                return False
+            self._water_consumption_refresh_worker_running = True
+
+        def worker() -> None:
+            rerun = False
+            try:
+                if delay_seconds > 0:
+                    time.sleep(min(float(delay_seconds), 10.0))
+                self.refresh_water_consumption_snapshot(force=force)
+            except Exception:
+                logging.getLogger(__name__).exception("后台刷新水耗快照失败")
+            finally:
+                with self._water_consumption_refresh_worker_lock:
+                    rerun = self._water_consumption_refresh_worker_pending
+                    self._water_consumption_refresh_worker_pending = False
+                    self._water_consumption_refresh_worker_running = False
+                if rerun:
+                    self.start_water_consumption_refresh_async(
+                        force=True,
+                        delay_seconds=1,
+                    )
+
+        threading.Thread(
+            target=worker,
+            name="WaterConsumptionSnapshotRefresh",
+            daemon=True,
+        ).start()
+        return True
+
+    def ensure_water_consumption_snapshot(self) -> dict[str, Any]:
+        meta = self._state_store.get_water_consumption_snapshot_meta()
+        if not meta.get("exists"):
+            failed_recently = (
+                str(meta.get("status") or "") == "failed"
+                and time.time() - float(meta.get("updated_at") or 0) < 60
+            )
+            if not failed_recently:
+                self.start_water_consumption_refresh_async(force=False)
+            return {
+                **meta,
+                "refreshing": self.water_consumption_refresh_running(),
+            }
+        if (
+            time.time() - float(meta.get("refreshed_at") or 0)
+            >= WATER_CONSUMPTION_SNAPSHOT_TTL_SECONDS
+        ):
+            self.start_water_consumption_refresh_async(force=False)
+        return {
+            **meta,
+            "refreshing": self.water_consumption_refresh_running(),
+        }
+
+    def water_consumption_refresh_running(self) -> bool:
+        with self._water_consumption_refresh_worker_lock:
+            return bool(self._water_consumption_refresh_worker_running)
+
+    @classmethod
+    def _water_allowed_scopes(
+        cls, scopes: list[str] | tuple[str, ...]
+    ) -> list[str]:
+        return list(
+            dict.fromkeys(
+                code
+                for code in (cls._water_scope_code(item) for item in scopes or [])
+                if code in WATER_CONSUMPTION_SCOPE_CODES
+            )
+        )
+
+    def water_consumption_buildings(
+        self, *, allowed_scopes: list[str] | tuple[str, ...]
+    ) -> dict[str, Any]:
+        self.ensure_water_consumption_snapshot()
+        scopes = self._water_allowed_scopes(allowed_scopes)
+        month = dt.datetime.now().strftime("%Y-%m")
+        current = self._state_store.water_consumption_summary(
+            scopes=scopes,
+            month=month,
+        )
+        all_time = self._state_store.water_consumption_summary(
+            scopes=scopes,
+        )
+        meta = self._state_store.get_water_consumption_snapshot_meta()
+        return {
+            "month": month,
+            "scopes": [
+                {
+                    "value": scope,
+                    "label": WATER_CONSUMPTION_SCOPE_LABELS[scope],
+                    "month_record_count": int(
+                        (current.get("scopes", {}).get(scope) or {}).get(
+                            "record_count", 0
+                        )
+                    ),
+                    "month_total_usage": float(
+                        (current.get("scopes", {}).get(scope) or {}).get(
+                            "total_usage", 0
+                        )
+                    ),
+                    "record_count": int(
+                        (all_time.get("scopes", {}).get(scope) or {}).get(
+                            "record_count", 0
+                        )
+                    ),
+                    "latest_date_ms": int(
+                        (all_time.get("scopes", {}).get(scope) or {}).get(
+                            "latest_date_ms", 0
+                        )
+                    ),
+                }
+                for scope in WATER_CONSUMPTION_SCOPE_CODES
+                if scope in scopes
+            ],
+            "snapshot": {
+                **meta,
+                "refreshing": self.water_consumption_refresh_running(),
+            },
+        }
+
+    def water_consumption_bootstrap(self, *, scope: str) -> dict[str, Any]:
+        scope_code = self._water_scope_code(scope)
+        if scope_code not in WATER_CONSUMPTION_SCOPE_CODES:
+            raise PortalError("水耗管理仅支持 A、B、C、D、E、H 楼。")
+        self.ensure_water_consumption_snapshot()
+        meta = self._state_store.get_water_consumption_snapshot_meta()
+        month = dt.datetime.now().strftime("%Y-%m")
+        summary = self._state_store.water_consumption_summary(
+            scopes=[scope_code],
+            month=month,
+        )
+        filter_values = self._state_store.water_consumption_filter_values(
+            scope=scope_code
+        )
+        options = meta.get("options") if isinstance(meta.get("options"), dict) else {}
+        all_meters = [
+            str(item or "").strip()
+            for item in (options.get("水表") or [])
+            if str(item or "").strip()
+        ]
+        preferred = filter_values.get("meters") or []
+        return {
+            "scope": scope_code,
+            "building": WATER_CONSUMPTION_SCOPE_LABELS[scope_code],
+            "month": month,
+            "summary": (summary.get("scopes") or {}).get(scope_code) or {},
+            "options": {
+                "meters": list(dict.fromkeys([*preferred, *all_meters])),
+                "preferred_meters": preferred,
+                "frequencies": list(options.get("统计频次") or ["日", "周", "月"]),
+                "shifts": list(options.get("班次") or ["白", "夜"]),
+            },
+            "snapshot": {
+                **meta,
+                "refreshing": self.water_consumption_refresh_running(),
+            },
+            "writable_fields": list(WATER_CONSUMPTION_WRITABLE_FIELDS),
+            "readonly_fields": list(WATER_CONSUMPTION_READONLY_FIELDS),
+        }
+
+    def list_water_consumption_records(
+        self,
+        *,
+        scope: str,
+        month: str = "",
+        start_date: str = "",
+        end_date: str = "",
+        meter: str = "",
+        frequency: str = "",
+        shift: str = "",
+        query: str = "",
+        page: int = 1,
+        page_size: int = 50,
+    ) -> dict[str, Any]:
+        scope_code = self._water_scope_code(scope)
+        if scope_code not in WATER_CONSUMPTION_SCOPE_CODES:
+            raise PortalError("水耗管理仅支持 A、B、C、D、E、H 楼。")
+        self.ensure_water_consumption_snapshot()
+        page = max(1, int(page or 1))
+        page_size = max(10, min(int(page_size or 50), 100))
+        result = self._state_store.query_water_consumption_records(
+            scope=scope_code,
+            month=month,
+            start_date=start_date,
+            end_date=end_date,
+            meter=meter,
+            frequency=frequency,
+            shift=shift,
+            query=query,
+            limit=page_size,
+            offset=(page - 1) * page_size,
+        )
+        result.update(
+            {
+                "scope": scope_code,
+                "page": page,
+                "page_size": page_size,
+                "snapshot": {
+                    **self._state_store.get_water_consumption_snapshot_meta(),
+                    "refreshing": self.water_consumption_refresh_running(),
+                },
+            }
+        )
+        return result
+
+    def get_water_consumption_record(
+        self, record_id: str, *, scope: str
+    ) -> dict[str, Any]:
+        scope_code = self._water_scope_code(scope)
+        record = self._state_store.get_water_consumption_record(record_id)
+        if not record:
+            self.ensure_water_consumption_snapshot()
+            record = self._state_store.get_water_consumption_record(record_id)
+        if not record:
+            raise PortalError("未找到水耗记录，可能已被删除。")
+        if str(record.get("scope_code") or "") != scope_code:
+            raise PortalError("当前账号无权查看该水耗记录。")
+        return record
+
+    @staticmethod
+    def _water_request_hash(payload: dict[str, Any]) -> str:
+        normalized = {
+            key: value
+            for key, value in dict(payload or {}).items()
+            if key != "operation_id"
+        }
+        raw = json.dumps(
+            normalized,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def _water_consumption_record_lock(self, record_id: str) -> threading.RLock:
+        key = str(record_id or "").strip()
+        with self._water_consumption_record_locks_guard:
+            lock = self._water_consumption_record_locks.get(key)
+            if lock is None:
+                lock = threading.RLock()
+                self._water_consumption_record_locks[key] = lock
+            return lock
+
+    @staticmethod
+    def _water_validate_option(
+        field_name: str, value: str, meta_by_name: dict[str, FieldMeta]
+    ) -> str:
+        text = str(value or "").strip()
+        if not text:
+            raise PortalError(f"请填写{field_name}。")
+        meta = meta_by_name.get(field_name)
+        if meta and meta.option_names and text not in meta.option_names:
+            raise PortalError(f"{field_name}的值“{text}”不在多维表选项中。")
+        return text
+
+    @classmethod
+    def _water_write_fields(
+        cls,
+        *,
+        scope: str,
+        meter: str,
+        frequency: str,
+        shift: str,
+        statistic_date: str,
+        meter_value: Any,
+        corrected_usage: Any,
+        attachment_tokens: list[str],
+        meta_by_name: dict[str, FieldMeta],
+    ) -> dict[str, Any]:
+        scope_code = cls._water_scope_code(scope)
+        if scope_code not in WATER_CONSUMPTION_SCOPE_CODES:
+            raise PortalError("水耗记录楼栋必须为 A、B、C、D、E、H。")
+        meter = cls._water_validate_option("水表", meter, meta_by_name)
+        frequency = cls._water_validate_option("统计频次", frequency, meta_by_name)
+        shift = cls._water_validate_option("班次", shift, meta_by_name)
+        date_text = str(statistic_date or "").strip()
+        try:
+            parsed_date = dt.datetime.strptime(date_text, "%Y-%m-%d")
+        except ValueError as exc:
+            raise PortalError("统计日期格式必须为 YYYY-MM-DD。") from exc
+        number = cls._water_number(meter_value)
+        if number is None or number < 0:
+            raise PortalError("水表数值必须是大于或等于 0 的数字。")
+        corrected = cls._water_number(corrected_usage)
+        fields: dict[str, Any] = {
+            "楼栋": WATER_CONSUMPTION_SCOPE_LABELS[scope_code],
+            "水表": meter,
+            "统计频次": frequency,
+            "班次": shift,
+            "统计日期": int(parsed_date.timestamp() * 1000),
+            "水表数值": number,
+            "水表照片": [
+                {"file_token": token}
+                for token in attachment_tokens
+                if str(token or "").strip()
+            ],
+        }
+        if corrected is not None:
+            fields["当期耗水量（修正）"] = corrected
+        return fields
+
+    def _water_upload_staged_images(
+        self, *, upload_ids: list[str], open_id: str
+    ) -> tuple[list[str], list[str]]:
+        tokens: list[str] = []
+        used_upload_ids: list[str] = []
+        for upload_id in dict.fromkeys(
+            str(item or "").strip() for item in (upload_ids or []) if str(item or "").strip()
+        ):
+            staged = self._state_store.get_notice_upload_attachment(upload_id)
+            if not staged:
+                raise PortalError("水表照片暂存已过期，请重新上传。")
+            owner_open_id = str(staged.get("open_id") or "").strip()
+            if owner_open_id and owner_open_id != str(open_id or "").strip():
+                raise PortalError("不能使用其他用户暂存的水表照片。")
+            mime_type = str(staged.get("mime_type") or "").lower()
+            content = bytes(staged.get("content") or b"")
+            if not mime_type.startswith("image/") or not content:
+                raise PortalError("水表照片格式无效，请重新上传图片。")
+            if len(content) > WATER_CONSUMPTION_IMAGE_MAX_BYTES:
+                raise PortalError("单张水表照片不能超过 8MB。")
+            suffix = mimetypes.guess_extension(mime_type.split(";", 1)[0]) or ".jpg"
+            temp_path = ""
+            try:
+                with tempfile.NamedTemporaryFile(
+                    delete=False,
+                    prefix="clipflow_water_",
+                    suffix=suffix,
+                ) as temp_file:
+                    temp_file.write(content)
+                    temp_path = temp_file.name
+                token = self._upload_drive_media_file(
+                    file_path=temp_path,
+                    file_name=str(staged.get("file_name") or f"水表照片{suffix}"),
+                    parent_type="bitable_image",
+                    parent_node=WATER_CONSUMPTION_APP_TOKEN,
+                    size=len(content),
+                    context="上传水表照片",
+                )
+                tokens.append(token)
+                used_upload_ids.append(upload_id)
+            finally:
+                if temp_path:
+                    with suppress(OSError):
+                        Path(temp_path).unlink()
+        return tokens, used_upload_ids
+
+    def _water_remote_record(
+        self, record_id: str, *, meta_by_name: dict[str, FieldMeta]
+    ) -> dict[str, Any]:
+        records = self._load_table_records_by_ids(
+            app_token=WATER_CONSUMPTION_APP_TOKEN,
+            table_id=WATER_CONSUMPTION_TABLE_ID,
+            meta_by_name=meta_by_name,
+            work_type="water",
+            notice_type="水耗管理",
+            record_ids=[record_id],
+        )
+        if not records:
+            raise PortalError("未找到水耗记录，可能已被删除。")
+        return self._normalize_water_consumption_record(records[0])
+
+    @staticmethod
+    def _water_created_record_id(payload: dict[str, Any]) -> str:
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        record = data.get("record") if isinstance(data.get("record"), dict) else {}
+        return str(
+            record.get("record_id")
+            or data.get("record_id")
+            or payload.get("record_id")
+            or ""
+        ).strip()
+
+    def create_water_consumption_record(
+        self,
+        *,
+        scope: str,
+        meter: str,
+        frequency: str,
+        shift: str,
+        statistic_date: str,
+        meter_value: Any,
+        corrected_usage: Any = None,
+        upload_ids: list[str] | None = None,
+        operation_id: str,
+        operator_open_id: str,
+    ) -> dict[str, Any]:
+        request_payload = {
+            "scope": scope,
+            "meter": meter,
+            "frequency": frequency,
+            "shift": shift,
+            "statistic_date": statistic_date,
+            "meter_value": meter_value,
+            "corrected_usage": corrected_usage,
+            "upload_ids": list(upload_ids or []),
+        }
+        operation_id = str(operation_id or "").strip()
+        if not operation_id:
+            raise PortalError("缺少 operation_id，请重新提交。")
+        operation = self._state_store.begin_water_consumption_operation(
+            operation_id=operation_id,
+            operation_type="create",
+            request_hash=self._water_request_hash(request_payload),
+            scope_code=self._water_scope_code(scope),
+            actor_open_id=operator_open_id,
+            changed_fields=list(WATER_CONSUMPTION_WRITABLE_FIELDS),
+        )
+        if operation.get("state") == "replay":
+            return dict(operation.get("result") or {})
+        if operation.get("state") == "processing":
+            raise PortalConflictError("该水耗记录正在保存，请勿重复提交。")
+        used_upload_ids: list[str] = []
+        remote_written = False
+        checkpoint_result: dict[str, Any] = {}
+        try:
+            _metas, meta_by_name, _options = self._water_consumption_fields()
+            uploaded_tokens, used_upload_ids = self._water_upload_staged_images(
+                upload_ids=list(upload_ids or []),
+                open_id=operator_open_id,
+            )
+            if not uploaded_tokens:
+                raise PortalError("新增水耗记录必须至少上传一张水表照片。")
+            fields = self._water_write_fields(
+                scope=scope,
+                meter=meter,
+                frequency=frequency,
+                shift=shift,
+                statistic_date=statistic_date,
+                meter_value=meter_value,
+                corrected_usage=corrected_usage,
+                attachment_tokens=uploaded_tokens,
+                meta_by_name=meta_by_name,
+            )
+            create_payload = self._create_record_fields(
+                app_token=WATER_CONSUMPTION_APP_TOKEN,
+                table_id=WATER_CONSUMPTION_TABLE_ID,
+                fields=fields,
+            )
+            record_id = self._water_created_record_id(create_payload)
+            if not record_id:
+                raise PortalError("水耗记录已创建，但飞书未返回 record_id。")
+            warnings: list[str] = []
+            checkpoint_result = {
+                "saved": True,
+                "created": True,
+                "record_id": record_id,
+                "record": {"record_id": record_id},
+                "warnings": ["飞书记录已创建，本地数据正在同步。"],
+                "remote_written": True,
+            }
+            remote_written = True
+            self._state_store.checkpoint_water_consumption_operation(
+                operation_id,
+                result=checkpoint_result,
+            )
+            try:
+                record = self._water_remote_record(record_id, meta_by_name=meta_by_name)
+            except Exception as exc:
+                warnings.append(f"公式字段正在计算，稍后刷新即可查看：{exc}")
+                record = {
+                    "record_id": record_id,
+                    "scope_code": self._water_scope_code(scope),
+                    "building": WATER_CONSUMPTION_SCOPE_LABELS[self._water_scope_code(scope)],
+                    "title": "",
+                    "auto_number": "",
+                    "meter": meter,
+                    "frequency": frequency,
+                    "shift": shift,
+                    "statistic_date": statistic_date,
+                    "statistic_date_key": statistic_date,
+                    "statistic_date_ms": self._water_datetime_ms(statistic_date),
+                    "meter_value": self._water_number(meter_value),
+                    "corrected_usage": self._water_number(corrected_usage),
+                    "computed_usage": None,
+                    "previous_date_text": "",
+                    "previous_value_text": "",
+                    "previous_usage": None,
+                    "yoy_ratio": None,
+                    "created_time": dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    "version": "",
+                    "source_updated_at": 0,
+                    "formula_pending": True,
+                    "photos": [
+                        {
+                            "image_id": self._water_image_id(record_id, token),
+                            "file_token": token,
+                            "name": "水表照片",
+                            "mime_type": "image/jpeg",
+                            "size": 0,
+                        }
+                        for token in uploaded_tokens
+                    ],
+                    "search_text": f"{meter}\n{statistic_date}",
+                }
+            try:
+                self._state_store.upsert_water_consumption_record(record)
+            except Exception as exc:
+                warnings.append(f"本地快照更新失败，后台刷新后会恢复：{exc}")
+            for upload_id in used_upload_ids:
+                with suppress(Exception):
+                    self._state_store.mark_notice_upload_attachment_used(upload_id)
+            result = {
+                "saved": True,
+                "created": True,
+                "record_id": record_id,
+                "record": self._state_store.get_water_consumption_record(record_id),
+                "warnings": warnings,
+                "remote_written": True,
+            }
+            self._state_store.finish_water_consumption_operation(
+                operation_id,
+                success=True,
+                result=result,
+            )
+            self.start_water_consumption_refresh_async(
+                force=True,
+                delay_seconds=2,
+            )
+            return result
+        except Exception as exc:
+            if remote_written:
+                recovered = {
+                    **checkpoint_result,
+                    "warnings": [
+                        "飞书记录已创建，但本地状态收尾失败；请刷新页面查看。",
+                        str(exc),
+                    ],
+                }
+                with suppress(Exception):
+                    self._state_store.finish_water_consumption_operation(
+                        operation_id,
+                        success=True,
+                        result=recovered,
+                    )
+                self.start_water_consumption_refresh_async(
+                    force=True,
+                    delay_seconds=2,
+                )
+                return recovered
+            self._state_store.finish_water_consumption_operation(
+                operation_id,
+                success=False,
+                error=str(exc),
+            )
+            raise
+
+    def update_water_consumption_record(
+        self,
+        record_id: str,
+        *,
+        scope: str,
+        meter: str,
+        frequency: str,
+        shift: str,
+        statistic_date: str,
+        meter_value: Any,
+        corrected_usage: Any = None,
+        retained_image_ids: list[str] | None = None,
+        upload_ids: list[str] | None = None,
+        expected_version: str,
+        operation_id: str,
+        operator_open_id: str,
+    ) -> dict[str, Any]:
+        with self._water_consumption_record_lock(record_id):
+            return self._update_water_consumption_record_unlocked(
+                record_id,
+                scope=scope,
+                meter=meter,
+                frequency=frequency,
+                shift=shift,
+                statistic_date=statistic_date,
+                meter_value=meter_value,
+                corrected_usage=corrected_usage,
+                retained_image_ids=retained_image_ids,
+                upload_ids=upload_ids,
+                expected_version=expected_version,
+                operation_id=operation_id,
+                operator_open_id=operator_open_id,
+            )
+
+    def _update_water_consumption_record_unlocked(
+        self,
+        record_id: str,
+        *,
+        scope: str,
+        meter: str,
+        frequency: str,
+        shift: str,
+        statistic_date: str,
+        meter_value: Any,
+        corrected_usage: Any = None,
+        retained_image_ids: list[str] | None = None,
+        upload_ids: list[str] | None = None,
+        expected_version: str,
+        operation_id: str,
+        operator_open_id: str,
+    ) -> dict[str, Any]:
+        record_id = str(record_id or "").strip()
+        if not record_id.startswith("rec"):
+            raise PortalError("水耗记录 ID 无效。")
+        request_payload = {
+            "record_id": record_id,
+            "scope": scope,
+            "meter": meter,
+            "frequency": frequency,
+            "shift": shift,
+            "statistic_date": statistic_date,
+            "meter_value": meter_value,
+            "corrected_usage": corrected_usage,
+            "retained_image_ids": list(retained_image_ids or []),
+            "upload_ids": list(upload_ids or []),
+            "expected_version": expected_version,
+        }
+        operation_id = str(operation_id or "").strip()
+        if not operation_id:
+            raise PortalError("缺少 operation_id，请重新提交。")
+        operation = self._state_store.begin_water_consumption_operation(
+            operation_id=operation_id,
+            operation_type="update",
+            request_hash=self._water_request_hash(request_payload),
+            scope_code=self._water_scope_code(scope),
+            target_record_id=record_id,
+            actor_open_id=operator_open_id,
+            changed_fields=list(WATER_CONSUMPTION_WRITABLE_FIELDS),
+        )
+        if operation.get("state") == "replay":
+            return dict(operation.get("result") or {})
+        if operation.get("state") == "processing":
+            raise PortalConflictError("该水耗记录正在保存，请勿重复提交。")
+        used_upload_ids: list[str] = []
+        remote_written = False
+        checkpoint_result: dict[str, Any] = {}
+        try:
+            _metas, meta_by_name, _options = self._water_consumption_fields()
+            remote_record = self._water_remote_record(
+                record_id,
+                meta_by_name=meta_by_name,
+            )
+            scope_code = self._water_scope_code(scope)
+            if remote_record.get("scope_code") != scope_code:
+                raise PortalError("当前账号无权修改该水耗记录。")
+            expected_version = str(expected_version or "").strip()
+            current_version = str(remote_record.get("version") or "").strip()
+            if expected_version and current_version and expected_version != current_version:
+                raise PortalConflictError(
+                    "该记录已被其他用户修改，请重新加载后再保存。"
+                )
+            retained_tokens: list[str] = []
+            for image_id in dict.fromkeys(
+                str(item or "").strip()
+                for item in (retained_image_ids or [])
+                if str(item or "").strip()
+            ):
+                image = self._state_store.get_water_consumption_image(image_id)
+                if (
+                    not image
+                    or image.get("record_id") != record_id
+                    or image.get("scope_code") != scope_code
+                ):
+                    raise PortalError("保留的水表照片与当前记录不匹配。")
+                retained_tokens.append(str(image.get("file_token") or ""))
+            uploaded_tokens, used_upload_ids = self._water_upload_staged_images(
+                upload_ids=list(upload_ids or []),
+                open_id=operator_open_id,
+            )
+            attachment_tokens = [
+                token
+                for token in dict.fromkeys([*retained_tokens, *uploaded_tokens])
+                if token
+            ]
+            if not attachment_tokens:
+                raise PortalError("水耗记录必须至少保留一张水表照片。")
+            fields = self._water_write_fields(
+                scope=scope_code,
+                meter=meter,
+                frequency=frequency,
+                shift=shift,
+                statistic_date=statistic_date,
+                meter_value=meter_value,
+                corrected_usage=corrected_usage,
+                attachment_tokens=attachment_tokens,
+                meta_by_name=meta_by_name,
+            )
+            if self._water_number(corrected_usage) is None:
+                fields["当期耗水量（修正）"] = None
+            self._patch_record_fields_exact(
+                app_token=WATER_CONSUMPTION_APP_TOKEN,
+                table_id=WATER_CONSUMPTION_TABLE_ID,
+                record_id=record_id,
+                fields=fields,
+            )
+            warnings: list[str] = []
+            checkpoint_result = {
+                "saved": True,
+                "created": False,
+                "record_id": record_id,
+                "record": {"record_id": record_id},
+                "warnings": ["飞书记录已修改，本地数据正在同步。"],
+                "remote_written": True,
+            }
+            remote_written = True
+            self._state_store.checkpoint_water_consumption_operation(
+                operation_id,
+                result=checkpoint_result,
+            )
+            try:
+                record = self._water_remote_record(record_id, meta_by_name=meta_by_name)
+            except Exception as exc:
+                warnings.append(f"公式字段正在计算，稍后刷新即可查看：{exc}")
+                record = {
+                    **remote_record,
+                    "meter": meter,
+                    "frequency": frequency,
+                    "shift": shift,
+                    "statistic_date": statistic_date,
+                    "statistic_date_key": statistic_date,
+                    "statistic_date_ms": self._water_datetime_ms(statistic_date),
+                    "meter_value": self._water_number(meter_value),
+                    "corrected_usage": self._water_number(corrected_usage),
+                    "formula_pending": True,
+                    "version": current_version,
+                    "photos": [
+                        {
+                            "image_id": self._water_image_id(record_id, token),
+                            "file_token": token,
+                            "name": "水表照片",
+                            "mime_type": "image/jpeg",
+                            "size": 0,
+                        }
+                        for token in attachment_tokens
+                    ],
+                    "search_text": f"{meter}\n{statistic_date}",
+                }
+            try:
+                self._state_store.upsert_water_consumption_record(record)
+            except Exception as exc:
+                warnings.append(f"本地快照更新失败，后台刷新后会恢复：{exc}")
+            for upload_id in used_upload_ids:
+                with suppress(Exception):
+                    self._state_store.mark_notice_upload_attachment_used(upload_id)
+            result = {
+                "saved": True,
+                "created": False,
+                "record_id": record_id,
+                "record": self._state_store.get_water_consumption_record(record_id),
+                "warnings": warnings,
+                "remote_written": True,
+            }
+            self._state_store.finish_water_consumption_operation(
+                operation_id,
+                success=True,
+                result=result,
+            )
+            self.start_water_consumption_refresh_async(
+                force=True,
+                delay_seconds=2,
+            )
+            return result
+        except Exception as exc:
+            if remote_written:
+                recovered = {
+                    **checkpoint_result,
+                    "warnings": [
+                        "飞书记录已修改，但本地状态收尾失败；请刷新页面查看。",
+                        str(exc),
+                    ],
+                }
+                with suppress(Exception):
+                    self._state_store.finish_water_consumption_operation(
+                        operation_id,
+                        success=True,
+                        result=recovered,
+                    )
+                self.start_water_consumption_refresh_async(
+                    force=True,
+                    delay_seconds=2,
+                )
+                return recovered
+            self._state_store.finish_water_consumption_operation(
+                operation_id,
+                success=False,
+                error=str(exc),
+            )
+            raise
+
+    def _water_image_download_url(
+        self,
+        image: dict[str, Any],
+        *,
+        force_remote: bool = False,
+    ) -> str:
+        if not force_remote:
+            cached_url = str(image.get("download_url") or "").strip()
+            if cached_url:
+                return cached_url
+        record_id = str(image.get("record_id") or "").strip()
+        file_token = str(image.get("file_token") or "").strip()
+        if not record_id or not file_token:
+            raise PortalError("水表照片缺少记录或附件标识。")
+        payload = self._request_json(
+            f"records/{record_id}",
+            params={"user_id_type": "open_id"},
+            app_token=WATER_CONSUMPTION_APP_TOKEN,
+            table_id=WATER_CONSUMPTION_TABLE_ID,
+        )
+        raw_record = (payload.get("data") or {}).get("record")
+        raw_fields = (
+            raw_record.get("fields")
+            if isinstance(raw_record, dict)
+            and isinstance(raw_record.get("fields"), dict)
+            else {}
+        )
+        for attachment in raw_fields.get("水表照片") or []:
+            if not isinstance(attachment, dict):
+                continue
+            if str(attachment.get("file_token") or "").strip() != file_token:
+                continue
+            download_url = str(attachment.get("url") or "").strip()
+            if download_url:
+                return download_url
+        raise PortalError("水表照片下载地址暂不可用，请刷新数据后重试。")
+
+    def get_water_consumption_image_bytes(
+        self,
+        image_id: str,
+        *,
+        scope: str,
+        variant: str = "thumb",
+    ) -> tuple[bytes, str, str]:
+        scope_code = self._water_scope_code(scope)
+        image = self._state_store.get_water_consumption_image(image_id)
+        if not image:
+            raise PortalError("未找到水表照片，可能已被替换。")
+        if image.get("scope_code") != scope_code:
+            raise PortalError("当前账号无权查看该水表照片。")
+        variant = "original" if str(variant or "").lower() == "original" else "thumb"
+        cache_dir = Path(
+            get_data_file_path(os.path.join("water_consumption_cache", "images"))
+        )
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        original_path = cache_dir / f"{image_id}.bin"
+        meta_path = cache_dir / f"{image_id}.json"
+        thumb_path = cache_dir / f"{image_id}_thumb.jpg"
+        content_type = str(image.get("mime_type") or "image/jpeg")
+        display_name = self._water_photo_display_name(
+            image.get("file_name"),
+            int(image.get("sort_order") or 0),
+        )
+        with self._water_consumption_image_cache_lock:
+            if not original_path.is_file():
+                token = str(image.get("file_token") or "").strip()
+                if not token:
+                    raise PortalError("水表照片缺少 file_token。")
+                try:
+                    url = self._water_image_download_url(image)
+                    content, downloaded_type = self._water_consumption_image_http_client.request_bytes(
+                        "GET",
+                        url,
+                        headers=self._auth_headers(),
+                        max_bytes=WATER_CONSUMPTION_IMAGE_MAX_BYTES,
+                    )
+                except FeishuHTTPError:
+                    refresh_feishu_token()
+                    url = self._water_image_download_url(
+                        image,
+                        force_remote=True,
+                    )
+                    content, downloaded_type = self._water_consumption_image_http_client.request_bytes(
+                        "GET",
+                        url,
+                        headers=self._auth_headers(),
+                        max_bytes=WATER_CONSUMPTION_IMAGE_MAX_BYTES,
+                    )
+                try:
+                    from PIL import Image
+
+                    with Image.open(io.BytesIO(content)) as loaded:
+                        loaded.verify()
+                except Exception as exc:
+                    raise PortalError("水表照片内容损坏，无法预览。") from exc
+                original_path.write_bytes(content)
+                content_type = str(downloaded_type or content_type).split(";", 1)[0]
+                meta_path.write_text(
+                    json.dumps(
+                        {
+                            "content_type": content_type,
+                            "file_name": display_name,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+            elif meta_path.is_file():
+                with suppress(Exception):
+                    cached_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                    content_type = str(
+                        cached_meta.get("content_type") or content_type
+                    )
+            if variant == "original":
+                return (
+                    original_path.read_bytes(),
+                    content_type,
+                    display_name,
+                )
+            if not thumb_path.is_file():
+                try:
+                    from PIL import Image, ImageOps
+
+                    with Image.open(original_path) as loaded:
+                        converted = ImageOps.exif_transpose(loaded).convert("RGB")
+                        converted.thumbnail((360, 240), Image.Resampling.LANCZOS)
+                        canvas = Image.new("RGB", (360, 240), "#f4f7fb")
+                        left = (360 - converted.width) // 2
+                        top = (240 - converted.height) // 2
+                        canvas.paste(converted, (left, top))
+                        canvas.save(thumb_path, "JPEG", quality=84, optimize=True)
+                except Exception as exc:
+                    raise PortalError("生成水表照片缩略图失败。") from exc
+            return (
+                thumb_path.read_bytes(),
+                "image/jpeg",
+                f"{Path(display_name).stem}_缩略图.jpg",
+            )
 
     @staticmethod
     def _repair_management_record_not_found_error(error: object) -> bool:

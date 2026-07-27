@@ -97,6 +97,23 @@
               <strong>{{ repairMetricValue(repairAggregate.monthTotal) }}</strong>
             </article>
           </template>
+          <template v-else-if="activeMode === 'water'">
+            <article>
+              <span class="summary-icon pending" aria-hidden="true"></span>
+              <small>本月记录</small>
+              <strong>{{ waterMetricValue(waterAggregate.recordCount) }}</strong>
+            </article>
+            <article>
+              <span class="summary-icon ongoing" aria-hidden="true"></span>
+              <small>本月耗水量</small>
+              <strong>{{ waterMetricValue(waterAggregate.totalUsage, " t") }}</strong>
+            </article>
+            <article>
+              <span class="summary-icon coverage" aria-hidden="true"></span>
+              <small>可访问楼栋</small>
+              <strong>{{ waterMetricValue(displayScopeOptions.length) }}</strong>
+            </article>
+          </template>
           <template v-else>
             <article>
               <span class="summary-icon pending" aria-hidden="true"></span>
@@ -134,6 +151,23 @@
         </button>
       </div>
 
+      <div
+        v-if="activeMode === 'water' && waterBuildingsError && !displayScopeOptions.length"
+        class="scope-loading-state error"
+        role="alert"
+      >
+        <span>{{ waterBuildingsError }}</span>
+        <button type="button" @click="loadWaterBuildings">重新读取</button>
+      </div>
+
+      <div
+        v-else-if="activeMode === 'water' && waterBuildingsLoading && !displayScopeOptions.length"
+        class="scope-loading-state"
+        role="status"
+      >
+        正在读取水耗楼栋数据
+      </div>
+
       <div v-else class="scope-grid scope-overview-grid">
         <article
           v-for="scope in displayScopeOptions"
@@ -146,8 +180,14 @@
             <strong>{{ scopeDisplayLabel(scope) }}</strong>
           </div>
           <div class="scope-badges">
-            <span>{{ scopePrimaryMetricLabel(scope.value) }} {{ scopeCounts(scope.value).pending }}</span>
-            <span>{{ scopeSecondaryMetricLabel(scope.value) }} {{ scopeCounts(scope.value).ongoing }}</span>
+            <template v-if="activeMode === 'water'">
+              <span>本月记录 {{ waterScopeItem(scope.value).month_record_count || 0 }}</span>
+              <span>最近 {{ formatWaterDate(waterScopeItem(scope.value).latest_date_ms) }}</span>
+            </template>
+            <template v-else>
+              <span>{{ scopePrimaryMetricLabel(scope.value) }} {{ scopeCounts(scope.value).pending }}</span>
+              <span>{{ scopeSecondaryMetricLabel(scope.value) }} {{ scopeCounts(scope.value).ongoing }}</span>
+            </template>
           </div>
           <div class="scope-actions">
             <button type="button"
@@ -170,6 +210,13 @@
               @click="$emit('engineer', scope.value)"
             >
               进入维护单管理
+            </button>
+            <button type="button"
+              v-else-if="activeMode === 'water'"
+              class="primary"
+              @click="$emit('water', scope.value)"
+            >
+              进入水耗管理
             </button>
             <a
               v-else-if="activeMode === 'handover' && handoverLinks[scope.value]"
@@ -208,7 +255,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onBeforeUnmount, ref } from "vue";
 import { requestJson } from "../api/client";
 import {
   SCOPE_HOME_ENTRY_CONFIGS as entryConfigs,
@@ -247,6 +294,7 @@ const emit = defineEmits<{
   event: [scope: string];
   engineer: [scope: string];
   "repair-management": [scope: string];
+  water: [scope: string];
   "request-permission": [];
 }>();
 
@@ -255,6 +303,11 @@ const openingWorkbenchKey = ref("");
 const repairOverviewLoading = ref(false);
 const repairOverviewLoaded = ref(false);
 const repairOverview = ref<Dict>({});
+const waterBuildingsLoading = ref(false);
+const waterBuildings = ref<Array<{ value: string; label: string } & Dict>>([]);
+const waterSnapshot = ref<Dict>({});
+const waterBuildingsError = ref("");
+let waterBuildingsPollTimer: number | null = null;
 
 const enabledModuleCount = computed(() => moduleCards.filter((item) => !item.disabled).length);
 const activeConfig = computed(() => entryConfigs[activeMode.value || "tools"]);
@@ -267,7 +320,10 @@ const activeMetricWorkType = computed(() => {
   return activeConfig.value.workType || "maintenance";
 });
 const displayScopeOptions = computed(() => {
-  return [...props.scopeOptions].sort((left, right) => {
+  const source = activeMode.value === "water"
+    ? waterBuildings.value
+    : props.scopeOptions;
+  return [...source].sort((left, right) => {
     const leftIndex = scopeSortIndex(left.value);
     const rightIndex = scopeSortIndex(right.value);
     if (leftIndex !== rightIndex) return leftIndex - rightIndex;
@@ -299,6 +355,16 @@ const repairAggregate = computed(() => {
     yearTotal: Number(aggregate.year_total || 0),
     monthTotal: Number(aggregate.month_total || 0),
   };
+});
+const waterAggregate = computed(() => {
+  return waterBuildings.value.reduce(
+    (total, item) => {
+      total.recordCount += Number(item.month_record_count || 0);
+      total.totalUsage += Number(item.month_total_usage || 0);
+      return total;
+    },
+    { recordCount: 0, totalUsage: 0 },
+  );
 });
 
 const broadcastWorkTypes = [
@@ -462,6 +528,7 @@ function selectEntry(key: EntryKey): void {
   }
   activeMode.value = key;
   if (key === "repair_management") void loadRepairOverview();
+  if (key === "water") void loadWaterBuildings();
 }
 
 async function loadRepairOverview(): Promise<void> {
@@ -481,12 +548,67 @@ function repairMetricValue(value: number): number | string {
   return repairOverviewLoading.value && !repairOverviewLoaded.value ? "…" : value;
 }
 
+function waterMetricValue(value: number, suffix = ""): string {
+  if (waterBuildingsLoading.value && !waterBuildings.value.length) return "…";
+  const formatted = suffix
+    ? new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(value)
+    : new Intl.NumberFormat("zh-CN").format(value);
+  return `${formatted}${suffix}`;
+}
+
+function clearWaterBuildingsPoll(): void {
+  if (waterBuildingsPollTimer !== null) {
+    window.clearTimeout(waterBuildingsPollTimer);
+    waterBuildingsPollTimer = null;
+  }
+}
+
+async function loadWaterBuildings(): Promise<void> {
+  if (waterBuildingsLoading.value) return;
+  waterBuildingsLoading.value = true;
+  waterBuildingsError.value = "";
+  try {
+    const data = await requestJson("/api/capacity/water/buildings", { cache: "no-store" });
+    waterBuildings.value = Array.isArray(data.scopes) ? data.scopes : [];
+    waterSnapshot.value = data.snapshot && typeof data.snapshot === "object" ? data.snapshot : {};
+    clearWaterBuildingsPoll();
+    if (
+      activeMode.value === "water"
+      && waterSnapshot.value.refreshing
+    ) {
+      waterBuildingsPollTimer = window.setTimeout(() => {
+        waterBuildingsPollTimer = null;
+        void loadWaterBuildings();
+      }, 1500);
+    }
+  } catch (error: any) {
+    clearWaterBuildingsPoll();
+    waterBuildingsError.value = error?.message || "水耗楼栋数据读取失败。";
+  } finally {
+    waterBuildingsLoading.value = false;
+  }
+}
+
+function waterScopeItem(scope: string): Dict {
+  const code = normalizeScopeValue(scope, "");
+  return waterBuildings.value.find((item) => normalizeScopeValue(item.value, "") === code) || {};
+}
+
+function formatWaterDate(value: unknown): string {
+  const numeric = Number(value || 0);
+  if (!numeric) return "暂无";
+  const date = new Date(numeric);
+  if (Number.isNaN(date.getTime())) return "暂无";
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
 function selectModuleAction(action: ModuleAction, disabled?: boolean): void {
   if (disabled || action.disabled || !action.key) return;
   selectEntry(action.key);
 }
 
 function returnFromFeature(): void {
+  if (activeMode.value === "water") clearWaterBuildingsPoll();
   activeMode.value = isToolScopeMode.value ? "tools" : "";
 }
 
@@ -580,6 +702,8 @@ function scopeSecondaryMetricLabel(_scope: string): string {
   if (activeMetricWorkType.value === "handover") return "待配置";
   return "进行中";
 }
+
+onBeforeUnmount(clearWaterBuildingsPoll);
 
 </script>
 
@@ -996,6 +1120,39 @@ function scopeSecondaryMetricLabel(_scope: string): string {
   border-radius: 20px;
   display: grid;
   gap: 14px;
+}
+
+.scope-loading-state {
+  display: grid;
+  min-height: 260px;
+  place-items: center;
+  border: 1px dashed #bdd4f2;
+  border-radius: 16px;
+  background: #f7fbff;
+  color: #52708f;
+  font-size: 14px;
+  font-weight: 850;
+}
+
+.scope-loading-state.error {
+  align-content: center;
+  gap: 12px;
+  border-color: #f3c5c5;
+  background: #fff8f8;
+  color: #a63737;
+}
+
+.scope-loading-state.error button {
+  justify-self: center;
+  min-height: 34px;
+  padding: 0 16px;
+  border: 1px solid #d8e5f7;
+  border-radius: 9px;
+  background: #fff;
+  color: #1554b8;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 850;
 }
 
 .feature-section.scope-selection {

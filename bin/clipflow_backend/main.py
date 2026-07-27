@@ -5,6 +5,7 @@ import argparse
 import asyncio
 import datetime as dt
 import hashlib
+import io
 import json
 import logging
 import mimetypes
@@ -22,7 +23,7 @@ from contextlib import suppress
 from collections import deque
 from pathlib import Path
 from typing import Any, AsyncIterator
-from urllib.parse import parse_qs, urlencode
+from urllib.parse import parse_qs, quote, urlencode
 
 import httpx
 from fastapi import FastAPI, File, Form, Request, UploadFile
@@ -95,6 +96,7 @@ from clipflow_backend.api_models import (
     TemporarySignatureCreateRequest,
     TemporarySignatureSaveRequest,
     TemporarySignatureSendLinkRequest,
+    WaterConsumptionRecordRequest,
     WorkbenchActionRequest,
     parse_api_model,
 )
@@ -147,6 +149,7 @@ from lan_bitable_template_portal.portal_service import (
     REPAIR_SOURCE_APP_TOKEN,
     REPAIR_SOURCE_TABLE_ID,
     SCOPE_OPTIONS,
+    WATER_CONSUMPTION_SCOPE_CODES,
     WORK_TYPE_REPAIR,
     WORK_TYPE_BY_NOTICE_TYPE,
     ZHIHANG_CHANGE_APP_TOKEN,
@@ -818,6 +821,11 @@ class FastAPIPortalController:
         @app.get("/repair-status")
         @app.get("/repair-status/")
         async def repair_status_page(request: Request):
+            return self._static_file_response(request, portal_index_file(), html=True)
+
+        @app.get("/water-management")
+        @app.get("/water-management/")
+        async def water_management_page(request: Request):
             return self._static_file_response(request, portal_index_file(), html=True)
 
         @app.get("/signature")
@@ -2886,6 +2894,325 @@ class FastAPIPortalController:
                 return self._json_ok(request, session, data)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
+
+        @app.get("/api/capacity/water/buildings")
+        async def water_consumption_buildings(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                allowed_scopes = [
+                    scope
+                    for scope in WATER_CONSUMPTION_SCOPE_CODES
+                    if PortalRuntime.auth_manager.scope_allowed(session, scope)
+                ]
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.water_consumption_buildings,
+                    allowed_scopes=allowed_scopes,
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
+        @app.get("/api/capacity/water/bootstrap")
+        async def water_consumption_bootstrap(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_scope_or_error(
+                    session, request.query_params.get("scope") or ""
+                )
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.water_consumption_bootstrap,
+                    scope=scope,
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
+        @app.get("/api/capacity/water/records")
+        async def water_consumption_records(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_scope_or_error(
+                    session, request.query_params.get("scope") or ""
+                )
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.list_water_consumption_records,
+                    scope=scope,
+                    month=str(request.query_params.get("month") or "").strip(),
+                    start_date=str(
+                        request.query_params.get("start_date") or ""
+                    ).strip(),
+                    end_date=str(
+                        request.query_params.get("end_date") or ""
+                    ).strip(),
+                    meter=str(request.query_params.get("meter") or "").strip(),
+                    frequency=str(
+                        request.query_params.get("frequency") or ""
+                    ).strip(),
+                    shift=str(request.query_params.get("shift") or "").strip(),
+                    query=str(request.query_params.get("q") or "").strip(),
+                    page=int(request.query_params.get("page") or 1),
+                    page_size=int(request.query_params.get("page_size") or 50),
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.get("/api/capacity/water/records/{record_id}")
+        async def water_consumption_record_detail(record_id: str, request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_scope_or_error(
+                    session, request.query_params.get("scope") or ""
+                )
+                data = await asyncio.to_thread(
+                    PortalRuntime.service.get_water_consumption_record,
+                    record_id,
+                    scope=scope,
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=404)
+
+        @app.post("/api/capacity/water/uploads")
+        async def water_consumption_upload(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                self._authorized_scope_or_error(
+                    session, request.query_params.get("scope") or ""
+                )
+                raw_length = request.headers.get("content-length", "0") or "0"
+                try:
+                    length = int(raw_length)
+                except ValueError as exc:
+                    raise PortalError("水表照片大小无效。") from exc
+                if length > MAX_SITE_PHOTO_BYTES:
+                    raise PortalError("单张水表照片不能超过 8MB。")
+                content_type = (
+                    str(request.headers.get("content-type") or "")
+                    .split(";", 1)[0]
+                    .strip()
+                    .lower()
+                )
+                if not content_type.startswith("image/"):
+                    raise PortalError("只能上传图片作为水表照片。")
+                body = await request.body()
+                if not body:
+                    raise PortalError("水表照片内容为空。")
+                if len(body) > MAX_SITE_PHOTO_BYTES:
+                    raise PortalError("单张水表照片不能超过 8MB。")
+                try:
+                    from PIL import Image
+
+                    with Image.open(io.BytesIO(body)) as image:
+                        image.verify()
+                except Exception as exc:
+                    raise PortalError("水表照片内容损坏，无法上传。") from exc
+                user = (
+                    session.get("user")
+                    if isinstance(session.get("user"), dict)
+                    else {}
+                )
+                file_name = str(
+                    request.query_params.get("file_name")
+                    or f"water_meter_{uuid.uuid4().hex[:8]}.jpg"
+                ).strip()
+                file_name = re.sub(
+                    r"[\x00-\x1f\x7f\"'<>:|?*\\/]+",
+                    "_",
+                    Path(file_name).name,
+                ).strip(" ._")[:120]
+                if not file_name:
+                    file_name = f"water_meter_{uuid.uuid4().hex[:8]}.jpg"
+                await asyncio.to_thread(
+                    PortalRuntime.state_store.cleanup_notice_upload_attachments
+                )
+                try:
+                    attachment = await asyncio.to_thread(
+                        PortalRuntime.state_store.put_notice_upload_attachment,
+                        open_id=str(user.get("open_id") or ""),
+                        file_name=file_name,
+                        mime_type=content_type,
+                        content=body,
+                        ttl_seconds=24 * 60 * 60,
+                        max_pending_bytes=MAX_NOTICE_ATTACHMENT_PENDING_BYTES,
+                    )
+                except ValueError as exc:
+                    raise PortalError(str(exc)) from exc
+                return self._json_ok(
+                    request,
+                    session,
+                    {
+                        "upload_id": attachment.get("upload_id"),
+                        "file_name": attachment.get("file_name"),
+                        "mime_type": attachment.get("mime_type"),
+                        "size": attachment.get("size"),
+                        "expires_at": attachment.get("expires_at"),
+                    },
+                )
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.get("/api/capacity/water/images/{image_id}")
+        async def water_consumption_image(image_id: str, request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_scope_or_error(
+                    session, request.query_params.get("scope") or ""
+                )
+                content, content_type, file_name = await asyncio.to_thread(
+                    PortalRuntime.service.get_water_consumption_image_bytes,
+                    image_id,
+                    scope=scope,
+                    variant=str(
+                        request.query_params.get("variant") or "thumb"
+                    ).strip(),
+                )
+                safe_name = re.sub(r"[\r\n\"\\\\/]+", "_", file_name)[:120]
+                return Response(
+                    content=content,
+                    media_type=content_type,
+                    headers={
+                        "Cache-Control": "private, max-age=3600",
+                        "Content-Disposition": (
+                            "inline; filename*=UTF-8''"
+                            f"{quote(safe_name, safe='')}"
+                        ),
+                    },
+                )
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=404)
+
+        @app.post("/api/capacity/water/records")
+        async def water_consumption_record_create(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                payload = (
+                    await self._read_model_request(
+                        request, WaterConsumptionRecordRequest
+                    )
+                ).to_payload()
+                scope = self._authorized_scope_or_error(
+                    session, payload.get("scope") or ""
+                )
+                user = (
+                    session.get("user")
+                    if isinstance(session.get("user"), dict)
+                    else {}
+                )
+                data = await audited_thread_call(
+                    PortalRuntime.state_store,
+                    PortalRuntime.service.create_water_consumption_record,
+                    audit_domain="water_consumption",
+                    audit_action="create_record",
+                    audit_operation_id=str(payload.get("operation_id") or ""),
+                    audit_scope=scope,
+                    audit_actor_open_id=str(user.get("open_id") or ""),
+                    audit_actor_name=str(
+                        user.get("name") or user.get("en_name") or ""
+                    ),
+                    audit_remote_written_on_success=True,
+                    scope=scope,
+                    meter=str(payload.get("meter") or ""),
+                    frequency=str(payload.get("frequency") or ""),
+                    shift=str(payload.get("shift") or ""),
+                    statistic_date=str(payload.get("statistic_date") or ""),
+                    meter_value=payload.get("meter_value"),
+                    corrected_usage=payload.get("corrected_usage"),
+                    upload_ids=payload.get("upload_ids") or [],
+                    operation_id=str(payload.get("operation_id") or ""),
+                    operator_open_id=str(user.get("open_id") or ""),
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.patch("/api/capacity/water/records/{record_id}")
+        async def water_consumption_record_update(record_id: str, request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                payload = (
+                    await self._read_model_request(
+                        request, WaterConsumptionRecordRequest
+                    )
+                ).to_payload()
+                scope = self._authorized_scope_or_error(
+                    session, payload.get("scope") or ""
+                )
+                user = (
+                    session.get("user")
+                    if isinstance(session.get("user"), dict)
+                    else {}
+                )
+                data = await audited_thread_call(
+                    PortalRuntime.state_store,
+                    PortalRuntime.service.update_water_consumption_record,
+                    record_id,
+                    audit_domain="water_consumption",
+                    audit_action="update_record",
+                    audit_operation_id=str(payload.get("operation_id") or ""),
+                    audit_scope=scope,
+                    audit_actor_open_id=str(user.get("open_id") or ""),
+                    audit_actor_name=str(
+                        user.get("name") or user.get("en_name") or ""
+                    ),
+                    audit_target_record_id=record_id,
+                    audit_remote_written_on_success=True,
+                    scope=scope,
+                    meter=str(payload.get("meter") or ""),
+                    frequency=str(payload.get("frequency") or ""),
+                    shift=str(payload.get("shift") or ""),
+                    statistic_date=str(payload.get("statistic_date") or ""),
+                    meter_value=payload.get("meter_value"),
+                    corrected_usage=payload.get("corrected_usage"),
+                    retained_image_ids=payload.get("retained_image_ids") or [],
+                    upload_ids=payload.get("upload_ids") or [],
+                    expected_version=str(payload.get("expected_version") or ""),
+                    operation_id=str(payload.get("operation_id") or ""),
+                    operator_open_id=str(user.get("open_id") or ""),
+                )
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.post("/api/capacity/water/refresh")
+        async def water_consumption_refresh(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_scope_or_error(
+                    session, request.query_params.get("scope") or ""
+                )
+                started = PortalRuntime.service.start_water_consumption_refresh_async(
+                    force=True
+                )
+                data = {
+                    "scope": scope,
+                    "started": started,
+                    "refreshing": True,
+                    "snapshot": (
+                        PortalRuntime.state_store.get_water_consumption_snapshot_meta()
+                    ),
+                }
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
 
         @app.get("/api/events/monthly")
         async def events_monthly(request: Request):
@@ -8534,6 +8861,14 @@ class FastAPIPortalController:
         except Exception as exc:
             log_warning(f"检修后台维护触发失败: {exc}")
 
+    def _run_scheduled_water_consumption_refresh(self) -> None:
+        if _mock_external_enabled():
+            return
+        try:
+            PortalRuntime.service.start_water_consumption_refresh_async(force=False)
+        except Exception as exc:
+            log_warning(f"水耗快照后台刷新触发失败: {exc}")
+
     def _run_scheduled_sqlite_maintenance(self) -> None:
         try:
             pressure = PortalRuntime.runtime_pressure()
@@ -8713,6 +9048,15 @@ class FastAPIPortalController:
             coalesce=True,
         )
         scheduler.add_job(
+            self._run_scheduled_water_consumption_refresh,
+            "interval",
+            minutes=30,
+            id="water_consumption_refresh",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+        scheduler.add_job(
             self._run_scheduled_job_cleanup,
             "date",
             run_date=dt.datetime.now() + dt.timedelta(seconds=30),
@@ -8726,6 +9070,14 @@ class FastAPIPortalController:
                 "date",
                 run_date=dt.datetime.now() + dt.timedelta(seconds=5),
                 id="feishu_token_refresh_startup",
+                replace_existing=True,
+                max_instances=1,
+            )
+            scheduler.add_job(
+                self._run_scheduled_water_consumption_refresh,
+                "date",
+                run_date=dt.datetime.now() + dt.timedelta(seconds=20),
+                id="water_consumption_refresh_startup",
                 replace_existing=True,
                 max_instances=1,
             )

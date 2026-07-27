@@ -1,6 +1,6 @@
 import type { Dict } from "./api/client";
 
-export type ScopeHomeEntryKey = "" | "event" | "maintenance" | "maintenance_mop" | "change" | "repair_management" | "repair" | "tools" | "power" | "polling" | "adjust" | "handover";
+export type ScopeHomeEntryKey = "" | "event" | "maintenance" | "maintenance_mop" | "change" | "repair_management" | "repair" | "water" | "tools" | "power" | "polling" | "adjust" | "handover";
 export type ScopeHomeModuleAction = { key: ScopeHomeEntryKey; label: string; primary?: boolean; disabled?: boolean };
 export type ScopeHomeModuleCard = {
   key: string;
@@ -99,10 +99,9 @@ export const SCOPE_HOME_MODULE_CARDS: ScopeHomeModuleCard[] = [
     icon: "capacity",
     badge: "数据洞察",
     title: "容量管理",
-    description: "管理电力、制冷、空间及端口容量",
-    tags: ["容量台账", "趋势预测", "阈值预警"],
-    disabled: true,
-    actions: [{ key: "", label: "建设中", disabled: true }],
+    description: "统一查看并维护各楼水耗记录",
+    tags: ["水耗台账", "趋势统计", "水表照片"],
+    actions: [{ key: "water", label: "水耗管理", primary: true }],
   },
   {
     key: "risk",
@@ -171,6 +170,12 @@ export const SCOPE_HOME_ENTRY_CONFIGS: Record<Exclude<ScopeHomeEntryKey, "">, Sc
     title: "选择楼栋进入检修单管理",
     description: "",
     actionLabel: "进入检修单管理",
+  },
+  water: {
+    kicker: "容量管理",
+    title: "选择楼栋进入水耗管理",
+    description: "",
+    actionLabel: "进入水耗管理",
   },
   tools: {
     kicker: "其他工具",

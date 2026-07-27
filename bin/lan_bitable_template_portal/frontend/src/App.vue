@@ -98,6 +98,14 @@
       @switch-scope="enterEventManagement"
     />
 
+    <WaterManagementPage
+      v-else-if="isWaterManagementPage"
+      :scope="currentScope"
+      :scope-options="visibleScopeOptions"
+      @status="syncText = $event"
+      @switch-scope="enterWaterManagement"
+    />
+
     <ScopeHome
       v-else
       :scope-options="visibleScopeOptions"
@@ -109,6 +117,7 @@
       @event="enterEventManagement"
       @engineer="enterEngineerMop"
       @repair-management="enterRepairManagement"
+      @water="enterWaterManagement"
       @request-permission="openAdditionalPermissionRequest"
     />
 
@@ -143,6 +152,7 @@ const RepairManagementPage = asyncPage(() => import("./components/RepairManageme
 const RepairStatusPage = asyncPage(() => import("./components/RepairStatusPage.vue"));
 const SignaturePage = asyncPage(() => import("./components/SignaturePage.vue"));
 const ScopeHome = asyncPage(() => import("./components/ScopeHome.vue"));
+const WaterManagementPage = asyncPage(() => import("./components/WaterManagementPage.vue"));
 
 type Dict = LooseDict;
 
@@ -214,6 +224,7 @@ const repairModuleComponent = computed(() => (
 ));
 const isSignaturePage = computed(() => routePath.value === "/signature");
 const isEventPage = computed(() => routeParams.value.get("mode") === "events");
+const isWaterManagementPage = computed(() => routePath.value === "/water-management");
 const signatureLinkMode = computed(() => isSignaturePage.value && Boolean(routeParams.value.get("record_id") || routeParams.value.get("temporary_id")));
 const isAdmin = computed(() => String(auth.user?.role || "").toLowerCase() === "admin");
 const visibleScopeOptions = computed(() => auth.scopeOptions.length ? auth.scopeOptions : requestableScopes);
@@ -258,6 +269,7 @@ const headerSubtitle = computed(() => {
   if (isRepairStatusPage.value) return `${scopeLabel(currentScope.value)} · 检修状态`;
   if (isSignaturePage.value) return "线上签名 · 手机手写保存";
   if (isEventPage.value) return `${scopeLabel(currentScope.value)} · 事件管理`;
+  if (isWaterManagementPage.value) return `${scopeLabel(currentScope.value)} · 水耗管理`;
   if (authChecking.value) return "功能选择 · 正在检查登录";
   if (!auth.loggedIn) return "功能选择 · 请先登录";
   if (!auth.scopeOptions.length) return "功能选择 · 申请访问权限";
@@ -554,9 +566,17 @@ function enterRepairManagement(scope: string): void {
   navigate(url);
 }
 
+function enterWaterManagement(scope: string): void {
+  const url = new URL("/water-management", window.location.origin);
+  url.searchParams.set("scope", normalizeScopeValue(scope));
+  navigate(url);
+}
+
 function switchScope(scope: string): void {
   if (isEventPage.value) {
     enterEventManagement(scope, true);
+  } else if (isWaterManagementPage.value) {
+    enterWaterManagement(scope);
   }
 }
 

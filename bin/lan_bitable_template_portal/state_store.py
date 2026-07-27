@@ -55,7 +55,7 @@ class LanPortalStateStore:
     are migration inputs only and are never deleted or overwritten here.
     """
 
-    SCHEMA_VERSION = 28
+    SCHEMA_VERSION = 29
     _schema_process_lock = threading.RLock()
     _schema_ready_paths: set[str] = set()
     SOURCE_SCOPE_TABLES = {
@@ -111,6 +111,10 @@ class LanPortalStateStore:
         "repair_management_operations",
         "repair_snapshot_sources",
         "repair_snapshot_records",
+        "water_consumption_snapshot_meta",
+        "water_consumption_records",
+        "water_consumption_images",
+        "water_consumption_operations",
         "repair_project_status_index",
         "repair_management_change_log",
         "business_operation_audits",
@@ -153,6 +157,10 @@ class LanPortalStateStore:
         "idx_repair_snapshot_records_source_sort",
         "idx_repair_snapshot_records_parent_sort",
         "idx_repair_snapshot_records_status_sort",
+        "idx_water_consumption_scope_date",
+        "idx_water_consumption_filters",
+        "idx_water_consumption_images_record",
+        "idx_water_consumption_operations_updated",
         "idx_repair_project_status_state",
         "idx_repair_project_status_completed",
         "idx_repair_management_change_created",
@@ -1198,6 +1206,127 @@ class LanPortalStateStore:
             """
             CREATE INDEX IF NOT EXISTS idx_repair_snapshot_records_status_sort
             ON repair_snapshot_records(source_key, status, sort_time DESC, record_id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS water_consumption_snapshot_meta (
+                source_key TEXT PRIMARY KEY,
+                app_token TEXT NOT NULL DEFAULT '',
+                table_id TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'empty',
+                record_count INTEGER NOT NULL DEFAULT 0,
+                fields_json TEXT NOT NULL DEFAULT '[]',
+                options_json TEXT NOT NULL DEFAULT '{}',
+                error TEXT NOT NULL DEFAULT '',
+                snapshot_version INTEGER NOT NULL DEFAULT 0,
+                refreshed_at REAL NOT NULL DEFAULT 0,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS water_consumption_records (
+                record_id TEXT PRIMARY KEY,
+                scope_code TEXT NOT NULL,
+                building TEXT NOT NULL,
+                meter TEXT NOT NULL DEFAULT '',
+                frequency TEXT NOT NULL DEFAULT '',
+                shift_name TEXT NOT NULL DEFAULT '',
+                statistic_date_ms INTEGER NOT NULL DEFAULT 0,
+                statistic_date_key TEXT NOT NULL DEFAULT '',
+                meter_value REAL,
+                corrected_usage REAL,
+                computed_usage REAL,
+                previous_date_text TEXT NOT NULL DEFAULT '',
+                previous_value_text TEXT NOT NULL DEFAULT '',
+                previous_usage REAL,
+                yoy_ratio REAL,
+                photo_count INTEGER NOT NULL DEFAULT 0,
+                title TEXT NOT NULL DEFAULT '',
+                search_text TEXT NOT NULL DEFAULT '',
+                source_updated_at REAL NOT NULL DEFAULT 0,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_water_consumption_scope_date
+            ON water_consumption_records(
+                scope_code, statistic_date_ms DESC, record_id
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_water_consumption_filters
+            ON water_consumption_records(
+                scope_code, frequency, shift_name, meter, statistic_date_ms DESC
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS water_consumption_images (
+                image_id TEXT PRIMARY KEY,
+                record_id TEXT NOT NULL,
+                scope_code TEXT NOT NULL,
+                file_token TEXT NOT NULL,
+                file_name TEXT NOT NULL DEFAULT '',
+                mime_type TEXT NOT NULL DEFAULT '',
+                file_size INTEGER NOT NULL DEFAULT 0,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_water_consumption_images_record
+            ON water_consumption_images(record_id, sort_order, image_id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS water_consumption_operations (
+                operation_id TEXT PRIMARY KEY,
+                operation_type TEXT NOT NULL,
+                request_hash TEXT NOT NULL,
+                scope_code TEXT NOT NULL DEFAULT '',
+                target_record_id TEXT NOT NULL DEFAULT '',
+                actor_open_id TEXT NOT NULL DEFAULT '',
+                changed_fields_json TEXT NOT NULL DEFAULT '[]',
+                status TEXT NOT NULL DEFAULT 'processing',
+                result_json TEXT NOT NULL DEFAULT '{}',
+                error TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        self._ensure_column_locked(
+            conn, "water_consumption_operations", "scope_code", "TEXT NOT NULL DEFAULT ''"
+        )
+        self._ensure_column_locked(
+            conn, "water_consumption_operations", "target_record_id", "TEXT NOT NULL DEFAULT ''"
+        )
+        self._ensure_column_locked(
+            conn, "water_consumption_operations", "actor_open_id", "TEXT NOT NULL DEFAULT ''"
+        )
+        self._ensure_column_locked(
+            conn, "water_consumption_operations", "changed_fields_json", "TEXT NOT NULL DEFAULT '[]'"
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_water_consumption_operations_updated
+            ON water_consumption_operations(status, updated_at DESC)
             """
         )
         conn.execute(
@@ -3779,6 +3908,726 @@ class LanPortalStateStore:
             "refreshed_at": float(source_row["refreshed_at"] or 0),
             "updated_at": float(source_row["updated_at"] or 0),
         }
+
+    @staticmethod
+    def _normalize_water_scope_code(value: Any) -> str:
+        text = str(value or "").strip().upper()
+        if text in {"A", "B", "C", "D", "E", "H"}:
+            return text
+        match = re.search(r"(?<![A-Z])([ABCDEH])(?:楼|栋)?", text)
+        return match.group(1) if match else ""
+
+    @staticmethod
+    def _water_public_photo(photo: Any) -> dict[str, Any]:
+        source = photo if isinstance(photo, dict) else {}
+        return {
+            "image_id": str(source.get("image_id") or "").strip(),
+            "name": str(source.get("name") or source.get("file_name") or "").strip(),
+            "mime_type": str(source.get("mime_type") or source.get("type") or "").strip(),
+            "size": int(source.get("size") or source.get("file_size") or 0),
+        }
+
+    @classmethod
+    def _water_private_photo(cls, photo: Any) -> dict[str, Any]:
+        source = photo if isinstance(photo, dict) else {}
+        payload = cls._water_public_photo(source)
+        payload.update(
+            {
+                "download_url": str(
+                    source.get("download_url") or source.get("url") or ""
+                ).strip(),
+                "tmp_url": str(source.get("tmp_url") or "").strip(),
+            }
+        )
+        return payload
+
+    @classmethod
+    def _water_public_record(cls, record: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(record or {})
+        photos = [
+            cls._water_public_photo(item)
+            for item in (payload.get("photos") or [])
+            if isinstance(item, dict) and str(item.get("image_id") or "").strip()
+        ]
+        payload["photos"] = photos
+        payload["photo_count"] = len(photos)
+        payload.pop("raw_fields", None)
+        return payload
+
+    def replace_water_consumption_snapshot(
+        self,
+        *,
+        app_token: str,
+        table_id: str,
+        fields: list[dict[str, Any]],
+        options: dict[str, Any],
+        records: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        now = time.time()
+        normalized_records = [
+            dict(item)
+            for item in (records or [])
+            if isinstance(item, dict)
+            and str(item.get("record_id") or "").strip()
+            and self._normalize_water_scope_code(item.get("scope_code"))
+        ]
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                current = conn.execute(
+                    """
+                    SELECT snapshot_version
+                    FROM water_consumption_snapshot_meta
+                    WHERE source_key='water_consumption'
+                    """
+                ).fetchone()
+                version = int(current["snapshot_version"] or 0) + 1 if current else 1
+                conn.execute("DELETE FROM water_consumption_images")
+                conn.execute("DELETE FROM water_consumption_records")
+                for item in normalized_records:
+                    self._upsert_water_consumption_record_locked(conn, item, now=now)
+                conn.execute(
+                    """
+                    INSERT INTO water_consumption_snapshot_meta(
+                        source_key, app_token, table_id, status, record_count,
+                        fields_json, options_json, error, snapshot_version,
+                        refreshed_at, created_at, updated_at
+                    ) VALUES (
+                        'water_consumption', ?, ?, 'active', ?, ?, ?, '', ?, ?, ?, ?
+                    )
+                    ON CONFLICT(source_key) DO UPDATE SET
+                        app_token=excluded.app_token,
+                        table_id=excluded.table_id,
+                        status='active',
+                        record_count=excluded.record_count,
+                        fields_json=excluded.fields_json,
+                        options_json=excluded.options_json,
+                        error='',
+                        snapshot_version=excluded.snapshot_version,
+                        refreshed_at=excluded.refreshed_at,
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        self._text(app_token),
+                        self._text(table_id),
+                        len(normalized_records),
+                        self._json(fields if isinstance(fields, list) else []),
+                        self._json(options if isinstance(options, dict) else {}),
+                        version,
+                        now,
+                        now,
+                        now,
+                    ),
+                )
+                conn.commit()
+        return {
+            "status": "active",
+            "record_count": len(normalized_records),
+            "snapshot_version": version,
+            "refreshed_at": now,
+        }
+
+    def _upsert_water_consumption_record_locked(
+        self,
+        conn: sqlite3.Connection,
+        record: dict[str, Any],
+        *,
+        now: float,
+    ) -> None:
+        record_id = self._text(record.get("record_id"))
+        scope_code = self._normalize_water_scope_code(record.get("scope_code"))
+        if not record_id or not scope_code:
+            raise ValueError("水耗快照记录缺少 record_id 或有效楼栋。")
+        public_payload = self._water_public_record(record)
+        conn.execute(
+            """
+            INSERT INTO water_consumption_records(
+                record_id, scope_code, building, meter, frequency, shift_name,
+                statistic_date_ms, statistic_date_key, meter_value,
+                corrected_usage, computed_usage, previous_date_text,
+                previous_value_text, previous_usage, yoy_ratio, photo_count,
+                title, search_text, source_updated_at, payload_json,
+                created_at, updated_at
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            )
+            ON CONFLICT(record_id) DO UPDATE SET
+                scope_code=excluded.scope_code,
+                building=excluded.building,
+                meter=excluded.meter,
+                frequency=excluded.frequency,
+                shift_name=excluded.shift_name,
+                statistic_date_ms=excluded.statistic_date_ms,
+                statistic_date_key=excluded.statistic_date_key,
+                meter_value=excluded.meter_value,
+                corrected_usage=excluded.corrected_usage,
+                computed_usage=excluded.computed_usage,
+                previous_date_text=excluded.previous_date_text,
+                previous_value_text=excluded.previous_value_text,
+                previous_usage=excluded.previous_usage,
+                yoy_ratio=excluded.yoy_ratio,
+                photo_count=excluded.photo_count,
+                title=excluded.title,
+                search_text=excluded.search_text,
+                source_updated_at=excluded.source_updated_at,
+                payload_json=excluded.payload_json,
+                updated_at=excluded.updated_at
+            """,
+            (
+                record_id,
+                scope_code,
+                self._text(record.get("building")),
+                self._text(record.get("meter")),
+                self._text(record.get("frequency")),
+                self._text(record.get("shift")),
+                int(record.get("statistic_date_ms") or 0),
+                self._text(record.get("statistic_date_key")),
+                record.get("meter_value"),
+                record.get("corrected_usage"),
+                record.get("computed_usage"),
+                self._text(record.get("previous_date_text")),
+                self._text(record.get("previous_value_text")),
+                record.get("previous_usage"),
+                record.get("yoy_ratio"),
+                len(public_payload.get("photos") or []),
+                self._text(record.get("title")),
+                self._text(record.get("search_text")),
+                float(record.get("source_updated_at") or 0),
+                self._json(public_payload),
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            "DELETE FROM water_consumption_images WHERE record_id=?",
+            (record_id,),
+        )
+        for index, photo in enumerate(record.get("photos") or []):
+            if not isinstance(photo, dict):
+                continue
+            image_id = self._text(photo.get("image_id"))
+            file_token = self._text(photo.get("file_token"))
+            if not image_id or not file_token:
+                continue
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO water_consumption_images(
+                    image_id, record_id, scope_code, file_token, file_name,
+                    mime_type, file_size, sort_order, payload_json,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    image_id,
+                    record_id,
+                    scope_code,
+                    file_token,
+                    self._text(photo.get("name") or photo.get("file_name")),
+                    self._text(photo.get("mime_type") or photo.get("type")),
+                    int(photo.get("size") or photo.get("file_size") or 0),
+                    index,
+                    self._json(self._water_private_photo(photo)),
+                    now,
+                    now,
+                ),
+            )
+
+    def upsert_water_consumption_record(
+        self, record: dict[str, Any]
+    ) -> dict[str, Any]:
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                self._upsert_water_consumption_record_locked(conn, record, now=now)
+                count_row = conn.execute(
+                    "SELECT COUNT(*) AS count FROM water_consumption_records"
+                ).fetchone()
+                meta_row = conn.execute(
+                    """
+                    SELECT snapshot_version
+                    FROM water_consumption_snapshot_meta
+                    WHERE source_key='water_consumption'
+                    """
+                ).fetchone()
+                version = int(meta_row["snapshot_version"] or 0) + 1 if meta_row else 1
+                conn.execute(
+                    """
+                    UPDATE water_consumption_snapshot_meta
+                    SET status='active', record_count=?, error='',
+                        snapshot_version=?, updated_at=?
+                    WHERE source_key='water_consumption'
+                    """,
+                    (int(count_row["count"] or 0) if count_row else 0, version, now),
+                )
+                conn.commit()
+        return {
+            "record_id": self._text(record.get("record_id")),
+            "snapshot_version": version,
+            "updated_at": now,
+        }
+
+    def mark_water_consumption_snapshot_failed(self, error: str) -> None:
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute(
+                    """
+                    INSERT INTO water_consumption_snapshot_meta(
+                        source_key, status, error, created_at, updated_at
+                    ) VALUES ('water_consumption', 'failed', ?, ?, ?)
+                    ON CONFLICT(source_key) DO UPDATE SET
+                        status='failed', error=excluded.error,
+                        updated_at=excluded.updated_at
+                    """,
+                    (self._text(error), now, now),
+                )
+                conn.commit()
+
+    def get_water_consumption_snapshot_meta(self) -> dict[str, Any]:
+        if not self.db_path.exists():
+            return {
+                "exists": False,
+                "status": "empty",
+                "record_count": 0,
+                "snapshot_version": 0,
+                "fields": [],
+                "options": {},
+                "error": "",
+                "refreshed_at": 0.0,
+                "updated_at": 0.0,
+            }
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    """
+                    SELECT * FROM water_consumption_snapshot_meta
+                    WHERE source_key='water_consumption'
+                    """
+                ).fetchone()
+        if not row:
+            return {
+                "exists": False,
+                "status": "empty",
+                "record_count": 0,
+                "snapshot_version": 0,
+                "fields": [],
+                "options": {},
+                "error": "",
+                "refreshed_at": 0.0,
+                "updated_at": 0.0,
+            }
+        fields = self._loads(str(row["fields_json"] or ""), [])
+        options = self._loads(str(row["options_json"] or ""), {})
+        return {
+            "exists": int(row["record_count"] or 0) > 0
+            or str(row["status"] or "") == "active",
+            "status": str(row["status"] or "empty"),
+            "record_count": int(row["record_count"] or 0),
+            "snapshot_version": int(row["snapshot_version"] or 0),
+            "fields": fields if isinstance(fields, list) else [],
+            "options": options if isinstance(options, dict) else {},
+            "error": str(row["error"] or ""),
+            "refreshed_at": float(row["refreshed_at"] or 0),
+            "updated_at": float(row["updated_at"] or 0),
+            "app_token": str(row["app_token"] or ""),
+            "table_id": str(row["table_id"] or ""),
+        }
+
+    def query_water_consumption_records(
+        self,
+        *,
+        scope: str,
+        month: str = "",
+        start_date: str = "",
+        end_date: str = "",
+        meter: str = "",
+        frequency: str = "",
+        shift: str = "",
+        query: str = "",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        scope_code = self._normalize_water_scope_code(scope)
+        if not scope_code:
+            raise ValueError("水耗查询仅支持 A、B、C、D、E、H 楼。")
+        clauses = ["scope_code=?"]
+        params: list[Any] = [scope_code]
+        normalized_month = self._text(month)
+        if normalized_month:
+            if not re.fullmatch(r"\d{4}-\d{2}", normalized_month):
+                raise ValueError("月份格式必须为 YYYY-MM。")
+            clauses.append("statistic_date_key LIKE ?")
+            params.append(f"{normalized_month}-%")
+        normalized_start = self._text(start_date)
+        normalized_end = self._text(end_date)
+        for field_name, value in (("开始日期", normalized_start), ("结束日期", normalized_end)):
+            if value and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+                raise ValueError(f"{field_name}格式必须为 YYYY-MM-DD。")
+        if normalized_start:
+            clauses.append("statistic_date_key>=?")
+            params.append(normalized_start)
+        if normalized_end:
+            clauses.append("statistic_date_key<=?")
+            params.append(normalized_end)
+        for column, value in (
+            ("meter", meter),
+            ("frequency", frequency),
+            ("shift_name", shift),
+        ):
+            normalized = self._text(value)
+            if normalized:
+                clauses.append(f"{column}=?")
+                params.append(normalized)
+        normalized_query = self._text(query)
+        if normalized_query:
+            clauses.append("search_text LIKE ?")
+            params.append(f"%{normalized_query}%")
+        limit = max(1, min(int(limit or 50), 100))
+        offset = max(0, int(offset or 0))
+        where_sql = " AND ".join(clauses)
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                total_row = conn.execute(
+                    f"SELECT COUNT(*) AS count FROM water_consumption_records WHERE {where_sql}",
+                    tuple(params),
+                ).fetchone()
+                rows = conn.execute(
+                    f"""
+                    SELECT payload_json
+                    FROM water_consumption_records
+                    WHERE {where_sql}
+                    ORDER BY statistic_date_ms DESC, record_id DESC
+                    LIMIT ? OFFSET ?
+                    """,
+                    (*params, limit, offset),
+                ).fetchall()
+        records: list[dict[str, Any]] = []
+        for row in rows:
+            payload = self._loads(str(row["payload_json"] or ""), {})
+            if isinstance(payload, dict):
+                records.append(payload)
+        total = int(total_row["count"] or 0) if total_row else 0
+        return {
+            "records": records,
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(records) < total,
+        }
+
+    def get_water_consumption_record(
+        self, record_id: str
+    ) -> dict[str, Any] | None:
+        record_id = self._text(record_id)
+        if not record_id or not self.db_path.exists():
+            return None
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    """
+                    SELECT payload_json
+                    FROM water_consumption_records
+                    WHERE record_id=?
+                    """,
+                    (record_id,),
+                ).fetchone()
+        if not row:
+            return None
+        payload = self._loads(str(row["payload_json"] or ""), {})
+        return payload if isinstance(payload, dict) else None
+
+    def water_consumption_summary(
+        self, *, scopes: list[str] | tuple[str, ...], month: str = ""
+    ) -> dict[str, Any]:
+        scope_codes = list(
+            dict.fromkeys(
+                self._normalize_water_scope_code(item)
+                for item in (scopes or [])
+                if self._normalize_water_scope_code(item)
+            )
+        )
+        if not scope_codes:
+            return {"scopes": {}, "aggregate": {}}
+        clauses = [
+            f"scope_code IN ({','.join('?' for _ in scope_codes)})"
+        ]
+        params: list[Any] = list(scope_codes)
+        normalized_month = self._text(month)
+        if normalized_month:
+            clauses.append("statistic_date_key LIKE ?")
+            params.append(f"{normalized_month}-%")
+        where_sql = " AND ".join(clauses)
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                rows = conn.execute(
+                    f"""
+                    SELECT scope_code,
+                           COUNT(*) AS record_count,
+                           COALESCE(SUM(computed_usage), 0) AS total_usage,
+                           SUM(CASE WHEN photo_count > 0 THEN 1 ELSE 0 END) AS photo_records,
+                           MAX(statistic_date_ms) AS latest_date_ms
+                    FROM water_consumption_records
+                    WHERE {where_sql}
+                    GROUP BY scope_code
+                    """,
+                    tuple(params),
+                ).fetchall()
+        by_scope: dict[str, dict[str, Any]] = {
+            code: {
+                "record_count": 0,
+                "total_usage": 0.0,
+                "photo_records": 0,
+                "latest_date_ms": 0,
+            }
+            for code in scope_codes
+        }
+        for row in rows:
+            code = str(row["scope_code"] or "")
+            by_scope[code] = {
+                "record_count": int(row["record_count"] or 0),
+                "total_usage": float(row["total_usage"] or 0),
+                "photo_records": int(row["photo_records"] or 0),
+                "latest_date_ms": int(row["latest_date_ms"] or 0),
+            }
+        aggregate = {
+            "record_count": sum(item["record_count"] for item in by_scope.values()),
+            "total_usage": sum(item["total_usage"] for item in by_scope.values()),
+            "photo_records": sum(item["photo_records"] for item in by_scope.values()),
+            "latest_date_ms": max(
+                [item["latest_date_ms"] for item in by_scope.values()] or [0]
+            ),
+        }
+        return {"scopes": by_scope, "aggregate": aggregate}
+
+    def water_consumption_filter_values(self, *, scope: str) -> dict[str, list[str]]:
+        scope_code = self._normalize_water_scope_code(scope)
+        if not scope_code or not self.db_path.exists():
+            return {"meters": [], "frequencies": [], "shifts": []}
+        columns = {
+            "meters": "meter",
+            "frequencies": "frequency",
+            "shifts": "shift_name",
+        }
+        result: dict[str, list[str]] = {}
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                for key, column in columns.items():
+                    rows = conn.execute(
+                        f"""
+                        SELECT {column} AS value, COUNT(*) AS count
+                        FROM water_consumption_records
+                        WHERE scope_code=? AND TRIM({column})<>''
+                        GROUP BY {column}
+                        ORDER BY count DESC, value ASC
+                        """,
+                        (scope_code,),
+                    ).fetchall()
+                    result[key] = [
+                        str(row["value"] or "").strip()
+                        for row in rows
+                        if str(row["value"] or "").strip()
+                    ]
+        return result
+
+    def get_water_consumption_image(
+        self, image_id: str
+    ) -> dict[str, Any] | None:
+        image_id = self._text(image_id)
+        if not image_id or not self.db_path.exists():
+            return None
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    """
+                    SELECT *
+                    FROM water_consumption_images
+                    WHERE image_id=?
+                    """,
+                    (image_id,),
+                ).fetchone()
+        if not row:
+            return None
+        payload = self._loads(str(row["payload_json"] or ""), {})
+        private_payload = payload if isinstance(payload, dict) else {}
+        return {
+            "image_id": str(row["image_id"] or ""),
+            "record_id": str(row["record_id"] or ""),
+            "scope_code": str(row["scope_code"] or ""),
+            "file_token": str(row["file_token"] or ""),
+            "file_name": str(row["file_name"] or ""),
+            "mime_type": str(row["mime_type"] or ""),
+            "size": int(row["file_size"] or 0),
+            "sort_order": int(row["sort_order"] or 0),
+            "download_url": str(private_payload.get("download_url") or ""),
+            "tmp_url": str(private_payload.get("tmp_url") or ""),
+        }
+
+    def begin_water_consumption_operation(
+        self,
+        *,
+        operation_id: str,
+        operation_type: str,
+        request_hash: str,
+        scope_code: str = "",
+        target_record_id: str = "",
+        actor_open_id: str = "",
+        changed_fields: list[str] | tuple[str, ...] | None = None,
+        stale_after_seconds: int = 5 * 60,
+    ) -> dict[str, Any]:
+        operation_id = self._text(operation_id)
+        operation_type = self._text(operation_type)
+        request_hash = self._text(request_hash)
+        if not operation_id or not operation_type or not request_hash:
+            raise ValueError("水耗操作缺少 operation_id、operation_type 或 request_hash。")
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    """
+                    SELECT * FROM water_consumption_operations
+                    WHERE operation_id=?
+                    """,
+                    (operation_id,),
+                ).fetchone()
+                if row:
+                    if (
+                        str(row["operation_type"] or "") != operation_type
+                        or str(row["request_hash"] or "") != request_hash
+                    ):
+                        raise ValueError("operation_id 已被其他水耗操作使用。")
+                    status = str(row["status"] or "")
+                    result = self._loads(str(row["result_json"] or ""), {})
+                    if status == "success":
+                        conn.commit()
+                        return {
+                            "state": "replay",
+                            "result": result if isinstance(result, dict) else {},
+                        }
+                    if status == "remote_written":
+                        conn.commit()
+                        return {
+                            "state": "replay",
+                            "result": result if isinstance(result, dict) else {},
+                        }
+                    if (
+                        status == "processing"
+                        and now - float(row["updated_at"] or 0)
+                        < max(30, int(stale_after_seconds or 300))
+                    ):
+                        conn.commit()
+                        return {"state": "processing", "result": {}}
+                    conn.execute(
+                        """
+                        UPDATE water_consumption_operations
+                        SET status='processing', result_json='{}', error='',
+                            scope_code=?, target_record_id=?, actor_open_id=?,
+                            changed_fields_json=?,
+                            updated_at=?
+                        WHERE operation_id=?
+                        """,
+                        (
+                            self._normalize_water_scope_code(scope_code),
+                            self._text(target_record_id),
+                            self._text(actor_open_id),
+                            self._json(list(changed_fields or [])),
+                            now,
+                            operation_id,
+                        ),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        INSERT INTO water_consumption_operations(
+                            operation_id, operation_type, request_hash,
+                            scope_code, target_record_id, actor_open_id,
+                            changed_fields_json, status,
+                            result_json, error, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'processing', '{}', '', ?, ?)
+                        """,
+                        (
+                            operation_id,
+                            operation_type,
+                            request_hash,
+                            self._normalize_water_scope_code(scope_code),
+                            self._text(target_record_id),
+                            self._text(actor_open_id),
+                            self._json(list(changed_fields or [])),
+                            now,
+                            now,
+                        ),
+                    )
+                conn.commit()
+        return {"state": "started", "result": {}}
+
+    def checkpoint_water_consumption_operation(
+        self,
+        operation_id: str,
+        *,
+        result: dict[str, Any],
+    ) -> None:
+        operation_id = self._text(operation_id)
+        if not operation_id:
+            return
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute(
+                    """
+                    UPDATE water_consumption_operations
+                    SET status='remote_written', result_json=?, error='',
+                        updated_at=?
+                    WHERE operation_id=?
+                    """,
+                    (
+                        self._json(result if isinstance(result, dict) else {}),
+                        now,
+                        operation_id,
+                    ),
+                )
+                conn.commit()
+
+    def finish_water_consumption_operation(
+        self,
+        operation_id: str,
+        *,
+        success: bool,
+        result: dict[str, Any] | None = None,
+        error: str = "",
+    ) -> None:
+        operation_id = self._text(operation_id)
+        if not operation_id:
+            return
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute(
+                    """
+                    UPDATE water_consumption_operations
+                    SET status=?, result_json=?, error=?, updated_at=?
+                    WHERE operation_id=?
+                    """,
+                    (
+                        "success" if success else "failed",
+                        self._json(result if isinstance(result, dict) else {}),
+                        self._text(error),
+                        time.time(),
+                        operation_id,
+                    ),
+                )
+                conn.commit()
 
     def query_repair_snapshot_page(
         self,

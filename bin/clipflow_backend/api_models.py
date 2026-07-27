@@ -136,6 +136,23 @@ class EventTransferRepairRequest(APIModel):
     record_id: str = ""
 
 
+class WaterConsumptionRecordRequest(APIModel):
+    operation_id: str = Field(default="", max_length=128)
+    expected_version: str = Field(default="", max_length=128)
+    scope: str
+    meter: str
+    frequency: str
+    shift: str
+    statistic_date: str
+    meter_value: float | int | str | None = None
+    corrected_usage: float | int | str | None = None
+    upload_ids: list[str] = Field(default_factory=list, max_length=20)
+    retained_image_ids: list[str] = Field(default_factory=list, max_length=50)
+
+    class Config(APIModel.Config):
+        extra = "forbid"
+
+
 class PermissionRequestCreate(APIModel):
     scopes: list[str] = Field(default_factory=list)
     reason: str = ""
