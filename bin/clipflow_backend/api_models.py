@@ -139,6 +139,7 @@ class EventTransferRepairRequest(APIModel):
 class WaterConsumptionRecordRequest(APIModel):
     operation_id: str = Field(default="", max_length=128)
     expected_version: str = Field(default="", max_length=128)
+    large_change_confirmed: bool = False
     scope: str
     meter: str
     frequency: str

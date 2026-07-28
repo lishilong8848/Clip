@@ -149,6 +149,7 @@ from lan_bitable_template_portal.portal_service import (
     REPAIR_SOURCE_APP_TOKEN,
     REPAIR_SOURCE_TABLE_ID,
     SCOPE_OPTIONS,
+    WATER_CONSUMPTION_NON_ADMIN_EDIT_LIMIT,
     WATER_CONSUMPTION_SCOPE_CODES,
     WORK_TYPE_REPAIR,
     WORK_TYPE_BY_NOTICE_TYPE,
@@ -2927,6 +2928,14 @@ class FastAPIPortalController:
                     PortalRuntime.service.water_consumption_bootstrap,
                     scope=scope,
                 )
+                is_admin = PortalRuntime.auth_manager.is_admin(session)
+                data["permissions"] = {
+                    "is_admin": is_admin,
+                    "can_create": is_admin,
+                    "non_admin_edit_limit": (
+                        WATER_CONSUMPTION_NON_ADMIN_EDIT_LIMIT
+                    ),
+                }
                 return self._json_ok(request, session, data)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)
@@ -2976,6 +2985,12 @@ class FastAPIPortalController:
                     PortalRuntime.service.get_water_consumption_record,
                     record_id,
                     scope=scope,
+                )
+                data["edit_policy"] = (
+                    PortalRuntime.service.water_consumption_record_edit_policy(
+                        record_id,
+                        is_admin=PortalRuntime.auth_manager.is_admin(session),
+                    )
                 )
                 return self._json_ok(request, session, data)
             except Exception as exc:
@@ -3100,6 +3115,15 @@ class FastAPIPortalController:
             if session is None:
                 return self._auth_required_response()
             try:
+                is_admin = PortalRuntime.auth_manager.is_admin(session)
+                if not is_admin:
+                    return JSONResponse(
+                        {
+                            "ok": False,
+                            "error": "只有管理员可以新增水耗记录。",
+                        },
+                        status_code=403,
+                    )
                 payload = (
                     await self._read_model_request(
                         request, WaterConsumptionRecordRequest
@@ -3135,6 +3159,7 @@ class FastAPIPortalController:
                     upload_ids=payload.get("upload_ids") or [],
                     operation_id=str(payload.get("operation_id") or ""),
                     operator_open_id=str(user.get("open_id") or ""),
+                    operator_is_admin=is_admin,
                 )
                 return self._json_ok(request, session, data)
             except Exception as exc:
@@ -3159,6 +3184,7 @@ class FastAPIPortalController:
                     if isinstance(session.get("user"), dict)
                     else {}
                 )
+                is_admin = PortalRuntime.auth_manager.is_admin(session)
                 data = await audited_thread_call(
                     PortalRuntime.state_store,
                     PortalRuntime.service.update_water_consumption_record,
@@ -3185,6 +3211,13 @@ class FastAPIPortalController:
                     expected_version=str(payload.get("expected_version") or ""),
                     operation_id=str(payload.get("operation_id") or ""),
                     operator_open_id=str(user.get("open_id") or ""),
+                    operator_name=str(
+                        user.get("name") or user.get("en_name") or ""
+                    ),
+                    operator_is_admin=is_admin,
+                    large_change_confirmed=bool(
+                        payload.get("large_change_confirmed")
+                    ),
                 )
                 return self._json_ok(request, session, data)
             except Exception as exc:
@@ -7466,7 +7499,14 @@ class FastAPIPortalController:
                 "Portal API unexpected failure: %s",
                 exc,
             )
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=status)
+        payload: dict[str, Any] = {"ok": False, "error": str(exc)}
+        error_code = str(getattr(exc, "error_code", "") or "").strip()
+        if error_code:
+            payload["error_code"] = error_code
+        details = getattr(exc, "details", None)
+        if isinstance(details, dict) and details:
+            payload["details"] = details
+        return JSONResponse(payload, status_code=status)
 
     @staticmethod
     def _authorized_scope_or_error(session: dict, scope: str) -> str:

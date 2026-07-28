@@ -121,6 +121,8 @@ WATER_CONSUMPTION_READONLY_FIELDS = (
 )
 WATER_CONSUMPTION_SNAPSHOT_TTL_SECONDS = 30 * 60
 WATER_CONSUMPTION_IMAGE_MAX_BYTES = 8 * 1024 * 1024
+WATER_CONSUMPTION_NON_ADMIN_EDIT_LIMIT = 2
+WATER_CONSUMPTION_LARGE_CHANGE_THRESHOLD = 0.5
 REPAIR_MANAGEMENT_RETIRED_FIELD_NAMES = frozenset(
     {
         "维修名称",
@@ -1062,6 +1064,19 @@ class PortalError(RuntimeError):
 
 class PortalConflictError(PortalError):
     status_code = 409
+
+
+class PortalConfirmationRequiredError(PortalConflictError):
+    error_code = "confirmation_required"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.details = dict(details or {})
 
 
 @dataclass
@@ -16194,6 +16209,122 @@ class MaintenancePortalService:
             raise PortalError("当前账号无权查看该水耗记录。")
         return record
 
+    def water_consumption_record_edit_policy(
+        self,
+        record_id: str,
+        *,
+        is_admin: bool,
+    ) -> dict[str, Any]:
+        if is_admin:
+            return {
+                "is_admin": True,
+                "can_edit": True,
+                "edit_count": 0,
+                "edit_limit": None,
+                "remaining_edits": None,
+            }
+        policy = self._state_store.water_consumption_record_edit_policy(
+            record_id,
+            edit_limit=WATER_CONSUMPTION_NON_ADMIN_EDIT_LIMIT,
+        )
+        return {
+            "is_admin": False,
+            **policy,
+        }
+
+    @classmethod
+    def _water_meter_change(
+        cls,
+        old_value: Any,
+        new_value: Any,
+    ) -> dict[str, Any]:
+        old_number = cls._water_number(old_value)
+        new_number = cls._water_number(new_value)
+        if old_number is None or new_number is None:
+            return {
+                "old_value": old_number,
+                "new_value": new_number,
+                "ratio": None,
+                "ratio_percent": None,
+                "requires_confirmation": False,
+                "baseline_zero": False,
+            }
+        if math.isclose(old_number, new_number, rel_tol=0.0, abs_tol=1e-12):
+            ratio = 0.0
+            baseline_zero = math.isclose(old_number, 0.0, abs_tol=1e-12)
+        elif math.isclose(old_number, 0.0, abs_tol=1e-12):
+            ratio = 1.0
+            baseline_zero = True
+        else:
+            ratio = (new_number - old_number) / abs(old_number)
+            baseline_zero = False
+        return {
+            "old_value": old_number,
+            "new_value": new_number,
+            "ratio": ratio,
+            "ratio_percent": ratio * 100,
+            "requires_confirmation": (
+                ratio > WATER_CONSUMPTION_LARGE_CHANGE_THRESHOLD
+                or ratio < -WATER_CONSUMPTION_LARGE_CHANGE_THRESHOLD
+            ),
+            "baseline_zero": baseline_zero,
+        }
+
+    @staticmethod
+    def _water_change_ratio_text(change: dict[str, Any]) -> str:
+        if change.get("baseline_zero") and change.get("old_value") == 0:
+            return "原值为 0，按大幅变化处理"
+        ratio_percent = change.get("ratio_percent")
+        if ratio_percent is None:
+            return "无法计算"
+        return f"{float(ratio_percent):+.2f}%"
+
+    def _notify_water_large_change(
+        self,
+        *,
+        scope: str,
+        record_id: str,
+        meter: str,
+        statistic_date: str,
+        change: dict[str, Any],
+        operator_open_id: str,
+        operator_name: str,
+    ) -> dict[str, Any]:
+        recipients = [
+            item
+            for item in dict.fromkeys(
+                [
+                    BUILDING_OPEN_ID_MAP.get("H", ""),
+                    str(operator_open_id or "").strip(),
+                ]
+            )
+            if item
+        ]
+        text = "\n".join(
+            [
+                "【水耗记录大幅变化提醒】",
+                f"楼栋：{WATER_CONSUMPTION_SCOPE_LABELS.get(self._water_scope_code(scope), scope)}",
+                f"统计日期：{statistic_date}",
+                f"水表：{meter}",
+                (
+                    "水表数值："
+                    f"{change.get('old_value')} → {change.get('new_value')}"
+                ),
+                f"变化率：{self._water_change_ratio_text(change)}",
+                f"操作人：{operator_name or '当前登录用户'}",
+                f"操作人 openid：{operator_open_id or '未获取'}",
+                f"记录标识：{record_id}",
+                f"操作时间：{dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            ]
+        )
+        ok, message, results = send_text_to_open_ids(text, recipients)
+        return {
+            "sent": bool(ok),
+            "message": str(message or ""),
+            "recipients": recipients,
+            "results": results,
+        }
+
     @staticmethod
     def _water_request_hash(payload: dict[str, Any]) -> str:
         normalized = {
@@ -16362,7 +16493,10 @@ class MaintenancePortalService:
         upload_ids: list[str] | None = None,
         operation_id: str,
         operator_open_id: str,
+        operator_is_admin: bool = False,
     ) -> dict[str, Any]:
+        if not operator_is_admin:
+            raise PortalError("只有管理员可以新增水耗记录。")
         request_payload = {
             "scope": scope,
             "meter": meter,
@@ -16539,6 +16673,9 @@ class MaintenancePortalService:
         expected_version: str,
         operation_id: str,
         operator_open_id: str,
+        operator_name: str = "",
+        operator_is_admin: bool = False,
+        large_change_confirmed: bool = False,
     ) -> dict[str, Any]:
         with self._water_consumption_record_lock(record_id):
             return self._update_water_consumption_record_unlocked(
@@ -16555,6 +16692,9 @@ class MaintenancePortalService:
                 expected_version=expected_version,
                 operation_id=operation_id,
                 operator_open_id=operator_open_id,
+                operator_name=operator_name,
+                operator_is_admin=operator_is_admin,
+                large_change_confirmed=large_change_confirmed,
             )
 
     def _update_water_consumption_record_unlocked(
@@ -16573,6 +16713,9 @@ class MaintenancePortalService:
         expected_version: str,
         operation_id: str,
         operator_open_id: str,
+        operator_name: str = "",
+        operator_is_admin: bool = False,
+        large_change_confirmed: bool = False,
     ) -> dict[str, Any]:
         record_id = str(record_id or "").strip()
         if not record_id.startswith("rec"):
@@ -16608,7 +16751,9 @@ class MaintenancePortalService:
             raise PortalConflictError("该水耗记录正在保存，请勿重复提交。")
         used_upload_ids: list[str] = []
         remote_written = False
+        edit_limit_reserved = False
         checkpoint_result: dict[str, Any] = {}
+        meter_change: dict[str, Any] = {}
         try:
             _metas, meta_by_name, _options = self._water_consumption_fields()
             remote_record = self._water_remote_record(
@@ -16623,6 +16768,46 @@ class MaintenancePortalService:
             if expected_version and current_version and expected_version != current_version:
                 raise PortalConflictError(
                     "该记录已被其他用户修改，请重新加载后再保存。"
+                )
+            meter_change = self._water_meter_change(
+                remote_record.get("meter_value"),
+                meter_value,
+            )
+            if (
+                meter_change.get("requires_confirmation")
+                and not large_change_confirmed
+            ):
+                raise PortalConfirmationRequiredError(
+                    (
+                        "修改后的水表数值变化率为"
+                        f"{self._water_change_ratio_text(meter_change)}，"
+                        "超过 ±50%，请确认后再保存。"
+                    ),
+                    details={
+                        "kind": "water_large_change",
+                        **meter_change,
+                    },
+                )
+            if not operator_is_admin:
+                edit_reservation = (
+                    self._state_store.begin_water_consumption_record_edit(
+                        operation_id=operation_id,
+                        record_id=record_id,
+                        actor_open_id=operator_open_id,
+                        old_meter_value=meter_change.get("old_value"),
+                        new_meter_value=meter_change.get("new_value"),
+                        change_ratio=meter_change.get("ratio"),
+                        edit_limit=WATER_CONSUMPTION_NON_ADMIN_EDIT_LIMIT,
+                    )
+                )
+                if not edit_reservation.get("allowed"):
+                    error = str(
+                        edit_reservation.get("error")
+                        or "当前水耗记录不能继续修改。"
+                    )
+                    raise PortalConflictError(error)
+                edit_limit_reserved = (
+                    edit_reservation.get("state") != "replay"
                 )
             retained_tokens: list[str] = []
             for image_id in dict.fromkeys(
@@ -16668,6 +16853,13 @@ class MaintenancePortalService:
                 record_id=record_id,
                 fields=fields,
             )
+            remote_written = True
+            if edit_limit_reserved:
+                self._state_store.finish_water_consumption_record_edit(
+                    operation_id,
+                    success=True,
+                )
+                edit_limit_reserved = False
             warnings: list[str] = []
             checkpoint_result = {
                 "saved": True,
@@ -16677,7 +16869,6 @@ class MaintenancePortalService:
                 "warnings": ["飞书记录已修改，本地数据正在同步。"],
                 "remote_written": True,
             }
-            remote_written = True
             self._state_store.checkpoint_water_consumption_operation(
                 operation_id,
                 result=checkpoint_result,
@@ -16717,6 +16908,33 @@ class MaintenancePortalService:
             for upload_id in used_upload_ids:
                 with suppress(Exception):
                     self._state_store.mark_notice_upload_attachment_used(upload_id)
+            notification: dict[str, Any] = {}
+            if meter_change.get("requires_confirmation"):
+                try:
+                    notification = self._notify_water_large_change(
+                        scope=scope,
+                        record_id=record_id,
+                        meter=meter,
+                        statistic_date=statistic_date,
+                        change=meter_change,
+                        operator_open_id=operator_open_id,
+                        operator_name=operator_name,
+                    )
+                    if not notification.get("sent"):
+                        warnings.append(
+                            "记录已更新，但大幅变化提醒发送失败："
+                            f"{notification.get('message') or '未知原因'}"
+                        )
+                except Exception as exc:
+                    notification = {
+                        "sent": False,
+                        "message": str(exc),
+                        "recipients": [],
+                        "results": [],
+                    }
+                    warnings.append(
+                        f"记录已更新，但大幅变化提醒发送失败：{exc}"
+                    )
             result = {
                 "saved": True,
                 "created": False,
@@ -16724,6 +16942,12 @@ class MaintenancePortalService:
                 "record": self._state_store.get_water_consumption_record(record_id),
                 "warnings": warnings,
                 "remote_written": True,
+                "large_change": meter_change,
+                "large_change_notification": notification,
+                "edit_policy": self.water_consumption_record_edit_policy(
+                    record_id,
+                    is_admin=operator_is_admin,
+                ),
             }
             self._state_store.finish_water_consumption_operation(
                 operation_id,
@@ -16736,6 +16960,12 @@ class MaintenancePortalService:
             )
             return result
         except Exception as exc:
+            if edit_limit_reserved:
+                with suppress(Exception):
+                    self._state_store.finish_water_consumption_record_edit(
+                        operation_id,
+                        success=False,
+                    )
             if remote_written:
                 recovered = {
                     **checkpoint_result,

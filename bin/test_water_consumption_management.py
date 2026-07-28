@@ -17,8 +17,10 @@ if str(BIN_DIR) not in sys.path:
 
 from lan_bitable_template_portal import portal_service as portal_service_module
 from lan_bitable_template_portal.portal_service import (
+    BUILDING_OPEN_ID_MAP,
     FieldMeta,
     MaintenancePortalService,
+    PortalConfirmationRequiredError,
     PortalError,
 )
 from lan_bitable_template_portal.state_store import LanPortalStateStore
@@ -146,6 +148,58 @@ class WaterConsumptionStateStoreTests(unittest.TestCase):
         self.assertEqual(replay["state"], "replay")
         self.assertEqual(replay["result"]["record_id"], "rec_created")
 
+    def test_non_admin_edit_limit_counts_only_successful_writes(self) -> None:
+        failed = self.store.begin_water_consumption_record_edit(
+            operation_id="water-edit-failed",
+            record_id="rec_limit",
+            actor_open_id="ou_test",
+            old_meter_value=100,
+            new_meter_value=110,
+            change_ratio=0.1,
+            edit_limit=2,
+        )
+        self.assertTrue(failed["allowed"])
+        self.store.finish_water_consumption_record_edit(
+            "water-edit-failed",
+            success=False,
+        )
+
+        for index in range(2):
+            operation_id = f"water-edit-{index}"
+            started = self.store.begin_water_consumption_record_edit(
+                operation_id=operation_id,
+                record_id="rec_limit",
+                actor_open_id="ou_test",
+                old_meter_value=100 + index,
+                new_meter_value=101 + index,
+                change_ratio=0.01,
+                edit_limit=2,
+            )
+            self.assertTrue(started["allowed"])
+            self.store.finish_water_consumption_record_edit(
+                operation_id,
+                success=True,
+            )
+
+        blocked = self.store.begin_water_consumption_record_edit(
+            operation_id="water-edit-third",
+            record_id="rec_limit",
+            actor_open_id="ou_other",
+            old_meter_value=102,
+            new_meter_value=103,
+            change_ratio=0.01,
+            edit_limit=2,
+        )
+        self.assertFalse(blocked["allowed"])
+        self.assertEqual(blocked["state"], "limit_reached")
+        policy = self.store.water_consumption_record_edit_policy(
+            "rec_limit",
+            edit_limit=2,
+        )
+        self.assertEqual(policy["edit_count"], 2)
+        self.assertEqual(policy["remaining_edits"], 0)
+        self.assertFalse(policy["can_edit"])
+
 
 class WaterConsumptionValidationTests(unittest.TestCase):
     @staticmethod
@@ -260,6 +314,7 @@ class WaterConsumptionWriteFlowTests(unittest.TestCase):
             "upload_ids": ["upload-1"],
             "operation_id": "water-create-op",
             "operator_open_id": "ou_test",
+            "operator_is_admin": True,
         }
         first = self.service.create_water_consumption_record(**kwargs)
         second = self.service.create_water_consumption_record(**kwargs)
@@ -272,6 +327,22 @@ class WaterConsumptionWriteFlowTests(unittest.TestCase):
             written["水表照片"],
             [{"file_token": "photo-token-1"}],
         )
+
+    def test_non_admin_cannot_create_record(self) -> None:
+        with self.assertRaisesRegex(PortalError, "只有管理员"):
+            self.service.create_water_consumption_record(
+                scope="A",
+                meter="东区水表-总",
+                frequency="日",
+                shift="白",
+                statistic_date="2026-07-28",
+                meter_value="101.5",
+                corrected_usage=None,
+                upload_ids=[],
+                operation_id="water-create-denied",
+                operator_open_id="ou_test",
+                operator_is_admin=False,
+            )
 
     def test_staged_image_is_uploaded_as_bitable_image(self) -> None:
         image = Image.new("RGB", (24, 24), "#1e63b7")
@@ -315,7 +386,7 @@ class WaterConsumptionWriteFlowTests(unittest.TestCase):
         updated = {
             **existing,
             "version": "2",
-            "meter_value": 202.0,
+            "meter_value": 120.0,
             "photos": [
                 *existing["photos"],
                 {
@@ -342,7 +413,7 @@ class WaterConsumptionWriteFlowTests(unittest.TestCase):
             frequency="日",
             shift="白",
             statistic_date="2026-07-28",
-            meter_value="202",
+            meter_value="120",
             corrected_usage=None,
             retained_image_ids=["image_rec_update"],
             upload_ids=["upload-new"],
@@ -359,6 +430,305 @@ class WaterConsumptionWriteFlowTests(unittest.TestCase):
                 {"file_token": "token_rec_update"},
                 {"file_token": "photo-token-new"},
             ],
+        )
+
+    def test_large_change_requires_confirmation_then_notifies(self) -> None:
+        existing = _record("rec_large", "A", "2026-07-28")
+        self.store.replace_water_consumption_snapshot(
+            app_token="app",
+            table_id="table",
+            fields=[],
+            options={},
+            records=[existing],
+        )
+        updated = {
+            **existing,
+            "version": "2",
+            "meter_value": 180.0,
+        }
+        self.service._water_remote_record = Mock(
+            side_effect=[existing, existing, updated]
+        )
+        self.service._water_upload_staged_images = Mock(
+            return_value=([], [])
+        )
+        self.service._patch_record_fields_exact = Mock()
+        self.service._notify_water_large_change = Mock(
+            return_value={
+                "sent": True,
+                "message": "发送成功",
+                "recipients": [
+                    BUILDING_OPEN_ID_MAP["H"],
+                    "ou_operator",
+                ],
+                "results": [],
+            }
+        )
+        kwargs = {
+            "scope": "A",
+            "meter": "东区水表-总",
+            "frequency": "日",
+            "shift": "白",
+            "statistic_date": "2026-07-28",
+            "meter_value": "180",
+            "corrected_usage": None,
+            "retained_image_ids": ["image_rec_large"],
+            "upload_ids": [],
+            "expected_version": "1",
+            "operation_id": "water-large-op",
+            "operator_open_id": "ou_operator",
+            "operator_name": "测试用户",
+            "operator_is_admin": False,
+        }
+
+        with self.assertRaises(PortalConfirmationRequiredError):
+            self.service._update_water_consumption_record_unlocked(
+                "rec_large",
+                large_change_confirmed=False,
+                **kwargs,
+            )
+        self.service._patch_record_fields_exact.assert_not_called()
+        policy_before = self.store.water_consumption_record_edit_policy(
+            "rec_large",
+            edit_limit=2,
+        )
+        self.assertEqual(policy_before["edit_count"], 0)
+
+        result = self.service._update_water_consumption_record_unlocked(
+            "rec_large",
+            large_change_confirmed=True,
+            **kwargs,
+        )
+
+        self.assertTrue(result["saved"])
+        self.assertTrue(result["large_change"]["requires_confirmation"])
+        self.assertEqual(result["edit_policy"]["remaining_edits"], 1)
+        self.service._patch_record_fields_exact.assert_called_once()
+        self.service._notify_water_large_change.assert_called_once()
+
+    def test_large_change_notification_targets_h_and_operator(self) -> None:
+        with patch.object(
+            portal_service_module,
+            "send_text_to_open_ids",
+            return_value=(True, "发送成功", []),
+        ) as sender:
+            result = self.service._notify_water_large_change(
+                scope="A",
+                record_id="rec_notice",
+                meter="东区水表-总",
+                statistic_date="2026-07-28",
+                change={
+                    "old_value": 100,
+                    "new_value": 180,
+                    "ratio": 0.8,
+                    "ratio_percent": 80,
+                    "baseline_zero": False,
+                },
+                operator_open_id="ou_operator",
+                operator_name="测试用户",
+            )
+
+        self.assertTrue(result["sent"])
+        recipients = sender.call_args.args[1]
+        self.assertEqual(
+            recipients,
+            [BUILDING_OPEN_ID_MAP["H"], "ou_operator"],
+        )
+
+    def test_remote_write_failure_does_not_consume_non_admin_edit(self) -> None:
+        existing = _record("rec_remote_fail", "A", "2026-07-28")
+        self.store.replace_water_consumption_snapshot(
+            app_token="app",
+            table_id="table",
+            fields=[],
+            options={},
+            records=[existing],
+        )
+        self.service._water_remote_record = Mock(return_value=existing)
+        self.service._water_upload_staged_images = Mock(
+            return_value=([], [])
+        )
+        self.service._patch_record_fields_exact = Mock(
+            side_effect=PortalError("模拟飞书写入失败")
+        )
+
+        with self.assertRaisesRegex(PortalError, "模拟飞书写入失败"):
+            self.service._update_water_consumption_record_unlocked(
+                "rec_remote_fail",
+                scope="A",
+                meter="东区水表-总",
+                frequency="日",
+                shift="白",
+                statistic_date="2026-07-28",
+                meter_value="110",
+                corrected_usage=None,
+                retained_image_ids=["image_rec_remote_fail"],
+                upload_ids=[],
+                expected_version="1",
+                operation_id="water-remote-fail-op",
+                operator_open_id="ou_operator",
+                operator_is_admin=False,
+            )
+
+        policy = self.store.water_consumption_record_edit_policy(
+            "rec_remote_fail",
+            edit_limit=2,
+        )
+        self.assertEqual(policy["edit_count"], 0)
+        self.assertEqual(policy["remaining_edits"], 2)
+
+    def test_notification_failure_keeps_successful_remote_update(self) -> None:
+        existing = _record("rec_notice_fail", "A", "2026-07-28")
+        self.store.replace_water_consumption_snapshot(
+            app_token="app",
+            table_id="table",
+            fields=[],
+            options={},
+            records=[existing],
+        )
+        updated = {
+            **existing,
+            "version": "2",
+            "meter_value": 180.0,
+        }
+        self.service._water_remote_record = Mock(
+            side_effect=[existing, updated]
+        )
+        self.service._water_upload_staged_images = Mock(
+            return_value=([], [])
+        )
+        self.service._patch_record_fields_exact = Mock()
+        self.service._notify_water_large_change = Mock(
+            return_value={
+                "sent": False,
+                "message": "模拟消息发送失败",
+                "recipients": [BUILDING_OPEN_ID_MAP["H"], "ou_operator"],
+                "results": [],
+            }
+        )
+
+        result = self.service._update_water_consumption_record_unlocked(
+            "rec_notice_fail",
+            scope="A",
+            meter="东区水表-总",
+            frequency="日",
+            shift="白",
+            statistic_date="2026-07-28",
+            meter_value="180",
+            corrected_usage=None,
+            retained_image_ids=["image_rec_notice_fail"],
+            upload_ids=[],
+            expected_version="1",
+            operation_id="water-notice-fail-op",
+            operator_open_id="ou_operator",
+            operator_name="测试用户",
+            operator_is_admin=False,
+            large_change_confirmed=True,
+        )
+
+        self.assertTrue(result["saved"])
+        self.assertTrue(result["remote_written"])
+        self.assertFalse(result["large_change_notification"]["sent"])
+        self.assertTrue(
+            any(
+                "大幅变化提醒发送失败" in warning
+                for warning in result["warnings"]
+            )
+        )
+        self.service._patch_record_fields_exact.assert_called_once()
+        policy = self.store.water_consumption_record_edit_policy(
+            "rec_notice_fail",
+            edit_limit=2,
+        )
+        self.assertEqual(policy["edit_count"], 1)
+
+    def test_admin_update_bypasses_exhausted_non_admin_edit_limit(self) -> None:
+        existing = _record("rec_admin_edit", "A", "2026-07-28")
+        self.store.replace_water_consumption_snapshot(
+            app_token="app",
+            table_id="table",
+            fields=[],
+            options={},
+            records=[existing],
+        )
+        for index in range(2):
+            operation_id = f"water-edit-seed-{index}"
+            reservation = self.store.begin_water_consumption_record_edit(
+                operation_id=operation_id,
+                record_id="rec_admin_edit",
+                actor_open_id=f"ou_seed_{index}",
+                old_meter_value=100.0,
+                new_meter_value=110.0 + index,
+                change_ratio=0.1,
+                edit_limit=2,
+            )
+            self.assertTrue(reservation["allowed"])
+            self.store.finish_water_consumption_record_edit(
+                operation_id,
+                success=True,
+            )
+        exhausted = self.store.water_consumption_record_edit_policy(
+            "rec_admin_edit",
+            edit_limit=2,
+        )
+        self.assertFalse(exhausted["can_edit"])
+
+        updated = {
+            **existing,
+            "version": "2",
+            "meter_value": 120.0,
+        }
+        self.service._water_remote_record = Mock(
+            side_effect=[existing, updated]
+        )
+        self.service._water_upload_staged_images = Mock(
+            return_value=([], [])
+        )
+        self.service._patch_record_fields_exact = Mock()
+
+        result = self.service._update_water_consumption_record_unlocked(
+            "rec_admin_edit",
+            scope="A",
+            meter="东区水表-总",
+            frequency="日",
+            shift="白",
+            statistic_date="2026-07-28",
+            meter_value="120",
+            corrected_usage=None,
+            retained_image_ids=["image_rec_admin_edit"],
+            upload_ids=[],
+            expected_version="1",
+            operation_id="water-admin-edit-op",
+            operator_open_id="ou_admin",
+            operator_name="管理员",
+            operator_is_admin=True,
+        )
+
+        self.assertTrue(result["saved"])
+        self.assertTrue(result["edit_policy"]["is_admin"])
+        self.assertTrue(result["edit_policy"]["can_edit"])
+        self.service._patch_record_fields_exact.assert_called_once()
+
+    def test_large_change_threshold_is_strictly_over_fifty_percent(self) -> None:
+        self.assertFalse(
+            self.service._water_meter_change(100, 150)[
+                "requires_confirmation"
+            ]
+        )
+        self.assertFalse(
+            self.service._water_meter_change(100, 50)[
+                "requires_confirmation"
+            ]
+        )
+        self.assertTrue(
+            self.service._water_meter_change(100, 150.01)[
+                "requires_confirmation"
+            ]
+        )
+        self.assertTrue(
+            self.service._water_meter_change(100, 49.99)[
+                "requires_confirmation"
+            ]
         )
 
 

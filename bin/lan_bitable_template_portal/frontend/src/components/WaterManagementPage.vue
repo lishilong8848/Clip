@@ -27,7 +27,12 @@
           <RefreshCw :size="17" :class="{ spinning: refreshing }" aria-hidden="true" />
           {{ refreshing ? "刷新中" : "刷新数据" }}
         </button>
-        <button type="button" class="btn primary icon-label" @click="openCreate">
+        <button
+          v-if="canCreateRecord"
+          type="button"
+          class="btn primary icon-label"
+          @click="openCreate"
+        >
           <Plus :size="18" aria-hidden="true" />
           新增录入
         </button>
@@ -190,13 +195,38 @@
         </header>
 
         <div v-if="drawerLoading" class="drawer-state">正在读取记录详情</div>
+        <div
+          v-else-if="editingRecordId && !detail.record_id"
+          class="drawer-state drawer-state--error"
+          role="alert"
+        >
+          <strong>记录详情读取失败</strong>
+          <span>{{ formError || "未取得完整记录，已阻止编辑以免覆盖远端数据。" }}</span>
+          <button
+            type="button"
+            class="btn secondary"
+            @click="openEdit(editingRecordId)"
+          >
+            重新读取
+          </button>
+        </div>
         <form
           v-else
           class="record-form"
-          :class="{ saving }"
+          :class="{ saving, 'read-only': recordEditingLocked }"
           :aria-busy="saving"
-          @submit.prevent="saveRecord"
+          @submit.prevent="saveRecord()"
         >
+          <div
+            v-if="editingRecordId && !isAdmin"
+            class="edit-policy-banner"
+            :class="{ locked: recordEditingLocked }"
+            role="status"
+          >
+            <strong>{{ recordEditingLocked ? "本条记录已不可修改" : `本条记录还可修改 ${remainingEdits} 次` }}</strong>
+            <span>{{ recordEditingLocked ? "普通用户的两次修改机会已用完，请联系管理员处理。" : "保存成功后计为一次修改。" }}</span>
+          </div>
+
           <div class="form-grid">
             <label>
               <span>楼栋</span>
@@ -204,7 +234,13 @@
             </label>
             <label>
               <span>统计日期 <b>*</b></span>
-              <input v-model="form.statisticDate" type="date" required @input="markDrawerDirty" />
+              <input
+                v-model="form.statisticDate"
+                type="date"
+                required
+                :disabled="recordEditingLocked"
+                @input="markDrawerDirty"
+              />
             </label>
             <label>
               <span>水表 <b>*</b></span>
@@ -214,6 +250,7 @@
                 input-id="water-form-meter"
                 label="水表"
                 required
+                :disabled="recordEditingLocked"
                 @change="markDrawerDirty"
               />
             </label>
@@ -225,6 +262,7 @@
                 input-id="water-form-frequency"
                 label="统计频次"
                 required
+                :disabled="recordEditingLocked"
                 @change="markDrawerDirty"
               />
             </label>
@@ -236,6 +274,7 @@
                 input-id="water-form-shift"
                 label="班次"
                 required
+                :disabled="recordEditingLocked"
                 @change="markDrawerDirty"
               />
             </label>
@@ -248,6 +287,7 @@
                 step="any"
                 placeholder="请输入非负数"
                 required
+                :disabled="recordEditingLocked"
                 @input="markDrawerDirty"
               />
             </label>
@@ -258,6 +298,7 @@
                 type="number"
                 step="any"
                 placeholder="选填，留空使用公式结果"
+                :disabled="recordEditingLocked"
                 @input="markDrawerDirty"
               />
             </label>
@@ -283,7 +324,7 @@
               <button
                 type="button"
                 class="compact-button"
-                :disabled="photoUploading || saving"
+                :disabled="photoUploading || saving || recordEditingLocked"
                 @click="openFilePicker"
               >
                 <Plus :size="16" />
@@ -296,13 +337,14 @@
               type="file"
               accept="image/*"
               multiple
+              :disabled="recordEditingLocked"
               @change="handleFileInput"
             />
             <div
               class="photo-dropzone"
-              :class="{ dragging: photoDragging, disabled: photoUploading || saving }"
-              tabindex="0"
-              :aria-disabled="photoUploading || saving"
+              :class="{ dragging: photoDragging, disabled: photoUploading || saving || recordEditingLocked }"
+              :tabindex="recordEditingLocked ? -1 : 0"
+              :aria-disabled="photoUploading || saving || recordEditingLocked"
               @click="openFilePicker"
               @dragenter.prevent="photoDragging = true"
               @dragover.prevent="photoDragging = true"
@@ -329,7 +371,12 @@
                   @keydown.space.prevent="openLightbox(retainedPhotos, index)"
                 />
                 <span>{{ displayPhotoName(photo, index) }}</span>
-                <button type="button" aria-label="移除照片" @click="askRemoveRetainedPhoto(photo)">
+                <button
+                  type="button"
+                  aria-label="移除照片"
+                  :disabled="recordEditingLocked"
+                  @click="askRemoveRetainedPhoto(photo)"
+                >
                   <X :size="15" />
                 </button>
               </article>
@@ -345,7 +392,12 @@
                   @keydown.space.prevent="openLightbox(stagedPhotos, index)"
                 />
                 <span>{{ photo.uploading ? "上传中" : displayPhotoName(photo, index) }}</span>
-                <button type="button" aria-label="移除照片" :disabled="photo.uploading" @click="removeStagedPhoto(photo.localId)">
+                <button
+                  type="button"
+                  aria-label="移除照片"
+                  :disabled="photo.uploading || recordEditingLocked"
+                  @click="removeStagedPhoto(photo.localId)"
+                >
                   <X :size="15" />
                 </button>
               </article>
@@ -355,10 +407,14 @@
           <p v-if="formError" class="form-error">{{ formError }}</p>
 
           <footer class="drawer-actions">
-            <span>{{ drawerDirty ? "有未保存修改" : editingRecordId ? "记录已加载" : "请填写必填项" }}</span>
+            <span>{{ drawerStatusText }}</span>
             <div>
               <button type="button" class="btn secondary" :disabled="saving" @click="requestCloseDrawer">取消</button>
-              <button type="submit" class="btn primary icon-label" :disabled="saving || photoUploading">
+              <button
+                type="submit"
+                class="btn primary icon-label"
+                :disabled="saving || photoUploading || recordEditingLocked"
+              >
                 <Save :size="17" />
                 {{ saving ? "保存中" : editingRecordId ? "保存修改" : "新增记录" }}
               </button>
@@ -407,6 +463,7 @@
       :tone="confirmState.tone"
       :title="confirmState.title"
       :message="confirmState.message"
+      :details="confirmState.details"
       :confirm-label="confirmState.confirmLabel"
       @resolve="resolveConfirmation"
     />
@@ -501,8 +558,9 @@ const confirmState = reactive({
   tone: "warning" as "danger" | "warning" | "primary",
   title: "",
   message: "",
+  details: [] as string[],
   confirmLabel: "确认",
-  action: "" as "" | "close" | "remove-photo",
+  action: "" as "" | "close" | "remove-photo" | "save-large-change",
   targetId: "",
 });
 const filters = reactive({
@@ -544,6 +602,26 @@ const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize))
 const meterFilterOptions = computed(() => ["全部水表", ...(bootstrap.value.options?.meters || [])]);
 const frequencyFilterOptions = computed(() => ["全部频次", ...(bootstrap.value.options?.frequencies || [])]);
 const shiftFilterOptions = computed(() => ["全部班次", ...(bootstrap.value.options?.shifts || [])]);
+const isAdmin = computed(() => Boolean(
+  bootstrap.value.permissions?.is_admin || detail.value.edit_policy?.is_admin,
+));
+const canCreateRecord = computed(() => Boolean(bootstrap.value.permissions?.can_create));
+const editPolicy = computed(() => detail.value.edit_policy || {});
+const remainingEdits = computed(() => {
+  const value = Number(editPolicy.value.remaining_edits);
+  return Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+});
+const recordEditingLocked = computed(() => (
+  Boolean(editingRecordId.value)
+  && !isAdmin.value
+  && editPolicy.value.can_edit === false
+));
+const drawerStatusText = computed(() => {
+  if (recordEditingLocked.value) return "修改次数已用完，仅可查看";
+  if (drawerDirty.value) return "有未保存修改";
+  if (editingRecordId.value) return "记录已加载";
+  return "请填写必填项";
+});
 const snapshotText = computed(() => {
   if (refreshing.value || snapshot.value.refreshing) return "数据刷新中";
   const value = Number(snapshot.value.refreshed_at || 0);
@@ -805,6 +883,10 @@ function resetForm(): void {
 }
 
 function openCreate(): void {
+  if (!canCreateRecord.value) {
+    setMessage("只有管理员可以新增水耗记录。", "warning");
+    return;
+  }
   detailController?.abort();
   detailController = null;
   detailGeneration += 1;
@@ -856,6 +938,7 @@ async function openEdit(recordId: string): Promise<void> {
 }
 
 function markDrawerDirty(): void {
+  if (recordEditingLocked.value) return;
   if (!saving.value) pendingOperationId.value = "";
   drawerDirty.value = true;
 }
@@ -872,6 +955,7 @@ function requestCloseDrawer(): void {
       tone: "warning",
       title: "放弃未保存修改？",
       message: "关闭后，本次填写和刚上传但尚未保存的照片不会写入水耗记录。",
+      details: [],
       confirmLabel: "放弃并关闭",
       action: "close",
       targetId: "",
@@ -892,6 +976,12 @@ function closeDrawer(): void {
 }
 
 function validateForm(): string {
+  if (recordEditingLocked.value) {
+    return "当前账号对本条记录的两次修改机会已用完。";
+  }
+  if (!editingRecordId.value && !canCreateRecord.value) {
+    return "只有管理员可以新增水耗记录。";
+  }
   if (!form.meter) return "请选择水表。";
   if (!form.frequency) return "请选择统计频次。";
   if (!form.shift) return "请选择班次。";
@@ -914,12 +1004,96 @@ function operationId(): string {
   return `water_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
-async function saveRecord(): Promise<void> {
+function meterChangePreview(details: Dict = {}): Dict {
+  const oldRaw = Object.prototype.hasOwnProperty.call(details, "old_value")
+    ? details.old_value
+    : detail.value.meter_value;
+  const newRaw = Object.prototype.hasOwnProperty.call(details, "new_value")
+    ? details.new_value
+    : form.meterValue;
+  if (
+    oldRaw === null
+    || oldRaw === undefined
+    || String(oldRaw).trim() === ""
+    || newRaw === null
+    || newRaw === undefined
+    || String(newRaw).trim() === ""
+  ) {
+    return { requiresConfirmation: false };
+  }
+  const oldValue = Number(oldRaw);
+  const newValue = Number(newRaw);
+  if (!Number.isFinite(oldValue) || !Number.isFinite(newValue)) {
+    return { requiresConfirmation: false };
+  }
+  let ratio = 0;
+  let baselineZero = false;
+  if (Math.abs(oldValue - newValue) <= 1e-12) {
+    ratio = 0;
+    baselineZero = Math.abs(oldValue) <= 1e-12;
+  } else if (Math.abs(oldValue) <= 1e-12) {
+    ratio = 1;
+    baselineZero = true;
+  } else {
+    ratio = (newValue - oldValue) / Math.abs(oldValue);
+  }
+  if (
+    details.ratio !== null
+    && details.ratio !== undefined
+    && String(details.ratio).trim() !== ""
+  ) {
+    const serverRatio = Number(details.ratio);
+    if (Number.isFinite(serverRatio)) ratio = serverRatio;
+  }
+  if (Object.prototype.hasOwnProperty.call(details, "baseline_zero")) {
+    baselineZero = Boolean(details.baseline_zero);
+  }
+  return {
+    oldValue,
+    newValue,
+    ratio,
+    baselineZero,
+    requiresConfirmation: ratio > 0.5 || ratio < -0.5,
+  };
+}
+
+function largeChangeRatioText(change: Dict): string {
+  if (change.baselineZero && Number(change.oldValue) === 0) {
+    return "原值为 0，按大幅变化处理";
+  }
+  return `${Number(change.ratio || 0) >= 0 ? "+" : ""}${(Number(change.ratio || 0) * 100).toFixed(2)}%`;
+}
+
+function requestLargeChangeConfirmation(change: Dict, messageText = ""): void {
+  Object.assign(confirmState, {
+    open: true,
+    tone: "warning",
+    title: "确认大幅修改水表数值？",
+    message: messageText || "变化率超过 ±50%。确认后将更新记录，并通知 H 楼和当前操作人。",
+    details: [
+      `原水表数值：${formatNullableNumber(change.oldValue)}`,
+      `修改后数值：${formatNullableNumber(change.newValue)}`,
+      `变化率：${largeChangeRatioText(change)}`,
+    ],
+    confirmLabel: "确认修改并通知",
+    action: "save-large-change",
+    targetId: "",
+  });
+}
+
+async function saveRecord(largeChangeConfirmed = false): Promise<void> {
   if (saving.value) return;
   const error = validateForm();
   if (error) {
     formError.value = error;
     return;
+  }
+  if (editingRecordId.value && !largeChangeConfirmed) {
+    const change = meterChangePreview();
+    if (change.requiresConfirmation) {
+      requestLargeChangeConfirmation(change);
+      return;
+    }
   }
   saving.value = true;
   formError.value = "";
@@ -936,6 +1110,7 @@ async function saveRecord(): Promise<void> {
     corrected_usage: form.correctedUsage === "" ? null : form.correctedUsage,
     upload_ids: stagedPhotos.value.map((item) => item.uploadId).filter(Boolean),
     retained_image_ids: retainedPhotos.value.map((item) => item.image_id).filter(Boolean),
+    large_change_confirmed: largeChangeConfirmed,
   };
   try {
     const path = editingRecordId.value
@@ -949,19 +1124,41 @@ async function saveRecord(): Promise<void> {
     drawerDirty.value = false;
     closeDrawer();
     const warnings = Array.isArray(result.warnings) ? result.warnings.filter(Boolean) : [];
+    const notificationSent = Boolean(result.large_change_notification?.sent);
     setMessage(
-      warnings.length ? `水耗记录已保存。${warnings.join("；")}` : "水耗记录已保存。",
+      warnings.length
+        ? `水耗记录已保存。${warnings.join("；")}`
+        : notificationSent
+          ? "水耗记录已保存，大幅变化提醒已发送。"
+          : "水耗记录已保存。",
       warnings.length ? "warning" : "success",
     );
     await Promise.all([loadBootstrap(), loadRecords()]);
   } catch (saveError: any) {
-    formError.value = saveError?.message || "水耗记录保存失败。";
+    const errorPayload = saveError?.payload || {};
+    if (
+      errorPayload.error_code === "confirmation_required"
+      && errorPayload.details?.kind === "water_large_change"
+    ) {
+      const change = meterChangePreview(errorPayload.details);
+      requestLargeChangeConfirmation(
+        change,
+        String(errorPayload.error || saveError?.message || ""),
+      );
+      formError.value = "";
+    } else {
+      formError.value = saveError?.message || "水耗记录保存失败。";
+    }
   } finally {
     saving.value = false;
   }
 }
 
 async function uploadFiles(files: File[]): Promise<void> {
+  if (recordEditingLocked.value) {
+    setMessage("本条记录的修改次数已用完。", "warning");
+    return;
+  }
   if (saving.value || uploadBatchRunning.value) {
     setMessage("照片正在处理，请稍候。", "warning");
     return;
@@ -1036,7 +1233,7 @@ function imageMimeType(file: File): string {
 }
 
 function openFilePicker(): void {
-  if (saving.value || photoUploading.value) return;
+  if (recordEditingLocked.value || saving.value || photoUploading.value) return;
   fileInput.value?.click();
 }
 
@@ -1048,10 +1245,12 @@ function handleFileInput(event: Event): void {
 
 function handleDrop(event: DragEvent): void {
   photoDragging.value = false;
+  if (recordEditingLocked.value) return;
   void uploadFiles(Array.from(event.dataTransfer?.files || []));
 }
 
 function handlePaste(event: ClipboardEvent): void {
+  if (recordEditingLocked.value) return;
   const files = Array.from(event.clipboardData?.files || []);
   if (!files.length) {
     setMessage("剪贴板中没有图片文件。", "warning");
@@ -1062,6 +1261,7 @@ function handlePaste(event: ClipboardEvent): void {
 }
 
 function removeStagedPhoto(localId: string): void {
+  if (recordEditingLocked.value) return;
   const index = stagedPhotos.value.findIndex((item) => item.localId === localId);
   if (index < 0) return;
   URL.revokeObjectURL(stagedPhotos.value[index].previewUrl);
@@ -1076,11 +1276,13 @@ function clearStagedPhotos(): void {
 }
 
 function askRemoveRetainedPhoto(photo: Dict): void {
+  if (recordEditingLocked.value) return;
   Object.assign(confirmState, {
     open: true,
     tone: "warning",
     title: "移除这张水表照片？",
     message: "保存修改后，这张照片将不再保留在该条水耗记录中。",
+    details: [],
     confirmLabel: "移除照片",
     action: "remove-photo",
     targetId: String(photo.image_id || ""),
@@ -1093,6 +1295,7 @@ function resolveConfirmation(confirmed: boolean): void {
   confirmState.open = false;
   confirmState.action = "";
   confirmState.targetId = "";
+  confirmState.details = [];
   if (!confirmed) return;
   if (action === "close") {
     drawerDirty.value = false;
@@ -1101,6 +1304,8 @@ function resolveConfirmation(confirmed: boolean): void {
     retainedPhotos.value = retainedPhotos.value.filter((item) => item.image_id !== targetId);
     if (!saving.value) pendingOperationId.value = "";
     drawerDirty.value = true;
+  } else if (action === "save-large-change") {
+    void saveRecord(true);
   }
 }
 
@@ -1643,6 +1848,23 @@ th {
   color: #64748b;
 }
 
+.drawer-state--error {
+  align-content: center;
+  gap: 12px;
+  padding: 24px;
+  text-align: center;
+}
+
+.drawer-state--error strong {
+  color: #b42318;
+  font-size: 16px;
+}
+
+.drawer-state--error span {
+  max-width: 420px;
+  line-height: 1.6;
+}
+
 .record-form {
   display: grid;
   gap: 14px;
@@ -1652,6 +1874,41 @@ th {
 .record-form.saving > :not(.drawer-actions) {
   pointer-events: none;
   opacity: 0.72;
+}
+
+.edit-policy-banner {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 11px;
+  border: 1px solid #bfdbfe;
+  border-radius: 10px;
+  background: #eff6ff;
+  color: #1e40af;
+}
+
+.edit-policy-banner strong {
+  flex: 0 0 auto;
+  font-size: 12px;
+}
+
+.edit-policy-banner span {
+  color: #526b8d;
+  font-size: 11px;
+  text-align: right;
+}
+
+.edit-policy-banner.locked {
+  border-color: #fed7aa;
+  background: #fff7ed;
+  color: #9a3412;
+}
+
+.record-form.read-only input:disabled {
+  color: #52667f;
+  opacity: 1;
 }
 
 .form-grid {
@@ -1844,6 +2101,11 @@ th {
   background: rgba(15, 23, 42, 0.72);
   color: #fff;
   cursor: pointer;
+}
+
+.photo-editor__grid article > button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .form-error {

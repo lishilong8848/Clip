@@ -55,7 +55,7 @@ class LanPortalStateStore:
     are migration inputs only and are never deleted or overwritten here.
     """
 
-    SCHEMA_VERSION = 29
+    SCHEMA_VERSION = 30
     _schema_process_lock = threading.RLock()
     _schema_ready_paths: set[str] = set()
     SOURCE_SCOPE_TABLES = {
@@ -115,6 +115,7 @@ class LanPortalStateStore:
         "water_consumption_records",
         "water_consumption_images",
         "water_consumption_operations",
+        "water_consumption_record_edits",
         "repair_project_status_index",
         "repair_management_change_log",
         "business_operation_audits",
@@ -161,6 +162,7 @@ class LanPortalStateStore:
         "idx_water_consumption_filters",
         "idx_water_consumption_images_record",
         "idx_water_consumption_operations_updated",
+        "idx_water_consumption_record_edits_record",
         "idx_repair_project_status_state",
         "idx_repair_project_status_completed",
         "idx_repair_management_change_created",
@@ -1311,6 +1313,21 @@ class LanPortalStateStore:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS water_consumption_record_edits (
+                operation_id TEXT PRIMARY KEY,
+                record_id TEXT NOT NULL,
+                actor_open_id TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'processing',
+                old_meter_value REAL,
+                new_meter_value REAL,
+                change_ratio REAL,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
         self._ensure_column_locked(
             conn, "water_consumption_operations", "scope_code", "TEXT NOT NULL DEFAULT ''"
         )
@@ -1327,6 +1344,12 @@ class LanPortalStateStore:
             """
             CREATE INDEX IF NOT EXISTS idx_water_consumption_operations_updated
             ON water_consumption_operations(status, updated_at DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_water_consumption_record_edits_record
+            ON water_consumption_record_edits(record_id, status, updated_at DESC)
             """
         )
         conn.execute(
@@ -4628,6 +4651,226 @@ class LanPortalStateStore:
                     ),
                 )
                 conn.commit()
+
+    def begin_water_consumption_record_edit(
+        self,
+        *,
+        operation_id: str,
+        record_id: str,
+        actor_open_id: str,
+        old_meter_value: float | None,
+        new_meter_value: float | None,
+        change_ratio: float | None,
+        edit_limit: int,
+        stale_after_seconds: int = 10 * 60,
+    ) -> dict[str, Any]:
+        operation_id = self._text(operation_id)
+        record_id = self._text(record_id)
+        actor_open_id = self._text(actor_open_id)
+        edit_limit = max(1, int(edit_limit or 1))
+        if not operation_id or not record_id:
+            raise ValueError("水耗修改计数缺少 operation_id 或 record_id。")
+        now = time.time()
+        stale_before = now - max(60, int(stale_after_seconds or 600))
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute(
+                    """
+                    UPDATE water_consumption_record_edits
+                    SET status='failed', updated_at=?
+                    WHERE status='processing' AND updated_at<?
+                    """,
+                    (now, stale_before),
+                )
+                existing = conn.execute(
+                    """
+                    SELECT record_id, actor_open_id, status
+                    FROM water_consumption_record_edits
+                    WHERE operation_id=?
+                    """,
+                    (operation_id,),
+                ).fetchone()
+                if existing:
+                    if (
+                        str(existing["record_id"] or "") != record_id
+                        or str(existing["actor_open_id"] or "") != actor_open_id
+                    ):
+                        conn.rollback()
+                        raise ValueError("operation_id 已被其他水耗修改使用。")
+                    status = str(existing["status"] or "")
+                    if status == "completed":
+                        completed = int(
+                            conn.execute(
+                                """
+                                SELECT COUNT(*) AS count
+                                FROM water_consumption_record_edits
+                                WHERE record_id=? AND status='completed'
+                                """,
+                                (record_id,),
+                            ).fetchone()["count"]
+                            or 0
+                        )
+                        conn.commit()
+                        return {
+                            "allowed": True,
+                            "state": "replay",
+                            "edit_count": completed,
+                            "remaining_edits": max(0, edit_limit - completed),
+                        }
+                    if status == "processing":
+                        conn.commit()
+                        return {
+                            "allowed": False,
+                            "state": "processing",
+                            "error": "该水耗记录正在保存，请勿重复提交。",
+                        }
+
+                usage = conn.execute(
+                    """
+                    SELECT
+                        SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) AS completed,
+                        SUM(CASE WHEN status='processing' THEN 1 ELSE 0 END) AS processing
+                    FROM water_consumption_record_edits
+                    WHERE record_id=?
+                    """,
+                    (record_id,),
+                ).fetchone()
+                completed = int(usage["completed"] or 0) if usage else 0
+                processing = int(usage["processing"] or 0) if usage else 0
+                if completed + processing >= edit_limit:
+                    conn.commit()
+                    return {
+                        "allowed": False,
+                        "state": "limit_reached",
+                        "edit_count": completed,
+                        "remaining_edits": 0,
+                        "error": (
+                            f"普通用户对同一条水耗记录最多修改 {edit_limit} 次，"
+                            "当前次数已用完；请联系管理员处理。"
+                        ),
+                    }
+
+                values = (
+                    record_id,
+                    actor_open_id,
+                    old_meter_value,
+                    new_meter_value,
+                    change_ratio,
+                    now,
+                    now,
+                    operation_id,
+                )
+                if existing:
+                    conn.execute(
+                        """
+                        UPDATE water_consumption_record_edits
+                        SET record_id=?, actor_open_id=?, status='processing',
+                            old_meter_value=?, new_meter_value=?, change_ratio=?,
+                            created_at=?, updated_at=?
+                        WHERE operation_id=?
+                        """,
+                        values,
+                    )
+                else:
+                    conn.execute(
+                        """
+                        INSERT INTO water_consumption_record_edits(
+                            record_id, actor_open_id, status,
+                            old_meter_value, new_meter_value, change_ratio,
+                            created_at, updated_at, operation_id
+                        ) VALUES (?, ?, 'processing', ?, ?, ?, ?, ?, ?)
+                        """,
+                        values,
+                    )
+                conn.commit()
+        return {
+            "allowed": True,
+            "state": "started",
+            "edit_count": completed,
+            "remaining_edits": max(0, edit_limit - completed - 1),
+        }
+
+    def finish_water_consumption_record_edit(
+        self,
+        operation_id: str,
+        *,
+        success: bool,
+    ) -> dict[str, int]:
+        operation_id = self._text(operation_id)
+        if not operation_id:
+            return {"edit_count": 0}
+        now = time.time()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    """
+                    SELECT record_id
+                    FROM water_consumption_record_edits
+                    WHERE operation_id=?
+                    """,
+                    (operation_id,),
+                ).fetchone()
+                if not row:
+                    conn.commit()
+                    return {"edit_count": 0}
+                record_id = str(row["record_id"] or "")
+                conn.execute(
+                    """
+                    UPDATE water_consumption_record_edits
+                    SET status=?, updated_at=?
+                    WHERE operation_id=?
+                    """,
+                    ("completed" if success else "failed", now, operation_id),
+                )
+                count_row = conn.execute(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM water_consumption_record_edits
+                    WHERE record_id=? AND status='completed'
+                    """,
+                    (record_id,),
+                ).fetchone()
+                conn.commit()
+        return {"edit_count": int(count_row["count"] or 0) if count_row else 0}
+
+    def water_consumption_record_edit_policy(
+        self,
+        record_id: str,
+        *,
+        edit_limit: int,
+    ) -> dict[str, int | bool]:
+        record_id = self._text(record_id)
+        edit_limit = max(1, int(edit_limit or 1))
+        if not record_id or not self.db_path.exists():
+            return {
+                "edit_count": 0,
+                "edit_limit": edit_limit,
+                "remaining_edits": edit_limit,
+                "can_edit": True,
+            }
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM water_consumption_record_edits
+                    WHERE record_id=? AND status='completed'
+                    """,
+                    (record_id,),
+                ).fetchone()
+        edit_count = int(row["count"] or 0) if row else 0
+        remaining = max(0, edit_limit - edit_count)
+        return {
+            "edit_count": edit_count,
+            "edit_limit": edit_limit,
+            "remaining_edits": remaining,
+            "can_edit": remaining > 0,
+        }
 
     def query_repair_snapshot_page(
         self,
