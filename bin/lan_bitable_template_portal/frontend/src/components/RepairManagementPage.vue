@@ -429,7 +429,28 @@
             </section>
           </div>
 
-          <footer v-if="!selectedRecordReadOnly" class="editor-action-bar">
+        </div>
+
+        <RepairFollowupPanel
+          v-if="editingRecordId && followupPanelMounted"
+          v-show="activeWorkspaceTab === 'followups'"
+          embedded
+          :scope="scope"
+          :summary-record-id="editingRecordId"
+          :summary-title="selectedRecordTitle"
+          :read-only="selectedRecordReadOnly"
+          :refresh-version="repairSourceRefreshVersion"
+          @changed="handleFollowupChanged"
+          @source-refreshed="handleRepairSourceRefreshed"
+          @dirty-changed="followupHasUnsavedChanges = $event"
+          @count-changed="updateSelectedFollowupCount"
+        />
+            </main>
+          </div>
+          <footer
+            v-if="activeWorkspaceTab === 'project' && !recordDetailLoading && !selectedRecordReadOnly"
+            class="editor-action-bar drawer-action-bar"
+          >
             <div class="save-state" :class="projectSaveStateTone">
               <component :is="projectSaveStateIcon" :size="17" aria-hidden="true" />
               <span>{{ projectSaveStateText }}</span>
@@ -470,27 +491,13 @@
               </button>
             </div>
           </footer>
-          <div v-else class="completed-readonly-bar" role="status">
+          <div
+            v-else-if="activeWorkspaceTab === 'project' && !recordDetailLoading"
+            class="completed-readonly-bar drawer-action-bar"
+            role="status"
+          >
             <LockKeyhole :size="16" aria-hidden="true" />
             <span>跟进状态暂未确认，当前仅供查看</span>
-          </div>
-        </div>
-
-        <RepairFollowupPanel
-          v-if="editingRecordId && followupPanelMounted"
-          v-show="activeWorkspaceTab === 'followups'"
-          embedded
-          :scope="scope"
-          :summary-record-id="editingRecordId"
-          :summary-title="selectedRecordTitle"
-          :read-only="selectedRecordReadOnly"
-          :refresh-version="repairSourceRefreshVersion"
-          @changed="handleFollowupChanged"
-          @source-refreshed="handleRepairSourceRefreshed"
-          @dirty-changed="followupHasUnsavedChanges = $event"
-          @count-changed="updateSelectedFollowupCount"
-        />
-            </main>
           </div>
         </section>
       </div>
@@ -4566,6 +4573,8 @@ onBeforeUnmount(() => {
 }
 
 .project-workspace {
+  min-width: 0;
+  max-width: 100%;
   display: grid;
   gap: 14px;
 }
@@ -4886,6 +4895,7 @@ onBeforeUnmount(() => {
 }
 
 .form-warning {
+  overflow-wrap: anywhere;
   margin-bottom: 12px;
   padding: 9px 12px;
   border: 1px solid #fed7aa;
@@ -4940,11 +4950,15 @@ onBeforeUnmount(() => {
 }
 
 .project-form-sections {
+  min-width: 0;
+  max-width: 100%;
   display: grid;
   gap: 7px;
 }
 
 .project-field-section {
+  min-width: 0;
+  max-width: 100%;
   display: grid;
   gap: 5px;
   padding: 0 0 7px;
@@ -4976,6 +4990,8 @@ onBeforeUnmount(() => {
 }
 
 .project-field-grid {
+  min-width: 0;
+  max-width: 100%;
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 7px 10px;
@@ -5044,6 +5060,8 @@ onBeforeUnmount(() => {
   position: sticky;
   z-index: 20;
   bottom: 8px;
+  min-width: 0;
+  max-width: 100%;
   min-height: 48px;
   display: flex;
   align-items: center;
@@ -5097,6 +5115,11 @@ onBeforeUnmount(() => {
   font-weight: 700;
 }
 
+.save-state span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .save-state.saving { color: #155ec2; }
 .save-state.warning,
 .save-state.dirty { color: #a65314; }
@@ -5108,6 +5131,8 @@ onBeforeUnmount(() => {
 
 .editor-action-buttons {
   flex: 0 0 auto;
+  min-width: 0;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 7px;
 }
@@ -5187,10 +5212,15 @@ onBeforeUnmount(() => {
 
 .repair-project-drawer {
   width: min(1180px, calc(100vw - 72px));
-  height: 100%;
+  max-width: 100%;
+  min-width: 0;
+  height: 100vh;
+  height: 100dvh;
+  max-height: 100vh;
+  max-height: 100dvh;
   overflow: hidden;
-  display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   border-left: 1px solid #cbdcf1;
   border-radius: 16px 0 0 16px;
   background: #fff;
@@ -5202,6 +5232,8 @@ onBeforeUnmount(() => {
 }
 
 .project-drawer-head {
+  flex: 0 0 auto;
+  min-width: 0;
   min-height: 72px;
   display: flex;
   align-items: center;
@@ -5296,6 +5328,8 @@ onBeforeUnmount(() => {
 }
 
 .project-drawer-summary {
+  flex: 0 0 auto;
+  min-width: 0;
   min-height: 62px;
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -5336,6 +5370,8 @@ onBeforeUnmount(() => {
 }
 
 .project-sync-status {
+  flex: 0 0 auto;
+  min-width: 0;
   min-height: 38px;
   margin: 0 16px;
   padding: 7px 10px;
@@ -5392,12 +5428,23 @@ onBeforeUnmount(() => {
 }
 
 .project-drawer-body {
-  overflow: auto;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
   overscroll-behavior: contain;
   display: grid;
   align-content: start;
   gap: 10px;
   padding: 12px 16px 18px;
+}
+
+.project-drawer-body > * {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .project-conflict {
@@ -5465,6 +5512,8 @@ onBeforeUnmount(() => {
 }
 
 .repair-project-drawer .editor-panel {
+  min-width: 0;
+  max-width: 100%;
   min-height: 0;
   padding: 0;
   border: 0;
@@ -5497,6 +5546,21 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
+.drawer-action-bar {
+  position: static;
+  z-index: 24;
+  width: 100%;
+  min-width: 0;
+  flex: 0 0 auto;
+  margin: 0;
+  border-width: 1px 0 0;
+  border-radius: 0;
+  padding: 9px 16px calc(9px + env(safe-area-inset-bottom));
+  background: #fff;
+  box-shadow: 0 -8px 24px rgba(20, 64, 122, 0.11);
+  backdrop-filter: none;
+}
+
 @media (max-width: 1279px) and (min-width: 1024px) {
   .record-table-head,
   .record-row {
@@ -5505,12 +5569,6 @@ onBeforeUnmount(() => {
 
   .project-field-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-}
-
-@media (max-height: 900px) {
-  .editor-action-bar {
-    position: static;
   }
 }
 

@@ -320,6 +320,18 @@ function openDatePicker(): void {
   line-height: 1.3;
 }
 
+.repair-field-control.compact.wide textarea {
+  height: auto;
+  min-height: 58px;
+  max-height: 132px;
+  overflow-y: auto;
+  resize: vertical;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  field-sizing: content;
+}
+
 .repair-field-control.compact .repair-percentage-control {
   min-height: 34px;
   padding: 3px 7px;
@@ -394,6 +406,12 @@ textarea {
   font-size: 14px;
   font-weight: 500;
   transition: border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
+}
+
+textarea {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .repair-date-control {
