@@ -865,6 +865,10 @@ def check_qt_active_cache_no_runtime_legacy_document_writes() -> tuple[bool, lis
         body = text[start:] if next_def < 0 else text[start:next_def]
         if "replace_qt_active_items_from_payload(" not in body:
             offenders.append(f"{marker.strip()} 未写入 SQLite qt_active_items 规范表")
+        if "delete_missing=False" not in body:
+            offenders.append(
+                f"{marker.strip()} 未禁止旧 Qt 快照删除网页/后端活动通告"
+            )
         if "put_document(" in body or "_put_table_document" in body:
             offenders.append(f"{marker.strip()} 仍写回 json_documents")
     return not offenders, offenders

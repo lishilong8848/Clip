@@ -58,6 +58,7 @@ class LanPortalStateStore:
     SCHEMA_VERSION = 30
     _schema_process_lock = threading.RLock()
     _schema_ready_paths: set[str] = set()
+    _live_portal_restore_last: dict[str, float] = {}
     SOURCE_SCOPE_TABLES = {
         "110": "source_records_110",
         "A": "source_records_a",
@@ -7068,6 +7069,223 @@ class LanPortalStateStore:
                 conn.commit()
                 return bool(cursor.rowcount)
 
+    def restore_live_portal_qt_active_items(
+        self,
+        *,
+        force: bool = False,
+        grace_seconds: float = 5.0,
+        throttle_seconds: float = 15.0,
+    ) -> dict[str, Any]:
+        """Restore portal items removed by an obsolete/stale Qt full snapshot."""
+        if not self.db_path.exists():
+            return {"restored": 0, "items": [], "checked_at": time.time()}
+        path_key = str(self.db_path.resolve())
+        now = time.time()
+        with self._schema_process_lock:
+            last = float(self._live_portal_restore_last.get(path_key) or 0)
+            if not force and last and now - last < max(1.0, throttle_seconds):
+                return {
+                    "restored": 0,
+                    "items": [],
+                    "checked_at": now,
+                    "throttled": True,
+                }
+        live_statuses = ("开始", "更新", "进行中", "新增")
+        cutoff = now - max(0.0, float(grace_seconds or 0.0))
+        restored_items: list[dict[str, Any]] = []
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                live_identity_keys: set[str] = set()
+                live_match_keys: set[str] = set()
+                live_rows = conn.execute(
+                    """
+                    SELECT active_item_id, record_id, payload_json
+                    FROM qt_active_items
+                    WHERE deleted_at IS NULL
+                    """
+                ).fetchall()
+                for live_row in live_rows:
+                    live_payload = self._loads(
+                        str(live_row["payload_json"] or ""), {}
+                    )
+                    live_payload = (
+                        live_payload if isinstance(live_payload, dict) else {}
+                    )
+                    live_payload.setdefault(
+                        "active_item_id", self._text(live_row["active_item_id"])
+                    )
+                    live_payload.setdefault(
+                        "target_record_id", self._text(live_row["record_id"])
+                    )
+                    live_work_type = self._text(
+                        live_payload.get("work_type")
+                        or live_payload.get("lan_work_type")
+                    )
+                    for kind, value in (
+                        ("active", live_payload.get("active_item_id")),
+                        ("source", canonical_source_record_id(live_payload)),
+                        ("target", canonical_target_record_id(live_payload)),
+                    ):
+                        value = self._text(value)
+                        if value:
+                            live_identity_keys.add(
+                                f"{live_work_type}:{kind}:{value}"
+                            )
+                    match_key = self._text(live_payload.get("match_key"))
+                    if match_key:
+                        live_match_keys.add(f"{live_work_type}:{match_key}")
+                rows = conn.execute(
+                    """
+                    SELECT
+                        q.active_item_id,
+                        q.record_id AS qt_record_id,
+                        q.notice_type AS qt_notice_type,
+                        q.section,
+                        q.sort_order,
+                        q.origin,
+                        q.payload_json AS qt_payload_json,
+                        i.target_record_id,
+                        i.source_record_id,
+                        i.notice_type AS identity_notice_type,
+                        i.status AS identity_status,
+                        i.payload_json AS identity_payload_json
+                    FROM qt_active_items AS q
+                    JOIN notice_identity_map AS i
+                      ON i.rowid = (
+                          SELECT i2.rowid
+                          FROM notice_identity_map AS i2
+                          WHERE i2.active_item_id = q.active_item_id
+                            AND i2.deleted_at IS NULL
+                            AND i2.status IN (?, ?, ?, ?)
+                          ORDER BY i2.updated_at DESC
+                          LIMIT 1
+                      )
+                    WHERE q.deleted_at IS NOT NULL
+                      AND q.deleted_at <= ?
+                      AND q.origin = 'portal'
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM notice_identity_map AS deleted_identity
+                          WHERE deleted_identity.active_item_id = q.active_item_id
+                            AND deleted_identity.deleted_at IS NOT NULL
+                      )
+                    ORDER BY q.deleted_at ASC
+                    """,
+                    (*live_statuses, cutoff),
+                ).fetchall()
+                for row in rows:
+                    qt_payload = self._loads(str(row["qt_payload_json"] or ""), {})
+                    identity_payload = self._loads(
+                        str(row["identity_payload_json"] or ""), {}
+                    )
+                    qt_payload = qt_payload if isinstance(qt_payload, dict) else {}
+                    identity_payload = (
+                        identity_payload if isinstance(identity_payload, dict) else {}
+                    )
+                    merged = dict(qt_payload)
+                    for key, value in identity_payload.items():
+                        if value not in (None, "", [], {}):
+                            merged[key] = value
+                    identity_status = self._text(row["identity_status"])
+                    merged["active_item_id"] = self._text(row["active_item_id"])
+                    merged["status"] = identity_status
+                    target_record_id = self._text(row["target_record_id"]) or self._text(
+                        row["qt_record_id"]
+                    )
+                    source_record_id = self._text(row["source_record_id"])
+                    if target_record_id:
+                        merged["record_id"] = target_record_id
+                        merged["target_record_id"] = target_record_id
+                        merged["_is_placeholder_record"] = False
+                    if source_record_id:
+                        merged["source_record_id"] = source_record_id
+                    notice_type = self._text(row["identity_notice_type"]) or self._text(
+                        row["qt_notice_type"]
+                    )
+                    if notice_type:
+                        merged["notice_type"] = notice_type
+                    merged["origin"] = "portal"
+                    merged["lan_created_from_portal"] = True
+                    text = self._text(merged.get("text") or merged.get("content"))
+                    if identity_status in {"结束", "已结束"} or re.search(
+                        r"状态\s*[:：]\s*结束", text
+                    ):
+                        continue
+                    normalized = normalize_notice_identity_payload(
+                        self._enrich_notice_payload_from_text(merged)
+                    )
+                    work_type = self._text(
+                        normalized.get("work_type")
+                        or normalized.get("lan_work_type")
+                    )
+                    candidate_identity_keys = {
+                        f"{work_type}:{kind}:{value}"
+                        for kind, raw_value in (
+                            ("active", normalized.get("active_item_id")),
+                            ("source", canonical_source_record_id(normalized)),
+                            ("target", canonical_target_record_id(normalized)),
+                        )
+                        if (value := self._text(raw_value))
+                    }
+                    candidate_match_key = self._text(normalized.get("match_key"))
+                    if candidate_identity_keys & live_identity_keys or (
+                        candidate_match_key
+                        and f"{work_type}:{candidate_match_key}" in live_match_keys
+                    ):
+                        continue
+                    cursor = conn.execute(
+                        """
+                        UPDATE qt_active_items
+                        SET record_id = ?,
+                            notice_type = ?,
+                            section = ?,
+                            origin = 'portal',
+                            payload_json = ?,
+                            updated_at = ?,
+                            deleted_at = NULL
+                        WHERE active_item_id = ?
+                          AND deleted_at IS NOT NULL
+                        """,
+                        (
+                            target_record_id,
+                            notice_type,
+                            self._normalize_qt_active_section(
+                                self._text(row["section"])
+                            ),
+                            self._json(normalized),
+                            now,
+                            self._text(row["active_item_id"]),
+                        ),
+                    )
+                    if int(cursor.rowcount or 0) <= 0:
+                        continue
+                    live_identity_keys.update(candidate_identity_keys)
+                    if candidate_match_key:
+                        live_match_keys.add(f"{work_type}:{candidate_match_key}")
+                    restored_items.append(
+                        {
+                            "active_item_id": self._text(row["active_item_id"]),
+                            "record_id": target_record_id,
+                            "notice_type": notice_type,
+                            "section": self._normalize_qt_active_section(
+                                self._text(row["section"])
+                            ),
+                            "sort_order": int(row["sort_order"] or 0),
+                            "origin": "portal",
+                            "payload": normalized,
+                        }
+                    )
+                conn.commit()
+        with self._schema_process_lock:
+            self._live_portal_restore_last[path_key] = now
+        return {
+            "restored": len(restored_items),
+            "items": restored_items,
+            "checked_at": now,
+            "throttled": False,
+        }
+
     def _notice_identity_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
         payload = self._loads(str(row["payload_json"] or ""), {})
         payload = payload if isinstance(payload, dict) else {}
@@ -7596,8 +7814,17 @@ class LanPortalStateStore:
                 return int(cursor.rowcount or 0)
 
     def replace_qt_active_items_from_payload(
-        self, payload: dict[str, Any] | None
+        self,
+        payload: dict[str, Any] | None,
+        *,
+        delete_missing: bool = False,
     ) -> dict[str, Any]:
+        """Merge a Qt UI snapshot into the canonical active-item table.
+
+        Qt snapshots can be older than portal/outbox writes. Missing snapshot
+        rows are therefore not deletions by default, and snapshot data may only
+        update Qt-owned rows. Explicit end/delete paths use delete_qt_active_item.
+        """
         payload = payload if isinstance(payload, dict) else {}
         sections = ("event", "other")
         raw_items: list[dict[str, Any]] = []
@@ -7668,11 +7895,16 @@ class LanPortalStateStore:
                     now,
                 )
             )
+        applied = 0
+        preserved = 0
+        deleted = 0
         with self._lock:
             with closing(self._connect()) as conn:
                 self._ensure_schema_locked(conn)
-                for row in rows:
-                    conn.execute(
+                for row, (identity_payload, identity_origin) in zip(
+                    rows, identity_payloads
+                ):
+                    cursor = conn.execute(
                         """
                         INSERT INTO qt_active_items(
                             active_item_id, record_id, notice_type, section, sort_order,
@@ -7688,40 +7920,51 @@ class LanPortalStateStore:
                             payload_json = excluded.payload_json,
                             updated_at = excluded.updated_at,
                             deleted_at = NULL
+                        WHERE qt_active_items.deleted_at IS NULL
+                          AND COALESCE(qt_active_items.origin, '') IN ('', 'qt')
                         """,
                         row,
                     )
-                for identity_payload, origin in identity_payloads:
-                    self._upsert_notice_identity_locked(
-                        conn,
-                        identity_payload,
-                        origin=origin,
-                    )
-                if seen:
-                    placeholders = ",".join("?" for _ in seen)
-                    conn.execute(
-                        f"""
-                        UPDATE qt_active_items
-                        SET deleted_at = ?, updated_at = ?
-                        WHERE deleted_at IS NULL
-                          AND active_item_id NOT IN ({placeholders})
-                        """,
-                        (now, now, *sorted(seen)),
-                    )
-                else:
-                    conn.execute(
-                        """
-                        UPDATE qt_active_items
-                        SET deleted_at = ?, updated_at = ?
-                        WHERE deleted_at IS NULL
-                        """,
-                        (now, now),
-                    )
+                    if int(cursor.rowcount or 0) > 0:
+                        applied += 1
+                        self._upsert_notice_identity_locked(
+                            conn,
+                            identity_payload,
+                            origin=identity_origin,
+                        )
+                    else:
+                        preserved += 1
+                if delete_missing:
+                    if seen:
+                        placeholders = ",".join("?" for _ in seen)
+                        cursor = conn.execute(
+                            f"""
+                            UPDATE qt_active_items
+                            SET deleted_at = ?, updated_at = ?
+                            WHERE deleted_at IS NULL
+                              AND COALESCE(origin, '') IN ('', 'qt')
+                              AND active_item_id NOT IN ({placeholders})
+                            """,
+                            (now, now, *sorted(seen)),
+                        )
+                    else:
+                        cursor = conn.execute(
+                            """
+                            UPDATE qt_active_items
+                            SET deleted_at = ?, updated_at = ?
+                            WHERE deleted_at IS NULL
+                              AND COALESCE(origin, '') IN ('', 'qt')
+                            """,
+                            (now, now),
+                        )
+                    deleted = int(cursor.rowcount or 0)
                 conn.commit()
         return {
-            "upserted": len(rows),
+            "upserted": applied,
             "active": len(seen),
             "deduped": max(0, len(raw_items) - len(rows)),
+            "preserved": preserved,
+            "deleted": deleted,
             "updated_at": now,
         }
 

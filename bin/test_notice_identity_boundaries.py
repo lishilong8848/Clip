@@ -1,4 +1,5 @@
 import sys
+import tempfile
 import threading
 import unittest
 from unittest import mock
@@ -12,6 +13,7 @@ if str(BIN_DIR) not in sys.path:
 from lan_bitable_template_portal.portal_service import MaintenancePortalService  # noqa: E402
 from lan_bitable_template_portal.portal_service import PortalError  # noqa: E402
 from lan_bitable_template_portal.server import PortalRuntime  # noqa: E402
+from lan_bitable_template_portal.state_store import LanPortalStateStore  # noqa: E402
 from lan_bitable_template_portal import workbench_lite  # noqa: E402
 from upload_event_module.config import EVENT_NOTICE_FIELDS  # noqa: E402
 from upload_event_module.core.parser import extract_event_info  # noqa: E402
@@ -84,6 +86,262 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
         )
 
         self.assertEqual(result, "")
+
+    def test_stale_qt_snapshot_preserves_all_portal_ongoing_notice_types(self) -> None:
+        notice_types = (
+            ("maintenance", "维保通告"),
+            ("change", "变更通告"),
+            ("repair", "设备检修"),
+            ("power", "上电通告"),
+            ("power", "下电通告"),
+            ("polling", "设备轮巡"),
+            ("adjust", "设备调整"),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            expected_ids = set()
+            for index, (work_type, notice_type) in enumerate(notice_types, start=1):
+                active_item_id = f"portal-active-{index}"
+                expected_ids.add(active_item_id)
+                self.assertTrue(
+                    store.upsert_qt_active_item(
+                        {
+                            "active_item_id": active_item_id,
+                            "target_record_id": f"recPortal{index}",
+                            "work_type": work_type,
+                            "notice_type": notice_type,
+                            "status": "开始",
+                            "text": f"【{notice_type}】状态：开始\n【名称】后端最新通告{index}",
+                            "lan_created_from_portal": True,
+                        },
+                        section="other",
+                        origin="portal",
+                    )
+                )
+            self.assertTrue(
+                store.upsert_qt_active_item(
+                    {
+                        "active_item_id": "qt-active-1",
+                        "target_record_id": "recQt1",
+                        "work_type": "maintenance",
+                        "notice_type": "维保通告",
+                        "status": "开始",
+                        "text": "【维保通告】状态：开始\n【名称】Qt通告",
+                    },
+                    section="other",
+                    origin="qt",
+                )
+            )
+
+            result = store.replace_qt_active_items_from_payload(
+                {
+                    "version": 2,
+                    "event": [],
+                    "other": [
+                        {
+                            "data": {
+                                "active_item_id": "qt-active-1",
+                                "target_record_id": "recQt1",
+                                "work_type": "maintenance",
+                                "notice_type": "维保通告",
+                                "status": "更新",
+                                "text": "【维保通告】状态：更新\n【名称】Qt通告",
+                            }
+                        },
+                        {
+                            "data": {
+                                "active_item_id": "portal-active-3",
+                                "target_record_id": "recPortal3",
+                                "work_type": "repair",
+                                "notice_type": "设备检修",
+                                "status": "开始",
+                                "text": "【设备检修】状态：开始\n【标题】过期的检修快照",
+                                "lan_created_from_portal": True,
+                            }
+                        },
+                    ],
+                }
+            )
+
+            active_rows = store.list_qt_active_items(include_deleted=False)
+            active_by_id = {
+                str(row.get("active_item_id") or ""): row for row in active_rows
+            }
+            self.assertTrue(expected_ids.issubset(active_by_id))
+            self.assertIn("qt-active-1", active_by_id)
+            self.assertEqual(result["deleted"], 0)
+            self.assertEqual(
+                active_by_id["portal-active-3"]["payload"]["text"],
+                "【设备检修】状态：开始\n【名称】后端最新通告3",
+            )
+
+    def test_stale_qt_snapshot_does_not_restore_explicitly_deleted_item(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            payload = {
+                "active_item_id": "qt-deleted-1",
+                "target_record_id": "recQtDeleted1",
+                "work_type": "maintenance",
+                "notice_type": "维保通告",
+                "status": "开始",
+                "text": "【维保通告】状态：开始\n【名称】已结束通告",
+            }
+            self.assertTrue(
+                store.upsert_qt_active_item(
+                    payload,
+                    section="other",
+                    origin="qt",
+                )
+            )
+            self.assertTrue(
+                store.delete_qt_active_item(active_item_id="qt-deleted-1")
+            )
+
+            result = store.replace_qt_active_items_from_payload(
+                {
+                    "version": 2,
+                    "event": [],
+                    "other": [{"data": payload}],
+                }
+            )
+
+            self.assertEqual(store.list_qt_active_items(include_deleted=False), [])
+            deleted_rows = store.list_qt_active_items(include_deleted=True)
+            self.assertEqual(len(deleted_rows), 1)
+            self.assertIsNotNone(deleted_rows[0]["deleted_at"])
+            self.assertEqual(result["preserved"], 1)
+
+    def test_live_portal_identity_repairs_snapshot_deleted_items_for_all_types(self) -> None:
+        notice_types = (
+            ("maintenance", "维保通告"),
+            ("change", "变更通告"),
+            ("repair", "设备检修"),
+            ("power", "上电通告"),
+            ("power", "下电通告"),
+            ("polling", "设备轮巡"),
+            ("adjust", "设备调整"),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            expected_ids = set()
+            for index, (work_type, notice_type) in enumerate(notice_types, start=1):
+                active_item_id = f"repairable-portal-{index}"
+                expected_ids.add(active_item_id)
+                payload = {
+                    "active_item_id": active_item_id,
+                    "target_record_id": f"recRepairable{index}",
+                    "work_type": work_type,
+                    "notice_type": notice_type,
+                    "status": "更新",
+                    "text": f"【{notice_type}】状态：更新\n【名称】待恢复通告{index}",
+                    "lan_created_from_portal": True,
+                }
+                self.assertTrue(
+                    store.upsert_qt_active_item(
+                        payload,
+                        section="other",
+                        origin="portal",
+                    )
+                )
+                self.assertTrue(
+                    store.delete_qt_active_item(active_item_id=active_item_id)
+                )
+
+            result = store.restore_live_portal_qt_active_items(
+                force=True,
+                grace_seconds=0,
+            )
+
+            active_ids = {
+                str(row.get("active_item_id") or "")
+                for row in store.list_qt_active_items(include_deleted=False)
+            }
+            self.assertEqual(result["restored"], len(notice_types))
+            self.assertEqual(active_ids, expected_ids)
+
+    def test_live_portal_identity_does_not_restore_ended_item(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            payload = {
+                "active_item_id": "ended-portal-1",
+                "target_record_id": "recEndedPortal1",
+                "work_type": "repair",
+                "notice_type": "设备检修",
+                "status": "更新",
+                "text": "【设备检修】状态：更新\n【标题】已结束检修",
+                "lan_created_from_portal": True,
+            }
+            self.assertTrue(
+                store.upsert_qt_active_item(
+                    payload,
+                    section="other",
+                    origin="portal",
+                )
+            )
+            self.assertTrue(
+                store.delete_qt_active_item(active_item_id="ended-portal-1")
+            )
+            store.upsert_notice_identity(
+                {
+                    **payload,
+                    "status": "已结束",
+                    "text": "【设备检修】状态：结束\n【标题】已结束检修",
+                },
+                origin="action_success",
+            )
+
+            result = store.restore_live_portal_qt_active_items(
+                force=True,
+                grace_seconds=0,
+            )
+
+            self.assertEqual(result["restored"], 0)
+            self.assertEqual(store.list_qt_active_items(include_deleted=False), [])
+
+    def test_live_portal_identity_does_not_restore_discarded_route_duplicate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LanPortalStateStore(Path(tmp) / "state.sqlite3")
+            base = {
+                "work_type": "repair",
+                "notice_type": "设备检修",
+                "status": "更新",
+                "match_key": "repair-route-1",
+                "text": "【设备检修】状态：更新\n【标题】同一路由检修",
+                "lan_created_from_portal": True,
+            }
+            store.upsert_qt_active_item(
+                {
+                    **base,
+                    "active_item_id": "route-survivor",
+                    "target_record_id": "recRouteSurvivor",
+                },
+                section="other",
+                origin="portal",
+            )
+            store.upsert_qt_active_item(
+                {
+                    **base,
+                    "active_item_id": "route-discarded",
+                    "target_record_id": "recRouteDiscarded",
+                },
+                section="other",
+                origin="portal",
+            )
+            store.delete_qt_active_item(active_item_id="route-discarded")
+
+            result = store.restore_live_portal_qt_active_items(
+                force=True,
+                grace_seconds=0,
+            )
+
+            self.assertEqual(result["restored"], 0)
+            self.assertEqual(
+                {
+                    row["active_item_id"]
+                    for row in store.list_qt_active_items(include_deleted=False)
+                },
+                {"route-survivor"},
+            )
 
     def test_command_expansion_keeps_source_for_later_target_resolution(self) -> None:
         payload = {

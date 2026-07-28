@@ -80,7 +80,10 @@ class ActiveCacheStore:
     def _save_payload_unlocked(self, payload: dict) -> bool:
         normalized = self._normalize_payload(payload)
         try:
-            self._state_store.replace_qt_active_items_from_payload(normalized)
+            self._state_store.replace_qt_active_items_from_payload(
+                normalized,
+                delete_missing=False,
+            )
         except Exception as exc:
             log_warning(f"Qt active items 规范表写入失败: {exc}")
             return False

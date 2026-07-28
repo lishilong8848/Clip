@@ -5580,6 +5580,7 @@ class FastAPIPortalController:
             deny = self._local_only_response(request)
             if deny is not None:
                 return deny
+            PortalRuntime.restore_live_portal_active_items()
             active_items = []
             for row in PortalRuntime.state_store.list_qt_active_items():
                 payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
@@ -7943,6 +7944,7 @@ class FastAPIPortalController:
 
     @staticmethod
     def _get_ongoing(scope: str) -> list[dict]:
+        PortalRuntime.restore_live_portal_active_items()
         active_rows: list[dict] = []
         active_rows_loaded = False
         active_qt_identity_keys: set[str] = set()

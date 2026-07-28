@@ -834,6 +834,44 @@ class PortalRuntime:
             cls.payload_cache_inflight_started.clear()
 
     @classmethod
+    def restore_live_portal_active_items(cls) -> dict:
+        try:
+            result = cls.state_store.restore_live_portal_qt_active_items()
+        except Exception as exc:
+            log_warning(f"网页进行中通告自愈失败: {exc}")
+            return {"restored": 0, "items": [], "error": str(exc)}
+        items = [
+            item
+            for item in (result.get("items") or [])
+            if isinstance(item, dict)
+        ]
+        if not items:
+            return result
+        for item in items:
+            try:
+                cls.state_store.enqueue_outbox_event(
+                    "qt_action",
+                    {
+                        "kind": "active_upsert",
+                        "payload": {
+                            "item": item,
+                            "source": "portal_active_repair",
+                        },
+                    },
+                )
+            except Exception as exc:
+                log_warning(
+                    "恢复的网页进行中通告通知 Qt 失败: "
+                    f"active_item_id={item.get('active_item_id')}, error={exc}"
+                )
+        cls.clear_payload_cache()
+        try:
+            cls.service._touch_state_cache_version()
+        except Exception:
+            pass
+        return result
+
+    @classmethod
     def _prune_payload_cache_locked(cls, now: float) -> None:
         expired_keys = [
             key for key, (expires_at, _payload) in cls.payload_cache.items()
@@ -3138,6 +3176,8 @@ class PortalRuntime:
         return self._send_json(404, {"ok": False, "error": "Not Found"})
 
     def _get_ongoing(self, scope: str) -> list[dict]:
+        PortalRuntime.restore_live_portal_active_items()
+
         def _is_ended(item: dict) -> bool:
             status = str(item.get("status") or "").strip()
             if status == "结束":
